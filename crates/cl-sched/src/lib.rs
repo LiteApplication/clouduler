@@ -5,6 +5,7 @@ pub mod materialize;
 pub mod place;
 pub mod plan;
 pub mod reconcile;
+pub mod spec;
 
 pub use error::{Result, SchedError};
 pub use materialize::{Materialized, Materializer};
