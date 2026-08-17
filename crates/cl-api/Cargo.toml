@@ -1,0 +1,33 @@
+[package]
+name = "cl-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cl-config.workspace = true
+cl-docker.workspace = true
+cl-raft.workspace = true
+cl-secret.workspace = true
+
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
+base64.workspace = true
+futures.workspace = true
+openidconnect = "4"
+rand = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2 = "0.11"
+sysinfo = "0.39"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
