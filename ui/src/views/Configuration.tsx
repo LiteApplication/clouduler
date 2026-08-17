@@ -425,6 +425,22 @@ function NodeCard({
         onChange={(data_dir) => onChange({ data_dir: data_dir || null })}
         disabled={disabled}
       />
+      {/* A node that joined an existing cluster is set to "never", because a
+          second cluster key would only seal secrets nothing else can open. */}
+      <SelectField
+        id={`node-${name}-genkey`}
+        label="Create the cluster key if missing"
+        value={node.generate_secret_key === null || node.generate_secret_key === undefined ? 'inherit' : String(node.generate_secret_key)}
+        onChange={(choice) =>
+          onChange({ generate_secret_key: choice === 'inherit' ? null : choice === 'true' })
+        }
+        options={[
+          { value: 'inherit', label: 'Follow the cluster setting' },
+          { value: 'true', label: 'Yes, this node may create it' },
+          { value: 'false', label: 'Never, it can only be given the key' },
+        ]}
+        disabled={disabled}
+      />
 
       <h4>Network addresses</h4>
       {Object.entries(networks).map(([netName, net]) => {

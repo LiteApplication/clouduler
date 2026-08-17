@@ -18,8 +18,17 @@ cl-secret.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
+ipnet.workspace = true
 openraft.workspace = true
 rcgen.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+sha2 = "0.11"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

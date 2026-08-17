@@ -1,5 +1,6 @@
 mod cli;
 mod daemon;
+mod init;
 mod report;
 mod stack;
 
@@ -14,11 +15,19 @@ use crate::cli::{Cli, Command, DriveCommand, NodeCommand, StackCommand};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli.log)?;
+    install_crypto_provider();
+
+    // Setting the node up is the one thing that runs without a config, since
+    // writing that config is most of what it does.
+    if let Command::Init(args) = cli.command {
+        return init::run(*args, cli.config).await;
+    }
 
     let cfg = ClusterConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
 
     match cli.command {
+        Command::Init(_) => unreachable!("handled before the config is loaded"),
         Command::Daemon { node } => {
             let node = match node {
                 Some(n) => n,
@@ -58,6 +67,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Pick the TLS backend once for the whole process.
+///
+/// rustls refuses to guess when more than one provider is compiled in, and it
+/// refuses at the first handshake rather than at startup, which would mean the
+/// web ui coming up and then dying the moment someone loaded it.
+fn install_crypto_provider() {
+    // Err means someone already installed one, which is just as good.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn init_tracing(filter: &str) -> Result<()> {

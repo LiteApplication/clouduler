@@ -22,7 +22,7 @@ use tracing::{info, warn};
 pub async fn run(
     cfg: ClusterConfig,
     node_name: String,
-    data_dir: PathBuf,
+    data_dir_override: Option<PathBuf>,
     config_path: PathBuf,
 ) -> Result<()> {
     let Some(node) = cfg.node(&node_name) else {
@@ -31,6 +31,10 @@ pub async fn run(
             cfg.nodes.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     };
+
+    // The config is where the data dir belongs, so the web ui can move it. The
+    // flag stays as an override for running a second daemon out of the way.
+    let data_dir = data_dir_override.unwrap_or_else(|| node.data_dir(&cfg).to_path_buf());
 
     let rpc_addr = cfg
         .rpc_addr(node)
@@ -45,7 +49,7 @@ pub async fn run(
         "starting"
     );
 
-    let key = load_cluster_key(&cfg);
+    let key = load_cluster_key(&cfg, node);
 
     let cluster = ClusterNode::start(Options {
         name: node_name.clone(),
@@ -95,7 +99,7 @@ pub async fn run(
         }
     };
 
-    let api = start_api(&cfg, &node_name, &config_path, &cluster, &data_dir).await;
+    let api = start_api(&cfg, node, &node_name, &config_path, &cluster, &data_dir).await;
 
     let config_writer = tokio::spawn(watch_cluster_config(
         cluster.clone(),
@@ -129,6 +133,7 @@ pub async fn run(
 /// every election, and it means someone who bookmarked a node still gets in.
 async fn start_api(
     cfg: &ClusterConfig,
+    node: &Node,
     node_name: &str,
     config_path: &Path,
     cluster: &Arc<ClusterNode>,
@@ -162,7 +167,7 @@ async fn start_api(
         config_path: config_path.to_path_buf(),
         cluster_config: cfg.clone(),
         key_path: cfg.secrets.key_file.clone(),
-        key: load_cluster_key(cfg),
+        key: load_cluster_key(cfg, node),
         tls_cert_pem: cert.cert.pem().into_bytes(),
         tls_key_pem: cert.signing_key.serialize_pem().into_bytes(),
         listen_addr,
@@ -191,10 +196,10 @@ async fn start_api(
 /// A node without a key is not an error: it replicates sealed secrets like any
 /// other state and simply cannot run containers that need them. That is the
 /// intended setup for a worker you do not want holding the keys to everything.
-fn load_cluster_key(cfg: &ClusterConfig) -> Option<ClusterKey> {
+fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<ClusterKey> {
     let path = &cfg.secrets.key_file;
 
-    match ClusterKey::load_or_create(path, cfg.secrets.generate_if_missing) {
+    match ClusterKey::load_or_create(path, node.generates_secret_key(cfg)) {
         Ok((key, created)) => {
             if created {
                 // The one moment to tell them, since it is never printed again.

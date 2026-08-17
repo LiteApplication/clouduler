@@ -32,7 +32,7 @@ pub struct ClusterConfig {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub auth: AuthConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloudflare: Option<CloudflareConfig>,
 }
 
@@ -83,7 +83,7 @@ impl Default for SecretsConfig {
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// OIDC is the recommended way in. Without it, api keys are the only option.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcConfig>,
 
     /// Api keys always work as a fallback, so a broken identity provider cannot
@@ -120,7 +120,7 @@ pub struct OidcConfig {
     pub issuer: String,
     pub client_id: String,
     /// Kept out of the config file so the config stays safe to commit.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret_file: Option<PathBuf>,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
@@ -129,7 +129,7 @@ pub struct OidcConfig {
     pub admin_claim: String,
     /// Value in that claim which grants admin. Without it, a successful login
     /// gets read only access.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_value: Option<String>,
 }
 
@@ -221,10 +221,10 @@ pub struct Network {
     #[serde(rename = "type")]
     pub kind: NetworkKind,
     /// Required for internal and private networks, must contain the node addresses.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<IpNet>,
     /// Records under this domain resolve to node addresses on this network.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
 }
 
@@ -257,7 +257,7 @@ pub struct Drive {
 
     /// Node holding the data for a served drive. The others mount it from
     /// there; the path they map the drive to is the mountpoint.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_by: Option<String>,
 }
 
@@ -297,8 +297,18 @@ pub struct Node {
     pub rpc_port: u16,
     /// Where this node keeps its database and working files. Overrides the
     /// cluster default, for nodes whose big disk is not in the usual place.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
+
+    /// Overrides `secrets.generate_if_missing` for this node.
+    ///
+    /// A node joining an existing cluster must not invent its own key: the
+    /// cluster's secrets are sealed with the one that already exists, and a
+    /// second key only produces a node that thinks it can open them. `clouduler
+    /// init --join` sets this to false unless you say the node should hold the
+    /// key, and then you copy the real one in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate_secret_key: Option<bool>,
 }
 
 fn default_rpc_port() -> u16 {
@@ -371,7 +381,7 @@ fn default_web_port() -> u16 {
 pub struct CloudflareConfig {
     /// Path to a file holding the API token. Left out when the token is set
     /// from the web ui instead.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token_file: Option<PathBuf>,
     /// Zones clouduler is allowed to write records into.
     pub zones: Vec<String>,
@@ -462,6 +472,12 @@ impl Node {
     /// Where this node keeps its database and working files.
     pub fn data_dir<'a>(&'a self, cluster: &'a ClusterConfig) -> &'a Path {
         self.data_dir.as_deref().unwrap_or(&cluster.data_dir)
+    }
+
+    /// Whether this node may create the cluster key when its file is missing.
+    pub fn generates_secret_key(&self, cluster: &ClusterConfig) -> bool {
+        self.generate_secret_key
+            .unwrap_or(cluster.secrets.generate_if_missing)
     }
 
     /// The IP this node holds on a subnetted network.
