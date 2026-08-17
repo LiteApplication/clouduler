@@ -1,0 +1,6 @@
+/target
+node_modules
+dist
+*.qcow2
+*.img
+.DS_Store

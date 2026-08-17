@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clouduler",
+    "crates/cl-config",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/clouduler/clouduler"
+
+[workspace.dependencies]
+cl-config = { path = "crates/cl-config" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+humantime-serde = "1"
+ipnet = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,59 @@
+# Reference cluster config. Every key clouduler understands is shown here.
+cluster:
+  name: home
+
+networks:
+  # Private networks carry node to node traffic and the container overlay.
+  # The subnet must contain every node private_ip. A domain is optional; when
+  # set, records for it resolve to private IPs instead of public ones.
+  lan:
+    type: private
+    subnet: 10.10.0.0/24
+    domain: int.example.com
+  # Public networks have no subnet. Records for their domain resolve to the
+  # public address of the node running the service.
+  wan:
+    type: public
+    domain: example.com
+
+# Cluster wide directory namespaces. Volumes live inside a drive.
+drives:
+  fast:
+    sync_interval: 5m
+  bulk:
+    sync_interval: 1h
+
+nodes:
+  n1:
+    role: manager
+    private_ip: 10.10.0.1
+    public:
+      ipv4: 203.0.113.5
+      ipv6: "2001:db8::5"
+    # Drives this node implements, mapped to the local directory backing them.
+    drives:
+      fast: /srv/clouduler/fast
+      bulk: /srv/clouduler/bulk
+  n2:
+    role: manager
+    private_ip: 10.10.0.2
+    public:
+      domain: n2.example.net
+    drives:
+      fast: /srv/clouduler/fast
+  n3:
+    role: worker
+    private_ip: 10.10.0.3
+    rpc_port: 7373
+    drives:
+      bulk: /mnt/bulk
+
+web:
+  address: cloud.int.example.com
+  network: lan
+  port: 443
+
+cloudflare:
+  api_token_file: /etc/clouduler/cf.token
+  zones:
+    - example.com
