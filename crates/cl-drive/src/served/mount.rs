@@ -76,6 +76,7 @@ pub struct MountManager {
 }
 
 impl MountManager {
+    /// `rt` must belong to a multi-threaded runtime; see `ClientFs::new`.
     pub fn new(rt: tokio::runtime::Handle) -> Self {
         Self::with_config(rt, ClientConfig::default())
     }

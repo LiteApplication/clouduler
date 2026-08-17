@@ -9,6 +9,7 @@ name = "clouduler"
 path = "src/main.rs"
 
 [dependencies]
+cl-api.workspace = true
 cl-config.workspace = true
 cl-raft.workspace = true
 cl-docker.workspace = true
@@ -18,6 +19,7 @@ cl-secret.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 openraft.workspace = true
+rcgen.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

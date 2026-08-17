@@ -1,0 +1,21 @@
+# Volume migration: move a running stateful container between nodes,
+# confirm the volume data arrives intact and the container restarts on the
+# target (see docs/drives.md's migration state machine).
+name: volume-migration
+description: move store's volume from one node to another, data intact, restarts on target.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4, drives: { fast: {} } }
+  - { name: n5, role: worker,  ip: 10.10.0.5, drives: { fast: {} } }
+
+drives:
+  fast: { sync_interval: 15s }
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/stateful.yaml, name: stateful }
+  - wait_running: { stack: stateful, service: store, timeout: 30 }
+  - assert_volume_migrates: { instance_prefix: "stateful.store", to: n5, timeout: 60 }

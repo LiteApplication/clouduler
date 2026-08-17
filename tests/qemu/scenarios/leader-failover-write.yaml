@@ -1,0 +1,26 @@
+# Leader failover during a write: kill the leader while a stack deploy is in
+# flight, confirm the deploy either fully applied or did not, never half.
+name: leader-failover-write
+description: kill the leader mid-deploy, confirm the deploy is atomic across the failover.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4 }
+
+failover:
+  probe_interval: 2s
+  fence_timeout: 6s
+  node_timeout: 12s
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  # fire the deploy and kill the leader right behind it; deploy_stack_async
+  # returns immediately so the kill lands while the write is likely still
+  # in flight, and the following assertion tolerates either outcome as long
+  # as it is a clean one.
+  - deploy_stack_async: { file: stacks/simple.yaml, name: simple }
+  - kill_leader: { save_as: victim }
+  - assert_leader_elected: { timeout: 30 }
+  - assert_stack_clean: { stack: simple }

@@ -1,7 +1,8 @@
 //! Daemon bootstrap. Subsystems get wired in here as later phases land.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,7 +19,12 @@ use cl_raft::state::{Availability, NodeState, Request, Role};
 use openraft::BasicNode;
 use tracing::{info, warn};
 
-pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Result<()> {
+pub async fn run(
+    cfg: ClusterConfig,
+    node_name: String,
+    data_dir: PathBuf,
+    config_path: PathBuf,
+) -> Result<()> {
     let Some(node) = cfg.node(&node_name) else {
         bail!(
             "node {node_name} is not declared in the config (known: {})",
@@ -89,9 +95,11 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
         }
     };
 
+    let api = start_api(&cfg, &node_name, &config_path, &cluster, &data_dir).await;
+
     let watcher = tokio::spawn(watch_leadership(cfg, cluster.clone()));
 
-    // Overlay, drives, proxy and api start here once wired in.
+    // Overlay, drives and the reverse proxy start here once wired in.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
@@ -100,8 +108,75 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
     if let Some(scheduler) = scheduler {
         scheduler.abort();
     }
+    if let Some(api) = api {
+        api.abort();
+    }
     cluster.shutdown().await?;
     Ok(())
+}
+
+/// Stand up the http api and the web ui.
+///
+/// Every node listens; a node that is not the leader answers with a redirect to
+/// the one that is. That is simpler than starting and stopping a listener on
+/// every election, and it means someone who bookmarked a node still gets in.
+async fn start_api(
+    cfg: &ClusterConfig,
+    node_name: &str,
+    config_path: &Path,
+    cluster: &Arc<ClusterNode>,
+    data_dir: &Path,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let docker = match cl_docker::Docker::connect() {
+        Ok(docker) => docker,
+        Err(e) => {
+            warn!(error = %e, "no docker, the api will not serve container detail");
+            return None;
+        }
+    };
+
+    // A self signed certificate until acme has issued a real one, so the ui is
+    // reachable on a brand new cluster. Browsers will complain, which is
+    // correct: it is not a trusted certificate.
+    let fqdn = cfg.web_fqdn();
+    let cert = match rcgen::generate_simple_self_signed(vec![fqdn.clone()]) {
+        Ok(cert) => cert,
+        Err(e) => {
+            warn!(error = %e, "cannot generate a certificate, the api will not start");
+            return None;
+        }
+    };
+
+    let listen_addr = SocketAddr::from(([0, 0, 0, 0], cfg.web.port));
+    let options = cl_api::ApiServerOptions {
+        cluster: cluster.clone(),
+        docker,
+        node_name: node_name.to_string(),
+        config_path: config_path.to_path_buf(),
+        cluster_config: cfg.clone(),
+        key_path: cfg.secrets.key_file.clone(),
+        key: load_cluster_key(cfg),
+        tls_cert_pem: cert.cert.pem().into_bytes(),
+        tls_key_pem: cert.signing_key.serialize_pem().into_bytes(),
+        listen_addr,
+    };
+    let _ = data_dir;
+
+    let server = match cl_api::ApiServer::new(options).await {
+        Ok(server) => server,
+        Err(e) => {
+            warn!(error = %e, "cannot build the api");
+            return None;
+        }
+    };
+
+    info!(%listen_addr, url = %format!("https://{fqdn}:{}", cfg.web.port), "web ui listening");
+    Some(tokio::spawn(async move {
+        if let Err(e) = server.serve().await {
+            // Port 443 needs root, and that is the usual reason this fails.
+            warn!(error = %e, "api server stopped");
+        }
+    }))
 }
 
 /// Load the key that opens stored secrets, creating it on first launch.

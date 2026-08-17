@@ -1,0 +1,20 @@
+# Full cluster restart: stop everything, restart, confirm state and running
+# containers are restored from the database (docs/database.md: state is
+# written out in full on every apply, so recovery is a read not a replay).
+name: full-restart
+description: stop every node, restart the cluster, confirm stacks and instances come back.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4 }
+  - { name: n5, role: worker,  ip: 10.10.0.5 }
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/simple.yaml, name: simple }
+  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - restart_all: {}
+  - wait_quorum: { timeout: 40 }
+  - wait_running: { stack: simple, service: app, timeout: 40 }

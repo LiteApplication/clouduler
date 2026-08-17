@@ -220,7 +220,7 @@ async fn a_killed_server_surfaces_as_an_error_not_a_hang() {
 /// Actually mounting requires root or `user_allow_other` in `/etc/fuse.conf`;
 /// CI has neither. Run manually with `cargo test -p cl-drive --test served
 /// -- --ignored mount_a_served_drive_and_read_a_file_through_the_kernel`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a real FUSE mount, needs root or user_allow_other"]
 async fn mount_a_served_drive_and_read_a_file_through_the_kernel() {
     use cl_drive::served::mount::MountManager;

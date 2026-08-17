@@ -7,3 +7,4 @@ dist
 ui/dist
 tests/qemu/cache/
 tests/qemu/run/
+__pycache__/

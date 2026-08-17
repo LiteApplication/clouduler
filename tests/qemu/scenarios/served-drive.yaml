@@ -1,0 +1,34 @@
+# Served drive: a drive implemented by exactly one node, so a container
+# mounting it can only run there (docs/drives.md has no separate "served"
+# mode from "replicated" today; this is what a single-implementer drive
+# means in practice). The serving node goes away and comes back, and the
+# service that depends on it should follow: unschedulable while it is gone,
+# running again once it returns.
+name: served-drive
+description: single-implementer drive; dependent service down while the server is gone, up when it returns.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4, drives: { fast: {} } }
+  - { name: n5, role: worker,  ip: 10.10.0.5 }
+
+drives:
+  fast: { sync_interval: 15s }
+
+failover:
+  probe_interval: 2s
+  fence_timeout: 6s
+  node_timeout: 12s
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/stateful.yaml, name: stateful }
+  - wait_running: { stack: stateful, service: store, timeout: 30 }
+  - assert_reachable: n4
+  - kill_node: n4
+  - assert_unreachable: n4
+  - start_node: n4
+  - assert_reachable: n4
+  - wait_running: { stack: stateful, service: store, timeout: 30 }

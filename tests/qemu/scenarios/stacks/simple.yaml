@@ -1,0 +1,14 @@
+# Minimal stateless-ish service used by most scenarios: one replica of a
+# tiny image on the test cluster network, no drive requirement so it can
+# land on any node.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  app:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo alive; sleep 5; done"]
+    restart: always
+    networks: [cluster]

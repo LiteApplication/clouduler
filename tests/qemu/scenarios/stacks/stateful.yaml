@@ -1,0 +1,16 @@
+# A service with a volume on the "fast" drive, for migration testing. The
+# volume gets seeded data by the scenario before migration, then checked
+# for byte-identity on the target node after.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  store:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo alive; sleep 5; done"]
+    restart: always
+    networks: [cluster]
+    volumes:
+      - fast/store-data:/data

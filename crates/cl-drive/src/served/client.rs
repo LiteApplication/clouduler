@@ -167,6 +167,11 @@ pub struct ClientFs {
 }
 
 impl ClientFs {
+    /// `rt` must belong to a multi-threaded runtime. Each FUSE callback
+    /// blocks its own background thread on `rt.block_on`, which needs a
+    /// worker thread free to actually drive the request; a current-thread
+    /// runtime has only the one thread, and it's typically busy elsewhere,
+    /// so `block_on` from here would deadlock against it.
     pub fn new(server: SocketAddr, rt: tokio::runtime::Handle) -> Self {
         Self::with_config(server, rt, ClientConfig::default())
     }

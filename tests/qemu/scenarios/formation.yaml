@@ -1,0 +1,18 @@
+# Cluster formation: 3 managers + 2 workers reach quorum and agree on state.
+name: formation
+description: 3 managers and 2 workers boot and agree on cluster state.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4, drives: { fast: {} } }
+  - { name: n5, role: worker,  ip: 10.10.0.5, drives: { fast: {} } }
+
+drives:
+  fast: { sync_interval: 30s }
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - assert_leader_elected: { timeout: 10 }
+  - assert_converged: { timeout: 20 }
