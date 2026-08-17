@@ -12,11 +12,15 @@ pub async fn run(cfg: ClusterConfig, node_name: String) -> Result<()> {
         );
     };
 
+    let rpc = cfg
+        .rpc_addr(node)
+        .expect("validated config gives every node an internal address");
+
     info!(
         cluster = %cfg.cluster.name,
         node = %node_name,
         role = %node.role,
-        rpc = %node.rpc_addr(),
+        %rpc,
         drives = node.drives.len(),
         "starting"
     );

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::cluster::{ClusterConfig, NetworkKind};
+use crate::cluster::{ClusterConfig, NetworkKind, NodeAddress};
 use crate::error::{ConfigError, Result};
 
 impl ClusterConfig {
@@ -10,6 +10,7 @@ impl ClusterConfig {
         self.validate_meta()?;
         self.validate_networks()?;
         self.validate_nodes()?;
+        self.validate_drives()?;
         self.validate_web()?;
         self.validate_cloudflare()?;
         Ok(())
@@ -23,63 +24,60 @@ impl ClusterConfig {
     }
 
     fn validate_networks(&self) -> Result<()> {
-        if self.networks.is_empty() {
-            return Err(ConfigError::invalid("networks", "at least one is required"));
-        }
+        let mut internal = Vec::new();
+        let mut domains = BTreeSet::new();
 
-        let mut private = 0;
         for (name, net) in &self.networks {
             let at = format!("networks.{name}");
-            match net.kind {
-                NetworkKind::Private => {
-                    private += 1;
-                    if net.subnet.is_none() {
-                        return Err(ConfigError::invalid(
-                            at,
-                            "a private network needs a subnet holding the node private IPs",
-                        ));
-                    }
+            if net.kind == NetworkKind::Internal {
+                internal.push(name.as_str());
+            }
+            match (net.kind.is_subnetted(), net.subnet) {
+                (true, None) => {
+                    return Err(ConfigError::invalid(
+                        at,
+                        format!("a {} network needs a subnet", net.kind),
+                    ))
                 }
-                NetworkKind::Public => {
-                    if net.subnet.is_some() {
-                        return Err(ConfigError::invalid(
-                            at,
-                            "a public network must not declare a subnet",
-                        ));
-                    }
+                (false, Some(_)) => {
+                    return Err(ConfigError::invalid(
+                        at,
+                        "a public network must not declare a subnet",
+                    ))
                 }
+                _ => {}
             }
             if let Some(domain) = &net.domain {
                 if domain.trim().is_empty() || domain.starts_with('.') || domain.ends_with('.') {
                     return Err(ConfigError::invalid(
-                        format!("networks.{name}.domain"),
+                        format!("{at}.domain"),
                         "must be a bare domain name",
                     ));
                 }
-            }
-        }
-
-        if private == 0 {
-            return Err(ConfigError::invalid(
-                "networks",
-                "at least one private network is required for node to node traffic",
-            ));
-        }
-
-        // Two networks owning the same domain makes record ownership ambiguous.
-        let mut seen = BTreeSet::new();
-        for (name, net) in &self.networks {
-            if let Some(domain) = &net.domain {
-                if !seen.insert(domain.to_ascii_lowercase()) {
+                // Two networks owning one domain makes record ownership ambiguous.
+                if !domains.insert(domain.to_ascii_lowercase()) {
                     return Err(ConfigError::invalid(
-                        format!("networks.{name}.domain"),
-                        format!("domain {domain} is already claimed by another network"),
+                        format!("{at}.domain"),
+                        format!("{domain} is already claimed by another network"),
                     ));
                 }
             }
         }
 
-        Ok(())
+        match internal.len() {
+            1 => Ok(()),
+            0 => Err(ConfigError::invalid(
+                "networks",
+                "exactly one internal network is required for node to node traffic",
+            )),
+            _ => Err(ConfigError::invalid(
+                "networks",
+                format!(
+                    "only one internal network is allowed, found {}",
+                    internal.join(", ")
+                ),
+            )),
+        }
     }
 
     fn validate_nodes(&self) -> Result<()> {
@@ -93,33 +91,63 @@ impl ClusterConfig {
             ));
         }
 
-        let mut ips = BTreeSet::new();
+        let internal = self.internal_network().0.clone();
+        let mut internal_ips = BTreeSet::new();
+
         for (name, node) in &self.nodes {
             let at = format!("nodes.{name}");
 
-            if !ips.insert(node.private_ip) {
+            if !node.network.contains_key(&internal) {
                 return Err(ConfigError::invalid(
-                    format!("{at}.private_ip"),
-                    format!("{} is used by another node", node.private_ip),
+                    format!("{at}.network"),
+                    format!("every node must have an address on the internal network {internal}"),
                 ));
             }
 
-            if self.private_network_of(node).is_none() {
-                return Err(ConfigError::invalid(
-                    format!("{at}.private_ip"),
-                    format!(
-                        "{} is not inside any declared private network subnet",
-                        node.private_ip
-                    ),
-                ));
-            }
-
-            if let Some(public) = &node.public {
-                if public.is_empty() {
+            for (net_name, addr) in &node.network {
+                let at = format!("{at}.network.{net_name}");
+                let Some(net) = self.networks.get(net_name) else {
                     return Err(ConfigError::invalid(
-                        format!("{at}.public"),
-                        "set at least one of ipv4, ipv6 or domain",
+                        at,
+                        format!("no network named {net_name}"),
                     ));
+                };
+                match (net.kind.is_subnetted(), addr) {
+                    (true, NodeAddress::Ip(ip)) => {
+                        let subnet = net.subnet.expect("subnetted network validated above");
+                        if !subnet.contains(ip) {
+                            return Err(ConfigError::invalid(
+                                at,
+                                format!("{ip} is outside the {net_name} subnet {subnet}"),
+                            ));
+                        }
+                        if net_name == &internal && !internal_ips.insert(*ip) {
+                            return Err(ConfigError::invalid(
+                                at,
+                                format!("{ip} is used by another node"),
+                            ));
+                        }
+                    }
+                    (true, NodeAddress::Public(_)) => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!("a {} network takes a bare IP address", net.kind),
+                        ))
+                    }
+                    (false, NodeAddress::Ip(_)) => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            "a public network takes an ipv4, ipv6 and/or domain block",
+                        ))
+                    }
+                    (false, NodeAddress::Public(public)) => {
+                        if public.is_empty() {
+                            return Err(ConfigError::invalid(
+                                at,
+                                "set at least one of ipv4, ipv6 or domain",
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -139,6 +167,10 @@ impl ClusterConfig {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_drives(&self) -> Result<()> {
         // A drive nobody implements can never host a volume, so it is a typo.
         for drive in self.drives.keys() {
             if !self.nodes.values().any(|n| n.implements(drive)) {
@@ -148,7 +180,6 @@ impl ClusterConfig {
                 ));
             }
         }
-
         Ok(())
     }
 
@@ -162,20 +193,16 @@ impl ClusterConfig {
                 format!("no network named {}", self.web.network),
             ));
         };
-        match &net.domain {
-            None => Err(ConfigError::invalid(
-                "web.network",
+        if net.domain.is_none() && !self.web.address.contains('.') {
+            return Err(ConfigError::invalid(
+                "web.address",
                 format!(
-                    "network {} has no domain, so {} cannot be published on it",
+                    "network {} has no domain, so {} cannot be qualified",
                     self.web.network, self.web.address
                 ),
-            )),
-            Some(domain) if !is_within(&self.web.address, domain) => Err(ConfigError::invalid(
-                "web.address",
-                format!("{} is not under {domain}", self.web.address),
-            )),
-            Some(_) => Ok(()),
+            ));
         }
+        Ok(())
     }
 
     fn validate_cloudflare(&self) -> Result<()> {
@@ -188,11 +215,13 @@ impl ClusterConfig {
                 "list at least one zone clouduler may write to",
             ));
         }
-        if !cf.api_token_file.is_absolute() {
-            return Err(ConfigError::invalid(
-                "cloudflare.api_token_file",
-                "must be an absolute path",
-            ));
+        if let Some(path) = &cf.api_token_file {
+            if !path.is_absolute() {
+                return Err(ConfigError::invalid(
+                    "cloudflare.api_token_file",
+                    "must be an absolute path",
+                ));
+            }
         }
         // Every network domain must sit under a zone or its records cannot be written.
         for (name, net) in &self.networks {
@@ -205,12 +234,19 @@ impl ClusterConfig {
                 }
             }
         }
+        let web = self.web_fqdn();
+        if !cf.zones.iter().any(|z| is_within(&web, z)) {
+            return Err(ConfigError::invalid(
+                "web.address",
+                format!("{web} is not covered by any configured cloudflare zone"),
+            ));
+        }
         Ok(())
     }
 }
 
 /// True when `name` is the domain itself or a subdomain of it.
-fn is_within(name: &str, domain: &str) -> bool {
+pub(crate) fn is_within(name: &str, domain: &str) -> bool {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
     let domain = domain.trim_end_matches('.').to_ascii_lowercase();
     name == domain || name.ends_with(&format!(".{domain}"))
@@ -219,32 +255,44 @@ fn is_within(name: &str, domain: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::{qualify, DEFAULT_RPC_PORT};
+    use crate::error::ConfigError;
 
     const BASE: &str = r#"
 cluster: { name: home }
 networks:
-  lan:  { type: private, subnet: 10.10.0.0/24, domain: int.example.com }
-  wan:  { type: public,  domain: example.com }
+  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }
+  wan:       { type: public,   domain: example.com }
 drives:
   fast: { sync_interval: 5m }
 nodes:
   n1:
     role: manager
-    private_ip: 10.10.0.1
-    public: { ipv4: 203.0.113.5 }
+    network:
+      tailscale: 10.10.0.1
+      lan: 192.168.1.1
+      wan: { ipv4: 203.0.113.5, ipv6: "2001:db8::5" }
     drives: { fast: /srv/clouduler/fast }
   n2:
     role: worker
-    private_ip: 10.10.0.2
+    network:
+      tailscale: 10.10.0.2
+      wan: { domain: n2.example.net }
     drives: { fast: /mnt/fast }
-web: { address: cloud.int.example.com, network: lan }
+web: { address: cloud, network: tailscale }
 cloudflare:
   api_token_file: /etc/clouduler/cf.token
   zones: [example.com]
 "#;
 
-    fn parse_with(patch: &str) -> Result<ClusterConfig> {
-        ClusterConfig::parse(&format!("{BASE}{patch}"))
+    fn parse(patch: &[(&str, &str)]) -> Result<ClusterConfig> {
+        let mut raw = BASE.to_string();
+        for (from, to) in patch {
+            assert!(raw.contains(from), "patch anchor {from} not found");
+            raw = raw.replace(from, to);
+        }
+        ClusterConfig::parse(&raw)
     }
 
     #[test]
@@ -253,79 +301,141 @@ cloudflare:
         assert_eq!(cfg.cluster.name, "home");
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.managers().count(), 1);
+        assert_eq!(cfg.quorum(), 1);
+        assert_eq!(cfg.internal_network().0, "tailscale");
         assert_eq!(
             cfg.drives["fast"].sync_interval,
             std::time::Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn rpc_uses_the_internal_address() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        let addr = cfg.rpc_addr(&cfg.nodes["n1"]).unwrap();
+        assert_eq!(addr.ip().to_string(), "10.10.0.1");
+        assert_eq!(addr.port(), DEFAULT_RPC_PORT);
+    }
+
+    #[test]
+    fn node_addresses_resolve_per_network() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        let n1 = &cfg.nodes["n1"];
+        assert_eq!(n1.ip_on("lan").unwrap().to_string(), "192.168.1.1");
+        assert_eq!(n1.public_on("wan").unwrap().ipv4.unwrap().to_string(), "203.0.113.5");
+        assert!(n1.ip_on("wan").is_none());
         assert_eq!(
-            cfg.nodes["n1"].rpc_addr().port(),
-            crate::cluster::DEFAULT_RPC_PORT
+            cfg.nodes["n2"].public_on("wan").unwrap().domain.as_deref(),
+            Some("n2.example.net")
         );
     }
 
     #[test]
-    fn node_private_ip_must_be_in_a_private_subnet() {
-        let err = parse_with("\n").err();
-        assert!(err.is_none());
-
-        let cfg = BASE.replace("private_ip: 10.10.0.2", "private_ip: 192.168.5.2");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
-        assert!(err.to_string().contains("not inside any declared private network"));
+    fn bare_web_address_gets_the_network_domain() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        assert_eq!(cfg.web_fqdn(), "cloud.int.example.com");
+        let cfg = parse(&[("address: cloud,", "address: ui.lan.example.com,")]).unwrap();
+        assert_eq!(cfg.web_fqdn(), "ui.lan.example.com");
     }
 
     #[test]
-    fn private_ips_must_be_unique() {
-        let cfg = BASE.replace("private_ip: 10.10.0.2", "private_ip: 10.10.0.1");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
+    fn only_one_internal_network_is_allowed() {
+        let err = parse(&[("lan:       { type: private", "lan:       { type: internal")]).unwrap_err();
+        assert!(err.to_string().contains("only one internal network"));
+
+        let err = parse(&[("tailscale: { type: internal", "tailscale: { type: private")]).unwrap_err();
+        assert!(err.to_string().contains("exactly one internal network"));
+    }
+
+    #[test]
+    fn every_node_needs_an_internal_address() {
+        let err = parse(&[("      tailscale: 10.10.0.2\n", "")]).unwrap_err();
+        assert!(err.to_string().contains("address on the internal network"));
+    }
+
+    #[test]
+    fn node_ip_must_sit_in_the_network_subnet() {
+        let err = parse(&[("tailscale: 10.10.0.2", "tailscale: 10.99.0.2")]).unwrap_err();
+        assert!(err.to_string().contains("outside the tailscale subnet"));
+    }
+
+    #[test]
+    fn internal_ips_must_be_unique() {
+        let err = parse(&[("tailscale: 10.10.0.2", "tailscale: 10.10.0.1")]).unwrap_err();
         assert!(err.to_string().contains("used by another node"));
     }
 
     #[test]
-    fn private_network_requires_a_subnet() {
-        let cfg = BASE.replace("subnet: 10.10.0.0/24, ", "");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
-        assert!(err.to_string().contains("needs a subnet"));
+    fn address_form_must_match_the_network_kind() {
+        let err = parse(&[("lan: 192.168.1.1", "lan: { ipv4: 192.168.1.1 }")]).unwrap_err();
+        assert!(err.to_string().contains("takes a bare IP address"));
+
+        let err = parse(&[
+            ("wan: { ipv4: 203.0.113.5, ipv6: \"2001:db8::5\" }", "wan: 203.0.113.5"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("takes an ipv4, ipv6 and/or domain"));
+    }
+
+    #[test]
+    fn public_address_must_not_be_empty() {
+        let err = parse(&[("wan: { domain: n2.example.net }", "wan: {}")]).unwrap_err();
+        assert!(err.to_string().contains("at least one of ipv4"));
+    }
+
+    #[test]
+    fn unknown_network_reference_is_rejected() {
+        let err = parse(&[("lan: 192.168.1.1", "wifi: 192.168.1.1")]).unwrap_err();
+        assert!(err.to_string().contains("no network named wifi"));
+    }
+
+    #[test]
+    fn subnetted_networks_need_a_subnet() {
+        let err = parse(&[("subnet: 10.10.0.0/24, ", "")]).unwrap_err();
+        assert!(err.to_string().contains("internal network needs a subnet"));
+    }
+
+    #[test]
+    fn public_networks_reject_a_subnet() {
+        let err = parse(&[("wan:       { type: public,", "wan:       { type: public, subnet: 1.0.0.0/8,")])
+            .unwrap_err();
+        assert!(err.to_string().contains("must not declare a subnet"));
     }
 
     #[test]
     fn drive_references_must_resolve() {
-        let cfg = BASE.replace("drives: { fast: /mnt/fast }", "drives: { bulk: /mnt/bulk }");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
+        let err = parse(&[("drives: { fast: /mnt/fast }", "drives: { bulk: /mnt/bulk }")]).unwrap_err();
         assert!(err.to_string().contains("no drive named bulk"));
     }
 
     #[test]
     fn drive_paths_must_be_absolute() {
-        let cfg = BASE.replace("fast: /mnt/fast", "fast: mnt/fast");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
+        let err = parse(&[("fast: /mnt/fast", "fast: mnt/fast")]).unwrap_err();
         assert!(err.to_string().contains("absolute path"));
     }
 
     #[test]
     fn unimplemented_drive_is_rejected() {
-        let cfg = BASE.replace("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: {}");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
+        let err = parse(&[("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: {}")])
+            .unwrap_err();
         assert!(err.to_string().contains("no node implements this drive"));
     }
 
     #[test]
-    fn web_address_must_sit_under_its_network_domain() {
-        let cfg = BASE.replace("cloud.int.example.com", "cloud.other.com");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
-        assert!(err.to_string().contains("is not under int.example.com"));
-    }
-
-    #[test]
     fn network_domain_must_be_covered_by_a_zone() {
-        let cfg = BASE.replace("zones: [example.com]", "zones: [other.com]");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
+        let err = parse(&[("zones: [example.com]", "zones: [other.com]")]).unwrap_err();
         assert!(err.to_string().contains("not covered by any configured cloudflare zone"));
     }
 
     #[test]
+    fn cloudflare_token_may_be_omitted() {
+        let cfg = parse(&[("  api_token_file: /etc/clouduler/cf.token\n", "")]).unwrap();
+        assert!(cfg.cloudflare.unwrap().api_token_file.is_none());
+    }
+
+    #[test]
     fn cluster_needs_a_manager() {
-        let cfg = BASE.replace("role: manager", "role: worker");
-        let err = ClusterConfig::parse(&cfg).unwrap_err();
+        let err = parse(&[("role: manager", "role: worker")]).unwrap_err();
         assert!(err.to_string().contains("role manager"));
     }
 
@@ -338,10 +448,18 @@ cloudflare:
     #[test]
     fn nodes_implementing_filters_on_every_drive() {
         let cfg = ClusterConfig::parse(BASE).unwrap();
-        let want = vec!["fast".to_string()];
-        assert_eq!(cfg.nodes_implementing(&want).count(), 2);
-        let want = vec!["fast".to_string(), "bulk".to_string()];
-        assert_eq!(cfg.nodes_implementing(&want).count(), 0);
+        assert_eq!(cfg.nodes_implementing(&["fast".into()]).count(), 2);
+        assert_eq!(
+            cfg.nodes_implementing(&["fast".into(), "bulk".into()]).count(),
+            0
+        );
+    }
+
+    #[test]
+    fn qualify_only_touches_bare_labels() {
+        assert_eq!(qualify("cloud", Some("example.com")), "cloud.example.com");
+        assert_eq!(qualify("a.b.com", Some("example.com")), "a.b.com");
+        assert_eq!(qualify("cloud", None), "cloud");
     }
 
     #[test]

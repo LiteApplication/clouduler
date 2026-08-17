@@ -1,34 +1,44 @@
 //! Read only views of the config, used by the check and list commands.
 
-use cl_config::{ClusterConfig, NetworkKind};
+use cl_config::{ClusterConfig, Node, NodeAddress};
 
 pub fn summary(cfg: &ClusterConfig) {
-    let managers = cfg.managers().count();
     println!("cluster {}", cfg.cluster.name);
     println!(
         "  {} nodes, {} managers, quorum {}",
         cfg.nodes.len(),
-        managers,
-        managers / 2 + 1
+        cfg.managers().count(),
+        cfg.quorum()
     );
     for (name, net) in &cfg.networks {
-        let kind = match net.kind {
-            NetworkKind::Private => "private",
-            NetworkKind::Public => "public",
-        };
         let subnet = net.subnet.map(|s| s.to_string()).unwrap_or_default();
         let domain = net.domain.clone().unwrap_or_default();
-        println!("  network {name} ({kind}) {subnet} {domain}");
+        println!("  network {name} ({}) {subnet} {domain}", net.kind);
     }
-    println!("  web {} on {}", cfg.web.address, cfg.web.network);
+    println!("  web https://{}:{}", cfg.web_fqdn(), cfg.web.port);
 }
 
 pub fn nodes(cfg: &ClusterConfig) {
     for (name, node) in &cfg.nodes {
-        let public = node
-            .public
-            .as_ref()
-            .map(|p| {
+        let rpc = cfg
+            .rpc_addr(node)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{name}\t{}\t{rpc}\tnets={}\tdrives={}",
+            node.role,
+            addresses(node),
+            list(node.drives.keys().map(String::as_str))
+        );
+    }
+}
+
+fn addresses(node: &Node) -> String {
+    let mut out = Vec::new();
+    for (net, addr) in &node.network {
+        let value = match addr {
+            NodeAddress::Ip(ip) => ip.to_string(),
+            NodeAddress::Public(p) => {
                 let mut parts = Vec::new();
                 if let Some(v4) = p.ipv4 {
                     parts.push(v4.to_string());
@@ -39,35 +49,34 @@ pub fn nodes(cfg: &ClusterConfig) {
                 if let Some(d) = &p.domain {
                     parts.push(d.clone());
                 }
-                parts.join(",")
-            })
-            .unwrap_or_else(|| "-".to_string());
-        let drives: Vec<&str> = node.drives.keys().map(String::as_str).collect();
-        println!(
-            "{name}\t{}\t{}\tpublic={public}\tdrives={}",
-            node.role,
-            node.rpc_addr(),
-            if drives.is_empty() {
-                "-".to_string()
-            } else {
-                drives.join(",")
+                parts.join("/")
             }
-        );
+        };
+        out.push(format!("{net}={value}"));
     }
+    list(out.iter().map(String::as_str))
 }
 
 pub fn drives(cfg: &ClusterConfig) {
     for (name, drive) in &cfg.drives {
-        let on: Vec<&str> = cfg
+        let on = cfg
             .nodes
             .iter()
             .filter(|(_, n)| n.implements(name))
-            .map(|(n, _)| n.as_str())
-            .collect();
+            .map(|(n, _)| n.as_str());
         println!(
             "{name}\tsync={:?}\tnodes={}",
             drive.sync_interval,
-            on.join(",")
+            list(on)
         );
+    }
+}
+
+fn list<'a>(items: impl Iterator<Item = &'a str>) -> String {
+    let joined = items.collect::<Vec<_>>().join(",");
+    if joined.is_empty() {
+        "-".to_string()
+    } else {
+        joined
     }
 }

@@ -13,15 +13,27 @@ repository = "https://github.com/clouduler/clouduler"
 
 [workspace.dependencies]
 cl-config = { path = "crates/cl-config" }
+cl-docker = { path = "crates/cl-docker" }
+cl-dns = { path = "crates/cl-dns" }
+cl-raft = { path = "crates/cl-raft" }
 
 anyhow = "1"
+async-trait = "0.1"
+bincode = "1"
+bollard = "0.21"
 clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
 humantime-serde = "1"
 ipnet = { version = "2", features = ["serde"] }
+openraft = { version = "0.9", features = ["serde"] }
+redb = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

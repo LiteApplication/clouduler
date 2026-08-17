@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -32,14 +32,24 @@ pub struct ClusterMeta {
     pub name: String,
 }
 
-/// A network is either private (node to node, trusted, carries the overlay) or
-/// public (reachable from the internet). Both may own a domain; records for a
-/// private network's domain resolve to private IPs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkKind {
+    /// The one network every node talks to every other node on. Carries raft,
+    /// drive sync and the container overlay. Trusted, so unencrypted.
+    Internal,
+    /// A further non public subnet a node may sit on. Records for its domain
+    /// resolve to the node address on that network.
     Private,
+    /// Reachable from the internet. Records resolve to the node public address.
     Public,
+}
+
+impl NetworkKind {
+    /// Internal and private networks address nodes by IP inside a subnet.
+    pub fn is_subnetted(self) -> bool {
+        matches!(self, NetworkKind::Internal | NetworkKind::Private)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,9 +57,10 @@ pub enum NetworkKind {
 pub struct Network {
     #[serde(rename = "type")]
     pub kind: NetworkKind,
-    /// Required for private networks, the range node private IPs must fall in.
+    /// Required for internal and private networks, must contain the node addresses.
     #[serde(default)]
     pub subnet: Option<IpNet>,
+    /// Records under this domain resolve to node addresses on this network.
     #[serde(default)]
     pub domain: Option<String>,
 }
@@ -80,9 +91,10 @@ pub enum NodeRole {
 #[serde(deny_unknown_fields)]
 pub struct Node {
     pub role: NodeRole,
-    pub private_ip: IpAddr,
+    /// Networks this node is attached to, keyed by network name. Subnetted
+    /// networks take a bare IP, public networks take an address block.
     #[serde(default)]
-    pub public: Option<PublicAddress>,
+    pub network: BTreeMap<String, NodeAddress>,
     /// Drives this node implements, mapped to the local directory backing them.
     #[serde(default)]
     pub drives: BTreeMap<String, PathBuf>,
@@ -94,7 +106,33 @@ fn default_rpc_port() -> u16 {
     DEFAULT_RPC_PORT
 }
 
-/// How the node is reached from outside. At least one field must be set.
+/// A node address on one network. Bare IP on subnetted networks, an address
+/// block on public ones.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum NodeAddress {
+    Ip(IpAddr),
+    Public(PublicAddress),
+}
+
+impl NodeAddress {
+    pub fn as_ip(&self) -> Option<IpAddr> {
+        match self {
+            NodeAddress::Ip(ip) => Some(*ip),
+            NodeAddress::Public(_) => None,
+        }
+    }
+
+    pub fn as_public(&self) -> Option<&PublicAddress> {
+        match self {
+            NodeAddress::Public(p) => Some(p),
+            NodeAddress::Ip(_) => None,
+        }
+    }
+}
+
+/// How the node is reached on a public network. At least one field must be set.
+/// ipv4 publishes an A record, ipv6 an AAAA, domain a CNAME.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublicAddress {
@@ -102,17 +140,24 @@ pub struct PublicAddress {
     pub ipv4: Option<Ipv4Addr>,
     #[serde(default)]
     pub ipv6: Option<Ipv6Addr>,
-    /// Used instead of A/AAAA records, published as a CNAME.
     #[serde(default)]
     pub domain: Option<String>,
+}
+
+impl PublicAddress {
+    pub fn is_empty(&self) -> bool {
+        self.ipv4.is_none() && self.ipv6.is_none() && self.domain.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WebConfig {
-    /// Hostname the UI is served on, always over HTTPS.
+    /// Hostname the UI is served on, always over HTTPS. A bare label gets the
+    /// network domain appended.
     pub address: String,
-    /// Network the hostname resolves through.
+    /// Network the hostname resolves through, picking which node address the
+    /// record points at.
     pub network: String,
     #[serde(default = "default_web_port")]
     pub port: u16,
@@ -125,9 +170,10 @@ fn default_web_port() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CloudflareConfig {
-    /// Path to a file holding the API token. Kept out of the config so the
-    /// config itself stays safe to commit.
-    pub api_token_file: PathBuf,
+    /// Path to a file holding the API token. Left out when the token is set
+    /// from the web ui instead.
+    #[serde(default)]
+    pub api_token_file: Option<PathBuf>,
     /// Zones clouduler is allowed to write records into.
     pub zones: Vec<String>,
 }
@@ -149,11 +195,10 @@ impl ClusterConfig {
     }
 
     pub fn parse(raw: &str) -> Result<Self> {
-        let cfg: ClusterConfig =
-            serde_yaml::from_str(raw).map_err(|source| ConfigError::Parse {
-                path: PathBuf::from("<config>"),
-                source,
-            })?;
+        let cfg: ClusterConfig = serde_yaml::from_str(raw).map_err(|source| ConfigError::Parse {
+            path: PathBuf::from("<config>"),
+            source,
+        })?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -163,9 +208,30 @@ impl ClusterConfig {
     }
 
     pub fn managers(&self) -> impl Iterator<Item = (&String, &Node)> {
-        self.nodes
+        self.nodes.iter().filter(|(_, n)| n.role == NodeRole::Manager)
+    }
+
+    /// Number of managers that must be reachable to hold quorum.
+    pub fn quorum(&self) -> usize {
+        self.managers().count() / 2 + 1
+    }
+
+    /// The single internal network. Validation guarantees exactly one exists.
+    pub fn internal_network(&self) -> (&String, &Network) {
+        self.networks
             .iter()
-            .filter(|(_, n)| n.role == NodeRole::Manager)
+            .find(|(_, n)| n.kind == NetworkKind::Internal)
+            .expect("validated config has exactly one internal network")
+    }
+
+    /// The node address on the internal network, used for all node to node RPC.
+    pub fn internal_ip(&self, node: &Node) -> Option<IpAddr> {
+        node.network.get(self.internal_network().0)?.as_ip()
+    }
+
+    /// Address other nodes use to reach this one.
+    pub fn rpc_addr(&self, node: &Node) -> Option<SocketAddr> {
+        Some(SocketAddr::new(self.internal_ip(node)?, node.rpc_port))
     }
 
     /// Nodes implementing every one of the given drives.
@@ -178,23 +244,39 @@ impl ClusterConfig {
             .filter(move |(_, n)| drives.iter().all(|d| n.drives.contains_key(d)))
     }
 
-    /// The private network whose subnet contains this node's private IP.
-    pub fn private_network_of(&self, node: &Node) -> Option<(&String, &Network)> {
-        self.networks.iter().find(|(_, net)| {
-            net.kind == NetworkKind::Private
-                && net.subnet.map(|s| s.contains(&node.private_ip)).unwrap_or(false)
-        })
+    /// The UI hostname with the network domain appended when it is a bare label.
+    pub fn web_fqdn(&self) -> String {
+        qualify(
+            &self.web.address,
+            self.networks
+                .get(&self.web.network)
+                .and_then(|n| n.domain.as_deref()),
+        )
     }
 }
 
 impl Node {
-    /// Address other nodes use to reach this one.
-    pub fn rpc_addr(&self) -> std::net::SocketAddr {
-        std::net::SocketAddr::new(self.private_ip, self.rpc_port)
-    }
-
     pub fn implements(&self, drive: &str) -> bool {
         self.drives.contains_key(drive)
+    }
+
+    /// The IP this node holds on a subnetted network.
+    pub fn ip_on(&self, network: &str) -> Option<IpAddr> {
+        self.network.get(network)?.as_ip()
+    }
+
+    /// The address block this node holds on a public network.
+    pub fn public_on(&self, network: &str) -> Option<&PublicAddress> {
+        self.network.get(network)?.as_public()
+    }
+}
+
+/// Append `domain` to a bare label. Anything already containing a dot is taken
+/// as a full name.
+pub fn qualify(name: &str, domain: Option<&str>) -> String {
+    match domain {
+        Some(domain) if !name.contains('.') => format!("{name}.{domain}"),
+        _ => name.to_string(),
     }
 }
 
@@ -207,8 +289,12 @@ impl fmt::Display for NodeRole {
     }
 }
 
-impl PublicAddress {
-    pub fn is_empty(&self) -> bool {
-        self.ipv4.is_none() && self.ipv6.is_none() && self.domain.is_none()
+impl fmt::Display for NetworkKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NetworkKind::Internal => f.write_str("internal"),
+            NetworkKind::Private => f.write_str("private"),
+            NetworkKind::Public => f.write_str("public"),
+        }
     }
 }
