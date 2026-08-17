@@ -22,10 +22,123 @@ pub struct ClusterConfig {
     pub drives: BTreeMap<String, Drive>,
     pub nodes: BTreeMap<String, Node>,
     pub web: WebConfig,
+    /// Cluster wide default for where nodes keep their data. Individual nodes
+    /// can override it.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
     #[serde(default)]
     pub failover: FailoverConfig,
     #[serde(default)]
+    pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
     pub cloudflare: Option<CloudflareConfig>,
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/clouduler")
+}
+
+/// Where the key that decrypts stored secrets lives.
+///
+/// Secrets are encrypted before they enter the database, so the replicated
+/// state and its snapshots are safe to copy around. The key itself is not in
+/// the database: it sits in a file on at least one node. A node without the key
+/// replicates secrets fine but cannot start a container that uses one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsConfig {
+    /// Path to the key file. Nodes that have it can decrypt; nodes that do not
+    /// simply cannot run containers needing secrets.
+    #[serde(default = "default_key_file")]
+    pub key_file: PathBuf,
+
+    /// Generate a key on first launch when the file is missing. Turn this off
+    /// on nodes that should only ever receive an existing key, so a typo in the
+    /// path cannot quietly create a second, useless key.
+    #[serde(default = "default_true_bool")]
+    pub generate_if_missing: bool,
+}
+
+fn default_key_file() -> PathBuf {
+    PathBuf::from("/etc/clouduler/secrets.key")
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+impl Default for SecretsConfig {
+    fn default() -> Self {
+        Self {
+            key_file: default_key_file(),
+            generate_if_missing: true,
+        }
+    }
+}
+
+/// How people authenticate to the web ui and the api.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    /// OIDC is the recommended way in. Without it, api keys are the only option.
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
+
+    /// Api keys always work as a fallback, so a broken identity provider cannot
+    /// lock you out of your own cluster. One is generated and printed on first
+    /// launch. Set to false only once OIDC is known to work.
+    #[serde(default = "default_true_bool")]
+    pub api_keys: bool,
+
+    /// How long a ui session lasts.
+    #[serde(with = "humantime_serde", default = "default_session_ttl")]
+    pub session_ttl: Duration,
+}
+
+fn default_session_ttl() -> Duration {
+    Duration::from_secs(12 * 3600)
+}
+
+/// Deriving this would leave api keys off, which the validator rejects. The
+/// default has to match what the serde field defaults say.
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            oidc: None,
+            api_keys: true,
+            session_ttl: default_session_ttl(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OidcConfig {
+    /// Issuer URL. Discovery happens at `<issuer>/.well-known/openid-configuration`.
+    pub issuer: String,
+    pub client_id: String,
+    /// Kept out of the config file so the config stays safe to commit.
+    #[serde(default)]
+    pub client_secret_file: Option<PathBuf>,
+    #[serde(default = "default_scopes")]
+    pub scopes: Vec<String>,
+    /// Claim listing the user's groups or roles.
+    #[serde(default = "default_admin_claim")]
+    pub admin_claim: String,
+    /// Value in that claim which grants admin. Without it, a successful login
+    /// gets read only access.
+    #[serde(default)]
+    pub admin_value: Option<String>,
+}
+
+fn default_scopes() -> Vec<String> {
+    vec!["openid".into(), "profile".into(), "email".into()]
+}
+
+fn default_admin_claim() -> String {
+    "groups".to_string()
 }
 
 /// Timings for handling a node that drops out of the cluster.
@@ -115,13 +228,43 @@ pub struct Network {
     pub domain: Option<String>,
 }
 
+/// How a drive's data is made available to the nodes using it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DriveMode {
+    /// Every implementing node keeps its own copy, kept in step by periodic
+    /// delta sync. Containers read local disk, so this survives a node losing
+    /// the network, at the cost of the copies lagging each other.
+    #[default]
+    Replicated,
+    /// One node holds the data and serves it to the others, who mount it over
+    /// the internal network. One copy, always consistent, but a container using
+    /// it stops working when the serving node goes away.
+    Served,
+}
+
 /// A cluster wide directory namespace. Nodes opt in by mapping it to a local path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Drive {
-    /// How often volumes on this drive replicate to the other implementing nodes.
+    /// How often volumes on this drive replicate to the other implementing
+    /// nodes. Ignored for a served drive, which has only one copy.
     #[serde(with = "humantime_serde", default = "default_sync_interval")]
     pub sync_interval: Duration,
+
+    #[serde(default)]
+    pub mode: DriveMode,
+
+    /// Node holding the data for a served drive. The others mount it from
+    /// there; the path they map the drive to is the mountpoint.
+    #[serde(default)]
+    pub served_by: Option<String>,
+}
+
+impl Drive {
+    pub fn is_served(&self) -> bool {
+        self.mode == DriveMode::Served
+    }
 }
 
 fn default_sync_interval() -> Duration {
@@ -146,10 +289,16 @@ pub struct Node {
     #[serde(default)]
     pub network: BTreeMap<String, NodeAddress>,
     /// Drives this node implements, mapped to the local directory backing them.
+    /// For a served drive, this is the real directory on the serving node and
+    /// the mountpoint everywhere else.
     #[serde(default)]
     pub drives: BTreeMap<String, PathBuf>,
     #[serde(default = "default_rpc_port")]
     pub rpc_port: u16,
+    /// Where this node keeps its database and working files. Overrides the
+    /// cluster default, for nodes whose big disk is not in the usual place.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
 }
 
 fn default_rpc_port() -> u16 {
@@ -308,6 +457,11 @@ impl ClusterConfig {
 impl Node {
     pub fn implements(&self, drive: &str) -> bool {
         self.drives.contains_key(drive)
+    }
+
+    /// Where this node keeps its database and working files.
+    pub fn data_dir<'a>(&'a self, cluster: &'a ClusterConfig) -> &'a Path {
+        self.data_dir.as_deref().unwrap_or(&cluster.data_dir)
     }
 
     /// The IP this node holds on a subnetted network.

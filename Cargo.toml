@@ -10,6 +10,7 @@ members = [
     "crates/cl-drive",
     "crates/cl-proxy",
     "crates/cl-sched",
+    "crates/cl-secret",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ cl-net = { path = "crates/cl-net" }
 cl-drive = { path = "crates/cl-drive" }
 cl-proxy = { path = "crates/cl-proxy" }
 cl-sched = { path = "crates/cl-sched" }
+cl-secret = { path = "crates/cl-secret" }
 
 anyhow = "1"
 base64 = "0.23"

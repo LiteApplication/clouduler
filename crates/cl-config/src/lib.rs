@@ -8,7 +8,8 @@ mod stack;
 mod validate;
 
 pub use cluster::{
-    qualify, CloudflareConfig, ClusterConfig, FailoverConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
+    qualify, AuthConfig, CloudflareConfig, ClusterConfig, DriveMode, FailoverConfig, OidcConfig,
+    SecretsConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
     NodeAddress, NodeRole, PublicAddress, WebConfig, DEFAULT_RPC_PORT,
 };
 pub use bundle::{BundledFile, StackBundle};

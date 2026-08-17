@@ -12,6 +12,9 @@ impl ClusterConfig {
         self.validate_nodes()?;
         self.validate_drives()?;
         self.validate_web()?;
+        self.validate_data_dirs()?;
+        self.validate_secrets()?;
+        self.validate_auth()?;
         self.validate_failover()?;
         self.validate_cloudflare()?;
         Ok(())
@@ -203,14 +206,112 @@ impl ClusterConfig {
     }
 
     fn validate_drives(&self) -> Result<()> {
-        // A drive nobody implements can never host a volume, so it is a typo.
-        for drive in self.drives.keys() {
-            if !self.nodes.values().any(|n| n.implements(drive)) {
+        for (name, drive) in &self.drives {
+            // A drive nobody implements can never host a volume, so it is a typo.
+            if !self.nodes.values().any(|n| n.implements(name)) {
                 return Err(ConfigError::invalid(
-                    format!("drives.{drive}"),
+                    format!("drives.{name}"),
                     "no node implements this drive",
                 ));
             }
+
+            match (drive.is_served(), &drive.served_by) {
+                (true, None) => {
+                    return Err(ConfigError::invalid(
+                        format!("drives.{name}.served_by"),
+                        "a served drive must name the node holding the data",
+                    ))
+                }
+                (false, Some(_)) => {
+                    return Err(ConfigError::invalid(
+                        format!("drives.{name}.served_by"),
+                        "only a served drive has a serving node, set mode: served",
+                    ))
+                }
+                (true, Some(server)) => {
+                    let Some(node) = self.nodes.get(server) else {
+                        return Err(ConfigError::invalid(
+                            format!("drives.{name}.served_by"),
+                            format!("no node named {server}"),
+                        ));
+                    };
+                    if !node.implements(name) {
+                        return Err(ConfigError::invalid(
+                            format!("drives.{name}.served_by"),
+                            format!("{server} must map {name} to the directory holding the data"),
+                        ));
+                    }
+                }
+                (false, None) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_data_dirs(&self) -> Result<()> {
+        if !self.data_dir.is_absolute() {
+            return Err(ConfigError::invalid("data_dir", "must be an absolute path"));
+        }
+        for (name, node) in &self.nodes {
+            if let Some(dir) = &node.data_dir {
+                if !dir.is_absolute() {
+                    return Err(ConfigError::invalid(
+                        format!("nodes.{name}.data_dir"),
+                        "must be an absolute path",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_secrets(&self) -> Result<()> {
+        if !self.secrets.key_file.is_absolute() {
+            return Err(ConfigError::invalid(
+                "secrets.key_file",
+                "must be an absolute path",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_auth(&self) -> Result<()> {
+        let Some(oidc) = &self.auth.oidc else {
+            // With no identity provider, api keys are the only way in.
+            if !self.auth.api_keys {
+                return Err(ConfigError::invalid(
+                    "auth.api_keys",
+                    "cannot be disabled without an oidc provider, that would lock everyone out",
+                ));
+            }
+            return Ok(());
+        };
+
+        if !oidc.issuer.starts_with("https://") {
+            return Err(ConfigError::invalid(
+                "auth.oidc.issuer",
+                "must be an https url",
+            ));
+        }
+        if oidc.client_id.trim().is_empty() {
+            return Err(ConfigError::invalid(
+                "auth.oidc.client_id",
+                "must not be empty",
+            ));
+        }
+        if let Some(path) = &oidc.client_secret_file {
+            if !path.is_absolute() {
+                return Err(ConfigError::invalid(
+                    "auth.oidc.client_secret_file",
+                    "must be an absolute path",
+                ));
+            }
+        }
+        if !oidc.scopes.iter().any(|s| s == "openid") {
+            return Err(ConfigError::invalid(
+                "auth.oidc.scopes",
+                "must include openid",
+            ));
         }
         Ok(())
     }
@@ -539,5 +640,106 @@ cloudflare:
         assert!(is_within("example.com", "example.com"));
         assert!(!is_within("notexample.com", "example.com"));
         assert!(!is_within("example.com.evil.net", "example.com"));
+    }
+
+    #[test]
+    fn data_dir_defaults_and_overrides_per_node() {
+        let cfg = ClusterConfig::parse(BASE).expect("valid");
+        assert_eq!(cfg.data_dir, std::path::PathBuf::from("/var/lib/clouduler"));
+        assert_eq!(cfg.nodes["n1"].data_dir(&cfg), cfg.data_dir);
+
+        let cfg = parse(&[("    role: worker", "    data_dir: /mnt/big/clouduler\n    role: worker")])
+            .expect("valid");
+        assert_eq!(
+            cfg.nodes["n2"].data_dir(&cfg),
+            std::path::Path::new("/mnt/big/clouduler")
+        );
+        // The other node still falls back to the cluster default.
+        assert_eq!(cfg.nodes["n1"].data_dir(&cfg), cfg.data_dir);
+    }
+
+    #[test]
+    fn data_dirs_must_be_absolute() {
+        let err = parse(&[("    role: worker", "    data_dir: relative/path\n    role: worker")])
+            .unwrap_err();
+        assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn a_served_drive_needs_a_serving_node() {
+        let err = parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).unwrap_err();
+        assert!(err.to_string().contains("must name the node holding the data"));
+    }
+
+    #[test]
+    fn a_replicated_drive_rejects_a_serving_node() {
+        let err = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { sync_interval: 5m, served_by: n1 }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("only a served drive"));
+    }
+
+    #[test]
+    fn the_serving_node_must_implement_the_drive() {
+        let err = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { mode: served, served_by: nowhere }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("no node named nowhere"));
+    }
+
+    #[test]
+    fn a_served_drive_is_accepted() {
+        let cfg = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { mode: served, served_by: n1 }",
+        )])
+        .expect("valid");
+        assert!(cfg.drives["fast"].is_served());
+        assert_eq!(cfg.drives["fast"].served_by.as_deref(), Some("n1"));
+    }
+
+    #[test]
+    fn api_keys_cannot_be_the_only_way_in_and_disabled() {
+        let err = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            "auth: { api_keys: false }\nweb: { address: cloud, network: tailscale }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("lock everyone out"));
+    }
+
+    #[test]
+    fn oidc_is_validated_when_present() {
+        let good = "auth:\n  api_keys: false\n  oidc:\n    issuer: https://accounts.example.com\n    client_id: clouduler\n";
+        let cfg = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            &format!("{good}web: {{ address: cloud, network: tailscale }}"),
+        )])
+        .expect("valid");
+        let oidc = cfg.auth.oidc.expect("oidc");
+        assert_eq!(oidc.scopes, vec!["openid", "profile", "email"]);
+        assert_eq!(oidc.admin_claim, "groups");
+
+        let bad = good.replace("https://accounts", "http://accounts");
+        let err = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            &format!("{bad}web: {{ address: cloud, network: tailscale }}"),
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("https url"));
+    }
+
+    #[test]
+    fn secrets_default_to_a_generated_key() {
+        let cfg = ClusterConfig::parse(BASE).expect("valid");
+        assert!(cfg.secrets.generate_if_missing);
+        assert_eq!(
+            cfg.secrets.key_file,
+            std::path::PathBuf::from("/etc/clouduler/secrets.key")
+        );
     }
 }
