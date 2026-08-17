@@ -195,8 +195,40 @@ Fields: `host` (a bare label like `gitlab` is qualified with the network's
 domain, e.g. `gitlab.example.com`; a name containing a dot is used as is),
 `network` (must be declared in the stack and have a domain in the cluster:
 an HTTP route needs somewhere to qualify its hostname against), `port`, and
-the optional `path_prefix`, `tls` (defaults to `true`), `middlewares`
-(`redirect_https`, `strip_prefix`, `basic_auth`, `headers`) and `sticky`.
+the optional `path_prefix`, `tls` (defaults to `true`), `middlewares` and
+`sticky`.
+
+#### Middlewares
+
+A middleware that needs no settings is named as a plain string. One that does
+takes a single key map:
+
+```yaml
+middlewares:
+  - redirect_https
+  - strip_prefix
+  - basic_auth:
+      users:
+        alice: "$2y$05$..."     # bcrypt hash, as in an htpasswd file
+      realm: "internal"          # optional, defaults to "clouduler"
+  - headers:
+      request:                   # set on the way to the container
+        X-Real-Source: clouduler
+      response:                  # set on the way back to the client
+        Cache-Control: no-store
+      remove_request: [X-Debug]
+      remove_response: [Server]
+```
+
+- `redirect_https`: answer plain HTTP with a redirect to the same URL over TLS.
+- `strip_prefix`: remove the route's `path_prefix` before forwarding.
+- `basic_auth`: HTTP basic auth. Passwords are given as hashes only; a
+  plaintext password here would end up in the cluster database and in shell
+  history.
+- `headers`: header rewriting in both directions.
+
+Naming `basic_auth` or `headers` as a bare string is an error, since neither
+does anything useful without settings.
 
 ### `expose`
 
