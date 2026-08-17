@@ -127,6 +127,11 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 if !self.registry.implements(&id.drive) {
                     continue;
                 }
+                if self.registry.is_served(&id.drive) {
+                    // One copy, always consistent: periodic delta sync has
+                    // nothing to do for a served drive.
+                    continue;
+                }
 
                 let interval = intervals.interval_for(id);
                 let due_at = next_due.entry(id.clone()).or_insert_with(|| {

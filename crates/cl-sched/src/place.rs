@@ -20,6 +20,12 @@ pub enum Decision {
 }
 
 impl Decision {
+    pub fn instance(&self) -> &InstanceId {
+        match self {
+            Decision::Place { instance, .. } | Decision::Remove { instance } => instance,
+        }
+    }
+
     /// The raft command carrying out this decision.
     pub fn into_request(self, drives: BTreeSet<String>) -> Request {
         match self {

@@ -11,6 +11,9 @@ use cl_raft::ids::node_id;
 use cl_raft::liveness::{Fence, FenceAction};
 use cl_raft::node::{ClusterNode, Options};
 use cl_secret::ClusterKey;
+use cl_sched::materialize::Materializer;
+use cl_sched::Scheduler;
+use std::sync::atomic::{AtomicBool, Ordering};
 use cl_raft::state::{Availability, NodeState, Request, Role};
 use openraft::BasicNode;
 use tracing::{info, warn};
@@ -46,9 +49,6 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
     })
     .await?;
 
-    // The materializer will take this once the reconcile loop is wired up.
-    let _ = &key;
-
     let cluster = Arc::new(cluster);
     form_cluster(&cfg, &node_name, &cluster).await?;
 
@@ -57,15 +57,49 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
         failover.probe_interval,
         failover.node_timeout,
     ));
-    let fencing = tokio::spawn(run_fence(cluster.clone(), failover.clone()));
+
+    // Shared between the fence watcher and the scheduler, which consults it
+    // before starting anything.
+    let fenced = Arc::new(AtomicBool::new(false));
+    let fencing = tokio::spawn(run_fence(
+        cluster.clone(),
+        failover.clone(),
+        fenced.clone(),
+    ));
+
+    let scheduler = match cl_docker::Docker::connect() {
+        Ok(docker) => {
+            let materializer = Materializer::new(&data_dir, key);
+            let scheduler = Scheduler::new(
+                node_name.clone(),
+                cluster.clone(),
+                docker,
+                materializer,
+            );
+            let gate = fenced.clone();
+            Some(tokio::spawn(
+                scheduler.run(move || gate.load(Ordering::Relaxed)),
+            ))
+        }
+        Err(e) => {
+            // A manager with no docker is still useful: it votes, holds state
+            // and serves the ui. It just runs nothing.
+            warn!(error = %e, "no docker daemon, this node will not run containers");
+            None
+        }
+    };
+
     let watcher = tokio::spawn(watch_leadership(cfg, cluster.clone()));
 
-    // Scheduler, overlay, drives, proxy and api start here once implemented.
+    // Overlay, drives, proxy and api start here once wired in.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
     detector.abort();
     fencing.abort();
+    if let Some(scheduler) = scheduler {
+        scheduler.abort();
+    }
     cluster.shutdown().await?;
     Ok(())
 }
@@ -112,7 +146,7 @@ fn load_cluster_key(cfg: &ClusterConfig) -> Option<ClusterKey> {
 /// This is the other half of the failure handling: the leader will hand our
 /// containers to another node after `node_timeout`, and we must have let go of
 /// them before that happens, or the same volume ends up with two writers.
-async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig) {
+async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig, fenced: Arc<AtomicBool>) {
     let quorum = cluster.quorum();
     let mut fence = Fence::new();
     let mut ticker = tokio::time::interval(failover.probe_interval);
@@ -125,10 +159,12 @@ async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig) {
                     timeout = ?failover.fence_timeout,
                     "no quorum, stopping local containers"
                 );
-                // The reconcile loop consults the fence, so stopping the
-                // containers happens there once it is wired up.
+                fenced.store(true, Ordering::Relaxed);
             }
-            FenceAction::Release => info!("quorum restored, containers may start again"),
+            FenceAction::Release => {
+                info!("quorum restored, containers may start again");
+                fenced.store(false, Ordering::Relaxed);
+            }
             FenceAction::None => {}
         }
     }

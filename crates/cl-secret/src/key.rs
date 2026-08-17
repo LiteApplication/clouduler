@@ -74,8 +74,19 @@ impl ClusterKey {
         }
 
         let key = Self::generate();
-        key.save(path)?;
-        Ok((key, true))
+        match key.save(path) {
+            Ok(()) => Ok((key, true)),
+            // Someone else created it between the check and the write. Theirs
+            // is as good as ours, and taking it is the only safe move: two
+            // nodes each keeping their own key would seal secrets the other
+            // cannot open.
+            Err(SecretError::WriteKey { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                Ok((Self::load(path)?, false))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Write the key out with owner-only permissions.
@@ -88,28 +99,45 @@ impl ClusterKey {
             })?;
         }
 
-        // Create with 0600 from the start rather than fixing it afterwards,
-        // which would leave a window where the key is world readable.
+        // Write a complete temp file first, then link it into place. A reader
+        // arriving mid-write would otherwise see a truncated key and conclude
+        // the key is corrupt. The link fails if the target exists, which is
+        // what makes this an atomic create rather than an overwrite.
+        let temp = path.with_extension(format!("tmp.{}", std::process::id()));
+        let result = self.write_temp(&temp).and_then(|()| {
+            std::fs::hard_link(&temp, path).map_err(|source| SecretError::WriteKey {
+                path: path.to_path_buf(),
+                source,
+            })
+        });
+
+        let _ = std::fs::remove_file(&temp);
+        result
+    }
+
+    fn write_temp(&self, temp: &Path) -> Result<()> {
+        use std::io::Write;
+
+        // Owner only from creation, so there is no window where the key is
+        // readable by anyone else.
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
 
-        let write = |mut file: std::fs::File| -> std::io::Result<()> {
-            use std::io::Write;
-            writeln!(file, "{}", self.encode())?;
-            file.sync_all()
-        };
-
-        let file = options.open(path).map_err(|source| SecretError::WriteKey {
-            path: path.to_path_buf(),
+        let mut file = options.open(temp).map_err(|source| SecretError::WriteKey {
+            path: temp.to_path_buf(),
             source,
         })?;
-        write(file).map_err(|source| SecretError::WriteKey {
-            path: path.to_path_buf(),
+        writeln!(file, "{}", self.encode()).map_err(|source| SecretError::WriteKey {
+            path: temp.to_path_buf(),
+            source,
+        })?;
+        file.sync_all().map_err(|source| SecretError::WriteKey {
+            path: temp.to_path_buf(),
             source,
         })
     }
@@ -256,6 +284,20 @@ mod tests {
             ClusterKey::load_or_create(&path, false),
             Err(SecretError::NoKey)
         ));
+    }
+
+    #[test]
+    fn a_lost_creation_race_adopts_the_winner_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.key");
+
+        // Stand in for another node that got there first.
+        let winner = ClusterKey::generate();
+        winner.save(&path).expect("save");
+
+        let (adopted, created) = ClusterKey::load_or_create(&path, true).expect("adopt");
+        assert!(!created);
+        assert_eq!(adopted.bytes(), winner.bytes());
     }
 
     #[test]

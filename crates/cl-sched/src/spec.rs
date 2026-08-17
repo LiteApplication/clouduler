@@ -1,6 +1,7 @@
 //! Turning a stack service into the container spec docker is given.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use cl_config::{Command, RestartPolicy as StackRestart, Service};
 use cl_docker::{
@@ -20,6 +21,7 @@ pub fn build(
     instance: &InstanceId,
     service: &Service,
     objects: &[Materialized],
+    drive_roots: &BTreeMap<String, PathBuf>,
     network: Option<String>,
     digest: Option<&str>,
     revision: u64,
@@ -35,11 +37,12 @@ pub fn build(
         .volumes
         .iter()
         .filter_map(|v| {
-            // Volume paths are resolved by the drive registry, which knows the
-            // node's local root. Anonymous mounts have nothing to bind.
+            // A volume binds to the node's local directory for its drive.
+            // Anonymous mounts name no drive, so there is nothing to bind.
             let (drive, volume) = (v.drive.as_ref()?, v.volume.as_ref()?);
+            let root = drive_roots.get(drive)?;
             Some(BindMount {
-                host_path: format!("{drive}/{volume}"),
+                host_path: root.join(volume).display().to_string(),
                 container_path: v.target.display().to_string(),
                 read_only: v.read_only,
             })
@@ -215,10 +218,17 @@ mod tests {
         InstanceId::new("site", "web", 0)
     }
 
+    fn roots() -> BTreeMap<String, PathBuf> {
+        BTreeMap::from([
+            ("fast".to_string(), PathBuf::from("/srv/fast")),
+            ("bulk".to_string(), PathBuf::from("/mnt/bulk")),
+        ])
+    }
+
     #[test]
     fn a_minimal_service_builds() {
         let s = service("services:\n  web:\n    image: nginx\n");
-        let spec = build(&instance(), &s, &[], None, None, 1);
+        let spec = build(&instance(), &s, &[], &roots(), None, None, 1);
 
         assert_eq!(spec.name, "site_web_0");
         assert_eq!(spec.image, "nginx");
@@ -230,7 +240,7 @@ mod tests {
     #[test]
     fn a_digest_pins_the_image() {
         let s = service("services:\n  web:\n    image: nginx:latest\n");
-        let spec = build(&instance(), &s, &[], None, Some("sha256:abc"), 1);
+        let spec = build(&instance(), &s, &[], &roots(), None, Some("sha256:abc"), 1);
         assert_eq!(spec.image, "nginx@sha256:abc");
     }
 
@@ -255,7 +265,7 @@ mod tests {
             revision: 1,
         }];
 
-        let spec = build(&instance(), &s, &objects, None, None, 1);
+        let spec = build(&instance(), &s, &objects, &roots(), None, None, 1);
         assert_eq!(spec.mounts.len(), 1);
         assert!(spec.mounts[0].read_only);
         assert_eq!(spec.mounts[0].container_path, "/etc/nginx/nginx.conf");
@@ -266,11 +276,13 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    volumes:\n      - \"fast/data:/data\"\n      - \"bulk/backup:/backup:ro\"\n",
         );
-        let spec = build(&instance(), &s, &[], None, None, 1);
+        let spec = build(&instance(), &s, &[], &roots(), None, None, 1);
 
         assert_eq!(spec.mounts.len(), 2);
+        assert_eq!(spec.mounts[0].host_path, "/srv/fast/data");
         assert_eq!(spec.mounts[0].container_path, "/data");
         assert!(!spec.mounts[0].read_only);
+        assert_eq!(spec.mounts[1].host_path, "/mnt/bulk/backup");
         assert!(spec.mounts[1].read_only);
     }
 
@@ -279,7 +291,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    environment:\n      TZ: UTC\n    labels:\n      team: infra\n",
         );
-        let spec = build(&instance(), &s, &[], None, None, 3);
+        let spec = build(&instance(), &s, &[], &roots(), None, None, 3);
 
         assert!(spec.env.contains(&("TZ".to_string(), "UTC".to_string())));
         assert_eq!(spec.labels["team"], "infra");
@@ -298,7 +310,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    deploy:\n      resources:\n        limits:\n          cpus: \"1.5\"\n          memory: 512M\n",
         );
-        let spec = build(&instance(), &s, &[], None, None, 1);
+        let spec = build(&instance(), &s, &[], &roots(), None, None, 1);
 
         assert_eq!(spec.resources.memory_bytes, Some(512 * 1024 * 1024));
         assert_eq!(spec.resources.nano_cpus, Some(1_500_000_000));
@@ -316,13 +328,13 @@ mod tests {
     fn restart_policies_map_across() {
         let s = service("services:\n  web:\n    image: nginx\n    restart: always\n");
         assert_eq!(
-            build(&instance(), &s, &[], None, None, 1).restart_policy,
+            build(&instance(), &s, &[], &roots(), None, None, 1).restart_policy,
             RestartPolicy::Always
         );
 
         let s = service("services:\n  web:\n    image: nginx\n");
         assert_eq!(
-            build(&instance(), &s, &[], None, None, 1).restart_policy,
+            build(&instance(), &s, &[], &roots(), None, None, 1).restart_policy,
             RestartPolicy::No
         );
     }
@@ -332,7 +344,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    healthcheck:\n      disable: true\n",
         );
-        assert!(build(&instance(), &s, &[], None, None, 1).healthcheck.is_none());
+        assert!(build(&instance(), &s, &[], &roots(), None, None, 1).healthcheck.is_none());
     }
 
     #[test]
@@ -340,7 +352,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    healthcheck:\n      test: curl -f localhost\n      retries: 3\n",
         );
-        let check = build(&instance(), &s, &[], None, None, 1)
+        let check = build(&instance(), &s, &[], &roots(), None, None, 1)
             .healthcheck
             .expect("healthcheck");
         assert_eq!(check.test[0], "CMD-SHELL");

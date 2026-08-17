@@ -27,7 +27,17 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip"] }
 tracing.workspace = true
 
+# Not in the pre-wired list; added here since only cl-api needs them.
+async-stream = "0.3"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+bollard = "0.21"
+cookie = "0.18"
+humantime = "2"
+rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+openraft = { workspace = true }
+http-body-util.workspace = true

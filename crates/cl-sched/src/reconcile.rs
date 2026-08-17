@@ -149,6 +149,18 @@ impl Reconciler {
         Ok(())
     }
 
+    /// Pull the image unless it is already here. Creating a container against
+    /// an image the node has never seen fails, and on a fresh node that is
+    /// every image.
+    async fn ensure_image(&self, image: &str) -> Result<()> {
+        if self.docker.resolve_digest(image).await?.is_some() {
+            return Ok(());
+        }
+        info!(%image, "pulling");
+        self.docker.pull(image).await?;
+        Ok(())
+    }
+
     async fn apply_one(&self, action: &Action, target: Option<&Target>) -> Result<()> {
         let name = action.instance().container_name();
 
@@ -158,6 +170,7 @@ impl Reconciler {
                     warn!(instance = %id, "no spec to create from");
                     return Ok(());
                 };
+                self.ensure_image(&target.spec.image).await?;
                 info!(instance = %id, "creating");
                 self.docker.create(&target.spec).await?;
                 self.docker.start(&name).await?;
@@ -180,6 +193,7 @@ impl Reconciler {
                     warn!(instance = %id, "no spec to recreate from");
                     return Ok(());
                 };
+                self.ensure_image(&target.spec.image).await?;
                 info!(instance = %id, "recreating after a spec change");
                 self.docker.stop(&name, stop_timeout(Some(target))).await.ok();
                 self.docker.remove(&name, true).await.ok();

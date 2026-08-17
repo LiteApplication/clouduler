@@ -1,0 +1,31 @@
+//! One module per section of docs/api.md. Handlers stay thin: parse,
+//! authorize, call into the cluster or docker, serialize.
+
+pub mod auth;
+pub mod auth_keys;
+pub mod certs;
+pub mod cluster;
+pub mod config;
+pub mod drives;
+pub mod instances;
+pub mod nodes;
+pub mod objects;
+pub mod stacks;
+
+use axum::Router;
+
+use crate::server::AppState;
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .merge(auth::router())
+        .merge(auth_keys::router())
+        .merge(cluster::router())
+        .merge(nodes::router())
+        .merge(stacks::router())
+        .merge(instances::router())
+        .merge(objects::router())
+        .merge(drives::router())
+        .merge(config::router())
+        .merge(certs::router())
+}
