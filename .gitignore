@@ -4,3 +4,4 @@ dist
 *.qcow2
 *.img
 .DS_Store
+ui/dist

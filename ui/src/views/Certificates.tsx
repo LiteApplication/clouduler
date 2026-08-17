@@ -1,0 +1,137 @@
+import { useState } from 'react';
+import { api, ApiError } from '../api/client';
+import { useClusterState } from '../state/store';
+import { useAuth } from '../auth/AuthContext';
+import { Badge } from '../components/Badge';
+import { daysUntil, formatUnixSeconds } from '../lib/format';
+
+export function Certificates() {
+  const cluster = useClusterState();
+  const { isAdmin } = useAuth();
+  const [error, setError] = useState<string | null>(null);
+  const [busyFqdn, setBusyFqdn] = useState<string | null>(null);
+
+  const certs = cluster ? Object.values(cluster.certificates) : [];
+  const records = cluster ? Object.values(cluster.dns_records) : [];
+
+  const renew = async (fqdn: string) => {
+    setBusyFqdn(fqdn);
+    setError(null);
+    try {
+      await api.renewCertificate(fqdn);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'renew failed');
+    } finally {
+      setBusyFqdn(null);
+    }
+  };
+
+  const [reconciling, setReconciling] = useState(false);
+  const reconcile = async () => {
+    setReconciling(true);
+    try {
+      await api.reconcileDns();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'reconcile failed');
+    } finally {
+      setReconciling(false);
+    }
+  };
+
+  if (!cluster) return <p className="muted">Loading...</p>;
+
+  return (
+    <div>
+      <div className="page-header">
+        <h1>Certificates and DNS</h1>
+      </div>
+      {error && <div className="banner banner-warn">{error}</div>}
+
+      <div className="section">
+        <h2>Certificates</h2>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>FQDN</th>
+                <th>Expires</th>
+                <th>Status</th>
+                {isAdmin && <th>Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {certs.map((c) => {
+                const days = daysUntil(c.not_after);
+                return (
+                  <tr key={c.fqdn}>
+                    <td>{c.fqdn}</td>
+                    <td>{formatUnixSeconds(c.not_after)}</td>
+                    <td>
+                      <Badge tone={days < 14 ? 'bad' : days < 30 ? 'warn' : 'good'}>
+                        {days < 0 ? 'expired' : `${days}d left`}
+                      </Badge>
+                    </td>
+                    {isAdmin && (
+                      <td>
+                        <button disabled={busyFqdn === c.fqdn} onClick={() => renew(c.fqdn)}>
+                          Renew
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+              {certs.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    no certificates
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="page-header">
+          <h2>DNS records</h2>
+          {isAdmin && (
+            <button onClick={reconcile} disabled={reconciling}>
+              Reconcile now
+            </button>
+          )}
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>FQDN</th>
+                <th>Type</th>
+                <th>Content</th>
+                <th>Zone</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr key={`${r.fqdn}|${r.record_type}|${r.content}`}>
+                  <td>{r.fqdn}</td>
+                  <td>{r.record_type}</td>
+                  <td className="mono">{r.content}</td>
+                  <td>{r.zone}</td>
+                </tr>
+              ))}
+              {records.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    no records
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}

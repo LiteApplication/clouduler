@@ -1,0 +1,433 @@
+/* Design tokens. Everything else in the app styles off these custom
+   properties so light/dark stay in sync and nothing hardcodes a color. */
+:root {
+  --bg: #f5f6f8;
+  --bg-raised: #ffffff;
+  --bg-sunken: #eceef2;
+  --border: #d8dce3;
+  --text: #1a1d23;
+  --text-dim: #5b6270;
+  --text-faint: #8a90a0;
+  --accent: #2563eb;
+  --accent-text: #ffffff;
+  --good: #15803d;
+  --good-bg: #dcfce7;
+  --warn: #b45309;
+  --warn-bg: #fef3c7;
+  --bad: #b91c1c;
+  --bad-bg: #fee2e2;
+  --focus: #2563eb;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 6px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --bg-raised: #1c1f26;
+    --bg-sunken: #101216;
+    --border: #2c313c;
+    --text: #e7e9ee;
+    --text-dim: #a2a8b8;
+    --text-faint: #6b7180;
+    --accent: #5b8def;
+    --accent-text: #0b1220;
+    --good: #4ade80;
+    --good-bg: #0f2e1c;
+    --warn: #fbbf24;
+    --warn-bg: #2e2409;
+    --bad: #f87171;
+    --bad-bg: #351212;
+    --focus: #5b8def;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+h1, h2, h3, h4 {
+  margin: 0 0 var(--space-3);
+  font-weight: 600;
+}
+
+h1 { font-size: 20px; }
+h2 { font-size: 16px; }
+h3 { font-size: 14px; }
+
+p { margin: 0 0 var(--space-3); }
+
+code, pre {
+  font-family: var(--mono);
+}
+
+pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  overflow: auto;
+}
+
+/* ---- app shell ---- */
+
+.app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100%;
+}
+
+.sidebar {
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border);
+  padding: var(--space-4) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebar-brand {
+  font-weight: 700;
+  padding: 0 var(--space-3) var(--space-4);
+  letter-spacing: 0.02em;
+}
+
+.nav-link {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.nav-link:hover {
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+
+.nav-link.active {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.main {
+  padding: var(--space-5);
+  min-width: 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-5);
+  gap: var(--space-3);
+}
+
+/* ---- banners ---- */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+}
+
+.banner-bad {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.banner-warn {
+  background: var(--warn-bg);
+  border-color: var(--warn);
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.banner-good {
+  background: var(--good-bg);
+  border-color: var(--good);
+  color: var(--good);
+}
+
+/* ---- cards / grid ---- */
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.stat-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- tables ---- */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 600px;
+}
+
+th, td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+th {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+}
+
+tbody tr:hover {
+  background: var(--bg-sunken);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+td.wrap, th.wrap {
+  white-space: normal;
+}
+
+.row-link {
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.row-link:hover {
+  text-decoration: underline;
+}
+
+/* ---- badges ---- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.badge-good { background: var(--good-bg); color: var(--good); }
+.badge-warn { background: var(--warn-bg); color: var(--warn); }
+.badge-bad { background: var(--bad-bg); color: var(--bad); }
+.badge-neutral { background: var(--bg-sunken); color: var(--text-dim); border-color: var(--border); }
+
+/* ---- forms ---- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+.field label {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.field-error {
+  font-size: 12px;
+  color: var(--bad);
+}
+
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+select,
+textarea {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+}
+
+input.invalid, select.invalid, textarea.invalid {
+  border-color: var(--bad);
+}
+
+textarea {
+  font-family: var(--mono);
+  resize: vertical;
+}
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4);
+}
+
+legend {
+  font-weight: 700;
+  padding: 0 var(--space-2);
+}
+
+/* ---- buttons ---- */
+
+button {
+  cursor: pointer;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-weight: 600;
+}
+
+button:hover:not(:disabled) {
+  background: var(--border);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+button.danger {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.btn-row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* ---- misc ---- */
+
+.muted { color: var(--text-dim); }
+.faint { color: var(--text-faint); }
+.mono { font-family: var(--mono); }
+.flex-row { display: flex; align-items: center; gap: var(--space-2); }
+.section { margin-bottom: var(--space-5); }
+
+.log-view {
+  background: #0b0d11;
+  color: #d7dae0;
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-add { background: var(--good-bg); color: var(--good); }
+.diff-remove { background: var(--bad-bg); color: var(--bad); }
+
+.countdown {
+  font-size: 32px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+kbd {
+  font-family: var(--mono);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
