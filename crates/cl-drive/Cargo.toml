@@ -18,6 +18,10 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
+bytes = "1"
+rand = "0.8"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+openraft.workspace = true

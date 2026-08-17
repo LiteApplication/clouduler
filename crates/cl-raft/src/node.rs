@@ -84,16 +84,25 @@ impl ClusterNode {
         let mut tasks = Vec::new();
 
         let contact = Contact::new();
-        let listener = raft.clone();
+        let shared = store.shared_state();
+        let (quorum_tx, quorum_rx) = watch::channel(QuorumStatus::unknown());
+        let quorum = QuorumWatch::new(quorum_rx);
+
         let addr = options.rpc_addr;
-        let serve_contact = contact.clone();
+        let ctx = server::Context {
+            name: options.name.clone(),
+            id,
+            raft: raft.clone(),
+            shared: shared.clone(),
+            quorum: quorum.clone(),
+            contact: contact.clone(),
+        };
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = server::serve(addr, listener, serve_contact).await {
+            if let Err(e) = server::serve(addr, ctx).await {
                 warn!(%addr, error = %e, "rpc server stopped");
             }
         }));
 
-        let (quorum_tx, quorum_rx) = watch::channel(QuorumStatus::unknown());
         let mut metrics = raft.metrics();
         let gate_contact = contact.clone();
         tasks.push(tokio::spawn(async move {
@@ -134,8 +143,8 @@ impl ClusterNode {
             name: options.name,
             raft,
             network,
-            shared: store.shared_state(),
-            quorum: QuorumWatch::new(quorum_rx),
+            shared,
+            quorum,
             tasks: Mutex::new(tasks),
         })
     }

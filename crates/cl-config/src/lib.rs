@@ -1,6 +1,7 @@
 //! Cluster configuration: the single file that describes the network topology,
 //! the nodes, and the drives available cluster wide.
 
+mod bundle;
 mod cluster;
 mod error;
 mod stack;
@@ -10,6 +11,7 @@ pub use cluster::{
     qualify, CloudflareConfig, ClusterConfig, FailoverConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
     NodeAddress, NodeRole, PublicAddress, WebConfig, DEFAULT_RPC_PORT,
 };
+pub use bundle::{BundledFile, StackBundle};
 pub use error::{ConfigError, Result};
 pub use stack::{
     Command, Deploy, DeployMode, DeployRestartPolicy, Healthcheck, HealthcheckTest, Middleware,

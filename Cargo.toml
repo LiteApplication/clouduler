@@ -29,6 +29,7 @@ cl-proxy = { path = "crates/cl-proxy" }
 cl-sched = { path = "crates/cl-sched" }
 
 anyhow = "1"
+base64 = "0.23"
 async-trait = "0.1"
 bincode = "1"
 bollard = "0.21"

@@ -1,0 +1,324 @@
+//! The routing table: maps an incoming host/path to a backend.
+//!
+//! Matching precedence, most specific wins:
+//! 1. Exact host match beats a wildcard host match.
+//! 2. Within a host match, the longest `path_prefix` wins. A route with no
+//!    `path_prefix` matches every path under its host (prefix length zero).
+//!
+//! A wildcard host is written `*.example.com` and matches exactly one extra
+//! label (`foo.example.com`, not `example.com` and not `a.b.example.com`).
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+use cl_config::Middleware;
+
+/// One published HTTP route, with every replica backing it.
+#[derive(Debug)]
+pub struct Route {
+    pub host: String,
+    pub path_prefix: Option<String>,
+    pub tls: bool,
+    pub middlewares: Vec<Middleware>,
+    pub sticky: bool,
+    /// Stack/service/instance label, for logging.
+    pub instance: String,
+    backends: Vec<SocketAddr>,
+    next: AtomicUsize,
+}
+
+impl Route {
+    pub fn new(
+        host: impl Into<String>,
+        path_prefix: Option<String>,
+        tls: bool,
+        middlewares: Vec<Middleware>,
+        sticky: bool,
+        instance: impl Into<String>,
+        backends: Vec<SocketAddr>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            path_prefix,
+            tls,
+            middlewares,
+            sticky,
+            instance: instance.into(),
+            backends,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    fn prefix_len(&self) -> usize {
+        self.path_prefix.as_deref().map(str::len).unwrap_or(0)
+    }
+
+    fn matches_path(&self, path: &str) -> bool {
+        match &self.path_prefix {
+            Some(prefix) => path.starts_with(prefix.as_str()),
+            None => true,
+        }
+    }
+
+    pub fn backends(&self) -> &[SocketAddr] {
+        &self.backends
+    }
+
+    /// Round robin pick, ignoring stickiness.
+    fn next_backend(&self) -> Option<SocketAddr> {
+        if self.backends.is_empty() {
+            return None;
+        }
+        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.backends.len();
+        Some(self.backends[i])
+    }
+
+    /// Pick a backend for this request. When `sticky` is set and the cookie
+    /// names a backend still in the pool, use that one and return no new
+    /// cookie to set; otherwise round robin and, if sticky, return the
+    /// backend to remember in a cookie.
+    pub fn pick(&self, sticky_cookie: Option<&str>) -> Option<Picked> {
+        if self.sticky {
+            if let Some(want) = sticky_cookie {
+                if let Some(addr) = self.backends.iter().find(|a| a.to_string() == want) {
+                    return Some(Picked {
+                        addr: *addr,
+                        set_cookie: None,
+                    });
+                }
+            }
+            let addr = self.next_backend()?;
+            return Some(Picked {
+                addr,
+                set_cookie: Some(addr.to_string()),
+            });
+        }
+        Some(Picked {
+            addr: self.next_backend()?,
+            set_cookie: None,
+        })
+    }
+}
+
+pub struct Picked {
+    pub addr: SocketAddr,
+    /// New sticky cookie value to set on the response, when the pick changed it.
+    pub set_cookie: Option<String>,
+}
+
+/// The name of the cookie used to pin a client to a backend.
+pub const STICKY_COOKIE: &str = "cl_sticky";
+
+/// The immutable snapshot readers see. Rebuilt wholesale on reload.
+#[derive(Debug, Default)]
+struct Snapshot {
+    exact: HashMap<String, Vec<Arc<Route>>>,
+    /// Keyed by the base domain (`example.com` for `*.example.com`).
+    wildcard: HashMap<String, Vec<Arc<Route>>>,
+}
+
+/// Lock-free-for-readers routing table. Reload swaps in a whole new snapshot.
+#[derive(Default)]
+pub struct RouteTable {
+    snapshot: ArcSwap<Snapshot>,
+}
+
+impl RouteTable {
+    pub fn new(routes: Vec<Route>) -> Self {
+        Self {
+            snapshot: ArcSwap::from_pointee(build(routes)),
+        }
+    }
+
+    /// Atomically replace the whole table.
+    pub fn reload(&self, routes: Vec<Route>) {
+        self.snapshot.store(Arc::new(build(routes)));
+    }
+
+    /// Find the best matching route for a host and path.
+    pub fn lookup(&self, host: &str, path: &str) -> Option<Arc<Route>> {
+        let snap = self.snapshot.load();
+        let host = host.split(':').next().unwrap_or(host);
+
+        if let Some(candidates) = snap.exact.get(host) {
+            if let Some(r) = best_path_match(candidates, path) {
+                return Some(r);
+            }
+        }
+
+        // Longest matching wildcard base wins.
+        let mut best_base_len = 0usize;
+        let mut best: Option<Arc<Route>> = None;
+        for (base, candidates) in snap.wildcard.iter() {
+            if !wildcard_matches(base, host) {
+                continue;
+            }
+            if let Some(r) = best_path_match(candidates, path) {
+                if base.len() > best_base_len {
+                    best_base_len = base.len();
+                    best = Some(r);
+                }
+            }
+        }
+        best
+    }
+}
+
+fn best_path_match(candidates: &[Arc<Route>], path: &str) -> Option<Arc<Route>> {
+    candidates
+        .iter()
+        .filter(|r| r.matches_path(path))
+        .max_by_key(|r| r.prefix_len())
+        .cloned()
+}
+
+/// `base` is `example.com` for a route registered as `*.example.com`. Matches
+/// exactly one extra label: `foo.example.com` yes, `example.com` no,
+/// `a.b.example.com` no.
+pub(crate) fn wildcard_matches(base: &str, host: &str) -> bool {
+    match host.strip_suffix(base) {
+        Some(prefix) => {
+            prefix.ends_with('.')
+                && prefix.len() > 1
+                && !prefix[..prefix.len() - 1].contains('.')
+        }
+        None => false,
+    }
+}
+
+fn build(routes: Vec<Route>) -> Snapshot {
+    let mut snap = Snapshot::default();
+    for route in routes {
+        let route = Arc::new(route);
+        if let Some(base) = route.host.strip_prefix("*.") {
+            snap.wildcard.entry(base.to_string()).or_default().push(route);
+        } else {
+            snap.exact.entry(route.host.clone()).or_default().push(route);
+        }
+    }
+    snap
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn route(host: &str, prefix: Option<&str>, backends: Vec<SocketAddr>) -> Route {
+        Route::new(
+            host,
+            prefix.map(String::from),
+            true,
+            vec![],
+            false,
+            "test",
+            backends,
+        )
+    }
+
+    #[test]
+    fn exact_host_wins_over_wildcard() {
+        let table = RouteTable::new(vec![
+            route("app.example.com", None, vec![addr(1)]),
+            route("*.example.com", None, vec![addr(2)]),
+        ]);
+        let got = table.lookup("app.example.com", "/").unwrap();
+        assert_eq!(got.backends(), &[addr(1)]);
+    }
+
+    #[test]
+    fn wildcard_matches_single_label() {
+        let table = RouteTable::new(vec![route("*.example.com", None, vec![addr(2)])]);
+        assert!(table.lookup("foo.example.com", "/").is_some());
+        assert!(table.lookup("example.com", "/").is_none());
+        assert!(table.lookup("a.b.example.com", "/").is_none());
+    }
+
+    #[test]
+    fn longest_path_prefix_wins() {
+        let table = RouteTable::new(vec![
+            route("app.example.com", None, vec![addr(1)]),
+            route("app.example.com", Some("/api"), vec![addr(2)]),
+            route("app.example.com", Some("/api/v2"), vec![addr(3)]),
+        ]);
+        assert_eq!(table.lookup("app.example.com", "/api/v2/things").unwrap().backends(), &[addr(3)]);
+        assert_eq!(table.lookup("app.example.com", "/api/v1").unwrap().backends(), &[addr(2)]);
+        assert_eq!(table.lookup("app.example.com", "/other").unwrap().backends(), &[addr(1)]);
+    }
+
+    #[test]
+    fn host_with_no_prefix_matches_everything() {
+        let table = RouteTable::new(vec![route("app.example.com", None, vec![addr(1)])]);
+        assert!(table.lookup("app.example.com", "/anything/deep/path").is_some());
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let table = RouteTable::new(vec![route("app.example.com", None, vec![addr(1)])]);
+        assert!(table.lookup("other.example.com", "/").is_none());
+    }
+
+    #[test]
+    fn host_header_port_is_ignored() {
+        let table = RouteTable::new(vec![route("app.example.com", None, vec![addr(1)])]);
+        assert!(table.lookup("app.example.com:8443", "/").is_some());
+    }
+
+    #[test]
+    fn round_robin_distributes_across_backends() {
+        let r = route("app.example.com", None, vec![addr(1), addr(2), addr(3)]);
+        let picks: Vec<SocketAddr> = (0..6).map(|_| r.pick(None).unwrap().addr).collect();
+        assert_eq!(picks, vec![addr(1), addr(2), addr(3), addr(1), addr(2), addr(3)]);
+    }
+
+    #[test]
+    fn sticky_cookie_pins_to_same_backend() {
+        let r = Route::new(
+            "app.example.com",
+            None,
+            true,
+            vec![],
+            true,
+            "test",
+            vec![addr(1), addr(2)],
+        );
+        let first = r.pick(None).unwrap();
+        let cookie = first.set_cookie.expect("first pick sets a cookie");
+        assert_eq!(cookie, first.addr.to_string());
+
+        // Subsequent requests carrying that cookie stay pinned, no new cookie.
+        for _ in 0..5 {
+            let picked = r.pick(Some(&cookie)).unwrap();
+            assert_eq!(picked.addr, first.addr);
+            assert!(picked.set_cookie.is_none());
+        }
+    }
+
+    #[test]
+    fn sticky_cookie_for_unknown_backend_falls_back_to_round_robin() {
+        let r = Route::new(
+            "app.example.com",
+            None,
+            true,
+            vec![],
+            true,
+            "test",
+            vec![addr(1), addr(2)],
+        );
+        let picked = r.pick(Some("127.0.0.1:9999")).unwrap();
+        assert!(picked.set_cookie.is_some());
+    }
+
+    #[test]
+    fn reload_is_atomic_and_visible_immediately() {
+        let table = RouteTable::new(vec![route("app.example.com", None, vec![addr(1)])]);
+        table.reload(vec![route("app.example.com", None, vec![addr(2)])]);
+        assert_eq!(table.lookup("app.example.com", "/").unwrap().backends(), &[addr(2)]);
+    }
+}

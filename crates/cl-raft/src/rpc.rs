@@ -29,8 +29,45 @@ pub enum RpcRequest {
     Vote(VoteRequest<NodeId>),
     /// A write submitted on a follower, forwarded to the leader.
     Forward(StateRequest),
+    /// A read served from the local applied state.
+    Query(Query),
     /// Liveness probe used by the quorum watcher.
     Ping,
+}
+
+/// Reads are answered from whichever node is asked, out of its own applied
+/// state. That can lag the leader by the replication delay, which is fine for
+/// the cli and the ui; anything needing linearizability goes through a write.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Query {
+    /// Quorum, leader and version, without shipping the whole state.
+    Status,
+    /// The full applied state.
+    State {
+        /// Secrets and private keys are blanked unless this is set. The cli
+        /// never sets it; only a restore path would.
+        include_secrets: bool,
+    },
+}
+
+/// What a node reports about itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusReport {
+    pub node: String,
+    pub id: NodeId,
+    pub leader: Option<NodeId>,
+    pub is_leader: bool,
+    pub has_quorum: bool,
+    pub voters: usize,
+    pub reachable: usize,
+    /// State machine version, so a caller can tell how far behind this node is.
+    pub version: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum QueryResult {
+    Status(StatusReport),
+    State(Box<crate::state::ClusterState>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,6 +77,7 @@ pub enum RpcResponse {
     Vote(VoteResponse<NodeId>),
     /// The forwarded write's outcome, or why it could not be applied here.
     Forward(std::result::Result<StateResponse, String>),
+    Query(Box<QueryResult>),
     Pong,
     /// The peer understood the frame but could not serve it, for instance
     /// because it is not the leader.

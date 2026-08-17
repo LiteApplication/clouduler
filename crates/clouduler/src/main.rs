@@ -1,13 +1,14 @@
 mod cli;
 mod daemon;
 mod report;
+mod stack;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, DriveCommand, NodeCommand};
+use crate::cli::{Cli, Command, DriveCommand, NodeCommand, StackCommand};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,6 +36,16 @@ async fn main() -> Result<()> {
             report::nodes(&cfg);
             Ok(())
         }
+        Command::Stack { command } => match command {
+            StackCommand::Deploy { file, name, via } => {
+                stack::deploy(&cfg, &file, name, via.as_deref()).await
+            }
+            StackCommand::List { via } => stack::list(&cfg, via.as_deref()).await,
+            StackCommand::Show { name, files, via } => {
+                stack::show(&cfg, &name, files, via.as_deref()).await
+            }
+            StackCommand::Remove { name, via } => stack::remove(&cfg, &name, via.as_deref()).await,
+        },
         Command::Drive {
             command: DriveCommand::List,
         } => {

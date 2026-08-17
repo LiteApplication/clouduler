@@ -49,6 +49,11 @@ pub enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    /// Deploy and inspect stacks. These talk to a running daemon.
+    Stack {
+        #[command(subcommand)]
+        command: StackCommand,
+    },
     /// Inspect drives.
     Drive {
         #[command(subcommand)]
@@ -62,6 +67,42 @@ pub enum Command {
 pub enum NodeCommand {
     /// List the nodes declared in the config.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StackCommand {
+    /// Store a stack in the cluster database and deploy it. The referenced
+    /// config and secret files are bundled in, so every node can run it.
+    Deploy {
+        /// Path to the stack file. The stack is named after the file unless
+        /// --name is given.
+        file: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// List the stacks stored in the cluster.
+    List {
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Print a stored stack's spec.
+    Show {
+        name: String,
+        /// Also list the bundled files. Secret contents are never printed.
+        #[arg(long)]
+        files: bool,
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Remove a stack and everything it runs.
+    Remove {
+        name: String,
+        #[arg(long)]
+        via: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

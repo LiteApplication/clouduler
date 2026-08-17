@@ -10,3 +10,6 @@ ipnet.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
