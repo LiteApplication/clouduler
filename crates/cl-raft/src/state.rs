@@ -69,6 +69,72 @@ pub struct StackState {
     /// container that moves would otherwise lose them.
     #[serde(default)]
     pub files: BTreeMap<String, Attachment>,
+    /// Cluster config objects this stack brought with it, so removing the stack
+    /// takes them away too.
+    #[serde(default)]
+    pub configs: BTreeSet<String>,
+    /// Cluster secrets this stack brought with it.
+    #[serde(default)]
+    pub secrets: BTreeSet<String>,
+}
+
+/// A cluster wide config object, mounted read only into the containers that
+/// reference it. Stored in the clear: a config is not a secret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigEntry {
+    pub name: String,
+    /// Base64, so the state machine stays valid json.
+    pub content: String,
+    /// Bumped on every update, so a node can tell its mounted copy is stale.
+    pub revision: u64,
+    /// Stack that owns it, if it came from a stack file rather than the ui.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+impl ConfigEntry {
+    pub fn decode(&self) -> Result<Vec<u8>, String> {
+        base64_decode(&self.content)
+    }
+
+    pub fn len(&self) -> usize {
+        self.content.len() / 4 * 3
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+    }
+}
+
+/// A cluster wide secret, mounted at `/run/secrets/<name>` like a docker secret.
+///
+/// The value is sealed before it reaches here, so the database, its snapshots
+/// and any backup of them carry only ciphertext. A node without the cluster key
+/// replicates this fine but cannot open it, and so cannot run a container that
+/// needs it.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretEntry {
+    pub name: String,
+    /// Base64 of nonce followed by ciphertext, from `cl_secret::Sealed`.
+    pub sealed: String,
+    pub revision: u64,
+    /// Fingerprint of the key it was sealed under, so a node holding the wrong
+    /// key can say so instead of reporting a decryption failure.
+    pub key_fingerprint: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// Prints no ciphertext, on the principle that nothing about a secret belongs
+/// in a log line.
+impl fmt::Debug for SecretEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretEntry")
+            .field("name", &self.name)
+            .field("revision", &self.revision)
+            .field("key_fingerprint", &self.key_fingerprint)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One file carried along with a stack.
@@ -115,6 +181,30 @@ impl fmt::Debug for Attachment {
 /// Cap on the files one stack may carry. Everything here goes through the raft
 /// log and into every snapshot, so a stack is not a place to put a disk image.
 pub const MAX_STACK_FILES_BYTES: usize = 1024 * 1024;
+
+/// Cap on one config or secret. Same reasoning as the stack file limit: it goes
+/// through the raft log and into every snapshot.
+pub const MAX_OBJECT_BYTES: usize = 1024 * 1024;
+
+/// Config and secret names become filenames under the mount directory, so they
+/// have to be safe to join onto a path.
+fn validate_object_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 253 {
+        return Err(format!("{name:?} must be between 1 and 253 characters"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(format!(
+            "{name:?} may only contain letters, digits, dot, dash and underscore"
+        ));
+    }
+    if name.starts_with('.') {
+        return Err(format!("{name:?} must not start with a dot"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -232,6 +322,12 @@ pub struct ClusterState {
     pub stacks: BTreeMap<String, StackState>,
     pub assignments: BTreeMap<InstanceId, Assignment>,
     pub volumes: BTreeMap<VolumeId, VolumeState>,
+    /// Cluster wide config objects, mounted read only into containers.
+    #[serde(default)]
+    pub configs: BTreeMap<String, ConfigEntry>,
+    /// Cluster wide secrets, sealed. Mounted at /run/secrets/<name>.
+    #[serde(default)]
+    pub secrets: BTreeMap<String, SecretEntry>,
     pub certificates: BTreeMap<String, CertificateState>,
     pub dns_records: BTreeMap<String, DnsRecordState>,
     /// Nodes the leader has stopped hearing from. Observed rather than
@@ -275,6 +371,13 @@ pub enum Request {
     },
     RemoveStack {
         name: String,
+    },
+    /// Record which cluster objects a stack owns, so removing the stack cleans
+    /// them up. Sent after the objects themselves have been written.
+    SetStackObjects {
+        name: String,
+        configs: BTreeSet<String>,
+        secrets: BTreeSet<String>,
     },
     /// Place an instance. `drives` lists what the instance needs, so the state
     /// machine can refuse a node that does not implement all of them.
@@ -325,6 +428,28 @@ pub enum Request {
     UpsertDnsRecord(DnsRecordState),
     RemoveDnsRecord {
         key: String,
+    },
+    PutConfig {
+        name: String,
+        /// Base64 content.
+        content: String,
+        #[serde(default)]
+        owner: Option<String>,
+    },
+    RemoveConfig {
+        name: String,
+    },
+    /// The value is sealed by the caller: plaintext never travels through the
+    /// raft log, so it is never written to disk unencrypted.
+    PutSecret {
+        name: String,
+        sealed: String,
+        key_fingerprint: String,
+        #[serde(default)]
+        owner: Option<String>,
+    },
+    RemoveSecret {
+        name: String,
     },
     /// Overlay address book. Allocation goes through raft so two nodes cannot
     /// hand out the same address for the same stack network.
@@ -381,6 +506,74 @@ impl ClusterState {
     fn dispatch(&mut self, req: &Request) -> Result<(), String> {
         match req {
             Request::NoOp => Ok(()),
+
+            Request::PutConfig {
+                name,
+                content,
+                owner,
+            } => {
+                validate_object_name(name)?;
+                if base64_decode(content).is_err() {
+                    return Err(format!("config {name} is not valid base64"));
+                }
+                let revision = self.configs.get(name).map(|c| c.revision + 1).unwrap_or(1);
+                let entry = ConfigEntry {
+                    name: name.clone(),
+                    content: content.clone(),
+                    revision,
+                    owner: owner.clone(),
+                };
+                if entry.len() > MAX_OBJECT_BYTES {
+                    return Err(format!(
+                        "config {name} is over the {MAX_OBJECT_BYTES} byte limit"
+                    ));
+                }
+                self.configs.insert(name.clone(), entry);
+                Ok(())
+            }
+
+            Request::RemoveConfig { name } => {
+                if let Some(user) = self.config_in_use(name) {
+                    return Err(format!("config {name} is still used by {user}"));
+                }
+                self.configs.remove(name);
+                Ok(())
+            }
+
+            Request::PutSecret {
+                name,
+                sealed,
+                key_fingerprint,
+                owner,
+            } => {
+                validate_object_name(name)?;
+                if base64_decode(sealed).is_err() {
+                    return Err(format!("secret {name} is not valid base64"));
+                }
+                let revision = self.secrets.get(name).map(|s| s.revision + 1).unwrap_or(1);
+                let entry = SecretEntry {
+                    name: name.clone(),
+                    sealed: sealed.clone(),
+                    revision,
+                    key_fingerprint: key_fingerprint.clone(),
+                    owner: owner.clone(),
+                };
+                if entry.sealed.len() / 4 * 3 > MAX_OBJECT_BYTES {
+                    return Err(format!(
+                        "secret {name} is over the {MAX_OBJECT_BYTES} byte limit"
+                    ));
+                }
+                self.secrets.insert(name.clone(), entry);
+                Ok(())
+            }
+
+            Request::RemoveSecret { name } => {
+                if let Some(user) = self.secret_in_use(name) {
+                    return Err(format!("secret {name} is still used by {user}"));
+                }
+                self.secrets.remove(name);
+                Ok(())
+            }
 
             Request::SetOverlayAllocations { allocations } => {
                 self.overlay = Some(allocations.clone());
@@ -439,6 +632,9 @@ impl ClusterState {
                 }
 
                 let revision = self.stacks.get(name).map(|s| s.revision + 1).unwrap_or(1);
+                let previous = self.stacks.get(name);
+                let configs = previous.map(|s| s.configs.clone()).unwrap_or_default();
+                let secrets = previous.map(|s| s.secrets.clone()).unwrap_or_default();
                 self.stacks.insert(
                     name.clone(),
                     StackState {
@@ -446,14 +642,43 @@ impl ClusterState {
                         spec: spec.clone(),
                         revision,
                         files: files.clone(),
+                        configs,
+                        secrets,
                     },
                 );
                 Ok(())
             }
 
             Request::RemoveStack { name } => {
-                self.stacks.remove(name);
+                // Drop the stack first so the in-use check below sees it gone.
+                let removed = self.stacks.remove(name);
                 self.assignments.retain(|id, _| &id.stack != name);
+                if let Some(stack) = removed {
+                    for config in &stack.configs {
+                        if self.config_in_use(config).is_none() {
+                            self.configs.remove(config);
+                        }
+                    }
+                    for secret in &stack.secrets {
+                        if self.secret_in_use(secret).is_none() {
+                            self.secrets.remove(secret);
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            Request::SetStackObjects {
+                name,
+                configs,
+                secrets,
+            } => {
+                let stack = self
+                    .stacks
+                    .get_mut(name)
+                    .ok_or_else(|| format!("unknown stack {name}"))?;
+                stack.configs = configs.clone();
+                stack.secrets = secrets.clone();
                 Ok(())
             }
 
@@ -650,6 +875,22 @@ impl ClusterState {
         Ok(())
     }
 
+    /// Stacks referencing a config, so removing one in use is refused rather
+    /// than quietly breaking a container on its next restart.
+    fn config_in_use(&self, name: &str) -> Option<String> {
+        self.stacks
+            .values()
+            .find(|s| s.configs.iter().any(|c| c == name))
+            .map(|s| format!("stack {}", s.name))
+    }
+
+    fn secret_in_use(&self, name: &str) -> Option<String> {
+        self.stacks
+            .values()
+            .find(|s| s.secrets.iter().any(|c| c == name))
+            .map(|s| format!("stack {}", s.name))
+    }
+
     /// A copy with every secret blanked, for anything that leaves the node.
     ///
     /// The lengths stay right so the ui can still show that a secret is set
@@ -662,6 +903,9 @@ impl ClusterState {
                     file.content = String::new();
                 }
             }
+        }
+        for secret in copy.secrets.values_mut() {
+            secret.sealed = String::new();
         }
         for cert in copy.certificates.values_mut() {
             cert.key_pem = String::new();
@@ -1126,5 +1370,152 @@ mod tests {
         let encoded = serde_json::to_vec(&state).unwrap();
         let decoded: ClusterState = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn configs_are_stored_and_versioned() {
+        let mut state = ClusterState::default();
+        assert!(state
+            .apply(&Request::PutConfig {
+                name: "nginx_conf".into(),
+                content: base64_encode(b"server {}"),
+                owner: None,
+            })
+            .is_ok());
+        assert_eq!(state.configs["nginx_conf"].revision, 1);
+        assert_eq!(state.configs["nginx_conf"].decode().unwrap(), b"server {}");
+
+        state.apply(&Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"server { listen 80; }"),
+            owner: None,
+        });
+        assert_eq!(state.configs["nginx_conf"].revision, 2);
+    }
+
+    #[test]
+    fn secrets_are_stored_sealed_and_redacted() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::PutSecret {
+            name: "db_password".into(),
+            sealed: base64_encode(b"ciphertext-goes-here"),
+            key_fingerprint: "abc123".into(),
+            owner: None,
+        });
+
+        assert_eq!(state.secrets["db_password"].key_fingerprint, "abc123");
+        // Nothing about the value leaves the node.
+        assert!(state.redacted().secrets["db_password"].sealed.is_empty());
+        // Nor reaches a log line.
+        let rendered = format!("{:?}", state.secrets["db_password"]);
+        assert!(!rendered.contains("ciphertext"));
+    }
+
+    #[test]
+    fn object_names_must_be_safe_as_filenames() {
+        let mut state = ClusterState::default();
+        for bad in ["../escape", "with/slash", ".hidden", ""] {
+            let rejected = state.apply(&Request::PutConfig {
+                name: bad.into(),
+                content: base64_encode(b"x"),
+                owner: None,
+            });
+            assert!(!rejected.is_ok(), "{bad} should be refused");
+        }
+        assert!(state.configs.is_empty());
+    }
+
+    #[test]
+    fn objects_in_use_cannot_be_removed() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "services: {}".into(),
+            files: BTreeMap::new(),
+        });
+        state.apply(&Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"x"),
+            owner: Some("site".into()),
+        });
+        state.apply(&Request::SetStackObjects {
+            name: "site".into(),
+            configs: BTreeSet::from(["nginx_conf".to_string()]),
+            secrets: BTreeSet::new(),
+        });
+
+        let rejected = state.apply(&Request::RemoveConfig {
+            name: "nginx_conf".into(),
+        });
+        assert!(rejected.error.unwrap().contains("still used by stack site"));
+    }
+
+    #[test]
+    fn removing_a_stack_takes_its_objects_with_it() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "services: {}".into(),
+            files: BTreeMap::new(),
+        });
+        state.apply(&Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"x"),
+            owner: Some("site".into()),
+        });
+        state.apply(&Request::PutSecret {
+            name: "db_password".into(),
+            sealed: base64_encode(b"y"),
+            key_fingerprint: "abc".into(),
+            owner: Some("site".into()),
+        });
+        state.apply(&Request::SetStackObjects {
+            name: "site".into(),
+            configs: BTreeSet::from(["nginx_conf".to_string()]),
+            secrets: BTreeSet::from(["db_password".to_string()]),
+        });
+
+        state.apply(&Request::RemoveStack {
+            name: "site".into(),
+        });
+        assert!(state.configs.is_empty());
+        assert!(state.secrets.is_empty());
+    }
+
+    #[test]
+    fn redeploying_a_stack_keeps_its_object_ownership() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "a".into(),
+            files: BTreeMap::new(),
+        });
+        state.apply(&Request::SetStackObjects {
+            name: "site".into(),
+            configs: BTreeSet::from(["c".to_string()]),
+            secrets: BTreeSet::new(),
+        });
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "b".into(),
+            files: BTreeMap::new(),
+        });
+        assert_eq!(state.stacks["site"].configs.len(), 1);
+    }
+
+    #[test]
+    fn an_unused_object_can_be_removed() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::PutConfig {
+            name: "orphan".into(),
+            content: base64_encode(b"x"),
+            owner: None,
+        });
+        assert!(state
+            .apply(&Request::RemoveConfig {
+                name: "orphan".into()
+            })
+            .is_ok());
+        assert!(state.configs.is_empty());
     }
 }
