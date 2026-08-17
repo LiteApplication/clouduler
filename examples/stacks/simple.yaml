@@ -1,0 +1,28 @@
+# Minimal two-service stack: a web app behind the proxy and its database.
+version: "3.8"
+
+networks:
+  wan: {}
+
+services:
+  app:
+    image: ghcr.io/example/app:1.4.0
+    restart: always
+    depends_on: [db]
+    networks: [wan]
+    environment:
+      DATABASE_URL: postgres://app@db/app
+    x-clouduler:
+      proxy:
+        - host: app
+          network: wan
+          port: 8080
+
+  db:
+    image: postgres:16
+    restart: always
+    environment:
+      - POSTGRES_DB=app
+      - POSTGRES_USER=app
+    volumes:
+      - fast/app-db:/var/lib/postgresql/data

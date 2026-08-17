@@ -1,0 +1,343 @@
+//! Validation is split in two: syntax checks that only look at the stack file
+//! itself (so a stack can be linted with no cluster at hand), and cross-checks
+//! against a `ClusterConfig` for the fields that must resolve against it.
+
+use std::collections::BTreeMap;
+
+use crate::cluster::ClusterConfig;
+use crate::error::{ConfigError, Result};
+
+use super::port::Protocol;
+use super::StackFile;
+
+impl StackFile {
+    /// Checks that only look at the stack file itself.
+    pub fn validate_syntax(&self) -> Result<()> {
+        self.validate_service_names()?;
+        self.validate_depends_on()?;
+        self.validate_service_networks_declared()?;
+        self.validate_no_duplicate_ports()?;
+        Ok(())
+    }
+
+    /// Full validation: syntax checks plus everything that needs to resolve
+    /// against the cluster this stack would run on.
+    pub fn validate(&self, cluster: &ClusterConfig) -> Result<()> {
+        self.validate_syntax()?;
+        self.validate_networks_exist(cluster)?;
+        self.validate_drives_exist(cluster)?;
+        self.validate_proxy_expose_networks(cluster)?;
+        self.validate_node_pins(cluster)?;
+        self.validate_placement_constraints(cluster)?;
+        Ok(())
+    }
+
+    fn validate_service_names(&self) -> Result<()> {
+        for name in self.services.keys() {
+            if !is_dns_label(name) {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}"),
+                    "service name must be a valid DNS label (lowercase letters, digits, hyphens, not starting or ending with a hyphen) since it becomes an overlay hostname",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_depends_on(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            for dep in &svc.depends_on {
+                if !self.services.contains_key(dep) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.depends_on"),
+                        format!("no service named {dep} in this stack"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_service_networks_declared(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            for net in &svc.networks {
+                if !self.networks.contains_key(net) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.networks"),
+                        format!("network {net} is not declared in this stack's top-level networks"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_no_duplicate_ports(&self) -> Result<()> {
+        let mut seen: BTreeMap<(Protocol, u16), String> = BTreeMap::new();
+
+        for (name, svc) in &self.services {
+            for (idx, port) in svc.ports.iter().enumerate() {
+                let Some(published) = port.published else { continue };
+                for p in published.start..=published.end {
+                    let at = format!("services.{name}.ports[{idx}]");
+                    if let Some(existing) = seen.insert((port.protocol, p), at.clone()) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!("port {p}/{} is already published by {existing}", port.protocol),
+                        ));
+                    }
+                }
+            }
+            if let Some(ext) = &svc.x_clouduler {
+                for (idx, expose) in ext.expose.iter().enumerate() {
+                    let at = format!("services.{name}.x-clouduler.expose[{idx}]");
+                    if let Some(existing) = seen.insert((expose.protocol, expose.published), at.clone()) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "port {}/{} is already published by {existing}",
+                                expose.published, expose.protocol
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_networks_exist(&self, cluster: &ClusterConfig) -> Result<()> {
+        for name in self.networks.keys() {
+            if !cluster.networks.contains_key(name) {
+                return Err(ConfigError::invalid(
+                    format!("networks.{name}"),
+                    format!("no network named {name} declared in the cluster"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_drives_exist(&self, cluster: &ClusterConfig) -> Result<()> {
+        for (name, svc) in &self.services {
+            for (idx, vol) in svc.volumes.iter().enumerate() {
+                let Some(drive) = &vol.drive else { continue };
+                if !cluster.drives.contains_key(drive) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.volumes[{idx}]"),
+                        format!("no drive named {drive} declared in the cluster"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_proxy_expose_networks(&self, cluster: &ClusterConfig) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(ext) = &svc.x_clouduler else { continue };
+            for (idx, route) in ext.proxy.iter().enumerate() {
+                let at = format!("services.{name}.x-clouduler.proxy[{idx}]");
+                let Some(net) = cluster.networks.get(&route.network) else {
+                    return Err(ConfigError::invalid(
+                        format!("{at}.network"),
+                        format!("no network named {} declared in the cluster", route.network),
+                    ));
+                };
+                if net.domain.is_none() {
+                    return Err(ConfigError::invalid(
+                        format!("{at}.network"),
+                        format!("network {} has no domain, so it cannot serve an HTTP route", route.network),
+                    ));
+                }
+            }
+            for (idx, expose) in ext.expose.iter().enumerate() {
+                let at = format!("services.{name}.x-clouduler.expose[{idx}].network");
+                if !cluster.networks.contains_key(&expose.network) {
+                    return Err(ConfigError::invalid(
+                        at,
+                        format!("no network named {} declared in the cluster", expose.network),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_node_pins(&self, cluster: &ClusterConfig) -> Result<()> {
+        if let Some(defaults) = &self.x_clouduler {
+            if let Some(node) = &defaults.node {
+                if !cluster.nodes.contains_key(node) {
+                    return Err(ConfigError::invalid(
+                        "x-clouduler.node",
+                        format!("no node named {node} in the cluster"),
+                    ));
+                }
+            }
+        }
+        for (name, svc) in &self.services {
+            let Some(ext) = &svc.x_clouduler else { continue };
+            let Some(node) = &ext.node else { continue };
+            if !cluster.nodes.contains_key(node) {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}.x-clouduler.node"),
+                    format!("no node named {node} in the cluster"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_placement_constraints(&self, cluster: &ClusterConfig) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(deploy) = &svc.deploy else { continue };
+            let Some(placement) = &deploy.placement else { continue };
+            for (idx, constraint) in placement.constraints.iter().enumerate() {
+                let Some(node) = constraint
+                    .strip_prefix("node.hostname==")
+                    .or_else(|| constraint.strip_prefix("node=="))
+                else {
+                    continue;
+                };
+                if !cluster.nodes.contains_key(node) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.deploy.placement.constraints[{idx}]"),
+                        format!("no node named {node} in the cluster"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_dns_label(s: &str) -> bool {
+    if s.is_empty() || s.len() > 63 {
+        return false;
+    }
+    if s.starts_with('-') || s.ends_with('-') {
+        return false;
+    }
+    s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::ClusterConfig;
+
+    const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
+
+    fn cluster() -> ClusterConfig {
+        ClusterConfig::parse(CLUSTER_YAML).unwrap()
+    }
+
+    fn stack(raw: &str) -> StackFile {
+        StackFile::parse(raw).expect("stack parses")
+    }
+
+    #[test]
+    fn dns_label_check() {
+        assert!(is_dns_label("gitlab"));
+        assert!(is_dns_label("gitlab-ce"));
+        assert!(!is_dns_label("Gitlab"));
+        assert!(!is_dns_label("-gitlab"));
+        assert!(!is_dns_label("gitlab-"));
+        assert!(!is_dns_label("gitlab_ce"));
+    }
+
+    #[test]
+    fn invalid_service_name_rejected() {
+        let raw = "services:\n  Bad_Name:\n    image: x\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.Bad_Name"));
+        assert!(err.to_string().contains("DNS label"));
+    }
+
+    #[test]
+    fn depends_on_target_must_exist() {
+        let raw = "services:\n  a:\n    image: x\n    depends_on: [b]\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.a.depends_on"));
+        assert!(err.to_string().contains("no service named b"));
+    }
+
+    #[test]
+    fn service_network_must_be_declared_in_stack() {
+        let raw = "services:\n  a:\n    image: x\n    networks: [wan]\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.a.networks"));
+        assert!(err.to_string().contains("not declared"));
+    }
+
+    #[test]
+    fn duplicate_published_ports_rejected() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    ports: ["8080:80"]
+  b:
+    image: x
+    ports: ["8080:81"]
+"#;
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("already published by"));
+    }
+
+    #[test]
+    fn cluster_network_must_exist() {
+        let raw = "networks:\n  bogus: {}\nservices:\n  a:\n    image: x\n";
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("networks.bogus"));
+    }
+
+    #[test]
+    fn drive_reference_must_exist() {
+        let raw = "services:\n  a:\n    image: x\n    volumes:\n      - bogus/data:/data\n";
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("services.a.volumes[0]"));
+        assert!(err.to_string().contains("no drive named bogus"));
+    }
+
+    #[test]
+    fn proxy_network_must_have_a_domain() {
+        let raw = r#"
+networks:
+  tailscale: {}
+services:
+  a:
+    image: x
+    networks: [tailscale]
+    x-clouduler:
+      proxy:
+        - host: a
+          network: bogus
+          port: 80
+"#;
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("services.a.x-clouduler.proxy[0].network"));
+    }
+
+    #[test]
+    fn node_pin_must_exist() {
+        let raw = "services:\n  a:\n    image: x\n    x-clouduler: { node: bogus }\n";
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("services.a.x-clouduler.node"));
+        assert!(err.to_string().contains("no node named bogus"));
+    }
+
+    #[test]
+    fn placement_constraint_node_must_exist() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    deploy:
+      placement:
+        constraints: ["node.hostname==bogus"]
+"#;
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("deploy.placement.constraints[0]"));
+    }
+}

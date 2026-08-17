@@ -3,6 +3,7 @@
 
 mod cluster;
 mod error;
+mod stack;
 mod validate;
 
 pub use cluster::{
@@ -10,3 +11,10 @@ pub use cluster::{
     NodeAddress, NodeRole, PublicAddress, WebConfig, DEFAULT_RPC_PORT,
 };
 pub use error::{ConfigError, Result};
+pub use stack::{
+    Command, Deploy, DeployMode, DeployRestartPolicy, Healthcheck, HealthcheckTest, Middleware,
+    Placement, PortMapping, PortRange, ProxyRoute, ResourceSpec, Resources, RestartPolicy,
+    ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile, StackNetwork,
+    StackSecret, StackVolume, Protocol, UpdateConfig, VolumeMount, VolumeSyncOverride,
+    DEFAULT_SYNC_INTERVAL,
+};
