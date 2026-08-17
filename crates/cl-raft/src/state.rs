@@ -63,12 +63,6 @@ pub struct StackState {
     pub spec: String,
     /// Bumped on every redeploy, so nodes can tell a spec change from a restart.
     pub revision: u64,
-    /// Contents of the files the spec's `configs` and `secrets` point at,
-    /// captured at deploy time. They have to travel with the stack: the paths
-    /// in the yaml only exist on whichever machine ran the deploy, and a
-    /// container that moves would otherwise lose them.
-    #[serde(default)]
-    pub files: BTreeMap<String, Attachment>,
     /// Cluster config objects this stack brought with it, so removing the stack
     /// takes them away too.
     #[serde(default)]
@@ -136,51 +130,6 @@ impl fmt::Debug for SecretEntry {
             .finish_non_exhaustive()
     }
 }
-
-/// One file carried along with a stack.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct Attachment {
-    /// Base64, so the state machine stays valid json for snapshots.
-    pub content: String,
-    /// Secrets are redacted when the state is rendered, and never logged.
-    pub secret: bool,
-}
-
-impl Attachment {
-    pub fn decode(&self) -> Result<Vec<u8>, String> {
-        base64_decode(&self.content)
-    }
-
-    pub fn len(&self) -> usize {
-        // Base64 is 4 characters per 3 bytes, padding included.
-        self.content.len() / 4 * 3
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.content.is_empty()
-    }
-}
-
-/// Never print a secret by accident.
-impl fmt::Debug for Attachment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Attachment")
-            .field(
-                "content",
-                &if self.secret {
-                    "<redacted>".to_string()
-                } else {
-                    format!("{} bytes", self.len())
-                },
-            )
-            .field("secret", &self.secret)
-            .finish()
-    }
-}
-
-/// Cap on the files one stack may carry. Everything here goes through the raft
-/// log and into every snapshot, so a stack is not a place to put a disk image.
-pub const MAX_STACK_FILES_BYTES: usize = 1024 * 1024;
 
 /// Cap on one config or secret. Same reasoning as the stack file limit: it goes
 /// through the raft log and into every snapshot.
@@ -365,9 +314,6 @@ pub enum Request {
     DeployStack {
         name: String,
         spec: String,
-        /// Contents of the files the spec references, bundled by the client.
-        #[serde(default)]
-        files: BTreeMap<String, Attachment>,
     },
     RemoveStack {
         name: String,
@@ -618,19 +564,7 @@ impl ClusterState {
                 Ok(())
             }
 
-            Request::DeployStack { name, spec, files } => {
-                let total: usize = files.values().map(|f| f.len()).sum();
-                if total > MAX_STACK_FILES_BYTES {
-                    return Err(format!(
-                        "stack {name} carries {total} bytes of files, over the {MAX_STACK_FILES_BYTES} byte limit"
-                    ));
-                }
-                for (path, file) in files {
-                    if file.decode().is_err() {
-                        return Err(format!("attachment {path} is not valid base64"));
-                    }
-                }
-
+            Request::DeployStack { name, spec } => {
                 let revision = self.stacks.get(name).map(|s| s.revision + 1).unwrap_or(1);
                 let previous = self.stacks.get(name);
                 let configs = previous.map(|s| s.configs.clone()).unwrap_or_default();
@@ -641,7 +575,6 @@ impl ClusterState {
                         name: name.clone(),
                         spec: spec.clone(),
                         revision,
-                        files: files.clone(),
                         configs,
                         secrets,
                     },
@@ -897,13 +830,6 @@ impl ClusterState {
     /// without ever handling its contents.
     pub fn redacted(&self) -> ClusterState {
         let mut copy = self.clone();
-        for stack in copy.stacks.values_mut() {
-            for file in stack.files.values_mut() {
-                if file.secret {
-                    file.content = String::new();
-                }
-            }
-        }
         for secret in copy.secrets.values_mut() {
             secret.sealed = String::new();
         }
@@ -1074,110 +1000,14 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "a".into(),
-            files: BTreeMap::new(),
         });
         assert_eq!(state.stacks["gitlab"].revision, 1);
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "b".into(),
-            files: BTreeMap::new(),
         });
         assert_eq!(state.stacks["gitlab"].revision, 2);
         assert_eq!(state.stacks["gitlab"].spec, "b");
-    }
-
-    fn attachment(content: &str, secret: bool) -> Attachment {
-        Attachment {
-            content: base64_encode(content.as_bytes()),
-            secret,
-        }
-    }
-
-    #[test]
-    fn stack_files_are_stored_with_the_spec() {
-        let mut state = ClusterState::default();
-        let files = BTreeMap::from([
-            ("nginx_conf".to_string(), attachment("server {}", false)),
-            ("db_password".to_string(), attachment("hunter2", true)),
-        ]);
-
-        assert!(state
-            .apply(&Request::DeployStack {
-                name: "site".into(),
-                spec: "services: {}".into(),
-                files: files.clone(),
-            })
-            .is_ok());
-
-        let stored = &state.stacks["site"];
-        assert_eq!(stored.files.len(), 2);
-        assert_eq!(stored.files["nginx_conf"].decode().unwrap(), b"server {}");
-    }
-
-    #[test]
-    fn oversized_stack_files_are_refused() {
-        let mut state = ClusterState::default();
-        let big = "x".repeat(MAX_STACK_FILES_BYTES + 1024);
-        let rejected = state.apply(&Request::DeployStack {
-            name: "site".into(),
-            spec: "services: {}".into(),
-            files: BTreeMap::from([("big".to_string(), attachment(&big, false))]),
-        });
-        assert!(rejected.error.unwrap().contains("over the"));
-        assert!(state.stacks.is_empty());
-    }
-
-    #[test]
-    fn malformed_attachments_are_refused() {
-        let mut state = ClusterState::default();
-        let rejected = state.apply(&Request::DeployStack {
-            name: "site".into(),
-            spec: "services: {}".into(),
-            files: BTreeMap::from([(
-                "bad".to_string(),
-                Attachment {
-                    content: "not base64!!".into(),
-                    secret: false,
-                },
-            )]),
-        });
-        assert!(rejected.error.unwrap().contains("not valid base64"));
-    }
-
-    #[test]
-    fn redaction_blanks_secrets_but_keeps_configs() {
-        let mut state = ClusterState::default();
-        state.apply(&Request::DeployStack {
-            name: "site".into(),
-            spec: "services: {}".into(),
-            files: BTreeMap::from([
-                ("conf".to_string(), attachment("public", false)),
-                ("pass".to_string(), attachment("hunter2", true)),
-            ]),
-        });
-        state.apply(&Request::StoreCertificate(CertificateState {
-            fqdn: "a.example.com".into(),
-            chain_pem: "chain".into(),
-            key_pem: "private".into(),
-            not_after: 0,
-        }));
-
-        let safe = state.redacted();
-        assert_eq!(safe.stacks["site"].files["conf"].decode().unwrap(), b"public");
-        assert!(safe.stacks["site"].files["pass"].content.is_empty());
-        assert!(safe.certificates["a.example.com"].key_pem.is_empty());
-        // The original is untouched.
-        assert!(!state.stacks["site"].files["pass"].content.is_empty());
-    }
-
-    #[test]
-    fn secret_contents_never_appear_in_debug_output() {
-        let secret = attachment("hunter2", true);
-        let rendered = format!("{secret:?}");
-        assert!(rendered.contains("redacted"));
-        assert!(!rendered.contains("hunter2"));
-        // The base64 of the secret must not leak either.
-        assert!(!rendered.contains(&base64_encode(b"hunter2")));
     }
 
     #[test]
@@ -1431,7 +1261,6 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "services: {}".into(),
-            files: BTreeMap::new(),
         });
         state.apply(&Request::PutConfig {
             name: "nginx_conf".into(),
@@ -1456,7 +1285,6 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "services: {}".into(),
-            files: BTreeMap::new(),
         });
         state.apply(&Request::PutConfig {
             name: "nginx_conf".into(),
@@ -1488,7 +1316,6 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "a".into(),
-            files: BTreeMap::new(),
         });
         state.apply(&Request::SetStackObjects {
             name: "site".into(),
@@ -1498,7 +1325,6 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "b".into(),
-            files: BTreeMap::new(),
         });
         assert_eq!(state.stacks["site"].configs.len(), 1);
     }

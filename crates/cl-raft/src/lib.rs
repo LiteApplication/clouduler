@@ -23,9 +23,8 @@ pub use liveness::{Fence, FenceAction, LivenessTracker};
 pub use node::{ClusterNode, Options};
 pub use quorum::{QuorumStatus, QuorumWatch};
 pub use state::{
-    base64_decode, base64_encode, Assignment, Attachment, Availability, CertificateState,
+    base64_decode, base64_encode, Assignment, Availability, CertificateState,
     ClusterState, ConfigEntry, DesiredState, DnsRecordState, Migration, MigrationPhase, NodeState,
     Request, Response, Role, SecretEntry, StackState, VolumeState, MAX_OBJECT_BYTES,
-    MAX_STACK_FILES_BYTES,
 };
 pub use store::Store;

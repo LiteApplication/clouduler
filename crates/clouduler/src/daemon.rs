@@ -10,6 +10,7 @@ use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
 use cl_raft::ids::node_id;
 use cl_raft::liveness::{Fence, FenceAction};
 use cl_raft::node::{ClusterNode, Options};
+use cl_secret::ClusterKey;
 use cl_raft::state::{Availability, NodeState, Request, Role};
 use openraft::BasicNode;
 use tracing::{info, warn};
@@ -35,6 +36,8 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
         "starting"
     );
 
+    let key = load_cluster_key(&cfg);
+
     let cluster = ClusterNode::start(Options {
         name: node_name.clone(),
         rpc_addr,
@@ -42,6 +45,9 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
         cluster_name: cfg.cluster.name.clone(),
     })
     .await?;
+
+    // The materializer will take this once the reconcile loop is wired up.
+    let _ = &key;
 
     let cluster = Arc::new(cluster);
     form_cluster(&cfg, &node_name, &cluster).await?;
@@ -62,6 +68,42 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
     fencing.abort();
     cluster.shutdown().await?;
     Ok(())
+}
+
+/// Load the key that opens stored secrets, creating it on first launch.
+///
+/// A node without a key is not an error: it replicates sealed secrets like any
+/// other state and simply cannot run containers that need them. That is the
+/// intended setup for a worker you do not want holding the keys to everything.
+fn load_cluster_key(cfg: &ClusterConfig) -> Option<ClusterKey> {
+    let path = &cfg.secrets.key_file;
+
+    match ClusterKey::load_or_create(path, cfg.secrets.generate_if_missing) {
+        Ok((key, created)) => {
+            if created {
+                // The one moment to tell them, since it is never printed again.
+                warn!(
+                    path = %path.display(),
+                    fingerprint = %key.fingerprint(),
+                    "generated a new cluster key, back this file up. Without it every stored secret is unrecoverable"
+                );
+            } else {
+                info!(fingerprint = %key.fingerprint(), "cluster key loaded");
+            }
+            Some(key)
+        }
+        Err(cl_secret::SecretError::NoKey) => {
+            info!(
+                path = %path.display(),
+                "no cluster key on this node, secrets cannot be decrypted here"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, "cannot use the cluster key, secrets will not be available");
+            None
+        }
+    }
 }
 
 /// Stop this node's containers once it has been without a quorum for longer
