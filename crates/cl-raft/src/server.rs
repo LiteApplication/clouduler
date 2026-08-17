@@ -8,20 +8,22 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, warn};
 
+use crate::contact::Contact;
 use crate::rpc::{decode, encode, frame, RpcRequest, RpcResponse};
 use crate::types::Raft;
 
 /// Accept connections until the task is dropped. Each connection handles
 /// requests sequentially, matching how the client side uses one socket per peer.
-pub async fn serve(addr: SocketAddr, raft: Arc<Raft>) -> std::io::Result<()> {
+pub async fn serve(addr: SocketAddr, raft: Arc<Raft>, contact: Contact) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     debug!(%addr, "rpc listening");
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let raft = raft.clone();
+        let contact = contact.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, raft).await {
+            if let Err(e) = handle(stream, raft, contact).await {
                 // A peer going away mid request is routine, so keep it quiet.
                 debug!(%peer, error = %e, "rpc connection closed");
             }
@@ -29,7 +31,7 @@ pub async fn serve(addr: SocketAddr, raft: Arc<Raft>) -> std::io::Result<()> {
     }
 }
 
-async fn handle(stream: TcpStream, raft: Arc<Raft>) -> std::io::Result<()> {
+async fn handle(stream: TcpStream, raft: Arc<Raft>, contact: Contact) -> std::io::Result<()> {
     let mut conn = frame(stream);
 
     while let Some(raw) = conn.next().await {
@@ -43,23 +45,30 @@ async fn handle(stream: TcpStream, raft: Arc<Raft>) -> std::io::Result<()> {
             }
         };
 
-        let response = dispatch(&raft, request).await;
+        let response = dispatch(&raft, &contact, request).await;
         conn.send(encode(&response)?).await?;
     }
 
     Ok(())
 }
 
-async fn dispatch(raft: &Raft, request: RpcRequest) -> RpcResponse {
+async fn dispatch(raft: &Raft, contact: &Contact, request: RpcRequest) -> RpcResponse {
     match request {
-        RpcRequest::AppendEntries(rpc) => match raft.append_entries(rpc).await {
-            Ok(response) => RpcResponse::AppendEntries(response),
-            Err(e) => RpcResponse::Error(e.to_string()),
-        },
-        RpcRequest::InstallSnapshot(rpc) => match raft.install_snapshot(rpc).await {
-            Ok(response) => RpcResponse::InstallSnapshot(response),
-            Err(e) => RpcResponse::Error(e.to_string()),
-        },
+        // Leader traffic, so the quorum gate knows we are still being reached.
+        RpcRequest::AppendEntries(rpc) => {
+            contact.touch();
+            match raft.append_entries(rpc).await {
+                Ok(response) => RpcResponse::AppendEntries(response),
+                Err(e) => RpcResponse::Error(e.to_string()),
+            }
+        }
+        RpcRequest::InstallSnapshot(rpc) => {
+            contact.touch();
+            match raft.install_snapshot(rpc).await {
+                Ok(response) => RpcResponse::InstallSnapshot(response),
+                Err(e) => RpcResponse::Error(e.to_string()),
+            }
+        }
         RpcRequest::Vote(rpc) => match raft.vote(rpc).await {
             Ok(response) => RpcResponse::Vote(response),
             Err(e) => RpcResponse::Error(e.to_string()),

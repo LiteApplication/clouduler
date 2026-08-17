@@ -182,6 +182,11 @@ impl RaftNetwork<TypeConfig> for Channel {
     }
 }
 
+/// Probe a peer's liveness. Used by the leader's failure detector.
+pub async fn ping(peer: &Peer) -> bool {
+    matches!(peer.call(&RpcRequest::Ping).await, Ok(RpcResponse::Pong))
+}
+
 /// Forward a write to the leader over the same channel raft uses.
 pub async fn forward(peer: &Peer, request: StateRequest) -> Result<StateResponse, String> {
     match peer.call(&RpcRequest::Forward(request)).await {

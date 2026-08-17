@@ -3,10 +3,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use cl_config::{ClusterConfig, Node, NodeRole};
+use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
 use cl_raft::ids::node_id;
+use cl_raft::liveness::{Fence, FenceAction};
 use cl_raft::node::{ClusterNode, Options};
 use cl_raft::state::{Availability, NodeState, Request, Role};
 use openraft::BasicNode;
@@ -44,14 +46,50 @@ pub async fn run(cfg: ClusterConfig, node_name: String, data_dir: PathBuf) -> Re
     let cluster = Arc::new(cluster);
     form_cluster(&cfg, &node_name, &cluster).await?;
 
+    let failover = cfg.failover.clone();
+    let detector = tokio::spawn(cluster.clone().run_failure_detector(
+        failover.probe_interval,
+        failover.node_timeout,
+    ));
+    let fencing = tokio::spawn(run_fence(cluster.clone(), failover.clone()));
     let watcher = tokio::spawn(watch_leadership(cfg, cluster.clone()));
 
     // Scheduler, overlay, drives, proxy and api start here once implemented.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
+    detector.abort();
+    fencing.abort();
     cluster.shutdown().await?;
     Ok(())
+}
+
+/// Stop this node's containers once it has been without a quorum for longer
+/// than `failover.fence_timeout`.
+///
+/// This is the other half of the failure handling: the leader will hand our
+/// containers to another node after `node_timeout`, and we must have let go of
+/// them before that happens, or the same volume ends up with two writers.
+async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig) {
+    let quorum = cluster.quorum();
+    let mut fence = Fence::new();
+    let mut ticker = tokio::time::interval(failover.probe_interval);
+
+    loop {
+        ticker.tick().await;
+        match fence.observe(quorum.has_quorum(), Instant::now(), failover.fence_timeout) {
+            FenceAction::Fence => {
+                warn!(
+                    timeout = ?failover.fence_timeout,
+                    "no quorum, stopping local containers"
+                );
+                // The reconcile loop consults the fence, so stopping the
+                // containers happens there once it is wired up.
+            }
+            FenceAction::Release => info!("quorum restored, containers may start again"),
+            FenceAction::None => {}
+        }
+    }
 }
 
 /// Keep the replicated roster in step with the config for as long as this node

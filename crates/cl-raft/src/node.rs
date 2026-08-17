@@ -7,16 +7,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openraft::{BasicNode, Config, ServerState};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::contact::Contact;
 use crate::error::{ClusterError, Result};
 use crate::ids::{node_id, NodeId};
-use crate::network::{forward, Network, Peer};
+use crate::liveness::LivenessTracker;
+use crate::network::{self, forward, Network, Peer};
 use crate::quorum::{from_metrics, QuorumStatus, QuorumWatch};
 use crate::server;
 use crate::state::{ClusterState, Request, Response};
@@ -81,20 +83,30 @@ impl ClusterNode {
 
         let mut tasks = Vec::new();
 
+        let contact = Contact::new();
         let listener = raft.clone();
         let addr = options.rpc_addr;
+        let serve_contact = contact.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = server::serve(addr, listener).await {
+            if let Err(e) = server::serve(addr, listener, serve_contact).await {
                 warn!(%addr, error = %e, "rpc server stopped");
             }
         }));
 
         let (quorum_tx, quorum_rx) = watch::channel(QuorumStatus::unknown());
         let mut metrics = raft.metrics();
+        let gate_contact = contact.clone();
         tasks.push(tokio::spawn(async move {
-            // Recompute the gate on every metrics change rather than polling.
+            // Metrics changes drive this, but a node cut off from the cluster
+            // stops getting them entirely, and that is exactly the case the
+            // gate has to catch. Hence the tick as well.
+            let mut ticker = tokio::time::interval(QUORUM_ACK_TIMEOUT / 3);
             loop {
-                let status = from_metrics(&metrics.borrow_and_update(), QUORUM_ACK_TIMEOUT);
+                let status = from_metrics(
+                    &metrics.borrow_and_update(),
+                    &gate_contact,
+                    QUORUM_ACK_TIMEOUT,
+                );
                 // Only wake watchers when something they care about moved.
                 quorum_tx.send_if_modified(|current| {
                     let changed = *current != status;
@@ -103,8 +115,14 @@ impl ClusterNode {
                     }
                     changed
                 });
-                if metrics.changed().await.is_err() {
-                    break;
+
+                tokio::select! {
+                    changed = metrics.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    _ = ticker.tick() => {}
                 }
             }
         }));
@@ -130,6 +148,76 @@ impl ClusterNode {
             .await
             .map_err(ClusterError::initialize)?;
         Ok(())
+    }
+
+    /// Probe every other node and mark the silent ones unreachable, so the
+    /// scheduler gives their containers to someone else.
+    ///
+    /// Runs only while this node leads. Every node keeps its own tracker, and a
+    /// new leader starts with a fresh one, so a leader change buys the cluster
+    /// another `node_timeout` before it declares anyone dead. That is
+    /// deliberate: right after an election is exactly when probes are least
+    /// trustworthy.
+    pub async fn run_failure_detector(
+        self: Arc<Self>,
+        probe_interval: Duration,
+        node_timeout: Duration,
+    ) {
+        let mut tracker = LivenessTracker::new();
+        let mut ticker = tokio::time::interval(probe_interval);
+
+        loop {
+            ticker.tick().await;
+            if !self.is_leader() {
+                // Not our job right now. Drop what we know so the next term
+                // starts from a clean slate.
+                tracker = LivenessTracker::new();
+                continue;
+            }
+
+            let state = self.state().await;
+            let now = Instant::now();
+            let mut alive = Vec::new();
+
+            for (name, node) in &state.nodes {
+                if name == &self.name {
+                    tracker.seen(name, now);
+                    continue;
+                }
+                tracker.track(name, now);
+                if network::ping(&Peer::connect(&node.rpc_addr.to_string())).await {
+                    tracker.seen(name, now);
+                    alive.push(name.clone());
+                }
+            }
+
+            // A node removed from the roster must not keep expiring forever.
+            tracker.retain(|name| state.nodes.contains_key(name));
+
+            let expired = tracker.expired(now, node_timeout);
+            for name in &expired {
+                if !state.unreachable.contains(name) {
+                    warn!(node = %name, "unreachable, rescheduling its containers");
+                    self.set_reachable(name, false).await;
+                }
+            }
+            for name in alive {
+                if state.unreachable.contains(&name) {
+                    info!(node = %name, "reachable again");
+                    self.set_reachable(&name, true).await;
+                }
+            }
+        }
+    }
+
+    async fn set_reachable(&self, node: &str, reachable: bool) {
+        let request = Request::SetReachable {
+            node: node.to_string(),
+            reachable,
+        };
+        if let Err(e) = self.submit(request).await {
+            warn!(node = %node, error = %e, "could not record reachability");
+        }
     }
 
     /// Whether this node already belongs to a formed cluster.

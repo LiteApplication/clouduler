@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
+use crate::contact::Contact;
 use crate::ids::NodeId;
 use crate::types::Node;
 
@@ -61,13 +62,18 @@ pub fn evaluate(voters: &BTreeSet<NodeId>, reachable: BTreeSet<NodeId>, leader: 
     }
 }
 
-/// Derive the gate from what raft reports.
+/// Derive the gate from what raft reports plus when the leader last got in touch.
 ///
-/// `has_quorum` is authoritative and comes from raft itself: a leader knows it
-/// holds quorum because a majority acknowledged it recently, and a follower
-/// knows because a leader is currently reaching it. `reachable` is best effort
-/// and only there for the ui.
-pub fn from_metrics(metrics: &Metrics, quorum_ack_timeout: Duration) -> QuorumStatus {
+/// A leader knows it holds quorum because a majority acknowledged it recently.
+/// A follower cannot use `current_leader` alone: it keeps reporting the last
+/// leader it saw long after that node has gone, and a learner never runs an
+/// election to find out otherwise. So a follower needs both a known leader and
+/// recent traffic from it. `reachable` is best effort and only there for the ui.
+pub fn from_metrics(
+    metrics: &Metrics,
+    leader_contact: &Contact,
+    quorum_ack_timeout: Duration,
+) -> QuorumStatus {
     let voters: BTreeSet<NodeId> = metrics
         .membership_config
         .membership()
@@ -85,10 +91,13 @@ pub fn from_metrics(metrics: &Metrics, quorum_ack_timeout: Duration) -> QuorumSt
         (acked, reachable)
     } else {
         let mut reachable = BTreeSet::from([metrics.id]);
+        let in_touch = leader_contact.is_fresh(quorum_ack_timeout);
         if let Some(leader) = metrics.current_leader {
-            reachable.insert(leader);
+            if in_touch {
+                reachable.insert(leader);
+            }
         }
-        (metrics.current_leader.is_some(), reachable)
+        (metrics.current_leader.is_some() && in_touch, reachable)
     };
 
     QuorumStatus {

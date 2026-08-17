@@ -91,9 +91,17 @@ impl Constraint {
 }
 
 /// Why a node was rejected, kept so the error can say what went wrong.
-fn rejection(node: &NodeState, desired: &Desired, constraints: &[Constraint]) -> Option<String> {
+fn rejection(
+    state: &ClusterState,
+    node: &NodeState,
+    desired: &Desired,
+    constraints: &[Constraint],
+) -> Option<String> {
     if !node.schedulable() {
         return Some(format!("{} is {:?}", node.name, node.availability));
+    }
+    if state.unreachable.contains(&node.name) {
+        return Some(format!("{} is unreachable", node.name));
     }
     if let Some(pin) = &desired.pinned_node {
         if &node.name != pin {
@@ -133,7 +141,7 @@ pub fn candidates<'a>(
     let mut eligible = Vec::new();
     let mut rejected = Vec::new();
     for node in state.nodes.values() {
-        match rejection(node, desired, &constraints) {
+        match rejection(state, node, desired, &constraints) {
             None => eligible.push(node),
             Some(reason) => rejected.push(reason),
         }
@@ -368,6 +376,43 @@ mod tests {
         let decisions = place(&state, &[desired("web", 0)]).expect("place");
         let target = placed(&decisions, "web", 0).expect("replacement node");
         assert_ne!(target, "n3");
+    }
+
+    #[test]
+    fn an_unreachable_node_gives_its_instances_up() {
+        let mut state = cluster();
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "web", 0),
+            node: "n3".into(),
+            drives: BTreeSet::new(),
+        });
+        state.apply(&Request::SetReachable {
+            node: "n3".into(),
+            reachable: false,
+        });
+
+        let decisions = place(&state, &[desired("web", 0)]).expect("place");
+        let target = placed(&decisions, "web", 0).expect("replacement node");
+        assert_ne!(target, "n3");
+    }
+
+    #[test]
+    fn a_recovered_node_becomes_a_candidate_again() {
+        let mut state = cluster();
+        state.apply(&Request::SetReachable {
+            node: "n1".into(),
+            reachable: false,
+        });
+        let (eligible, rejected) = candidates(&state, &desired("web", 0)).expect("candidates");
+        assert!(!eligible.iter().any(|n| n.name == "n1"));
+        assert!(rejected.iter().any(|r| r.contains("n1 is unreachable")));
+
+        state.apply(&Request::SetReachable {
+            node: "n1".into(),
+            reachable: true,
+        });
+        let (eligible, _) = candidates(&state, &desired("web", 0)).expect("candidates");
+        assert!(eligible.iter().any(|n| n.name == "n1"));
     }
 
     #[test]

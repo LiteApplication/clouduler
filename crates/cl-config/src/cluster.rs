@@ -23,7 +23,57 @@ pub struct ClusterConfig {
     pub nodes: BTreeMap<String, Node>,
     pub web: WebConfig,
     #[serde(default)]
+    pub failover: FailoverConfig,
+    #[serde(default)]
     pub cloudflare: Option<CloudflareConfig>,
+}
+
+/// Timings for handling a node that drops out of the cluster.
+///
+/// The two timeouts work against each other and must not be set carelessly.
+/// `fence_timeout` is how long a node keeps running containers after losing
+/// quorum; `node_timeout` is how long the rest of the cluster waits before
+/// giving that node's containers to someone else. Fencing has to happen first,
+/// or the same container runs in two places at once, which for anything with a
+/// volume means corruption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FailoverConfig {
+    /// How long a node may be unreachable before its containers are
+    /// rescheduled elsewhere.
+    #[serde(with = "humantime_serde", default = "default_node_timeout")]
+    pub node_timeout: Duration,
+
+    /// How long a node may run without a manager quorum before it stops its own
+    /// containers. Must be shorter than `node_timeout`.
+    #[serde(with = "humantime_serde", default = "default_fence_timeout")]
+    pub fence_timeout: Duration,
+
+    /// How often the leader probes the other nodes.
+    #[serde(with = "humantime_serde", default = "default_probe_interval")]
+    pub probe_interval: Duration,
+}
+
+fn default_node_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_fence_timeout() -> Duration {
+    Duration::from_secs(15)
+}
+
+fn default_probe_interval() -> Duration {
+    Duration::from_secs(5)
+}
+
+impl Default for FailoverConfig {
+    fn default() -> Self {
+        Self {
+            node_timeout: default_node_timeout(),
+            fence_timeout: default_fence_timeout(),
+            probe_interval: default_probe_interval(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

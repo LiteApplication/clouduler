@@ -182,6 +182,11 @@ pub struct ClusterState {
     pub volumes: BTreeMap<VolumeId, VolumeState>,
     pub certificates: BTreeMap<String, CertificateState>,
     pub dns_records: BTreeMap<String, DnsRecordState>,
+    /// Nodes the leader has stopped hearing from. Observed rather than
+    /// configured, so it is kept apart from `availability`, which is what the
+    /// operator asked for.
+    #[serde(default)]
+    pub unreachable: BTreeSet<String>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -194,6 +199,12 @@ pub enum Request {
     SetAvailability {
         node: String,
         availability: Availability,
+    },
+    /// Submitted by the leader once a node has been silent for longer than
+    /// `failover.node_timeout`, or once it answers again.
+    SetReachable {
+        node: String,
+        reachable: bool,
     },
     RemoveNode {
         node: String,
@@ -320,11 +331,24 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::SetReachable { node, reachable } => {
+                if !self.nodes.contains_key(node) {
+                    return Err(format!("unknown node {node}"));
+                }
+                if *reachable {
+                    self.unreachable.remove(node);
+                } else {
+                    self.unreachable.insert(node.clone());
+                }
+                Ok(())
+            }
+
             Request::RemoveNode { node } => {
                 if let Some(inst) = self.assignments.values().find(|a| &a.node == node) {
                     return Err(format!("node {node} still runs {}", inst.instance));
                 }
                 self.nodes.remove(node);
+                self.unreachable.remove(node);
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
                 }
@@ -516,6 +540,12 @@ impl ClusterState {
         self.nodes.get(node).is_some_and(|n| n.implements(drive))
     }
 
+    /// Whether a node may take new work: the operator has not held it back and
+    /// the cluster can still hear from it.
+    pub fn can_schedule(&self, node: &str) -> bool {
+        self.nodes.get(node).is_some_and(|n| n.schedulable()) && !self.unreachable.contains(node)
+    }
+
     /// The core scheduling invariant: an instance only lands on a node that is
     /// taking work and implements every drive its volumes live on.
     fn check_placement(&self, node: &str, drives: &BTreeSet<String>) -> Result<(), String> {
@@ -525,6 +555,9 @@ impl ClusterState {
             .ok_or_else(|| format!("unknown node {node}"))?;
         if !target.schedulable() {
             return Err(format!("node {node} is {:?}", target.availability));
+        }
+        if self.unreachable.contains(node) {
+            return Err(format!("node {node} is unreachable"));
         }
         for drive in drives {
             if !target.implements(drive) {
@@ -617,6 +650,48 @@ mod tests {
         });
         let rejected = assign(&mut state, "n1", &[]);
         assert!(rejected.error.unwrap().contains("Drain"));
+    }
+
+    #[test]
+    fn an_unreachable_node_takes_no_new_work() {
+        let mut state = cluster();
+        state.apply(&Request::SetReachable {
+            node: "n1".into(),
+            reachable: false,
+        });
+        assert!(!state.can_schedule("n1"));
+
+        let rejected = assign(&mut state, "n1", &[]);
+        assert!(rejected.error.unwrap().contains("n1 is unreachable"));
+
+        // The node coming back makes it a candidate again.
+        state.apply(&Request::SetReachable {
+            node: "n1".into(),
+            reachable: true,
+        });
+        assert!(state.can_schedule("n1"));
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+    }
+
+    #[test]
+    fn reachability_is_only_tracked_for_known_nodes() {
+        let mut state = cluster();
+        let rejected = state.apply(&Request::SetReachable {
+            node: "ghost".into(),
+            reachable: false,
+        });
+        assert!(rejected.error.unwrap().contains("unknown node ghost"));
+    }
+
+    #[test]
+    fn removing_a_node_clears_its_unreachable_flag() {
+        let mut state = cluster();
+        state.apply(&Request::SetReachable {
+            node: "n1".into(),
+            reachable: false,
+        });
+        state.apply(&Request::RemoveNode { node: "n1".into() });
+        assert!(state.unreachable.is_empty());
     }
 
     #[test]

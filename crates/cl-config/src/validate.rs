@@ -12,7 +12,39 @@ impl ClusterConfig {
         self.validate_nodes()?;
         self.validate_drives()?;
         self.validate_web()?;
+        self.validate_failover()?;
         self.validate_cloudflare()?;
+        Ok(())
+    }
+
+    fn validate_failover(&self) -> Result<()> {
+        let f = &self.failover;
+        // Fencing must complete before anyone else takes the containers over,
+        // otherwise the same volume gets two writers.
+        if f.fence_timeout >= f.node_timeout {
+            return Err(ConfigError::invalid(
+                "failover.fence_timeout",
+                format!(
+                    "must be shorter than node_timeout ({:?}), or a container can run on two nodes at once",
+                    f.node_timeout
+                ),
+            ));
+        }
+        if f.probe_interval >= f.fence_timeout {
+            return Err(ConfigError::invalid(
+                "failover.probe_interval",
+                format!(
+                    "must be shorter than fence_timeout ({:?}), or a node cannot be missed before it fences",
+                    f.fence_timeout
+                ),
+            ));
+        }
+        if f.probe_interval.is_zero() {
+            return Err(ConfigError::invalid(
+                "failover.probe_interval",
+                "must not be zero",
+            ));
+        }
         Ok(())
     }
 
@@ -431,6 +463,45 @@ cloudflare:
     fn cloudflare_token_may_be_omitted() {
         let cfg = parse(&[("  api_token_file: /etc/clouduler/cf.token\n", "")]).unwrap();
         assert!(cfg.cloudflare.unwrap().api_token_file.is_none());
+    }
+
+    #[test]
+    fn failover_defaults_are_ordered_correctly() {
+        let cfg = ClusterConfig::parse(BASE).expect("valid");
+        let f = &cfg.failover;
+        assert!(f.probe_interval < f.fence_timeout);
+        assert!(f.fence_timeout < f.node_timeout);
+    }
+
+    #[test]
+    fn fencing_must_beat_rescheduling() {
+        let err = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            "failover: { node_timeout: 10s, fence_timeout: 20s }\nweb: { address: cloud, network: tailscale }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("must be shorter than node_timeout"));
+    }
+
+    #[test]
+    fn probing_must_beat_fencing() {
+        let err = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            "failover: { fence_timeout: 5s, probe_interval: 5s }\nweb: { address: cloud, network: tailscale }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("must be shorter than fence_timeout"));
+    }
+
+    #[test]
+    fn failover_timings_are_configurable() {
+        let cfg = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            "failover: { node_timeout: 2m, fence_timeout: 45s, probe_interval: 10s }\nweb: { address: cloud, network: tailscale }",
+        )])
+        .expect("valid");
+        assert_eq!(cfg.failover.node_timeout, std::time::Duration::from_secs(120));
+        assert_eq!(cfg.failover.fence_timeout, std::time::Duration::from_secs(45));
     }
 
     #[test]

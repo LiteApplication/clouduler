@@ -21,6 +21,14 @@ pub enum SchedError {
     #[error("docker: {0}")]
     Docker(#[from] cl_docker::DockerError),
 
+    /// Boxed because openraft's storage error is 224 bytes and would otherwise
+    /// bloat every Result in this crate.
     #[error("cluster: {0}")]
-    Cluster(#[from] cl_raft::ClusterError),
+    Cluster(#[from] Box<cl_raft::ClusterError>),
+}
+
+impl From<cl_raft::ClusterError> for SchedError {
+    fn from(e: cl_raft::ClusterError) -> Self {
+        SchedError::Cluster(Box::new(e))
+    }
 }

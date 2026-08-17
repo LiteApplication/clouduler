@@ -7,7 +7,7 @@ mod stack;
 mod validate;
 
 pub use cluster::{
-    qualify, CloudflareConfig, ClusterConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
+    qualify, CloudflareConfig, ClusterConfig, FailoverConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
     NodeAddress, NodeRole, PublicAddress, WebConfig, DEFAULT_RPC_PORT,
 };
 pub use error::{ConfigError, Result};

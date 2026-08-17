@@ -72,6 +72,21 @@ web:
   network: tailscale
   port: 443
 
+# What happens when a node drops out of the cluster.
+#
+# The two timeouts work against each other. fence_timeout must be shorter than
+# node_timeout: the failing node has to stop its containers before anyone else
+# starts them, or the same volume gets two writers. The config is rejected if
+# that ordering is broken.
+failover:
+  # How long a node may be unreachable before its containers are rescheduled.
+  node_timeout: 30s
+  # How long a node may run without a manager quorum before it stops its own
+  # containers.
+  fence_timeout: 15s
+  # How often the leader probes the other nodes.
+  probe_interval: 5s
+
 cloudflare:
   # If not specified, needs to be filled in from the GUI
   api_token_file: /etc/clouduler/cf.token
