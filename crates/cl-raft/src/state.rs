@@ -239,6 +239,11 @@ pub struct ClusterState {
     /// operator asked for.
     #[serde(default)]
     pub unreachable: BTreeSet<String>,
+    /// Overlay subnet and address assignments, as json owned by cl-net. Kept
+    /// opaque here so the address book can evolve without touching the state
+    /// machine, which every node has to agree on byte for byte.
+    #[serde(default)]
+    pub overlay: Option<String>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -321,6 +326,11 @@ pub enum Request {
     RemoveDnsRecord {
         key: String,
     },
+    /// Overlay address book. Allocation goes through raft so two nodes cannot
+    /// hand out the same address for the same stack network.
+    SetOverlayAllocations {
+        allocations: String,
+    },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
 }
@@ -371,6 +381,11 @@ impl ClusterState {
     fn dispatch(&mut self, req: &Request) -> Result<(), String> {
         match req {
             Request::NoOp => Ok(()),
+
+            Request::SetOverlayAllocations { allocations } => {
+                self.overlay = Some(allocations.clone());
+                Ok(())
+            }
 
             Request::UpsertNode(node) => {
                 self.nodes.insert(node.name.clone(), node.clone());
