@@ -60,8 +60,18 @@ DELETE /api/nodes/:name                 decommission, refused while it runs work
 GET    /api/nodes/:name/logs            read    SSE stream of daemon logs
 ```
 
-Node detail includes CPU count and load, memory total and used, disk usage per
-implemented drive, container counts, uptime, and the reachability flag.
+Node detail includes CPU count and load, memory total and used, container
+counts, and the reachability flag. Live resource usage (`usage`) is only
+populated when the node answering the request is the node being described;
+cl-raft carries no rpc call for one node to pull another's live resource
+figures, so a remote node's `usage` comes back zeroed with `local: false`.
+Disk usage per implemented drive is not currently reported.
+
+`GET /api/nodes/:name/logs` similarly only streams the daemon log of the node
+answering the request. Asking a node for another node's log returns `404`
+with a message saying to connect to that node directly, since there is no rpc
+path to fetch it remotely either. No in-process log ring buffer exists yet, so
+even the local case currently streams nothing; wiring one up is future work.
 
 ## Stacks
 
@@ -91,6 +101,14 @@ GET    /api/instances/:id/stats         read    SSE, cpu, memory, network, io
 ```
 
 Instance ids are `stack.service.index`.
+
+`restart`, `update`, `logs` and `stats` only work when the instance runs on
+the node currently answering the request; cl-docker has no rpc path for
+fetching another node's container state. Hitting them for an instance that
+runs elsewhere returns `409` naming the node it actually runs on. `move`
+currently begins the migration without re-deriving the drives the instance's
+volumes need from its stack spec, so a target node's drive support is not
+re-checked at move time the way it is at initial placement.
 
 ## Configs and secrets
 
@@ -135,6 +153,12 @@ GET    /api/volumes                     read    generation, replicas, sync state
 POST   /api/volumes/:drive/:volume/sync trigger a sync now
 ```
 
+`sync` bumps the volume's generation (`TouchVolume`) rather than signalling
+`cl-drive` directly: there is no channel from the api into that crate's sync
+loop today. The next pass picks up the bumped generation as if the primary
+had just written to the volume, which triggers a sync but is one step removed
+from "trigger a sync now" in the literal sense.
+
 ## Configuration
 
 ```
@@ -159,8 +183,15 @@ GET    /api/config/pending              read    what is armed and how long is le
 ## Certificates and DNS
 
 ```
-GET    /api/certificates                read    fqdn, expiry, issuer, never keys
+GET    /api/certificates                read    fqdn, expiry, never keys
 POST   /api/certificates/:fqdn/renew
 GET    /api/dns                         read    records clouduler owns
 POST   /api/dns/reconcile               force a reconcile pass
 ```
+
+`cl_raft::CertificateState` does not track an issuer name, so certificate
+listing reports `fqdn`, `not_after` and `has_chain` rather than an issuer.
+Neither `renew` nor `reconcile` has a direct channel into `cl-dns`, which owns
+the ACME account and the reconcile loop: `renew` removes the stored
+certificate so the next pass reissues it, and `reconcile` currently just
+accepts the request (`202`) without a way to force a pass early.

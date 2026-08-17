@@ -2,7 +2,7 @@
 //!
 //! Every stream here is built from a `futures::Stream` that ends when the
 //! underlying source ends (docker log stream closing) or, for `/api/events`,
-//! stops emitting on its own since it is driven by `Sse` — the client
+//! stops emitting on its own since it is driven by `Sse`: the client
 //! dropping the connection frees the whole chain, per axum's normal SSE
 //! handling, so there is nothing extra to clean up.
 

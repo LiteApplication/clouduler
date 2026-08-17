@@ -5,3 +5,5 @@ dist
 *.img
 .DS_Store
 ui/dist
+tests/qemu/cache/
+tests/qemu/run/
