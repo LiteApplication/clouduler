@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
                 Some(n) => n,
                 None => hostname()?,
             };
-            daemon::run(cfg, node).await
+            daemon::run(cfg, node, cli.data_dir).await
         }
         Command::Check => {
             report::summary(&cfg);

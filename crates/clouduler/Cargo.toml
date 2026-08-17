@@ -10,9 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 cl-config.workspace = true
+cl-raft.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
+openraft.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

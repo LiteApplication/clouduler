@@ -16,8 +16,18 @@ pub struct Cli {
     )]
     pub config: PathBuf,
 
-    /// Log filter, syntax as in RUST_LOG.
-    #[arg(long, global = true, env = "CLOUDULER_LOG", default_value = "info")]
+    /// Directory holding this node's local state.
+    #[arg(
+        long,
+        global = true,
+        env = "CLOUDULER_DATA",
+        default_value = "/var/lib/clouduler"
+    )]
+    pub data_dir: PathBuf,
+
+    /// Log filter, syntax as in RUST_LOG. openraft is quieted by default because
+    /// it logs every raft message at info.
+    #[arg(long, global = true, env = "CLOUDULER_LOG", default_value = "info,openraft=warn")]
     pub log: String,
 
     #[command(subcommand)]
