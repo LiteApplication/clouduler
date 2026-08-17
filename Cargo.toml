@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/clouduler",
     "crates/cl-config",
+    "crates/cl-docker",
+    "crates/cl-dns",
+    "crates/cl-raft",
 ]
 
 [workspace.package]
