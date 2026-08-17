@@ -28,7 +28,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 humantime-serde = "1"
 ipnet = { version = "2", features = ["serde"] }
-openraft = { version = "0.9", features = ["serde"] }
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
