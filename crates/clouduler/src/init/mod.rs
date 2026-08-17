@@ -71,7 +71,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     prompt.say(&format!("\nwrote {}", config_path.display()))?;
 
     setup_drive_directories(&mut prompt, &config, &node_name)?;
-    setup_secret_key(&mut prompt, &args, &config, &node_name)?;
+    setup_secret_key(&mut prompt, &config, &node_name)?;
     setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
     Ok(())
@@ -334,7 +334,6 @@ fn setup_drive_directories<R: BufRead, W: Write>(
 /// want holding the keys to everything, so it is offered rather than pushed.
 fn setup_secret_key<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
-    args: &InitArgs,
     config: &ClusterConfig,
     node_name: &str,
 ) -> Result<()> {
@@ -380,7 +379,6 @@ fn setup_secret_key<R: BufRead, W: Write>(
     key.save(path)
         .with_context(|| format!("writing the key to {}", path.display()))?;
     prompt.say(&format!("installed the cluster key ({})", key.fingerprint()))?;
-    let _ = args;
     Ok(())
 }
 
