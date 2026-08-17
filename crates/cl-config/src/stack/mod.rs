@@ -3,6 +3,7 @@
 
 mod de;
 mod deploy;
+mod objects;
 mod derived;
 mod extensions;
 mod healthcheck;
@@ -15,6 +16,7 @@ pub use deploy::{
 };
 pub use extensions::{ExposePort, Middleware, ProxyRoute, ServiceExtensions, StackDefaults, VolumeSyncOverride};
 pub use healthcheck::{Healthcheck, HealthcheckTest};
+pub use objects::{ObjectRef, SECRET_DIR};
 pub use port::{PortMapping, PortRange, Protocol};
 pub use volume::VolumeMount;
 
@@ -116,6 +118,12 @@ pub struct Service {
     pub sysctls: BTreeMap<String, String>,
     #[serde(default, with = "humantime_serde::option")]
     pub stop_grace_period: Option<Duration>,
+    /// Cluster configs mounted into this service.
+    #[serde(default)]
+    pub configs: Vec<ObjectRef>,
+    /// Cluster secrets mounted into this service, at /run/secrets by default.
+    #[serde(default)]
+    pub secrets: Vec<ObjectRef>,
     #[serde(default)]
     pub deploy: Option<Deploy>,
     #[serde(rename = "x-clouduler", default)]

@@ -8,9 +8,13 @@ license.workspace = true
 cl-config.workspace = true
 cl-docker.workspace = true
 cl-raft.workspace = true
+cl-secret.workspace = true
 
 futures.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

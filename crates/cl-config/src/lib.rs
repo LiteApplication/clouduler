@@ -15,6 +15,7 @@ pub use cluster::{
 pub use bundle::{BundledFile, StackBundle};
 pub use error::{ConfigError, Result};
 pub use stack::{
+    ObjectRef, SECRET_DIR,
     Command, Deploy, DeployMode, DeployRestartPolicy, Healthcheck, HealthcheckTest, Middleware,
     Placement, PortMapping, PortRange, ProxyRoute, ResourceSpec, Resources, RestartPolicy,
     ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile, StackNetwork,

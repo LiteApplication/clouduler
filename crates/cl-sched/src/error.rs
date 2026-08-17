@@ -18,6 +18,35 @@ pub enum SchedError {
     #[error("unknown placement constraint {0}")]
     BadConstraint(String),
 
+    #[error("{kind} {name} referenced by {instance} does not exist in the cluster")]
+    MissingObject {
+        kind: &'static str,
+        name: String,
+        instance: String,
+    },
+
+    #[error("{name} is unusable: {reason}")]
+    BadObject { name: String, reason: String },
+
+    /// This node holds no cluster key, so it cannot open the secret. Starting
+    /// the container anyway would give it an empty or encrypted file.
+    #[error("no cluster key on this node, cannot mount secret {name} for {instance}")]
+    NoSecretKey { name: String, instance: String },
+
+    #[error("secret {name} was sealed with key {expected}, this node holds {got}")]
+    WrongSecretKey {
+        name: String,
+        expected: String,
+        got: String,
+    },
+
+    #[error("{path}: {source}")]
+    ObjectIo {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("docker: {0}")]
     Docker(#[from] cl_docker::DockerError),
 
