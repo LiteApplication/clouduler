@@ -1,0 +1,19 @@
+[package]
+name = "cl-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cl-config.workspace = true
+cl-raft.workspace = true
+
+futures.workspace = true
+hickory-proto.workspace = true
+hickory-server.workspace = true
+ipnet.workspace = true
+rtnetlink.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -6,6 +6,10 @@ members = [
     "crates/cl-docker",
     "crates/cl-dns",
     "crates/cl-raft",
+    "crates/cl-net",
+    "crates/cl-drive",
+    "crates/cl-proxy",
+    "crates/cl-sched",
 ]
 
 [workspace.package]
@@ -19,25 +23,44 @@ cl-config = { path = "crates/cl-config" }
 cl-docker = { path = "crates/cl-docker" }
 cl-dns = { path = "crates/cl-dns" }
 cl-raft = { path = "crates/cl-raft" }
+cl-net = { path = "crates/cl-net" }
+cl-drive = { path = "crates/cl-drive" }
+cl-proxy = { path = "crates/cl-proxy" }
+cl-sched = { path = "crates/cl-sched" }
 
 anyhow = "1"
 async-trait = "0.1"
 bincode = "1"
 bollard = "0.21"
 clap = { version = "4", features = ["derive", "env"] }
+blake3 = "1"
+fast_rsync = "0.2"
 futures = "0.3"
+hickory-proto = "0.26"
+hickory-resolver = "0.26"
+hickory-server = { version = "0.26", features = ["resolver"] }
+http-body-util = "0.1"
 humantime-serde = "1"
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1", "http2"] }
+instant-acme = "0.8"
 ipnet = { version = "2", features = ["serde"] }
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+rcgen = "0.14"
 redb = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rtnetlink = "0.22"
+rustls = "0.23"
+rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
+walkdir = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
