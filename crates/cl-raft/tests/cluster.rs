@@ -228,3 +228,29 @@ async fn a_node_without_a_cluster_holds_no_quorum() {
     assert!(!node.quorum().has_quorum());
     assert!(node.submit(Request::NoOp).await.is_err());
 }
+
+/// A config edit made on any node reaches every node, which is what lets each
+/// daemon write its own copy of the file.
+#[tokio::test]
+async fn a_config_edit_replicates_to_every_node() {
+    let cluster = Harness::start(3).await;
+    let leader = cluster.leader().await;
+    let follower = (leader + 1) % 3;
+
+    let yaml = "cluster:\n  name: home\n";
+    let response = cluster.nodes[follower]
+        .submit(Request::PutClusterConfig {
+            yaml: yaml.to_string(),
+            expect_generation: 0,
+        })
+        .await
+        .expect("submit");
+    assert!(response.is_ok(), "{:?}", response.error);
+
+    cluster.await_version(1).await;
+    for node in &cluster.nodes {
+        let stored = node.state().await.cluster_config.expect("config replicated");
+        assert_eq!(stored.yaml, yaml);
+        assert_eq!(stored.generation, 1);
+    }
+}

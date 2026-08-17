@@ -97,12 +97,19 @@ pub async fn run(
 
     let api = start_api(&cfg, &node_name, &config_path, &cluster, &data_dir).await;
 
-    let watcher = tokio::spawn(watch_leadership(cfg, cluster.clone()));
+    let config_writer = tokio::spawn(watch_cluster_config(
+        cluster.clone(),
+        config_path.clone(),
+        failover.probe_interval,
+    ));
+
+    let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
 
     // Overlay, drives and the reverse proxy start here once wired in.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
+    config_writer.abort();
     detector.abort();
     fencing.abort();
     if let Some(scheduler) = scheduler {
@@ -245,10 +252,69 @@ async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig, fenced: 
     }
 }
 
+/// Write the replicated cluster config to this node's config file whenever it
+/// changes.
+///
+/// This is what makes an edit in the web ui reach every node: the api submits
+/// it through raft, and each daemon lands its own copy here. A node that was
+/// down during the edit picks it up on its next tick after rejoining, rather
+/// than coming back with a stale file.
+///
+/// Running subsystems are not reconfigured in place, so the file is ahead of
+/// the process until the daemon restarts. That is deliberate: rebuilding the
+/// overlay or the raft membership under a running cluster from a config diff
+/// is not something to do behind the operator's back.
+async fn watch_cluster_config(
+    cluster: Arc<ClusterNode>,
+    config_path: PathBuf,
+    interval: std::time::Duration,
+) {
+    // Whatever is on disk right now is taken as already applied, so a restart
+    // does not rewrite an identical file and log a change that did not happen.
+    let mut written = 0;
+    let mut ticker = tokio::time::interval(interval);
+
+    loop {
+        ticker.tick().await;
+        let Some(entry) = cluster.state().await.cluster_config else {
+            continue;
+        };
+        if entry.generation == written {
+            continue;
+        }
+
+        let current = std::fs::read_to_string(&config_path).unwrap_or_default();
+        if current == entry.yaml {
+            written = entry.generation;
+            continue;
+        }
+
+        match write_atomically(&config_path, entry.yaml.as_bytes()) {
+            Ok(()) => {
+                written = entry.generation;
+                info!(
+                    generation = entry.generation,
+                    path = %config_path.display(),
+                    "cluster config updated, restart the daemon to apply it"
+                );
+            }
+            Err(e) => warn!(error = %e, path = %config_path.display(), "cannot write the config file"),
+        }
+    }
+}
+
+/// Write through a temp file in the same directory, so a reader never sees a
+/// half written config.
+fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, contents)?;
+    std::fs::rename(&temp, path)
+}
+
 /// Keep the replicated roster in step with the config for as long as this node
 /// leads. Seeding is done on every leadership change rather than once at
 /// startup, because at startup no leader has been elected yet.
-async fn watch_leadership(cfg: ClusterConfig, cluster: Arc<ClusterNode>) {
+async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc<ClusterNode>) {
     let mut quorum = cluster.quorum();
     loop {
         let status = quorum.status();
@@ -261,6 +327,9 @@ async fn watch_leadership(cfg: ClusterConfig, cluster: Arc<ClusterNode>) {
         );
 
         if status.is_leader(cluster.id) {
+            if let Err(e) = seed_config(&config_path, &cluster).await {
+                warn!(error = %e, "could not publish the cluster config");
+            }
             if let Err(e) = seed_roster(&cfg, &cluster).await {
                 warn!(error = %e, "could not publish the node roster");
             }
@@ -299,6 +368,34 @@ async fn form_cluster(cfg: &ClusterConfig, node_name: &str, cluster: &ClusterNod
     Ok(())
 }
 
+/// Seed the replicated cluster config from the leader's file, once, on a
+/// cluster that has never had one.
+///
+/// Only the very first leader does anything here. After that the stored config
+/// is the authority and is only replaced through an explicit edit, so a node
+/// starting with an out of date file cannot push it back over everyone else's.
+async fn seed_config(config_path: &Path, cluster: &ClusterNode) -> Result<()> {
+    if cluster.state().await.cluster_config.is_some() {
+        return Ok(());
+    }
+
+    let yaml = std::fs::read_to_string(config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let response = cluster
+        .submit(Request::PutClusterConfig {
+            yaml,
+            expect_generation: 0,
+        })
+        .await?;
+    match response.error {
+        // Another manager got there first, which is the expected race and not
+        // a problem: both published the same file.
+        Some(error) => info!(%error, "cluster config was already published"),
+        None => info!("published the cluster config"),
+    }
+    Ok(())
+}
+
 /// Publish every configured node into the replicated roster, and attach the
 /// workers as learners so they receive state without voting.
 async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
@@ -310,8 +407,19 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             continue;
         };
 
-        if node.role == NodeRole::Worker && !known.nodes.contains_key(name) {
-            cluster.add_worker(node_id(name), rpc_addr).await?;
+        // A node the roster has never seen is one that joined after the cluster
+        // was formed, so it still has to be added to raft membership. Managers
+        // become voters, workers only learners.
+        if !known.nodes.contains_key(name) {
+            let result = match node.role {
+                NodeRole::Manager => cluster.add_manager(node_id(name), rpc_addr).await,
+                NodeRole::Worker => cluster.add_worker(node_id(name), rpc_addr).await,
+            };
+            if let Err(e) = result {
+                // Usually the node is not up yet. Retried on the next pass.
+                warn!(node = %name, error = %e, "could not add the node to raft membership");
+                continue;
+            }
         }
 
         let desired = to_state(name, node, rpc_addr, known.nodes.get(name));

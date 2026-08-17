@@ -72,6 +72,22 @@ pub struct StackState {
     pub secrets: BTreeSet<String>,
 }
 
+/// The cluster config file, replicated so an edit made on one node reaches the
+/// file on disk on every node.
+///
+/// The file is what each daemon reads at startup, and a node that was down
+/// during an edit would otherwise come back with a stale one. Held as the raw
+/// yaml rather than a parsed `ClusterConfig` so `cl-raft` does not depend on
+/// `cl-config`, and so comments and key order survive a round trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClusterConfigEntry {
+    pub yaml: String,
+    /// Bumped on every accepted edit. A node writes the file only when this
+    /// moves, so a restarted daemon does not fight the operator over an
+    /// unchanged file.
+    pub generation: u64,
+}
+
 /// A cluster wide config object, mounted read only into the containers that
 /// reference it. Stored in the clear: a config is not a secret.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -271,6 +287,9 @@ pub struct ClusterState {
     pub stacks: BTreeMap<String, StackState>,
     pub assignments: BTreeMap<InstanceId, Assignment>,
     pub volumes: BTreeMap<VolumeId, VolumeState>,
+    /// The cluster config file, so every node can keep its own copy current.
+    #[serde(default)]
+    pub cluster_config: Option<ClusterConfigEntry>,
     /// Cluster wide config objects, mounted read only into containers.
     #[serde(default)]
     pub configs: BTreeMap<String, ConfigEntry>,
@@ -297,6 +316,16 @@ pub struct ClusterState {
 /// A command submitted through raft. Every mutation of cluster state is one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
+    /// Replace the cluster config file on every node.
+    ///
+    /// `expect_generation` is the generation the writer read before editing, 0
+    /// when nothing was stored yet. A mismatch means someone else edited in
+    /// between and the command is refused rather than silently overwriting
+    /// their change.
+    PutClusterConfig {
+        yaml: String,
+        expect_generation: u64,
+    },
     UpsertNode(NodeState),
     SetAvailability {
         node: String,
@@ -452,6 +481,27 @@ impl ClusterState {
     fn dispatch(&mut self, req: &Request) -> Result<(), String> {
         match req {
             Request::NoOp => Ok(()),
+
+            Request::PutClusterConfig {
+                yaml,
+                expect_generation,
+            } => {
+                let current = self
+                    .cluster_config
+                    .as_ref()
+                    .map(|c| c.generation)
+                    .unwrap_or(0);
+                if current != *expect_generation {
+                    return Err(format!(
+                        "cluster config was edited concurrently (stored generation {current}, edit was made against {expect_generation})"
+                    ));
+                }
+                self.cluster_config = Some(ClusterConfigEntry {
+                    yaml: yaml.clone(),
+                    generation: current + 1,
+                });
+                Ok(())
+            }
 
             Request::PutConfig {
                 name,
@@ -867,6 +917,46 @@ pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_cluster_config_is_stored_at_generation_one() {
+        let mut state = ClusterState::default();
+        let response = state.apply(&Request::PutClusterConfig {
+            yaml: "cluster:\n  name: home\n".into(),
+            expect_generation: 0,
+        });
+
+        assert!(response.is_ok(), "{:?}", response.error);
+        let stored = state.cluster_config.expect("stored");
+        assert_eq!(stored.generation, 1);
+        assert!(stored.yaml.contains("home"));
+    }
+
+    #[test]
+    fn a_config_edit_made_against_a_stale_generation_is_refused() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::PutClusterConfig {
+            yaml: "first".into(),
+            expect_generation: 0,
+        });
+
+        // Two admins both read generation 1 and both save. The second one has
+        // not seen the first one's change, so it must not land.
+        let first = state.apply(&Request::PutClusterConfig {
+            yaml: "second".into(),
+            expect_generation: 1,
+        });
+        let second = state.apply(&Request::PutClusterConfig {
+            yaml: "third".into(),
+            expect_generation: 1,
+        });
+
+        assert!(first.is_ok());
+        assert!(second.error.is_some());
+        let stored = state.cluster_config.expect("stored");
+        assert_eq!(stored.yaml, "second");
+        assert_eq!(stored.generation, 2);
+    }
 
     fn node(name: &str, drives: &[&str]) -> NodeState {
         NodeState {

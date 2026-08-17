@@ -46,8 +46,7 @@ async fn put_config(
     };
 
     let previous = state.cluster_config.read().await.clone();
-    write_config_file(&state, &body.config)?;
-    *state.cluster_config.write().await = body.config;
+    apply_config(&state, &body.config).await?;
 
     let mut pending = state.pending_edit.lock().await;
     *pending = Some(PendingEdit::arm(previous, state.clock(), rollback_after));
@@ -70,18 +69,48 @@ fn spawn_rollback_watchdog(state: AppState, after: std::time::Duration) {
         let restored = edit.previous().clone();
         drop(pending);
 
-        if write_config_file(&state, &restored).is_ok() {
-            *state.cluster_config.write().await = restored;
-            tracing::warn!("config edit was not confirmed in time, rolled back automatically");
-        } else {
-            tracing::error!("automatic config rollback could not write the config file");
+        match apply_config(&state, &restored).await {
+            Ok(()) => {
+                tracing::warn!("config edit was not confirmed in time, rolled back automatically")
+            }
+            Err(e) => tracing::error!(error = %e, "automatic config rollback failed"),
         }
     });
 }
 
-fn write_config_file(state: &AppState, config: &ClusterConfig) -> Result<(), ApiError> {
+/// Put a config into effect: through raft first, so every node's daemon writes
+/// its own copy, then locally so the node answering this request is current
+/// straight away rather than after its next watcher tick.
+///
+/// Raft goes first on purpose. Without a quorum the edit must not land anywhere,
+/// or this node comes back from a restart with a config the cluster never
+/// agreed to.
+async fn apply_config(state: &AppState, config: &ClusterConfig) -> Result<(), ApiError> {
     let yaml = serde_yaml::to_string(config).map_err(ApiError::internal)?;
-    std::fs::write(&state.config_path, yaml).map_err(ApiError::internal)
+
+    let expect_generation = state
+        .cluster
+        .state()
+        .await
+        .cluster_config
+        .map(|c| c.generation)
+        .unwrap_or(0);
+
+    let response = state
+        .cluster
+        .submit(cl_raft::Request::PutClusterConfig {
+            yaml: yaml.clone(),
+            expect_generation,
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("replicating the config: {e}")))?;
+    if let Some(error) = response.error {
+        return Err(ApiError::Conflict(error));
+    }
+
+    std::fs::write(&state.config_path, yaml).map_err(ApiError::internal)?;
+    *state.cluster_config.write().await = config.clone();
+    Ok(())
 }
 
 async fn validate_config(
@@ -114,8 +143,7 @@ async fn rollback(_admin: RequireAdmin, State(state): State<AppState>) -> Result
     let restored = edit.previous().clone();
     drop(pending);
 
-    write_config_file(&state, &restored)?;
-    *state.cluster_config.write().await = restored;
+    apply_config(&state, &restored).await?;
     Ok(StatusCode::OK)
 }
 
