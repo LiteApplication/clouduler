@@ -13,9 +13,9 @@ use std::time::Duration;
 use cl_config::StackFile;
 use cl_docker::Docker;
 use cl_net::Allocations;
-use cl_raft::ids::InstanceId;
+use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{ClusterState, Request};
+use cl_raft::state::{ClusterState, DesiredState, Request};
 use tracing::{debug, info, warn};
 
 use crate::materialize::Materializer;
@@ -120,6 +120,13 @@ impl Scheduler {
                 info!(instance = %decision.instance(), "placed");
             }
         }
+
+        for request in volume_requests(state) {
+            let response = self.cluster.submit(request.clone()).await.map_err(Box::new)?;
+            if let Some(error) = response.error {
+                warn!(?request, %error, "registering a volume was rejected");
+            }
+        }
         Ok(())
     }
 
@@ -215,17 +222,38 @@ impl Scheduler {
                 placement.zone = self.zone.clone();
             }
 
+            // An instance on its way somewhere else must not be started here
+            // again between the migration stopping it and the handover
+            // finishing: the two loops would fight, and every restart would
+            // dirty the volume the final sync is trying to freeze. Recorded as
+            // a stopped target rather than dropped from the list, so the
+            // container stays in place and a failed migration is one start
+            // away from being back where it was.
+            //
+            // Past `Switching` the assignment names the target, so this same
+            // test lets the target start it: `to` is the node reading it.
+            let mut assignment = assignment.clone();
+            if assignment
+                .migration
+                .as_ref()
+                .is_some_and(|m| !m.phase.is_terminal() && m.to != self.node)
+            {
+                assignment.desired = DesiredState::Stopped;
+            }
+
+            let spec = spec::build(
+                instance,
+                service,
+                &objects,
+                &drive_roots,
+                placement,
+                assignment.image_digest.as_deref(),
+                stack.revision,
+            );
+
             targets.push(Target {
-                assignment: assignment.clone(),
-                spec: spec::build(
-                    instance,
-                    service,
-                    &objects,
-                    &drive_roots,
-                    placement,
-                    assignment.image_digest.as_deref(),
-                    stack.revision,
-                ),
+                assignment,
+                spec,
                 revision: stack.revision,
                 stop_grace: service.stop_grace_period.unwrap_or(DEFAULT_STOP_GRACE),
             });
@@ -233,6 +261,51 @@ impl Scheduler {
 
         Ok(targets)
     }
+}
+
+/// `UpsertVolume` for every volume a placed instance mounts that the cluster
+/// does not know about yet.
+///
+/// Nothing else creates a volume record, and without one there is nothing for
+/// the sync scheduler to replicate, nothing for `/api/volumes` to report and
+/// nothing for a migration to hand over: the mount would work on the node that
+/// happens to hold the directory and the data would exist nowhere else.
+///
+/// Only unknown volumes are submitted. A volume already on record has a
+/// primary that migration moves around, and re-asserting the assignment's node
+/// every sweep would either fight that or write a raft entry per volume per
+/// ten seconds forever.
+pub fn volume_requests(state: &ClusterState) -> Vec<Request> {
+    let mut requests = Vec::new();
+    // Every replica of a service mounts the same volume, so the same id comes
+    // up once per instance.
+    let mut seen = BTreeSet::new();
+    for assignment in state.assignments.values() {
+        let instance = &assignment.instance;
+        let Some(stack) = state.stacks.get(&instance.stack) else {
+            continue;
+        };
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        let Some(service) = file.services.get(&instance.service) else {
+            continue;
+        };
+        for mount in &service.volumes {
+            let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) else {
+                continue;
+            };
+            let id = VolumeId::new(drive, volume);
+            if state.volumes.contains_key(&id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            requests.push(Request::UpsertVolume {
+                id,
+                primary: assignment.node.clone(),
+            });
+        }
+    }
+    requests
 }
 
 /// Docker network name for a stack's declared network.
@@ -365,5 +438,50 @@ services:
     #[test]
     fn overlay_names_are_namespaced_by_stack() {
         assert_eq!(overlay_name("site", "internal"), "site_internal");
+    }
+
+    const STATEFUL: &str = r#"
+services:
+  db:
+    image: postgres
+    volumes:
+      - fast/data:/var/lib/postgresql
+"#;
+
+    fn stateful_state() -> ClusterState {
+        let mut state = ClusterState::default();
+        state.apply(&Request::UpsertNode(node("n1", &["fast"])));
+        state.apply(&Request::UpsertNode(node("n2", &["fast"])));
+        state.apply(&Request::DeployStack {
+            name: "app".into(),
+            spec: STATEFUL.into(),
+        });
+        for request in plan_requests(&state).expect("plan") {
+            assert!(state.apply(&request).is_ok());
+        }
+        state
+    }
+
+    #[test]
+    fn a_placed_volume_is_registered_once() {
+        let mut state = stateful_state();
+        let requests = volume_requests(&state);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0],
+            Request::UpsertVolume { id, .. } if id == &VolumeId::new("fast", "data")
+        ));
+
+        for request in requests {
+            assert!(state.apply(&request).is_ok());
+        }
+        // A registered volume has a primary that migration moves; re-asserting
+        // it every sweep would fight that.
+        assert!(volume_requests(&state).is_empty());
+    }
+
+    #[test]
+    fn a_stack_with_no_volumes_registers_nothing() {
+        assert!(volume_requests(&state()).is_empty());
     }
 }

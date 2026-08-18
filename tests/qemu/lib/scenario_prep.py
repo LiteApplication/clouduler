@@ -4,8 +4,12 @@ cluster.yaml for the run, and prints a JSON summary for the bash driver to
 consume with jq. Kept separate from the bash side because parsing yaml and
 picking free ports is much less painful in python than in bash.
 """
+import base64
 import json
+import os
+import secrets
 import socket
+import stat
 import sys
 
 import yaml
@@ -83,6 +87,16 @@ def main():
             "drives": list(node_drives.keys()),
         })
 
+    # One cluster key for the whole run, generated here and installed into
+    # every node's image. Letting each node generate its own (the default for
+    # a first launch) gives three managers three different keys, and a secret
+    # sealed by the leader is then unreadable everywhere else. The host copy
+    # is what lets the cli deploy a stack carrying secrets.
+    key_path = os.path.join(os.path.dirname(os.path.abspath(out_control_path)), "secrets.key")
+    with open(key_path, "w") as f:
+        f.write(base64.b64encode(secrets.token_bytes(32)).decode() + "\n")
+    os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+
     cluster = {
         "cluster": {"name": scenario.get("name", "qemu-test")},
         "networks": {
@@ -92,6 +106,7 @@ def main():
         "nodes": cluster_nodes,
         "web": {"address": "api", "network": "cluster", "port": 8443},
         "failover": failover,
+        "secrets": {"key_file": "/etc/clouduler/secrets.key", "generate_if_missing": False},
     }
 
     with open(out_cluster_path, "w") as f:
@@ -115,6 +130,8 @@ def main():
         "cluster": {"type": "internal", "subnet": "127.0.0.0/8", "domain": "cl.test"},
     }
     control["nodes"] = control_nodes
+    # The cli runs on the host, where /etc/clouduler is not ours to write.
+    control["secrets"] = {"key_file": key_path, "generate_if_missing": False}
     with open(out_control_path, "w") as f:
         yaml.safe_dump(control, f, sort_keys=False)
 
@@ -123,6 +140,7 @@ def main():
         "description": scenario.get("description", ""),
         "mcast_group": f"230.10.{mcast_id}.1",
         "nodes": node_summaries,
+        "key_file": key_path,
         "steps": scenario.get("steps", []),
     }
     print(json.dumps(summary))

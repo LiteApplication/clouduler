@@ -40,6 +40,17 @@ traffic is what lets an isolated node work out that it is alone.
 A brief quorum loss does not fence. The clock restarts on every recovery, so
 flapping keeps containers up; only a sustained loss stops them.
 
+A node starts fenced and opens only once it has seen a quorum, rather than
+starting open and closing `fence_timeout` later. The window that closes is at
+boot: the reconcile loop's first sweep lands about a second into the process,
+long before raft has caught up, and until then the node's only idea of what it
+runs is whatever was true when it died. A node coming back from an outage would
+therefore restart the containers the leader has already handed to somebody else,
+and there would be two copies until the fence caught up — which is the same
+two-writers problem fencing exists to prevent, arriving by the other door. The
+cost is one probe interval of delay on a node that really is still in the
+cluster.
+
 ## Configuration
 
 ```yaml

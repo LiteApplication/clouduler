@@ -117,7 +117,7 @@ async fn serve(config: &ClusterConfig) -> Server {
     let cluster = Arc::new(cluster);
     let server = cl_api::ApiServer::new(cl_api::ApiServerOptions {
         cluster: cluster.clone(),
-        docker: cl_docker::Docker::connect().expect("docker client, never dialed here"),
+        docker: std::sync::Arc::new(tokio::sync::RwLock::new(cl_docker::Docker::connect().ok())),
         node_name: "n1".into(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: config.clone(),

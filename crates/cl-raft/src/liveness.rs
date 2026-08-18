@@ -64,7 +64,7 @@ impl LivenessTracker {
 }
 
 /// Tracks how long this node has been without a quorum.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Fence {
     /// When quorum was lost, or None while it is held.
     lost_at: Option<Instant>,
@@ -82,9 +82,27 @@ pub enum FenceAction {
     Release,
 }
 
+impl Default for Fence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Fence {
+    /// A new fence is closed.
+    ///
+    /// This is what a node coming back from a reboot has to start from. Its
+    /// stored state still says it owns the containers it owned when it died,
+    /// and the reconcile loop would act on that within a second of boot, well
+    /// before raft has told it that the leader handed those containers to
+    /// somebody else. Starting open means a rejoining node starts a second
+    /// copy of everything it used to run; starting closed costs one probe
+    /// interval on a node that really is still in the cluster.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            lost_at: None,
+            fenced: true,
+        }
     }
 
     /// Feed the current quorum state and get back what to do.
@@ -167,11 +185,38 @@ mod tests {
         assert!(!tracker.is_live("n1", at(base, 61), Duration::from_secs(30)));
     }
 
+    /// A fence on a node that has been up and in the cluster for a while.
+    /// Every test but the boot one starts here, since a fresh `Fence` is
+    /// closed and the interesting transitions are the ones after that.
+    fn settled(base: Instant, timeout: Duration) -> Fence {
+        let mut fence = Fence::new();
+        assert_eq!(fence.observe(true, base, timeout), FenceAction::Release);
+        fence
+    }
+
     #[test]
-    fn a_brief_quorum_loss_does_not_fence() {
+    fn a_fresh_fence_is_closed_until_quorum_is_confirmed() {
         let base = Instant::now();
         let mut fence = Fence::new();
         let timeout = Duration::from_secs(15);
+
+        // A node that has just booted has not heard from anyone yet. It must
+        // not run anything in that window, however long it lasts.
+        assert!(fence.is_fenced());
+        assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
+        assert_eq!(fence.observe(false, at(base, 60), timeout), FenceAction::None);
+        assert!(fence.is_fenced());
+
+        // and it opens on the first sighting of a quorum, not a timeout later.
+        assert_eq!(fence.observe(true, at(base, 61), timeout), FenceAction::Release);
+        assert!(!fence.is_fenced());
+    }
+
+    #[test]
+    fn a_brief_quorum_loss_does_not_fence() {
+        let base = Instant::now();
+        let timeout = Duration::from_secs(15);
+        let mut fence = settled(base, timeout);
 
         assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
         assert_eq!(fence.observe(false, at(base, 5), timeout), FenceAction::None);
@@ -182,8 +227,8 @@ mod tests {
     #[test]
     fn a_sustained_quorum_loss_fences_once() {
         let base = Instant::now();
-        let mut fence = Fence::new();
         let timeout = Duration::from_secs(15);
+        let mut fence = settled(base, timeout);
 
         assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
         assert_eq!(fence.observe(false, at(base, 15), timeout), FenceAction::Fence);
@@ -195,8 +240,8 @@ mod tests {
     #[test]
     fn regaining_quorum_releases_the_fence() {
         let base = Instant::now();
-        let mut fence = Fence::new();
         let timeout = Duration::from_secs(15);
+        let mut fence = settled(base, timeout);
 
         fence.observe(false, base, timeout);
         fence.observe(false, at(base, 15), timeout);
@@ -209,8 +254,8 @@ mod tests {
     #[test]
     fn the_loss_clock_restarts_after_recovery() {
         let base = Instant::now();
-        let mut fence = Fence::new();
         let timeout = Duration::from_secs(15);
+        let mut fence = settled(base, timeout);
 
         fence.observe(false, base, timeout);
         fence.observe(true, at(base, 10), timeout);

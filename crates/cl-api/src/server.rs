@@ -31,7 +31,14 @@ use crate::ui;
 #[derive(Clone)]
 pub struct AppState {
     pub cluster: Arc<ClusterNode>,
-    pub docker: Docker,
+    /// Empty when this node has no docker daemon to talk to. The api still
+    /// serves everything else: a node whose docker is down still votes, still
+    /// holds replicated state and still has to be reachable to be fixed.
+    ///
+    /// Shared rather than owned because the daemon waits for dockerd on its
+    /// own schedule; the api comes up first and picks the client up whenever
+    /// it lands.
+    pub docker: Arc<RwLock<Option<Docker>>>,
     /// Name of the node this api instance is running on. Used for the local
     /// half of node detail (resource usage, daemon logs) that has no RPC path
     /// to another node's process.
@@ -54,12 +61,21 @@ impl AppState {
     pub fn clock(&self) -> Duration {
         self.started_at.elapsed()
     }
+
+    /// The docker client, or a 503 naming why there is none.
+    pub async fn docker(&self) -> Result<Docker, ApiError> {
+        self.docker.read().await.clone().ok_or_else(|| {
+            ApiError::Unavailable(
+                "this node has no docker daemon, so it cannot answer for containers".to_string(),
+            )
+        })
+    }
 }
 
 /// What the daemon passes in to stand up the api.
 pub struct ApiServerOptions {
     pub cluster: Arc<ClusterNode>,
-    pub docker: Docker,
+    pub docker: Arc<RwLock<Option<Docker>>>,
     pub node_name: String,
     pub config_path: PathBuf,
     pub cluster_config: ClusterConfig,

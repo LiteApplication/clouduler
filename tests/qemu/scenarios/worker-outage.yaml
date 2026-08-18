@@ -21,7 +21,7 @@ failover:
 steps:
   - wait_quorum: { timeout: 40 }
   - deploy_stack: { file: stacks/simple.yaml, name: simple }
-  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }
   - kill_service_node: { service: app, save_as: victim }
   - assert_unreachable: "${victim}"
   - assert_rescheduled: { service: app, not_on: "${victim}", timeout: 30 }

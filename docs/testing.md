@@ -237,5 +237,11 @@ clears `kernel.apparmor_restrict_unprivileged_userns` before building the
 image; `build-image.sh` checks for it up front and says so rather than laying
 down an empty rootfs.
 
+Alpine's setuid helpers are installed mode 711, which their own owner cannot
+read. Left that way, the cache action's `tar` fails on `bin/bbsuid` and the
+rootfs is silently rebuilt every run, so `build-image.sh` makes them
+owner-readable. Nothing in the image can use setuid regardless: every file is
+owned by the host user, not root.
+
 For examples of deploying *to* a cluster from your own pipeline, see
 `examples/ci/`.

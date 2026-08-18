@@ -36,6 +36,14 @@ stack mounts one with the `drive/volume:path` syntax on a service's `volumes:` e
 created on demand: the first write (`DriveRegistry::ensure_volume`) makes the directory if it
 doesn't already exist.
 
+The directory is only half of it: a volume also has to be *on record*, or it exists on whichever
+node happens to hold the bytes and nowhere else — there is nothing for the sync scheduler to
+replicate, nothing for `/api/volumes` to report and nothing for a migration to hand over. The
+leader registers one (`Request::UpsertVolume`) on its scheduling pass for every volume a placed
+instance mounts, with the instance's node as the first primary (`cl_sched::run::volume_requests`).
+Only volumes the cluster does not already know about are submitted: an existing record has a
+primary that migration moves, and re-asserting the assignment's node every sweep would fight it.
+
 Volume names are validated component by component before ever touching the filesystem: empty,
 `.`, `..` and NUL-containing components are rejected outright, and a name is joined onto the
 drive's root by simple path segment concatenation. There is no canonicalization step, since the
@@ -127,6 +135,28 @@ repeating or skipping a step:
 `InstanceControl` is the only place this module touches the outside world for the container
 itself; docker lifecycle is the scheduler crate's job, not this one's, which is what lets
 migration be tested with a fake instance control and no docker daemon.
+
+## Who runs a migration
+
+The api records the move and returns. `clouduler::migration` is the loop that carries it out: every
+node polls for migrations naming it in `Migration::from` and hands each to `migration::run`.
+
+Ownership is `from` rather than the assignment's node because **Switching** repoints the assignment
+at the target halfway through — a claim keyed off the assignment would change hands mid-move, and
+after a crash nobody could tell whose job an unfinished migration was. `from` is written once, when
+the move is recorded, so one node drives a move for its whole life and recognises its own work when
+it restarts.
+
+**Starting** is the exception to that. The container has never existed on the target, so the source
+cannot start it there and there is no rpc for starting a container on another node. `Switching` has
+already pointed the assignment at the target, so the target's own reconcile loop creates and starts
+it on its next sweep, like any other instance it has been given; `start_instance` for a remote node
+does nothing but say so.
+
+While a migration is live the source must not restart what it just stopped. `Scheduler::targets`
+records an instance migrating away from this node as a **stopped** target rather than dropping it:
+the reconcile loop then leaves it alone instead of racing the handover, the container stays in
+place, and a migration that fails before **Switching** is one start away from where it began.
 
 If any step before **Switching** fails, the migration is marked `Failed { reason }` and the
 function returns; the assignment still points at the source and the source is still the volume's

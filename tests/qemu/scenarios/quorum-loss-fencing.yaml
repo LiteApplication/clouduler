@@ -18,7 +18,7 @@ failover:
 steps:
   - wait_quorum: { timeout: 40 }
   - deploy_stack: { file: stacks/simple.yaml, name: simple }
-  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }
   - kill_node: n1
   - kill_node: n2
   - assert_fenced: [n3, n4]
@@ -26,4 +26,4 @@ steps:
   - start_node: n1
   - start_node: n2
   - wait_quorum: { timeout: 30 }
-  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }

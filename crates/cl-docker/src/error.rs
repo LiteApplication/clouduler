@@ -17,8 +17,11 @@ pub enum DockerError {
     #[error("not found: {0}")]
     NotFound(String),
 
-    /// Any other error the daemon returned.
-    #[error("docker api error")]
+    /// Any other error the daemon returned. The daemon's own message is part
+    /// of the display text: callers log the error rather than walking its
+    /// source chain, and "docker api error" on its own says nothing about
+    /// what docker actually refused.
+    #[error("docker api error: {0}")]
     Api(#[source] bollard::errors::Error),
 
     /// An image reference couldn't be parsed or resolved.

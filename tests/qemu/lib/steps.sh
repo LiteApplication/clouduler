@@ -84,11 +84,16 @@ instances_everywhere() {
   done | jq -s 'add // []'
 }
 
+# A container is up to three sweeps away from running, and the sweeps belong to
+# two independent 10s loops: the leader records the placement, the next overlay
+# pass gives the instance its address, and only the pass after that can create
+# the container. Add the image pull on top, so anything under ~40s here fails on
+# tick phase rather than on the behaviour under test.
 step_wait_running() {
   local stack svc timeout
   stack="$(echo "$1" | jq -r '.stack')"
   svc="$(echo "$1" | jq -r '.service')"
-  timeout="$(echo "$1" | jq -r '.timeout // 30')"
+  timeout="$(echo "$1" | jq -r '.timeout // 90')"
   wait_for "$stack.$svc running" "$timeout" \
     "instances_everywhere | jq -e --arg s '$stack' --arg v '$svc' \
       '[.[] | select(.id | startswith(\$s + \".\" + \$v))] | any(.state == \"running\")' >/dev/null 2>&1"
@@ -200,21 +205,34 @@ step_assert_no_duplicate() {
   svc="$(echo "$1" | jq -r '.service')"
   mgr="$(any_manager)"
   local count
-  count="$(instances_everywhere | jq --arg v "$svc" \
-    '[.[] | select(.id | contains($v)) | select(.state=="running")] | length')"
+  count="$(_running_count "$svc")"
   [[ "$count" -le 1 ]] || die "$svc has $count running copies, expected at most 1"
   log "$svc has no duplicate after rejoin ($count running)"
 }
 
+# assert_fenced: ["n3", "n4"] or { nodes: [...], timeout: 60 }
+#
+# The default timeout is generous on purpose. A node gives up its containers
+# fence_timeout after losing quorum, the scheduler notices on its next sweep
+# (up to 10s later), and stopping a container waits out its grace period
+# (10s). Thirty seconds is inside that budget and fails for the wrong reason.
 step_assert_fenced() {
-  local mgr; mgr="$(any_manager)"
+  local nodes timeout
+  if [[ "$(echo "$1" | jq -r 'type')" == "array" ]]; then
+    nodes="$(echo "$1" | jq -r '.[]')"
+    timeout=60
+  else
+    nodes="$(echo "$1" | jq -r '.nodes[]')"
+    timeout="$(echo "$1" | jq -r '.timeout // 60')"
+  fi
+
   local node
-  for node in $(echo "$1" | jq -r '.[]'); do
-    wait_for "$node fenced (no running containers)" 30 \
+  for node in $nodes; do
+    wait_for "$node fenced (no running containers)" "$timeout" \
       "instances_everywhere | jq -e --arg n '$node' \
         '[.[] | select(.node == \$n and .state == \"running\")] | length == 0' >/dev/null 2>&1"
   done
-  log "fencing confirmed for: $(echo "$1" | jq -r 'join(", ")')"
+  log "fencing confirmed for: $(echo "$nodes" | tr '\n' ' ')"
 }
 
 step_assert_leader_elected() {
@@ -264,9 +282,11 @@ step_assert_volume_migrates() {
   # after a hash-verified sync, so a running instance on the target is
   # already good evidence the volume arrived intact; this additionally
   # confirms the drive api agrees the target now holds the volume.
+  # `replicas` is an array of {node, generation, in_sync}, not a map, so this
+  # matches on .node rather than asking `has` for a key it cannot look up.
   wait_for "volume tracked on $to" 20 \
     "api_get '$mgr' /api/volumes 2>/dev/null | jq -e --arg n '$to' \
-      'any(.[]?; .primary == \$n or (.replicas // {} | has(\$n)))' >/dev/null 2>&1"
+      'any(.[]?; .primary == \$n or any(.replicas[]?; .node == \$n))' >/dev/null 2>&1"
   log "instance $id migrated to $to with volume tracked"
 }
 
@@ -319,14 +339,22 @@ step_assert_secret_ciphertext() {
   log "secret $name present as metadata only, no value in the api response"
 }
 
+# Counting has to select twice: `select(.id | contains($v) and .state == ...)`
+# pipes the object away and then asks a string for its .state, which is a jq
+# error, not a false. Under set -e that took the whole run down.
+_running_count() {
+  instances_everywhere | jq --arg v "$1" \
+    '[.[] | select(.id | contains($v)) | select(.state == "running")] | length'
+}
+
 step_assert_no_new_starts() {
   local svc timeout mgr before after
   svc="$(echo "$1" | jq -r '.service')"
   timeout="$(echo "$1" | jq -r '.timeout // 10')"
   mgr="$(any_manager)"
-  before="$(instances_everywhere | jq --arg v "$svc" '[.[]|select(.id|contains($v) and .state=="running")]|length')"
+  before="$(_running_count "$svc")"
   sleep "$timeout"
-  after="$(instances_everywhere | jq --arg v "$svc" '[.[]|select(.id|contains($v) and .state=="running")]|length')"
+  after="$(_running_count "$svc")"
   [[ "$before" == "$after" ]] || die "$svc instance count changed during fencing ($before -> $after)"
   log "no new $svc instances started while fenced"
 }

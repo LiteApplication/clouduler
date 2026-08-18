@@ -2,6 +2,7 @@ mod cli;
 mod daemon;
 mod drives;
 mod internal_dns;
+mod migration;
 mod placement;
 mod overlay;
 mod expose;

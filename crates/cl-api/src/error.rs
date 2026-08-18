@@ -17,6 +17,10 @@ pub enum ApiError {
     NotFound(String),
     /// The request conflicts with the current state, e.g. no cluster key held.
     Conflict(String),
+    /// Something this node needs to answer with is not there right now, and
+    /// may be later. Docker being down is the case that matters: the rest of
+    /// the api keeps working, container detail does not.
+    Unavailable(String),
     /// This node is not the leader. Carries the leader's address so the
     /// caller can retry there directly.
     NotLeader { leader: Option<String> },
@@ -38,6 +42,7 @@ impl ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::NotLeader { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -50,6 +55,7 @@ impl ApiError {
             ApiError::Forbidden(m) => m.clone(),
             ApiError::NotFound(m) => m.clone(),
             ApiError::Conflict(m) => m.clone(),
+            ApiError::Unavailable(m) => m.clone(),
             ApiError::NotLeader { .. } => "not the leader".to_string(),
             ApiError::Internal(m) => m.clone(),
         }

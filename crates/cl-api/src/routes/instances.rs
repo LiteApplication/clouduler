@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use cl_config::Service;
 use cl_docker::{LogOptions, Tail};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::DesiredState;
@@ -63,15 +64,16 @@ const STATE_UNKNOWN: &str = "unknown";
 
 async fn summarize(state: &AppState, assignment: &cl_raft::Assignment) -> InstanceSummary {
     let local = assignment.node == state.node_name;
-    let container = if local {
-        state
-            .docker
+    // A local instance whose docker is unreachable reads as unknown, the same
+    // as one on another node: in both cases nobody here can say what the
+    // container is doing, which is a different answer from "stopped".
+    let container = match (local, state.docker.read().await.clone()) {
+        (true, Some(docker)) => docker
             .inspect(&assignment.instance.container_name())
             .await
             .ok()
-            .flatten()
-    } else {
-        None
+            .flatten(),
+        _ => None,
     };
 
     let running = container.as_ref().map(|c| c.running);
@@ -150,7 +152,8 @@ async fn restart(
         )));
     }
     state
-        .docker
+        .docker()
+        .await?
         .restart(&instance.container_name(), Duration::from_secs(10))
         .await
         .map_err(ApiError::internal)?;
@@ -187,12 +190,29 @@ async fn move_instance(
     Ok(StatusCode::OK)
 }
 
-/// The scheduler stamps a volume's drive onto assignments indirectly; cl-api
-/// only sees the assignment, not the service spec that named the drives it
-/// needs. Best it can do without re-parsing the stack spec is pass an empty
-/// set, which `check_placement` treats as "no drive requirements".
-fn required_drives(_state: &cl_raft::ClusterState, _instance: &InstanceId) -> std::collections::BTreeSet<String> {
-    std::collections::BTreeSet::new()
+/// Drives the instance's service mounts volumes from, read back out of the
+/// stored stack spec.
+///
+/// `check_placement` rejects a move to a node that does not implement these,
+/// and that check has to happen here, before the migration is recorded. The
+/// alternative is discovering it at `Switching`, which is the point of no
+/// return: the volume's primary has already moved and the write that moves it
+/// is the one that would fail.
+///
+/// An unknown stack or service yields an empty set, which reads as "no drive
+/// requirements". That is the right answer for a stack with no volumes and
+/// harmless for one that has since been removed, where the move fails on the
+/// missing assignment instead.
+fn required_drives(
+    state: &cl_raft::ClusterState,
+    instance: &InstanceId,
+) -> std::collections::BTreeSet<String> {
+    state
+        .stacks
+        .get(&instance.stack)
+        .and_then(|stack| cl_config::StackFile::parse(&stack.spec).ok())
+        .and_then(|file| file.services.get(&instance.service).map(Service::drives_used))
+        .unwrap_or_default()
 }
 
 #[derive(Deserialize)]
@@ -239,21 +259,20 @@ async fn update(
         )));
     }
     let name = instance.container_name();
-    let current = state
-        .docker
+    let docker = state.docker().await?;
+    let current = docker
         .inspect(&name)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::NotFound(format!("container {name} does not exist on this node")))?;
 
-    let digest = state.docker.pull(&current.image).await.map_err(ApiError::internal)?;
+    let digest = docker.pull(&current.image).await.map_err(ApiError::internal)?;
     state
         .cluster
         .submit(ClusterRequest::SetImageDigest { instance, digest })
         .await
         .map_err(ApiError::not_leader)?;
-    state
-        .docker
+    docker
         .restart(&name, Duration::from_secs(10))
         .await
         .map_err(ApiError::internal)?;
@@ -293,7 +312,7 @@ async fn logs(
         since: query.since,
     };
     let container_name = instance.container_name();
-    let docker = state.docker.clone();
+    let docker = state.docker().await?;
     let log_stream = async_stream::stream! {
         let stream = docker.logs(&container_name, opts);
         futures::pin_mut!(stream);

@@ -96,11 +96,18 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<
         };
 
         // A changed spec cannot be patched onto a live container, so replace it.
+        //
+        // Only for one that should be running: recreating ends in `start`, and
+        // an instance is stopped either because someone asked for that or
+        // because it is migrating away, and neither wants it back up. It keeps
+        // its stale container until it is wanted again, and is recreated then.
         let current_revision = current
             .labels
             .get(LABEL_REVISION)
             .and_then(|r| r.parse::<u64>().ok());
-        if current_revision != Some(target.revision) {
+        if current_revision != Some(target.revision)
+            && target.assignment.desired == DesiredState::Running
+        {
             actions.push(Action::Recreate(id.clone()));
             continue;
         }
@@ -305,6 +312,18 @@ mod tests {
         assert_eq!(
             diff(&targets, &actual, false),
             vec![Action::Recreate(InstanceId::new("site", "web", 0))]
+        );
+    }
+
+    #[test]
+    fn a_stale_spec_does_not_restart_a_stopped_instance() {
+        // An instance migrating away is recorded as stopped. Recreating ends
+        // in `start`, which would put it back up on the node it is leaving.
+        let targets = vec![target("web", 0, DesiredState::Stopped, 2)];
+        let actual = vec![container("web", 0, true, 1)];
+        assert_eq!(
+            diff(&targets, &actual, false),
+            vec![Action::Stop(InstanceId::new("site", "web", 0))]
         );
     }
 

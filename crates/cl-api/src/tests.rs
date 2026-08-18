@@ -109,7 +109,7 @@ async fn harness() -> Harness {
 
     let state = AppState {
         cluster: Arc::new(node),
-        docker: Docker::connect().expect("docker client construction does not dial the socket"),
+        docker: Arc::new(RwLock::new(Docker::connect().ok())),
         node_name: "n0".to_string(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: Arc::new(RwLock::new(cluster_config)),
@@ -296,6 +296,51 @@ async fn cluster_status_has_the_documented_shape() {
     assert_eq!(value["node"], "n0");
     assert_eq!(value["managers_total"], 1);
     assert_eq!(value["managers_reachable"], 1);
+}
+
+/// A node whose dockerd is down or slow to start still has to serve the api:
+/// the web ui is where someone would go to find out why, and a manager
+/// without docker is a supported setup in its own right. The daemon used to
+/// skip starting the api entirely in that case, which took the whole node off
+/// the air after a reboot that raced dockerd.
+#[tokio::test]
+async fn the_api_answers_without_a_docker_daemon() {
+    let h = harness().await;
+    *h.state.docker.write().await = None;
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Container detail is the part that genuinely cannot be answered, and it
+    // says so with a retryable status rather than a 500.
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/instances/blog.web.0/restart")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::SERVICE_UNAVAILABLE || resp.status() == StatusCode::NOT_FOUND,
+        "unexpected status {}",
+        resp.status()
+    );
 }
 
 #[tokio::test]

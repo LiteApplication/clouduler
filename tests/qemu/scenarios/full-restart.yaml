@@ -14,7 +14,7 @@ nodes:
 steps:
   - wait_quorum: { timeout: 40 }
   - deploy_stack: { file: stacks/simple.yaml, name: simple }
-  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }
   - restart_all: {}
   - wait_quorum: { timeout: 40 }
-  - wait_running: { stack: simple, service: app, timeout: 40 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }

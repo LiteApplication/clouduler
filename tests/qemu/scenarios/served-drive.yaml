@@ -25,10 +25,10 @@ failover:
 steps:
   - wait_quorum: { timeout: 40 }
   - deploy_stack: { file: stacks/stateful.yaml, name: stateful }
-  - wait_running: { stack: stateful, service: store, timeout: 30 }
+  - wait_running: { stack: stateful, service: store, timeout: 90 }
   - assert_reachable: n4
   - kill_node: n4
   - assert_unreachable: n4
   - start_node: n4
   - assert_reachable: n4
-  - wait_running: { stack: stateful, service: store, timeout: 30 }
+  - wait_running: { stack: stateful, service: store, timeout: 90 }

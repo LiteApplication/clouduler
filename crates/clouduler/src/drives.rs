@@ -38,9 +38,16 @@ pub struct Drives {
     tasks: Vec<JoinHandle<()>>,
     mounts: Option<Arc<MountManager>>,
     mounted: Vec<String>,
+    /// This node's drive-name-to-directory map, kept so migration can resolve
+    /// a volume to a real path. `None` when the node implements no drive.
+    registry: Option<Arc<DriveRegistry>>,
 }
 
 impl Drives {
+    pub fn registry(&self) -> Option<Arc<DriveRegistry>> {
+        self.registry.clone()
+    }
+
     pub fn shutdown(self) {
         for task in self.tasks {
             task.abort();
@@ -65,6 +72,7 @@ pub fn start(
         tasks: Vec::new(),
         mounts: None,
         mounted: Vec::new(),
+        registry: None,
     };
 
     if node.drives.is_empty() {
@@ -75,6 +83,7 @@ pub fn start(
     let registry = Arc::new(
         DriveRegistry::new(cfg, node_name).context("building this node's drive registry")?,
     );
+    drives.registry = Some(registry.clone());
     let internal_ip = cfg
         .internal_ip(node)
         .context("node has no address on the internal network")?;

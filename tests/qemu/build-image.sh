@@ -94,6 +94,14 @@ unshare --user --map-root-user --mount -- "$APK" \
       util-linux iproute2 curl jq coreutils gcompat \
   || echo "build-image: apk reported non-fatal errors (likely setuid ownership under userns), continuing"
 
+# Alpine's setuid helpers land as mode 711, which their owner cannot read.
+# That breaks anything that copies the tree without CAP_DAC_OVERRIDE: the CI
+# cache's tar fails outright, and the rootfs is then rebuilt on every run.
+# Nothing here can use setuid anyway, since every file is owned by the host
+# user rather than root, so making them readable costs nothing.
+unshare --user --map-root-user --mount -- \
+  find "$ROOTFS_DIR" -type f ! -perm -u+r -exec chmod u+r {} +
+
 # apk exits nonzero for the setuid ownership it cannot set, so its exit code
 # says nothing. An empty rootfs does: it means the install never really ran.
 [[ -d "$ROOTFS_DIR/sbin" && -d "$ROOTFS_DIR/etc" ]] \

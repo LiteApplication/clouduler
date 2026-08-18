@@ -46,36 +46,36 @@ pub struct MigrationJob<'a> {
 /// untouched, since nothing here calls `Switching` until every earlier step
 /// has succeeded.
 pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
-    loop {
-        let state = node.state().await;
-        let assignment = state
-            .assignments
-            .get(&job.instance)
-            .ok_or_else(|| DriveError::Config(format!("{} is not assigned", job.instance)))?;
-        let migration = assignment.migration.clone().ok_or_else(|| {
-            DriveError::Config(format!("{} is not migrating", job.instance))
-        })?;
+    // Read once, at the door. `node.state()` is this node's applied state, and
+    // on anyone but the leader it lags the write that has just been
+    // acknowledged: re-reading it per iteration hands back the phase that was
+    // just left, and the step runs a second time. That is merely noisy for a
+    // stop and actively wrong for `Switching`, which bumps every volume's
+    // generation. So raft records each phase, and the loop then trusts the
+    // phase it just recorded; the read is for resuming, not for stepping.
+    let mut phase = recorded_phase(node, &job.instance).await?;
 
-        match migration.phase {
+    loop {
+        match phase {
             MigrationPhase::Stopping => {
                 if let Err(e) = job.control.stop_instance(&job.instance, &job.source_node).await {
                     return Err(fail(node, &job.instance, e).await);
                 }
-                advance(node, &job.instance, MigrationPhase::Syncing).await?;
+                phase = advance(node, &job.instance, MigrationPhase::Syncing).await?;
             }
 
             MigrationPhase::Syncing => {
                 if let Err(e) = sync_all(node, job).await {
                     return Err(fail(node, &job.instance, e).await);
                 }
-                advance(node, &job.instance, MigrationPhase::Verifying).await?;
+                phase = advance(node, &job.instance, MigrationPhase::Verifying).await?;
             }
 
             MigrationPhase::Verifying => {
                 if let Err(e) = verify_all(job).await {
                     return Err(fail(node, &job.instance, e).await);
                 }
-                advance(node, &job.instance, MigrationPhase::Switching).await?;
+                phase = advance(node, &job.instance, MigrationPhase::Switching).await?;
             }
 
             MigrationPhase::Switching => {
@@ -86,7 +86,7 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
                         .await
                         .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
                 }
-                advance(node, &job.instance, MigrationPhase::Starting).await?;
+                phase = advance(node, &job.instance, MigrationPhase::Starting).await?;
             }
 
             MigrationPhase::Starting => {
@@ -104,6 +104,21 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             MigrationPhase::Failed { reason } => return Err(DriveError::Transfer { message: reason }),
         }
     }
+}
+
+/// The phase raft has on record for `instance`, which is where a resumed
+/// migration picks up.
+async fn recorded_phase(node: &ClusterNode, instance: &InstanceId) -> Result<MigrationPhase> {
+    let state = node.state().await;
+    let assignment = state
+        .assignments
+        .get(instance)
+        .ok_or_else(|| DriveError::Config(format!("{instance} is not assigned")))?;
+    assignment
+        .migration
+        .as_ref()
+        .map(|migration| migration.phase.clone())
+        .ok_or_else(|| DriveError::Config(format!("{instance} is not migrating")))
 }
 
 async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
@@ -148,15 +163,24 @@ async fn verify_all(job: &MigrationJob<'_>) -> Result<()> {
     Ok(())
 }
 
-async fn advance(node: &ClusterNode, instance: &InstanceId, phase: MigrationPhase) -> Result<()> {
+/// Record `phase` and hand it back, so the caller carries on from what it
+/// wrote rather than from a state read that may not have caught up yet.
+async fn advance(
+    node: &ClusterNode,
+    instance: &InstanceId,
+    phase: MigrationPhase,
+) -> Result<MigrationPhase> {
     let response = node
-        .submit(Request::AdvanceMigration { instance: instance.clone(), phase })
+        .submit(Request::AdvanceMigration {
+            instance: instance.clone(),
+            phase: phase.clone(),
+        })
         .await
         .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
     if let Some(err) = response.error {
         return Err(DriveError::Transfer { message: err });
     }
-    Ok(())
+    Ok(phase)
 }
 
 /// Record the failure through raft (best effort: if this write also fails

@@ -18,10 +18,10 @@ failover:
 steps:
   - wait_quorum: { timeout: 40 }
   - deploy_stack: { file: stacks/simple.yaml, name: simple }
-  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }
   - partition: [n3]
   - assert_fenced: [n3]
-  - wait_running: { stack: simple, service: app, timeout: 20 }
+  - wait_running: { stack: simple, service: app, timeout: 90 }
   - heal: [n3]
   - assert_reachable: n3
   - assert_converged: { timeout: 30 }

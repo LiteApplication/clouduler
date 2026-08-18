@@ -194,6 +194,13 @@ pub struct Assignment {
 /// A move between nodes, recorded step by step so a crash mid-move is recoverable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Migration {
+    /// The node driving the move, which is where the instance started.
+    ///
+    /// Recorded rather than derived from the assignment because `Switching`
+    /// repoints the assignment at the target: from that phase on there is no
+    /// other way to tell who owns the remaining work, and a node that crashed
+    /// mid-move has to be able to recognise its own job when it comes back.
+    pub from: String,
     pub to: String,
     pub phase: MigrationPhase,
 }
@@ -715,6 +722,7 @@ impl ClusterState {
                     }
                 }
                 assignment.migration = Some(Migration {
+                    from: assignment.node.clone(),
                     to: to.clone(),
                     phase: MigrationPhase::Stopping,
                 });
@@ -727,6 +735,14 @@ impl ClusterState {
                     .migration
                     .as_mut()
                     .ok_or_else(|| format!("{instance} is not migrating"))?;
+
+                // Asking for the phase already on record changes nothing, so
+                // it succeeds rather than reading as an illegal transition. A
+                // driver that retries a submit it never saw the answer to has
+                // to be able to tell "already done" from "not allowed".
+                if &migration.phase == phase {
+                    return Ok(());
+                }
 
                 // Failure can interrupt at any point, but forward progress must
                 // follow the phase order so a stale message cannot rewind a move.
@@ -1155,6 +1171,76 @@ mod tests {
             phase: MigrationPhase::Done,
         });
         assert!(state.assignments[&instance].migration.is_none());
+    }
+
+    #[test]
+    fn re_recording_the_current_phase_is_a_no_op() {
+        let mut state = cluster();
+        let instance = InstanceId::new("gitlab", "web", 0);
+        assign(&mut state, "n1", &["fast"]);
+
+        state.apply(&Request::BeginMigration {
+            instance: instance.clone(),
+            to: "n2".into(),
+            drives: drives(&["fast"]),
+        });
+        state.apply(&Request::AdvanceMigration {
+            instance: instance.clone(),
+            phase: MigrationPhase::Syncing,
+        });
+
+        // A driver that retried a submit it never saw the answer to must be
+        // told "already done", not "not allowed": the second reads as a
+        // failure and would abandon a move that is in fact on track.
+        let repeat = state.apply(&Request::AdvanceMigration {
+            instance: instance.clone(),
+            phase: MigrationPhase::Syncing,
+        });
+        assert!(repeat.error.is_none());
+        assert_eq!(
+            state.assignments[&instance].migration.as_ref().unwrap().phase,
+            MigrationPhase::Syncing
+        );
+
+        // Going backwards is still refused.
+        let rewind = state.apply(&Request::AdvanceMigration {
+            instance: instance.clone(),
+            phase: MigrationPhase::Stopping,
+        });
+        assert!(rewind.error.unwrap().contains("cannot advance"));
+    }
+
+    #[test]
+    fn a_migration_records_the_node_driving_it() {
+        let mut state = cluster();
+        let instance = InstanceId::new("gitlab", "web", 0);
+        assign(&mut state, "n1", &["fast"]);
+
+        state.apply(&Request::BeginMigration {
+            instance: instance.clone(),
+            to: "n2".into(),
+            drives: drives(&["fast"]),
+        });
+        let migration = state.assignments[&instance].migration.clone().unwrap();
+        assert_eq!(migration.from, "n1");
+
+        // `Switching` repoints the assignment, so `from` is the only thing
+        // that still says whose job this is.
+        for phase in [
+            MigrationPhase::Syncing,
+            MigrationPhase::Verifying,
+            MigrationPhase::Switching,
+        ] {
+            state.apply(&Request::AdvanceMigration {
+                instance: instance.clone(),
+                phase,
+            });
+        }
+        assert_eq!(state.assignments[&instance].node, "n2");
+        assert_eq!(
+            state.assignments[&instance].migration.as_ref().unwrap().from,
+            "n1"
+        );
     }
 
     #[test]

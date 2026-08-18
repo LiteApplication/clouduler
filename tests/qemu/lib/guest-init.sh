@@ -18,6 +18,16 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 
+# /run is a tmpfs on any real system, and has to be one here too (/var/run is
+# a symlink to it). containerd keeps a directory per running container under
+# /run/docker, and this image has no boot sequence that clears them: after a
+# hard power off the stale ones survive on the ext4 root, and dockerd then
+# refuses to start those containers again with
+#   failed to start shim: mkdir .../io.containerd.runtime.v2.task/moby/<id>:
+#   file exists
+# which leaves a restarted node stuck with its containers created but down.
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+
 CMDLINE="$(cat /proc/cmdline)"
 get_arg() {
   # shellcheck disable=SC2086
@@ -113,10 +123,21 @@ mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
 
 echo "init-clouduler: waiting for docker socket"
-for _ in $(seq 1 50); do
+for _ in $(seq 1 150); do
   [ -S /var/run/docker.sock ] && break
   sleep 0.2
 done
+
+# Without docker the node runs nothing, so a failure here has to be visible on
+# the console rather than buried in a log file inside a disk image nobody
+# mounts. This is the second boot of a node killed mid-write, so it is the
+# most likely place for the filesystem or docker's own state to complain.
+if [ -S /var/run/docker.sock ]; then
+  echo "init-clouduler: docker socket up"
+else
+  echo "init-clouduler: WARNING docker never came up, last lines of its log:"
+  tail -n 30 /var/log/dockerd.log 2>/dev/null | sed 's/^/init-clouduler:   dockerd: /'
+fi
 
 echo "init-clouduler: starting clouduler daemon"
 # inherit stdio (the serial console) so the host captures clouduler's own

@@ -65,7 +65,8 @@ vm_start() {
   local accel
   accel="$(qemu_accel)"
 
-  "$LIB_DIR/mkdisk.sh" "$ROOTFS_CACHE" "$node" "$RUN_DIR/cluster.yaml" "$CLOUDULER_BIN" "$disk"
+  "$LIB_DIR/mkdisk.sh" "$ROOTFS_CACHE" "$node" "$RUN_DIR/cluster.yaml" "$CLOUDULER_BIN" "$disk" \
+    "$RUN_DIR/secrets.key"
 
   local mac0 mac1
   mac0="$(printf '52:54:00:aa:00:%02x' "$idx")"
@@ -191,12 +192,17 @@ wait_for() {
 # Auth: clouduler prints a bootstrap api key to the node's serial log once.
 # We scrape it from whichever node's log has it first.
 
+# The bootstrap key is printed to a node's serial log exactly once, and
+# `-serial file:` truncates that log when the node restarts, so it has to be
+# kept somewhere else the moment it is seen. A shell variable is not enough:
+# most callers reach this from inside a command substitution, whose exports
+# die with the subshell, and the next call would find the log already gone.
 api_key() {
-  if [[ -z "${API_KEY:-}" ]]; then
-    API_KEY="$(grep -ohE 'clk_[A-Za-z0-9_]+' "$RUN_DIR"/*.serial.log 2>/dev/null | head -1)"
-    export API_KEY
+  local cached="$RUN_DIR/api_key"
+  if [[ ! -s "$cached" ]]; then
+    grep -ohE 'clk_[A-Za-z0-9_]+' "$RUN_DIR"/*.serial.log 2>/dev/null | head -1 > "$cached"
   fi
-  echo "$API_KEY"
+  cat "$cached"
 }
 
 # The host address a node's forwarded port answers on. `kind` is one of the

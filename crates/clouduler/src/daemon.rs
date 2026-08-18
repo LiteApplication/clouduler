@@ -19,6 +19,11 @@ use cl_raft::state::{Availability, NodeState, Request, Role};
 use openraft::BasicNode;
 use tracing::{info, warn};
 
+/// How long to wait for dockerd at startup before carrying on without it.
+/// Generous because this is a boot race: on a host bringing several machines
+/// up at once, dockerd can take a minute to answer its own socket.
+const DOCKER_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub async fn run(
     cfg: ClusterConfig,
     node_name: String,
@@ -69,45 +74,32 @@ pub async fn run(
     ));
 
     // Shared between the fence watcher and the scheduler, which consults it
-    // before starting anything.
-    let fenced = Arc::new(AtomicBool::new(false));
+    // before starting anything. Closed to begin with, matching `Fence::new`:
+    // the scheduler's first sweep lands about a second into the process, long
+    // before raft has caught up, and until then this node's idea of what runs
+    // here is whatever was true when it died.
+    let fenced = Arc::new(AtomicBool::new(true));
     let fencing = tokio::spawn(run_fence(
         cluster.clone(),
         failover.clone(),
         fenced.clone(),
     ));
 
-    let scheduler = match cl_docker::Docker::connect() {
-        Ok(docker) => {
-            let materializer = Materializer::new(&data_dir, key);
-            let scheduler = Scheduler::new(
-                node_name.clone(),
-                cluster.clone(),
-                docker,
-                materializer,
-            )
-            .with_zone(cl_net::dns::zone_origin(&cfg));
-            let gate = fenced.clone();
-            Some(tokio::spawn(
-                scheduler.run(move || gate.load(Ordering::Relaxed)),
-            ))
-        }
-        Err(e) => {
-            // A manager with no docker is still useful: it votes, holds state
-            // and serves the ui. It just runs nothing.
-            warn!(error = %e, "no docker daemon, this node will not run containers");
-            None
-        }
-    };
+    // The api comes up before docker does, and picks the client up whenever it
+    // lands. A node whose dockerd is slow or absent still has to be reachable,
+    // since the web ui is where someone would go to find out why.
+    let docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>> = Arc::default();
 
-    // Built before the scheduler needs it, but idempotent and on a loop, so
-    // ordering against a stack deploy does not matter.
-    let overlay = crate::overlay::start(
+    let api = start_api(
         &cfg,
+        node,
         &node_name,
+        &config_path,
         &cluster,
-        cl_docker::Docker::connect().ok(),
-    );
+        &data_dir,
+        docker.clone(),
+    )
+    .await;
 
     let drives = match crate::drives::start(&cfg, node, &node_name, &cluster) {
         Ok(drives) => Some(drives),
@@ -125,7 +117,50 @@ pub async fn run(
     let exposed = crate::expose::start(&cluster);
     let proxy = crate::proxy::start(&cfg, &cluster, &data_dir);
 
-    let api = start_api(&cfg, node, &node_name, &config_path, &cluster, &data_dir).await;
+    // Worth waiting for: on a node that has just booted, dockerd is often a
+    // second or two behind us, and a node that gave up on docker for the life
+    // of the process would vote but run nothing until someone restarted it.
+    let connected = connect_docker().await;
+    *docker.write().await = connected.clone();
+
+    let scheduler = match connected.clone() {
+        Some(docker) => {
+            let materializer = Materializer::new(&data_dir, key);
+            let scheduler = Scheduler::new(
+                node_name.clone(),
+                cluster.clone(),
+                docker,
+                materializer,
+            )
+            .with_zone(cl_net::dns::zone_origin(&cfg));
+            let gate = fenced.clone();
+            Some(tokio::spawn(
+                scheduler.run(move || gate.load(Ordering::Relaxed)),
+            ))
+        }
+        None => {
+            // A manager with no docker is still useful: it votes, holds state
+            // and serves the ui. It just runs nothing.
+            warn!("no docker daemon, this node will not run containers");
+            None
+        }
+    };
+
+    // Built before the scheduler needs it, but idempotent and on a loop, so
+    // ordering against a stack deploy does not matter.
+    let overlay = crate::overlay::start(&cfg, &node_name, &cluster, connected.clone());
+
+    // The api records a move and returns; this is what carries it out. It
+    // needs both halves of the job, a docker to stop the container with and a
+    // registry to find the volume on disk, so a node missing either runs no
+    // migrations, which is correct: it can hold no volume to move.
+    let migrations = crate::migration::start(
+        &cfg,
+        &node_name,
+        &cluster,
+        connected,
+        drives.as_ref().and_then(crate::drives::Drives::registry),
+    );
 
     let config_writer = tokio::spawn(watch_cluster_config(
         cluster.clone(),
@@ -146,6 +181,9 @@ pub async fn run(
     }
     if let Some(api) = api {
         api.abort();
+    }
+    if let Some(migrations) = migrations {
+        migrations.abort();
     }
     if let Some(overlay) = overlay {
         overlay.abort();
@@ -178,15 +216,8 @@ async fn start_api(
     config_path: &Path,
     cluster: &Arc<ClusterNode>,
     data_dir: &Path,
+    docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let docker = match cl_docker::Docker::connect() {
-        Ok(docker) => docker,
-        Err(e) => {
-            warn!(error = %e, "no docker, the api will not serve container detail");
-            return None;
-        }
-    };
-
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
     // about the fallback, which is correct: it is not trusted.
@@ -235,6 +266,29 @@ async fn start_api(
             warn!(error = %e, "api server stopped");
         }
     }))
+}
+
+/// Connect to docker, waiting for it to come up.
+///
+/// The wait is what makes a node that reboots with the cluster come back with
+/// its containers: the daemon and dockerd start at the same time, and the
+/// first connect often loses that race by a second or two. Giving up for the
+/// life of the process over that would leave the node voting but idle.
+async fn connect_docker() -> Option<cl_docker::Docker> {
+    let deadline = Instant::now() + DOCKER_WAIT;
+    let mut last = None;
+    while Instant::now() < deadline {
+        match cl_docker::Docker::connect() {
+            Ok(docker) => match docker.ping().await {
+                Ok(()) => return Some(docker),
+                Err(e) => last = Some(e.to_string()),
+            },
+            Err(e) => last = Some(e.to_string()),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    warn!(waited = ?DOCKER_WAIT, error = ?last, "docker never answered");
+    None
 }
 
 /// Load the key that opens stored secrets, creating it on first launch.
@@ -295,7 +349,9 @@ async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig, fenced: 
                 fenced.store(true, Ordering::Relaxed);
             }
             FenceAction::Release => {
-                info!("quorum restored, containers may start again");
+                // Also the normal path on a healthy start: the fence opens on
+                // the first tick that sees a quorum.
+                info!("quorum confirmed, containers may start");
                 fenced.store(false, Ordering::Relaxed);
             }
             FenceAction::None => {}
