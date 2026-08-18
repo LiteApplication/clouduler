@@ -3,16 +3,15 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import { AuthProvider } from './auth/AuthContext';
-import { installStoredApiKey } from './views/Login';
+import { UpdatePrompt } from './components/UpdatePrompt';
 import './styles.css';
-
-installStoredApiKey();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
       <AuthProvider>
         <App />
+        <UpdatePrompt />
       </AuthProvider>
     </BrowserRouter>
   </StrictMode>,

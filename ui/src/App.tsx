@@ -18,7 +18,13 @@ import { Certificates } from './views/Certificates';
 export function App() {
   const { identity, loading } = useAuth();
 
-  if (loading) return <p className="muted" style={{ padding: 24 }}>Loading...</p>;
+  if (loading) {
+    return (
+      <p className="loading" style={{ padding: 24 }}>
+        <span className="spinner" /> Loading...
+      </p>
+    );
+  }
   if (!identity) return <Login />;
 
   return (
@@ -34,7 +40,7 @@ export function App() {
           <Route path="/instances/:id" element={<InstanceDetail />} />
           <Route path="/configs-secrets" element={<ConfigsSecrets />} />
           <Route path="/drives" element={<Drives />} />
-          <Route path="/configuration" element={<Configuration />} />
+          <Route path="/configuration/*" element={<Configuration />} />
           <Route path="/certificates" element={<Certificates />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

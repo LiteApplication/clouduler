@@ -7,6 +7,7 @@ import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { formatBytes, formatUptime } from '../lib/format';
 import { useEventSource } from '../hooks/useEventSource';
+import { Icon } from '../components/Icon';
 
 export function NodeDetail() {
   const { name = '' } = useParams();
@@ -45,62 +46,107 @@ export function NodeDetail() {
     }
   };
 
-  if (!node) return <p className="muted">Loading node...</p>;
+  if (!node) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading node...
+      </p>
+    );
+  }
 
   return (
     <div>
       <div className="page-header">
-        <h1>{name}</h1>
+        <div className="page-title">
+          <Icon name="nodes" />
+          <div>
+            <h1>{name}</h1>
+            <p className="page-sub mono">{node.rpc_addr}</p>
+          </div>
+        </div>
         {isAdmin && (
           <div className="btn-row">
-            {node.availability !== 'drain' && <button onClick={() => api.setAvailability(name, 'drain')}>Drain</button>}
-            {node.availability !== 'active' && <button onClick={() => api.setAvailability(name, 'active')}>Activate</button>}
+            {node.availability !== 'drain' && (
+              <button onClick={() => api.setAvailability(name, 'drain')}>
+                <Icon name="download" /> Drain
+              </button>
+            )}
+            {node.availability !== 'active' && (
+              <button onClick={() => api.setAvailability(name, 'active')}>
+                <Icon name="play" /> Activate
+              </button>
+            )}
             <button className="danger" onClick={decommission} disabled={instances.length > 0}>
-              Decommission
+              <Icon name="trash" /> Decommission
             </button>
           </div>
         )}
       </div>
 
-      {error && <div className="banner banner-warn">{error}</div>}
+      {error && (
+        <div className="banner banner-warn">
+          <Icon name="alert" /> {error}
+        </div>
+      )}
 
       <div className="card-grid">
         <div className="card stat">
-          <span className="stat-label">Role</span>
+          <span className="stat-head">
+            <Icon name="crown" />
+            <span className="stat-label">Role</span>
+          </span>
           <span className="stat-value">{node.role}</span>
         </div>
         <div className="card stat">
-          <span className="stat-label">Availability</span>
+          <span className="stat-head">
+            <Icon name="activity" />
+            <span className="stat-label">Availability</span>
+          </span>
           <Badge tone={node.availability === 'active' ? 'good' : node.availability === 'drain' ? 'warn' : 'neutral'}>
             {node.availability}
           </Badge>
         </div>
         <div className="card stat">
-          <span className="stat-label">Reachable</span>
+          <span className="stat-head">
+            <Icon name="network" />
+            <span className="stat-label">Reachable</span>
+          </span>
           <Badge tone={cluster?.unreachable.includes(name) ? 'bad' : 'good'}>
             {cluster?.unreachable.includes(name) ? 'no' : 'yes'}
           </Badge>
         </div>
         <div className="card stat">
-          <span className="stat-label">Instances</span>
+          <span className="stat-head">
+            <Icon name="instances" />
+            <span className="stat-label">Instances</span>
+          </span>
           <span className="stat-value">{instances.length}</span>
         </div>
         {detail && (
           <>
             <div className="card stat">
-              <span className="stat-label">CPU</span>
+              <span className="stat-head">
+                <Icon name="cpu" />
+                <span className="stat-label">CPU</span>
+              </span>
               <span className="stat-value">
                 {detail.load_avg_1.toFixed(2)} / {detail.cpu_count}
               </span>
             </div>
             <div className="card stat">
-              <span className="stat-label">Memory</span>
+              <span className="stat-head">
+                <Icon name="memory" />
+                <span className="stat-label">Memory</span>
+              </span>
               <span className="stat-value">
                 {formatBytes(detail.mem_used_bytes)} / {formatBytes(detail.mem_total_bytes)}
               </span>
             </div>
             <div className="card stat">
-              <span className="stat-label">Uptime</span>
+              <span className="stat-head">
+                <Icon name="clock" />
+                <span className="stat-label">Uptime</span>
+              </span>
               <span className="stat-value">{formatUptime(detail.uptime_secs)}</span>
             </div>
           </>
@@ -108,7 +154,11 @@ export function NodeDetail() {
       </div>
 
       <div className="section">
-        <h2>Drives</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="drives" /> Drives
+          </h2>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -135,14 +185,23 @@ export function NodeDetail() {
       </div>
 
       <div className="section">
-        <h2>Addresses</h2>
-        <p className="mono">{node.rpc_addr}</p>
+        <div className="section-head">
+          <h2>
+            <Icon name="network" /> Addresses
+          </h2>
+        </div>
+        <div className="card mono">{node.rpc_addr}</div>
       </div>
 
       <div className="section">
-        <div className="page-header">
-          <h2>Daemon logs</h2>
-          <button onClick={() => setShowLogs((v) => !v)}>{showLogs ? 'Hide' : 'Show'}</button>
+        <div className="section-head">
+          <h2>
+            <Icon name="terminal" /> Daemon logs
+          </h2>
+          <button onClick={() => setShowLogs((v) => !v)}>
+            <Icon name={showLogs ? 'eye-off' : 'eye'} />
+            {showLogs ? 'Hide' : 'Show'}
+          </button>
         </div>
         {showLogs && <NodeLogs name={name} />}
       </div>
@@ -156,7 +215,10 @@ function NodeLogs({ name }: { name: string }) {
   });
   return (
     <div>
-      <p className="faint">{connected ? 'streaming' : 'connecting...'}</p>
+      <p className="faint flex-row">
+        <span className={`live-dot ${connected ? 'on' : 'off'}`} />
+        {connected ? 'streaming' : 'connecting...'}
+      </p>
       <div className="log-view" aria-live="polite">
         {items.map((line, i) => (
           <div key={i}>

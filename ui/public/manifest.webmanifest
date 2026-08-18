@@ -1,0 +1,25 @@
+{
+  "name": "clouduler",
+  "short_name": "clouduler",
+  "description": "Cluster orchestration console for clouduler",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#01080d",
+  "theme_color": "#01080d",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Nodes", "url": "./nodes" },
+    { "name": "Stacks", "url": "./stacks" },
+    { "name": "Instances", "url": "./instances" }
+  ]
+}

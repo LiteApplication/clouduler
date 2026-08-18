@@ -36,6 +36,15 @@ use crate::cli::{DriveModeArg, InitArgs, RoleArg};
 use plan::{ClusterPlan, NodePlan};
 use prompt::Prompt;
 
+/// Where the service runs the daemon from. init copies itself here rather than
+/// leaving the unit pointing at wherever the binary happened to be downloaded.
+const DEFAULT_BINARY_PATH: &str = "/usr/bin/clouduler";
+
+/// Offered as the answer to the data directory question. It matches
+/// `cl_config`'s own default, so taking it writes the same path the daemon
+/// would have picked anyway, only now visibly and created up front.
+const DEFAULT_DATA_DIR: &str = "/var/lib/clouduler";
+
 pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     let mut prompt = prompt::stdio(!args.yes);
     prompt.say("clouduler init")?;
@@ -70,6 +79,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     write_config(&config_path, &config)?;
     prompt.say(&format!("\nwrote {}", config_path.display()))?;
 
+    setup_data_directory(&mut prompt, &config, &node_name)?;
     setup_drive_directories(&mut prompt, &config, &node_name)?;
     setup_secret_key(&mut prompt, &config, &node_name)?;
     setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
@@ -135,7 +145,7 @@ fn create_cluster<R: BufRead, W: Write>(
         prompt,
         args.node_data_dir.clone().map(path_string),
         "directory for this node's database and working files",
-        None,
+        Some(DEFAULT_DATA_DIR),
     )?
     .map(PathBuf::from);
 
@@ -219,6 +229,7 @@ async fn join_cluster<R: BufRead, W: Write>(
     )?
     .map(PathBuf::from);
 
+
     node.drives = drives_from_args(&args.drive)?;
     if node.drives.is_empty() {
         let known: Vec<&str> = existing.drives.keys().map(String::as_str).collect();
@@ -299,6 +310,34 @@ fn drives_from_args(args: &[String]) -> Result<BTreeMap<String, PathBuf>> {
     args.iter()
         .map(|arg| plan::parse_drive_arg(arg))
         .collect::<Result<BTreeMap<_, _>>>()
+}
+
+/// Create the directory the daemon keeps its database and working files in.
+///
+/// The daemon would create it on first launch anyway, but by then it is running
+/// under systemd where a permission error is a restart loop in the journal
+/// rather than a line on the terminal of the person doing the install.
+fn setup_data_directory<R: BufRead, W: Write>(
+    prompt: &mut Prompt<R, W>,
+    config: &ClusterConfig,
+    node_name: &str,
+) -> Result<()> {
+    let Some(node) = config.node(node_name) else {
+        return Ok(());
+    };
+    let path = node.data_dir(config);
+    if path.is_dir() {
+        prompt.say(&format!("data directory {} is already there", path.display()))?;
+        return Ok(());
+    }
+    match std::fs::create_dir_all(path) {
+        Ok(()) => prompt.say(&format!("created {} for this node's files", path.display()))?,
+        Err(e) => prompt.say(&format!(
+            "could not create {}: {e}. Create it before starting the daemon",
+            path.display()
+        ))?,
+    }
+    Ok(())
 }
 
 /// Create the directories the declared drives are mapped to, so the first
@@ -398,14 +437,41 @@ fn setup_systemd<R: BufRead, W: Write>(
         prompt.say("this machine is not running systemd, so no unit was installed")?;
         return Ok(());
     }
+    if !detect::is_root() {
+        prompt.say(&format!(
+            "this is not running as root, so the unit cannot be written to {}.\n\
+             Re-run init with sudo to install the service, or pass --no-systemd to skip it",
+            systemd::UNIT_DIR
+        ))?;
+        if !prompt.confirm("try anyway?", false)? {
+            prompt.say(&format!(
+                "skipped. Later: sudo {} init --force",
+                std::env::current_exe()
+                    .map(path_string)
+                    .unwrap_or_else(|_| "clouduler".into())
+            ))?;
+            return Ok(());
+        }
+    }
     if !args.systemd && !prompt.confirm("install a systemd unit for the daemon?", true)? {
         return Ok(());
     }
 
-    let binary = std::env::current_exe().context("finding this binary's path")?;
-    let binary = prompt.ask("path the service should run", Some(&path_string(binary)))?;
+    let current = std::env::current_exe().context("finding this binary's path")?;
+    let binary = PathBuf::from(prompt.ask(
+        "path the service should run",
+        Some(&path_string(PathBuf::from(DEFAULT_BINARY_PATH))),
+    )?);
+
+    // Put the binary where the unit expects it before the unit exists, so the
+    // service is never pointed at a path holding nothing.
+    systemd::install_binary(&current, &binary)?;
+    if binary != current {
+        prompt.say(&format!("copied {} to {}", current.display(), binary.display()))?;
+    }
+
     let unit = systemd::Unit {
-        binary: PathBuf::from(binary),
+        binary,
         config: config_path.to_path_buf(),
         node: node_name.to_string(),
     };

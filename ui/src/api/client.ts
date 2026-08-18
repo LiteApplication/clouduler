@@ -7,6 +7,7 @@ import type {
   ApiKey,
   ApiKeyCreated,
   CertificateState,
+  CloudflareTokenStatus,
   ClusterConfig,
   ClusterKeyStatus,
   ClusterState,
@@ -115,6 +116,7 @@ function del<T>(path: string): Promise<T> {
 export const api = {
   // auth
   me: () => get<Identity>('/auth/me'),
+  loginWithKey: (key: string) => post<Identity>('/auth/login', { key }),
   logout: () => post<void>('/auth/logout'),
   listKeys: () => get<ApiKey[]>('/api/keys'),
   createKey: (name: string) => post<ApiKeyCreated>('/api/keys', { name }),
@@ -180,6 +182,10 @@ export const api = {
   rollbackConfiguration: () => post<void>('/api/config/rollback'),
   pendingConfiguration: () => get<PendingConfig>('/api/config/pending'),
 
+  // cloudflare: the token is write-only, so there is no getter for its value
+  cloudflareToken: () => get<CloudflareTokenStatus>('/api/cloudflare/token'),
+  setCloudflareToken: (token: string) => put<void>('/api/cloudflare/token', { token }),
+
   // certificates & dns
   listCertificates: () => get<CertificateState[]>('/api/certificates'),
   renewCertificate: (fqdn: string) => post<void>(`/api/certificates/${encodeURIComponent(fqdn)}/renew`),
@@ -187,7 +193,11 @@ export const api = {
   reconcileDns: () => post<void>('/api/dns/reconcile'),
 };
 
-/** Build a same-origin SSE url; EventSource can't take custom headers so auth rides the session cookie. */
+/**
+ * Build a same-origin SSE url. EventSource can't take custom headers, so auth
+ * rides the session cookie — which is why an api key is exchanged for one at
+ * login rather than being attached per request.
+ */
 export function sseUrl(path: string): string {
   return path;
 }

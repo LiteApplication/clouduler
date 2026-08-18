@@ -1,22 +1,37 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
+import { Icon } from '../components/Icon';
 
 export function Stacks() {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
   const navigate = useNavigate();
 
-  if (!cluster) return <p className="muted">Loading...</p>;
+  if (!cluster) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading stacks...
+      </p>
+    );
+  }
   const stacks = Object.values(cluster.stacks);
 
   return (
     <div>
       <div className="page-header">
-        <h1>Stacks</h1>
+        <div className="page-title">
+          <Icon name="stacks" />
+          <div>
+            <h1>Stacks</h1>
+            <p className="page-sub">
+              {stacks.length} deployed stack{stacks.length === 1 ? '' : 's'}
+            </p>
+          </div>
+        </div>
         {isAdmin && (
           <button className="primary" onClick={() => navigate('/stacks/_new')}>
-            Deploy stack
+            <Icon name="plus" /> Deploy stack
           </button>
         )}
       </div>
@@ -46,6 +61,13 @@ export function Stacks() {
                 </tr>
               );
             })}
+            {stacks.length === 0 && (
+              <tr>
+                <td colSpan={4} className="empty-cell">
+                  no stacks deployed
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

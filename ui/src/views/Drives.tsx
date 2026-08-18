@@ -4,6 +4,7 @@ import type { DriveStatus } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
+import { Icon } from '../components/Icon';
 
 export function Drives() {
   const cluster = useClusterState();
@@ -39,12 +40,29 @@ export function Drives() {
   return (
     <div>
       <div className="page-header">
-        <h1>Drives and volumes</h1>
+        <div className="page-title">
+          <Icon name="drives" />
+          <div>
+            <h1>Drives and volumes</h1>
+            <p className="page-sub">
+              {drives.length} drive{drives.length === 1 ? '' : 's'} · {volumes.length} volume
+              {volumes.length === 1 ? '' : 's'}
+            </p>
+          </div>
+        </div>
       </div>
-      {error && <div className="banner banner-warn">{error}</div>}
+      {error && (
+        <div className="banner banner-warn">
+          <Icon name="alert" /> {error}
+        </div>
+      )}
 
       <div className="section">
-        <h2>Drives</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="drives" /> Drives
+          </h2>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -74,7 +92,7 @@ export function Drives() {
               ))}
               {drives.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="muted">
+                  <td colSpan={5} className="empty-cell">
                     no drives configured
                   </td>
                 </tr>
@@ -85,7 +103,11 @@ export function Drives() {
       </div>
 
       <div className="section">
-        <h2>Volumes</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="stacks" /> Volumes
+          </h2>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -120,7 +142,9 @@ export function Drives() {
                     </td>
                     {isAdmin && (
                       <td>
-                        <button onClick={() => sync(drive, volume)}>Sync now</button>
+                        <button onClick={() => sync(drive, volume)}>
+                          <Icon name="sync" /> Sync now
+                        </button>
                       </td>
                     )}
                   </tr>
@@ -128,7 +152,7 @@ export function Drives() {
               })}
               {volumes.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="muted">
+                  <td colSpan={6} className="empty-cell">
                     no volumes
                   </td>
                 </tr>

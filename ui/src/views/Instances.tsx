@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { InstanceState } from '../api/types';
 import { Badge } from '../components/Badge';
+import { Icon } from '../components/Icon';
 
 export function Instances() {
   const [instances, setInstances] = useState<InstanceState[] | null>(null);
@@ -19,7 +20,13 @@ export function Instances() {
     };
   }, []);
 
-  if (!instances) return <p className="muted">Loading...</p>;
+  if (!instances) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading instances...
+      </p>
+    );
+  }
 
   const filtered = instances.filter(
     (i) => i.id.includes(filter) || i.node.includes(filter) || (i.image ?? '').includes(filter),
@@ -28,14 +35,25 @@ export function Instances() {
   return (
     <div>
       <div className="page-header">
-        <h1>Instances</h1>
-        <input
-          type="search"
-          placeholder="filter by id, node, image"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          aria-label="Filter instances"
-        />
+        <div className="page-title">
+          <Icon name="instances" />
+          <div>
+            <h1>Instances</h1>
+            <p className="page-sub">
+              {instances.filter((i) => i.state === 'running').length} of {instances.length} running
+            </p>
+          </div>
+        </div>
+        <div className="flex-row" style={{ flexWrap: 'nowrap', maxWidth: 300, flex: '1 1 220px' }}>
+          <Icon name="search" style={{ color: 'var(--text-faint)' }} />
+          <input
+            type="search"
+            placeholder="filter by id, node, image"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="Filter instances"
+          />
+        </div>
       </div>
       <div className="table-wrap">
         <table>
@@ -72,7 +90,7 @@ export function Instances() {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={5} className="muted">
+                <td colSpan={5} className="empty-cell">
                   no instances match
                 </td>
               </tr>

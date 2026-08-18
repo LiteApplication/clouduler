@@ -85,7 +85,7 @@ fn spawn_rollback_watchdog(state: AppState, after: std::time::Duration) {
 /// Raft goes first on purpose. Without a quorum the edit must not land anywhere,
 /// or this node comes back from a restart with a config the cluster never
 /// agreed to.
-async fn apply_config(state: &AppState, config: &ClusterConfig) -> Result<(), ApiError> {
+pub(super) async fn apply_config(state: &AppState, config: &ClusterConfig) -> Result<(), ApiError> {
     let yaml = serde_yaml::to_string(config).map_err(ApiError::internal)?;
 
     let expect_generation = state
@@ -113,12 +113,53 @@ async fn apply_config(state: &AppState, config: &ClusterConfig) -> Result<(), Ap
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct ValidateRequest {
+    config: ClusterConfig,
+}
+
+#[derive(Serialize)]
+struct ValidationError {
+    /// Dotted config path of the offending key, empty when the failure is not
+    /// tied to one.
+    path: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct ValidationResponse {
+    valid: bool,
+    errors: Vec<ValidationError>,
+}
+
+/// Check a config without applying it.
+///
+/// Takes the same `{"config": ...}` envelope as `PUT /api/config` so the two
+/// can be called with one body, and answers 200 with the outcome rather than a
+/// 4xx: a config that fails validation is an expected answer to this question,
+/// not a bad request. Validation short circuits on the first problem, so
+/// `errors` holds at most one entry.
 async fn validate_config(
     _identity: Identity,
-    Json(config): Json<ClusterConfig>,
-) -> Result<StatusCode, ApiError> {
-    config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(StatusCode::OK)
+    Json(body): Json<ValidateRequest>,
+) -> Json<ValidationResponse> {
+    match body.config.validate() {
+        Ok(()) => Json(ValidationResponse {
+            valid: true,
+            errors: Vec::new(),
+        }),
+        Err(cl_config::ConfigError::Invalid { at, msg }) => Json(ValidationResponse {
+            valid: false,
+            errors: vec![ValidationError { path: at, message: msg }],
+        }),
+        Err(other) => Json(ValidationResponse {
+            valid: false,
+            errors: vec![ValidationError {
+                path: String::new(),
+                message: other.to_string(),
+            }],
+        }),
+    }
 }
 
 async fn confirm(_admin: RequireAdmin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
@@ -150,7 +191,7 @@ async fn rollback(_admin: RequireAdmin, State(state): State<AppState>) -> Result
 #[derive(Serialize)]
 struct PendingBody {
     armed: bool,
-    remaining_seconds: Option<u64>,
+    seconds_left: Option<u64>,
 }
 
 async fn pending(_identity: Identity, State(state): State<AppState>) -> Json<PendingBody> {
@@ -158,11 +199,11 @@ async fn pending(_identity: Identity, State(state): State<AppState>) -> Json<Pen
     let body = match pending.as_ref() {
         Some(edit) if edit.status() == PendingStatus::Armed => PendingBody {
             armed: true,
-            remaining_seconds: Some(edit.remaining(state.clock()).as_secs()),
+            seconds_left: Some(edit.remaining(state.clock()).as_secs()),
         },
         _ => PendingBody {
             armed: false,
-            remaining_seconds: None,
+            seconds_left: None,
         },
     };
     Json(body)

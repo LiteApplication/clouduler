@@ -192,6 +192,220 @@ async fn a_good_api_key_reaches_the_handler() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// The ui logs in with a key and then opens SSE streams, which `EventSource`
+/// cannot put a bearer token on. So the key has to come back as a cookie the
+/// browser will attach by itself.
+#[tokio::test]
+async fn logging_in_with_an_api_key_returns_a_session_cookie() {
+    let h = harness().await;
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"key":"{}"}}"#, h.admin_key)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("a session cookie is set")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.starts_with("cl_session="), "got {cookie}");
+    assert!(cookie.contains("HttpOnly"), "got {cookie}");
+    assert!(cookie.contains("Secure"), "got {cookie}");
+
+    // That cookie alone, with no Authorization header, must reach the stream
+    // endpoint that was returning "no credentials presented".
+    let session = cookie.split(';').next().unwrap().to_string();
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .header("cookie", session)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logging_in_with_a_bad_api_key_sets_no_cookie() {
+    let h = harness().await;
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"key":"clk_bogus_secret"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(resp.headers().get("set-cookie").is_none());
+}
+
+/// A config that passes validation, built through `parse` so it stays valid as
+/// the rules change rather than needing a field added here each time. The
+/// harness's own config is deliberately minimal and does not validate, which is
+/// fine for the routes that never check it but no good for the two tests below.
+fn valid_config() -> ClusterConfig {
+    ClusterConfig::parse(
+        r#"
+cluster:
+  name: test
+networks:
+  internal:
+    type: internal
+    subnet: 10.10.0.0/24
+    domain: home.test
+nodes:
+  n0:
+    role: manager
+    network:
+      internal: 10.10.0.1
+web:
+  address: cloud
+  network: internal
+  port: 8443
+"#,
+    )
+    .expect("the fixture config validates")
+}
+
+/// The ui posts the same `{"config": ...}` envelope it uses for PUT, and reads
+/// `{valid, errors}` back. A bare config body used to be expected here, so the
+/// call failed to deserialize before it ever reached validation.
+#[tokio::test]
+async fn validating_a_config_takes_the_same_envelope_as_applying_one() {
+    let h = harness().await;
+    let config = serde_json::to_string(&valid_config()).unwrap();
+
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/validate")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"config":{config}}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["valid"], true);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 0);
+}
+
+/// An invalid config is an answer, not a transport failure: 200 with the
+/// offending path, so the form can point at the field.
+#[tokio::test]
+async fn an_invalid_config_reports_the_field_that_broke() {
+    let h = harness().await;
+    let mut config = valid_config();
+    config.data_dir = std::path::PathBuf::from("not/absolute");
+    let config = serde_json::to_string(&config).unwrap();
+
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/validate")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"config":{config}}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["valid"], false);
+    assert_eq!(body["errors"][0]["path"], "data_dir");
+}
+
+/// The token is write-only: the status route says whether one exists and where,
+/// never what it is.
+#[tokio::test]
+async fn the_cloudflare_token_status_never_carries_the_token() {
+    let h = harness().await;
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/cloudflare/token")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    // The harness config has no cloudflare section at all.
+    assert_eq!(body["configured"], false);
+    assert!(body.get("token").is_none());
+}
+
+#[tokio::test]
+async fn setting_a_cloudflare_token_without_cloudflare_enabled_is_a_conflict() {
+    let h = harness().await;
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/cloudflare/token")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"cf-token-123"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
 #[tokio::test]
 async fn a_viewer_cannot_write() {
     let h = harness().await;

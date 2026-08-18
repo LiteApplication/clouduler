@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod auth_keys;
 pub mod certs;
+pub mod cloudflare;
 pub mod cluster;
 pub mod config;
 pub mod drives;
@@ -27,5 +28,6 @@ pub fn router() -> Router<AppState> {
         .merge(objects::router())
         .merge(drives::router())
         .merge(config::router())
+        .merge(cloudflare::router())
         .merge(certs::router())
 }

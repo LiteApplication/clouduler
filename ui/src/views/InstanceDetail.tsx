@@ -7,6 +7,7 @@ import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { useEventSource } from '../hooks/useEventSource';
 import { formatBytes } from '../lib/format';
+import { Icon } from '../components/Icon';
 
 export function InstanceDetail() {
   const { id = '' } = useParams();
@@ -45,7 +46,17 @@ export function InstanceDetail() {
     }
   };
 
-  if (!instance) return error ? <p className="field-error">{error}</p> : <p className="muted">Loading...</p>;
+  if (!instance) {
+    return error ? (
+      <p className="field-error">
+        <Icon name="alert-circle" /> {error}
+      </p>
+    ) : (
+      <p className="loading">
+        <span className="spinner" /> Loading instance...
+      </p>
+    );
+  }
 
   const nodes = cluster ? Object.values(cluster.nodes) : [];
   const eligible = nodes.filter(
@@ -56,33 +67,55 @@ export function InstanceDetail() {
   return (
     <div>
       <div className="page-header">
-        <h1>{instance.id}</h1>
+        <div className="page-title">
+          <Icon name="instances" />
+          <div>
+            <h1>{instance.id}</h1>
+            <p className="page-sub">on {instance.node}</p>
+          </div>
+        </div>
         <Badge tone={instance.state === 'running' ? 'good' : instance.health === 'unhealthy' ? 'bad' : 'neutral'}>
           {instance.state}
         </Badge>
       </div>
 
-      {error && <div className="banner banner-warn">{error}</div>}
+      {error && (
+        <div className="banner banner-warn">
+          <Icon name="alert" /> {error}
+        </div>
+      )}
 
       <div className="card-grid">
         <div className="card stat">
-          <span className="stat-label">Node</span>
+          <span className="stat-head">
+            <Icon name="nodes" />
+            <span className="stat-label">Node</span>
+          </span>
           <span className="stat-value">{instance.node}</span>
         </div>
         <div className="card stat">
-          <span className="stat-label">Health</span>
+          <span className="stat-head">
+            <Icon name="activity" />
+            <span className="stat-label">Health</span>
+          </span>
           <Badge tone={instance.health === 'healthy' ? 'good' : instance.health === 'unhealthy' ? 'bad' : 'neutral'}>
             {instance.health}
           </Badge>
         </div>
         <div className="card stat">
-          <span className="stat-label">Image</span>
+          <span className="stat-head">
+            <Icon name="stacks" />
+            <span className="stat-label">Image</span>
+          </span>
           <span className="mono" style={{ fontSize: 13 }}>
             {instance.image ?? '-'}
           </span>
         </div>
         <div className="card stat">
-          <span className="stat-label">Digest</span>
+          <span className="stat-head">
+            <Icon name="lock" />
+            <span className="stat-label">Digest</span>
+          </span>
           <span className="mono" style={{ fontSize: 12 }}>
             {instance.image_digest ?? '-'}
           </span>
@@ -91,23 +124,27 @@ export function InstanceDetail() {
 
       {isAdmin && (
         <div className="section card">
-          <h2>Actions</h2>
+          <div className="section-head">
+            <h2>
+              <Icon name="settings" /> Actions
+            </h2>
+          </div>
           <div className="btn-row" style={{ marginBottom: 12 }}>
             <button disabled={busy} onClick={() => run(() => api.restartInstance(id))}>
-              Restart
+              <Icon name="restart" /> Restart
             </button>
             {instance.desired === 'running' ? (
               <button disabled={busy} onClick={() => run(() => api.setDesired(id, 'stopped'))}>
-                Stop
+                <Icon name="stop" /> Stop
               </button>
             ) : (
               <button disabled={busy} onClick={() => run(() => api.setDesired(id, 'running'))}>
-                Start
+                <Icon name="play" /> Start
               </button>
             )}
             {isLatest && (
               <button disabled={busy} onClick={() => run(() => api.updateInstance(id))}>
-                Update to latest
+                <Icon name="download" /> Update to latest
               </button>
             )}
           </div>
@@ -120,11 +157,8 @@ export function InstanceDetail() {
                 </option>
               ))}
             </select>
-            <button
-              disabled={busy || !moveTarget}
-              onClick={() => run(() => api.moveInstance(id, moveTarget))}
-            >
-              Move
+            <button disabled={busy || !moveTarget} onClick={() => run(() => api.moveInstance(id, moveTarget))}>
+              <Icon name="move" /> Move
             </button>
             {eligible.length === 0 && <span className="faint">no eligible nodes</span>}
           </div>
@@ -132,12 +166,12 @@ export function InstanceDetail() {
       )}
 
       <div className="section">
-        <div className="btn-row" style={{ marginBottom: 12 }}>
-          <button className={tab === 'logs' ? 'primary' : ''} onClick={() => setTab('logs')}>
-            Logs
+        <div className="segmented" role="tablist" style={{ marginBottom: 12 }}>
+          <button role="tab" aria-selected={tab === 'logs'} onClick={() => setTab('logs')}>
+            <Icon name="terminal" /> Logs
           </button>
-          <button className={tab === 'stats' ? 'primary' : ''} onClick={() => setTab('stats')}>
-            Stats
+          <button role="tab" aria-selected={tab === 'stats'} onClick={() => setTab('stats')}>
+            <Icon name="activity" /> Stats
           </button>
         </div>
         {tab === 'logs' ? <InstanceLogs id={id} /> : <InstanceStats id={id} />}
@@ -179,7 +213,10 @@ function InstanceLogs({ id }: { id: string }) {
           onChange={(e) => setSearch(e.target.value)}
           aria-label="Search logs"
         />
-        <span className="faint">{connected ? 'streaming' : 'connecting...'}</span>
+        <span className="faint flex-row">
+          <span className={`live-dot ${connected ? 'on' : 'off'}`} />
+          {connected ? 'streaming' : 'connecting...'}
+        </span>
       </div>
       <div className="log-view" aria-live="polite">
         {visible.map((line, i) => (
@@ -201,29 +238,45 @@ function InstanceStats({ id }: { id: string }) {
   const latest = items[items.length - 1];
 
   if (!latest) {
-    return <p className="muted">{connected ? 'waiting for samples...' : 'connecting...'}</p>;
+    return (
+      <p className="loading">
+        <span className="spinner" /> {connected ? 'waiting for samples...' : 'connecting...'}
+      </p>
+    );
   }
 
   return (
     <div className="card-grid">
       <div className="card stat">
-        <span className="stat-label">CPU</span>
+        <span className="stat-head">
+          <Icon name="cpu" />
+          <span className="stat-label">CPU</span>
+        </span>
         <span className="stat-value">{latest.cpu_percent.toFixed(1)}%</span>
       </div>
       <div className="card stat">
-        <span className="stat-label">Memory</span>
+        <span className="stat-head">
+          <Icon name="memory" />
+          <span className="stat-label">Memory</span>
+        </span>
         <span className="stat-value">
           {formatBytes(latest.mem_used_bytes)} / {formatBytes(latest.mem_limit_bytes)}
         </span>
       </div>
       <div className="card stat">
-        <span className="stat-label">Network</span>
+        <span className="stat-head">
+          <Icon name="network" />
+          <span className="stat-label">Network</span>
+        </span>
         <span className="stat-value" style={{ fontSize: 16 }}>
           rx {formatBytes(latest.net_rx_bytes)} / tx {formatBytes(latest.net_tx_bytes)}
         </span>
       </div>
       <div className="card stat">
-        <span className="stat-label">Disk IO</span>
+        <span className="stat-head">
+          <Icon name="drives" />
+          <span className="stat-label">Disk IO</span>
+        </span>
         <span className="stat-value" style={{ fontSize: 16 }}>
           r {formatBytes(latest.block_read_bytes)} / w {formatBytes(latest.block_write_bytes)}
         </span>

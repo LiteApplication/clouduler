@@ -286,6 +286,13 @@ export interface CloudflareConfig {
   zones: string[];
 }
 
+/** GET /api/cloudflare/token. The token value itself is never returned. */
+export interface CloudflareTokenStatus {
+  configured: boolean;
+  path: string | null;
+  present_on_this_node: boolean;
+}
+
 export interface AcmeConfig {
   enabled: boolean;
   directory_url?: string | null;
@@ -316,7 +323,6 @@ export interface ClusterConfig {
 export interface PendingConfig {
   armed: boolean;
   seconds_left: number | null;
-  config: ClusterConfig | null;
 }
 
 // ---- validation ----

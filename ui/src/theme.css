@@ -1,0 +1,175 @@
+/* ============================================================================
+   THEME — the one file to edit to restyle the app.
+
+   Everything in styles.css and every component reads these custom properties,
+   so nothing else hardcodes a color. Each theme is defined by five brand
+   tokens; every surface, border and state color below is derived from them
+   with color-mix, so changing the five is enough for a coherent repaint.
+
+   To retheme:
+     1. change --text / --background / --primary / --secondary / --accent in
+        both blocks below (light first, dark second),
+     2. optionally adjust the STATE colors if your palette needs different
+        success/warning/danger hues,
+     3. nothing else — surfaces and borders follow automatically.
+
+   The theme is selected by data-theme="light" | "dark" on <html>. A blocking
+   script in index.html stamps it before first paint from the user's saved
+   choice (or the OS setting), so there is no flash of the wrong theme.
+   ========================================================================= */
+
+/* ---- LIGHT (also the default when no data-theme is set) ---- */
+:root,
+:root[data-theme='light'] {
+  --text: #031121;
+  --background: #f1f8fe;
+  --primary: #0c4079;
+  --secondary: #e46ff1;
+  --accent: #c8147d;
+
+  /* state colors */
+  --good: #0f7a4f;
+  --warn: #9a5b00;
+  --bad: #c0233c;
+
+  /* text on top of primary/accent fills */
+  --on-primary: #ffffff;
+  --on-accent: #ffffff;
+
+  /* surface ramp: panels lift off the background by mixing toward white */
+  --surface: #ffffff;
+  --surface-2: color-mix(in srgb, var(--primary) 7%, var(--background));
+  --surface-3: color-mix(in srgb, var(--primary) 14%, var(--background));
+
+  --border: color-mix(in srgb, var(--text) 12%, transparent);
+  --border-strong: color-mix(in srgb, var(--text) 24%, transparent);
+  --text-dim: color-mix(in srgb, var(--text) 66%, transparent);
+  --text-faint: color-mix(in srgb, var(--text) 45%, transparent);
+
+  --shadow-1: 0 1px 2px color-mix(in srgb, var(--text) 7%, transparent),
+    0 1px 3px color-mix(in srgb, var(--text) 8%, transparent);
+  --shadow-2: 0 4px 12px color-mix(in srgb, var(--text) 9%, transparent),
+    0 12px 32px color-mix(in srgb, var(--text) 9%, transparent);
+  --shadow-pop: 0 8px 20px color-mix(in srgb, var(--text) 12%, transparent),
+    0 24px 60px color-mix(in srgb, var(--text) 14%, transparent);
+
+  /* strength of the ambient aurora wash behind the app (0 disables it) */
+  --aurora-strength: 0.5;
+  --scrim: color-mix(in srgb, var(--text) 42%, transparent);
+
+  /* log panes stay dark in both themes: terminal output is read that way */
+  --log-bg: #0b1520;
+  --log-text: #d8e6f5;
+
+  color-scheme: light;
+}
+
+/* ---- DARK ---- */
+:root[data-theme='dark'] {
+  --text: #ddecfc;
+  --background: #01080d;
+  --primary: #86baf3;
+  --secondary: #820e8e;
+  --accent: #ec39a2;
+
+  --good: #46d6a0;
+  --warn: #ffb454;
+  --bad: #ff6b85;
+
+  --on-primary: #01080d;
+  --on-accent: #ffffff;
+
+  /* surfaces lift by mixing the primary hue into the background, not by
+     going gray, which keeps the deep blue-black from muddying */
+  --surface: color-mix(in srgb, var(--primary) 6%, var(--background));
+  --surface-2: color-mix(in srgb, var(--primary) 10%, var(--background));
+  --surface-3: color-mix(in srgb, var(--primary) 16%, var(--background));
+
+  --border: color-mix(in srgb, var(--primary) 16%, transparent);
+  --border-strong: color-mix(in srgb, var(--primary) 30%, transparent);
+  --text-dim: color-mix(in srgb, var(--text) 66%, transparent);
+  --text-faint: color-mix(in srgb, var(--text) 42%, transparent);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.55), 0 16px 40px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 10px 26px rgba(0, 0, 0, 0.6), 0 30px 70px rgba(0, 0, 0, 0.55);
+
+  --aurora-strength: 1;
+  --scrim: color-mix(in srgb, var(--background) 70%, transparent);
+
+  --log-bg: color-mix(in srgb, var(--primary) 4%, var(--background));
+  --log-text: #cfe2f5;
+
+  color-scheme: dark;
+}
+
+/* If the theme script never runs (blocked JS), still follow the OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --text: #ddecfc;
+    --background: #01080d;
+    --primary: #86baf3;
+    --secondary: #820e8e;
+    --accent: #ec39a2;
+
+    --good: #46d6a0;
+    --warn: #ffb454;
+    --bad: #ff6b85;
+
+    --on-primary: #01080d;
+    --on-accent: #ffffff;
+
+    --surface: color-mix(in srgb, var(--primary) 6%, var(--background));
+    --surface-2: color-mix(in srgb, var(--primary) 10%, var(--background));
+    --surface-3: color-mix(in srgb, var(--primary) 16%, var(--background));
+
+    --border: color-mix(in srgb, var(--primary) 16%, transparent);
+    --border-strong: color-mix(in srgb, var(--primary) 30%, transparent);
+    --text-dim: color-mix(in srgb, var(--text) 66%, transparent);
+    --text-faint: color-mix(in srgb, var(--text) 42%, transparent);
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.55), 0 16px 40px rgba(0, 0, 0, 0.4);
+    --shadow-pop: 0 10px 26px rgba(0, 0, 0, 0.6), 0 30px 70px rgba(0, 0, 0, 0.55);
+
+    --aurora-strength: 1;
+    --scrim: color-mix(in srgb, var(--background) 70%, transparent);
+
+    --log-bg: color-mix(in srgb, var(--primary) 4%, var(--background));
+    --log-text: #cfe2f5;
+
+    color-scheme: dark;
+  }
+}
+
+/* ---- tinted backgrounds derived from the state colors (theme-agnostic) ---- */
+:root {
+  --good-bg: color-mix(in srgb, var(--good) 14%, transparent);
+  --warn-bg: color-mix(in srgb, var(--warn) 14%, transparent);
+  --bad-bg: color-mix(in srgb, var(--bad) 14%, transparent);
+  --glow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+}
+
+/* ---- shape, type and motion: shared by every theme ---- */
+:root {
+  --font: "Inter var", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --sidebar-w: 248px;
+  --topbar-h: 60px;
+  --tabbar-h: 62px;
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}

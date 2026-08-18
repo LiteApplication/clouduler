@@ -4,6 +4,7 @@ import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { daysUntil, formatUnixSeconds } from '../lib/format';
+import { Icon } from '../components/Icon';
 
 export function Certificates() {
   const cluster = useClusterState();
@@ -38,17 +39,40 @@ export function Certificates() {
     }
   };
 
-  if (!cluster) return <p className="muted">Loading...</p>;
+  if (!cluster) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading certificates...
+      </p>
+    );
+  }
 
   return (
     <div>
       <div className="page-header">
-        <h1>Certificates and DNS</h1>
+        <div className="page-title">
+          <Icon name="certificate" />
+          <div>
+            <h1>Certificates and DNS</h1>
+            <p className="page-sub">
+              {certs.length} certificate{certs.length === 1 ? '' : 's'} · {records.length} DNS record
+              {records.length === 1 ? '' : 's'}
+            </p>
+          </div>
+        </div>
       </div>
-      {error && <div className="banner banner-warn">{error}</div>}
+      {error && (
+        <div className="banner banner-warn">
+          <Icon name="alert" /> {error}
+        </div>
+      )}
 
       <div className="section">
-        <h2>Certificates</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="certificate" /> Certificates
+          </h2>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -74,7 +98,7 @@ export function Certificates() {
                     {isAdmin && (
                       <td>
                         <button disabled={busyFqdn === c.fqdn} onClick={() => renew(c.fqdn)}>
-                          Renew
+                          <Icon name="refresh" /> Renew
                         </button>
                       </td>
                     )}
@@ -83,7 +107,7 @@ export function Certificates() {
               })}
               {certs.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={4} className="empty-cell">
                     no certificates
                   </td>
                 </tr>
@@ -94,11 +118,13 @@ export function Certificates() {
       </div>
 
       <div className="section">
-        <div className="page-header">
-          <h2>DNS records</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="network" /> DNS records
+          </h2>
           {isAdmin && (
             <button onClick={reconcile} disabled={reconciling}>
-              Reconcile now
+              <Icon name="sync" /> Reconcile now
             </button>
           )}
         </div>
@@ -123,7 +149,7 @@ export function Certificates() {
               ))}
               {records.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={4} className="empty-cell">
                     no records
                   </td>
                 </tr>

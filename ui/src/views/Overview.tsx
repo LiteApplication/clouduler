@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type { ClusterStatus } from '../api/types';
 import { useClusterState } from '../state/store';
 import { Badge } from '../components/Badge';
+import { Icon, type IconName } from '../components/Icon';
 
 export function Overview() {
   const cluster = useClusterState();
@@ -22,7 +23,11 @@ export function Overview() {
   }, []);
 
   if (!cluster) {
-    return <p className="muted">Connecting to cluster...</p>;
+    return (
+      <p className="loading">
+        <span className="spinner" /> Connecting to cluster...
+      </p>
+    );
   }
 
   const nodes = Object.values(cluster.nodes);
@@ -37,38 +42,54 @@ export function Overview() {
   return (
     <div>
       <div className="page-header">
-        <h1>Overview</h1>
+        <div className="page-title">
+          <Icon name="overview" />
+          <div>
+            <h1>Overview</h1>
+            <p className="page-sub">{cluster.nodes && Object.keys(cluster.nodes).length} nodes under management</p>
+          </div>
+        </div>
       </div>
 
       {hasQuorumProblem && (
         <div className="banner banner-bad" role="alert">
+          <Icon name="alert" />
           Quorum lost — the cluster cannot accept writes until enough managers are reachable.
         </div>
       )}
       {fenced.length > 0 && (
         <div className="banner banner-bad" role="alert">
+          <Icon name="alert-circle" />
           {fenced.length} node{fenced.length > 1 ? 's' : ''} unreachable: {fenced.map((n) => n.name).join(', ')}
         </div>
       )}
       {!hasQuorumProblem && fenced.length === 0 && (
-        <div className="banner banner-good">Cluster healthy, quorum held.</div>
+        <div className="banner banner-good">
+          <Icon name="check-circle" />
+          Cluster healthy, quorum held.
+        </div>
       )}
 
       <div className="card-grid">
-        <Stat label="Leader" value={status?.leader ?? '-'} />
+        <Stat icon="crown" label="Leader" value={status?.leader ?? '-'} small={!!status?.leader} />
         <Stat
+          icon="check-circle"
           label="Quorum"
           value={status ? `${status.managers_reachable}/${status.managers_total}` : '-'}
           tone={hasQuorumProblem ? 'bad' : 'good'}
         />
-        <Stat label="Nodes" value={String(nodes.length)} />
-        <Stat label="Stacks" value={String(Object.keys(cluster.stacks).length)} />
-        <Stat label="Instances" value={String(instances.length)} />
-        <Stat label="Volumes" value={String(volumes.length)} />
+        <Stat icon="nodes" label="Nodes" value={String(nodes.length)} />
+        <Stat icon="stacks" label="Stacks" value={String(Object.keys(cluster.stacks).length)} />
+        <Stat icon="instances" label="Instances" value={String(instances.length)} />
+        <Stat icon="drives" label="Volumes" value={String(volumes.length)} />
       </div>
 
       <div className="section">
-        <h2>Node health</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="nodes" /> Node health
+          </h2>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -96,6 +117,13 @@ export function Overview() {
                   </td>
                 </tr>
               ))}
+              {nodes.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="empty-cell">
+                    no nodes yet
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -103,7 +131,11 @@ export function Overview() {
 
       {outOfSyncVolumes.length > 0 && (
         <div className="section">
-          <h2>Degraded volumes</h2>
+          <div className="section-head">
+            <h2>
+              <Icon name="alert" /> Degraded volumes
+            </h2>
+          </div>
           <div className="table-wrap">
             <table>
               <thead>
@@ -135,11 +167,26 @@ export function Overview() {
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
+function Stat({
+  label,
+  value,
+  tone,
+  icon,
+  small,
+}: {
+  label: string;
+  value: string;
+  tone?: 'good' | 'bad';
+  icon: IconName;
+  small?: boolean;
+}) {
   return (
     <div className="card stat">
-      <span className="stat-label">{label}</span>
-      <span className="stat-value" style={tone ? { color: `var(--${tone})` } : undefined}>
+      <span className="stat-head">
+        <Icon name={icon} />
+        <span className="stat-label">{label}</span>
+      </span>
+      <span className={small ? 'stat-value sm' : 'stat-value'} style={tone ? { color: `var(--${tone})` } : undefined}>
         {value}
       </span>
     </div>

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api, ApiError } from '../api/client';
+import { Icon } from '../components/Icon';
 
 // Minimal add-node form: name, role and rpc address. Network/drive wiring for
 // a new node happens through the Configuration view, which owns the full
@@ -27,7 +28,9 @@ export function AddNodeForm({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={submit} className="card section">
-      <h3>Add a node</h3>
+      <h3 className="flex-row">
+        <Icon name="plus" /> Add a node
+      </h3>
       <div className="field">
         <label htmlFor="node-name">Name</label>
         <input id="node-name" type="text" value={name} onChange={(e) => setName(e.target.value)} required />
@@ -43,13 +46,17 @@ export function AddNodeForm({ onDone }: { onDone: () => void }) {
         <label htmlFor="node-rpc">RPC address (host:port)</label>
         <input id="node-rpc" type="text" value={rpcAddr} onChange={(e) => setRpcAddr(e.target.value)} required />
       </div>
-      {error && <p className="field-error">{error}</p>}
+      {error && (
+        <p className="field-error">
+          <Icon name="alert-circle" /> {error}
+        </p>
+      )}
       <div className="btn-row">
         <button type="submit" className="primary" disabled={busy}>
-          Add node
+          <Icon name="plus" /> Add node
         </button>
         <button type="button" onClick={onDone}>
-          Cancel
+          <Icon name="close" /> Cancel
         </button>
       </div>
     </form>

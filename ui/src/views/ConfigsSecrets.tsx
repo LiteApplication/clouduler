@@ -5,6 +5,7 @@ import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { SecretForm } from './SecretForm';
 import { Badge } from '../components/Badge';
+import { Icon } from '../components/Icon';
 
 export function ConfigsSecrets() {
   const cluster = useClusterState();
@@ -15,7 +16,13 @@ export function ConfigsSecrets() {
   const [configContent, setConfigContent] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  if (!cluster) return <p className="muted">Loading...</p>;
+  if (!cluster) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading...
+      </p>
+    );
+  }
 
   const configs = Object.values(cluster.configs);
   const secrets = Object.values(cluster.secrets);
@@ -58,15 +65,31 @@ export function ConfigsSecrets() {
   return (
     <div>
       <div className="page-header">
-        <h1>Configs and secrets</h1>
+        <div className="page-title">
+          <Icon name="secrets" />
+          <div>
+            <h1>Configs and secrets</h1>
+            <p className="page-sub">
+              {Object.keys(cluster.configs).length} config{Object.keys(cluster.configs).length === 1 ? '' : 's'} ·{' '}
+              {Object.keys(cluster.secrets).length} secret{Object.keys(cluster.secrets).length === 1 ? '' : 's'}
+            </p>
+          </div>
+        </div>
       </div>
 
       <ClusterKeyPanel />
 
       <div className="section">
-        <div className="page-header">
-          <h2>Configs</h2>
-          {isAdmin && <button onClick={() => setShowConfigForm((v) => !v)}>{showConfigForm ? 'Cancel' : 'New config'}</button>}
+        <div className="section-head">
+          <h2>
+            <Icon name="file" /> Configs
+          </h2>
+          {isAdmin && (
+            <button onClick={() => setShowConfigForm((v) => !v)}>
+              <Icon name={showConfigForm ? 'close' : 'plus'} />
+              {showConfigForm ? 'Cancel' : 'New config'}
+            </button>
+          )}
         </div>
         {showConfigForm && (
           <div className="card section">
@@ -78,9 +101,13 @@ export function ConfigsSecrets() {
               <label htmlFor="config-content">Content</label>
               <textarea id="config-content" rows={8} value={configContent} onChange={(e) => setConfigContent(e.target.value)} />
             </div>
-            {error && <p className="field-error">{error}</p>}
+            {error && (
+              <p className="field-error">
+                <Icon name="alert-circle" /> {error}
+              </p>
+            )}
             <button className="primary" onClick={saveConfig}>
-              Save
+              <Icon name="check" /> Save
             </button>
           </div>
         )}
@@ -104,7 +131,9 @@ export function ConfigsSecrets() {
                   <td>{stacksUsing('configs', c.name).join(', ') || '-'}</td>
                   {isAdmin && (
                     <td>
-                      <button onClick={() => removeConfig(c.name)}>Remove</button>
+                      <button className="danger" onClick={() => removeConfig(c.name)}>
+                        <Icon name="trash" /> Remove
+                      </button>
                     </td>
                   )}
                 </tr>
@@ -115,10 +144,15 @@ export function ConfigsSecrets() {
       </div>
 
       <div className="section">
-        <div className="page-header">
-          <h2>Secrets</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="key" /> Secrets
+          </h2>
           {isAdmin && (
-            <button onClick={() => setShowSecretForm((v) => !v)}>{showSecretForm ? 'Cancel' : 'New secret'}</button>
+            <button onClick={() => setShowSecretForm((v) => !v)}>
+              <Icon name={showSecretForm ? 'close' : 'plus'} />
+              {showSecretForm ? 'Cancel' : 'New secret'}
+            </button>
           )}
         </div>
         {showSecretForm && <SecretForm onDone={() => setShowSecretForm(false)} />}
@@ -144,7 +178,9 @@ export function ConfigsSecrets() {
                   <td>{stacksUsing('secrets', s.name).join(', ') || '-'}</td>
                   {isAdmin && (
                     <td>
-                      <button onClick={() => removeSecret(s.name)}>Remove</button>
+                      <button className="danger" onClick={() => removeSecret(s.name)}>
+                        <Icon name="trash" /> Remove
+                      </button>
                     </td>
                   )}
                 </tr>
@@ -183,7 +219,11 @@ function ClusterKeyPanel() {
 
   return (
     <div className="card section">
-      <h2>Cluster key</h2>
+      <div className="section-head">
+        <h2>
+          <Icon name="lock" /> Cluster key
+        </h2>
+      </div>
       {status ? (
         <>
           <p>
@@ -194,12 +234,15 @@ function ClusterKeyPanel() {
           </p>
           {!status.held && (
             <p className="banner banner-warn">
+              <Icon name="alert" />
               Without the key this node cannot decrypt secrets or run containers that need one.
             </p>
           )}
         </>
       ) : (
-        <p className="muted">Loading...</p>
+        <p className="loading">
+          <span className="spinner" /> Loading...
+        </p>
       )}
       {isAdmin && !status?.held && (
         <div className="field">
@@ -212,7 +255,11 @@ function ClusterKeyPanel() {
           />
         </div>
       )}
-      {error && <p className="field-error">{error}</p>}
+      {error && (
+        <p className="field-error">
+          <Icon name="alert-circle" /> {error}
+        </p>
+      )}
     </div>
   );
 }

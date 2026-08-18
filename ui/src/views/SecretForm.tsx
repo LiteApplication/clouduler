@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { SecretCharset } from '../api/types';
 import { previewFor, validateGeneratorLength } from '../lib/secretGenerator';
+import { Icon } from '../components/Icon';
 
 type Mode = 'paste' | 'file' | 'generate';
 
@@ -51,7 +52,9 @@ export function SecretForm({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={submit} className="card section">
-      <h3>New secret</h3>
+      <h3 className="flex-row">
+        <Icon name="key" /> New secret
+      </h3>
       <div className="field">
         <label htmlFor="secret-name">Name</label>
         <input id="secret-name" type="text" value={name} onChange={(e) => setName(e.target.value)} required />
@@ -59,15 +62,15 @@ export function SecretForm({ onDone }: { onDone: () => void }) {
 
       <div className="field">
         <label>Source</label>
-        <div className="btn-row">
-          <button type="button" className={mode === 'paste' ? 'primary' : ''} onClick={() => setMode('paste')}>
-            Paste string
+        <div className="segmented" role="tablist">
+          <button type="button" role="tab" aria-selected={mode === 'paste'} onClick={() => setMode('paste')}>
+            <Icon name="edit" /> Paste string
           </button>
-          <button type="button" className={mode === 'file' ? 'primary' : ''} onClick={() => setMode('file')}>
-            File
+          <button type="button" role="tab" aria-selected={mode === 'file'} onClick={() => setMode('file')}>
+            <Icon name="file" /> File
           </button>
-          <button type="button" className={mode === 'generate' ? 'primary' : ''} onClick={() => setMode('generate')}>
-            Generate
+          <button type="button" role="tab" aria-selected={mode === 'generate'} onClick={() => setMode('generate')}>
+            <Icon name="dice" /> Generate
           </button>
         </div>
       </div>
@@ -132,17 +135,21 @@ export function SecretForm({ onDone }: { onDone: () => void }) {
         </>
       )}
 
-      {error && <p className="field-error">{error}</p>}
+      {error && (
+        <p className="field-error">
+          <Icon name="alert-circle" /> {error}
+        </p>
+      )}
       <p className="field-hint">
         The value is sealed on the server and never returned by the API, so this is the only chance to copy it down
         if you set it yourself.
       </p>
       <div className="btn-row">
         <button type="submit" className="primary" disabled={busy}>
-          Create secret
+          <Icon name="key" /> Create secret
         </button>
         <button type="button" onClick={onDone} disabled={busy}>
-          Cancel
+          <Icon name="close" /> Cancel
         </button>
       </div>
     </form>

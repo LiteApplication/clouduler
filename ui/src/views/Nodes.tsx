@@ -5,21 +5,38 @@ import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { api } from '../api/client';
 import { AddNodeForm } from './AddNodeForm';
+import { Icon } from '../components/Icon';
 
 export function Nodes() {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
   const [showAdd, setShowAdd] = useState(false);
 
-  if (!cluster) return <p className="muted">Loading...</p>;
+  if (!cluster) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading nodes...
+      </p>
+    );
+  }
   const nodes = Object.values(cluster.nodes);
 
   return (
     <div>
       <div className="page-header">
-        <h1>Nodes</h1>
+        <div className="page-title">
+          <Icon name="nodes" />
+          <div>
+            <h1>Nodes</h1>
+            <p className="page-sub">
+              {nodes.length} node{nodes.length === 1 ? '' : 's'}
+              {cluster.unreachable.length > 0 && ` · ${cluster.unreachable.length} unreachable`}
+            </p>
+          </div>
+        </div>
         {isAdmin && (
           <button className="primary" onClick={() => setShowAdd((v) => !v)}>
+            <Icon name={showAdd ? 'close' : 'plus'} />
             {showAdd ? 'Cancel' : 'Add node'}
           </button>
         )}
@@ -65,16 +82,27 @@ export function Nodes() {
                   <td>
                     <div className="btn-row">
                       {n.availability !== 'drain' && (
-                        <button onClick={() => api.setAvailability(n.name, 'drain')}>Drain</button>
+                        <button onClick={() => api.setAvailability(n.name, 'drain')}>
+                          <Icon name="download" /> Drain
+                        </button>
                       )}
                       {n.availability !== 'active' && (
-                        <button onClick={() => api.setAvailability(n.name, 'active')}>Activate</button>
+                        <button onClick={() => api.setAvailability(n.name, 'active')}>
+                          <Icon name="play" /> Activate
+                        </button>
                       )}
                     </div>
                   </td>
                 )}
               </tr>
             ))}
+            {nodes.length === 0 && (
+              <tr>
+                <td colSpan={isAdmin ? 7 : 6} className="empty-cell">
+                  no nodes yet
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

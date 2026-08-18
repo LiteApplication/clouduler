@@ -5,6 +5,24 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use anyhow::{Context, Result};
 use ipnet::IpNet;
 
+/// Whether this process can write to /etc, /usr/bin and /var/lib, which is
+/// what installing the service needs.
+///
+/// Reads the effective uid out of /proc rather than calling geteuid, so this
+/// crate keeps its dependency list as it is. A kernel that does not give us
+/// the field is treated as unprivileged: guessing the other way would let init
+/// march into a write it cannot do and fail halfway through.
+pub fn is_root() -> bool {
+    effective_uid() == Some(0)
+}
+
+fn effective_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    // "Uid:\treal\teffective\tsaved\tfilesystem"
+    line.split_whitespace().nth(2)?.parse().ok()
+}
+
 pub fn hostname() -> Result<String> {
     let raw = std::fs::read_to_string("/proc/sys/kernel/hostname").context("reading hostname")?;
     let name = raw.trim().to_string();
@@ -41,6 +59,15 @@ pub fn address_in(subnet: IpNet) -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whatever uid the test runs as, the answer has to agree with itself and
+    /// be readable at all, which is the part that would break on a stripped
+    /// /proc.
+    #[test]
+    fn the_effective_uid_is_readable_and_agrees_with_the_root_check() {
+        let uid = effective_uid().expect("/proc/self/status exposes Uid");
+        assert_eq!(is_root(), uid == 0);
+    }
 
     #[test]
     fn the_loopback_route_resolves_to_a_loopback_source() {

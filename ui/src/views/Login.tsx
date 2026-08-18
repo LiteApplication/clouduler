@@ -1,67 +1,91 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import { api } from '../api/client';
+import { Icon } from '../components/Icon';
+import { Logo } from '../components/Logo';
+import { useTheme } from '../theme';
 
-// There's no dedicated api-key login endpoint: a key is sent as a bearer
-// token on every request. We stash it in sessionStorage and attach it via
-// a fetch patch so the rest of the app doesn't need to know it exists.
-const KEY_STORAGE = 'clouduler_api_key';
-
-export function installStoredApiKey() {
-  const key = sessionStorage.getItem(KEY_STORAGE);
-  if (!key) return;
-  const originalFetch = window.fetch.bind(window);
-  window.fetch = (input, init) => {
-    const headers = new Headers(init?.headers);
-    if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${key}`);
-    return originalFetch(input, { ...init, headers });
-  };
-}
+// The key is traded once for a session cookie rather than kept around and
+// attached per request. EventSource cannot send an Authorization header, so a
+// key held client side would leave every SSE stream (/api/events, logs, stats)
+// unauthenticated; the cookie the browser attaches on its own covers them.
 
 export function Login() {
   const [key, setKey] = useState('');
+  const [show, setShow] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const { refresh } = useAuth();
+  // Mounted before the app shell, so the login screen is where the saved
+  // theme first gets applied.
+  useTheme();
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    sessionStorage.setItem(KEY_STORAGE, key.trim());
-    installStoredApiKey();
+    setBusy(true);
     try {
+      await api.loginWithKey(key.trim());
       await refresh();
     } catch {
       setError('could not verify that key');
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <div style={{ display: 'grid', placeItems: 'center', minHeight: '100vh' }}>
-      <div className="card" style={{ width: 380 }}>
-        <h1>clouduler</h1>
-        <p className="muted">Sign in to manage the cluster.</p>
-        <a href="/auth/oidc/login">
-          <button type="button" className="primary" style={{ width: '100%', marginBottom: 16 }}>
-            Sign in with OIDC
+    <div className="login">
+      <div className="login-card">
+        <div className="login-brand">
+          <Logo size={64} className="brand-mark" />
+          <div>
+            <h1>clouduler</h1>
+            <p className="muted" style={{ margin: 0 }}>
+              Sign in to manage the cluster.
+            </p>
+          </div>
+        </div>
+
+        <a href="/auth/oidc/login" className="block">
+          <button type="button" className="primary block">
+            <Icon name="lock" /> Sign in with OIDC
           </button>
         </a>
-        <p className="muted" style={{ fontSize: 12 }}>
-          Or use an API key
-        </p>
+
+        <div className="divider">or use an API key</div>
+
         <form onSubmit={submit}>
           <div className="field">
             <label htmlFor="api-key">API key</label>
-            <input
-              id="api-key"
-              type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder="clk_..."
-              autoComplete="off"
-            />
+            <div className="flex-row" style={{ flexWrap: 'nowrap' }}>
+              <input
+                id="api-key"
+                type={show ? 'text' : 'password'}
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                placeholder="clk_..."
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="ghost icon-btn"
+                onClick={() => setShow((v) => !v)}
+                aria-label={show ? 'Hide key' : 'Show key'}
+              >
+                <Icon name={show ? 'eye-off' : 'eye'} />
+              </button>
+            </div>
           </div>
-          {error && <p className="field-error">{error}</p>}
-          <button type="submit" style={{ width: '100%' }} disabled={key.trim().length === 0}>
-            Continue
+          {error && (
+            <p className="field-error">
+              <Icon name="alert-circle" /> {error}
+            </p>
+          )}
+          <button type="submit" className="block" disabled={busy || key.trim().length === 0}>
+            {busy ? <span className="spinner" /> : <Icon name="chevron-right" />}
+            {busy ? 'Checking...' : 'Continue'}
           </button>
         </form>
       </div>

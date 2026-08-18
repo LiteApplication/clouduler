@@ -5,6 +5,7 @@ import type { ValidationError } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
+import { Icon } from '../components/Icon';
 
 export function StackDetail() {
   const { name = '' } = useParams();
@@ -75,14 +76,21 @@ export function StackDetail() {
   };
 
   if (!isNew && !stack && cluster) {
-    return <p className="muted">No such stack.</p>;
+    return (
+      <p className="muted flex-row">
+        <Icon name="alert-circle" /> No such stack.
+      </p>
+    );
   }
 
   if (editing) {
     return (
       <div>
         <div className="page-header">
-          <h1>{isNew ? 'Deploy stack' : `Redeploy ${name}`}</h1>
+          <div className="page-title">
+            <Icon name="stacks" />
+            <h1>{isNew ? 'Deploy stack' : `Redeploy ${name}`}</h1>
+          </div>
         </div>
         <div className="field">
           <label htmlFor="stack-name">Name</label>
@@ -111,6 +119,7 @@ export function StackDetail() {
         </div>
         {errors.length > 0 && (
           <div className="banner banner-bad" role="alert">
+            <Icon name="alert" />
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               {errors.map((err, i) => (
                 <li key={i}>
@@ -120,23 +129,33 @@ export function StackDetail() {
             </ul>
           </div>
         )}
-        {submitError && <p className="field-error">{submitError}</p>}
+        {submitError && (
+          <p className="field-error">
+            <Icon name="alert-circle" /> {submitError}
+          </p>
+        )}
         <div className="btn-row">
           <button onClick={validate} disabled={busy}>
-            Validate
+            <Icon name="check" /> Validate
           </button>
           <button className="primary" onClick={deploy} disabled={busy}>
-            {isNew ? 'Deploy' : 'Redeploy'}
+            <Icon name="upload" /> {isNew ? 'Deploy' : 'Redeploy'}
           </button>
           <button onClick={() => (isNew ? navigate('/stacks') : setEditing(false))} disabled={busy}>
-            Cancel
+            <Icon name="close" /> Cancel
           </button>
         </div>
       </div>
     );
   }
 
-  if (!stack) return <p className="muted">Loading...</p>;
+  if (!stack) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading stack...
+      </p>
+    );
+  }
 
   const instances = cluster
     ? Object.values(cluster.assignments).filter((a) => a.instance.startsWith(`${name}.`))
@@ -145,12 +164,20 @@ export function StackDetail() {
   return (
     <div>
       <div className="page-header">
-        <h1>{stack.name}</h1>
+        <div className="page-title">
+          <Icon name="stacks" />
+          <div>
+            <h1>{stack.name}</h1>
+            <p className="page-sub">revision {stack.revision}</p>
+          </div>
+        </div>
         {isAdmin && (
           <div className="btn-row">
-            <button onClick={openEdit}>Redeploy</button>
+            <button onClick={openEdit}>
+              <Icon name="edit" /> Redeploy
+            </button>
             <button className="danger" onClick={remove}>
-              Remove
+              <Icon name="trash" /> Remove
             </button>
           </div>
         )}
@@ -158,21 +185,34 @@ export function StackDetail() {
 
       <div className="card-grid">
         <div className="card stat">
-          <span className="stat-label">Revision</span>
+          <span className="stat-head">
+            <Icon name="file" />
+            <span className="stat-label">Revision</span>
+          </span>
           <span className="stat-value">{stack.revision}</span>
         </div>
         <div className="card stat">
-          <span className="stat-label">Configs</span>
+          <span className="stat-head">
+            <Icon name="file" />
+            <span className="stat-label">Configs</span>
+          </span>
           <span className="stat-value">{stack.configs.length}</span>
         </div>
         <div className="card stat">
-          <span className="stat-label">Secrets</span>
+          <span className="stat-head">
+            <Icon name="key" />
+            <span className="stat-label">Secrets</span>
+          </span>
           <span className="stat-value">{stack.secrets.length}</span>
         </div>
       </div>
 
       <div className="section">
-        <h2>Instances</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="instances" /> Instances
+          </h2>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -196,7 +236,7 @@ export function StackDetail() {
               ))}
               {instances.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={4} className="empty-cell">
                     no instances
                   </td>
                 </tr>
@@ -207,7 +247,11 @@ export function StackDetail() {
       </div>
 
       <div className="section">
-        <h2>Spec</h2>
+        <div className="section-head">
+          <h2>
+            <Icon name="file" /> Spec
+          </h2>
+        </div>
         <pre>{stack.spec}</pre>
       </div>
     </div>
