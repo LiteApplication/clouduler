@@ -169,10 +169,14 @@ daemon's tracing output are all in there in order.
 
 ## What passes today
 
-`formation`, `leader-failover-write` and `worker-outage` pass. The last one is
-the interesting one: it deploys a stack, waits for the container to run, kills
-the node running it, and asserts the cluster notices, reschedules the work
-elsewhere, and does not end up with two copies once the dead node comes back.
+Every scenario in `tests/qemu/scenarios` passes.
+
+`worker-outage` is the interesting one: it deploys a stack, waits for the
+container to run, kills the node running it, and asserts the cluster notices,
+reschedules the work elsewhere, and does not end up with two copies once the
+dead node comes back. That last clause is the one with teeth — a node used to
+come back up unfenced and restart the container from its own stale state before
+raft could tell it the work had moved (see `docs/failover.md`).
 
 `publishing` is the cover for everything a stack exposes to the outside. It
 deploys one stack carrying all three paths and asserts each of them:
@@ -227,9 +231,13 @@ through and only a real cluster could show:
 tests, and validates the shipped example configs on every push and pull request.
 The qemu suite runs on pushes to the default branch only: it boots VMs, so it is
 too slow for the pull request path, and it uploads serial logs as artifacts when
-it fails. It runs the four scenarios documented above as passing rather than
-`--all`: GitHub's runners have no kvm, so every VM is emulated, and there is no
-sense spending that on scenarios that are still being brought up.
+it fails. It runs `--all`, which reports one summary at the end, so a failure
+names itself instead of hiding behind whichever scenario a loop stopped on.
+
+The job's timeout is generous because GitHub's runners often expose no
+`/dev/kvm`, and the harness falls back to TCG on its own: the same suite that
+takes about twenty minutes locally takes several times that emulated, and a
+timeout that kills a healthy run looks exactly like a broken scenario.
 
 The runners also restrict unprivileged user namespaces through apparmor, which
 the rootfs build needs (apk chroots for its post-install scripts). The workflow

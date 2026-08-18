@@ -59,7 +59,11 @@ jobs:
   qemu:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The whole suite, and the runners often have no kvm, so every VM is
+    # emulated. Locally with kvm the suite takes about twenty minutes; under
+    # TCG it is several times that, and a timeout that kills a healthy run
+    # looks exactly like a broken scenario.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,15 +89,11 @@ jobs:
           key: qemu-rootfs-${{ hashFiles('tests/qemu/build-image.sh', 'tests/qemu/lib/guest-init.sh') }}
 
       - run: tests/qemu/build-image.sh
-      # Not --all. The runners have no kvm, so every VM is emulated, and the
-      # scenarios still being brought up (partitions, fencing, volume
-      # migration) would spend that time failing. These four are the ones
-      # documented as passing; run the rest locally, where kvm is available.
-      - name: run the scenarios that pass today
-        run: |
-          for scenario in formation leader-failover-write worker-outage publishing; do
-            tests/qemu/run.sh "$scenario"
-          done
+      # --all runs every scenario in tests/qemu/scenarios and reports one
+      # summary at the end, so a failure names itself rather than hiding
+      # behind whichever scenario the loop stopped on.
+      - name: run every scenario
+        run: tests/qemu/run.sh --all
 
       - name: keep the logs from a failed run
         if: failure()
