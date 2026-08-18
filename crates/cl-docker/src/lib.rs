@@ -8,6 +8,7 @@ mod error;
 mod events;
 mod image;
 mod logs;
+mod network;
 
 pub use client::Docker;
 pub use container::{
@@ -19,3 +20,4 @@ pub use error::{DockerError, Result};
 pub use events::ContainerEvent;
 pub use image::ImageRef;
 pub use logs::{LogLine, LogOptions, LogStream, Tail};
+pub use network::NetworkSpec;

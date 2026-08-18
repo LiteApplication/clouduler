@@ -163,19 +163,35 @@ daemon's tracing output are all in there in order.
 
 ## What passes today
 
-`formation` and `leader-failover-write` pass. The scenarios that deploy a stack
-and wait for a container fail at the same point:
+`formation`, `leader-failover-write` and `worker-outage` pass. The last one is
+the interesting one: it deploys a stack, waits for the container to run, kills
+the node running it, and asserts the cluster notices, reschedules the work
+elsewhere, and does not end up with two copies once the dead node comes back.
 
-```
-reconcile step failed instance=simple.app.0 error=docker: not found: network simple_cluster not found
-```
+The remaining scenarios exercise partitions, fencing and volume migration and
+are still being brought up. When one fails, the run directory it leaves behind
+has every node's console in it; start there.
 
-That is not a harness problem. The scheduler builds a container spec attached to
-the stack's network, but nothing creates that docker network yet, because the
-overlay (`cl-net`) is not wired into the daemon. The crate is complete and unit
-tested; what is missing is the daemon-side orchestration. Until that lands, the
-stack-deploying scenarios are expected failures, and they are the acceptance
-test for it when it does.
+### Things this suite has already caught
+
+Worth listing, because they are all bugs that unit tests passed straight
+through and only a real cluster could show:
+
+- The bootstrap api key was minted once at startup, before any leader existed,
+  so the write had nowhere to go and a brand new cluster had **no way in at all**.
+- The liveness probe had no timeout. The failure it exists to detect is a node
+  vanishing without closing its sockets, where a connect neither succeeds nor
+  fails, so the detector blocked for the OS TCP timeout and never marked
+  anything unreachable.
+- `/api/instances` emitted `running`, the ui read `status` and the harness read
+  `state`. Three consumers, three names, no compile error.
+- `/api/status` reported the leader as an internal raft id, which is a hash of
+  the node name and useless to anyone acting on it.
+- VXLAN FDB entries were added with `NLM_F_REPLACE`, which the vxlan driver
+  refuses outright, and without `NTF_SELF`, which sends them to the bridge
+  driver instead. Head-end replication needs `NLM_F_APPEND`: one entry per peer.
+- The overlay's VXLAN device was created with `IFF_UP` set in the same message,
+  which the kernel rejects because it opens the device before it is enslaved.
 
 ## CI
 

@@ -62,12 +62,20 @@ export interface Assignment {
   migration: Migration | null;
 }
 
-/** Live container state, folded onto an Assignment for GET /api/instances. */
-export interface InstanceState extends Assignment {
-  status: 'running' | 'starting' | 'stopped' | 'restarting' | 'unhealthy' | 'unknown';
+/** What GET /api/instances returns: the assignment plus live container state.
+ *  `state` is "unknown" for an instance on another node: there is no rpc path
+ *  to inspect a container elsewhere, and that is different from "stopped". */
+export interface InstanceState {
+  id: InstanceId;
+  node: string;
+  desired: DesiredState;
+  state: 'running' | 'stopped' | 'unknown';
+  running: boolean | null;
   health: 'healthy' | 'unhealthy' | 'starting' | 'none';
-  image: string;
-  created_at: string | null;
+  image: string | null;
+  image_digest: string | null;
+  started_at: string | null;
+  migration: { to: string; phase: string } | null;
 }
 
 export interface Attachment {

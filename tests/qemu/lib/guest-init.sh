@@ -93,6 +93,19 @@ echo "init-clouduler: interfaces:"
 ip -o addr show 2>/dev/null | sed 's/^/init-clouduler:   /'
 ip route show 2>/dev/null | sed 's/^/init-clouduler:   route /'
 
+# The overlay needs these two, and nothing else loads them: linux-virt builds
+# both as modules, and the kernel only autoloads on an interface type it
+# already knows. Without vxlan, creating the device fails with ENOTSUP and
+# every container on a stack network stays down.
+for module in bridge vxlan; do
+  modprobe "$module" 2>&1 | sed "s/^/init-clouduler: modprobe $module: /"
+  if [ -d "/sys/module/$module" ]; then
+    echo "init-clouduler: module $module loaded"
+  else
+    echo "init-clouduler: WARNING module $module NOT loaded"
+  fi
+done
+
 mkdir -p /var/run
 # dockerd needs cgroups; mount the essentials it wants under cgroup2.
 mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true

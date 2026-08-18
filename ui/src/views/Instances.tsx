@@ -22,7 +22,7 @@ export function Instances() {
   if (!instances) return <p className="muted">Loading...</p>;
 
   const filtered = instances.filter(
-    (i) => i.instance.includes(filter) || i.node.includes(filter) || i.image.includes(filter),
+    (i) => i.id.includes(filter) || i.node.includes(filter) || (i.image ?? '').includes(filter),
   );
 
   return (
@@ -50,16 +50,16 @@ export function Instances() {
           </thead>
           <tbody>
             {filtered.map((i) => (
-              <tr key={i.instance}>
+              <tr key={i.id}>
                 <td>
-                  <Link className="row-link" to={`/instances/${encodeURIComponent(i.instance)}`}>
-                    {i.instance}
+                  <Link className="row-link" to={`/instances/${encodeURIComponent(i.id)}`}>
+                    {i.id}
                   </Link>
                 </td>
                 <td>{i.node}</td>
                 <td>
-                  <Badge tone={i.status === 'running' ? 'good' : i.status === 'unhealthy' ? 'bad' : 'neutral'}>
-                    {i.status}
+                  <Badge tone={i.state === 'running' ? 'good' : i.health === 'unhealthy' ? 'bad' : 'neutral'}>
+                    {i.state}
                   </Badge>
                 </td>
                 <td>
@@ -67,7 +67,7 @@ export function Instances() {
                     {i.health}
                   </Badge>
                 </td>
-                <td className="mono">{i.image}</td>
+                <td className="mono">{i.image ?? '-'}</td>
               </tr>
             ))}
             {filtered.length === 0 && (

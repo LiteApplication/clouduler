@@ -33,31 +33,82 @@ pub fn router() -> Router<AppState> {
 struct InstanceSummary {
     id: String,
     node: String,
+    /// What the cluster wants: "running" or "stopped".
     desired: String,
+    /// What the container is actually doing. `unknown` when the instance runs
+    /// on another node, since there is no rpc path to inspect a container
+    /// elsewhere; that is a real gap, not an error, so it gets its own value
+    /// rather than being reported as stopped.
+    state: String,
     running: Option<bool>,
+    health: String,
+    image: Option<String>,
+    image_digest: Option<String>,
+    started_at: Option<String>,
+    migration: Option<MigrationSummary>,
+}
+
+#[derive(Serialize)]
+struct MigrationSummary {
+    to: String,
+    phase: String,
+}
+
+/// The state names the ui and the test harness both match on. Kept as strings
+/// rather than a bare bool because "we cannot see it from here" is a distinct
+/// answer from "it is not running".
+const STATE_RUNNING: &str = "running";
+const STATE_STOPPED: &str = "stopped";
+const STATE_UNKNOWN: &str = "unknown";
+
+async fn summarize(state: &AppState, assignment: &cl_raft::Assignment) -> InstanceSummary {
+    let local = assignment.node == state.node_name;
+    let container = if local {
+        state
+            .docker
+            .inspect(&assignment.instance.container_name())
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    let running = container.as_ref().map(|c| c.running);
+    let instance_state = match (local, running) {
+        (true, Some(true)) => STATE_RUNNING,
+        (true, Some(false)) => STATE_STOPPED,
+        // Assigned here but no container yet: it is on its way.
+        (true, None) => STATE_STOPPED,
+        (false, _) => STATE_UNKNOWN,
+    };
+
+    InstanceSummary {
+        id: assignment.instance.to_string(),
+        node: assignment.node.clone(),
+        desired: format!("{:?}", assignment.desired).to_lowercase(),
+        state: instance_state.to_string(),
+        running,
+        health: container
+            .as_ref()
+            .and_then(|c| c.health.as_ref())
+            .map(|h| format!("{h:?}").to_lowercase())
+            .unwrap_or_else(|| "none".to_string()),
+        image: container.as_ref().map(|c| c.image.clone()),
+        image_digest: assignment.image_digest.clone(),
+        started_at: container.as_ref().and_then(|c| c.started_at.clone()),
+        migration: assignment.migration.as_ref().map(|m| MigrationSummary {
+            to: m.to.clone(),
+            phase: format!("{:?}", m.phase).to_lowercase(),
+        }),
+    }
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<InstanceSummary>> {
     let cluster_state = state.cluster.state().await;
     let mut out = Vec::with_capacity(cluster_state.assignments.len());
     for assignment in cluster_state.assignments.values() {
-        let running = if assignment.node == state.node_name {
-            state
-                .docker
-                .inspect(&assignment.instance.container_name())
-                .await
-                .ok()
-                .flatten()
-                .map(|c| c.running)
-        } else {
-            None
-        };
-        out.push(InstanceSummary {
-            id: assignment.instance.to_string(),
-            node: assignment.node.clone(),
-            desired: format!("{:?}", assignment.desired).to_lowercase(),
-            running,
-        });
+        out.push(summarize(&state, assignment).await);
     }
     Json(out)
 }
@@ -78,24 +129,7 @@ async fn detail(
         .get(&instance)
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
 
-    let running = if assignment.node == state.node_name {
-        state
-            .docker
-            .inspect(&instance.container_name())
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.running)
-    } else {
-        None
-    };
-
-    Ok(Json(InstanceSummary {
-        id: instance.to_string(),
-        node: assignment.node.clone(),
-        desired: format!("{:?}", assignment.desired).to_lowercase(),
-        running,
-    }))
+    Ok(Json(summarize(&state, assignment).await))
 }
 
 async fn restart(

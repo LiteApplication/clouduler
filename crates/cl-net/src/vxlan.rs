@@ -11,9 +11,13 @@
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
+use netlink_packet_core::{
+    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_REQUEST,
+};
+use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::packet_route::neighbour::{
-    NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage,
+    NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
 use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVxlan};
@@ -33,6 +37,10 @@ pub const VXLAN_OVERHEAD_IPV4: u16 = 50;
 
 /// Same, over an IPv6 underlay: outer IPv6 (40) is bigger than IPv4.
 pub const VXLAN_OVERHEAD_IPV6: u16 = 70;
+
+/// Assumed when the kernel does not report an MTU for the underlay link,
+/// which should not happen but must not be a panic if it does.
+const DEFAULT_UNDERLAY_MTU: u16 = 1500;
 
 /// Deterministic interface name for a stack network's bridge.
 pub fn bridge_name(network: &str) -> String {
@@ -136,6 +144,14 @@ const WILDCARD_MAC: [u8; 6] = [0; 6];
 /// enslaving one to the other, and keeping the FDB in sync. Every method is
 /// idempotent, since the reconcile loop calls these on every pass regardless
 /// of whether anything actually changed.
+/// The interface the overlay rides on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Underlay {
+    pub index: u32,
+    pub name: String,
+    pub mtu: u16,
+}
+
 pub struct Overlay {
     handle: Handle,
 }
@@ -143,6 +159,62 @@ pub struct Overlay {
 impl Overlay {
     pub fn new(handle: Handle) -> Self {
         Self { handle }
+    }
+
+    /// The interface carrying `address`, as (index, name, mtu).
+    ///
+    /// The VXLAN device has to be told which link to send its encapsulated
+    /// traffic out of, and its MTU has to be derived from that link's. Both come
+    /// from the node's own address on the internal network, which is the one
+    /// thing the config already pins down, rather than from an interface name
+    /// nobody should have to write into a config file.
+    pub async fn underlay_for(&self, address: Ipv4Addr) -> Result<Option<Underlay>> {
+        let mut addrs = self.handle.address().get().execute();
+        let mut index = None;
+
+        while let Some(addr) = addrs
+            .try_next()
+            .await
+            .map_err(|e| NetError::from_netlink("addresses", e))?
+        {
+            for attr in &addr.attributes {
+                if let rtnetlink::packet_route::address::AddressAttribute::Address(
+                    std::net::IpAddr::V4(existing),
+                ) = attr
+                {
+                    if *existing == address {
+                        index = Some(addr.header.index);
+                    }
+                }
+            }
+        }
+
+        let Some(index) = index else {
+            return Ok(None);
+        };
+
+        let mut links = self.handle.link().get().match_index(index).execute();
+        let Some(link) = links
+            .try_next()
+            .await
+            .map_err(|e| NetError::from_netlink("link", e))?
+        else {
+            return Ok(None);
+        };
+
+        let mut name = String::new();
+        let mut mtu = DEFAULT_UNDERLAY_MTU;
+        for attr in &link.attributes {
+            match attr {
+                rtnetlink::packet_route::link::LinkAttribute::IfName(n) => name = n.clone(),
+                rtnetlink::packet_route::link::LinkAttribute::Mtu(m) => {
+                    mtu = (*m).min(u16::MAX as u32) as u16
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Some(Underlay { index, name, mtu }))
     }
 
     /// Index of a link by name, if it exists.
@@ -203,6 +275,10 @@ impl Overlay {
         let index = match self.find_link(name).await? {
             Some(index) => index,
             None => {
+                // Created down and brought up afterwards, the same order the
+                // bridge uses. Asking the kernel to create and open a vxlan in
+                // one message fails with EOPNOTSUPP: it opens the device before
+                // the device is enslaved to its bridge.
                 let message = LinkVxlan::new(name, vni)
                     .dev(underlay_index)
                     .port(VXLAN_PORT)
@@ -210,23 +286,22 @@ impl Overlay {
                     // Static FDB only: never learn from traffic, we manage
                     // every remote explicitly.
                     .learning(false)
-                    .up()
                     .build();
                 self.handle
                     .link()
                     .add(message)
                     .execute()
                     .await
-                    .map_err(|e| NetError::from_netlink(name, e))?;
+                    .map_err(|e| NetError::from_netlink(format!("{name} (create)"), e))?;
                 self.find_link(name)
                     .await?
                     .ok_or_else(|| NetError::UnknownNetwork(name.to_string()))?
             }
         };
 
-        self.ensure_mtu(name, index, mtu).await?;
-        self.ensure_controller(name, index, bridge_index).await?;
-        self.ensure_up(name, index).await?;
+        self.ensure_mtu(&format!("{name} (mtu)"), index, mtu).await?;
+        self.ensure_controller(&format!("{name} (enslave)"), index, bridge_index).await?;
+        self.ensure_up(&format!("{name} (up)"), index).await?;
         Ok(index)
     }
 
@@ -306,7 +381,7 @@ impl Overlay {
         while let Some(entry) = entries
             .try_next()
             .await
-            .map_err(|e| NetError::from_netlink(vxlan_name, e))?
+            .map_err(|e| NetError::from_netlink(format!("{vxlan_name} (fdb dump)"), e))?
         {
             if entry.header.ifindex != vxlan_index {
                 continue;
@@ -334,15 +409,7 @@ impl Overlay {
         let diff = diff_fdb(peers, &current);
 
         for peer in diff.add {
-            self.handle
-                .neighbours()
-                .add_bridge(vxlan_index, &WILDCARD_MAC)
-                .destination(std::net::IpAddr::V4(peer))
-                .flags(NeighbourFlags::Own)
-                .replace()
-                .execute()
-                .await
-                .map_err(|e| NetError::from_netlink(vxlan_name, e))?;
+            self.append_fdb(vxlan_name, vxlan_index, peer).await?;
         }
 
         for peer in diff.remove {
@@ -352,7 +419,7 @@ impl Overlay {
                 .del(message)
                 .execute()
                 .await
-                .map_err(|e| NetError::from_netlink(vxlan_name, e))?;
+                .map_err(|e| NetError::from_netlink(format!("{vxlan_name} (fdb del {peer})"), e))?;
         }
 
         Ok(())
@@ -382,10 +449,51 @@ fn is_wildcard_entry(entry: &NeighbourMessage) -> bool {
     })
 }
 
+impl Overlay {
+    /// Add one wildcard FDB entry, with NLM_F_APPEND.
+    ///
+    /// Head-end replication means one entry per peer, all sharing the all-zero
+    /// MAC. Only APPEND builds that list: CREATE|EXCL refuses the second peer
+    /// as a duplicate, and CREATE|REPLACE is rejected outright by the vxlan
+    /// driver with EOPNOTSUPP. rtnetlink's neighbour builder offers only those
+    /// two, so the message goes out through the raw request path instead.
+    async fn append_fdb(&self, vxlan_name: &str, index: u32, peer: Ipv4Addr) -> Result<()> {
+        let mut request = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(
+            wildcard_fdb_message(index, peer),
+        ));
+        request.header.flags =
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND;
+
+        let mut response = self
+            .handle
+            .clone()
+            .request(request)
+            .map_err(|e| NetError::from_netlink(vxlan_name, e))?;
+        while let Some(message) = response.next().await {
+            if let NetlinkPayload::Error(err) = message.payload {
+                // An error payload with no code is the ACK, not a failure.
+                if err.code.is_some() {
+                    return Err(NetError::from_netlink(
+                        format!("{vxlan_name} (fdb append {peer})"),
+                        rtnetlink::Error::NetlinkError(err),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn wildcard_fdb_message(index: u32, dest: Ipv4Addr) -> NeighbourMessage {
     let mut message = NeighbourMessage::default();
     message.header.family = AddressFamily::Bridge;
     message.header.ifindex = index;
+    // NTF_SELF sends this to the vxlan driver's own FDB rather than to a
+    // bridge's. Without it the kernel hands the request to the bridge code,
+    // which has no idea what to do with it and answers EINVAL.
+    message.header.flags = NeighbourFlags::Own;
+    // Static entry: we manage the peer list, nothing should age it out.
+    message.header.state = NeighbourState::Permanent;
     message
         .attributes
         .push(NeighbourAttribute::LinkLayerAddress(WILDCARD_MAC.to_vec()));

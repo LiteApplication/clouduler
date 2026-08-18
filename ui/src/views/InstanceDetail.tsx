@@ -51,14 +51,14 @@ export function InstanceDetail() {
   const eligible = nodes.filter(
     (n) => n.name !== instance.node && n.availability === 'active' && !cluster?.unreachable.includes(n.name),
   );
-  const isLatest = instance.image.endsWith(':latest');
+  const isLatest = (instance.image ?? '').endsWith(':latest');
 
   return (
     <div>
       <div className="page-header">
-        <h1>{instance.instance}</h1>
-        <Badge tone={instance.status === 'running' ? 'good' : instance.status === 'unhealthy' ? 'bad' : 'neutral'}>
-          {instance.status}
+        <h1>{instance.id}</h1>
+        <Badge tone={instance.state === 'running' ? 'good' : instance.health === 'unhealthy' ? 'bad' : 'neutral'}>
+          {instance.state}
         </Badge>
       </div>
 
@@ -78,7 +78,7 @@ export function InstanceDetail() {
         <div className="card stat">
           <span className="stat-label">Image</span>
           <span className="mono" style={{ fontSize: 13 }}>
-            {instance.image}
+            {instance.image ?? '-'}
           </span>
         </div>
         <div className="card stat">

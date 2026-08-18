@@ -1,14 +1,19 @@
 # HTTP API
 
-Served by the raft leader on `web.address:web.port` over HTTPS. Non-leaders
-answer `503` with a `Location` header pointing at the leader, so a client that
-hit the wrong node can retry without extra machinery.
+Served on `web.address:web.port` over HTTPS by every node, but **writes only by
+the leader**. A non-leader answers a write with `503` and a `Location` header
+pointing at the leader, so a client that hit the wrong node can retry without
+extra machinery.
 
-Three routes answer on every node instead of redirecting: `/api/status`,
-`/auth/me` and `/auth/oidc/*`. `/api/status` describes the node answering it
-rather than the cluster's authoritative state, so it is the one way to ask a
-follower whether it has caught up, and to find the leader without relying on
-the `Location` header. The auth routes have to work everywhere or a client
+Reads (`GET`) are answered by whichever node you ask. That is deliberate:
+live container state, node resource usage and daemon logs exist only on the
+node they describe, and there is no rpc path for the leader to fetch another
+node's. If reads redirected too, that information could never be obtained at
+all. The trade is that a lagging follower answers from slightly stale
+replicated state; `/api/status` carries `state_version` so a caller that cares
+can tell how far behind it is.
+
+`/auth/oidc/*` is the one write path exempt from the redirect, or a client
 stuck on a follower could never log in to discover anything.
 
 Everything is JSON. Errors use this shape and the matching status code:
@@ -124,7 +129,26 @@ GET    /api/instances/:id/logs          read    SSE, ?follow=&tail=&since=
 GET    /api/instances/:id/stats         read    SSE, cpu, memory, network, io
 ```
 
-Instance ids are `stack.service.index`.
+Instance ids are `stack.service.index`. A summary looks like:
+
+```json
+{
+  "id": "blog.web.0",
+  "node": "n1",
+  "desired": "running",       // what the cluster wants
+  "state": "running",         // what the container is doing: running|stopped|unknown
+  "running": true,            // null when state is unknown
+  "health": "healthy",        // healthy|unhealthy|starting|none
+  "image": "nginx:1.25",
+  "image_digest": "sha256:...",
+  "started_at": "2026-08-18T09:30:19Z",
+  "migration": null           // { "to": "n2", "phase": "syncing" } while moving
+}
+```
+
+`state` is `unknown`, and `running` null, for an instance on another node: there
+is no rpc path for one node to inspect another's containers, and that is a
+different answer from `stopped`.
 
 `restart`, `update`, `logs` and `stats` only work when the instance runs on
 the node currently answering the request; cl-docker has no rpc path for

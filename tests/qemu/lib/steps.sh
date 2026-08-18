@@ -3,11 +3,14 @@
 # step's JSON argument (a jq value, possibly empty/null for bare steps) on
 # stdin via $1.
 #
-# Every /api route other than the auth ones answers 503 on a follower, so any
-# step that reads the api has to aim at the leader. `any_manager` resolves that,
-# but a step that waits for an election has to re-resolve on each poll rather
-# than pin one node up front: at the moment it starts there may be no leader at
-# all, and whichever manager it picked may never become one.
+# Reads are answered by any node, writes only by the leader. `any_manager`
+# resolves the leader for writes; a step that waits for an election has to
+# re-resolve on each poll rather than pin one node up front, since at the moment
+# it starts there may be no leader at all.
+#
+# Live container state is the exception to "any node will do": only the node
+# running a container can see it, so `instances_everywhere` asks all of them and
+# merges, rather than trusting the leader's `unknown` for everyone else's work.
 #
 # Sourced by scenario-run.sh, not run directly.
 
@@ -70,14 +73,24 @@ step_assert_stack_clean() {
   fi
 }
 
+# Every instance every running node can see, as one json array. An instance
+# shows up once per node that knows of it, with only its own node reporting a
+# real state, so callers filter on state rather than deduplicating.
+instances_everywhere() {
+  local n
+  for n in $(jq -r '.nodes[].name' "$RUN_DIR/topology.json"); do
+    vm_running "$n" || continue
+    api_get "$n" /api/instances 2>/dev/null
+  done | jq -s 'add // []'
+}
+
 step_wait_running() {
-  local stack svc timeout mgr
+  local stack svc timeout
   stack="$(echo "$1" | jq -r '.stack')"
   svc="$(echo "$1" | jq -r '.service')"
   timeout="$(echo "$1" | jq -r '.timeout // 30')"
-  mgr="$(any_manager)"
   wait_for "$stack.$svc running" "$timeout" \
-    "api_get '$mgr' /api/instances 2>/dev/null | jq -e --arg s '$stack' --arg v '$svc' \
+    "instances_everywhere | jq -e --arg s '$stack' --arg v '$svc' \
       '[.[] | select(.id | startswith(\$s + \".\" + \$v))] | any(.state == \"running\")' >/dev/null 2>&1"
   log "$stack.$svc is running"
 }
@@ -87,7 +100,7 @@ step_kill_service_node() {
   svc="$(echo "$1" | jq -r '.service')"
   save="$(echo "$1" | jq -r '.save_as // "victim"')"
   mgr="$(any_manager)"
-  node="$(api_get "$mgr" /api/instances | jq -r --arg v "$svc" \
+  node="$(instances_everywhere | jq -r --arg v "$svc" \
     '[.[] | select(.id|contains($v)) | select(.state=="running")][0].node // empty')"
   [[ -n "$node" ]] || die "no running $svc instance found to kill"
   echo -n "$node" > "$RUN_DIR/var_$save"
@@ -154,16 +167,18 @@ step_restart_all() {
 
 step_assert_unreachable() {
   local node="$(echo "$1" | jq -r 'if type=="string" then . else .node end')"
+  local timeout; timeout="$(echo "$1" | jq -r 'if type=="object" then (.timeout // 45) else 45 end')"
   local mgr; mgr="$(any_manager)"
-  wait_for "$node marked unreachable" 20 \
+  wait_for "$node marked unreachable" "$timeout" \
     "api_get '$mgr' /api/nodes/$node 2>/dev/null | jq -e '.reachable == false' >/dev/null 2>&1"
   log "$node correctly marked unreachable"
 }
 
 step_assert_reachable() {
   local node="$(echo "$1" | jq -r 'if type=="string" then . else .node end')"
+  local timeout; timeout="$(echo "$1" | jq -r 'if type=="object" then (.timeout // 45) else 45 end')"
   local mgr; mgr="$(any_manager)"
-  wait_for "$node marked reachable" 20 \
+  wait_for "$node marked reachable" "$timeout" \
     "api_get '$mgr' /api/nodes/$node 2>/dev/null | jq -e '.reachable == true' >/dev/null 2>&1"
   log "$node rejoined and is reachable"
 }
@@ -175,7 +190,7 @@ step_assert_rescheduled() {
   timeout="$(echo "$1" | jq -r '.timeout // 30')"
   mgr="$(any_manager)"
   wait_for "$svc rescheduled off $not_on" "$timeout" \
-    "api_get '$mgr' /api/instances 2>/dev/null | jq -e --arg v '$svc' --arg n '$not_on' \
+    "instances_everywhere | jq -e --arg v '$svc' --arg n '$not_on' \
       '[.[] | select(.id | contains(\$v))] | any(.state == \"running\" and .node != \$n)' >/dev/null 2>&1"
   log "$svc rescheduled away from $not_on"
 }
@@ -185,7 +200,7 @@ step_assert_no_duplicate() {
   svc="$(echo "$1" | jq -r '.service')"
   mgr="$(any_manager)"
   local count
-  count="$(api_get "$mgr" /api/instances | jq --arg v "$svc" \
+  count="$(instances_everywhere | jq --arg v "$svc" \
     '[.[] | select(.id | contains($v)) | select(.state=="running")] | length')"
   [[ "$count" -le 1 ]] || die "$svc has $count running copies, expected at most 1"
   log "$svc has no duplicate after rejoin ($count running)"
@@ -196,7 +211,7 @@ step_assert_fenced() {
   local node
   for node in $(echo "$1" | jq -r '.[]'); do
     wait_for "$node fenced (no running containers)" 30 \
-      "api_get '$mgr' /api/instances 2>/dev/null | jq -e --arg n '$node' \
+      "instances_everywhere | jq -e --arg n '$node' \
         '[.[] | select(.node == \$n and .state == \"running\")] | length == 0' >/dev/null 2>&1"
   done
   log "fencing confirmed for: $(echo "$1" | jq -r 'join(", ")')"
@@ -238,12 +253,12 @@ step_assert_volume_migrates() {
   to="$(echo "$1" | jq -r '.to')"
   timeout="$(echo "$1" | jq -r '.timeout // 60')"
   mgr="$(any_manager)"
-  id="$(api_get "$mgr" /api/instances | jq -r --arg p "$prefix" \
+  id="$(instances_everywhere | jq -r --arg p "$prefix" \
     '[.[] | select(.id|startswith($p))][0].id // empty')"
   [[ -n "$id" ]] || die "no instance matching $prefix"
   api_call POST "$mgr" "/api/instances/$id/move" "{\"node\":\"$to\"}" >/dev/null
   wait_for "instance $id running on $to" "$timeout" \
-    "api_get '$mgr' /api/instances/$id 2>/dev/null | jq -e --arg n '$to' \
+    "api_get '$to' /api/instances/$id 2>/dev/null | jq -e --arg n '$to' \
       '.node == \$n and .state == \"running\"' >/dev/null 2>&1"
   # the migration state machine (docs/drives.md) only flips the assignment
   # after a hash-verified sync, so a running instance on the target is
@@ -309,9 +324,9 @@ step_assert_no_new_starts() {
   svc="$(echo "$1" | jq -r '.service')"
   timeout="$(echo "$1" | jq -r '.timeout // 10')"
   mgr="$(any_manager)"
-  before="$(api_get "$mgr" /api/instances 2>/dev/null | jq --arg v "$svc" '[.[]|select(.id|contains($v))]|length')"
+  before="$(instances_everywhere | jq --arg v "$svc" '[.[]|select(.id|contains($v) and .state=="running")]|length')"
   sleep "$timeout"
-  after="$(api_get "$mgr" /api/instances 2>/dev/null | jq --arg v "$svc" '[.[]|select(.id|contains($v))]|length')"
+  after="$(instances_everywhere | jq --arg v "$svc" '[.[]|select(.id|contains($v) and .state=="running")]|length')"
   [[ "$before" == "$after" ]] || die "$svc instance count changed during fencing ($before -> $after)"
   log "no new $svc instances started while fenced"
 }

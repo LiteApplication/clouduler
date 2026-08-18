@@ -99,6 +99,15 @@ pub async fn run(
         }
     };
 
+    // Built before the scheduler needs it, but idempotent and on a loop, so
+    // ordering against a stack deploy does not matter.
+    let overlay = crate::overlay::start(
+        &cfg,
+        &node_name,
+        &cluster,
+        cl_docker::Docker::connect().ok(),
+    );
+
     let drives = match crate::drives::start(&cfg, node, &node_name, &cluster) {
         Ok(drives) => Some(drives),
         Err(e) => {
@@ -119,7 +128,7 @@ pub async fn run(
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
 
-    // Overlay and the reverse proxy start here once wired in.
+    // The reverse proxy starts here once wired in.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
@@ -131,6 +140,9 @@ pub async fn run(
     }
     if let Some(api) = api {
         api.abort();
+    }
+    if let Some(overlay) = overlay {
+        overlay.abort();
     }
     // Before the raft shutdown, so the mounts are gone while the runtime that
     // serves their requests is still alive.

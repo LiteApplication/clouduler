@@ -181,17 +181,27 @@ async fn redirect_non_leader(
         return Ok(next.run(request).await);
     }
 
-    // Auth's own login/callback routes and /auth/me have to work everywhere,
-    // otherwise a client stuck on a follower can never even discover who the
-    // leader is via a normal api call.
+    // Writes go to the leader, reads answer anywhere.
     //
-    // /api/status is exempt for the same reason and one more: it describes the
-    // node answering it, not the cluster's authoritative state. Bouncing it to
-    // the leader would make it impossible to ask a follower anything at all,
-    // including whether it has caught up, which is exactly what you want to
-    // know when one is lagging.
+    // A write has to be ordered against every other write, so it belongs on the
+    // leader. A read does not, and insisting on the leader for reads makes some
+    // things simply unreachable: live container state, resource usage and
+    // daemon logs exist only on the node they describe, and there is no rpc
+    // path for the leader to fetch another node's. Bouncing a read at that node
+    // to the leader means the answer can never be obtained at all.
+    //
+    // The trade is that a lagging follower can answer with slightly stale
+    // replicated state. `/api/status` carries `state_version` so a caller that
+    // cares can tell.
+    if request.method() == axum::http::Method::GET {
+        return Ok(next.run(request).await);
+    }
+
+    // Auth's own login and callback routes are POSTs that have to work
+    // everywhere, or a client stuck on a follower can never log in to discover
+    // who the leader is.
     let path = request.uri().path();
-    if path == "/auth/me" || path == "/api/status" || path.starts_with("/auth/oidc/") {
+    if path.starts_with("/auth/oidc/") {
         return Ok(next.run(request).await);
     }
 

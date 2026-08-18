@@ -12,3 +12,9 @@ services:
     command: ["sh", "-c", "while true; do echo alive; sleep 5; done"]
     restart: always
     networks: [cluster]
+    deploy:
+      # Pinned to a worker so the outage scenarios kill a worker rather than
+      # whichever node the scheduler happened to pick, which is usually a
+      # manager and makes worker-outage a leader-failover test by accident.
+      placement:
+        constraints: ["node.role == worker"]

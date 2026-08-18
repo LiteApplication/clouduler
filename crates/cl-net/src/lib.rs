@@ -17,3 +17,4 @@ pub mod vxlan;
 
 pub use error::{NetError, Result};
 pub use ipam::Allocations;
+pub use vxlan::{Overlay, Underlay};

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use openraft::{BasicNode, Config, ServerState};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::contact::Contact;
@@ -194,7 +195,14 @@ impl ClusterNode {
                     continue;
                 }
                 tracker.track(name, now);
-                if network::ping(&Peer::connect(&node.rpc_addr.to_string())).await {
+                // Bounded, because the failure this detector exists for is a
+                // node vanishing without closing its sockets: power loss, a
+                // pulled cable, a killed VM. Nothing answers and nothing
+                // refuses, so an unbounded connect sits there for the OS TCP
+                // timeout, minutes long, and stalls this whole loop. A probe
+                // that has not answered within the probe interval is a miss.
+                let peer = Peer::connect(&node.rpc_addr.to_string());
+                if matches!(timeout(probe_interval, network::ping(&peer)).await, Ok(true)) {
                     tracker.seen(name, now);
                     alive.push(name.clone());
                 }
