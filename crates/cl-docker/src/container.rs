@@ -119,6 +119,8 @@ pub struct ContainerSpec {
     /// Search domains, so a bare `service.stack` is tried under the cluster's
     /// internal zone before being sent upstream as written.
     pub dns_search: Vec<String>,
+    /// Resolver options, written into the container's `/etc/resolv.conf`.
+    pub dns_options: Vec<String>,
     pub restart_policy: RestartPolicy,
     pub resources: ResourceLimits,
     pub healthcheck: Option<Healthcheck>,
@@ -195,6 +197,7 @@ impl ContainerSpec {
             port_bindings,
             dns: (!self.dns.is_empty()).then(|| self.dns.iter().map(|d| d.to_string()).collect()),
             dns_search: (!self.dns_search.is_empty()).then(|| self.dns_search.clone()),
+            dns_options: (!self.dns_options.is_empty()).then(|| self.dns_options.clone()),
             restart_policy: Some(self.bollard_restart_policy()),
             network_mode: self.network.clone(),
             memory: self.resources.memory_bytes,
@@ -462,10 +465,12 @@ mod tests {
         let mut spec = base_spec();
         spec.dns = vec![IpAddr::V4(Ipv4Addr::new(10, 244, 0, 1))];
         spec.dns_search = vec!["int.example.com".to_string()];
+        spec.dns_options = vec!["ndots:2".to_string()];
 
         let host = spec.to_create_body().host_config.expect("host config");
         assert_eq!(host.dns, Some(vec!["10.244.0.1".to_string()]));
         assert_eq!(host.dns_search, Some(vec!["int.example.com".to_string()]));
+        assert_eq!(host.dns_options, Some(vec!["ndots:2".to_string()]));
     }
 
     #[test]

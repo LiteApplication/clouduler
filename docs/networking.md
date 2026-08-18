@@ -165,6 +165,13 @@ operator runs there. Each container is created with that gateway as its
 resolver and the internal zone as its search domain, so `web.blog` resolves
 without the cluster's domain being written into the stack file.
 
+It is also created with `ndots:2`. Docker's own resolver hands a container
+`ndots:0`, which treats any name containing a dot as absolute and skips the
+search list: `web.blog` then comes back NXDOMAIN from upstream while
+`web.blog.int.example.com` resolves perfectly well. Two is the smallest value
+that sends a `service.stack` name through the search list, and it leaves
+ordinary two-dot internet names resolving directly.
+
 The zone itself is the internal network's `domain` when it declares one, so a
 name means the same thing inside a container and outside it. With no domain
 declared the zone is `cluster.local`, which only resolves inside the cluster.

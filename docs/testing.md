@@ -215,6 +215,11 @@ through and only a real cluster could show:
   driver instead. Head-end replication needs `NLM_F_APPEND`: one entry per peer.
 - The overlay's VXLAN device was created with `IFF_UP` set in the same message,
   which the kernel rejects because it opens the device before it is enslaved.
+- Containers could not resolve `service.stack`, only the fully qualified
+  `service.stack.<domain>`. Docker hands a container `ndots:0`, which makes any
+  name containing a dot absolute and skips the search list, so the short name
+  went straight upstream and came back NXDOMAIN. Nothing short of a container
+  actually asking would have shown this.
 
 ## CI
 
@@ -222,7 +227,15 @@ through and only a real cluster could show:
 tests, and validates the shipped example configs on every push and pull request.
 The qemu suite runs on pushes to the default branch only: it boots VMs, so it is
 too slow for the pull request path, and it uploads serial logs as artifacts when
-it fails.
+it fails. It runs the four scenarios documented above as passing rather than
+`--all`: GitHub's runners have no kvm, so every VM is emulated, and there is no
+sense spending that on scenarios that are still being brought up.
+
+The runners also restrict unprivileged user namespaces through apparmor, which
+the rootfs build needs (apk chroots for its post-install scripts). The workflow
+clears `kernel.apparmor_restrict_unprivileged_userns` before building the
+image; `build-image.sh` checks for it up front and says so rather than laying
+down an empty rootfs.
 
 For examples of deploying *to* a cluster from your own pipeline, see
 `examples/ci/`.

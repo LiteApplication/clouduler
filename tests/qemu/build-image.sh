@@ -59,6 +59,18 @@ curl -fsSL "$APK_TOOLS_STATIC_URL/$APK_PKG_NAME" -o "$APKGZ"
 tar -xz -f "$APKGZ" -C "$WORK" sbin/apk.static
 APK="$WORK/sbin/apk.static"
 
+# apk's post-install scripts chroot, which needs a user namespace with uid 0
+# mapped. Ubuntu 24.04 and later ship with unprivileged user namespaces
+# restricted by apparmor, where unshare fails outright and apk then lays down
+# nothing at all, which used to surface much later as a confusing "cannot
+# create /sbin/init-clouduler".
+if ! unshare --user --map-root-user --mount -- true 2>/dev/null; then
+  echo "build-image: cannot create a user namespace, so the rootfs cannot be built" >&2
+  echo "  on ubuntu 24.04 and later this is apparmor; allow it with:" >&2
+  echo "    sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" >&2
+  exit 1
+fi
+
 echo "build-image: installing base packages into $ROOTFS_DIR"
 # apk's post-install scripts (mkinitfs, docker-engine, iproute2) chroot into
 # the target root. A plain unprivileged run can lay files down but can't
@@ -81,6 +93,11 @@ unshare --user --map-root-user --mount -- "$APK" \
   add alpine-base linux-virt docker docker-cli iptables ip6tables \
       util-linux iproute2 curl jq coreutils gcompat \
   || echo "build-image: apk reported non-fatal errors (likely setuid ownership under userns), continuing"
+
+# apk exits nonzero for the setuid ownership it cannot set, so its exit code
+# says nothing. An empty rootfs does: it means the install never really ran.
+[[ -d "$ROOTFS_DIR/sbin" && -d "$ROOTFS_DIR/etc" ]] \
+  || { echo "build-image: apk populated nothing, the rootfs is empty" >&2; exit 1; }
 
 echo "build-image: writing init"
 # No openrc: our custom init (below) starts dockerd and clouduler itself,

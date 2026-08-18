@@ -107,7 +107,9 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, nodes: Vec<(Strin
                     tokio::time::sleep(BIND_RETRY).await;
                 }
             });
-            info!(%addr, "internal dns listening");
+            // Logged as an attempt, not a success: the bind is what decides,
+            // and it happens inside the task above.
+            info!(%addr, "binding the internal resolver");
         }
     }
 }

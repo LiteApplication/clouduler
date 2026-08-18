@@ -85,7 +85,17 @@ pub fn build(
         network: placement.network,
         ip: placement.ip,
         dns: placement.resolver.into_iter().map(std::net::IpAddr::V4).collect(),
-        dns_search: placement.zone.into_iter().collect(),
+        dns_search: placement.zone.iter().cloned().collect(),
+        // `service.stack` has one dot, and docker's own resolver defaults the
+        // container to ndots:0, which makes a name with any dot in it absolute
+        // and skips the search list entirely: the short name then comes back
+        // NXDOMAIN from upstream while the fully qualified one resolves. Two
+        // is the smallest value that sends `service.stack` through the search
+        // list, and leaves ordinary two dot internet names resolving directly.
+        dns_options: placement
+            .zone
+            .map(|_| vec!["ndots:2".to_string()])
+            .unwrap_or_default(),
         restart_policy: restart_policy(service),
         resources: resources(service),
         healthcheck: healthcheck(service),
@@ -271,6 +281,7 @@ mod tests {
         assert_eq!(spec.ip, Some(std::net::Ipv4Addr::new(10, 244, 0, 7)));
         assert_eq!(spec.dns, vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 244, 0, 1))]);
         assert_eq!(spec.dns_search, vec!["int.example.com".to_string()]);
+        assert_eq!(spec.dns_options, vec!["ndots:2".to_string()]);
     }
 
     #[test]
