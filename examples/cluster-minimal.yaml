@@ -1,0 +1,43 @@
+# The smallest config that actually runs: one manager, one network, one drive.
+#
+# This is close to what `clouduler init` writes for a new cluster. Everything
+# left out here has a working default, and every one of those defaults is shown
+# and explained in cluster.yaml next to this file.
+#
+#   clouduler --config cluster-minimal.yaml check
+#
+# Add nodes by running `clouduler init --join <this node's address>` on them,
+# rather than editing this file by hand: the join goes through the cluster, so
+# every node's copy is updated at once.
+
+cluster:
+  name: home
+
+networks:
+  # Exactly one internal network is required. It carries raft, drive sync and
+  # the container overlay, so every node needs an address inside this subnet.
+  # The domain is optional; with it set, `cloud` below resolves to a node's
+  # internal address rather than needing to be written out in full.
+  internal:
+    type: internal
+    subnet: 10.10.0.0/24
+    domain: int.example.com
+
+# A drive is a cluster wide namespace that volumes live in. Nodes opt in by
+# mapping it to a local directory, as n1 does below.
+drives:
+  fast:
+    sync_interval: 5m
+
+nodes:
+  n1:
+    role: manager
+    network:
+      internal: 10.10.0.1
+    drives:
+      fast: /srv/clouduler/fast
+
+# The web ui and api, always over HTTPS.
+web:
+  address: cloud
+  network: internal

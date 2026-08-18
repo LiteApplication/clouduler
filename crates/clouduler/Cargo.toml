@@ -13,6 +13,7 @@ cl-api.workspace = true
 cl-config.workspace = true
 cl-raft.workspace = true
 cl-docker.workspace = true
+cl-drive.workspace = true
 cl-sched.workspace = true
 cl-secret.workspace = true
 

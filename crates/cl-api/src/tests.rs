@@ -273,9 +273,28 @@ async fn cluster_status_has_the_documented_shape() {
         .unwrap()
         .to_bytes();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(value.get("is_leader").is_some());
-    assert!(value.get("has_quorum").is_some());
-    assert!(value.get("version").is_some());
+    // The ui reads every one of these by name (ui/src/api/types.ts,
+    // views/Overview.tsx), so a rename here breaks the overview panel silently.
+    for field in [
+        "node",
+        "is_leader",
+        "has_quorum",
+        "leader",
+        "voters",
+        "reachable",
+        "managers_total",
+        "managers_reachable",
+        "version",
+        "state_version",
+    ] {
+        assert!(value.get(field).is_some(), "missing {field} in {value}");
+    }
+
+    // A node name, not the raft id, which is an internal hash nobody can act on.
+    assert_eq!(value["leader"], "n0");
+    assert_eq!(value["node"], "n0");
+    assert_eq!(value["managers_total"], 1);
+    assert_eq!(value["managers_reachable"], 1);
 }
 
 #[tokio::test]
@@ -301,4 +320,61 @@ async fn nodes_list_reflects_the_cluster_state() {
     let nodes = value.as_array().unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["name"], "n0");
+}
+
+/// A brand new cluster mints its first api key once it has a leader.
+///
+/// The api starts before any election finishes, so the write has nowhere to go
+/// on the first attempt. Getting this wrong means a fresh cluster has no way in
+/// at all, which is exactly what happened before it was made a retrying task.
+#[tokio::test]
+async fn a_fresh_cluster_mints_a_bootstrap_key_once_a_leader_exists() {
+    let h = harness().await;
+
+    // Start from a cluster holding no keys at all, as a fresh one would.
+    h.state
+        .cluster
+        .submit(cl_raft::Request::RemoveConfig {
+            name: keys::API_KEYS_CONFIG.to_string(),
+        })
+        .await
+        .expect("clear keys");
+    let empty = keys::ApiKeyStore::load(&h.state.cluster.state().await);
+    assert!(empty.keys.is_empty(), "precondition: no keys");
+
+    crate::routes::auth_keys::spawn_bootstrap_first_key(h.state.clone());
+
+    let mut minted = Vec::new();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        minted = keys::ApiKeyStore::load(&h.state.cluster.state().await).keys;
+        if !minted.is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(minted.len(), 1, "exactly one bootstrap key");
+    assert_eq!(minted[0].name.as_deref(), Some("bootstrap"));
+}
+
+/// Two managers coming up together must not each mint their own, or the log
+/// shows two keys and only one of them is the one that got stored.
+#[tokio::test]
+async fn the_bootstrap_key_is_only_minted_once() {
+    let h = harness().await;
+    h.state
+        .cluster
+        .submit(cl_raft::Request::RemoveConfig {
+            name: keys::API_KEYS_CONFIG.to_string(),
+        })
+        .await
+        .expect("clear keys");
+
+    for _ in 0..3 {
+        crate::routes::auth_keys::spawn_bootstrap_first_key(h.state.clone());
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let keys = keys::ApiKeyStore::load(&h.state.cluster.state().await).keys;
+    assert_eq!(keys.len(), 1, "expected one key, got {}", keys.len());
 }

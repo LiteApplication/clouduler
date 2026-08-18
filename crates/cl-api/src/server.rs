@@ -125,9 +125,10 @@ impl ApiServer {
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the
-        // only way in until either OIDC is configured or a key already
-        // exists.
-        routes::auth_keys::bootstrap_first_key(&state).await;
+        // only way in until either OIDC is configured or a key already exists.
+        // Backgrounded because at this point the cluster usually has no leader
+        // yet and the write would have nowhere to go.
+        routes::auth_keys::spawn_bootstrap_first_key(state.clone());
 
         Ok(Self {
             router: build_router(state),
@@ -183,8 +184,14 @@ async fn redirect_non_leader(
     // Auth's own login/callback routes and /auth/me have to work everywhere,
     // otherwise a client stuck on a follower can never even discover who the
     // leader is via a normal api call.
+    //
+    // /api/status is exempt for the same reason and one more: it describes the
+    // node answering it, not the cluster's authoritative state. Bouncing it to
+    // the leader would make it impossible to ask a follower anything at all,
+    // including whether it has caught up, which is exactly what you want to
+    // know when one is lagging.
     let path = request.uri().path();
-    if path == "/auth/me" || path.starts_with("/auth/oidc/") {
+    if path == "/auth/me" || path == "/api/status" || path.starts_with("/auth/oidc/") {
         return Ok(next.run(request).await);
     }
 

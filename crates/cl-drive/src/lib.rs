@@ -30,4 +30,4 @@ pub use registry::{resolve_in_root, resolve_relative, DriveRegistry, DriveRole};
 pub use scan::{scan as scan_volume, Diff, FileMeta, Manifest};
 pub use served::{MountManager, MountPermission, MountSpec};
 pub use sync::{IntervalSource, StaticIntervals, SyncScheduler};
-pub use transport::{drive_port, Message};
+pub use transport::{drive_port, served_port, Message};

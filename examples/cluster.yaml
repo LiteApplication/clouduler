@@ -62,6 +62,14 @@ nodes:
     rpc_port: 7373
     drives:
       bulk: /mnt/bulk
+    # Where this node keeps its database and working files, overriding the
+    # cluster wide data_dir below. For a node whose big disk is elsewhere.
+    data_dir: /mnt/bulk/clouduler
+    # Overrides secrets.generate_if_missing for this node only. false means
+    # this node may never create a cluster key, it can only be given one.
+    # `clouduler init --join` sets this on every node that joins an existing
+    # cluster: a second key would seal secrets nothing else can open.
+    generate_secret_key: false
 
 # For the clouduler web ui
 web:

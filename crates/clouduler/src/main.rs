@@ -1,5 +1,6 @@
 mod cli;
 mod daemon;
+mod drives;
 mod init;
 mod report;
 mod stack;

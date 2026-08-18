@@ -18,11 +18,9 @@ source "$QEMU_DIR/lib/steps.sh"
 
 mkdir -p "$RUN_DIR"
 
-CLOUDULER_BIN="${CLOUDULER_BIN:-$QEMU_DIR/../../target/release/clouduler}"
-if [[ ! -x "$CLOUDULER_BIN" ]]; then
-  CLOUDULER_BIN="$QEMU_DIR/../../target/debug/clouduler"
-fi
-[[ -x "$CLOUDULER_BIN" ]] || die "clouduler binary not found; run cargo build --release first"
+# Must be a musl binary, since the guest rootfs is Alpine. build-binary.sh
+# works out how to produce one; see its header for the ways it can.
+CLOUDULER_BIN="$("$QEMU_DIR/build-binary.sh")" || die "could not build the clouduler binary"
 export CLOUDULER_BIN
 
 MCAST_ID=$(( (RANDOM % 200) + 1 ))
@@ -55,10 +53,11 @@ mkdir -p "$RUN_DIR/cli-scratch"
 
 log "booting $(jq '.nodes | length' "$RUN_DIR/topology.json") nodes"
 idx=0
-while IFS=$'\t' read -r name ip web_port rpc_port; do
-  vm_start "$name" "$ip" "$web_port" "$rpc_port" "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx"
+while IFS=$'\t' read -r name ip web_port rpc_port host_ip; do
+  vm_start "$name" "$ip" "$web_port" "$rpc_port" \
+    "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip"
   idx=$((idx + 1))
-done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port] | @tsv' "$RUN_DIR/topology.json")
+done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port, .control_ip] | @tsv' "$RUN_DIR/topology.json")
 
 log "waiting for daemons to come up"
 sleep 5

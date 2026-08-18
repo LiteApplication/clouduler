@@ -114,33 +114,54 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Mint a key on first launch, when the cluster holds none yet. This is the
-/// only way into a brand new cluster without OIDC already configured, so the
-/// log line has to be impossible to miss.
-pub async fn bootstrap_first_key(state: &AppState) {
-    let cluster_state = state.cluster.state().await;
-    let store = ApiKeyStore::load(&cluster_state);
-    if !store.keys.is_empty() {
-        return;
-    }
+/// Mint a key on first launch, when the cluster holds none yet.
+///
+/// This runs as a task rather than once at startup because of the ordering on a
+/// brand new cluster: the api comes up before any leader has been elected, and
+/// a write with no leader to forward to just fails. Doing it once meant the
+/// only way into a fresh cluster was never created at all.
+///
+/// Only the leader mints, and it rechecks the store on every attempt, so
+/// several managers starting together produce one key rather than one each.
+pub fn spawn_bootstrap_first_key(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(BOOTSTRAP_RETRY);
+        loop {
+            ticker.tick().await;
 
-    let new_key = keys::generate(Some("bootstrap".to_string()), now());
-    let mut store = store;
-    store.keys.push(new_key.record);
+            let cluster_state = state.cluster.state().await;
+            let store = ApiKeyStore::load(&cluster_state);
+            if !store.keys.is_empty() {
+                return;
+            }
+            if !state.cluster.is_leader() {
+                continue;
+            }
 
-    match submit_store(state, &store).await {
-        Ok(()) => {
-            info!(
-                "\n\n=====================================================\n\
-                 no api keys exist yet: generated one for initial access\n\
-                 \n    {}\n\n\
-                 save it now, it will not be shown again\n\
-                 =====================================================\n",
-                new_key.secret
-            );
+            let new_key = keys::generate(Some("bootstrap".to_string()), now());
+            let mut store = store;
+            store.keys.push(new_key.record);
+
+            match submit_store(&state, &store).await {
+                Ok(()) => {
+                    // The one time this is ever shown, so it has to be
+                    // impossible to miss in a wall of startup logs.
+                    info!(
+                        "\n\n=====================================================\n\
+                         no api keys exist yet: generated one for initial access\n\
+                         \n    {}\n\n\
+                         save it now, it will not be shown again\n\
+                         =====================================================\n",
+                        new_key.secret
+                    );
+                    return;
+                }
+                // Leadership can be lost between the check and the write.
+                // Another manager will pick it up, or we will on the next tick.
+                Err(e) => tracing::debug!(error = %e, "bootstrap api key not stored yet, retrying"),
+            }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not store the bootstrap api key");
-        }
-    }
+    });
 }
+
+const BOOTSTRAP_RETRY: std::time::Duration = std::time::Duration::from_secs(2);

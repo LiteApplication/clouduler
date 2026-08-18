@@ -917,6 +917,7 @@ dependencies = [
  "cl-api",
  "cl-config",
  "cl-docker",
+ "cl-drive",
  "cl-raft",
  "cl-sched",
  "cl-secret",

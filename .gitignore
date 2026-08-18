@@ -6,5 +6,5 @@ dist
 .DS_Store
 ui/dist
 tests/qemu/cache/
-tests/qemu/run/
+tests/qemu/work/
 __pycache__/

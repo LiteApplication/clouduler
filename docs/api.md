@@ -4,6 +4,13 @@ Served by the raft leader on `web.address:web.port` over HTTPS. Non-leaders
 answer `503` with a `Location` header pointing at the leader, so a client that
 hit the wrong node can retry without extra machinery.
 
+Three routes answer on every node instead of redirecting: `/api/status`,
+`/auth/me` and `/auth/oidc/*`. `/api/status` describes the node answering it
+rather than the cluster's authoritative state, so it is the one way to ask a
+follower whether it has caught up, and to find the leader without relying on
+the `Location` header. The auth routes have to work everywhere or a client
+stuck on a follower could never log in to discover anything.
+
 Everything is JSON. Errors use this shape and the matching status code:
 
 ```json
@@ -41,9 +48,26 @@ DELETE /api/keys/:id
 ## Cluster
 
 ```
-GET    /api/status                      read    quorum, leader, versions
+GET    /api/status                      read    this node's view: quorum, leader, versions
 GET    /api/state                       read    the whole applied state, redacted
 GET    /api/events                      read    SSE stream of state changes
+```
+
+`/api/status` answers with:
+
+```json
+{
+  "node": "n1",              // the node answering, not necessarily the leader
+  "is_leader": true,
+  "has_quorum": true,
+  "leader": "n1",            // node name, not the internal raft id
+  "voters": 3,
+  "reachable": 3,
+  "managers_total": 3,
+  "managers_reachable": 3,
+  "version": "0.1.0",        // daemon build version
+  "state_version": 5         // replicated state version, moves on every write
+}
 ```
 
 `/api/events` emits `state` events carrying the same body as `/api/state`

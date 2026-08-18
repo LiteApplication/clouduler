@@ -99,6 +99,16 @@ pub async fn run(
         }
     };
 
+    let drives = match crate::drives::start(&cfg, node, &node_name, &cluster) {
+        Ok(drives) => Some(drives),
+        Err(e) => {
+            // A node whose drives will not start still votes and still runs
+            // anything that needs no volume, so this is not fatal.
+            warn!(error = %e, "drive subsystem did not start");
+            None
+        }
+    };
+
     let api = start_api(&cfg, node, &node_name, &config_path, &cluster, &data_dir).await;
 
     let config_writer = tokio::spawn(watch_cluster_config(
@@ -109,7 +119,7 @@ pub async fn run(
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
 
-    // Overlay, drives and the reverse proxy start here once wired in.
+    // Overlay and the reverse proxy start here once wired in.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
@@ -121,6 +131,11 @@ pub async fn run(
     }
     if let Some(api) = api {
         api.abort();
+    }
+    // Before the raft shutdown, so the mounts are gone while the runtime that
+    // serves their requests is still alive.
+    if let Some(drives) = drives {
+        drives.shutdown();
     }
     cluster.shutdown().await?;
     Ok(())

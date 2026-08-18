@@ -1,0 +1,52 @@
+# Build an image, push it, then roll it out on a clouduler cluster.
+#
+# Copy into .github/workflows/ in your own repository, alongside
+# examples/ci/deploy.sh from this repo.
+#
+# Secrets to set (Settings -> Secrets and variables -> Actions):
+#   CLOUDULER_URL     https://cloud.int.example.com
+#   CLOUDULER_TOKEN   an admin api key made for CI
+#
+# The runner has to be able to reach the cluster's web address. For a cluster on
+# a private network that means a self hosted runner, or one on the tailnet.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tagging with the commit sha, not just :latest. A stack pinned to a
+      # moving tag cannot be rolled back to a known image, and the digest the
+      # cluster resolved is the only record of what actually ran.
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+
+      - name: point the stack at this build
+        run: |
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|" deploy/stack.yaml
+
+      - name: deploy
+        env:
+          CLOUDULER_URL: ${{ secrets.CLOUDULER_URL }}
+          CLOUDULER_TOKEN: ${{ secrets.CLOUDULER_TOKEN }}
+          # 0 once the cluster has an ACME certificate rather than a self
+          # signed one. Leave at 1 only on a runner inside the trusted network.
+          CLOUDULER_INSECURE: "1"
+          DEPLOY_TIMEOUT: "180"
+        run: ./ci/deploy.sh myapp deploy/stack.yaml

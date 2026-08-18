@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # Step verbs a scenario's `steps:` list can use. Each function takes the
 # step's JSON argument (a jq value, possibly empty/null for bare steps) on
-# stdin via $1. Field names read off /api/* responses follow docs/api.md;
-# where the doc doesn't pin an exact key we take the most literal reading of
-# it and note the assumption, since no live cluster was available to confirm
-# wire shapes against a running daemon.
+# stdin via $1.
+#
+# Every /api route other than the auth ones answers 503 on a follower, so any
+# step that reads the api has to aim at the leader. `any_manager` resolves that,
+# but a step that waits for an election has to re-resolve on each poll rather
+# than pin one node up front: at the moment it starts there may be no leader at
+# all, and whichever manager it picked may never become one.
 #
 # Sourced by scenario-run.sh, not run directly.
 
 step_wait_quorum() {
   local timeout; timeout="$(echo "$1" | jq -r '.timeout // 30')"
-  local mgr; mgr="$(any_manager)"
-  wait_for "cluster quorum" "$timeout" \
-    "api_get '$mgr' /api/status 2>/dev/null | jq -e '.leader != null' >/dev/null 2>&1"
-  log "quorum reached, leader known"
+  wait_for "cluster quorum" "$timeout" "_quorum_reached"
+  log "quorum reached, leader is $(leader_node)"
+}
+
+_quorum_reached() {
+  local leader
+  leader="$(leader_node)" || return 1
+  api_get "$leader" /api/status 2>/dev/null \
+    | jq -e '.has_quorum == true and .leader != null' >/dev/null 2>&1
 }
 
 step_deploy_stack() {
@@ -195,26 +203,28 @@ step_assert_fenced() {
 }
 
 step_assert_leader_elected() {
-  local timeout mgr
+  local timeout
   timeout="$(echo "$1" | jq -r '.timeout // 30')"
-  mgr="$(any_manager)"
-  wait_for "a leader is elected" "$timeout" \
-    "api_get '$mgr' /api/status 2>/dev/null | jq -e '.leader != null and .leader != \"\"' >/dev/null 2>&1"
-  log "leader elected: $(api_get "$mgr" /api/status | jq -r '.leader')"
+  wait_for "a leader is elected" "$timeout" "leader_node >/dev/null"
+  local leader; leader="$(leader_node)"
+  log "leader elected: $(api_get "$leader" /api/status | jq -r '.leader')"
 }
 
 step_assert_converged() {
   local timeout; timeout="$(echo "$1" | jq -r '.timeout // 30')"
-  local mgrs; mgrs="$(jq -r '.nodes[] | select(.role=="manager") | .name' "$RUN_DIR/topology.json")"
+  local mgrs; mgrs="$(managers)"
   wait_for "all managers converge on the same state version" "$timeout" \
     "_all_versions_match \"$mgrs\""
 }
 
+# /api/status is answered by every node, leader or not, and reports that node's
+# own applied state version. That is what makes this a real convergence check
+# rather than one node's opinion repeated three times.
 _all_versions_match() {
   local mgrs="$1" first="" v n
   for n in $mgrs; do
     vm_running "$n" || continue
-    v="$(api_get "$n" /api/status 2>/dev/null | jq -r '.version // empty')"
+    v="$(api_get "$n" /api/status 2>/dev/null | jq -r '.state_version // empty')"
     [[ -z "$v" ]] && return 1
     [[ -z "$first" ]] && first="$v"
     [[ "$v" != "$first" ]] && return 1

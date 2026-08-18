@@ -49,10 +49,15 @@ def main():
 
     node_summaries = []
     cluster_nodes = {}
-    for n in nodes:
+    for index, n in enumerate(nodes):
         name = n["name"]
         web_port = free_port()
         rpc_port = free_port()
+        # Each node gets its own loopback address on the host. They all route
+        # to lo, but a config needs every node on a distinct address inside the
+        # declared subnet, and qemu binds its forwarded ports per address, so
+        # one 127.0.0.1 for all of them would be rejected by both.
+        control_ip = f"127.0.0.{index + 1}"
         node_drives = n.get("drives") or {}
         cluster_nodes[name] = {
             "role": n["role"],
@@ -66,6 +71,7 @@ def main():
             "ip": n["ip"],
             "web_port": web_port,
             "rpc_port": rpc_port,
+            "control_ip": control_ip,
             "drives": list(node_drives.keys()),
         })
 
@@ -84,17 +90,22 @@ def main():
         yaml.safe_dump(cluster, f, sort_keys=False)
 
     # control.yaml: same shape, but every node address points at its
-    # host-forwarded port on 127.0.0.1, since the CLI runs on the host and
-    # has no route onto the VMs' own cluster network.
+    # host-forwarded loopback address and port, since the CLI runs on the host
+    # and has no route onto the VMs' own cluster network. The internal network
+    # is widened to 127.0.0.0/8 to match, or every node would sit outside its
+    # own subnet and the config would not load at all.
     control_nodes = {}
     for ns in node_summaries:
         control_nodes[ns["name"]] = {
             "role": ns["role"],
-            "network": {"cluster": "127.0.0.1"},
+            "network": {"cluster": ns["control_ip"]},
             "rpc_port": ns["rpc_port"],
             "drives": {d: f"/srv/clouduler/{d}" for d in ns["drives"]},
         }
     control = dict(cluster)
+    control["networks"] = {
+        "cluster": {"type": "internal", "subnet": "127.0.0.0/8", "domain": "cl.test"},
+    }
     control["nodes"] = control_nodes
     with open(out_control_path, "w") as f:
         yaml.safe_dump(control, f, sort_keys=False)

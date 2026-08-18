@@ -13,6 +13,7 @@ tests/qemu/
   run.sh               entry point: run one scenario or the whole suite
   lib/                 shared bash: vm lifecycle, network wiring, http/cli assertions
   scenarios/           one file per scenario (bash, sourcing lib/harness.sh)
+  build-binary.sh      builds the musl clouduler binary the VMs run
   cache/               cached base image (git-ignored)
   work/                per-run scratch: disks, sockets, logs, pids (git-ignored)
 ```
@@ -25,8 +26,10 @@ tests/qemu/run.sh formation      # one scenario
 tests/qemu/run.sh --all          # the whole suite
 ```
 
-Requires `qemu-system-x86_64`, `qemu-img`, `docker`, `cargo`, and root or
-`CAP_NET_ADMIN` for the bridge-free socket networking used here (none needed
-in the default configuration, see build-image.sh header). Works without KVM
-(TCG) but is much slower; the runner detects `/dev/kvm` and warns rather than
-failing when it's absent.
+Requires `qemu-system-x86_64`, `qemu-img`, `mke2fs`, `unshare`, `jq`, and
+`python3` with PyYAML. No root: the rootfs is built and packed inside a user
+namespace and the networking is qemu's own. The binary the VMs run has to be
+linked against musl, which needs either `musl-gcc` on PATH or docker;
+`build-binary.sh` sorts that out and explains itself. Works without KVM (TCG)
+but is much slower; the runner detects `/dev/kvm` and warns rather than failing
+when it's absent.
