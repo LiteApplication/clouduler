@@ -53,11 +53,12 @@ mkdir -p "$RUN_DIR/cli-scratch"
 
 log "booting $(jq '.nodes | length' "$RUN_DIR/topology.json") nodes"
 idx=0
-while IFS=$'\t' read -r name ip web_port rpc_port host_ip; do
+while IFS=$'\t' read -r name ip web_port rpc_port host_ip http_port expose_port; do
   vm_start "$name" "$ip" "$web_port" "$rpc_port" \
-    "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip"
+    "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip" \
+    "$http_port" "$expose_port"
   idx=$((idx + 1))
-done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port, .control_ip] | @tsv' "$RUN_DIR/topology.json")
+done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port] | @tsv' "$RUN_DIR/topology.json")
 
 log "waiting for daemons to come up"
 sleep 5

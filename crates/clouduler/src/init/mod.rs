@@ -125,7 +125,7 @@ fn create_cluster<R: BufRead, W: Write>(
         "hostname the web ui answers on",
         Some(if internal_domain.is_some() { "cloud" } else { "cloud.example.com" }),
     )?;
-    let web_port = ask_parsed(prompt, args.web_port, "port the web ui listens on", 443)?;
+    let web_port = ask_parsed(prompt, args.web_port, "port the web ui listens on", 8443)?;
 
     prompt.heading("this node")?;
     let ip = ask_ip(prompt, args.ip, subnet)?;

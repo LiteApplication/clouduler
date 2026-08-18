@@ -255,6 +255,37 @@ mod tests {
         stack.validate(&cluster()).expect("simple stack matches the reference cluster");
     }
 
+    /// The qemu suite's publishing scenario is the only end to end cover for
+    /// the proxy, published ports and the internal resolver. A stack file that
+    /// no longer validates would fail an hour into a vm run, so it is checked
+    /// here too.
+    #[test]
+    fn the_publishing_scenario_stack_is_valid() {
+        const PUBLISH_YAML: &str =
+            include_str!("../../../../tests/qemu/scenarios/stacks/publish.yaml");
+        const QEMU_CLUSTER: &str = "\
+cluster:
+  name: qemu-test
+networks:
+  cluster:
+    type: internal
+    subnet: 10.10.0.0/24
+    domain: cl.test
+nodes:
+  n1:
+    role: manager
+    network:
+      cluster: 10.10.0.1
+web:
+  address: api
+  network: cluster
+  port: 8443
+";
+        let cluster = ClusterConfig::parse(QEMU_CLUSTER).expect("qemu cluster shape is valid");
+        let stack = StackFile::parse(PUBLISH_YAML).expect("publish stack parses");
+        stack.validate(&cluster).expect("publish stack matches the qemu cluster");
+    }
+
     #[test]
     fn command_accepts_both_forms() {
         let raw = "services:\n  a:\n    image: x\n    command: [\"echo\", \"hi\"]\n";

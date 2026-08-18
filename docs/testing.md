@@ -96,6 +96,12 @@ Each VM gets two interfaces:
   registry. Statically addressed too: slirp hands out one fixed address, so
   there is no reason to run a dhcp client.
 
+Four ports are forwarded per node: the api, the rpc channel, the reverse
+proxy's plain http listener, and port 2222, which is the published port the
+`publishing` scenario declares. The last two are how an assertion made from the
+host can check that a service is actually reachable from outside the cluster
+network, which is the entire point of publishing it.
+
 The daemon binds its node-to-node rpc to the cluster address only, deliberately:
 that channel is unencrypted and belongs on the trusted network. Since the cli
 runs on the host and can only arrive via slirp, the guest's init adds a DNAT
@@ -167,6 +173,23 @@ daemon's tracing output are all in there in order.
 the interesting one: it deploys a stack, waits for the container to run, kills
 the node running it, and asserts the cluster notices, reschedules the work
 elsewhere, and does not end up with two copies once the dead node comes back.
+
+`publishing` is the cover for everything a stack exposes to the outside. It
+deploys one stack carrying all three paths and asserts each of them:
+
+- an http route answered through the reverse proxy, asked of **every** node
+  rather than the one running the container, since a route that only works
+  where the container landed defeats the point;
+- a published port forwarded over the overlay, again from every node;
+- a second container whose healthcheck fetches `http://web.publish/`, which
+  passes only if the internal resolver answered the name and the overlay
+  carried the request. That assertion cannot be made from the host: there is
+  no exec channel into a guest, so the container's own healthcheck is the test
+  and the api's health reporting is how the result gets back out.
+
+ACME issuance is not covered end to end. It needs a Pebble server and a mock
+Cloudflare api in the harness; until then only the pure parts (renewal window,
+zone selection, leaf expiry parsing) are unit tested.
 
 The remaining scenarios exercise partitions, fencing and volume migration and
 are still being brought up. When one fails, the run directory it leaves behind

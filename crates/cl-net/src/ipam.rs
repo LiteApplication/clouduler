@@ -56,6 +56,31 @@ impl Allocations {
         }
     }
 
+    /// Decode a replicated address book.
+    ///
+    /// `None` covers both "nothing allocated yet" and "the stored value is
+    /// from an incompatible version". Callers treat the two the same way:
+    /// there is no address to hand out yet, so wait for the leader to write
+    /// one rather than guessing.
+    pub fn decode(stored: Option<&str>) -> Option<Self> {
+        serde_json::from_str(stored?).ok()
+    }
+
+    /// Every instance holding an address on a network.
+    pub fn instances(&self, network: &str) -> impl Iterator<Item = (&InstanceId, Ipv4Addr)> {
+        self.networks
+            .get(network)
+            .into_iter()
+            .flat_map(|n| n.instances.iter().map(|(id, ip)| (id, *ip)))
+    }
+
+    /// Every network with a subnet, and that subnet's gateway.
+    pub fn gateways(&self) -> impl Iterator<Item = (&str, Ipv4Addr)> {
+        self.networks
+            .iter()
+            .map(|(name, n)| (name.as_str(), gateway_of(n.subnet)))
+    }
+
     /// Subnet the network already holds, if any.
     pub fn subnet(&self, network: &str) -> Option<Ipv4Net> {
         self.networks.get(network).map(|n| n.subnet)
@@ -215,6 +240,32 @@ fn nets_overlap(a: Ipv4Net, b: Ipv4Net) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_book_decodes_and_a_broken_one_does_not() {
+        let mut a = Allocations::new("10.244.0.0/16".parse().unwrap(), 24);
+        a.allocate_network("gitlab", &[]).unwrap();
+        let encoded = serde_json::to_string(&a).unwrap();
+
+        assert_eq!(Allocations::decode(Some(&encoded)), Some(a));
+        assert_eq!(Allocations::decode(Some("{not json")), None);
+        assert_eq!(Allocations::decode(None), None);
+    }
+
+    #[test]
+    fn instances_and_gateways_are_readable_back_out() {
+        let mut a = Allocations::new("10.244.0.0/16".parse().unwrap(), 24);
+        a.allocate_network("gitlab", &[]).unwrap();
+        let id = InstanceId::new("gitlab", "web", 0);
+        let ip = a.allocate_ip("gitlab", &id).unwrap();
+
+        assert_eq!(a.instances("gitlab").collect::<Vec<_>>(), vec![(&id, ip)]);
+        assert_eq!(
+            a.gateways().collect::<Vec<_>>(),
+            vec![("gitlab", a.gateway("gitlab").unwrap())]
+        );
+        assert_eq!(a.instances("nothing").count(), 0);
+    }
 
     fn instance(n: u32) -> InstanceId {
         InstanceId::new("gitlab", "web", n)

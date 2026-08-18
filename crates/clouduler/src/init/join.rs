@@ -105,7 +105,7 @@ pub struct Peer {
 
 /// Default port to reach the api on. The web port is in the config we have not
 /// fetched yet, so a cluster on a different port has to be given `host:port`.
-const DEFAULT_API_PORT: u16 = 443;
+const DEFAULT_API_PORT: u16 = 8443;
 
 impl Peer {
     pub fn connect(address: &str, token: String, pin: Option<String>) -> Result<Self> {
@@ -258,8 +258,8 @@ mod tests {
 
     #[test]
     fn a_bare_host_gets_https_and_the_default_port() {
-        assert_eq!(base_url("10.10.0.1"), "https://10.10.0.1:443");
-        assert_eq!(base_url("n1.int.example.com"), "https://n1.int.example.com:443");
+        assert_eq!(base_url("10.10.0.1"), "https://10.10.0.1:8443");
+        assert_eq!(base_url("n1.int.example.com"), "https://n1.int.example.com:8443");
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn an_ipv6_literal_keeps_its_own_port() {
-        assert_eq!(base_url("[fd00::1]"), "https://[fd00::1]:443");
+        assert_eq!(base_url("[fd00::1]"), "https://[fd00::1]:8443");
         assert_eq!(base_url("[fd00::1]:8443"), "https://[fd00::1]:8443");
     }
 

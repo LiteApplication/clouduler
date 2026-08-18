@@ -126,13 +126,14 @@ mod tests {
             web: cl_config::WebConfig {
                 address: "cloud".into(),
                 network: "internal".into(),
-                port: 443,
+                port: 8443,
             },
             data_dir: "/var/lib/clouduler".into(),
             failover: Default::default(),
             secrets: Default::default(),
             auth: Default::default(),
             cloudflare: None,
+            proxy: Default::default(),
         }
     }
 

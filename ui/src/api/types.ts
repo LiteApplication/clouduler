@@ -286,6 +286,19 @@ export interface CloudflareConfig {
   zones: string[];
 }
 
+export interface AcmeConfig {
+  enabled: boolean;
+  directory_url?: string | null;
+  contact_email?: string | null;
+}
+
+export interface ProxyConfig {
+  enabled: boolean;
+  http_port: number;
+  https_port: number;
+  acme: AcmeConfig;
+}
+
 export interface ClusterConfig {
   cluster: { name: string };
   networks: Record<string, NetworkConfig>;
@@ -297,6 +310,7 @@ export interface ClusterConfig {
   secrets: SecretsConfig;
   auth: AuthConfig;
   cloudflare: CloudflareConfig | null;
+  proxy: ProxyConfig;
 }
 
 export interface PendingConfig {

@@ -85,7 +85,8 @@ pub async fn run(
                 cluster.clone(),
                 docker,
                 materializer,
-            );
+            )
+            .with_zone(cl_net::dns::zone_origin(&cfg));
             let gate = fenced.clone();
             Some(tokio::spawn(
                 scheduler.run(move || gate.load(Ordering::Relaxed)),
@@ -118,6 +119,12 @@ pub async fn run(
         }
     };
 
+    // Containers resolve each other through this, so it comes up alongside the
+    // overlay rather than waiting for anything to be scheduled.
+    let internal_dns = crate::internal_dns::start(&cfg, &cluster);
+    let exposed = crate::expose::start(&cluster);
+    let proxy = crate::proxy::start(&cfg, &cluster, &data_dir);
+
     let api = start_api(&cfg, node, &node_name, &config_path, &cluster, &data_dir).await;
 
     let config_writer = tokio::spawn(watch_cluster_config(
@@ -128,7 +135,6 @@ pub async fn run(
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
 
-    // The reverse proxy starts here once wired in.
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
     watcher.abort();
@@ -143,6 +149,13 @@ pub async fn run(
     }
     if let Some(overlay) = overlay {
         overlay.abort();
+    }
+    if let Some(internal_dns) = internal_dns {
+        internal_dns.abort();
+    }
+    exposed.abort();
+    if let Some(proxy) = proxy {
+        proxy.shutdown();
     }
     // Before the raft shutdown, so the mounts are gone while the runtime that
     // serves their requests is still alive.
@@ -174,16 +187,22 @@ async fn start_api(
         }
     };
 
-    // A self signed certificate until acme has issued a real one, so the ui is
-    // reachable on a brand new cluster. Browsers will complain, which is
-    // correct: it is not a trusted certificate.
+    // The issued certificate when there is one, and a self signed one until
+    // then, so the ui is reachable on a brand new cluster. Browsers complain
+    // about the fallback, which is correct: it is not trusted.
     let fqdn = cfg.web_fqdn();
-    let cert = match rcgen::generate_simple_self_signed(vec![fqdn.clone()]) {
-        Ok(cert) => cert,
-        Err(e) => {
-            warn!(error = %e, "cannot generate a certificate, the api will not start");
-            return None;
-        }
+    let (cert_pem, key_pem) = match cluster.state().await.certificates.get(&fqdn) {
+        Some(stored) => (stored.chain_pem.clone(), stored.key_pem.clone()),
+        None => match rcgen::generate_simple_self_signed(vec![fqdn.clone()]) {
+            Ok(cert) => {
+                warn!(%fqdn, "serving the ui with a self signed certificate");
+                (cert.cert.pem(), cert.signing_key.serialize_pem())
+            }
+            Err(e) => {
+                warn!(error = %e, "cannot generate a certificate, the api will not start");
+                return None;
+            }
+        },
     };
 
     let listen_addr = SocketAddr::from(([0, 0, 0, 0], cfg.web.port));
@@ -195,8 +214,8 @@ async fn start_api(
         cluster_config: cfg.clone(),
         key_path: cfg.secrets.key_file.clone(),
         key: load_cluster_key(cfg, node),
-        tls_cert_pem: cert.cert.pem().into_bytes(),
-        tls_key_pem: cert.signing_key.serialize_pem().into_bytes(),
+        tls_cert_pem: cert_pem.into_bytes(),
+        tls_key_pem: key_pem.into_bytes(),
         listen_addr,
     };
     let _ = data_dir;

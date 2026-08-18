@@ -97,13 +97,14 @@ async fn harness() -> Harness {
         web: WebConfig {
             address: "cloud".into(),
             network: "internal".into(),
-            port: 443,
+            port: 8443,
         },
         data_dir: dir.path().to_path_buf(),
         failover: Default::default(),
         secrets: Default::default(),
         auth: Default::default(),
         cloudflare: None,
+        proxy: Default::default(),
     };
 
     let state = AppState {

@@ -105,6 +105,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         secrets: Default::default(),
         auth: Default::default(),
         cloudflare: None,
+        proxy: Default::default(),
     };
 
     config.validate().context("the answers do not make a valid config")?;
@@ -213,7 +214,7 @@ mod tests {
             subnet: "10.10.0.0/24".parse().unwrap(),
             internal_domain: Some("int.example.com".into()),
             web_address: "cloud".into(),
-            web_port: 443,
+            web_port: 8443,
             drives: BTreeMap::new(),
             node: NodePlan::new("n1", NodeRole::Manager, ip("10.10.0.1")),
         }

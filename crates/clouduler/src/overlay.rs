@@ -13,7 +13,7 @@
 //! node's own job, and are idempotent: the loop re-runs them on a timer and on
 //! restart, and doing them twice changes nothing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +24,7 @@ use cl_docker::{Docker, NetworkSpec};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
 use cl_net::Allocations;
+use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::Request;
 use cl_sched::run::overlay_name;
@@ -116,10 +117,10 @@ impl Context_ {
     async fn reconcile(&self, netlink: Option<&Overlay>) -> Result<()> {
         let state = self.cluster.state().await;
 
-        // Every stack network that has an instance assigned to this node, and
-        // separately every one the cluster knows about, since the leader
-        // allocates for all of them and not just its own.
-        let mut all = BTreeSet::new();
+        // Every stack network the cluster knows about, with the instances on
+        // it, and separately the ones with a container on this node. The
+        // leader allocates for all of them, not just its own.
+        let mut all: BTreeMap<String, BTreeSet<InstanceId>> = BTreeMap::new();
         let mut mine = BTreeSet::new();
 
         for (name, stack) in &state.stacks {
@@ -131,14 +132,16 @@ impl Context_ {
                 continue;
             };
             let overlay = overlay_name(name, network);
-            all.insert(overlay.clone());
+            let instances = all.entry(overlay.clone()).or_default();
 
-            let runs_here = state
-                .assignments
-                .values()
-                .any(|a| a.instance.stack == *name && a.node == self.node);
-            if runs_here {
-                mine.insert(overlay);
+            for assignment in state.assignments.values() {
+                if assignment.instance.stack != *name {
+                    continue;
+                }
+                instances.insert(assignment.instance.clone());
+                if assignment.node == self.node {
+                    mine.insert(overlay.clone());
+                }
             }
         }
 
@@ -160,26 +163,54 @@ impl Context_ {
         Ok(())
     }
 
-    /// Give every known stack network a subnet, and publish the result.
+    /// Give every known stack network a subnet and every instance on it an
+    /// address, and publish the result.
+    ///
+    /// Addresses are decided here rather than left to docker because the rest
+    /// of the cluster reads them out of this book: internal DNS answers,
+    /// proxy backends and published ports all need to name a container that
+    /// runs on some other node.
     async fn allocate_missing(
         &self,
         allocations: &mut Allocations,
-        networks: &BTreeSet<String>,
+        networks: &BTreeMap<String, BTreeSet<InstanceId>>,
     ) -> Result<()> {
         let mut changed = false;
-        for network in networks {
-            if allocations.subnet(network).is_some() {
-                continue;
+        for (network, instances) in networks {
+            if allocations.subnet(network).is_none() {
+                allocations
+                    .allocate_network(network, &self.cluster_subnets)
+                    .with_context(|| format!("allocating a subnet for {network}"))?;
+                changed = true;
+                info!(
+                    network = %network,
+                    subnet = ?allocations.subnet(network),
+                    "allocated an overlay subnet"
+                );
             }
-            allocations
-                .allocate_network(network, &self.cluster_subnets)
-                .with_context(|| format!("allocating a subnet for {network}"))?;
-            changed = true;
-            info!(
-                network = %network,
-                subnet = ?allocations.subnet(network),
-                "allocated an overlay subnet"
-            );
+
+            // An instance that is gone gives its address back, so a stack
+            // redeployed often does not exhaust the subnet.
+            let stale: Vec<InstanceId> = allocations
+                .instances(network)
+                .filter(|(id, _)| !instances.contains(*id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for instance in stale {
+                allocations.release_ip(network, &instance);
+                changed = true;
+            }
+
+            for instance in instances {
+                if allocations.instance_ip(network, instance).is_some() {
+                    continue;
+                }
+                let ip = allocations
+                    .allocate_ip(network, instance)
+                    .with_context(|| format!("allocating an address for {instance}"))?;
+                changed = true;
+                info!(network = %network, %instance, %ip, "allocated an overlay address");
+            }
         }
 
         if !changed {

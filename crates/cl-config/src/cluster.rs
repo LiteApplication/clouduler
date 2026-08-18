@@ -34,6 +34,8 @@ pub struct ClusterConfig {
     pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloudflare: Option<CloudflareConfig>,
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -372,8 +374,69 @@ pub struct WebConfig {
     pub port: u16,
 }
 
+/// Not 443: the reverse proxy owns the standard ports, since those are where
+/// the cluster's own services are published. The admin ui takes the odd one.
 fn default_web_port() -> u16 {
+    8443
+}
+
+/// The reverse proxy in front of every `x-clouduler.proxy` route.
+///
+/// Both listeners are bound on every node, on all addresses, because a route's
+/// hostname resolves to whichever node is publishing it and that changes as
+/// containers move.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyConfig {
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+    /// Plain HTTP. Serves `tls: false` routes and redirects the rest.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    /// TLS. Must differ from `web.port`, which the api holds on the same
+    /// addresses; the https listener is skipped when they collide.
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
+    #[serde(default)]
+    pub acme: AcmeConfig,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            http_port: default_http_port(),
+            https_port: default_https_port(),
+            acme: AcmeConfig::default(),
+        }
+    }
+}
+
+fn default_http_port() -> u16 {
+    80
+}
+
+fn default_https_port() -> u16 {
     443
+}
+
+/// Certificate issuance for proxy routes. Needs `cloudflare`, since the only
+/// challenge implemented is DNS-01 against Cloudflare.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeConfig {
+    /// Off by default: issuing against the real Let's Encrypt from a cluster
+    /// that is not reachable yet burns rate limit for nothing.
+    #[serde(default)]
+    pub enabled: bool,
+    /// ACME directory. Left out for Let's Encrypt production; set it to a
+    /// staging or Pebble directory for testing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_url: Option<String>,
+    /// Contact address registered with the CA, which uses it for expiry
+    /// warnings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

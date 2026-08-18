@@ -17,6 +17,7 @@ impl ClusterConfig {
         self.validate_auth()?;
         self.validate_failover()?;
         self.validate_cloudflare()?;
+        self.validate_proxy()?;
         Ok(())
     }
 
@@ -333,6 +334,41 @@ impl ClusterConfig {
                     "network {} has no domain, so {} cannot be qualified",
                     self.web.network, self.web.address
                 ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_proxy(&self) -> Result<()> {
+        let proxy = &self.proxy;
+        if !proxy.enabled {
+            return Ok(());
+        }
+        if proxy.http_port == proxy.https_port {
+            return Err(ConfigError::invalid(
+                "proxy.https_port",
+                "must differ from proxy.http_port",
+            ));
+        }
+        // Not fatal on its own: the api holds web.port on the same addresses,
+        // so the https listener would fail to bind and the plain one still
+        // works. Refusing here says so at `check` time instead.
+        if proxy.https_port == self.web.port {
+            return Err(ConfigError::invalid(
+                "proxy.https_port",
+                format!("web.port already listens on {}", self.web.port),
+            ));
+        }
+        if proxy.http_port == self.web.port {
+            return Err(ConfigError::invalid(
+                "proxy.http_port",
+                format!("web.port already listens on {}", self.web.port),
+            ));
+        }
+        if proxy.acme.enabled && self.cloudflare.is_none() {
+            return Err(ConfigError::invalid(
+                "proxy.acme.enabled",
+                "certificate issuance is DNS-01 only, so it needs a cloudflare section",
             ));
         }
         Ok(())

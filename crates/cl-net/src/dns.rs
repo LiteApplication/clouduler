@@ -32,6 +32,22 @@ use crate::error::{NetError, Result};
 /// if it doesn't respect the swap.
 pub const RECORD_TTL: u32 = 5;
 
+/// Zone served when the internal network declares no domain. Nothing outside
+/// the cluster resolves it, which is the point: it only has to be a name the
+/// containers agree on.
+pub const DEFAULT_ZONE: &str = "cluster.local";
+
+/// The domain the internal zone is served under. The internal network's own
+/// domain when it has one, so `web.blog.int.example.com` is the same name
+/// inside a container and outside it.
+pub fn zone_origin(cfg: &cl_config::ClusterConfig) -> String {
+    cfg.internal_network()
+        .1
+        .domain
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ZONE.to_string())
+}
+
 /// One resolvable name inside the internal zone and the addresses it answers
 /// with. Deliberately independent of any DNS wire format: this is what the
 /// rest of clouduler reasons about, and what the tests below check directly.

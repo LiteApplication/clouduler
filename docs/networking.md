@@ -107,26 +107,32 @@ fully unit tested and serde round-trippable so it can travel through raft.
   associates with the previous instance. Only once every fresh address is
   exhausted does allocation fall back to the oldest released address.
 
-## Replication: what raft needs to carry
+## Replication: who allocates
 
-`Allocations` is designed to be the payload of raft-replicated state, so two
-nodes can never hand out the same overlay address independently, but this
-crate deliberately does not touch `cl_raft`'s state machine — `cl-sched` (the
-scheduler, a later phase) owns submitting allocation decisions through raft
-alongside placement. `cl_raft::state::Request` would need two additional
-variants:
+`Allocations` is the payload of one replicated value, `ClusterState.overlay`,
+held as opaque json so the address book can change shape without every node
+having to agree on it byte for byte the way a state machine command does.
 
-- `AllocateNetwork { network: String }` → applies
-  `Allocations::allocate_network` and stores the resulting subnet.
-- `AllocateAddress { network: String, instance: InstanceId }` (and a
-  `ReleaseAddress` counterpart for the reverse) → applies
-  `Allocations::allocate_ip` / `release_ip` against the replicated
-  `Allocations` value.
+The leader is the only node that writes it. On every pass of the overlay loop
+(`clouduler::overlay`) it gives each stack network a subnet, each instance on
+that network an address, and returns the addresses of instances that no longer
+have an assignment; if anything changed it submits the whole book back through
+`Request::SetOverlayAllocations`. Every node, leader or not, then reads it:
 
-Both are natural companions to the existing `Assign`/`Unassign` variants:
-whichever request assigns an instance to a node should also be the one that
-allocates its overlay address, so an instance's placement and its address
-are always committed together.
+- the overlay loop, to know which subnet and gateway to build the bridge with;
+- the scheduler, to pin the container's address at create time rather than
+  letting docker pick one;
+- internal DNS, published ports and the reverse proxy, to name containers
+  running on other nodes.
+
+That last group is why addresses are allocated centrally at all. A node has no
+way to ask another node what address its containers ended up with, so an
+address docker chose locally could never be published cluster wide.
+
+A container is not started until its address exists. The scheduler skips an
+instance whose network has no allocation yet and picks it up on the next pass,
+which costs a few seconds on a first deploy and avoids a container coming up on
+an address nothing else in the cluster knows about.
 
 ## DNS
 
@@ -150,6 +156,23 @@ swap it into the running server without a restart or dropping in-flight
 queries, so a service that moves to another node picks up its new address
 on the next lookup rather than after a TTL expires or a resolver restart.
 
+### How containers reach it
+
+The daemon binds the resolver on port 53 of every overlay network's gateway
+address, which is an address on this node's own bridge and so belongs to
+clouduler alone; port 53 on the node's real addresses is left for whatever the
+operator runs there. Each container is created with that gateway as its
+resolver and the internal zone as its search domain, so `web.blog` resolves
+without the cluster's domain being written into the stack file.
+
+The zone itself is the internal network's `domain` when it declares one, so a
+name means the same thing inside a container and outside it. With no domain
+declared the zone is `cluster.local`, which only resolves inside the cluster.
+
+Records are rebuilt from replicated state every five seconds, matching the
+record TTL, and are built the same way on every node: a node answers for
+containers it is not running as readily as for its own.
+
 ## Non-HTTP published ports
 
 `x-clouduler.expose` (the motivating case is publishing gitlab's ssh on port
@@ -170,3 +193,13 @@ session watches its route for the rest of its life, so if the instance
 moves to another node while a connection is open, the connection is closed
 immediately rather than left hanging against a backend that's no longer
 being served — the client sees a clean disconnect, not a stall.
+
+A service with several replicas is forwarded to one of them, the lowest
+instance index, rather than balanced across them. There is no request boundary
+in a raw TCP or UDP stream to spread work over, and picking by index means
+every node forwards to the same replica, so a client that reconnects through a
+different node does not land somewhere else for no reason.
+
+A published port that no running instance backs stays bound and refuses
+connections rather than disappearing, so a redeploy shows up as a connection
+refused rather than as the port belonging to nobody.

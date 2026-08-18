@@ -53,6 +53,12 @@ def main():
         name = n["name"]
         web_port = free_port()
         rpc_port = free_port()
+        # The two ports a published service answers on inside the guest: the
+        # reverse proxy's plain listener, and the one published port the
+        # publishing scenario uses. Forwarded like the api's, so an assertion
+        # can be made from the host without a route onto the cluster network.
+        http_port = free_port()
+        expose_port = free_port()
         # Each node gets its own loopback address on the host. They all route
         # to lo, but a config needs every node on a distinct address inside the
         # declared subnet, and qemu binds its forwarded ports per address, so
@@ -71,6 +77,8 @@ def main():
             "ip": n["ip"],
             "web_port": web_port,
             "rpc_port": rpc_port,
+            "http_port": http_port,
+            "expose_port": expose_port,
             "control_ip": control_ip,
             "drives": list(node_drives.keys()),
         })
@@ -82,7 +90,7 @@ def main():
         },
         "drives": drives_block,
         "nodes": cluster_nodes,
-        "web": {"address": "api", "network": "cluster", "port": 443},
+        "web": {"address": "api", "network": "cluster", "port": 8443},
         "failover": failover,
     }
 

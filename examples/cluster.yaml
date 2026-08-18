@@ -78,7 +78,10 @@ web:
   address: cloud
   # Picks which node address the record points at.
   network: tailscale
-  port: 443
+  # Not 443: the reverse proxy below owns the standard ports, since that is
+  # where the stacks you deploy are published. Refused if it collides with
+  # either proxy port.
+  port: 8443
 
 # What happens when a node drops out of the cluster.
 #
@@ -100,3 +103,22 @@ cloudflare:
   api_token_file: /etc/clouduler/cf.token
   zones:
     - example.com
+
+# The reverse proxy in front of every x-clouduler.proxy route. Both listeners
+# are bound on every node, because a route's hostname can resolve to any of
+# them and the container behind it is reachable from all of them.
+proxy:
+  enabled: true
+  http_port: 80
+  https_port: 443
+  acme:
+    # Off by default: ordering certificates from a cluster the internet cannot
+    # reach yet spends rate limit for nothing. Turn it on once the names in
+    # your stacks resolve. Issuance is DNS-01 only, so it needs the cloudflare
+    # section above.
+    enabled: false
+    # Left out for Let's Encrypt production. Point it at staging or a local
+    # Pebble while you are still testing.
+    directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
+    # Where the CA sends expiry warnings.
+    contact_email: ops@example.com

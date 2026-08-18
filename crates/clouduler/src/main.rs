@@ -1,8 +1,12 @@
 mod cli;
 mod daemon;
 mod drives;
+mod internal_dns;
+mod placement;
 mod overlay;
+mod expose;
 mod init;
+mod proxy;
 mod report;
 mod stack;
 

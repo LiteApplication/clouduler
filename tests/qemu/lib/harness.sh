@@ -43,12 +43,21 @@ kernel_cmdline() {
 }
 
 # ---- vm lifecycle ---------------------------------------------------------
-# Node state lives in $RUN_DIR/<node>.{pid,qmp,serial.log,img,web_port,rpc_port,host_ip}
+# Node state lives in $RUN_DIR/<node>.{pid,qmp,serial.log,img,web_port,rpc_port,
+# http_port,expose_port,host_ip}
+
+# Guest side ports forwarded to the host on top of the api and the rpc channel:
+# the reverse proxy's plain listener, and the published port the publishing
+# scenario declares. Both are how a published service is reached from outside
+# the cluster network, which is the whole point of them.
+GUEST_HTTP_PORT=80
+GUEST_EXPOSE_PORT=2222
 
 declare -a VM_NODES=()
 
 vm_start() {
   local node="$1" ip="$2" web_port="$3" rpc_port="$4" mcast="$5" idx="$6" host_ip="$7"
+  local http_port="$8" expose_port="$9"
   local disk="$RUN_DIR/$node.img"
   local serial="$RUN_DIR/$node.serial.log"
   local pidfile="$RUN_DIR/$node.pid"
@@ -71,7 +80,7 @@ vm_start() {
     -append "$(kernel_cmdline "$node" "$ip")" \
     -drive file="$disk",if=virtio,format=raw \
     -netdev socket,mcast="$mcast":4321,id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
-    -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373 \
+    -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \
     -device virtio-net-pci,netdev=net1,mac="$mac1" \
     -qmp unix:"$qmp",server,nowait \
     -serial file:"$serial" \
@@ -80,6 +89,8 @@ vm_start() {
 
   echo "$web_port" > "$RUN_DIR/$node.web_port"
   echo "$rpc_port" > "$RUN_DIR/$node.rpc_port"
+  echo "$http_port" > "$RUN_DIR/$node.http_port"
+  echo "$expose_port" > "$RUN_DIR/$node.expose_port"
   echo "$host_ip" > "$RUN_DIR/$node.host_ip"
   VM_NODES+=("$node")
   log "started $node (ip=$ip api=$host_ip:$web_port accel=$accel)"
@@ -107,9 +118,11 @@ vm_kill() {
 # directory and database survive, matching a real reboot.
 vm_restart() {
   local node="$1" ip="$2" mcast="$3" idx="$4"
-  local web_port rpc_port host_ip
+  local web_port rpc_port host_ip http_port expose_port
   web_port="$(cat "$RUN_DIR/$node.web_port")"
   rpc_port="$(cat "$RUN_DIR/$node.rpc_port")"
+  http_port="$(cat "$RUN_DIR/$node.http_port")"
+  expose_port="$(cat "$RUN_DIR/$node.expose_port")"
   host_ip="$(cat "$RUN_DIR/$node.host_ip")"
   local disk="$RUN_DIR/$node.img"
   local qmp="$RUN_DIR/$node.qmp"
@@ -129,7 +142,7 @@ vm_restart() {
     -append "$(kernel_cmdline "$node" "$ip")" \
     -drive file="$disk",if=virtio,format=raw \
     -netdev socket,mcast="$mcast":4321,id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
-    -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373 \
+    -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \
     -device virtio-net-pci,netdev=net1,mac="$mac1" \
     -qmp unix:"$qmp",server,nowait \
     -serial file:"$RUN_DIR/$node.serial.log" \
@@ -184,6 +197,13 @@ api_key() {
     export API_KEY
   fi
   echo "$API_KEY"
+}
+
+# The host address a node's forwarded port answers on. `kind` is one of the
+# port files written at boot: web_port, rpc_port, http_port, expose_port.
+host_addr() {
+  local node="$1" kind="$2"
+  echo "$(cat "$RUN_DIR/$node.host_ip"):$(cat "$RUN_DIR/$node.$kind")"
 }
 
 # api_get <node> <path>

@@ -10,6 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 cl-api.workspace = true
+cl-dns.workspace = true
+cl-proxy.workspace = true
 cl-config.workspace = true
 cl-raft.workspace = true
 cl-docker.workspace = true
@@ -20,6 +22,8 @@ cl-secret.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
+hickory-proto.workspace = true
+instant-acme.workspace = true
 ipnet.workspace = true
 rtnetlink.workspace = true
 openraft.workspace = true

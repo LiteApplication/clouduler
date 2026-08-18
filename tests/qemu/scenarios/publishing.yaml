@@ -1,0 +1,22 @@
+# Internal DNS, published ports and the reverse proxy, on a cluster that is
+# otherwise left alone. Nothing is killed here: the point is that a deployed
+# stack is reachable, by name from inside and through both published paths
+# from outside.
+name: publishing
+description: resolve a service by name, reach it through the proxy and through a published port.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/publish.yaml, name: publish }
+  - wait_running: { stack: publish, service: web, timeout: 120 }
+  # Asked of every node, not just the one running the container: a route that
+  # only answers where the container landed defeats the point of a proxy on
+  # every node.
+  - assert_http_route: { host: app.cl.test, contains: "nginx", timeout: 90 }
+  - assert_published_port: { contains: "nginx", timeout: 90 }
+  - assert_healthy: { stack: publish, service: probe, timeout: 120 }

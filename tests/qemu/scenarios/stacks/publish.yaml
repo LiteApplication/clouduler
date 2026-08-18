@@ -1,0 +1,43 @@
+# Everything a stack can publish, in one place: an http route through the
+# reverse proxy, a raw published port, and a second service that proves the
+# internal resolver works by reaching the first one by name.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  web:
+    image: nginx:1.27-alpine
+    restart: always
+    networks: [cluster]
+    x-clouduler:
+      proxy:
+        # A bare label, so the cluster network's domain is appended and the
+        # route ends up as app.cl.test. Plain http, because the test asserts
+        # against the proxy's routing, not against a certificate it has no
+        # way to have been issued.
+        - host: app
+          network: cluster
+          port: 80
+          tls: false
+      expose:
+        - port: 80
+          published: 2222
+          protocol: tcp
+          network: cluster
+
+  probe:
+    image: alpine:3.20
+    restart: always
+    networks: [cluster]
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+    # The assertion the host cannot make itself: this only passes if the
+    # container's resolver answers web.publish and the overlay carries the
+    # request to it.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O - http://web.publish/ > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s

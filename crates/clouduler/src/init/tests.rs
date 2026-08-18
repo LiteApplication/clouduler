@@ -35,7 +35,7 @@ fn founding_config() -> ClusterConfig {
         subnet: "10.10.0.0/24".parse().unwrap(),
         internal_domain: Some("int.example.com".into()),
         web_address: "cloud".into(),
-        web_port: 443,
+        web_port: 8443,
         drives: BTreeMap::new(),
         node: NodePlan::new("n1", NodeRole::Manager, ip("10.10.0.1")),
     })

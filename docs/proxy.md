@@ -5,6 +5,32 @@ service's `x-clouduler.proxy` (see `docs/stacks.md`), forwards to the
 container backend over the overlay network, and issues/renews the
 certificates those routes need via ACME DNS-01 through `cl-dns`.
 
+## Ports and configuration
+
+```yaml
+proxy:
+  enabled: true
+  http_port: 80
+  https_port: 443
+  acme:
+    enabled: false
+    directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
+    contact_email: ops@example.com
+```
+
+Both listeners are bound on every node, on all addresses, because a route's
+hostname resolves to whichever node publishes it and that changes as
+containers move. Neither may collide with `web.port`, which the api holds on
+the same addresses; the config validator refuses that outright rather than
+leaving a listener that silently failed to bind. This is why `web.port`
+defaults to 8443 and not 443: the standard ports belong to the services the
+cluster publishes, and the admin ui takes the odd one.
+
+Routes and certificates are rebuilt from replicated state every five seconds.
+A route with no running backend is still published and answers 502, since a
+redeploy briefly having nothing behind it is not the same as the hostname not
+being configured, and a 404 is what a client would cache.
+
 ## Routing
 
 A route is built from one `ProxyRoute` entry (`host`, `network`, `port`,
@@ -145,6 +171,25 @@ The ACME directory URL is configurable (`AcmeConfig::directory_url`).
 `LETS_ENCRYPT_STAGING_URL` is exposed as a named constant for tests and the
 qemu harness, which should point at a local Pebble server via a custom
 `directory_url` instead of either Let's Encrypt endpoint.
+
+### What is issued, and by whom
+
+Issuance and renewal run only on the leader, and only when `proxy.acme.enabled`
+is set and a Cloudflare token is readable. Several nodes ordering the same
+certificate at once would burn the CA's rate limit and race each other writing
+the result back. Every five minutes the leader:
+
+1. orders a certificate for each `tls: true` route hostname, and for the web
+   ui's own fqdn, that has none stored yet;
+2. runs `renewal_tick` over everything that does have one.
+
+Cloudflare zone ids are resolved once at startup from `cloudflare.zones`, since
+`ZoneResolver` is synchronous and cannot look one up mid-order. The longest
+matching zone wins, so a delegated subdomain zone is preferred over its parent.
+
+The api serves the ui with the stored certificate for its own fqdn when there
+is one, and generates a self-signed one when there is not, which is what makes
+a brand new cluster reachable before anything has been issued.
 
 ### Account
 

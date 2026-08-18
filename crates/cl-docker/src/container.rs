@@ -1,12 +1,14 @@
 //! Container lifecycle: create, start, stop, remove, inspect, list.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use bollard::models::{
     ContainerCreateBody, ContainerState as BollardContainerState, ContainerStateStatusEnum,
-    ContainerSummary, HealthConfig as BollardHealthConfig, HealthStatusEnum, HostConfig,
-    PortBinding, RestartPolicy as BollardRestartPolicy, RestartPolicyNameEnum,
+    ContainerSummary, EndpointIpamConfig, EndpointSettings, HealthConfig as BollardHealthConfig,
+    HealthStatusEnum, HostConfig, NetworkingConfig, PortBinding,
+    RestartPolicy as BollardRestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
@@ -106,6 +108,17 @@ pub struct ContainerSpec {
     pub mounts: Vec<BindMount>,
     pub ports: Vec<PortMapping>,
     pub network: Option<String>,
+    /// Fixed address on `network`. Allocated cluster wide and replicated, so
+    /// every node can name this container's address without asking the node
+    /// running it.
+    pub ip: Option<Ipv4Addr>,
+    /// Resolvers written into the container's `/etc/resolv.conf`. The internal
+    /// resolver goes first so `service.stack` resolves; it forwards anything
+    /// outside the cluster zone upstream.
+    pub dns: Vec<IpAddr>,
+    /// Search domains, so a bare `service.stack` is tried under the cluster's
+    /// internal zone before being sent upstream as written.
+    pub dns_search: Vec<String>,
     pub restart_policy: RestartPolicy,
     pub resources: ResourceLimits,
     pub healthcheck: Option<Healthcheck>,
@@ -180,12 +193,32 @@ impl ContainerSpec {
         HostConfig {
             binds,
             port_bindings,
+            dns: (!self.dns.is_empty()).then(|| self.dns.iter().map(|d| d.to_string()).collect()),
+            dns_search: (!self.dns_search.is_empty()).then(|| self.dns_search.clone()),
             restart_policy: Some(self.bollard_restart_policy()),
             network_mode: self.network.clone(),
             memory: self.resources.memory_bytes,
             nano_cpus: self.resources.nano_cpus,
             ..Default::default()
         }
+    }
+
+    /// Endpoint configuration, only needed to pin the container's address.
+    /// `network_mode` in the host config is what attaches it to the network;
+    /// this adds the fixed address on top, and is left out entirely when none
+    /// was allocated so docker picks one from the subnet as usual.
+    fn networking_config(&self) -> Option<NetworkingConfig> {
+        let (network, ip) = (self.network.as_ref()?, self.ip?);
+        let endpoint = EndpointSettings {
+            ipam_config: Some(EndpointIpamConfig {
+                ipv4_address: Some(ip.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Some(NetworkingConfig {
+            endpoints_config: Some(HashMap::from([(network.clone(), endpoint)])),
+        })
     }
 
     /// Convert to the body bollard expects for `POST /containers/create`.
@@ -206,6 +239,7 @@ impl ContainerSpec {
             exposed_ports,
             healthcheck: self.bollard_healthcheck(),
             host_config: Some(self.host_config()),
+            networking_config: self.networking_config(),
             ..Default::default()
         }
     }
@@ -395,6 +429,43 @@ mod tests {
             instance: "1".to_string(),
             ..Default::default()
         }
+    }
+
+    /// The address is decided cluster wide, so the create call has to carry
+    /// it: letting docker pick would give every node a different answer for
+    /// where a container is.
+    #[test]
+    fn an_allocated_address_is_pinned_on_the_network() {
+        let mut spec = base_spec();
+        spec.network = Some("blog_default".to_string());
+        spec.ip = Some(Ipv4Addr::new(10, 244, 0, 5));
+
+        let body = spec.to_create_body();
+        let endpoints = body
+            .networking_config
+            .expect("networking config")
+            .endpoints_config
+            .expect("endpoints");
+        let ipam = endpoints["blog_default"].ipam_config.clone().expect("ipam");
+        assert_eq!(ipam.ipv4_address.as_deref(), Some("10.244.0.5"));
+    }
+
+    #[test]
+    fn no_address_leaves_docker_to_pick_one() {
+        let mut spec = base_spec();
+        spec.network = Some("blog_default".to_string());
+        assert!(spec.to_create_body().networking_config.is_none());
+    }
+
+    #[test]
+    fn the_internal_resolver_is_written_into_the_container() {
+        let mut spec = base_spec();
+        spec.dns = vec![IpAddr::V4(Ipv4Addr::new(10, 244, 0, 1))];
+        spec.dns_search = vec!["int.example.com".to_string()];
+
+        let host = spec.to_create_body().host_config.expect("host config");
+        assert_eq!(host.dns, Some(vec!["10.244.0.1".to_string()]));
+        assert_eq!(host.dns_search, Some(vec!["int.example.com".to_string()]));
     }
 
     #[test]

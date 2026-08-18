@@ -138,6 +138,7 @@ export function Configuration() {
       <SecretsSection draft={draft} setDraft={setDraft} disabled={!isAdmin} />
       <AuthSection draft={draft} setDraft={setDraft} disabled={!isAdmin} />
       <CloudflareSection draft={draft} setDraft={setDraft} disabled={!isAdmin} />
+      <ProxySection draft={draft} setDraft={setDraft} disabled={!isAdmin} />
 
       {errors.length > 0 && (
         <div className="banner banner-bad" role="alert">
@@ -578,6 +579,65 @@ function AuthSection({ draft, setDraft, disabled }: SectionProps) {
           <TextField id="oidc-adminclaim" label="Admin claim" value={a.oidc.admin_claim} onChange={(admin_claim) => set({ oidc: { ...a.oidc!, admin_claim } })} disabled={disabled} />
           <TextField id="oidc-adminvalue" label="Admin value" value={a.oidc.admin_value ?? ''} onChange={(v) => set({ oidc: { ...a.oidc!, admin_value: v || null } })} disabled={disabled} />
         </div>
+      )}
+    </fieldset>
+  );
+}
+
+function ProxySection({ draft, setDraft, disabled }: SectionProps) {
+  const p = draft.proxy;
+  const set = (patch: Partial<typeof p>) => setDraft({ ...draft, proxy: { ...p, ...patch } });
+  return (
+    <fieldset>
+      <legend>Reverse proxy</legend>
+      <CheckboxField
+        id="proxy-enabled"
+        label="Publish routes through the reverse proxy"
+        value={p.enabled}
+        onChange={(enabled) => set({ enabled })}
+        disabled={disabled}
+      />
+      <PortField
+        id="proxy-http-port"
+        label="HTTP port"
+        value={p.http_port}
+        onChange={(http_port) => set({ http_port })}
+        disabled={disabled || !p.enabled}
+      />
+      <PortField
+        id="proxy-https-port"
+        label="HTTPS port"
+        value={p.https_port}
+        onChange={(https_port) => set({ https_port })}
+        hint="Must differ from the web ui's port, which listens on the same addresses."
+        disabled={disabled || !p.enabled}
+      />
+      <CheckboxField
+        id="proxy-acme-enabled"
+        label="Issue certificates with ACME"
+        value={p.acme.enabled}
+        onChange={(enabled) => set({ acme: { ...p.acme, enabled } })}
+        disabled={disabled || !p.enabled}
+      />
+      {p.acme.enabled && (
+        <>
+          <TextField
+            id="proxy-acme-directory"
+            label="Directory URL"
+            value={p.acme.directory_url ?? ''}
+            onChange={(v) => set({ acme: { ...p.acme, directory_url: v || null } })}
+            hint="Leave blank for Let's Encrypt production."
+            disabled={disabled}
+          />
+          <TextField
+            id="proxy-acme-contact"
+            label="Contact email"
+            value={p.acme.contact_email ?? ''}
+            onChange={(v) => set({ acme: { ...p.acme, contact_email: v || null } })}
+            hint="Where the CA sends expiry warnings."
+            disabled={disabled}
+          />
+        </>
       )}
     </fieldset>
   );

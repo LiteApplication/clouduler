@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use cl_config::StackFile;
 use cl_docker::Docker;
+use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{ClusterState, Request};
@@ -34,6 +35,8 @@ pub struct Scheduler {
     docker: Docker,
     reconciler: Reconciler,
     materializer: Materializer,
+    /// Internal DNS zone, written into every container's search list.
+    zone: Option<String>,
 }
 
 impl Scheduler {
@@ -49,7 +52,15 @@ impl Scheduler {
             reconciler: Reconciler::new(docker.clone()),
             docker,
             materializer,
+            zone: None,
         }
+    }
+
+    /// Set the internal DNS zone containers search, so `web.blog` resolves
+    /// without the cluster's domain being spelled out in every stack file.
+    pub fn with_zone(mut self, zone: impl Into<String>) -> Self {
+        self.zone = Some(zone.into());
+        self
     }
 
     /// Run until cancelled. `fenced` reports whether this node has lost quorum
@@ -145,6 +156,10 @@ impl Scheduler {
             .map(|n| n.drives.clone())
             .unwrap_or_default();
 
+        // Decoded once per pass rather than per instance: every container on
+        // this node reads out of the same address book.
+        let allocations = Allocations::decode(state.overlay.as_deref());
+
         let mut targets = Vec::new();
 
         for assignment in state.assignments_on(&self.node) {
@@ -180,6 +195,26 @@ impl Scheduler {
 
             let network = file.networks.keys().next().map(|n| overlay_name(&instance.stack, n));
 
+            // A container on a stack network gets the address the leader
+            // allocated for it, not one docker picks: the other nodes read
+            // that address out of replicated state to build DNS answers and
+            // proxy backends, and can only do that if it was decided cluster
+            // wide. Nothing to run yet if it has not been allocated.
+            let mut placement = spec::Placement {
+                network: network.clone(),
+                ..Default::default()
+            };
+            if let Some(network) = &network {
+                let Some(ip) = allocations.as_ref().and_then(|a| a.instance_ip(network, instance))
+                else {
+                    debug!(instance = %instance, network = %network, "no overlay address yet");
+                    continue;
+                };
+                placement.ip = Some(ip);
+                placement.resolver = allocations.as_ref().and_then(|a| a.gateway(network));
+                placement.zone = self.zone.clone();
+            }
+
             targets.push(Target {
                 assignment: assignment.clone(),
                 spec: spec::build(
@@ -187,7 +222,7 @@ impl Scheduler {
                     service,
                     &objects,
                     &drive_roots,
-                    network,
+                    placement,
                     assignment.image_digest.as_deref(),
                     stack.revision,
                 ),

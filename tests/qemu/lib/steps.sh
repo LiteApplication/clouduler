@@ -331,6 +331,85 @@ step_assert_no_new_starts() {
   log "no new $svc instances started while fenced"
 }
 
+# ---- publishing (internal dns, published ports, reverse proxy) ------------
+
+# Every node runs the proxy and every node listens on every published port, so
+# these assertions try each running node in turn rather than looking up where
+# the container landed. A route that only answers on the node hosting the
+# container is a bug this is meant to catch.
+_running_nodes() {
+  local n
+  for n in $(jq -r '.nodes[].name' "$RUN_DIR/topology.json"); do
+    vm_running "$n" && echo "$n"
+  done
+}
+
+# assert_http_route: { host: app.cl.test, path: /, contains: "..." , timeout: 60 }
+step_assert_http_route() {
+  local host path contains timeout
+  host="$(echo "$1" | jq -r '.host')"
+  path="$(echo "$1" | jq -r '.path // "/"')"
+  contains="$(echo "$1" | jq -r '.contains // empty')"
+  timeout="$(echo "$1" | jq -r '.timeout // 60')"
+
+  wait_for "$host$path answered by the proxy" "$timeout" \
+    "_http_route_ok '$host' '$path' '$contains'"
+  log "$host$path is served through the reverse proxy"
+}
+
+_http_route_ok() {
+  local host="$1" path="$2" contains="$3" node body
+  for node in $(_running_nodes); do
+    body="$(curl -s -m 5 -H "Host: $host" "http://$(host_addr "$node" http_port)$path" 2>/dev/null)" || continue
+    if [[ -z "$contains" || "$body" == *"$contains"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# assert_published_port: { contains: "...", path: /, timeout: 60 }
+#
+# The published port is forwarded straight through, so anything that speaks
+# to it works; http is used because the harness already has curl and the test
+# service already answers it.
+step_assert_published_port() {
+  local contains path timeout
+  contains="$(echo "$1" | jq -r '.contains // empty')"
+  path="$(echo "$1" | jq -r '.path // "/"')"
+  timeout="$(echo "$1" | jq -r '.timeout // 60')"
+
+  wait_for "the published port answers on every node" "$timeout" \
+    "_published_port_ok '$path' '$contains'"
+  log "the published port is forwarded to the container"
+}
+
+_published_port_ok() {
+  local path="$1" contains="$2" node body
+  for node in $(_running_nodes); do
+    body="$(curl -s -m 5 "http://$(host_addr "$node" expose_port)$path" 2>/dev/null)" || continue
+    if [[ -z "$contains" || "$body" == *"$contains"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# assert_healthy: { stack: publish, service: probe, timeout: 90 }
+#
+# Used to check things only a container can see. The container's healthcheck
+# is the assertion; this waits for docker to report it passing.
+step_assert_healthy() {
+  local stack svc timeout
+  stack="$(echo "$1" | jq -r '.stack')"
+  svc="$(echo "$1" | jq -r '.service')"
+  timeout="$(echo "$1" | jq -r '.timeout // 90')"
+  wait_for "$stack.$svc healthy" "$timeout" \
+    "instances_everywhere | jq -e --arg s '$stack' --arg v '$svc' \
+      '[.[] | select(.id | startswith(\$s + \".\" + \$v))] | any(.health == \"healthy\")' >/dev/null 2>&1"
+  log "$stack.$svc reports healthy"
+}
+
 dispatch_step() {
   local key val
   key="$(echo "$1" | jq -r 'keys[0]')"
