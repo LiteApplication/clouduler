@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
@@ -187,6 +187,7 @@ pub async fn run(
     ));
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
+    let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone()));
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => { result?; }
@@ -194,6 +195,7 @@ pub async fn run(
     }
     info!("shutting down");
     watcher.abort();
+    self_report.abort();
     config_writer.abort();
     detector.abort();
     fencing.abort();
@@ -678,12 +680,47 @@ fn to_state(
             .filter(|(_, addr)| matches!(addr, cl_config::NodeAddress::Interface(_)))
             .map(|(name, _)| name.clone())
             .collect(),
-        arch: current
-            .map(|c| c.arch.clone())
-            .unwrap_or_else(|| std::env::consts::ARCH.to_string()),
-        binary_hash: current
-            .map(|c| c.binary_hash.clone())
-            .unwrap_or_else(current_binary_hash),
+        // Not derived from this process's own environment: this runs on
+        // whichever node currently leads, so `std::env::consts::ARCH` and the
+        // local binary would describe the leader, not `name`. Left as
+        // whatever is already stored (empty for a brand new node) and healed
+        // by `report_self`, which is the one thing every node — including a
+        // non-leader — runs about itself.
+        arch: current.map(|c| c.arch.clone()).unwrap_or_default(),
+        binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
+    }
+}
+
+/// Keep this node's own `arch` and `binary_hash` accurate in the roster.
+/// Unlike the rest of a `NodeState`, these two fields describe facts only the
+/// node itself can observe, so every node runs this about itself regardless
+/// of leadership — the leader-driven `seed_roster` never touches them.
+///
+/// Also the fix for a node whose roster entry predates one of these fields:
+/// such an entry keeps whatever was stored (empty) forever otherwise, since
+/// `to_state` only fills a field in when the node is being created for the
+/// first time.
+async fn report_self(node_name: String, cluster: Arc<ClusterNode>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        let state = cluster.state().await;
+        let Some(current) = state.nodes.get(&node_name) else {
+            continue;
+        };
+        let arch = std::env::consts::ARCH.to_string();
+        let binary_hash = current_binary_hash();
+        if current.arch == arch && current.binary_hash == binary_hash {
+            continue;
+        }
+        let desired = NodeState {
+            arch,
+            binary_hash,
+            ..current.clone()
+        };
+        if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {
+            warn!(error = %e, "could not report this node's arch and binary hash");
+        }
     }
 }
 
