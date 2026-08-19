@@ -95,16 +95,16 @@ pub async fn run(
     // swapping in a new binary.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
 
-    let api = start_api(
-        &cfg,
+    let api = start_api(StartApiArgs {
+        cfg: &cfg,
         node,
-        &node_name,
-        &config_path,
-        &cluster,
-        &data_dir,
-        docker.clone(),
-        shutdown_tx,
-    )
+        node_name: &node_name,
+        config_path: &config_path,
+        cluster: &cluster,
+        data_dir: &data_dir,
+        docker: docker.clone(),
+        shutdown: shutdown_tx,
+    })
     .await;
 
     let drives = match crate::drives::start(&cfg, node, &node_name, &cluster) {
@@ -237,16 +237,28 @@ pub async fn run(
 /// Every node listens; a node that is not the leader answers with a redirect to
 /// the one that is. That is simpler than starting and stopping a listener on
 /// every election, and it means someone who bookmarked a node still gets in.
-async fn start_api(
-    cfg: &ClusterConfig,
-    node: &Node,
-    node_name: &str,
-    config_path: &Path,
-    cluster: &Arc<ClusterNode>,
-    data_dir: &Path,
+struct StartApiArgs<'a> {
+    cfg: &'a ClusterConfig,
+    node: &'a Node,
+    node_name: &'a str,
+    config_path: &'a Path,
+    cluster: &'a Arc<ClusterNode>,
+    data_dir: &'a Path,
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
     shutdown: tokio::sync::watch::Sender<()>,
-) -> Option<tokio::task::JoinHandle<()>> {
+}
+
+async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>> {
+    let StartApiArgs {
+        cfg,
+        node,
+        node_name,
+        config_path,
+        cluster,
+        data_dir,
+        docker,
+        shutdown,
+    } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
     // about the fallback, which is correct: it is not trusted.
