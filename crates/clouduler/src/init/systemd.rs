@@ -1,6 +1,5 @@
 //! The systemd unit init installs for the daemon.
 
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -61,42 +60,18 @@ pub fn is_available() -> bool {
 /// cleaned up or the user is removed. Copying first makes the installed service
 /// depend only on paths root controls.
 ///
-/// Writes to a temporary file in the destination directory and renames it into
-/// place, because a running daemon cannot have its own executable overwritten
-/// (ETXTBSY) but can have the directory entry swapped underneath it.
+/// Shared with the self-update worker via `cl_update::install`, which does
+/// the actual temp-file-and-rename swap: a running daemon cannot have its own
+/// executable overwritten in place (ETXTBSY), but can have the directory
+/// entry swapped underneath it.
 pub fn install_binary(source: &Path, destination: &Path) -> Result<()> {
-    if same_file(source, destination) {
-        return Ok(());
-    }
-    let dir = destination
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("{} has no directory", destination.display()))?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-
-    let staged = dir.join(format!(
-        ".{}.new",
-        destination
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("clouduler"))
-            .to_string_lossy()
-    ));
-    std::fs::copy(source, &staged)
-        .with_context(|| format!("copying {} to {}", source.display(), staged.display()))?;
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("making {} executable", staged.display()))?;
-    std::fs::rename(&staged, destination).with_context(|| {
-        format!("moving {} into place at {}", staged.display(), destination.display())
-    })?;
-    Ok(())
-}
-
-/// True when both paths are the same file on disk, so a re-run of init that
-/// points at the binary already installed copies nothing.
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::metadata(a), std::fs::metadata(b)) {
-        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-        _ => false,
-    }
+    cl_update::install::install_binary(source, destination).with_context(|| {
+        format!(
+            "installing {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 /// Write the unit and reload systemd so it is visible.
@@ -132,6 +107,7 @@ fn systemctl(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn unit() -> Unit {
         Unit {

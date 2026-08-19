@@ -19,8 +19,10 @@ cl-drive.workspace = true
 cl-net.workspace = true
 cl-sched.workspace = true
 cl-secret.workspace = true
+cl-update.workspace = true
 
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
 hickory-proto.workspace = true
 instant-acme.workspace = true

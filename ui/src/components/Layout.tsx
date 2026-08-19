@@ -48,6 +48,7 @@ const LINKS: NavItem[] = [
   },
   { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
   { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },
+  { to: '/self-update', label: 'Self-update', short: 'Update', icon: 'refresh' },
 ];
 
 const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [

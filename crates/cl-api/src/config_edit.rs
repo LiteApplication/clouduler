@@ -136,6 +136,7 @@ mod tests {
             auth: Default::default(),
             cloudflare: None,
             proxy: Default::default(),
+            self_update: None,
         }
     }
 

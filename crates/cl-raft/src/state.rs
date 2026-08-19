@@ -51,6 +51,16 @@ pub struct NodeState {
     /// be placed on a node that implements it.
     #[serde(default)]
     pub egress_networks: BTreeSet<String>,
+    /// `std::env::consts::ARCH` of the running binary, e.g. `x86_64` or
+    /// `aarch64`. Lets the self-update orchestrator group nodes by what needs
+    /// a native build.
+    #[serde(default)]
+    pub arch: String,
+    /// Blake3 hash of the currently running binary, hex encoded. Lets the
+    /// self-update orchestrator confirm a restarted node actually came back
+    /// on the freshly built binary rather than just coming back.
+    #[serde(default)]
+    pub binary_hash: String,
 }
 
 impl NodeState {
@@ -999,6 +1009,8 @@ mod tests {
             availability: Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }
     }
 
@@ -1430,6 +1442,25 @@ mod tests {
         // Nor reaches a log line.
         let rendered = format!("{:?}", state.secrets["db_password"]);
         assert!(!rendered.contains("ciphertext"));
+    }
+
+    /// The self-update deploy key rides the ordinary secrets map under a
+    /// reserved name, with no special casing in `redacted()`. This confirms
+    /// that falls out for free rather than needing its own blanking rule.
+    #[test]
+    fn redacted_blanks_the_self_update_deploy_key_like_any_other_secret() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::PutSecret {
+            name: "_clouduler_self_update_deploy_key".into(),
+            sealed: base64_encode(b"ssh-private-key-ciphertext"),
+            key_fingerprint: "abc123".into(),
+            owner: None,
+        });
+        assert!(state
+            .redacted()
+            .secrets["_clouduler_self_update_deploy_key"]
+            .sealed
+            .is_empty());
     }
 
     #[test]

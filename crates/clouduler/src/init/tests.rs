@@ -91,7 +91,9 @@ async fn serve(config: &ClusterConfig) -> Server {
             drives: BTreeMap::new(),
             availability: Availability::Active,
             labels: Default::default(),
-        egress_networks: Default::default(),
+            egress_networks: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }))
         .await
         .expect("seed roster");
@@ -131,6 +133,8 @@ async fn serve(config: &ClusterConfig) -> Server {
         // This harness drives the join flow over TLS; the proxy's plain
         // backend listener plays no part in it.
         plain_listen_addr: None,
+        self_update_artifact_path: dir.path().join("self-update-artifact"),
+        shutdown: tokio::sync::watch::channel(()).0,
     })
     .await
     .expect("build api");

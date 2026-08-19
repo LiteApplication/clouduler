@@ -21,6 +21,9 @@ import type {
   RedirectRule,
   SecretEntry,
   SecretPutRequest,
+  SelfUpdateConfig,
+  SelfUpdateRunState,
+  SelfUpdateSshKeyStatus,
   ValidationResult,
   VolumeState,
 } from './types';
@@ -205,6 +208,15 @@ export const api = {
   renewCertificate: (fqdn: string) => post<void>(`/api/certificates/${encodeURIComponent(fqdn)}/renew`),
   listDns: () => get<DnsRecordState[]>('/api/dns'),
   reconcileDns: () => post<void>('/api/dns/reconcile'),
+
+  // self-update: generate the deploy key first, then set the repo
+  generateSelfUpdateSshKey: () => post<SelfUpdateSshKeyStatus & { public_key: string }>('/api/self-update/ssh-key'),
+  selfUpdateSshKey: () => get<SelfUpdateSshKeyStatus>('/api/self-update/ssh-key'),
+  setSelfUpdateRepo: (body: SelfUpdateConfig) => put<void>('/api/self-update/repo', body),
+  selfUpdateRepo: () => get<SelfUpdateConfig | null>('/api/self-update/repo'),
+  startSelfUpdate: () => post<SelfUpdateRunState>('/api/self-update/run'),
+  selfUpdateRun: () => get<SelfUpdateRunState | null>('/api/self-update/run'),
+  cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
 };
 
 /**

@@ -38,7 +38,9 @@ fn node(name: &str) -> NodeState {
         drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
         availability: Availability::Active,
         labels: Default::default(),
-            egress_networks: Default::default(),
+        egress_networks: Default::default(),
+        arch: Default::default(),
+        binary_hash: Default::default(),
     }
 }
 

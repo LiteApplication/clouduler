@@ -119,6 +119,8 @@ impl Harness {
             availability: Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }))
         .await
         .unwrap();
@@ -130,6 +132,8 @@ impl Harness {
             availability: Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }))
         .await
         .unwrap();

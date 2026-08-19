@@ -15,6 +15,11 @@ export interface NodeState {
   availability: Availability;
   /** Egress-kind networks this node has a host interface address for. */
   egress_networks: string[];
+  /** std::env::consts::ARCH of the running binary, e.g. "x86_64". Empty until
+   *  the node has reported in at least once since this field was added. */
+  arch: string;
+  /** Blake3 hash (hex) of the currently running binary. */
+  binary_hash: string;
 }
 
 export interface ResourceUsage {
@@ -365,6 +370,7 @@ export interface ClusterConfig {
   auth: AuthConfig;
   cloudflare: CloudflareConfig | null;
   proxy: ProxyConfig;
+  self_update: SelfUpdateConfig | null;
 }
 
 export interface PendingConfig {
@@ -401,4 +407,51 @@ export interface LogLine {
   timestamp: string;
   stream: 'stdout' | 'stderr';
   message: string;
+}
+
+// ---- self-update ----
+
+/** Git-based cluster self-update. Write-once through the ui, like `cloudflare`. */
+export interface SelfUpdateConfig {
+  git_url: string;
+  git_branch: string;
+  ssh_public_key: string;
+}
+
+/** GET /api/self-update/ssh-key. The public key is only ever surfaced by the
+ *  POST that generates it, then cached here once the repo has been saved. */
+export interface SelfUpdateSshKeyStatus {
+  public_key: string | null;
+}
+
+/** One node's progress through a self-update run, forward-only. Matches
+ *  `cl_update::plan::NodePhase`: a unit variant serializes as a bare string,
+ *  a variant carrying data as `{ variant_name: { ...fields } }`. */
+export type SelfUpdateNodePhase =
+  | 'idle'
+  | 'assigned_build'
+  | 'cloning'
+  | 'building'
+  | { built: { sha256: string } }
+  | { build_failed: { reason: string } }
+  | 'awaiting_artifact'
+  | 'fetching'
+  | 'ready'
+  | 'restarting'
+  | 'done'
+  | { restart_failed: { reason: string } };
+
+/** Stored in `ClusterState.configs['_clouduler_self_update_run']`, so it
+ *  arrives live over the same `/api/events` stream as everything else. */
+export interface SelfUpdateRunState {
+  id: string;
+  target_commit: string | null;
+  /** arch -> node name building for that arch */
+  arch_builders: Record<string, string>;
+  /** node name -> its current phase */
+  per_node: Record<string, SelfUpdateNodePhase>;
+  started_at: number;
+  finished_at: number | null;
+  failure_reason: string | null;
+  restart_started_at: number | null;
 }

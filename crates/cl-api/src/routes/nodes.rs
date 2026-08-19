@@ -137,6 +137,8 @@ async fn add(
             labels: body.labels,
             availability: Availability::Active,
             egress_networks: Default::default(),
+            arch: String::new(),
+            binary_hash: String::new(),
         }),
     )
     .await?;

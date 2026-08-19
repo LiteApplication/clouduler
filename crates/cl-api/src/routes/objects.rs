@@ -19,7 +19,13 @@ use crate::server::AppState;
 /// Config names clouduler itself owns and never shows through the generic
 /// config routes.
 fn is_reserved(name: &str) -> bool {
-    name == API_KEYS_CONFIG || name == REDIRECTS_CONFIG
+    name == API_KEYS_CONFIG || name == REDIRECTS_CONFIG || super::self_update::is_reserved_config(name)
+}
+
+/// Secret names clouduler itself owns and never shows through the generic
+/// secret listing route.
+fn is_reserved_secret(name: &str) -> bool {
+    super::self_update::is_reserved_secret(name)
 }
 
 pub fn router() -> Router<AppState> {
@@ -152,6 +158,7 @@ async fn list_secrets(_identity: Identity, State(state): State<AppState>) -> Jso
         cluster_state
             .secrets
             .values()
+            .filter(|s| !is_reserved_secret(&s.name))
             .map(|s| SecretSummary {
                 name: s.name.clone(),
                 revision: s.revision,
@@ -182,6 +189,9 @@ async fn put_secret(
     Path(name): Path<String>,
     Json(body): Json<PutSecretRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if is_reserved_secret(&name) {
+        return Err(ApiError::BadRequest(format!("{name} is a reserved name")));
+    }
     let plaintext = match body {
         PutSecretRequest::Literal { value } => value.into_bytes(),
         PutSecretRequest::File { content } => cl_raft::base64_decode(&content)
@@ -225,6 +235,9 @@ async fn delete_secret(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    if is_reserved_secret(&name) {
+        return Err(ApiError::BadRequest(format!("{name} is a reserved name")));
+    }
     let response = state
         .cluster
         .submit(ClusterRequest::RemoveSecret { name })
@@ -270,4 +283,24 @@ async fn post_key(
     key.save(&state.key_path).map_err(ApiError::internal)?;
     *key_guard = Some(key);
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The self-update run object rides `state.configs` like the api key
+    /// store does, so it needs the same filtering out of the generic config
+    /// listing, mirroring the existing `API_KEYS_CONFIG` exclusion.
+    #[test]
+    fn the_self_update_run_config_is_excluded_from_the_generic_listing() {
+        assert!(is_reserved(cl_update::plan::RUN_CONFIG));
+        assert!(!is_reserved("a_users_config"));
+    }
+
+    #[test]
+    fn the_self_update_deploy_key_is_excluded_from_the_generic_secret_listing() {
+        assert!(is_reserved_secret(cl_update::plan::DEPLOY_KEY_SECRET));
+        assert!(!is_reserved_secret("db_password"));
+    }
 }

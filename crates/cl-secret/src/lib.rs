@@ -10,6 +10,7 @@
 //! between nodes, which matters because any node may seal a secret.
 
 mod error;
+pub mod internal_auth;
 mod key;
 mod seal;
 
