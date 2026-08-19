@@ -256,6 +256,8 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }
     }
 

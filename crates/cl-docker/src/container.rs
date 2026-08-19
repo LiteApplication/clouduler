@@ -11,9 +11,11 @@ use bollard::models::{
     RestartPolicy as BollardRestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
-    RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, DownloadFromContainerOptionsBuilder,
+    ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
+    StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
+use futures::StreamExt;
 
 use crate::client::Docker;
 use crate::error::{classify, DockerError, Result};
@@ -336,6 +338,28 @@ impl From<ContainerSummary> for ContainerState {
     }
 }
 
+/// Un-tar the first entry of a docker `download_from_container` archive.
+///
+/// Docker always wraps a single-file download in a tar with one entry, so
+/// this takes whichever entry comes first rather than matching on name: the
+/// entry's path is the container path made relative, and reconstructing that
+/// exactly is more brittle than just trusting there is only one.
+fn untar_single_file(archive: &[u8], container_path: &str) -> Result<Vec<u8>> {
+    let mut tar = tar::Archive::new(archive);
+    let mut entries = tar
+        .entries()
+        .map_err(|e| DockerError::Api(bollard::errors::Error::IOError { err: e }))?;
+    let mut entry = entries
+        .next()
+        .ok_or_else(|| DockerError::NotFound(container_path.to_string()))?
+        .map_err(|e| DockerError::Api(bollard::errors::Error::IOError { err: e }))?;
+
+    let mut contents = Vec::new();
+    std::io::Read::read_to_end(&mut entry, &mut contents)
+        .map_err(|e| DockerError::Api(bollard::errors::Error::IOError { err: e }))?;
+    Ok(contents)
+}
+
 impl Docker {
     /// Create a container from `spec`. Does not start it.
     pub async fn create(&self, spec: &ContainerSpec) -> Result<String> {
@@ -401,6 +425,42 @@ impl Docker {
                 other => Err(other),
             },
         }
+    }
+
+    /// Wait for a container to exit, returning its exit code.
+    ///
+    /// Used by the self-update build: the build container has to finish
+    /// before the binary it produced can be pulled out of it.
+    pub async fn wait(&self, name: &str) -> Result<i64> {
+        let options = WaitContainerOptionsBuilder::default().build();
+        let mut stream = Box::pin(self.inner.wait_container(name, Some(options)));
+        match stream.next().await {
+            Some(Ok(resp)) => Ok(resp.status_code),
+            // A non-zero exit surfaces as an error variant carrying the code,
+            // not a value in the stream: bollard's `wait_container` maps it
+            // that way, so report the code rather than failing the caller.
+            Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => Ok(code),
+            Some(Err(e)) => Err(classify(e)),
+            None => Err(DockerError::Api(bollard::errors::Error::IOError {
+                err: std::io::Error::other("wait stream ended with no response"),
+            })),
+        }
+    }
+
+    /// Pull a single file out of a stopped or running container, un-tarring
+    /// the single-entry archive docker wraps it in.
+    ///
+    /// Used to fetch the freshly built binary out of the build container.
+    pub async fn download_file(&self, name: &str, container_path: &str) -> Result<Vec<u8>> {
+        let options = DownloadFromContainerOptionsBuilder::default()
+            .path(container_path)
+            .build();
+        let mut stream = Box::pin(self.inner.download_from_container(name, Some(options)));
+        let mut archive = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            archive.extend_from_slice(&chunk.map_err(classify)?);
+        }
+        untar_single_file(&archive, container_path)
     }
 
     /// List every container carrying the clouduler ownership label, running or not.
@@ -604,6 +664,30 @@ mod tests {
         let body = spec.to_create_body();
         assert!(body.host_config.unwrap().binds.is_none());
         assert!(body.exposed_ports.is_none());
+    }
+
+    fn build_test_tar(name: &str, contents: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append_data(&mut header, name, contents).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn untar_single_file_pulls_out_the_only_entry() {
+        let archive = build_test_tar("clouduler", b"pretend-binary-bytes");
+        let out = untar_single_file(&archive, "/usr/local/bin/clouduler").expect("untar");
+        assert_eq!(out, b"pretend-binary-bytes");
+    }
+
+    #[test]
+    fn untar_an_empty_archive_is_not_found() {
+        let archive = tar::Builder::new(Vec::new()).into_inner().unwrap();
+        let err = untar_single_file(&archive, "/missing").unwrap_err();
+        assert!(matches!(err, DockerError::NotFound(_)));
     }
 
     #[tokio::test]

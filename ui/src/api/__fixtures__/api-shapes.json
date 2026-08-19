@@ -58,6 +58,11 @@
     "armed": false,
     "seconds_left": null
   },
+  "selfUpdateRepo": null,
+  "selfUpdateRun": null,
+  "selfUpdateSshKey": {
+    "public_key": null
+  },
   "state": {
     "assignments": {},
     "certificates": {},
@@ -73,7 +78,9 @@
     "dns_records": {},
     "nodes": {
       "n0": {
+        "arch": "",
         "availability": "active",
+        "binary_hash": "",
         "drives": {},
         "labels": {},
         "name": "n0",

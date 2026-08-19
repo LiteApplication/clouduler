@@ -67,6 +67,8 @@ async fn harness() -> Harness {
         drives: BTreeMap::new(),
         availability: Availability::Active,
         labels: Default::default(),
+        arch: Default::default(),
+        binary_hash: Default::default(),
     }))
     .await
     .expect("submit");
@@ -108,8 +110,10 @@ async fn harness() -> Harness {
         auth: Default::default(),
         cloudflare: None,
         proxy: Default::default(),
+        self_update: None,
     };
 
+    let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(());
     let state = AppState {
         cluster: Arc::new(node),
         docker: Arc::new(RwLock::new(Docker::connect().ok())),
@@ -124,6 +128,8 @@ async fn harness() -> Harness {
         started_at: Instant::now(),
         session_ttl: Duration::from_secs(3600),
         rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
+        self_update_artifact_path: dir.path().join("self-update-artifact"),
+        shutdown,
     };
 
     let router = build_router(state.clone());
@@ -407,6 +413,64 @@ async fn setting_a_cloudflare_token_without_cloudflare_enabled_is_a_conflict() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+/// Calling `POST ssh-key` twice must return the same public key rather than
+/// generating (and sealing) a second, orphaned keypair.
+#[tokio::test]
+async fn generating_the_self_update_ssh_key_twice_returns_the_same_public_key() {
+    let h = harness().await;
+    let generate = || {
+        h.router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/self-update/ssh-key")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let first = generate().await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(first.into_body()).await.unwrap().to_bytes(),
+    )
+    .unwrap();
+
+    let second = generate().await.unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(second.into_body()).await.unwrap().to_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(first_body["public_key"], second_body["public_key"]);
+}
+
+/// The repo section is write-once: once set, `PUT` again is a conflict rather
+/// than a silent overwrite, exactly like the cloudflare token.
+#[tokio::test]
+async fn setting_the_self_update_repo_twice_is_a_conflict() {
+    let h = harness().await;
+    let body = r#"{"git_url":"git@example.com:org/repo.git","git_branch":"main","ssh_public_key":"ssh-ed25519 AAAA test"}"#;
+    let put = || {
+        h.router.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/self-update/repo")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+
+    let first = put().await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = put().await.unwrap();
+    assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -805,6 +869,8 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             drives: BTreeMap::new(),
             availability: Availability::Active,
             labels: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }))
         .await
         .expect("add n1");
@@ -913,6 +979,9 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("clusterConfig", "/api/config"),
         ("cloudflareTokenStatus", "/api/cloudflare/token"),
         ("clusterKeyStatus", "/api/secrets/key"),
+        ("selfUpdateSshKey", "/api/self-update/ssh-key"),
+        ("selfUpdateRepo", "/api/self-update/repo"),
+        ("selfUpdateRun", "/api/self-update/run"),
     ] {
         let resp = h
             .router

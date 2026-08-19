@@ -1,5 +1,6 @@
 //! Authentication: api keys and OIDC, resolved to one [`Identity`].
 
+pub mod internal;
 pub mod keys;
 pub mod middleware;
 pub mod oidc;

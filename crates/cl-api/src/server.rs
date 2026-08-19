@@ -54,6 +54,13 @@ pub struct AppState {
     pub started_at: Instant,
     pub session_ttl: Duration,
     pub rollback_after: Duration,
+    /// Where a self-update artifact this node built or fetched is staged,
+    /// waiting for the internal restart route to install it.
+    pub self_update_artifact_path: PathBuf,
+    /// Fires the daemon's clean shutdown path, the same one `SIGINT` drives,
+    /// so the internal restart route can trigger it programmatically after
+    /// swapping in a new binary.
+    pub shutdown: tokio::sync::watch::Sender<()>,
 }
 
 impl AppState {
@@ -87,6 +94,8 @@ pub struct ApiServerOptions {
     /// Plain HTTP listener the reverse proxy forwards dashboard traffic to.
     /// `None` leaves it off. Always a loopback address; see `WebConfig`.
     pub plain_listen_addr: Option<SocketAddr>,
+    pub self_update_artifact_path: PathBuf,
+    pub shutdown: tokio::sync::watch::Sender<()>,
 }
 
 pub struct ApiServer {
@@ -142,6 +151,8 @@ impl ApiServer {
             started_at: Instant::now(),
             session_ttl,
             rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
+            self_update_artifact_path: options.self_update_artifact_path,
+            shutdown: options.shutdown,
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the

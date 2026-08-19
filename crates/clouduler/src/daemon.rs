@@ -90,6 +90,11 @@ pub async fn run(
     // since the web ui is where someone would go to find out why.
     let docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>> = Arc::default();
 
+    // Fires the same clean shutdown path `ctrl_c()` drives, so the internal
+    // self-update restart route can trigger it programmatically after
+    // swapping in a new binary.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
+
     let api = start_api(
         &cfg,
         node,
@@ -98,6 +103,7 @@ pub async fn run(
         &cluster,
         &data_dir,
         docker.clone(),
+        shutdown_tx,
     )
     .await;
 
@@ -150,6 +156,10 @@ pub async fn run(
     // ordering against a stack deploy does not matter.
     let overlay = crate::overlay::start(&cfg, &node_name, &cluster, connected.clone());
 
+    let self_update = connected
+        .clone()
+        .and_then(|docker| start_self_update(&cfg, &node_name, &cluster, docker, &data_dir));
+
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
     // registry to find the volume on disk, so a node missing either runs no
@@ -170,7 +180,10 @@ pub async fn run(
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
 
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => { result?; }
+        _ = shutdown_rx.changed() => {}
+    }
     info!("shutting down");
     watcher.abort();
     config_writer.abort();
@@ -178,6 +191,10 @@ pub async fn run(
     fencing.abort();
     if let Some(scheduler) = scheduler {
         scheduler.abort();
+    }
+    if let Some((orchestrator, worker)) = self_update {
+        orchestrator.abort();
+        worker.abort();
     }
     if let Some(api) = api {
         api.abort();
@@ -217,6 +234,7 @@ async fn start_api(
     cluster: &Arc<ClusterNode>,
     data_dir: &Path,
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
+    shutdown: tokio::sync::watch::Sender<()>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -255,8 +273,9 @@ async fn start_api(
         tls_key_pem: key_pem.into_bytes(),
         listen_addr,
         plain_listen_addr,
+        self_update_artifact_path: self_update_artifact_path(data_dir),
+        shutdown,
     };
-    let _ = data_dir;
 
     let server = match cl_api::ApiServer::new(options).await {
         Ok(server) => server,
@@ -273,6 +292,64 @@ async fn start_api(
             warn!(error = %e, "api server stopped");
         }
     }))
+}
+
+/// Where a self-update artifact this node built or fetched is staged.
+fn self_update_artifact_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("self-update").join("artifact")
+}
+
+/// Wire up the leader-gated orchestrator and the per-node worker for
+/// git-based self-update, alongside the scheduler. Both need a cluster key
+/// (to unseal the deploy key and to sign internal node-to-node calls), so a
+/// node without one runs neither: it could not build or fetch anything it
+/// would then be unable to verify came from a trusted peer.
+fn start_self_update(
+    cfg: &ClusterConfig,
+    node_name: &str,
+    cluster: &Arc<ClusterNode>,
+    docker: cl_docker::Docker,
+    data_dir: &Path,
+) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
+    let node = cfg.node(node_name)?;
+    let orchestrator_key = load_cluster_key(cfg, node)?;
+    let worker_key = load_cluster_key(cfg, node)?;
+
+    let http = reqwest::Client::builder()
+        // Peers are authenticated by the HMAC header, not by TLS trust: every
+        // node's certificate is self signed until ACME issues a real one, and
+        // there is no shared CA to check it against.
+        .danger_accept_invalid_certs(true)
+        .build()
+        .ok()?;
+
+    let checkout_dir = data_dir.join("self-update").join("checkout");
+    let artifact_path = self_update_artifact_path(data_dir);
+    if let Some(parent) = artifact_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let orchestrator = cl_update::orchestrator::Orchestrator {
+        cluster: cluster.clone(),
+        http: http.clone(),
+        cluster_config: cfg.clone(),
+        cluster_key: orchestrator_key,
+    };
+    let worker = cl_update::worker::Worker {
+        node_name: node_name.to_string(),
+        cluster: cluster.clone(),
+        docker,
+        cluster_key: worker_key,
+        http,
+        cluster_config: cfg.clone(),
+        checkout_dir,
+        artifact_path,
+    };
+
+    Some((
+        tokio::spawn(orchestrator.run()),
+        tokio::spawn(worker.run()),
+    ))
 }
 
 /// Connect to docker, waiting for it to come up.
@@ -572,5 +649,28 @@ fn to_state(
         availability: current
             .map(|c| c.availability)
             .unwrap_or(Availability::Active),
+        arch: current
+            .map(|c| c.arch.clone())
+            .unwrap_or_else(|| std::env::consts::ARCH.to_string()),
+        binary_hash: current
+            .map(|c| c.binary_hash.clone())
+            .unwrap_or_else(current_binary_hash),
     }
+}
+
+/// Blake3 hash of the running binary, hex encoded.
+///
+/// Used by the self-update orchestrator to confirm a restarted node actually
+/// came back on the freshly built binary rather than just coming back at all.
+/// Empty on any failure to locate or read the executable, which is treated as
+/// "unknown" rather than a startup error: reporting the roster is more
+/// important than this one field.
+fn current_binary_hash() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return String::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return String::new();
+    };
+    blake3::hash(&bytes).to_hex().to_string()
 }

@@ -118,6 +118,8 @@ impl Harness {
             drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/unused"))]),
             availability: Availability::Active,
             labels: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }))
         .await
         .unwrap();
@@ -128,6 +130,8 @@ impl Harness {
             drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/unused"))]),
             availability: Availability::Active,
             labels: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
         }))
         .await
         .unwrap();

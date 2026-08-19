@@ -136,6 +136,8 @@ async fn add(
             drives: body.drives,
             labels: body.labels,
             availability: Availability::Active,
+            arch: String::new(),
+            binary_hash: String::new(),
         }),
     )
     .await?;

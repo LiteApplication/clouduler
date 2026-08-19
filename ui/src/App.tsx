@@ -16,6 +16,7 @@ import { Configuration } from './views/Configuration';
 import { ConfigDraftProvider } from './views/config/draft';
 import { Certificates } from './views/Certificates';
 import { Redirects } from './views/Redirects';
+import { SelfUpdate } from './views/SelfUpdate';
 
 export function App() {
   const { identity, loading } = useAuth();
@@ -46,6 +47,7 @@ export function App() {
             <Route path="/configuration/*" element={<Configuration />} />
             <Route path="/certificates" element={<Certificates />} />
             <Route path="/redirects" element={<Redirects />} />
+            <Route path="/self-update" element={<SelfUpdate />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Layout>

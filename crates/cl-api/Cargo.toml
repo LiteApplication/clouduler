@@ -9,6 +9,7 @@ cl-config.workspace = true
 cl-docker.workspace = true
 cl-raft.workspace = true
 cl-secret.workspace = true
+cl-update.workspace = true
 
 axum = { version = "0.8", features = ["macros"] }
 axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
