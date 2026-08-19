@@ -8,8 +8,20 @@ import { api, ApiError } from '../api/client';
 import type { RedirectRule, StaticRouteRule } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { Icon } from '../components/Icon';
+import { SelectField } from '../components/FormFields';
 
 const STATUS_OPTIONS: RedirectRule['status'][] = [301, 302, 307, 308];
+
+function useNetworkNames(): string[] {
+  const [names, setNames] = useState<string[]>([]);
+  useEffect(() => {
+    api
+      .getConfiguration()
+      .then((config) => setNames(Object.keys(config.networks)))
+      .catch(() => setNames([]));
+  }, []);
+  return names;
+}
 
 type DraftRule = Omit<RedirectRule, 'id'>;
 
@@ -42,6 +54,7 @@ export function Redirects() {
 
 function RedirectsSection() {
   const { isAdmin } = useAuth();
+  const networkNames = useNetworkNames();
   const [rules, setRules] = useState<RedirectRule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -59,7 +72,7 @@ function RedirectsSection() {
 
   const startCreate = () => {
     setEditing(null);
-    setDraft(emptyDraft(''));
+    setDraft(emptyDraft(networkNames[0] ?? ''));
     setShowForm(true);
   };
 
@@ -141,15 +154,13 @@ function RedirectsSection() {
             />
             <span className="field-hint">A bare label gets the network's domain appended.</span>
           </div>
-          <div className="field">
-            <label htmlFor="redirect-network">Network</label>
-            <input
-              id="redirect-network"
-              type="text"
-              value={draft.network}
-              onChange={(e) => setDraft({ ...draft, network: e.target.value })}
-            />
-          </div>
+          <SelectField
+            id="redirect-network"
+            label="Network"
+            value={draft.network}
+            onChange={(network) => setDraft({ ...draft, network })}
+            options={networkNames.map((n) => ({ value: n, label: n }))}
+          />
           <div className="field">
             <label htmlFor="redirect-prefix">Path prefix</label>
             <input
@@ -266,6 +277,7 @@ const emptyStaticRouteDraft = (network: string): StaticRouteDraft => ({
 
 function StaticBackendsSection() {
   const { isAdmin } = useAuth();
+  const networkNames = useNetworkNames();
   const [routes, setRoutes] = useState<StaticRouteRule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -283,7 +295,7 @@ function StaticBackendsSection() {
 
   const startCreate = () => {
     setEditing(null);
-    setDraft(emptyStaticRouteDraft(''));
+    setDraft(emptyStaticRouteDraft(networkNames[0] ?? ''));
     setShowForm(true);
   };
 
@@ -372,15 +384,13 @@ function StaticBackendsSection() {
             />
             <span className="field-hint">A bare label gets the network's domain appended.</span>
           </div>
-          <div className="field">
-            <label htmlFor="static-route-network">Network</label>
-            <input
-              id="static-route-network"
-              type="text"
-              value={draft.network}
-              onChange={(e) => setDraft({ ...draft, network: e.target.value })}
-            />
-          </div>
+          <SelectField
+            id="static-route-network"
+            label="Network"
+            value={draft.network}
+            onChange={(network) => setDraft({ ...draft, network })}
+            options={networkNames.map((n) => ({ value: n, label: n }))}
+          />
           <div className="field">
             <label htmlFor="static-route-backend">Backend</label>
             <input
