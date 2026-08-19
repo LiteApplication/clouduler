@@ -40,9 +40,18 @@ run_one() {
   echo "=== running scenario: $name ==="
   if "$SCRIPT_DIR/lib/scenario-run.sh" "$scenario_file" "$run_dir"; then
     echo "=== PASS: $name ==="
+    # Each node's disk image is up to 1.5G and nothing here reuses it once
+    # the scenario is done, so a --all run that kept them all would fill
+    # the disk long before the last scenario runs. Nothing worth keeping
+    # from a passing run, so drop the whole directory.
+    rm -rf "$run_dir"
     return 0
   else
     echo "=== FAIL: $name (logs in $run_dir) ==="
+    # Keep the small state/log files for diagnosis but drop the disk
+    # images, which are the only thing here large enough to matter for
+    # disk space and are useless without a live VM to attach them to.
+    rm -f "$run_dir"/*.img
     return 1
   fi
 }

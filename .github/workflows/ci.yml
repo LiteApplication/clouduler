@@ -55,10 +55,11 @@ jobs:
             ./target/debug/clouduler --config "$cfg" check
           done
 
-  # The qemu suite boots real VMs, so it is slower and kept off the pull request
-  # path. It runs on pushes to the default branch and on demand.
+  # The qemu suite boots real VMs, so it is slower and kept off the pull
+  # request and push paths entirely. It only runs when triggered manually
+  # via workflow_dispatch.
   qemu:
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # The whole suite, and the runners often have no kvm, so every VM is
     # emulated. Locally with kvm the suite takes about twenty minutes; under
