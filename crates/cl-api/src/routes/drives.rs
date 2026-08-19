@@ -24,6 +24,7 @@ struct DriveSummary {
     name: String,
     mode: String,
     served_by: Option<String>,
+    sync_interval: String,
     /// Nodes that implement this drive, with whether each one is currently
     /// reachable.
     nodes: Vec<DriveNodeStatus>,
@@ -46,6 +47,7 @@ async fn list_drives(_identity: Identity, State(state): State<AppState>) -> Json
                 name: name.clone(),
                 mode: format!("{:?}", drive.mode).to_lowercase(),
                 served_by: drive.served_by.clone(),
+                sync_interval: humantime::format_duration(drive.sync_interval).to_string(),
                 nodes: cluster_state
                     .nodes
                     .values()
