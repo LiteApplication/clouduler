@@ -15,22 +15,25 @@ export interface NodeState {
   availability: Availability;
 }
 
-/** Live resource usage, only present on GET /api/nodes/:name. */
-export interface NodeDetail extends NodeState {
-  reachable: boolean;
+export interface ResourceUsage {
   cpu_count: number;
-  load_avg_1: number;
-  mem_total_bytes: number;
-  mem_used_bytes: number;
-  uptime_secs: number;
-  container_count: number;
-  disks: NodeDiskUsage[];
+  load_1m: number;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
+  uptime_seconds: number;
+  /** False (all-zero above) unless the answering node is this node itself. */
+  local: boolean;
 }
 
-export interface NodeDiskUsage {
-  drive: string;
-  used_bytes: number;
-  total_bytes: number;
+/** Response of GET /api/nodes/:name. */
+export interface NodeDetail {
+  name: string;
+  role: Role;
+  availability: Availability;
+  reachable: boolean;
+  drives: string[];
+  container_count: number;
+  usage: ResourceUsage;
 }
 
 export type DesiredState = 'running' | 'stopped';
@@ -195,13 +198,18 @@ export interface ApiErrorBody {
 
 export type DriveMode = 'replicated' | 'served';
 
+export interface DriveNodeStatus {
+  node: string;
+  reachable: boolean;
+}
+
 export interface DriveStatus {
   name: string;
   mode: DriveMode;
   served_by: string | null;
   sync_interval: string;
-  /** node name -> whether it implements this drive */
-  nodes: Record<string, boolean>;
+  /** Nodes that implement this drive. */
+  nodes: DriveNodeStatus[];
 }
 
 // ---- secrets ----

@@ -122,7 +122,7 @@ export function NodeDetail() {
           </span>
           <span className="stat-value">{instances.length}</span>
         </div>
-        {detail && (
+        {detail?.usage.local && (
           <>
             <div className="card stat">
               <span className="stat-head">
@@ -130,7 +130,7 @@ export function NodeDetail() {
                 <span className="stat-label">CPU</span>
               </span>
               <span className="stat-value">
-                {detail.load_avg_1.toFixed(2)} / {detail.cpu_count}
+                {detail.usage.load_1m.toFixed(2)} / {detail.usage.cpu_count}
               </span>
             </div>
             <div className="card stat">
@@ -139,7 +139,7 @@ export function NodeDetail() {
                 <span className="stat-label">Memory</span>
               </span>
               <span className="stat-value">
-                {formatBytes(detail.mem_used_bytes)} / {formatBytes(detail.mem_total_bytes)}
+                {formatBytes(detail.usage.memory_used_bytes)} / {formatBytes(detail.usage.memory_total_bytes)}
               </span>
             </div>
             <div className="card stat">
@@ -147,7 +147,7 @@ export function NodeDetail() {
                 <Icon name="clock" />
                 <span className="stat-label">Uptime</span>
               </span>
-              <span className="stat-value">{formatUptime(detail.uptime_secs)}</span>
+              <span className="stat-value">{formatUptime(detail.usage.uptime_seconds)}</span>
             </div>
           </>
         )}
@@ -165,20 +165,15 @@ export function NodeDetail() {
               <tr>
                 <th>Drive</th>
                 <th>Local path</th>
-                <th>Disk usage</th>
               </tr>
             </thead>
             <tbody>
-              {Object.entries(node.drives).map(([drive, path]) => {
-                const disk = detail?.disks.find((d) => d.drive === drive);
-                return (
-                  <tr key={drive}>
-                    <td>{drive}</td>
-                    <td className="mono">{path}</td>
-                    <td>{disk ? `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)}` : '-'}</td>
-                  </tr>
-                );
-              })}
+              {Object.entries(node.drives).map(([drive, path]) => (
+                <tr key={drive}>
+                  <td>{drive}</td>
+                  <td className="mono">{path}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

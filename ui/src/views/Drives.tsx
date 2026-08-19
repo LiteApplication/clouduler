@@ -84,9 +84,11 @@ export function Drives() {
                   <td>{d.served_by ?? '-'}</td>
                   <td>{d.sync_interval}</td>
                   <td className="wrap">
-                    {Object.entries(d.nodes)
-                      .map(([node, has]) => `${node}${has ? '' : ' (missing)'}`)
-                      .join(', ')}
+                    {d.nodes.length === 0
+                      ? '-'
+                      : d.nodes
+                          .map((n) => `${n.node}${n.reachable ? '' : ' (unreachable)'}`)
+                          .join(', ')}
                   </td>
                 </tr>
               ))}
