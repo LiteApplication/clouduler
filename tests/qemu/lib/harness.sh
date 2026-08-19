@@ -36,10 +36,13 @@ qemu_accel() {
 #
 # clnode/clip are read back off /proc/cmdline by that init.
 kernel_cmdline() {
-  local node="$1" ip="$2"
+  local node="$1" ip="$2" vpn_ip="${3:-}" vpn_canary="${4:-}"
+  local extra=""
+  [[ -n "$vpn_ip" ]] && extra="$extra clvpnip=$vpn_ip"
+  [[ -n "$vpn_canary" ]] && extra="$extra clvpncanary=1"
   echo "console=ttyS0 root=/dev/vda rootfstype=ext4" \
        "modules=virtio_pci,virtio_blk,virtio_net,ext4" \
-       "init=/sbin/init-clouduler ip=off clnode=$node clip=$ip/24"
+       "init=/sbin/init-clouduler ip=off clnode=$node clip=$ip/24$extra"
 }
 
 # ---- vm lifecycle ---------------------------------------------------------
@@ -58,6 +61,11 @@ declare -a VM_NODES=()
 vm_start() {
   local node="$1" ip="$2" web_port="$3" rpc_port="$4" mcast="$5" idx="$6" host_ip="$7"
   local http_port="$8" expose_port="$9"
+  # Optional, only set by scenarios using the vpn-segment (see
+  # scenario_prep.py's "vpn_segment" handling): a third netdev standing in
+  # for a VPN tunnel. Empty vpn_mcast means no third device at all, so every
+  # other scenario's VM shape is unchanged.
+  local vpn_ip="${10:-}" vpn_canary="${11:-}" vpn_mcast="${12:-}"
   local disk="$RUN_DIR/$node.img"
   local serial="$RUN_DIR/$node.serial.log"
   local pidfile="$RUN_DIR/$node.pid"
@@ -68,9 +76,15 @@ vm_start() {
   "$LIB_DIR/mkdisk.sh" "$ROOTFS_CACHE" "$node" "$RUN_DIR/cluster.yaml" "$CLOUDULER_BIN" "$disk" \
     "$RUN_DIR/secrets.key"
 
-  local mac0 mac1
+  local mac0 mac1 mac2
   mac0="$(printf '52:54:00:aa:00:%02x' "$idx")"
   mac1="$(printf '52:54:00:bb:00:%02x' "$idx")"
+  mac2="$(printf '52:54:00:cc:00:%02x' "$idx")"
+
+  local -a vpn_args=()
+  if [[ -n "$vpn_mcast" ]]; then
+    vpn_args=(-netdev "socket,mcast=$vpn_mcast:4321,id=net2" -device "virtio-net-pci,netdev=net2,mac=$mac2")
+  fi
 
   # shellcheck disable=SC2086
   qemu-system-x86_64 \
@@ -78,11 +92,12 @@ vm_start() {
     -m 512 -smp 1 \
     -accel "$accel" \
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
-    -append "$(kernel_cmdline "$node" "$ip")" \
+    -append "$(kernel_cmdline "$node" "$ip" "$vpn_ip" "$vpn_canary")" \
     -drive file="$disk",if=virtio,format=raw \
     -netdev socket,mcast="$mcast":4321,id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
     -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \
     -device virtio-net-pci,netdev=net1,mac="$mac1" \
+    "${vpn_args[@]}" \
     -qmp unix:"$qmp",server,nowait \
     -serial file:"$serial" \
     -display none -no-reboot \
@@ -170,6 +185,19 @@ vm_link_set() {
 
 partition_isolate() { vm_link_set "$1" false; log "isolated $1 from the cluster network"; }
 partition_heal()    { vm_link_set "$1" true;  log "healed $1 back onto the cluster network"; }
+
+# Same trick, targeting the vpn-segment netdev (net2) instead of the cluster
+# network (net0): simulates the tunnel interface a node's egress network NATs
+# through going down, without touching cluster membership at all.
+vpn_link_set() {
+  local node="$1" up="$2" qmp="$RUN_DIR/$node.qmp"
+  [[ -S "$qmp" ]] || { log "no qmp socket for $node, skipping vpn link change"; return 0; }
+  python3 "$LIB_DIR/qmp.py" "$qmp" \
+    "{\"execute\":\"set_link\",\"arguments\":{\"name\":\"net2\",\"up\":$up}}" >/dev/null
+}
+
+vpn_down() { vpn_link_set "$1" false; log "brought down $1's vpn segment link"; }
+vpn_up()   { vpn_link_set "$1" true;  log "brought up $1's vpn segment link"; }
 
 # ---- waiting helpers --------------------------------------------------------
 

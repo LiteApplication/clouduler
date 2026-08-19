@@ -37,6 +37,10 @@ pub struct Scheduler {
     materializer: Materializer,
     /// Internal DNS zone, written into every container's search list.
     zone: Option<String>,
+    /// Names of every cluster network of kind `Egress`, from the config file
+    /// at startup. Static for the process's life, like the overlay subsystem
+    /// treats the rest of the network topology (see `clouduler::overlay`).
+    egress_networks: BTreeSet<String>,
 }
 
 impl Scheduler {
@@ -53,6 +57,7 @@ impl Scheduler {
             docker,
             materializer,
             zone: None,
+            egress_networks: BTreeSet::new(),
         }
     }
 
@@ -60,6 +65,14 @@ impl Scheduler {
     /// without the cluster's domain being spelled out in every stack file.
     pub fn with_zone(mut self, zone: impl Into<String>) -> Self {
         self.zone = Some(zone.into());
+        self
+    }
+
+    /// Set which cluster networks are egress-kind, so a service naming one in
+    /// its `networks:` list gets a second, NAT'd attachment instead of an
+    /// overlay one.
+    pub fn with_egress_networks(mut self, networks: BTreeSet<String>) -> Self {
+        self.egress_networks = networks;
         self
     }
 
@@ -90,7 +103,7 @@ impl Scheduler {
         let mut desired = Vec::new();
         for (name, stack) in &state.stacks {
             match StackFile::parse(&stack.spec) {
-                Ok(file) => desired.extend(plan::expand(name, &file)),
+                Ok(file) => desired.extend(plan::expand(name, &file, &self.egress_networks)),
                 // A stored stack that no longer parses is the operator's
                 // problem, but it must not stop every other stack scheduling.
                 Err(e) => warn!(stack = %name, error = %e, "stored stack does not parse"),
@@ -221,6 +234,11 @@ impl Scheduler {
                 placement.resolver = allocations.as_ref().and_then(|a| a.gateway(network));
                 placement.zone = self.zone.clone();
             }
+            placement.egress_network = service
+                .networks
+                .iter()
+                .find(|n| self.egress_networks.contains(*n))
+                .map(|n| cl_net::egress::egress_docker_name(n));
 
             // An instance on its way somewhere else must not be started here
             // again between the migration stopping it and the handover
@@ -334,7 +352,7 @@ pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
     let mut desired = Vec::new();
     for (name, stack) in &state.stacks {
         if let Ok(file) = StackFile::parse(&stack.spec) {
-            desired.extend(plan::expand(name, &file));
+            desired.extend(plan::expand(name, &file, &BTreeSet::new()));
         }
     }
 
@@ -369,6 +387,7 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            egress_networks: Default::default(),
         }
     }
 

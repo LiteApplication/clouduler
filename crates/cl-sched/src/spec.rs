@@ -28,6 +28,9 @@ pub struct Placement {
     pub ip: Option<std::net::Ipv4Addr>,
     pub resolver: Option<std::net::Ipv4Addr>,
     pub zone: Option<String>,
+    /// Docker network for a second, egress-kind attachment, if the service
+    /// names one of those in its `networks:` list.
+    pub egress_network: Option<String>,
 }
 
 pub fn build(
@@ -100,6 +103,7 @@ pub fn build(
         resources: resources(service),
         healthcheck: healthcheck(service),
         stop_signal: service.stop_signal.clone(),
+        egress_network: placement.egress_network,
     }
 }
 
@@ -275,6 +279,7 @@ mod tests {
             ip: Some(std::net::Ipv4Addr::new(10, 244, 0, 7)),
             resolver: Some(std::net::Ipv4Addr::new(10, 244, 0, 1)),
             zone: Some("int.example.com".into()),
+            egress_network: None,
         };
         let spec = build(&instance(), &s, &[], &roots(), placement, None, 1);
 

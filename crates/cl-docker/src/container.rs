@@ -127,6 +127,11 @@ pub struct ContainerSpec {
     /// Signal sent on a graceful stop. `None` leaves the image's own
     /// `STOPSIGNAL` (usually `SIGTERM`) in effect.
     pub stop_signal: Option<String>,
+    /// Docker network for a second attachment alongside `network`, backing an
+    /// egress-kind cluster network (a VPN interface, usually). Attached after
+    /// creation with `Docker::connect_network`, since docker only takes one
+    /// network at create time.
+    pub egress_network: Option<String>,
 }
 
 impl ContainerSpec {
@@ -455,6 +460,24 @@ mod tests {
             .expect("endpoints");
         let ipam = endpoints["blog_default"].ipam_config.clone().expect("ipam");
         assert_eq!(ipam.ipv4_address.as_deref(), Some("10.244.0.5"));
+    }
+
+    /// An egress network is always a second, post-create attachment: the
+    /// overlay network stays primary at create time (see
+    /// `Docker::set_default_route` for how the egress network still wins the
+    /// default route despite that).
+    #[test]
+    fn an_egress_network_does_not_change_the_primary_attachment() {
+        let mut spec = base_spec();
+        spec.network = Some("blog_default".to_string());
+        spec.ip = Some(Ipv4Addr::new(10, 244, 0, 5));
+        spec.egress_network = Some("egress_vpn".to_string());
+
+        let body = spec.to_create_body();
+        assert_eq!(
+            body.host_config.expect("host config").network_mode.as_deref(),
+            Some("blog_default")
+        );
     }
 
     #[test]

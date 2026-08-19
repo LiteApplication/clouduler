@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use bollard::models::{Ipam, IpamConfig, NetworkCreateRequest};
+use bollard::models::{Ipam, IpamConfig, NetworkConnectRequest, NetworkCreateRequest};
 use bollard::query_parameters::InspectNetworkOptions;
 
 use crate::client::Docker;
@@ -98,6 +98,92 @@ impl Docker {
         }
     }
 
+    /// Attach an already-created container to a second network. Docker only
+    /// takes one network at create time (`HostConfig.network_mode`); a
+    /// service's egress network, if it has one, is always this second
+    /// attachment (see `Docker::set_default_route` for how it still ends up
+    /// carrying the container's default route despite that).
+    ///
+    /// `ipv4` pins the address on this network the same way create-time
+    /// `EndpointIpamConfig` does; `None` lets docker pick one from the
+    /// network's subnet, which is normal for an egress network (its address
+    /// there is not something anything else in the cluster needs to know).
+    ///
+    /// Reconnecting a container already on the network is a 403 from docker,
+    /// not useful information here (the reconcile loop calls this on every
+    /// create, not just the first), so it reads as success like the rest of
+    /// this file's idempotent `ensure_*` calls.
+    pub async fn connect_network(&self, container: &str, network: &str, ipv4: Option<Ipv4Addr>) -> Result<()> {
+        let request = NetworkConnectRequest {
+            container: container.to_string(),
+            endpoint_config: ipv4.map(|ip| bollard::models::EndpointSettings {
+                ipam_config: Some(bollard::models::EndpointIpamConfig {
+                    ipv4_address: Some(ip.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        match self.inner.connect_network(network, request).await {
+            Ok(()) => Ok(()),
+            Err(e) if already_connected(&e) => Ok(()),
+            Err(e) => Err(classify(e)),
+        }
+    }
+
+    /// Point a container's default route at `network`'s gateway.
+    ///
+    /// Docker only gives the *primary* (create-time) network the default
+    /// route; a network attached afterward with `connect_network` never gets
+    /// it, and there is no version-independent flag to ask for it either
+    /// (`GwPriority` exists only on newer daemons). So this does it directly:
+    /// find the container's PID and, in its own network namespace, replace
+    /// the default route — the same operation `ip route replace default via
+    /// <gw>` would do run inside the container, but from the host, needing
+    /// only the daemon's own privileges rather than a capability grant on
+    /// the workload.
+    pub async fn set_default_route(&self, container: &str, network: &str) -> Result<()> {
+        let gateway = self.network_gateway(network).await?;
+        let pid = self.container_pid(container).await?;
+
+        let output = tokio::process::Command::new("nsenter")
+            .args(["-t", &pid.to_string(), "-n", "ip", "route", "replace", "default", "via", &gateway.to_string()])
+            .output()
+            .await
+            .map_err(|e| DockerError::Other(format!("running nsenter for {container}: {e}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(DockerError::Other(format!(
+                "nsenter route replace for {container} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )))
+        }
+    }
+
+    async fn network_gateway(&self, network: &str) -> Result<Ipv4Addr> {
+        let details = self
+            .inner
+            .inspect_network(network, None::<InspectNetworkOptions>)
+            .await
+            .map_err(classify)?;
+        details
+            .ipam
+            .and_then(|ipam| ipam.config)
+            .and_then(|configs| configs.into_iter().find_map(|c| c.gateway))
+            .and_then(|gw| gw.parse().ok())
+            .ok_or_else(|| DockerError::Other(format!("network {network} has no ipv4 gateway")))
+    }
+
+    async fn container_pid(&self, container: &str) -> Result<i64> {
+        let details = self.inner.inspect_container(container, None).await.map_err(classify)?;
+        details
+            .state
+            .and_then(|s| s.pid)
+            .filter(|&pid| pid > 0)
+            .ok_or_else(|| DockerError::Other(format!("container {container} has no pid, is it running?")))
+    }
+
     pub async fn network_exists(&self, name: &str) -> Result<bool> {
         match self
             .inner
@@ -134,6 +220,18 @@ fn already_exists(err: &bollard::errors::Error) -> bool {
             status_code,
             message,
         } => *status_code == 409 || message.contains("already exists"),
+        _ => false,
+    }
+}
+
+/// Reconnecting an already-connected container is a 403, with the container
+/// id in the message rather than a typed field.
+fn already_connected(err: &bollard::errors::Error) -> bool {
+    match err {
+        bollard::errors::Error::DockerResponseServerError {
+            status_code,
+            message,
+        } => *status_code == 403 || message.contains("already exists in network"),
         _ => false,
     }
 }

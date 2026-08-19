@@ -51,6 +51,21 @@ def main():
         for name in sorted(all_drive_names)
     }
 
+    # vpn_segment: an isolated second network segment simulating a VPN
+    # tunnel, only present when a scenario declares it. `egress_node` gets a
+    # host interface (eth2) named in cluster.yaml as an egress network's
+    # node address; `canary_node` gets the same segment and a fixed-response
+    # listener, standing in for something only reachable through the tunnel.
+    # See docs/networking.md's "Egress networks" section for what this is
+    # actually testing.
+    vpn = scenario.get("vpn_segment")
+    vpn_ips = {}
+    egress_networks_block = {}
+    if vpn:
+        vpn_ips[vpn["egress_node"]] = "172.31.0.1/24"
+        vpn_ips[vpn["canary_node"]] = "172.31.0.2/24"
+        egress_networks_block[vpn["network"]] = {"type": "egress"}
+
     node_summaries = []
     cluster_nodes = {}
     for index, n in enumerate(nodes):
@@ -69,9 +84,15 @@ def main():
         # one 127.0.0.1 for all of them would be rejected by both.
         control_ip = f"127.0.0.{index + 1}"
         node_drives = n.get("drives") or {}
+        node_network = {"cluster": n["ip"]}
+        if vpn and name == vpn["egress_node"]:
+            # A bare non-IP string is the third `NodeAddress` form: a host
+            # interface name, naming eth2 (the vpn-segment netdev) rather
+            # than an address on it.
+            node_network[vpn["network"]] = "eth2"
         cluster_nodes[name] = {
             "role": n["role"],
-            "network": {"cluster": n["ip"]},
+            "network": node_network,
             "rpc_port": 7373,
             "drives": {d: f"/srv/clouduler/{d}" for d in node_drives},
         }
@@ -85,6 +106,8 @@ def main():
             "expose_port": expose_port,
             "control_ip": control_ip,
             "drives": list(node_drives.keys()),
+            "vpn_ip": vpn_ips.get(name, ""),
+            "vpn_canary": "1" if vpn and name == vpn["canary_node"] else "",
         })
 
     # One cluster key for the whole run, generated here and installed into
@@ -101,6 +124,7 @@ def main():
         "cluster": {"name": scenario.get("name", "qemu-test")},
         "networks": {
             "cluster": {"type": "internal", "subnet": "10.10.0.0/24", "domain": "cl.test"},
+            **egress_networks_block,
         },
         "drives": drives_block,
         "nodes": cluster_nodes,
@@ -119,15 +143,19 @@ def main():
     # own subnet and the config would not load at all.
     control_nodes = {}
     for ns in node_summaries:
+        control_network = {"cluster": ns["control_ip"]}
+        if vpn and ns["name"] == vpn["egress_node"]:
+            control_network[vpn["network"]] = "eth2"
         control_nodes[ns["name"]] = {
             "role": ns["role"],
-            "network": {"cluster": ns["control_ip"]},
+            "network": control_network,
             "rpc_port": ns["rpc_port"],
             "drives": {d: f"/srv/clouduler/{d}" for d in ns["drives"]},
         }
     control = dict(cluster)
     control["networks"] = {
         "cluster": {"type": "internal", "subnet": "127.0.0.0/8", "domain": "cl.test"},
+        **egress_networks_block,
     }
     control["nodes"] = control_nodes
     # The cli runs on the host, where /etc/clouduler is not ours to write.
@@ -139,6 +167,7 @@ def main():
         "name": scenario.get("name", "unnamed"),
         "description": scenario.get("description", ""),
         "mcast_group": f"230.10.{mcast_id}.1",
+        "vpn_mcast_group": f"230.11.{mcast_id}.1" if vpn else "",
         "nodes": node_summaries,
         "key_file": key_path,
         "steps": scenario.get("steps", []),

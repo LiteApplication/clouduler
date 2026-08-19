@@ -10,6 +10,7 @@
 //! internal network over anything you don't already trust.
 
 pub mod dns;
+pub mod egress;
 pub mod error;
 pub mod expose;
 pub mod ipam;

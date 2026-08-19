@@ -179,12 +179,24 @@ impl Reconciler {
                 };
                 self.ensure_image(&target.spec.image).await?;
                 info!(instance = %id, "creating");
-                self.docker.create(&target.spec).await?;
+                let container_id = self.docker.create(&target.spec).await?;
+                if let Some(egress) = &target.spec.egress_network {
+                    self.docker.connect_network(&container_id, egress, None).await?;
+                }
                 self.docker.start(&name).await?;
+                if let Some(egress) = &target.spec.egress_network {
+                    self.docker.set_default_route(&name, egress).await?;
+                }
             }
             Action::Start(id) => {
                 info!(instance = %id, "starting");
                 self.docker.start(&name).await?;
+                // A fresh start means a fresh pid, so a route pinned to the
+                // old one is gone too: has to be redone every time, not just
+                // on create.
+                if let Some(egress) = target.and_then(|t| t.spec.egress_network.as_ref()) {
+                    self.docker.set_default_route(&name, egress).await?;
+                }
             }
             Action::Stop(id) => {
                 info!(instance = %id, "stopping");
@@ -204,8 +216,14 @@ impl Reconciler {
                 info!(instance = %id, "recreating after a spec change");
                 self.docker.stop(&name, stop_timeout(Some(target))).await.ok();
                 self.docker.remove(&name, true).await.ok();
-                self.docker.create(&target.spec).await?;
+                let container_id = self.docker.create(&target.spec).await?;
+                if let Some(egress) = &target.spec.egress_network {
+                    self.docker.connect_network(&container_id, egress, None).await?;
+                }
                 self.docker.start(&name).await?;
+                if let Some(egress) = &target.spec.egress_network {
+                    self.docker.set_default_route(&name, egress).await?;
+                }
             }
         }
         Ok(())

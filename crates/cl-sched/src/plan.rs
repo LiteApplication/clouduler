@@ -20,12 +20,21 @@ pub struct Desired {
     pub pinned_node: Option<String>,
     /// Global services run one copy on every eligible node.
     pub global: bool,
+    /// The egress-kind network this instance's service attaches to, if any.
+    /// A node must implement it (`NodeState::implements_egress_network`) to
+    /// be a candidate, the same way `drives` works.
+    pub egress_network: Option<String>,
 }
 
 /// Expand a stack into its instances. Replica counts come from
 /// `deploy.replicas`, defaulting to one; global services are expanded later,
 /// once the eligible node set is known.
-pub fn expand(stack: &str, file: &StackFile) -> Vec<Desired> {
+///
+/// `egress_networks` names every cluster network of kind `Egress`, so a
+/// service's plain `networks: Vec<String>` list can be told apart without
+/// this crate needing the full `ClusterConfig` (it only ever sees replicated
+/// state and stack files otherwise).
+pub fn expand(stack: &str, file: &StackFile, egress_networks: &BTreeSet<String>) -> Vec<Desired> {
     let mut out = Vec::new();
 
     for (service_name, service) in &file.services {
@@ -59,6 +68,7 @@ pub fn expand(stack: &str, file: &StackFile) -> Vec<Desired> {
                     .unwrap_or_default(),
                 pinned_node: file.effective_node(service_name),
                 global,
+                egress_network: service.networks.iter().find(|n| egress_networks.contains(*n)).cloned(),
             });
         }
     }
@@ -89,7 +99,7 @@ services:
     image: nginx
 "#,
         );
-        let desired = expand("site", &file);
+        let desired = expand("site", &file, &BTreeSet::new());
         assert_eq!(desired.len(), 1);
         assert_eq!(desired[0].id, InstanceId::new("site", "web", 0));
         assert!(!desired[0].global);
@@ -106,7 +116,7 @@ services:
       replicas: 3
 "#,
         );
-        let desired = expand("site", &file);
+        let desired = expand("site", &file, &BTreeSet::new());
         assert_eq!(desired.len(), 3);
         assert_eq!(
             desired.iter().map(|d| d.id.index).collect::<Vec<_>>(),
@@ -125,7 +135,7 @@ services:
       mode: global
 "#,
         );
-        let desired = expand("site", &file);
+        let desired = expand("site", &file, &BTreeSet::new());
         assert_eq!(desired.len(), 1);
         assert!(desired[0].global);
     }
@@ -142,7 +152,7 @@ services:
       - "bulk/backups:/backups:ro"
 "#,
         );
-        let desired = expand("site", &file);
+        let desired = expand("site", &file, &BTreeSet::new());
         assert_eq!(
             desired[0].drives,
             ["bulk".to_string(), "fast".to_string()].into()
@@ -164,7 +174,7 @@ services:
       node: n2
 "#,
         );
-        let desired = expand("site", &file);
+        let desired = expand("site", &file, &BTreeSet::new());
         assert_eq!(desired[0].constraints, vec!["node.role == manager"]);
         assert_eq!(desired[0].pinned_node.as_deref(), Some("n2"));
     }

@@ -25,6 +25,14 @@ networks:
     type: public
     domain: example.com
 
+  # Not addressable, no subnet or domain: a service on this network gets its
+  # outbound traffic forced out the named host interface (a VPN tunnel,
+  # usually) on whichever node runs it, and nowhere else. See
+  # docs/networking.md's "Egress networks" section. Clouduler does not bring
+  # the interface up itself; n1's wg0 below is expected to already exist.
+  vpn:
+    type: egress
+
 # Cluster wide directory namespaces. Volumes live inside a drive.
 drives:
   fast:
@@ -42,6 +50,10 @@ nodes:
       wan:
         ipv4: 203.0.113.5 # will use A
         ipv6: "2001:db8::5" # will use AAAA
+      # A bare non-IP string on an egress network names the host interface a
+      # service on it egresses through. Only nodes with an address here
+      # implement the network; the scheduler restricts such a service to them.
+      vpn: wg0
     # Drives this node implements, mapped to the local directory backing them.
     drives:
       fast: /srv/clouduler/fast

@@ -129,6 +129,11 @@ fn rejection(
             return Some(format!("{} does not implement drive {drive}", node.name));
         }
     }
+    if let Some(net) = &desired.egress_network {
+        if !node.implements_egress_network(net) {
+            return Some(format!("{} does not implement egress network {net}", node.name));
+        }
+    }
     for constraint in constraints {
         if !constraint.matches(node) {
             return Some(format!(
@@ -256,6 +261,7 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            egress_networks: Default::default(),
         }
     }
 
@@ -333,6 +339,7 @@ mod tests {
             constraints: Vec::new(),
             pinned_node: None,
             global: false,
+            egress_network: None,
         }
     }
 

@@ -53,12 +53,14 @@ mkdir -p "$RUN_DIR/cli-scratch"
 
 log "booting $(jq '.nodes | length' "$RUN_DIR/topology.json") nodes"
 idx=0
-while IFS=$'\t' read -r name ip web_port rpc_port host_ip http_port expose_port; do
+vpn_mcast="$(jq -r '.vpn_mcast_group // ""' "$RUN_DIR/topology.json")"
+while IFS=$'\t' read -r name ip web_port rpc_port host_ip http_port expose_port vpn_ip vpn_canary; do
   vm_start "$name" "$ip" "$web_port" "$rpc_port" \
     "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip" \
-    "$http_port" "$expose_port"
+    "$http_port" "$expose_port" "$vpn_ip" "$vpn_canary" \
+    "$([[ -n "$vpn_ip$vpn_canary" ]] && echo "$vpn_mcast" || echo "")"
   idx=$((idx + 1))
-done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port] | @tsv' "$RUN_DIR/topology.json")
+done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port, (.vpn_ip // ""), (.vpn_canary // "")] | @tsv' "$RUN_DIR/topology.json")
 
 log "waiting for daemons to come up"
 sleep 5

@@ -126,13 +126,20 @@ pub async fn run(
     let scheduler = match connected.clone() {
         Some(docker) => {
             let materializer = Materializer::new(&data_dir, key);
+            let egress_networks = cfg
+                .networks
+                .iter()
+                .filter(|(_, net)| net.kind == cl_config::NetworkKind::Egress)
+                .map(|(name, _)| name.clone())
+                .collect();
             let scheduler = Scheduler::new(
                 node_name.clone(),
                 cluster.clone(),
                 docker,
                 materializer,
             )
-            .with_zone(cl_net::dns::zone_origin(&cfg));
+            .with_zone(cl_net::dns::zone_origin(&cfg))
+            .with_egress_networks(egress_networks);
             let gate = fenced.clone();
             Some(tokio::spawn(
                 scheduler.run(move || gate.load(Ordering::Relaxed)),
@@ -149,6 +156,7 @@ pub async fn run(
     // Built before the scheduler needs it, but idempotent and on a loop, so
     // ordering against a stack deploy does not matter.
     let overlay = crate::overlay::start(&cfg, &node_name, &cluster, connected.clone());
+    let egress = crate::egress::start(&cfg, &node_name, &cluster, connected.clone());
 
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
@@ -187,6 +195,9 @@ pub async fn run(
     }
     if let Some(overlay) = overlay {
         overlay.abort();
+    }
+    if let Some(egress) = egress {
+        egress.abort();
     }
     if let Some(internal_dns) = internal_dns {
         internal_dns.abort();
@@ -572,5 +583,11 @@ fn to_state(
         availability: current
             .map(|c| c.availability)
             .unwrap_or(Availability::Active),
+        egress_networks: node
+            .network
+            .iter()
+            .filter(|(_, addr)| matches!(addr, cl_config::NodeAddress::Interface(_)))
+            .map(|(name, _)| name.clone())
+            .collect(),
     }
 }

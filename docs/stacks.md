@@ -33,6 +33,12 @@ x-clouduler: {...}
   to. Clouduler does not create custom docker networks: each name here must
   match a network declared in the cluster's `networks:` section. Entries take
   no fields (`wan: {}` or `wan:`).
+  A service may name at most one network of the cluster's `egress` kind
+  alongside its usual (non-egress) network — see `docs/networking.md`'s
+  "Egress networks" section. It gets a second, NAT'd attachment forcing its
+  outbound traffic out that network's host interface, and the scheduler
+  restricts it to nodes that implement that network automatically; no
+  `deploy.placement.constraints` entry is needed for that part.
 - `volumes`, `configs`, `secrets` are accepted for compose compatibility.
   Volumes are not used: a service references drives directly through its own
   `volumes:` list (see below). `configs`/`secrets` only support a `file:`

@@ -136,6 +136,7 @@ async fn add(
             drives: body.drives,
             labels: body.labels,
             availability: Availability::Active,
+            egress_networks: Default::default(),
         }),
     )
     .await?;

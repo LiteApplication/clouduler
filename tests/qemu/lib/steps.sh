@@ -154,6 +154,19 @@ step_heal() {
   for node in $(echo "$1" | jq -r '.[]'); do partition_heal "$node"; done
 }
 
+# vpn_down/vpn_up: ["n1"] or "n1". Brings the vpn-segment link (not the
+# cluster network) up or down on the named node(s), to prove an egress
+# network's kill-switch has no fallback when its interface disappears.
+step_vpn_down() {
+  local node
+  for node in $(echo "$1" | jq -r 'if type=="array" then .[] else . end'); do vpn_down "$node"; done
+}
+
+step_vpn_up() {
+  local node
+  for node in $(echo "$1" | jq -r 'if type=="array" then .[] else . end'); do vpn_up "$node"; done
+}
+
 step_restart_all() {
   local n
   for n in "${VM_NODES[@]}"; do vm_kill "$n"; done

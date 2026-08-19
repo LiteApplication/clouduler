@@ -46,11 +46,20 @@ pub struct NodeState {
     /// `node.labels.<key>` constraints without reading the config file.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Egress-kind networks this node has a host interface address for. Used
+    /// the same way `drives` is: a service on one of these networks can only
+    /// be placed on a node that implements it.
+    #[serde(default)]
+    pub egress_networks: BTreeSet<String>,
 }
 
 impl NodeState {
     pub fn implements(&self, drive: &str) -> bool {
         self.drives.contains_key(drive)
+    }
+
+    pub fn implements_egress_network(&self, network: &str) -> bool {
+        self.egress_networks.contains(network)
     }
 
     /// A drained or decommissioned node must not receive new containers.
@@ -989,6 +998,7 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            egress_networks: Default::default(),
         }
     }
 

@@ -1,0 +1,46 @@
+# Proves an egress network's traffic really only leaves through its named
+# interface, and that nothing falls through when that interface is down.
+#
+# The container attaches to both `cluster` (so the reverse proxy can reach
+# it, same as any other stack) and `vpn` (an egress-kind network whose only
+# node, n1, points it at eth2 — the harness's isolated "vpn segment" netdev,
+# see lib/guest-init.sh and lib/scenario_prep.py's `vpn_segment` handling).
+#
+# It polls a canary reachable only over that segment (172.31.0.2:8080,
+# guest-init's nc listener on the canary node) and serves the result over a
+# published port on `cluster`, read from the host with the harness's
+# existing assert_published_port (x-clouduler.expose isn't HTTP-gated by
+# private-network route gating the way x-clouduler.proxy is, and this needs
+# no gating either way: it's the harness reading its own test's result, not
+# something the feature under test is supposed to restrict).
+version: "3.8"
+
+networks:
+  cluster: {}
+  vpn: {}
+
+services:
+  egress-check:
+    image: alpine:3.20
+    restart: always
+    networks: [cluster, vpn]
+    x-clouduler:
+      node: n1
+      expose:
+        - port: 80
+          published: 2222
+          protocol: tcp
+          network: cluster
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          if wget -q -T 2 -O - http://172.31.0.2:8080/ 2>/dev/null | grep -q vpn-canary-ok; then
+            BODY=canary-ok
+          else
+            BODY=canary-blocked
+          fi
+          { printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "${#BODY}" "$BODY"; } \
+            | timeout 5 nc -l -p 80 || true
+        done

@@ -76,6 +76,39 @@ if [ -e "/sys/class/net/$HOST_IFACE" ]; then
   echo "nameserver 10.0.2.3" > /etc/resolv.conf
 fi
 
+# Third interface, present only for the egress-network scenario: a segment
+# isolated from both the cluster network and slirp, standing in for a VPN
+# tunnel. Only brought up when the scenario asked for it (clvpnip set); left
+# alone otherwise so every other scenario's boot is unaffected.
+VPN_IFACE="eth2"
+VPN_ADDR="$(get_arg clvpnip)"
+if [ -n "$VPN_ADDR" ]; then
+  for _ in $(seq 1 20); do
+    [ -e "/sys/class/net/$VPN_IFACE" ] && break
+    sleep 0.2
+  done
+  if [ -e "/sys/class/net/$VPN_IFACE" ]; then
+    ip link set "$VPN_IFACE" up
+    ip addr add "$VPN_ADDR" dev "$VPN_IFACE"
+    echo "init-clouduler: vpn segment interface $VPN_IFACE up at $VPN_ADDR"
+  else
+    echo "init-clouduler: WARNING vpn segment interface $VPN_IFACE never appeared"
+  fi
+fi
+
+# The canary: a fixed-response TCP listener standing in for something only
+# reachable over the vpn segment, so a test container can prove which
+# interface its traffic actually left through by whether it can reach this.
+if [ -n "$(get_arg clvpncanary)" ]; then
+  (
+    while true; do
+      { printf 'HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nvpn-canary-ok'; } \
+        | nc -l -p 8080 >/dev/null 2>&1
+    done
+  ) &
+  echo "init-clouduler: vpn canary listening on :8080"
+fi
+
 # The daemon binds its node-to-node rpc to the cluster address only, on purpose:
 # that channel is unencrypted and belongs on the trusted network. But the
 # harness runs the clouduler cli on the host, which can only reach this guest

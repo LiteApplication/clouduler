@@ -13,6 +13,8 @@ export interface NodeState {
   /** drive name -> local backing path */
   drives: Record<string, string>;
   availability: Availability;
+  /** Egress-kind networks this node has a host interface address for. */
+  egress_networks: string[];
 }
 
 /** Live resource usage, only present on GET /api/nodes/:name. */

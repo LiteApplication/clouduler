@@ -210,3 +210,81 @@ different node does not land somewhere else for no reason.
 A published port that no running instance backs stays bound and refuses
 connections rather than disappearing, so a redeploy shows up as a connection
 refused rather than as the port belonging to nobody.
+
+## Egress networks
+
+Every other network kind (`internal`, `private`, `public`) is about how a
+container is *reached*. An `egress` network is about how one *leaves*: a
+service attached to it gets its outbound traffic forced out a named host
+interface, and nowhere else, instead of the node's normal route.
+
+```yaml
+networks:
+  vpn:
+    type: egress
+
+nodes:
+  n1:
+    network:
+      vpn: wg0   # bare string: a host interface name, not an address
+```
+
+A node's address on an egress network is a host interface name
+(`NodeAddress::Interface`), not an IP or a domain — the third form
+`nodes.<name>.network` can take, alongside a bare IP on a subnetted network
+and an address block on a public one. Only a node with such an address
+**implements** the network; a service naming it in a stack file's
+`networks:` is automatically restricted to those nodes by the scheduler
+(`NodeState::implements_egress_network`, checked in `cl_sched::place`
+exactly like a drive requirement), and can also be pinned there explicitly
+with `x-clouduler.node`.
+
+**Clouduler does not manage the interface.** `wg0` above is expected to
+already exist and be up — brought up by `wg-quick`, Tailscale, or whatever
+the operator uses, entirely outside clouduler, matching the trust-model note
+above about running a VPN mesh underneath the cluster rather than clouduler
+implementing one. All clouduler needs is the interface's name.
+
+A service may attach to one normal network and one egress network at once
+(`networks: [home, vpn]`): the overlay network stays the container's
+primary (create-time) attachment exactly as it would without an egress
+network, so nothing about DNS, the reverse proxy or its fixed address
+changes. The egress network is attached second, after creation
+(`Docker::connect_network`).
+
+Docker only ever gives the *primary* attachment the default route, and a
+network connected afterward never gets it — not even with the container's
+own `NET_ADMIN`, since routing changes from inside the container would
+depend on how the workload's image is built. So `Docker::set_default_route`
+does it from the host instead: find the container's PID, and inside its own
+network namespace (`nsenter -t <pid> -n`, needing only the daemon's own
+privileges, not a capability grant on the workload) replace the default
+route with the egress network's gateway. This is deliberately not docker's
+newer `GwPriority` endpoint field (a way to mark a secondary attachment as
+the default-route winner) — that field is silently ignored by older
+daemons, so it cannot be relied on, where explicitly replacing the route
+works on any docker version.
+
+### The bridge and the kill-switch
+
+Unlike the overlay, an egress network is node-local: it is never a VXLAN
+segment spanning nodes, so it needs no cluster-wide subnet allocation. Each
+node implementing it derives its own `/24` deterministically from the
+network's name (`cl_net::egress::egress_subnet`) and builds a plain Linux
+bridge for it (`clex-<network>`, `cl_net::egress::ensure_egress_bridge`) —
+no VXLAN device, since nothing here needs to reach another node.
+
+The only route out of that bridge is enforced with iptables, applied fresh
+every reconcile pass (`cl_net::egress::apply_egress_iptables`):
+
+- a `MASQUERADE` rule NATs the bridge's subnet out the named interface,
+  and only that interface;
+- a `FORWARD` rule accepts traffic from the bridge specifically when it's
+  leaving via that interface (plus the matching return-traffic rule);
+- a final `FORWARD` rule drops everything else from the bridge.
+
+That order is the kill-switch: if the interface goes down, is renamed, or
+was never brought up, there is no rule that accepts the bridge's traffic out
+anything else, so it is dropped rather than silently falling back to the
+node's normal WAN. Nothing has to notice the interface is down and react —
+the ruleset simply never had another way out.

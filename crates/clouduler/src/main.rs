@@ -5,6 +5,7 @@ mod internal_dns;
 mod migration;
 mod placement;
 mod overlay;
+mod egress;
 mod expose;
 mod init;
 mod proxy;

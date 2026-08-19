@@ -67,6 +67,7 @@ async fn harness() -> Harness {
         drives: BTreeMap::new(),
         availability: Availability::Active,
         labels: Default::default(),
+        egress_networks: Default::default(),
     }))
     .await
     .expect("submit");
@@ -805,6 +806,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             drives: BTreeMap::new(),
             availability: Availability::Active,
             labels: Default::default(),
+        egress_networks: Default::default(),
         }))
         .await
         .expect("add n1");

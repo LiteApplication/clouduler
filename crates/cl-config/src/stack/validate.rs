@@ -45,6 +45,7 @@ impl StackFile {
         self.validate_networks_exist(cluster)?;
         self.validate_drives_exist(cluster)?;
         self.validate_proxy_expose_networks(cluster)?;
+        self.validate_service_network_kinds(cluster)?;
         self.validate_node_pins(cluster)?;
         self.validate_placement_constraints(cluster)?;
         Ok(())
@@ -193,6 +194,32 @@ impl StackFile {
         Ok(())
     }
 
+    /// A service may attach to at most one egress network: two would mean
+    /// two conflicting default routes for its outbound traffic, which is not
+    /// a thing. This is layered on top of whatever the stack already allows
+    /// for its other (overlay) networks.
+    fn validate_service_network_kinds(&self, cluster: &ClusterConfig) -> Result<()> {
+        use crate::cluster::NetworkKind;
+
+        for (name, svc) in &self.services {
+            let mut egress = None;
+            for net in &svc.networks {
+                // Already checked to exist by validate_networks_exist.
+                if cluster.networks.get(net).map(|n| n.kind) != Some(NetworkKind::Egress) {
+                    continue;
+                }
+                if let Some(existing) = &egress {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.networks"),
+                        format!("only one egress network is allowed per service, found {existing} and {net}"),
+                    ));
+                }
+                egress = Some(net.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn validate_node_pins(&self, cluster: &ClusterConfig) -> Result<()> {
         if let Some(defaults) = &self.x_clouduler {
             if let Some(node) = &defaults.node {
@@ -204,14 +231,26 @@ impl StackFile {
                 }
             }
         }
-        for (name, svc) in &self.services {
-            let Some(ext) = &svc.x_clouduler else { continue };
-            let Some(node) = &ext.node else { continue };
-            if !cluster.nodes.contains_key(node) {
+        for name in self.services.keys() {
+            let Some(node) = self.effective_node(name) else { continue };
+            if !cluster.nodes.contains_key(&node) {
                 return Err(ConfigError::invalid(
                     format!("services.{name}.x-clouduler.node"),
                     format!("no node named {node} in the cluster"),
                 ));
+            }
+            if let Some(net) = self.egress_network(name, cluster) {
+                let implements = cluster
+                    .nodes
+                    .get(&node)
+                    .map(|n| n.network.get(&net).is_some_and(|a| a.as_interface().is_some()))
+                    .unwrap_or(false);
+                if !implements {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.x-clouduler.node"),
+                        format!("{node} has no interface address on egress network {net}"),
+                    ));
+                }
             }
         }
         Ok(())

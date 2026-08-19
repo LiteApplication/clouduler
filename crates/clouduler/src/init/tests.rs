@@ -91,6 +91,7 @@ async fn serve(config: &ClusterConfig) -> Server {
             drives: BTreeMap::new(),
             availability: Availability::Active,
             labels: Default::default(),
+        egress_networks: Default::default(),
         }))
         .await
         .expect("seed roster");

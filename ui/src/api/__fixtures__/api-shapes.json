@@ -75,6 +75,7 @@
       "n0": {
         "availability": "active",
         "drives": {},
+        "egress_networks": [],
         "labels": {},
         "name": "n0",
         "role": "manager",

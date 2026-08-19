@@ -27,6 +27,11 @@ pub enum DockerError {
     /// An image reference couldn't be parsed or resolved.
     #[error("invalid image reference: {0}")]
     InvalidImageRef(String),
+
+    /// Something outside the docker API proper failed: shelling out to
+    /// `nsenter` for `Docker::set_default_route`, mainly.
+    #[error("{0}")]
+    Other(String),
 }
 
 impl DockerError {
