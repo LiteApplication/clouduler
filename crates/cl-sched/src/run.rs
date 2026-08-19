@@ -41,6 +41,11 @@ pub struct Scheduler {
     /// at startup. Static for the process's life, like the overlay subsystem
     /// treats the rest of the network topology (see `clouduler::overlay`).
     egress_networks: BTreeSet<String>,
+    /// Names of every cluster network of kind `Public`, from the config file
+    /// at startup. Tells `plan::expand` which `x-clouduler.expose` entries
+    /// need a node with that port marked open, rather than just an overlay
+    /// attachment.
+    port_gated_networks: BTreeSet<String>,
 }
 
 impl Scheduler {
@@ -58,6 +63,7 @@ impl Scheduler {
             materializer,
             zone: None,
             egress_networks: BTreeSet::new(),
+            port_gated_networks: BTreeSet::new(),
         }
     }
 
@@ -73,6 +79,14 @@ impl Scheduler {
     /// overlay one.
     pub fn with_egress_networks(mut self, networks: BTreeSet<String>) -> Self {
         self.egress_networks = networks;
+        self
+    }
+
+    /// Set which cluster networks are public-kind, so a service's
+    /// `x-clouduler.expose` entries on one of them require a node that has
+    /// that port marked open, not just any node implementing the network.
+    pub fn with_port_gated_networks(mut self, networks: BTreeSet<String>) -> Self {
+        self.port_gated_networks = networks;
         self
     }
 
@@ -103,7 +117,12 @@ impl Scheduler {
         let mut desired = Vec::new();
         for (name, stack) in &state.stacks {
             match StackFile::parse(&stack.spec) {
-                Ok(file) => desired.extend(plan::expand(name, &file, &self.egress_networks)),
+                Ok(file) => desired.extend(plan::expand(
+                    name,
+                    &file,
+                    &self.egress_networks,
+                    &self.port_gated_networks,
+                )),
                 // A stored stack that no longer parses is the operator's
                 // problem, but it must not stop every other stack scheduling.
                 Err(e) => warn!(stack = %name, error = %e, "stored stack does not parse"),
@@ -352,7 +371,7 @@ pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
     let mut desired = Vec::new();
     for (name, stack) in &state.stacks {
         if let Ok(file) = StackFile::parse(&stack.spec) {
-            desired.extend(plan::expand(name, &file, &BTreeSet::new()));
+            desired.extend(plan::expand(name, &file, &BTreeSet::new(), &BTreeSet::new()));
         }
     }
 
@@ -388,6 +407,8 @@ mod tests {
             availability: Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
         }

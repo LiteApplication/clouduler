@@ -51,6 +51,16 @@ pub struct NodeState {
     /// be placed on a node that implements it.
     #[serde(default)]
     pub egress_networks: BTreeSet<String>,
+    /// Every network this node has any address on, keyed by network name.
+    /// Used the same way `drives` is: a service attached to one of these
+    /// networks can only be placed on a node that implements it.
+    #[serde(default)]
+    pub networks: BTreeSet<String>,
+    /// Ports this node's public-network router forwards to it, keyed by
+    /// network name. A raw `x-clouduler.expose` port on a public network can
+    /// only be placed on a node that lists that `(protocol, port)` pair here.
+    #[serde(default)]
+    pub open_ports: BTreeMap<String, BTreeSet<(PortProtocol, u16)>>,
     /// `std::env::consts::ARCH` of the running binary, e.g. `x86_64` or
     /// `aarch64`. Lets the self-update orchestrator group nodes by what needs
     /// a native build.
@@ -72,10 +82,30 @@ impl NodeState {
         self.egress_networks.contains(network)
     }
 
+    pub fn implements_network(&self, network: &str) -> bool {
+        self.networks.contains(network)
+    }
+
+    pub fn opens_port(&self, network: &str, protocol: PortProtocol, port: u16) -> bool {
+        self.open_ports
+            .get(network)
+            .is_some_and(|ports| ports.contains(&(protocol, port)))
+    }
+
     /// A drained or decommissioned node must not receive new containers.
     pub fn schedulable(&self) -> bool {
         self.availability == Availability::Active
     }
+}
+
+/// Transport protocol for a port a node's router forwards to it. Mirrors
+/// `cl_config::stack::Protocol`, redeclared here so `cl-raft` does not depend
+/// on `cl-config` (see `ClusterConfigEntry` below for the same reasoning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortProtocol {
+    Tcp,
+    Udp,
 }
 
 /// A deployed stack. The spec is kept as the raw yaml the user submitted so the
@@ -1009,6 +1039,8 @@ mod tests {
             availability: Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
         }

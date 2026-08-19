@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
+use crate::stack::Protocol;
 
 /// Default port for the node to node RPC channel (raft, drive sync, proxy backhaul).
 pub const DEFAULT_RPC_PORT: u16 = 7373;
@@ -216,6 +217,11 @@ pub enum NetworkKind {
     /// interface (a VPN tunnel, usually) that a service attached to it
     /// egresses through, instead of the node's normal route out.
     Egress,
+    /// Like `Egress`, but the tunnel is a WireGuard interface clouduler
+    /// itself brings up from an imported config, instead of one the admin
+    /// set up out of band. A node's address is still the interface name
+    /// clouduler derives for it, not admin-chosen.
+    Wireguard,
 }
 
 impl NetworkKind {
@@ -344,7 +350,7 @@ pub enum NodeAddress {
     Ip(IpAddr),
     // Tried after `Ip`, so a bare IP string still parses as one; only a
     // non-IP bare string falls through to here.
-    Interface(String),
+    Interface(InterfaceAddress),
     Public(PublicAddress),
 }
 
@@ -358,7 +364,14 @@ impl NodeAddress {
 
     pub fn as_interface(&self) -> Option<&str> {
         match self {
-            NodeAddress::Interface(name) => Some(name),
+            NodeAddress::Interface(addr) => Some(&addr.interface),
+            NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
+        }
+    }
+
+    pub fn as_interface_address(&self) -> Option<&InterfaceAddress> {
+        match self {
+            NodeAddress::Interface(addr) => Some(addr),
             NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
         }
     }
@@ -368,6 +381,75 @@ impl NodeAddress {
             NodeAddress::Public(p) => Some(p),
             NodeAddress::Ip(_) | NodeAddress::Interface(_) => None,
         }
+    }
+}
+
+/// A node's address on an egress or wireguard network: the local host
+/// interface (a VPN tunnel, usually) a service on this network egresses
+/// through. `open_ports` names ports the tunnel's far end forwards back to
+/// this node -- a VPN provider's port forwarding feature, e.g. AirVPN -- so
+/// the scheduler only places a service exposing one on a node where it will
+/// actually arrive, the same way `PublicAddress::open_ports` works for a
+/// public network's router.
+///
+/// Serializes as a bare string when `open_ports` is empty, so a plain egress
+/// interface (`vpn: wg0`) round trips unchanged; a map form is used once
+/// ports are declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceAddress {
+    pub interface: String,
+    pub open_ports: BTreeSet<OpenPort>,
+}
+
+impl InterfaceAddress {
+    pub fn new(interface: impl Into<String>) -> Self {
+        Self {
+            interface: interface.into(),
+            open_ports: BTreeSet::new(),
+        }
+    }
+}
+
+impl Serialize for InterfaceAddress {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.open_ports.is_empty() {
+            serializer.serialize_str(&self.interface)
+        } else {
+            #[derive(Serialize)]
+            struct Full<'a> {
+                interface: &'a str,
+                open_ports: &'a BTreeSet<OpenPort>,
+            }
+            Full { interface: &self.interface, open_ports: &self.open_ports }.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for InterfaceAddress {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Full {
+            interface: String,
+            #[serde(default)]
+            open_ports: BTreeSet<OpenPort>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bare(String),
+            Full(Full),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Bare(interface) => InterfaceAddress { interface, open_ports: BTreeSet::new() },
+            Raw::Full(full) => InterfaceAddress { interface: full.interface, open_ports: full.open_ports },
+        })
     }
 }
 
@@ -382,12 +464,27 @@ pub struct PublicAddress {
     pub ipv6: Option<Ipv6Addr>,
     #[serde(default)]
     pub domain: Option<String>,
+    /// Ports this node's router forwards to it on this network. A raw
+    /// `x-clouduler.expose` port on this network is only ever placed on a
+    /// node that lists it here, since nothing else guarantees the traffic
+    /// can actually reach the node from outside.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub open_ports: BTreeSet<OpenPort>,
 }
 
 impl PublicAddress {
     pub fn is_empty(&self) -> bool {
         self.ipv4.is_none() && self.ipv6.is_none() && self.domain.is_none()
     }
+}
+
+/// One port a node's public router forwards to it, e.g. `25/tcp` for SMTP.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct OpenPort {
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: Protocol,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -651,6 +748,7 @@ impl fmt::Display for NetworkKind {
             NetworkKind::Private => f.write_str("private"),
             NetworkKind::Public => f.write_str("public"),
             NetworkKind::Egress => f.write_str("egress"),
+            NetworkKind::Wireguard => f.write_str("wireguard"),
         }
     }
 }

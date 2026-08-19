@@ -134,6 +134,19 @@ fn rejection(
             return Some(format!("{} does not implement egress network {net}", node.name));
         }
     }
+    for net in &desired.networks {
+        if !node.implements_network(net) {
+            return Some(format!("{} does not implement network {net}", node.name));
+        }
+    }
+    for (net, proto, port) in &desired.bound_ports {
+        if !node.opens_port(net, *proto, *port) {
+            return Some(format!(
+                "{} does not have {port}/{proto:?} open on network {net}",
+                node.name
+            ));
+        }
+    }
     for constraint in constraints {
         if !constraint.matches(node) {
             return Some(format!(
@@ -262,6 +275,8 @@ mod tests {
             availability: Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
         }
@@ -342,6 +357,8 @@ mod tests {
             pinned_node: None,
             global: false,
             egress_network: None,
+            networks: BTreeSet::new(),
+            bound_ports: BTreeSet::new(),
         }
     }
 
@@ -380,6 +397,33 @@ mod tests {
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
         assert!(rejected.iter().any(|r| r.contains("n2 does not implement drive bulk")));
+    }
+
+    #[test]
+    fn networks_narrow_the_candidates() {
+        let mut state = cluster();
+        state.nodes.get_mut("n1").unwrap().networks = ["wan".to_string()].into();
+        let mut item = desired("db", 0);
+        item.networks = ["wan".to_string()].into();
+
+        let (eligible, rejected) = candidates(&state, &item).expect("candidates");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].name, "n1");
+        assert!(rejected.iter().any(|r| r.contains("n2 does not implement network wan")));
+    }
+
+    #[test]
+    fn bound_ports_narrow_the_candidates() {
+        let mut state = cluster();
+        state.nodes.get_mut("n1").unwrap().open_ports =
+            [("wan".to_string(), [(cl_raft::state::PortProtocol::Tcp, 25)].into())].into();
+        let mut item = desired("mail", 0);
+        item.bound_ports = [("wan".to_string(), cl_raft::state::PortProtocol::Tcp, 25)].into();
+
+        let (eligible, rejected) = candidates(&state, &item).expect("candidates");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].name, "n1");
+        assert!(rejected.iter().any(|r| r.contains("n2 does not have 25/Tcp open on network wan")));
     }
 
     #[test]

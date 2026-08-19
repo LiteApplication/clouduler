@@ -84,6 +84,8 @@
         "egress_networks": [],
         "labels": {},
         "name": "n0",
+        "networks": [],
+        "open_ports": {},
         "role": "manager",
         "rpc_addr": "<volatile>"
       }

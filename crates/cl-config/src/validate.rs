@@ -83,10 +83,10 @@ impl ClusterConfig {
                 }
                 _ => {}
             }
-            if net.kind == NetworkKind::Egress && net.domain.is_some() {
+            if matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard) && net.domain.is_some() {
                 return Err(ConfigError::invalid(
                     format!("{at}.domain"),
-                    "an egress network is not addressable and must not declare a domain",
+                    format!("a {} network is not addressable and must not declare a domain", net.kind),
                 ));
             }
             if let Some(domain) = &net.domain {
@@ -190,18 +190,18 @@ impl ClusterConfig {
                             "a public network takes an ipv4, ipv6 and/or domain block",
                         ))
                     }
-                    (NetworkKind::Egress, NodeAddress::Interface(name)) => {
-                        if name.trim().is_empty() {
+                    (NetworkKind::Egress | NetworkKind::Wireguard, NodeAddress::Interface(addr)) => {
+                        if addr.interface.trim().is_empty() {
                             return Err(ConfigError::invalid(
                                 at,
                                 "must name a non-empty host interface",
                             ));
                         }
                     }
-                    (NetworkKind::Egress, _) => {
+                    (NetworkKind::Egress | NetworkKind::Wireguard, _) => {
                         return Err(ConfigError::invalid(
                             at,
-                            "an egress network takes a bare host interface name",
+                            format!("a {} network takes a bare host interface name", net.kind),
                         ))
                     }
                 }
@@ -627,6 +627,65 @@ cloudflare:
         let err = parse(&[("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: {}")])
             .unwrap_err();
         assert!(err.to_string().contains("no node implements this drive"));
+    }
+
+    #[test]
+    fn wireguard_network_takes_a_bare_interface_name() {
+        let cfg = parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: wireguard }",
+        )])
+        .expect("valid");
+        assert_eq!(cfg.networks["vpn"].kind, NetworkKind::Wireguard);
+
+        let err = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: wireguard }",
+            ),
+            ("      tailscale: 10.10.0.1", "      tailscale: 10.10.0.1\n      vpn: { ipv4: 1.2.3.4 }"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("takes a bare host interface name"));
+    }
+
+    #[test]
+    fn wireguard_interface_open_ports_round_trip_and_stay_bare_when_empty() {
+        let cfg = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: wireguard }",
+            ),
+            (
+                "      tailscale: 10.10.0.1",
+                "      tailscale: 10.10.0.1\n      vpn: { interface: wg0, open_ports: [{ port: 51413 }, { port: 53, protocol: udp }] }",
+            ),
+        ])
+        .expect("valid");
+        let addr = cfg.nodes["n1"].network["vpn"].as_interface_address().expect("interface address");
+        assert_eq!(addr.interface, "wg0");
+        assert_eq!(addr.open_ports.len(), 2);
+        assert!(addr.open_ports.contains(&crate::cluster::OpenPort {
+            port: 51413,
+            protocol: crate::stack::Protocol::Tcp,
+        }));
+
+        // A bare interface (no ports declared) round trips as a plain string.
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(yaml.contains("wan:") && yaml.contains("203.0.113.5"));
+        let n2_addr = cfg.nodes["n2"].network.get("tailscale").unwrap();
+        let reserialized = serde_yaml::to_string(n2_addr).unwrap();
+        assert_eq!(reserialized.trim(), "10.10.0.2");
+    }
+
+    #[test]
+    fn wireguard_network_rejects_a_domain() {
+        let err = parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: wireguard, domain: vpn.example.com }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("wireguard network is not addressable"));
     }
 
     #[test]

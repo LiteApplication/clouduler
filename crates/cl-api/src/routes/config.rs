@@ -1,16 +1,19 @@
 //! `/api/config`: the cluster config file, edited with an auto-rollback safety net.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cl_config::ClusterConfig;
+use cl_config::{ClusterConfig, StackFile};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{Identity, RequireAdmin};
 use crate::config_edit::{connection_sensitive_change, PendingEdit, PendingStatus, DEFAULT_ROLLBACK_AFTER};
 use crate::error::ApiError;
+use crate::redirects::{RedirectStore, REDIRECTS_CONFIG};
 use crate::server::AppState;
+use crate::static_routes::{StaticRouteStore, STATIC_ROUTES_CONFIG};
+use crate::wireguard::{WireguardIngressStore, WIREGUARD_INGRESS_CONFIG};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -19,6 +22,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/config/confirm", post(confirm))
         .route("/api/config/rollback", post(rollback))
         .route("/api/config/pending", get(pending))
+        .route("/api/config/networks/{name}/rename", post(rename_network))
 }
 
 async fn get_config(_identity: Identity, State(state): State<AppState>) -> Json<ClusterConfig> {
@@ -115,6 +119,248 @@ pub(super) async fn apply_config(state: &AppState, config: &ClusterConfig) -> Re
 
     std::fs::write(&state.config_path, yaml).map_err(ApiError::internal)?;
     *state.cluster_config.write().await = config.clone();
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RenameNetworkRequest {
+    new_name: String,
+}
+
+/// Rename a network everywhere it is referenced: the cluster config (the
+/// `networks` key, every node's address map, `web.network`), every deployed
+/// stack that names it, and the three out-of-band stores that hold a plain
+/// `network: String` (redirects, static routes, wireguard ingress).
+///
+/// Not one atomic transaction -- each piece is its own raft log entry -- but
+/// each step is atomic on its own and a failure partway through is surfaced
+/// immediately rather than silently leaving a mismatched reference.
+async fn rename_network(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(old_name): Path<String>,
+    Json(body): Json<RenameNetworkRequest>,
+) -> Result<StatusCode, ApiError> {
+    let new_name = body.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err(ApiError::BadRequest("new_name must not be empty".into()));
+    }
+    if new_name == old_name {
+        return Ok(StatusCode::OK);
+    }
+
+    let mut config = state.cluster_config.read().await.clone();
+    if !config.networks.contains_key(&old_name) {
+        return Err(ApiError::BadRequest(format!("no network named {old_name}")));
+    }
+    if config.networks.contains_key(&new_name) {
+        return Err(ApiError::BadRequest(format!("a network named {new_name} already exists")));
+    }
+
+    let net = config.networks.remove(&old_name).expect("checked above");
+    let is_wireguard = net.kind == cl_config::NetworkKind::Wireguard;
+    config.networks.insert(new_name.clone(), net);
+    let node_names: Vec<String> = config.nodes.keys().cloned().collect();
+    for node in config.nodes.values_mut() {
+        if let Some(addr) = node.network.remove(&old_name) {
+            node.network.insert(new_name.clone(), addr);
+        }
+    }
+    if config.web.network == old_name {
+        config.web.network = new_name.clone();
+    }
+    config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    apply_config(&state, &config).await?;
+
+    // Each node's imported wireguard config is sealed under a secret name
+    // scoped by network name, so it must move along with the rename or the
+    // tunnel silently stops finding its config.
+    if is_wireguard {
+        rename_wireguard_secrets(&state, &old_name, &new_name, &node_names).await?;
+    }
+
+    let cluster_state = state.cluster.state().await;
+    for (stack_name, stack) in &cluster_state.stacks {
+        let Ok(mut file) = StackFile::parse(&stack.spec) else { continue };
+        if !rename_network_in_stack(&mut file, &old_name, &new_name) {
+            continue;
+        }
+        let spec = serde_yaml::to_string(&file).map_err(ApiError::internal)?;
+        let response = state
+            .cluster
+            .submit(cl_raft::Request::DeployStack { name: stack_name.clone(), spec })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::Internal(format!("renaming network in stack {stack_name}: {msg}")));
+        }
+    }
+
+    rename_in_redirects(&state, &old_name, &new_name).await?;
+    rename_in_static_routes(&state, &old_name, &new_name).await?;
+    rename_in_wireguard_ingress(&state, &old_name, &new_name).await?;
+
+    Ok(StatusCode::OK)
+}
+
+/// Renames `old` to `new` everywhere a stack file can name a network: the
+/// top-level `networks` block, each service's `networks:` list, and every
+/// `x-clouduler.proxy`/`expose` entry's `network` field. Returns whether
+/// anything changed, so the caller can skip stacks that never mention it.
+fn rename_network_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
+    let mut changed = false;
+    if let Some(net) = file.networks.remove(old) {
+        file.networks.insert(new.to_string(), net);
+        changed = true;
+    }
+    for svc in file.services.values_mut() {
+        for n in svc.networks.iter_mut() {
+            if n == old {
+                *n = new.to_string();
+                changed = true;
+            }
+        }
+        let Some(ext) = svc.x_clouduler.as_mut() else { continue };
+        for route in ext.proxy.iter_mut() {
+            if route.network == old {
+                route.network = new.to_string();
+                changed = true;
+            }
+        }
+        for expose in ext.expose.iter_mut() {
+            if expose.network == old {
+                expose.network = new.to_string();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Moves every node's sealed wireguard config secret from the old network's
+/// reserved name to the new one, so the tunnel keeps finding it after the
+/// rename. Submitted as-is (still sealed, no key needed here) -- a
+/// put-then-remove per node, since there is no rename request.
+async fn rename_wireguard_secrets(
+    state: &AppState,
+    old: &str,
+    new: &str,
+    nodes: &[String],
+) -> Result<(), ApiError> {
+    for node in nodes {
+        let old_name = crate::wireguard::wireguard_secret_name(old, node);
+        let cluster_state = state.cluster.state().await;
+        let Some(entry) = cluster_state.secrets.get(&old_name).cloned() else { continue };
+        drop(cluster_state);
+
+        let new_name = crate::wireguard::wireguard_secret_name(new, node);
+        let response = state
+            .cluster
+            .submit(cl_raft::Request::PutSecret {
+                name: new_name,
+                sealed: entry.sealed,
+                key_fingerprint: entry.key_fingerprint,
+                owner: entry.owner,
+            })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::Internal(format!("moving wireguard config for {node}: {msg}")));
+        }
+
+        let response = state
+            .cluster
+            .submit(cl_raft::Request::RemoveSecret { name: old_name })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::Internal(format!("removing old wireguard config for {node}: {msg}")));
+        }
+    }
+    Ok(())
+}
+
+async fn rename_in_redirects(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
+    let cluster_state = state.cluster.state().await;
+    let mut store = RedirectStore::load(&cluster_state);
+    let mut changed = false;
+    for rule in store.rules.iter_mut() {
+        if rule.network == old {
+            rule.network = new.to_string();
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let response = state
+        .cluster
+        .submit(cl_raft::Request::PutConfig {
+            name: REDIRECTS_CONFIG.to_string(),
+            content: store.encode(),
+            owner: None,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Internal(msg));
+    }
+    Ok(())
+}
+
+async fn rename_in_static_routes(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
+    let cluster_state = state.cluster.state().await;
+    let mut store = StaticRouteStore::load(&cluster_state);
+    let mut changed = false;
+    for rule in store.routes.iter_mut() {
+        if rule.network == old {
+            rule.network = new.to_string();
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let response = state
+        .cluster
+        .submit(cl_raft::Request::PutConfig {
+            name: STATIC_ROUTES_CONFIG.to_string(),
+            content: store.encode(),
+            owner: None,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Internal(msg));
+    }
+    Ok(())
+}
+
+async fn rename_in_wireguard_ingress(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
+    let cluster_state = state.cluster.state().await;
+    let mut store = WireguardIngressStore::load(&cluster_state);
+    let mut changed = false;
+    for rule in store.rules.iter_mut() {
+        if rule.network == old {
+            rule.network = new.to_string();
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let response = state
+        .cluster
+        .submit(cl_raft::Request::PutConfig {
+            name: WIREGUARD_INGRESS_CONFIG.to_string(),
+            content: store.encode(),
+            owner: None,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Internal(msg));
+    }
     Ok(())
 }
 

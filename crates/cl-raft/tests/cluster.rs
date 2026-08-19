@@ -98,6 +98,8 @@ fn node_state(name: &str, addr: SocketAddr) -> NodeState {
         availability: Availability::Active,
         labels: Default::default(),
         egress_networks: Default::default(),
+        networks: Default::default(),
+        open_ports: Default::default(),
         arch: Default::default(),
         binary_hash: Default::default(),
     }

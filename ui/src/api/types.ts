@@ -5,6 +5,7 @@
 
 export type Role = 'manager' | 'worker';
 export type Availability = 'active' | 'drain' | 'decommissioned';
+export type PortProtocol = 'tcp' | 'udp';
 
 export interface NodeState {
   name: string;
@@ -15,6 +16,11 @@ export interface NodeState {
   availability: Availability;
   /** Egress-kind networks this node has a host interface address for. */
   egress_networks: string[];
+  /** Every network this node has any address on. */
+  networks: string[];
+  /** network name -> ports this node has open on it (public router
+   *  forwarding, or a wireguard tunnel's far end forwarding a port back). */
+  open_ports: Record<string, [PortProtocol, number][]>;
   /** std::env::consts::ARCH of the running binary, e.g. "x86_64". Empty until
    *  the node has reported in at least once since this field was added. */
   arch: string;
@@ -235,15 +241,28 @@ export interface ClusterKeyStatus {
 
 // ---- config ----
 
-export type NetworkKind = 'internal' | 'private' | 'public';
+export type NetworkKind = 'internal' | 'private' | 'public' | 'egress' | 'wireguard';
+
+export interface OpenPort {
+  port: number;
+  protocol: PortProtocol;
+}
 
 export interface PublicAddress {
   ipv4: string | null;
   ipv6: string | null;
   domain: string | null;
+  open_ports: OpenPort[];
 }
 
-export type NodeAddress = string | PublicAddress;
+/** An egress or wireguard network's host interface address. Serializes as a
+ *  bare string when `open_ports` is empty. */
+export interface InterfaceAddress {
+  interface: string;
+  open_ports: OpenPort[];
+}
+
+export type NodeAddress = string | PublicAddress | InterfaceAddress;
 
 export interface NetworkConfig {
   type: NetworkKind;
@@ -360,6 +379,22 @@ export interface StaticRouteRule {
   websockets: boolean;
   preserve_host: boolean;
   response_timeout?: string | null;
+}
+
+/**
+ * A UI-managed rule letting a port in through a wireguard network's tunnel
+ * and forwarding it to a port on this node's own address, where an
+ * already-published docker port bind picks it up. Not part of cluster.yaml;
+ * see /api/wireguard-ingress.
+ */
+export interface WireguardIngressRule {
+  id: string;
+  /** Must name a `wireguard`-kind network. */
+  network: string;
+  port: number;
+  protocol: 'tcp' | 'udp';
+  /** Port on this node's own docker port bind. Equal to `port` when no renumbering is needed. */
+  target_port: number;
 }
 
 export interface ClusterConfig {

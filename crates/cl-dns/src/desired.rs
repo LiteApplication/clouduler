@@ -162,6 +162,7 @@ mod tests {
                 ipv4: Some("203.0.113.9".parse().unwrap()),
                 ipv6: Some("2001:db8::9".parse().unwrap()),
                 domain: Some("n1.example.net".to_string()),
+                open_ports: Default::default(),
             }),
         );
         let recs = records_for(&cfg, "svc", "wan", &node).unwrap();

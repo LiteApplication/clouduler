@@ -43,6 +43,7 @@ impl StackFile {
     pub fn validate(&self, cluster: &ClusterConfig) -> Result<()> {
         self.validate_syntax()?;
         self.validate_networks_exist(cluster)?;
+        self.validate_networks_implemented(cluster)?;
         self.validate_drives_exist(cluster)?;
         self.validate_proxy_expose_networks(cluster)?;
         self.validate_service_network_kinds(cluster)?;
@@ -137,6 +138,24 @@ impl StackFile {
         Ok(())
     }
 
+    /// A network no node implements can never host a placement, so a service
+    /// naming one could never schedule. Same idiom as `validate_drives` in
+    /// the cluster config, but per stack since that's where a service's
+    /// `networks:` list lives.
+    fn validate_networks_implemented(&self, cluster: &ClusterConfig) -> Result<()> {
+        for (name, svc) in &self.services {
+            for net in &svc.networks {
+                if !cluster.nodes.values().any(|n| n.network.contains_key(net)) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.networks"),
+                        format!("no node implements network {net}, this service could never be placed"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_drives_exist(&self, cluster: &ClusterConfig) -> Result<()> {
         for (name, svc) in &self.services {
             for (idx, vol) in svc.volumes.iter().enumerate() {
@@ -182,12 +201,40 @@ impl StackFile {
                 }
             }
             for (idx, expose) in ext.expose.iter().enumerate() {
-                let at = format!("services.{name}.x-clouduler.expose[{idx}].network");
-                if !cluster.networks.contains_key(&expose.network) {
+                let at = format!("services.{name}.x-clouduler.expose[{idx}]");
+                let Some(net) = cluster.networks.get(&expose.network) else {
                     return Err(ConfigError::invalid(
-                        at,
+                        format!("{at}.network"),
                         format!("no network named {} declared in the cluster", expose.network),
                     ));
+                };
+                // Only a public network's router, or a wireguard tunnel's far
+                // end forwarding a port back in (e.g. a VPN provider's port
+                // forwarding feature), can make a raw port reachable from
+                // outside. At least one node must have it marked open, or
+                // this could never actually be reached.
+                use crate::cluster::NetworkKind;
+                if matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard) {
+                    let wanted = crate::cluster::OpenPort {
+                        port: expose.published,
+                        protocol: expose.protocol,
+                    };
+                    let reachable = cluster.nodes.values().any(|n| {
+                        n.network.get(&expose.network).is_some_and(|addr| match addr {
+                            crate::cluster::NodeAddress::Public(p) => p.open_ports.contains(&wanted),
+                            crate::cluster::NodeAddress::Interface(i) => i.open_ports.contains(&wanted),
+                            crate::cluster::NodeAddress::Ip(_) => false,
+                        })
+                    });
+                    if !reachable {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "no node has {}/{} open on network {}, this port could never be reached",
+                                expose.published, expose.protocol, expose.network
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -205,7 +252,10 @@ impl StackFile {
             let mut egress = None;
             for net in &svc.networks {
                 // Already checked to exist by validate_networks_exist.
-                if cluster.networks.get(net).map(|n| n.kind) != Some(NetworkKind::Egress) {
+                if !matches!(
+                    cluster.networks.get(net).map(|n| n.kind),
+                    Some(NetworkKind::Egress | NetworkKind::Wireguard)
+                ) {
                     continue;
                 }
                 if let Some(existing) = &egress {
@@ -393,6 +443,108 @@ services:
         let err = stack(raw).validate(&cluster()).unwrap_err();
         assert!(err.to_string().contains("services.a.x-clouduler.node"));
         assert!(err.to_string().contains("no node named bogus"));
+    }
+
+    #[test]
+    fn network_with_no_implementing_node_is_rejected() {
+        let raw = r#"
+networks:
+  unreachable: {}
+services:
+  a:
+    image: x
+    networks: [unreachable]
+"#;
+        // Add a network to the reference cluster that no node opts into.
+        let yaml = CLUSTER_YAML.replace(
+            "  vpn:\n    type: egress\n",
+            "  vpn:\n    type: egress\n  unreachable:\n    type: egress\n",
+        );
+        let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
+        let err = stack(raw).validate(&cluster).unwrap_err();
+        assert!(err.to_string().contains("no node implements network unreachable"));
+    }
+
+    #[test]
+    fn expose_port_nobody_has_open_is_rejected() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - port: 25
+          published: 25
+          network: wan
+"#;
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("no node has 25/tcp open on network wan"));
+    }
+
+    #[test]
+    fn expose_port_a_node_has_open_is_accepted() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - port: 25
+          published: 25
+          network: wan
+"#;
+        let mut cfg = cluster();
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "wan".to_string(),
+            crate::cluster::NodeAddress::Public(crate::cluster::PublicAddress {
+                ipv4: Some("203.0.113.9".parse().unwrap()),
+                ipv6: None,
+                domain: None,
+                open_ports: [crate::cluster::OpenPort {
+                    port: 25,
+                    protocol: crate::stack::Protocol::Tcp,
+                }]
+                .into_iter()
+                .collect(),
+            }),
+        );
+        stack(raw).validate(&cfg).expect("a node has the port open");
+    }
+
+    #[test]
+    fn expose_port_a_wireguard_node_has_open_is_accepted() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - port: 22
+          published: 51413
+          network: vpn
+"#;
+        let yaml = CLUSTER_YAML.replace(
+            "  vpn:\n    type: egress\n",
+            "  vpn:\n    type: wireguard\n",
+        );
+        let mut cfg = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
+
+        let err = stack(raw).validate(&cfg).unwrap_err();
+        assert!(err.to_string().contains("no node has 51413/tcp open on network vpn"));
+
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "vpn".to_string(),
+            crate::cluster::NodeAddress::Interface(crate::cluster::InterfaceAddress {
+                interface: "wg-vpn".to_string(),
+                open_ports: [crate::cluster::OpenPort {
+                    port: 51413,
+                    protocol: crate::stack::Protocol::Tcp,
+                }]
+                .into_iter()
+                .collect(),
+            }),
+        );
+        stack(raw).validate(&cfg).expect("n1's tunnel has the port open");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::redirects::REDIRECTS_CONFIG;
 use crate::secrets::{self, Charset};
 use crate::server::AppState;
 use crate::static_routes::STATIC_ROUTES_CONFIG;
+use crate::wireguard::{is_reserved_wireguard_secret, WIREGUARD_INGRESS_CONFIG};
 
 /// Config names clouduler itself owns and never shows through the generic
 /// config routes.
@@ -23,13 +24,14 @@ fn is_reserved(name: &str) -> bool {
     name == API_KEYS_CONFIG
         || name == REDIRECTS_CONFIG
         || name == STATIC_ROUTES_CONFIG
+        || name == WIREGUARD_INGRESS_CONFIG
         || super::self_update::is_reserved_config(name)
 }
 
 /// Secret names clouduler itself owns and never shows through the generic
 /// secret listing route.
 fn is_reserved_secret(name: &str) -> bool {
-    super::self_update::is_reserved_secret(name)
+    super::self_update::is_reserved_secret(name) || is_reserved_wireguard_secret(name)
 }
 
 pub fn router() -> Router<AppState> {

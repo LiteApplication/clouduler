@@ -21,10 +21,14 @@ use crate::error::{NetError, Result};
 use crate::vxlan::Overlay;
 
 /// Linux interface names are capped at `IFNAMSIZ - 1` usable bytes.
-const IFNAMSIZ_USABLE: usize = 15;
+///
+/// Shared with `wireguard`, whose interface names are capped the same way.
+pub(crate) const IFNAMSIZ_USABLE: usize = 15;
 
 /// iptables chain names are capped at 28 bytes.
-const CHAIN_USABLE: usize = 28;
+///
+/// Shared with `wireguard`, whose ingress chains are capped the same way.
+pub(crate) const CHAIN_USABLE: usize = 28;
 
 /// Reserved for egress bridges, well away from the overlay pool
 /// (`cl_net::ipam::DEFAULT_OVERLAY_POOL`) and common RFC1918 LAN ranges.
@@ -49,7 +53,9 @@ fn iptables_chain(prefix: &str, network: &str) -> String {
 /// Build a `<= cap` char name from a prefix and a network name. Short names
 /// pass through unchanged; long ones get truncated and a hash suffix
 /// appended so two networks that truncate to the same prefix don't collide.
-fn short_name(prefix: &str, name: &str, cap: usize) -> String {
+///
+/// Shared with `wireguard`, which derives its interface names the same way.
+pub(crate) fn short_name(prefix: &str, name: &str, cap: usize) -> String {
     let full = format!("{prefix}{name}");
     if full.len() <= cap {
         return full;

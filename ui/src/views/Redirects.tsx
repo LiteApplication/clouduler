@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
-import type { RedirectRule, StaticRouteRule } from '../api/types';
+import type { RedirectRule, StaticRouteRule, WireguardIngressRule } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { Icon } from '../components/Icon';
 import { SelectField } from '../components/FormFields';
@@ -18,6 +18,19 @@ function useNetworkNames(): string[] {
     api
       .getConfiguration()
       .then((config) => setNames(Object.keys(config.networks)))
+      .catch(() => setNames([]));
+  }, []);
+  return names;
+}
+
+function useWireguardNetworkNames(): string[] {
+  const [names, setNames] = useState<string[]>([]);
+  useEffect(() => {
+    api
+      .getConfiguration()
+      .then((config) =>
+        setNames(Object.entries(config.networks).filter(([, n]) => n.type === 'wireguard').map(([name]) => name)),
+      )
       .catch(() => setNames([]));
   }, []);
   return names;
@@ -48,6 +61,7 @@ export function Redirects() {
       </div>
       <RedirectsSection />
       <StaticBackendsSection />
+      <WireguardIngressSection />
     </div>
   );
 }
@@ -509,6 +523,195 @@ function StaticBackendsSection() {
               <tr>
                 <td colSpan={5} className="empty-cell">
                   no static backends
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+type WireguardIngressDraft = Omit<WireguardIngressRule, 'id'>;
+
+const emptyWireguardIngressDraft = (network: string): WireguardIngressDraft => ({
+  network,
+  port: 0,
+  protocol: 'tcp',
+  target_port: 0,
+});
+
+function WireguardIngressSection() {
+  const { isAdmin } = useAuth();
+  const networkNames = useWireguardNetworkNames();
+  const [rules, setRules] = useState<WireguardIngressRule[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState<WireguardIngressDraft>(emptyWireguardIngressDraft(''));
+
+  const load = () => {
+    api
+      .listWireguardIngress()
+      .then(setRules)
+      .catch((e) => setError(e instanceof ApiError ? e.message : 'failed to load wireguard ingress rules'));
+  };
+
+  useEffect(load, []);
+
+  const startCreate = () => {
+    setEditing(null);
+    setDraft(emptyWireguardIngressDraft(networkNames[0] ?? ''));
+    setShowForm(true);
+  };
+
+  const startEdit = (rule: WireguardIngressRule) => {
+    setEditing(rule.id);
+    setDraft({ network: rule.network, port: rule.port, protocol: rule.protocol, target_port: rule.target_port });
+    setShowForm(true);
+  };
+
+  const save = async () => {
+    setError(null);
+    try {
+      if (editing) {
+        await api.updateWireguardIngress(editing, draft);
+      } else {
+        await api.createWireguardIngress(draft);
+      }
+      setShowForm(false);
+      setEditing(null);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'failed to save wireguard ingress rule');
+    }
+  };
+
+  const remove = async (id: string) => {
+    if (!confirm('Remove this wireguard ingress rule?')) return;
+    try {
+      await api.removeWireguardIngress(id);
+      load();
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'failed to remove wireguard ingress rule');
+    }
+  };
+
+  if (!rules) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading wireguard ingress rules...
+      </p>
+    );
+  }
+
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h2>
+          {rules.length} wireguard ingress rule{rules.length === 1 ? '' : 's'}
+        </h2>
+        {isAdmin && networkNames.length > 0 && (
+          <button onClick={showForm ? () => setShowForm(false) : startCreate}>
+            <Icon name={showForm ? 'close' : 'plus'} />
+            {showForm ? 'Cancel' : 'New rule'}
+          </button>
+        )}
+      </div>
+      <p className="field-hint">
+        Ports let in through a wireguard network's tunnel, forwarded to a port on this node -- normally an
+        already-published docker port bind. Never opens the port anywhere else.
+      </p>
+      {networkNames.length === 0 && (
+        <div className="banner banner-warn">
+          <Icon name="alert" /> No wireguard networks configured yet.
+        </div>
+      )}
+      {error && (
+        <div className="banner banner-warn">
+          <Icon name="alert" /> {error}
+        </div>
+      )}
+
+      {showForm && (
+        <div className="card section">
+          <SelectField
+            id="wg-ingress-network"
+            label="Network"
+            value={draft.network}
+            onChange={(network) => setDraft({ ...draft, network })}
+            options={networkNames.map((n) => ({ value: n, label: n }))}
+          />
+          <div className="field">
+            <label htmlFor="wg-ingress-port">Port (on the tunnel)</label>
+            <input
+              id="wg-ingress-port"
+              type="number"
+              value={draft.port}
+              onChange={(e) => setDraft({ ...draft, port: Number(e.target.value) })}
+            />
+          </div>
+          <SelectField
+            id="wg-ingress-protocol"
+            label="Protocol"
+            value={draft.protocol}
+            onChange={(protocol) => setDraft({ ...draft, protocol: protocol as 'tcp' | 'udp' })}
+            options={[
+              { value: 'tcp', label: 'TCP' },
+              { value: 'udp', label: 'UDP' },
+            ]}
+          />
+          <div className="field">
+            <label htmlFor="wg-ingress-target">Target port (on this node)</label>
+            <input
+              id="wg-ingress-target"
+              type="number"
+              value={draft.target_port}
+              onChange={(e) => setDraft({ ...draft, target_port: Number(e.target.value) })}
+            />
+            <span className="field-hint">A docker container's published host port. Same as Port when unchanged.</span>
+          </div>
+          <button onClick={save}>
+            <Icon name="check" /> {editing ? 'Save' : 'Create'}
+          </button>
+        </div>
+      )}
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Network</th>
+              <th>Port</th>
+              <th>Protocol</th>
+              <th>Target port</th>
+              {isAdmin && <th>Actions</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rules.map((r) => (
+              <tr key={r.id}>
+                <td>{r.network}</td>
+                <td className="mono">{r.port}</td>
+                <td>{r.protocol}</td>
+                <td className="mono">{r.target_port}</td>
+                {isAdmin && (
+                  <td>
+                    <button onClick={() => startEdit(r)}>
+                      <Icon name="edit" /> Edit
+                    </button>
+                    <button className="danger" onClick={() => remove(r.id)}>
+                      <Icon name="trash" /> Remove
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+            {rules.length === 0 && (
+              <tr>
+                <td colSpan={5} className="empty-cell">
+                  no wireguard ingress rules
                 </td>
               </tr>
             )}

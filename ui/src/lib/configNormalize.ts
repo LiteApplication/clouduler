@@ -18,10 +18,14 @@ function nullable<T>(v: T | null | undefined): T | null {
 
 function normalizeAddress(addr: NodeAddress): NodeAddress {
   if (typeof addr === 'string') return addr;
+  if ('interface' in addr) {
+    return { interface: addr.interface, open_ports: addr.open_ports ?? [] };
+  }
   return {
     ipv4: nullable(addr.ipv4),
     ipv6: nullable(addr.ipv6),
     domain: nullable(addr.domain),
+    open_ports: addr.open_ports ?? [],
   };
 }
 

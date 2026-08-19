@@ -2,8 +2,16 @@
 
 use std::collections::BTreeSet;
 
-use cl_config::{DeployMode, Service, StackFile};
+use cl_config::{DeployMode, Protocol, Service, StackFile};
 use cl_raft::ids::InstanceId;
+use cl_raft::state::PortProtocol;
+
+fn to_port_protocol(protocol: Protocol) -> PortProtocol {
+    match protocol {
+        Protocol::Tcp => PortProtocol::Tcp,
+        Protocol::Udp => PortProtocol::Udp,
+    }
+}
 
 /// One instance the cluster should be running, with everything placement needs
 /// to decide where it can go.
@@ -24,6 +32,14 @@ pub struct Desired {
     /// A node must implement it (`NodeState::implements_egress_network`) to
     /// be a candidate, the same way `drives` works.
     pub egress_network: Option<String>,
+    /// Every network this instance's service attaches to. A node must
+    /// implement each of them (`NodeState::implements_network`) to be a
+    /// candidate, the same way `drives` works.
+    pub networks: BTreeSet<String>,
+    /// `(network, protocol, published port)` for every `x-clouduler.expose`
+    /// entry on a public-kind network. A node must have the port marked open
+    /// on that network (`NodeState::opens_port`) to be a candidate.
+    pub bound_ports: BTreeSet<(String, PortProtocol, u16)>,
 }
 
 /// Expand a stack into its instances. Replica counts come from
@@ -34,7 +50,12 @@ pub struct Desired {
 /// service's plain `networks: Vec<String>` list can be told apart without
 /// this crate needing the full `ClusterConfig` (it only ever sees replicated
 /// state and stack files otherwise).
-pub fn expand(stack: &str, file: &StackFile, egress_networks: &BTreeSet<String>) -> Vec<Desired> {
+pub fn expand(
+    stack: &str,
+    file: &StackFile,
+    egress_networks: &BTreeSet<String>,
+    port_gated_networks: &BTreeSet<String>,
+) -> Vec<Desired> {
     let mut out = Vec::new();
 
     for (service_name, service) in &file.services {
@@ -69,6 +90,18 @@ pub fn expand(stack: &str, file: &StackFile, egress_networks: &BTreeSet<String>)
                 pinned_node: file.effective_node(service_name),
                 global,
                 egress_network: service.networks.iter().find(|n| egress_networks.contains(*n)).cloned(),
+                networks: service.networks.iter().cloned().collect(),
+                bound_ports: service
+                    .x_clouduler
+                    .as_ref()
+                    .map(|x| {
+                        x.expose
+                            .iter()
+                            .filter(|e| port_gated_networks.contains(&e.network))
+                            .map(|e| (e.network.clone(), to_port_protocol(e.protocol), e.published))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
     }
@@ -99,7 +132,7 @@ services:
     image: nginx
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), 1);
         assert_eq!(desired[0].id, InstanceId::new("site", "web", 0));
         assert!(!desired[0].global);
@@ -116,7 +149,7 @@ services:
       replicas: 3
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), 3);
         assert_eq!(
             desired.iter().map(|d| d.id.index).collect::<Vec<_>>(),
@@ -135,7 +168,7 @@ services:
       mode: global
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired.len(), 1);
         assert!(desired[0].global);
     }
@@ -152,11 +185,58 @@ services:
       - "bulk/backups:/backups:ro"
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(
             desired[0].drives,
             ["bulk".to_string(), "fast".to_string()].into()
         );
+    }
+
+    #[test]
+    fn networks_are_carried_through() {
+        let file = parse(
+            r#"
+networks:
+  wan: {}
+services:
+  a:
+    image: x
+    networks: [wan]
+"#,
+        );
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(desired[0].networks, ["wan".to_string()].into());
+    }
+
+    #[test]
+    fn expose_ports_on_a_public_network_become_bound_ports() {
+        let file = parse(
+            r#"
+networks:
+  wan: {}
+services:
+  a:
+    image: x
+    networks: [wan]
+    x-clouduler:
+      expose:
+        - port: 25
+          published: 25
+          protocol: tcp
+          network: wan
+"#,
+        );
+        let port_gated_networks = ["wan".to_string()].into();
+        let desired = expand("site", &file, &BTreeSet::new(), &port_gated_networks);
+        assert_eq!(
+            desired[0].bound_ports,
+            [("wan".to_string(), PortProtocol::Tcp, 25)].into()
+        );
+
+        // Not in `port_gated_networks` (e.g. a private network) means no port
+        // constraint, since only a public router forwards anything in.
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        assert!(desired[0].bound_ports.is_empty());
     }
 
     #[test]
@@ -174,7 +254,7 @@ services:
       node: n2
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(desired[0].constraints, vec!["node.role == manager"]);
         assert_eq!(desired[0].pinned_node.as_deref(), Some("n2"));
     }

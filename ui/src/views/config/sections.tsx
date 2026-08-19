@@ -7,10 +7,13 @@ import { api, ApiError } from '../../api/client';
 import type {
   CloudflareTokenStatus,
   ClusterConfig,
+  InterfaceAddress,
   NetworkConfig,
   NetworkKind,
   NodeAddress,
   NodeConfig,
+  OpenPort,
+  PortProtocol,
   PublicAddress,
 } from '../../api/types';
 import { Icon } from '../../components/Icon';
@@ -46,8 +49,40 @@ export function ClusterSection({ draft, setDraft, disabled }: SectionProps) {
   );
 }
 
+/** Applies the same key rename the server does, to every place a network
+ *  name appears in a `ClusterConfig`, so the draft stays in sync with a
+ *  `renameNetwork` call without wiping any other unrelated staged edit. */
+function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newName: string): ClusterConfig {
+  const networks = { ...draft.networks };
+  const net = networks[oldName];
+  delete networks[oldName];
+  networks[newName] = net;
+
+  const nodes = Object.fromEntries(
+    Object.entries(draft.nodes).map(([nodeName, node]) => {
+      if (!(oldName in node.network)) return [nodeName, node];
+      const network = { ...node.network };
+      const addr = network[oldName];
+      delete network[oldName];
+      network[newName] = addr;
+      return [nodeName, { ...node, network }];
+    }),
+  );
+
+  return {
+    ...draft,
+    networks,
+    nodes,
+    web: draft.web.network === oldName ? { ...draft.web, network: newName } : draft.web,
+  };
+}
+
 export function NetworksSection({ draft, setDraft, disabled }: SectionProps) {
   const entries = Object.entries(draft.networks);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
 
   const updateNetwork = (name: string, patch: Partial<NetworkConfig>) => {
     setDraft({ ...draft, networks: { ...draft.networks, [name]: { ...draft.networks[name], ...patch } } });
@@ -66,20 +101,73 @@ export function NetworksSection({ draft, setDraft, disabled }: SectionProps) {
     setDraft({ ...draft, networks: next });
   };
 
+  const startRename = (name: string) => {
+    setRenaming(name);
+    setRenameValue(name);
+    setRenameError(null);
+  };
+
+  const submitRename = async (oldName: string) => {
+    const newName = renameValue.trim();
+    if (!newName || newName === oldName) {
+      setRenaming(null);
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      await api.renameNetwork(oldName, newName);
+      setDraft(renameNetworkInDraft(draft, oldName, newName));
+      setRenaming(null);
+    } catch (e) {
+      setRenameError(e instanceof ApiError ? e.message : 'rename failed');
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
   return (
     <>
       {entries.map(([name, net]) => (
         <div className="card section" key={name}>
           <div className="section-head">
-            <h3 className="flex-row">
-              <Icon name="network" /> {name}
-            </h3>
+            {renaming === name ? (
+              <div className="flex-row" style={{ gap: 8 }}>
+                <input
+                  className="mono"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  disabled={renameBusy}
+                  aria-label={`rename network ${name}`}
+                />
+                <button onClick={() => submitRename(name)} disabled={renameBusy}>
+                  <Icon name="check" /> Save
+                </button>
+                <button onClick={() => setRenaming(null)} disabled={renameBusy}>
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <h3 className="flex-row">
+                <Icon name="network" /> {name}
+                {!disabled && (
+                  <button className="ghost" onClick={() => startRename(name)} aria-label={`rename ${name}`}>
+                    <Icon name="edit" />
+                  </button>
+                )}
+              </h3>
+            )}
             {!disabled && net.type !== 'internal' && (
               <button className="danger" onClick={() => removeNetwork(name)}>
                 <Icon name="trash" /> Remove
               </button>
             )}
           </div>
+          {renaming === name && renameError && (
+            <p className="field-error">
+              <Icon name="alert-circle" /> {renameError}
+            </p>
+          )}
           <SelectField
             id={`net-${name}-type`}
             label="Type"
@@ -89,10 +177,11 @@ export function NetworksSection({ draft, setDraft, disabled }: SectionProps) {
               { value: 'internal', label: 'Internal' },
               { value: 'private', label: 'Private' },
               { value: 'public', label: 'Public' },
+              { value: 'wireguard', label: 'WireGuard' },
             ]}
             disabled={disabled}
           />
-          {net.type !== 'public' && (
+          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && (
             <CidrField
               id={`net-${name}-subnet`}
               label="Subnet"
@@ -101,14 +190,21 @@ export function NetworksSection({ draft, setDraft, disabled }: SectionProps) {
               disabled={disabled}
             />
           )}
-          <TextField
-            id={`net-${name}-domain`}
-            label="Domain"
-            value={net.domain ?? ''}
-            onChange={(domain) => updateNetwork(name, { domain: domain || null })}
-            hint="Records under this domain resolve to node addresses on this network."
-            disabled={disabled}
-          />
+          {net.type !== 'wireguard' && net.type !== 'egress' && (
+            <TextField
+              id={`net-${name}-domain`}
+              label="Domain"
+              value={net.domain ?? ''}
+              onChange={(domain) => updateNetwork(name, { domain: domain || null })}
+              hint="Records under this domain resolve to node addresses on this network."
+              disabled={disabled}
+            />
+          )}
+          {net.type === 'wireguard' && (
+            <p className="field-hint">
+              Not addressable: import each node's WireGuard config below, under its own card.
+            </p>
+          )}
         </div>
       ))}
       {!disabled && (
@@ -316,6 +412,24 @@ function NodeCard({
       </h4>
       {Object.entries(networks).map(([netName, net]) => {
         const addr = node.network[netName];
+        if (net.type === 'wireguard') {
+          const wg: InterfaceAddress | null =
+            typeof addr === 'string'
+              ? { interface: addr, open_ports: [] }
+              : addr && 'interface' in addr
+                ? { interface: addr.interface, open_ports: addr.open_ports ?? [] }
+                : null;
+          return (
+            <WireguardAddressField
+              key={netName}
+              nodeName={name}
+              netName={netName}
+              addr={wg}
+              onChange={(v) => setAddress(netName, v ? { interface: v.interface, open_ports: v.open_ports } : null)}
+              disabled={disabled}
+            />
+          );
+        }
         if (net.type === 'public') {
           const pub = (typeof addr === 'object' ? addr : {}) as Partial<PublicAddress>;
           const update = (patch: Partial<PublicAddress>) => {
@@ -323,6 +437,7 @@ function NodeCard({
               ipv4: pub.ipv4 ?? null,
               ipv6: pub.ipv6 ?? null,
               domain: pub.domain ?? null,
+              open_ports: pub.open_ports ?? [],
               ...patch,
             };
             const empty = !merged.ipv4 && !merged.ipv6 && !merged.domain;
@@ -352,6 +467,13 @@ function NodeCard({
                 onChange={(v) => update({ domain: v || null })}
                 disabled={disabled}
               />
+              <OpenPortsEditor
+                idPrefix={`node-${name}-${netName}`}
+                hint="Ports this node's router forwards to it here. A raw port a stack exposes on this network only ever schedules onto a node that lists it."
+                ports={pub.open_ports ?? []}
+                onChange={(open_ports) => update({ open_ports })}
+                disabled={disabled}
+              />
             </div>
           );
         }
@@ -378,6 +500,206 @@ function NodeCard({
         valueLabel="Local path"
         disabled={disabled}
       />
+    </div>
+  );
+}
+
+/** Ports a node has open on one network's address: a router forwarding them
+ *  in (public) or a VPN tunnel's far end forwarding them back (wireguard). */
+function OpenPortsEditor({
+  idPrefix,
+  hint,
+  ports,
+  onChange,
+  disabled,
+}: {
+  idPrefix: string;
+  hint: string;
+  ports: OpenPort[];
+  onChange: (ports: OpenPort[]) => void;
+  disabled: boolean;
+}) {
+  const [port, setPort] = useState(0);
+  const [protocol, setProtocol] = useState<PortProtocol>('tcp');
+
+  const add = () => {
+    if (!port || ports.some((p) => p.port === port && p.protocol === protocol)) return;
+    onChange([...ports, { port, protocol }].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol)));
+    setPort(0);
+  };
+
+  const remove = (target: OpenPort) => {
+    onChange(ports.filter((p) => !(p.port === target.port && p.protocol === target.protocol)));
+  };
+
+  return (
+    <div className="field">
+      <label>Open ports</label>
+      <p className="field-hint">{hint}</p>
+      {ports.map((p) => (
+        <div key={`${p.protocol}-${p.port}`} className="flex-row" style={{ gap: 8, marginBottom: 4 }}>
+          <span className="mono">
+            {p.port}/{p.protocol}
+          </span>
+          {!disabled && (
+            <button type="button" onClick={() => remove(p)} aria-label={`remove ${p.port}/${p.protocol}`}>
+              <Icon name="trash" />
+            </button>
+          )}
+        </div>
+      ))}
+      {!disabled && (
+        <div className="flex-row" style={{ gap: 8 }}>
+          <PortField id={`${idPrefix}-open-port`} label="Port" value={port} onChange={setPort} disabled={disabled} />
+          <SelectField
+            id={`${idPrefix}-open-port-protocol`}
+            label="Protocol"
+            value={protocol}
+            onChange={setProtocol}
+            options={[
+              { value: 'tcp', label: 'TCP' },
+              { value: 'udp', label: 'UDP' },
+            ]}
+            disabled={disabled}
+          />
+          <button type="button" onClick={add} disabled={!port}>
+            <Icon name="plus" /> Add
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A wireguard-kind network is not addressable by an IP or interface name the
+ * admin picks: importing a config seals it as a secret and clouduler derives
+ * the tunnel interface name itself, returned by the import call and stored
+ * as this node's address on the network. Applies immediately, like
+ * `SecretForm`, rather than waiting on the draft's own Save.
+ */
+function WireguardAddressField({
+  nodeName,
+  netName,
+  addr,
+  onChange,
+  disabled,
+}: {
+  nodeName: string;
+  netName: string;
+  addr: InterfaceAddress | null;
+  onChange: (addr: InterfaceAddress | null) => void;
+  disabled: boolean;
+}) {
+  const [mode, setMode] = useState<'paste' | 'file'>('paste');
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const onFile = async (file: File) => setText(await file.text());
+
+  const importConfig = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const result = await api.putWireguardConfig(netName, nodeName, btoa(text));
+      onChange({ interface: result.interface, open_ports: [] });
+      setText('');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to import wireguard config');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirm(`Remove the imported WireGuard config for ${nodeName} on ${netName}?`)) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.removeWireguardConfig(netName, nodeName);
+      onChange(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to remove wireguard config');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (addr) {
+    return (
+      <div className="card" style={{ marginBottom: 8 }}>
+        <strong>{netName}</strong> <span className="faint">(wireguard)</span>
+        <p className="field-hint">
+          Imported. Tunnel interface: <span className="mono">{addr.interface}</span>
+        </p>
+        {error && (
+          <p className="field-error">
+            <Icon name="alert-circle" /> {error}
+          </p>
+        )}
+        <OpenPortsEditor
+          idPrefix={`node-${nodeName}-${netName}`}
+          hint="Ports the tunnel's far end forwards back to this node, e.g. a VPN provider's port forwarding feature. A raw port a stack exposes on this network only ever schedules onto a node that lists it."
+          ports={addr.open_ports}
+          onChange={(open_ports) => onChange({ interface: addr.interface, open_ports })}
+          disabled={disabled}
+        />
+        {!disabled && (
+          <button className="danger" onClick={remove} disabled={busy}>
+            <Icon name="trash" /> Remove
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 8 }}>
+      <strong>{netName}</strong> <span className="faint">(wireguard)</span>
+      <div className="field">
+        <label>Config source</label>
+        <div className="segmented" role="tablist">
+          <button type="button" role="tab" aria-selected={mode === 'paste'} onClick={() => setMode('paste')}>
+            <Icon name="edit" /> Paste
+          </button>
+          <button type="button" role="tab" aria-selected={mode === 'file'} onClick={() => setMode('file')}>
+            <Icon name="file" /> File
+          </button>
+        </div>
+      </div>
+      {mode === 'file' && (
+        <div className="field">
+          <label htmlFor={`node-${nodeName}-${netName}-wg-file`}>File</label>
+          <input
+            id={`node-${nodeName}-${netName}-wg-file`}
+            type="file"
+            onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+            disabled={disabled}
+          />
+        </div>
+      )}
+      <div className="field">
+        <label htmlFor={`node-${nodeName}-${netName}-wg-text`}>wg-quick config</label>
+        <textarea
+          id={`node-${nodeName}-${netName}-wg-text`}
+          rows={8}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={'[Interface]\nPrivateKey = ...\nAddress = ...\n\n[Peer]\nPublicKey = ...\nEndpoint = ...\nAllowedIPs = 0.0.0.0/0'}
+          disabled={disabled}
+        />
+      </div>
+      {error && (
+        <p className="field-error">
+          <Icon name="alert-circle" /> {error}
+        </p>
+      )}
+      {!disabled && (
+        <button type="button" onClick={importConfig} disabled={busy || !text.trim()}>
+          <Icon name="check" /> Import
+        </button>
+      )}
     </div>
   );
 }

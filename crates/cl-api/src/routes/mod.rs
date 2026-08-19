@@ -15,6 +15,7 @@ pub mod redirects;
 pub mod self_update;
 pub mod stacks;
 pub mod static_routes;
+pub mod wireguard;
 
 use axum::Router;
 
@@ -36,4 +37,5 @@ pub fn router() -> Router<AppState> {
         .merge(redirects::router())
         .merge(static_routes::router())
         .merge(self_update::router())
+        .merge(wireguard::router())
 }

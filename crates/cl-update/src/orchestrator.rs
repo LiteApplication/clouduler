@@ -306,6 +306,8 @@ mod tests {
             availability: cl_raft::state::Availability::Active,
             labels: Default::default(),
             egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
             arch: arch.to_string(),
             binary_hash: String::new(),
         }

@@ -12,6 +12,7 @@ pub mod server;
 pub mod static_routes;
 pub mod stream;
 pub mod ui;
+pub mod wireguard;
 
 pub use error::ApiError;
 pub use server::{ApiServer, ApiServerOptions, AppState};

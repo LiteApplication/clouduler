@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 cl-config.workspace = true
 cl-docker.workspace = true
+cl-net.workspace = true
 cl-raft.workspace = true
 cl-secret.workspace = true
 cl-update.workspace = true

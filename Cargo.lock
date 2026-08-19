@@ -693,6 +693,7 @@ dependencies = [
  "bollard",
  "cl-config",
  "cl-docker",
+ "cl-net",
  "cl-raft",
  "cl-secret",
  "cl-update",

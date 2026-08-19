@@ -27,6 +27,7 @@ import type {
   StaticRouteRule,
   ValidationResult,
   VolumeState,
+  WireguardIngressRule,
 } from './types';
 
 /** Thrown for any non-2xx response, carrying the parsed error body when there is one. */
@@ -192,6 +193,12 @@ export const api = {
   confirmConfiguration: () => post<void>('/api/config/confirm'),
   rollbackConfiguration: () => post<void>('/api/config/rollback'),
   pendingConfiguration: () => get<PendingConfig>('/api/config/pending'),
+  // Renames a network everywhere it is referenced: cluster.yaml, every
+  // deployed stack, and the redirect/static-route/wireguard-ingress stores.
+  // Not part of the generic apply flow above -- it fans out to state that
+  // flow does not know about.
+  renameNetwork: (name: string, newName: string) =>
+    post<void>(`/api/config/networks/${encodeURIComponent(name)}/rename`, { new_name: newName }),
 
   // cloudflare: the token is write-only, so there is no getter for its value
   cloudflareToken: () => get<CloudflareTokenStatus>('/api/cloudflare/token'),
@@ -210,6 +217,22 @@ export const api = {
   updateStaticRoute: (id: string, body: Omit<StaticRouteRule, 'id'>) =>
     put<StaticRouteRule>(`/api/static-routes/${encodeURIComponent(id)}`, body),
   removeStaticRoute: (id: string) => del<void>(`/api/static-routes/${encodeURIComponent(id)}`),
+
+  // wireguard: config import (sealed like a secret) and the ingress rules
+  // that let ports in through the tunnel, both not part of cluster.yaml
+  putWireguardConfig: (network: string, node: string, content: string) =>
+    put<{ interface: string }>(
+      `/api/wireguard/${encodeURIComponent(network)}/${encodeURIComponent(node)}`,
+      { content },
+    ),
+  removeWireguardConfig: (network: string, node: string) =>
+    del<void>(`/api/wireguard/${encodeURIComponent(network)}/${encodeURIComponent(node)}`),
+  listWireguardIngress: () => get<WireguardIngressRule[]>('/api/wireguard-ingress'),
+  createWireguardIngress: (body: Omit<WireguardIngressRule, 'id'>) =>
+    post<WireguardIngressRule>('/api/wireguard-ingress', body),
+  updateWireguardIngress: (id: string, body: Omit<WireguardIngressRule, 'id'>) =>
+    put<WireguardIngressRule>(`/api/wireguard-ingress/${encodeURIComponent(id)}`, body),
+  removeWireguardIngress: (id: string) => del<void>(`/api/wireguard-ingress/${encodeURIComponent(id)}`),
 
   // certificates & dns
   listCertificates: () => get<CertificateState[]>('/api/certificates'),

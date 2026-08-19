@@ -143,10 +143,29 @@ pub async fn run(
     let scheduler = match connected.clone() {
         Some(docker) => {
             let materializer = Materializer::new(&data_dir, key);
+            // A wireguard network attaches a container exactly like an
+            // egress one -- its interface is just clouduler-managed instead
+            // of admin-managed -- so it counts here too.
             let egress_networks = cfg
                 .networks
                 .iter()
-                .filter(|(_, net)| net.kind == cl_config::NetworkKind::Egress)
+                .filter(|(_, net)| {
+                    matches!(net.kind, cl_config::NetworkKind::Egress | cl_config::NetworkKind::Wireguard)
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            // Names every network whose reachability from outside depends on
+            // a specific node -- public (its own router) or wireguard (its
+            // own tunnel's far end forwarding a port back, e.g. a VPN
+            // provider's port forwarding feature) -- so a raw
+            // `x-clouduler.expose` port on one only ever schedules onto a
+            // node that actually has it open (`NodeState::open_ports`).
+            let port_gated_networks = cfg
+                .networks
+                .iter()
+                .filter(|(_, net)| {
+                    matches!(net.kind, cl_config::NetworkKind::Public | cl_config::NetworkKind::Wireguard)
+                })
                 .map(|(name, _)| name.clone())
                 .collect();
             let scheduler = Scheduler::new(
@@ -156,7 +175,8 @@ pub async fn run(
                 materializer,
             )
             .with_zone(cl_net::dns::zone_origin(&cfg))
-            .with_egress_networks(egress_networks);
+            .with_egress_networks(egress_networks)
+            .with_port_gated_networks(port_gated_networks);
             let gate = fenced.clone();
             Some(tokio::spawn(
                 scheduler.run(move || gate.load(Ordering::Relaxed)),
@@ -412,7 +432,7 @@ async fn connect_docker() -> Option<cl_docker::Docker> {
 /// A node without a key is not an error: it replicates sealed secrets like any
 /// other state and simply cannot run containers that need them. That is the
 /// intended setup for a worker you do not want holding the keys to everything.
-fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<ClusterKey> {
+pub(crate) fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<ClusterKey> {
     let path = &cfg.secrets.key_file;
 
     match ClusterKey::load_or_create(path, node.generates_secret_key(cfg)) {
@@ -657,6 +677,16 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
     Ok(())
 }
 
+/// `cl_raft::PortProtocol` mirrors `cl_config::Protocol` structurally so
+/// `cl-raft` does not depend on `cl-config`; this is the one place the two
+/// meet, converting a node's declared open ports into replicated state.
+fn to_port_protocol(protocol: cl_config::Protocol) -> cl_raft::PortProtocol {
+    match protocol {
+        cl_config::Protocol::Tcp => cl_raft::PortProtocol::Tcp,
+        cl_config::Protocol::Udp => cl_raft::PortProtocol::Udp,
+    }
+}
+
 /// Build the roster entry from config, keeping any availability the cluster has
 /// already set. Draining a node from the ui must not be undone by a restart.
 fn to_state(
@@ -686,6 +716,29 @@ fn to_state(
             .iter()
             .filter(|(_, addr)| matches!(addr, cl_config::NodeAddress::Interface(_)))
             .map(|(name, _)| name.clone())
+            .collect(),
+        networks: node.network.keys().cloned().collect(),
+        // Public networks declare open ports on the router address; wireguard
+        // ones on the tunnel interface address (a VPN provider's port
+        // forwarding, e.g. AirVPN). Either way, this is the set of ports the
+        // scheduler may place a raw `x-clouduler.expose` entry on this node for.
+        open_ports: node
+            .network
+            .iter()
+            .filter_map(|(name, addr)| {
+                let open_ports = match addr {
+                    cl_config::NodeAddress::Public(p) => &p.open_ports,
+                    cl_config::NodeAddress::Interface(i) => &i.open_ports,
+                    cl_config::NodeAddress::Ip(_) => return None,
+                };
+                if open_ports.is_empty() {
+                    return None;
+                }
+                Some((
+                    name.clone(),
+                    open_ports.iter().map(|p| (to_port_protocol(p.protocol), p.port)).collect(),
+                ))
+            })
             .collect(),
         // Not derived from this process's own environment: this runs on
         // whichever node currently leads, so `std::env::consts::ARCH` and the

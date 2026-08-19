@@ -15,6 +15,7 @@ pub mod error;
 pub mod expose;
 pub mod ipam;
 pub mod vxlan;
+pub mod wireguard;
 
 pub use error::{NetError, Result};
 pub use ipam::Allocations;

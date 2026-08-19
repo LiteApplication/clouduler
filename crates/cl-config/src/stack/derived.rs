@@ -71,15 +71,19 @@ impl StackFile {
             .or_else(|| self.stack_node().map(str::to_string))
     }
 
-    /// The egress-kind network this service attaches to, if any. A service
-    /// attaches to at most one, so the scheduler can pin it to whichever node
-    /// implements that network the same way it pins to a drive.
+    /// The egress or wireguard kind network this service attaches to, if
+    /// any. A service attaches to at most one, so the scheduler can pin it
+    /// to whichever node implements that network the same way it pins to a
+    /// drive.
     pub fn egress_network(&self, service: &str, cluster: &ClusterConfig) -> Option<String> {
         let svc = self.services.get(service)?;
         svc.networks
             .iter()
             .find(|net| {
-                cluster.networks.get(net.as_str()).map(|n| n.kind) == Some(NetworkKind::Egress)
+                matches!(
+                    cluster.networks.get(net.as_str()).map(|n| n.kind),
+                    Some(NetworkKind::Egress | NetworkKind::Wireguard)
+                )
             })
             .cloned()
     }

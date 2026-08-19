@@ -38,7 +38,7 @@ fn addresses(node: &Node) -> String {
     for (net, addr) in &node.network {
         let value = match addr {
             NodeAddress::Ip(ip) => ip.to_string(),
-            NodeAddress::Interface(iface) => iface.clone(),
+            NodeAddress::Interface(iface) => iface.interface.clone(),
             NodeAddress::Public(p) => {
                 let mut parts = Vec::new();
                 if let Some(v4) = p.ipv4 {
