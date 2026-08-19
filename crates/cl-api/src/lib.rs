@@ -8,6 +8,7 @@ pub mod redirects;
 pub mod routes;
 pub mod secrets;
 pub mod server;
+pub mod static_routes;
 pub mod stream;
 pub mod ui;
 

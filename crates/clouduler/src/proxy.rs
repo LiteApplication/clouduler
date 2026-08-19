@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cl_api::redirects::RedirectStore;
+use cl_api::static_routes::StaticRouteStore;
 use cl_config::{qualify, ClusterConfig};
 use cl_dns::{Cloudflare, DesiredRecord};
 use cl_proxy::{
@@ -124,7 +125,7 @@ async fn reconcile_loop(
         let state = cluster.state().await;
 
         let mut built = routes_for(&cfg, &state);
-        built.extend(static_backend_routes(&cfg).await);
+        built.extend(static_backend_routes(&cfg, &state).await);
         if built.len() != published {
             info!(routes = built.len(), "reverse proxy routes changed");
             published = built.len();
@@ -256,13 +257,14 @@ fn dashboard_route(cfg: &ClusterConfig) -> Option<Route> {
     )
 }
 
-/// Static/external backend routes: `proxy.static_routes` in `cluster.yaml`,
-/// for a service clouduler does not run itself. `backend` is resolved by DNS
+/// Static/external backend routes, UI-managed and stored outside
+/// `cluster.yaml`; see `cl_api::static_routes`. `backend` is resolved by DNS
 /// on every reconcile pass, so a hostname backend picks up a changed address
-/// without touching the config; a plain IP resolves to itself immediately.
-async fn static_backend_routes(cfg: &ClusterConfig) -> Vec<Route> {
-    let mut routes = Vec::with_capacity(cfg.proxy.static_routes.len());
-    for entry in &cfg.proxy.static_routes {
+/// without touching any config; a plain IP resolves to itself immediately.
+async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
+    let entries = StaticRouteStore::load(state).routes;
+    let mut routes = Vec::with_capacity(entries.len());
+    for entry in &entries {
         let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
         let backends = match tokio::net::lookup_host(&entry.backend).await {
             Ok(addrs) => addrs.collect(),
@@ -295,7 +297,7 @@ async fn static_backend_routes(cfg: &ClusterConfig) -> Vec<Route> {
 
 /// Every hostname the proxy terminates TLS for, and so needs a certificate.
 ///
-/// Static routes are folded in directly from config rather than through
+/// Static routes are folded in directly from the store rather than through
 /// `static_backend_routes`, so listing hostnames that need a certificate
 /// never depends on DNS resolving for their backend.
 fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<String> {
@@ -304,7 +306,7 @@ fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<String> {
         .filter(|r| r.tls)
         .map(|r| r.host)
         .collect();
-    for entry in &cfg.proxy.static_routes {
+    for entry in StaticRouteStore::load(state).routes {
         if entry.tls {
             let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
             hosts.insert(qualify(&entry.host, domain));
@@ -532,8 +534,8 @@ fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<(Str
             hosts.insert((entry.host.clone(), entry.network.clone()));
         }
     }
-    for entry in &cfg.proxy.static_routes {
-        hosts.insert((entry.host.clone(), entry.network.clone()));
+    for entry in StaticRouteStore::load(state).routes {
+        hosts.insert((entry.host, entry.network));
     }
     for rule in RedirectStore::load(state).rules {
         hosts.insert((rule.host, rule.network));
@@ -823,14 +825,12 @@ services:
         assert!(route.tls);
     }
 
-    #[tokio::test]
-    async fn a_static_route_resolves_its_backend_and_is_gated() {
-        let mut cfg = cfg();
-        cfg.proxy.static_routes.clear();
-        cfg.proxy.static_routes.push(cl_config::StaticRoute {
-            host: "files".into(),
-            network: "lan".into(),
-            backend: "127.0.0.1:9999".into(),
+    fn static_route(host: &str, network: &str, backend: &str) -> cl_api::static_routes::StaticRouteRule {
+        cl_api::static_routes::StaticRouteRule {
+            id: "s1".into(),
+            host: host.into(),
+            network: network.into(),
+            backend: backend.into(),
             path_prefix: None,
             tls: true,
             middlewares: Vec::new(),
@@ -838,9 +838,29 @@ services:
             websockets: true,
             preserve_host: false,
             response_timeout: None,
-        });
+        }
+    }
 
-        let routes = static_backend_routes(&cfg).await;
+    fn with_static_routes(mut state: ClusterState, routes: Vec<cl_api::static_routes::StaticRouteRule>) -> ClusterState {
+        let store = cl_api::static_routes::StaticRouteStore { routes };
+        state.configs.insert(
+            cl_api::static_routes::STATIC_ROUTES_CONFIG.to_string(),
+            cl_raft::state::ConfigEntry {
+                name: cl_api::static_routes::STATIC_ROUTES_CONFIG.to_string(),
+                content: store.encode(),
+                revision: 1,
+                owner: None,
+            },
+        );
+        state
+    }
+
+    #[tokio::test]
+    async fn a_static_route_resolves_its_backend_and_is_gated() {
+        let cfg = cfg();
+        let state = with_static_routes(state_with(SPEC, 0), vec![static_route("files", "lan", "127.0.0.1:9999")]);
+
+        let routes = static_backend_routes(&cfg, &state).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].host, "files.lan.example.com");
         assert_eq!(routes[0].backends(), &[SocketAddr::from(([127, 0, 0, 1], 9999))]);
@@ -849,20 +869,12 @@ services:
 
     #[test]
     fn a_static_routes_hostname_still_gets_a_certificate_without_dns() {
-        let mut cfg = cfg();
-        cfg.proxy.static_routes.push(cl_config::StaticRoute {
-            host: "files".into(),
-            network: "wan".into(),
-            backend: "does-not-resolve.invalid:9999".into(),
-            path_prefix: None,
-            tls: true,
-            middlewares: Vec::new(),
-            max_body_size: None,
-            websockets: true,
-            preserve_host: false,
-            response_timeout: None,
-        });
-        let hosts = tls_hosts(&cfg, &state_with(SPEC, 1));
+        let cfg = cfg();
+        let state = with_static_routes(
+            state_with(SPEC, 1),
+            vec![static_route("files", "wan", "does-not-resolve.invalid:9999")],
+        );
+        let hosts = tls_hosts(&cfg, &state);
         assert!(hosts.contains("files.example.com"));
     }
 
@@ -875,21 +887,9 @@ services:
 
     #[test]
     fn desired_dns_hosts_includes_static_routes_and_redirects() {
-        let mut cfg = cfg();
-        cfg.proxy.static_routes.push(cl_config::StaticRoute {
-            host: "printer".into(),
-            network: "lan".into(),
-            backend: "192.168.1.50:9100".into(),
-            path_prefix: None,
-            tls: true,
-            middlewares: Vec::new(),
-            max_body_size: None,
-            websockets: true,
-            preserve_host: false,
-            response_timeout: None,
-        });
-
-        let mut state = state_with(SPEC, 0);
+        let cfg = cfg();
+        let mut state =
+            with_static_routes(state_with(SPEC, 0), vec![static_route("printer", "lan", "192.168.1.50:9100")]);
         let store = cl_api::redirects::RedirectStore {
             rules: vec![cl_api::redirects::RedirectRule {
                 id: "r1".into(),

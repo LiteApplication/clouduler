@@ -1,6 +1,8 @@
 //! Auto-rollback for `PUT /api/config`.
 //!
-//! Applying a new config arms a timer. Unless `confirm` arrives before it
+//! Applying a new config arms a timer, but only when the edit touches a field
+//! that could cut off the connection the edit arrived over (see
+//! `connection_sensitive_change`). Unless `confirm` arrives before the timer
 //! fires, the previous config is restored. This is the part of a config edit
 //! that must never depend on a live clock: it is the safety net for when the
 //! edit breaks the very network the ui is talking over, so it has to be
@@ -12,6 +14,20 @@ use cl_config::ClusterConfig;
 
 /// Default grace period before an unconfirmed edit rolls back.
 pub const DEFAULT_ROLLBACK_AFTER: Duration = Duration::from_secs(60);
+
+/// Whether two configs differ in a field that can cut off the connection an
+/// operator is editing over: which networks and node addresses exist, where
+/// the web ui and reverse proxy listen, and the Cloudflare records that route
+/// to them from outside. Everything else (cluster name, drives, failover
+/// timers, secrets, auth, self-update) takes effect immediately, unwatched:
+/// getting those wrong is a bad config, not a lost connection.
+pub fn connection_sensitive_change(previous: &ClusterConfig, next: &ClusterConfig) -> bool {
+    previous.networks != next.networks
+        || previous.nodes != next.nodes
+        || previous.web != next.web
+        || previous.proxy != next.proxy
+        || previous.cloudflare != next.cloudflare
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingStatus {
@@ -175,6 +191,22 @@ mod tests {
         let mut edit = PendingEdit::arm(config(), Duration::from_secs(0), Duration::from_secs(60));
         assert!(edit.confirm());
         assert!(!edit.confirm());
+    }
+
+    #[test]
+    fn connection_sensitive_change_flags_network_and_web_edits() {
+        let mut edited = config();
+        edited.web.port = 9443;
+        assert!(connection_sensitive_change(&config(), &edited));
+    }
+
+    #[test]
+    fn connection_sensitive_change_ignores_everything_else() {
+        let mut edited = config();
+        edited.cluster.name = "renamed".into();
+        edited.failover.node_timeout = Duration::from_secs(999);
+        edited.auth.session_ttl = Duration::from_secs(1);
+        assert!(!connection_sensitive_change(&config(), &edited));
     }
 
     #[test]

@@ -22,6 +22,7 @@ export function Configuration() {
   const [errors, setErrors] = useState<ValidationError[]>([]);
   const [pending, setPending] = useState<PendingConfig | null>(null);
   const [busy, setBusy] = useState(false);
+  const [rollbackAfter, setRollbackAfter] = useState(60);
 
   // Poll for an armed rollback timer, ours or someone else's, so a page
   // reload mid-window still shows the countdown instead of hiding it.
@@ -66,7 +67,7 @@ export function Configuration() {
         setBusy(false);
         return;
       }
-      await api.applyConfiguration(draft, '60s');
+      await api.applyConfiguration(draft, `${rollbackAfter}s`);
       setPending(await api.pendingConfiguration());
     } catch (e) {
       setErrors([{ path: '', message: e instanceof ApiError ? e.message : 'apply failed' }]);
@@ -119,6 +120,18 @@ export function Configuration() {
             )}
           </span>
           <div className="btn-row">
+            <label className="rollback-after" title="If a network-affecting change (networks, nodes, web ui, reverse proxy, Cloudflare) isn't confirmed within this window, it rolls back automatically.">
+              <Icon name="clock" /> Rollback after
+              <input
+                type="number"
+                min={5}
+                max={3600}
+                value={rollbackAfter}
+                onChange={(e) => setRollbackAfter(Math.max(5, Number(e.target.value) || 60))}
+                disabled={busy}
+              />
+              s
+            </label>
             <button onClick={validate} disabled={busy}>
               <Icon name="check" /> Validate
             </button>
@@ -181,7 +194,9 @@ export function Configuration() {
           ))}
           <Route
             path="review"
-            element={<ReviewPage diff={diff} onGo={(slug) => navigate(`/configuration/${slug}`)} />}
+            element={
+              <ReviewPage diff={diff} rollbackAfter={rollbackAfter} onGo={(slug) => navigate(`/configuration/${slug}`)} />
+            }
           />
           <Route path="*" element={<Navigate to="cluster" replace />} />
         </Routes>
@@ -207,9 +222,11 @@ export function Configuration() {
 
 function ReviewPage({
   diff,
+  rollbackAfter,
   onGo,
 }: {
   diff: { path: string; before: string; after: string }[];
+  rollbackAfter: number;
   onGo: (slug: string) => void;
 }) {
   if (diff.length === 0) {
@@ -235,7 +252,9 @@ function ReviewPage({
         </h2>
       </div>
       <p className="page-sub" style={{ marginBottom: 16 }}>
-        Applying arms a 60 second rollback timer: confirm afterwards, or the previous config comes back on its own.
+        If any change touches networks, nodes, the web ui, the reverse proxy or Cloudflare, applying arms a{' '}
+        {rollbackAfter} second rollback timer: confirm afterwards, or the previous config comes back on its own.
+        Everything else takes effect immediately.
       </p>
       <div className="table-wrap">
         <table>

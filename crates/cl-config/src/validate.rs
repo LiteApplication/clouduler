@@ -410,27 +410,6 @@ impl ClusterConfig {
                 "certificate issuance is DNS-01 only, so it needs a cloudflare section",
             ));
         }
-        for (i, route) in proxy.static_routes.iter().enumerate() {
-            let at = format!("proxy.static_routes[{i}]");
-            if !self.networks.contains_key(&route.network) {
-                return Err(ConfigError::invalid(
-                    format!("{at}.network"),
-                    format!("no network named {}", route.network),
-                ));
-            }
-            let (host, port) = route.backend.rsplit_once(':').ok_or_else(|| {
-                ConfigError::invalid(format!("{at}.backend"), "must be host:port")
-            })?;
-            if host.is_empty() {
-                return Err(ConfigError::invalid(format!("{at}.backend"), "must be host:port"));
-            }
-            if port.parse::<u16>().is_err() {
-                return Err(ConfigError::invalid(
-                    format!("{at}.backend"),
-                    format!("{port} is not a valid port"),
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -827,47 +806,6 @@ cloudflare:
         )])
         .unwrap_err();
         assert!(err.to_string().contains("https url"));
-    }
-
-    #[test]
-    fn static_routes_parse_and_default() {
-        let cfg = parse(&[(
-            "web: { address: cloud, network: tailscale }",
-            "proxy:\n  static_routes:\n    - host: printer\n      network: lan\n      backend: 192.168.1.50:9100\nweb: { address: cloud, network: tailscale }",
-        )])
-        .expect("valid");
-        let route = &cfg.proxy.static_routes[0];
-        assert_eq!(route.backend, "192.168.1.50:9100");
-        assert!(route.tls);
-        assert!(route.websockets);
-        assert!(!route.preserve_host);
-    }
-
-    #[test]
-    fn static_route_network_must_exist() {
-        let err = parse(&[(
-            "web: { address: cloud, network: tailscale }",
-            "proxy:\n  static_routes:\n    - host: printer\n      network: nope\n      backend: 192.168.1.50:9100\nweb: { address: cloud, network: tailscale }",
-        )])
-        .unwrap_err();
-        assert!(err.to_string().contains("no network named nope"));
-    }
-
-    #[test]
-    fn static_route_backend_must_be_host_and_port() {
-        let err = parse(&[(
-            "web: { address: cloud, network: tailscale }",
-            "proxy:\n  static_routes:\n    - host: printer\n      network: lan\n      backend: notaport\nweb: { address: cloud, network: tailscale }",
-        )])
-        .unwrap_err();
-        assert!(err.to_string().contains("must be host:port"));
-
-        let err = parse(&[(
-            "web: { address: cloud, network: tailscale }",
-            "proxy:\n  static_routes:\n    - host: printer\n      network: lan\n      backend: \"host:notaport\"\nweb: { address: cloud, network: tailscale }",
-        )])
-        .unwrap_err();
-        assert!(err.to_string().contains("not a valid port"));
     }
 
     #[test]

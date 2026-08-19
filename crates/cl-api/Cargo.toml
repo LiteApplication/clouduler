@@ -34,6 +34,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 bollard = "0.21"
 cookie = "0.18"
 humantime = "2"
+humantime-serde.workspace = true
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
 
 [dev-dependencies]

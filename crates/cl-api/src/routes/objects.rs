@@ -15,11 +15,15 @@ use crate::error::ApiError;
 use crate::redirects::REDIRECTS_CONFIG;
 use crate::secrets::{self, Charset};
 use crate::server::AppState;
+use crate::static_routes::STATIC_ROUTES_CONFIG;
 
 /// Config names clouduler itself owns and never shows through the generic
 /// config routes.
 fn is_reserved(name: &str) -> bool {
-    name == API_KEYS_CONFIG || name == REDIRECTS_CONFIG || super::self_update::is_reserved_config(name)
+    name == API_KEYS_CONFIG
+        || name == REDIRECTS_CONFIG
+        || name == STATIC_ROUTES_CONFIG
+        || super::self_update::is_reserved_config(name)
 }
 
 /// Secret names clouduler itself owns and never shows through the generic

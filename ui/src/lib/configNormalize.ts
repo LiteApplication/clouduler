@@ -77,12 +77,6 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
         directory_url: nullable(cfg.proxy.acme.directory_url),
         contact_email: nullable(cfg.proxy.acme.contact_email),
       },
-      static_routes: (cfg.proxy.static_routes ?? []).map((route) => ({
-        ...route,
-        path_prefix: nullable(route.path_prefix),
-        max_body_size: nullable(route.max_body_size),
-        response_timeout: nullable(route.response_timeout),
-      })),
     },
   };
 }

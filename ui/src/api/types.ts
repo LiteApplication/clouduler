@@ -325,26 +325,11 @@ export interface AcmeConfig {
   contact_email?: string | null;
 }
 
-/** A proxy route backed by a fixed address instead of a stack's containers. */
-export interface StaticRoute {
-  host: string;
-  network: string;
-  /** `host:port`, resolved fresh on every reconcile pass. */
-  backend: string;
-  path_prefix?: string | null;
-  tls: boolean;
-  max_body_size?: string | null;
-  websockets: boolean;
-  preserve_host: boolean;
-  response_timeout?: string | null;
-}
-
 export interface ProxyConfig {
   enabled: boolean;
   http_port: number;
   https_port: number;
   acme: AcmeConfig;
-  static_routes: StaticRoute[];
 }
 
 /** A UI-managed redirect. Not part of cluster.yaml; see /api/redirects. */
@@ -356,6 +341,25 @@ export interface RedirectRule {
   target: string;
   preserve_path: boolean;
   status: 301 | 302 | 307 | 308;
+}
+
+/**
+ * A UI-managed static/external proxy backend: a route for a service
+ * clouduler does not run itself, backed by a fixed address instead of a
+ * stack's containers. Not part of cluster.yaml; see /api/static-routes.
+ */
+export interface StaticRouteRule {
+  id: string;
+  host: string;
+  network: string;
+  /** `host:port`, resolved fresh on every reconcile pass. */
+  backend: string;
+  path_prefix?: string | null;
+  tls: boolean;
+  max_body_size?: string | null;
+  websockets: boolean;
+  preserve_host: boolean;
+  response_timeout?: string | null;
 }
 
 export interface ClusterConfig {

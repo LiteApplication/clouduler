@@ -31,8 +31,7 @@
       },
       "enabled": true,
       "http_port": 80,
-      "https_port": 443,
-      "static_routes": []
+      "https_port": 443
     },
     "secrets": {
       "generate_if_missing": true,

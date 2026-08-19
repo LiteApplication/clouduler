@@ -142,10 +142,3 @@ proxy:
     directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
     # Where the CA sends expiry warnings.
     contact_email: ops@example.com
-  # A route for something clouduler does not run itself, backed by a fixed
-  # address instead of a stack's containers. `backend` is resolved fresh on
-  # every reconcile pass. See docs/proxy.md.
-  static_routes:
-    - host: printer
-      network: lan
-      backend: 192.168.1.50:9100

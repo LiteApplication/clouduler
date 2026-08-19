@@ -10,7 +10,7 @@ mod validate;
 pub use cluster::{
     qualify, AuthConfig, CloudflareConfig, ClusterConfig, DriveMode, FailoverConfig, OidcConfig,
     SecretsConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
-    NodeAddress, NodeRole, ProxyConfig, PublicAddress, SelfUpdateConfig, StaticRoute, WebConfig,
+    NodeAddress, NodeRole, ProxyConfig, PublicAddress, SelfUpdateConfig, WebConfig,
     DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,
 };
 pub use bundle::{BundledFile, StackBundle};

@@ -8,7 +8,6 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
-use crate::stack::{ByteSize, Middleware};
 
 /// Default port for the node to node RPC channel (raft, drive sync, proxy backhaul).
 pub const DEFAULT_RPC_PORT: u16 = 7373;
@@ -457,11 +456,6 @@ pub struct ProxyConfig {
     pub https_port: u16,
     #[serde(default)]
     pub acme: AcmeConfig,
-    /// Routes published straight from a fixed address rather than a stack's
-    /// containers, for a service clouduler does not run: another box on the
-    /// network, a third party endpoint.
-    #[serde(default)]
-    pub static_routes: Vec<StaticRoute>,
 }
 
 impl Default for ProxyConfig {
@@ -471,39 +465,8 @@ impl Default for ProxyConfig {
             http_port: default_http_port(),
             https_port: default_https_port(),
             acme: AcmeConfig::default(),
-            static_routes: Vec::new(),
         }
     }
-}
-
-/// A proxy route whose backend is a fixed address instead of a stack's
-/// containers. Resolved by DNS on every reconcile pass, so a hostname backend
-/// picks up a changed address without the config being touched.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct StaticRoute {
-    /// Bare label gets the network's domain appended, same as a stack route.
-    pub host: String,
-    /// Declared network this route is published on.
-    pub network: String,
-    /// `host:port` of the backend. A hostname is resolved fresh on every
-    /// reconcile pass; every address it resolves to becomes a backend, round
-    /// robined like a multi replica service.
-    pub backend: String,
-    #[serde(default)]
-    pub path_prefix: Option<String>,
-    #[serde(default = "default_true_bool")]
-    pub tls: bool,
-    #[serde(default)]
-    pub middlewares: Vec<Middleware>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_body_size: Option<ByteSize>,
-    #[serde(default = "default_true_bool")]
-    pub websockets: bool,
-    #[serde(default)]
-    pub preserve_host: bool,
-    #[serde(default, with = "humantime_serde::option")]
-    pub response_timeout: Option<Duration>,
 }
 
 fn default_http_port() -> u16 {

@@ -114,27 +114,23 @@ pool, the proxy falls back to round robin and issues a new cookie.
 
 Most routes come from a stack's `x-clouduler.proxy` and follow its containers
 automatically. A route for something clouduler does not run at all — another
-box on the network, a third party endpoint — is declared directly in
-`cluster.yaml` instead, under `proxy.static_routes`:
+box on the network, a third party endpoint — is managed entirely from the web
+ui instead, not `cluster.yaml`: like a redirect, one of these can be added or
+changed without a daemon restart, since it lives in replicated state under a
+reserved config name (see `cl_api::static_routes`) rather than the config
+file every daemon has to be restarted to pick up. It is exposed at
+`/api/static-routes` (`GET`/`POST`/`PUT /{id}`/`DELETE /{id}`, admin only to
+write).
 
-```yaml
-proxy:
-  static_routes:
-    - host: printer
-      network: lan
-      backend: 192.168.1.50:9100
-      tls: true
-      # path_prefix, middlewares, max_body_size, websockets, preserve_host
-      # and response_timeout all work the same as on a stack's proxy route.
-```
+A rule is a `host` (optionally with a `path_prefix`) on a given `network`, and
+a `backend` (`host:port`); `tls`, `middlewares`, `max_body_size`,
+`websockets`, `preserve_host` and `response_timeout` all work the same as on
+a stack's proxy route.
 
-`backend` is `host:port`; a hostname is resolved fresh on every reconcile
-pass (every 5s), so a DNS change on the backend takes effect without editing
-the config, and every address it resolves to becomes a backend, round robined
-the same way multiple replicas of a service are. These entries can also be
-managed from the web ui's Reverse proxy configuration page, since they are
-part of `cluster.yaml` and go through the same config-draft flow as
-`proxy.http_port` and the rest.
+`backend`'s host is resolved fresh on every reconcile pass (every 5s), so a
+DNS change on the backend takes effect without editing anything, and every
+address it resolves to becomes a backend, round robined the same way multiple
+replicas of a service are.
 
 ## Network gating
 

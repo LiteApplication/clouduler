@@ -17,27 +17,6 @@ describe('normalizeConfig', () => {
     expect(cfg.nodes.piosny.generate_secret_key).toBeNull();
   });
 
-  it('defaults a missing static_routes list to empty', () => {
-    const cfg = normalizeConfig(raw);
-    expect(cfg.proxy.static_routes).toEqual([]);
-  });
-
-  it('turns omitted optional fields on a static route into explicit nulls', () => {
-    const withRoute = {
-      ...raw,
-      proxy: {
-        ...raw.proxy,
-        static_routes: [{ host: 'printer', network: 'internal', backend: '192.168.1.50:9100', tls: true, websockets: true, preserve_host: false }],
-      },
-    } as ClusterConfig;
-    const cfg = normalizeConfig(withRoute);
-    const route = cfg.proxy.static_routes[0];
-    expect(route.path_prefix).toBeNull();
-    expect(route.max_body_size).toBeNull();
-    expect(route.response_timeout).toBeNull();
-    expect(route.backend).toBe('192.168.1.50:9100');
-  });
-
   it('keeps values that are present', () => {
     const cfg = normalizeConfig(raw);
     expect(cfg.cluster.name).toBe('brimacluster');

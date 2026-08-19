@@ -8,7 +8,7 @@ use cl_config::ClusterConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{Identity, RequireAdmin};
-use crate::config_edit::{PendingEdit, PendingStatus, DEFAULT_ROLLBACK_AFTER};
+use crate::config_edit::{connection_sensitive_change, PendingEdit, PendingStatus, DEFAULT_ROLLBACK_AFTER};
 use crate::error::ApiError;
 use crate::server::AppState;
 
@@ -48,11 +48,16 @@ async fn put_config(
     let previous = state.cluster_config.read().await.clone();
     apply_config(&state, &body.config).await?;
 
-    let mut pending = state.pending_edit.lock().await;
-    *pending = Some(PendingEdit::arm(previous, state.clock(), rollback_after));
-    drop(pending);
+    // Only arm the rollback watchdog for edits that can cut off the
+    // connection this request came over. Anything else takes effect right
+    // away: a mistyped failover timer doesn't need a 60 second grace period.
+    if connection_sensitive_change(&previous, &body.config) {
+        let mut pending = state.pending_edit.lock().await;
+        *pending = Some(PendingEdit::arm(previous, state.clock(), rollback_after));
+        drop(pending);
 
-    spawn_rollback_watchdog(state, rollback_after);
+        spawn_rollback_watchdog(state, rollback_after);
+    }
     Ok(StatusCode::OK)
 }
 

@@ -7,7 +7,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useClusterStore } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Icon, type IconName } from './Icon';
-import { CONFIG_PAGES } from '../views/config/pages';
+import { CONFIG_GROUPS, CONFIG_PAGES } from '../views/config/pages';
 import { changesFor, useConfigDraft } from '../views/config/draft';
 import { Logo } from './Logo';
 import { useTheme, type ThemeChoice } from '../theme';
@@ -21,8 +21,12 @@ interface NavItem {
   /** Shown in the phone tab bar as well as the drawer. */
   tab?: boolean;
   /** Expands into a submenu while the section is open. */
-  submenu?: { to: string; label: string; icon: IconName; keys?: string[] }[];
+  submenu?: SubmenuEntry[];
 }
+
+type SubmenuEntry =
+  | { heading: string }
+  | { to: string; label: string; icon: IconName; keys?: string[] };
 
 const LINKS: NavItem[] = [
   { to: '/', label: 'Overview', short: 'Home', icon: 'overview', end: true, tab: true },
@@ -37,12 +41,15 @@ const LINKS: NavItem[] = [
     short: 'Config',
     icon: 'settings',
     submenu: [
-      ...CONFIG_PAGES.map((p) => ({
-        to: `/configuration/${p.slug}`,
-        label: p.label,
-        icon: p.icon,
-        keys: p.keys,
-      })),
+      ...CONFIG_GROUPS.flatMap((group) => [
+        { heading: group } as SubmenuEntry,
+        ...CONFIG_PAGES.filter((p) => p.group === group).map((p) => ({
+          to: `/configuration/${p.slug}`,
+          label: p.label,
+          icon: p.icon,
+          keys: p.keys,
+        })),
+      ]),
       { to: '/configuration/review', label: 'Review', icon: 'check-circle' as IconName },
     ],
   },
@@ -122,17 +129,23 @@ export function Layout({ children }: { children: ReactNode }) {
               </NavLink>
               {open && (
                 <div className="nav-sub" role="group" aria-label={`${link.label} sections`}>
-                  {link.submenu!.map((sub) => (
-                    <NavLink
-                      key={sub.to}
-                      to={sub.to}
-                      className={({ isActive }) => `nav-link nav-sublink${isActive ? ' active' : ''}`}
-                    >
-                      <Icon name={sub.icon} />
-                      <span className="nav-sublabel">{sub.label}</span>
-                      <ConfigChanges keys={sub.keys} />
-                    </NavLink>
-                  ))}
+                  {link.submenu!.map((sub) =>
+                    'heading' in sub ? (
+                      <div key={sub.heading} className="nav-subgroup-label">
+                        {sub.heading}
+                      </div>
+                    ) : (
+                      <NavLink
+                        key={sub.to}
+                        to={sub.to}
+                        className={({ isActive }) => `nav-link nav-sublink${isActive ? ' active' : ''}`}
+                      >
+                        <Icon name={sub.icon} />
+                        <span className="nav-sublabel">{sub.label}</span>
+                        <ConfigChanges keys={sub.keys} />
+                      </NavLink>
+                    ),
+                  )}
                 </div>
               )}
             </div>

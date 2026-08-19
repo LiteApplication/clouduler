@@ -24,6 +24,7 @@ import type {
   SelfUpdateConfig,
   SelfUpdateRunState,
   SelfUpdateSshKeyStatus,
+  StaticRouteRule,
   ValidationResult,
   VolumeState,
 } from './types';
@@ -202,6 +203,13 @@ export const api = {
   updateRedirect: (id: string, body: Omit<RedirectRule, 'id'>) =>
     put<RedirectRule>(`/api/redirects/${encodeURIComponent(id)}`, body),
   removeRedirect: (id: string) => del<void>(`/api/redirects/${encodeURIComponent(id)}`),
+
+  // static routes: UI-managed, not part of cluster.yaml — see docs/proxy.md
+  listStaticRoutes: () => get<StaticRouteRule[]>('/api/static-routes'),
+  createStaticRoute: (body: Omit<StaticRouteRule, 'id'>) => post<StaticRouteRule>('/api/static-routes', body),
+  updateStaticRoute: (id: string, body: Omit<StaticRouteRule, 'id'>) =>
+    put<StaticRouteRule>(`/api/static-routes/${encodeURIComponent(id)}`, body),
+  removeStaticRoute: (id: string) => del<void>(`/api/static-routes/${encodeURIComponent(id)}`),
 
   // certificates & dns
   listCertificates: () => get<CertificateState[]>('/api/certificates'),

@@ -43,7 +43,7 @@ clap = { version = "4", features = ["derive", "env"] }
 blake3 = "1"
 fast_rsync = "0.2"
 futures = "0.3"
-git2 = "0.19"
+git2 = { version = "0.19", features = ["vendored-openssl"] }
 hickory-proto = "0.26"
 hickory-resolver = "0.26"
 hickory-server = { version = "0.26", features = ["resolver"] }
