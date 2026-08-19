@@ -61,6 +61,12 @@ pub struct AppState {
     /// so the internal restart route can trigger it programmatically after
     /// swapping in a new binary.
     pub shutdown: tokio::sync::watch::Sender<()>,
+    /// For forwarding a read to the node that actually holds the answer
+    /// (container inspection, logs, stats, resource usage). Accepts invalid
+    /// certs for the same reason `cl-update`'s internal client does: peers
+    /// are authenticated by the HMAC header, not TLS trust, since every
+    /// node's certificate is self signed until ACME issues a real one.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -96,6 +102,7 @@ pub struct ApiServerOptions {
     pub plain_listen_addr: Option<SocketAddr>,
     pub self_update_artifact_path: PathBuf,
     pub shutdown: tokio::sync::watch::Sender<()>,
+    pub http: reqwest::Client,
 }
 
 pub struct ApiServer {
@@ -153,6 +160,7 @@ impl ApiServer {
             rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
             self_update_artifact_path: options.self_update_artifact_path,
             shutdown: options.shutdown,
+            http: options.http,
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the

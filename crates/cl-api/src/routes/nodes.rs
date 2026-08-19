@@ -9,9 +9,12 @@ use cl_raft::state::{Availability, NodeState};
 use cl_raft::Request as ClusterRequest;
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
+use tracing::warn;
 
+use crate::auth::internal::InternalAuth;
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
+use crate::internal_peer;
 use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -19,6 +22,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/nodes", get(list).post(add))
         .route("/api/nodes/{name}", get(detail).patch(patch_node).delete(remove))
         .route("/api/nodes/{name}/logs", get(logs))
+        // Node-to-node only, HMAC authenticated: what `detail` forwards to
+        // when asked about a node other than the one answering. See
+        // `internal_peer`.
+        .route("/api/nodes/internal/{name}/usage", get(internal_usage))
 }
 
 #[derive(Serialize)]
@@ -46,15 +53,16 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<No
     Json(nodes)
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct ResourceUsage {
     cpu_count: usize,
     load_1m: f64,
     memory_total_bytes: u64,
     memory_used_bytes: u64,
     uptime_seconds: u64,
-    /// Only filled in when queried on the node itself: cl-raft carries no rpc
-    /// path for one node to ask another for its live resource usage.
+    /// True once this reflects a real reading rather than the zeroed
+    /// default returned when neither a local read nor forwarding to the
+    /// owning node succeeded.
     local: bool,
 }
 
@@ -83,7 +91,12 @@ async fn detail(
     let usage = if name == state.node_name {
         local_resource_usage()
     } else {
-        ResourceUsage::default()
+        internal_peer::fetch_json(&state, &name, &internal_usage_path(&name))
+            .await
+            .unwrap_or_else(|e| {
+                warn!(node = %name, error = %e, "could not fetch resource usage from its node");
+                ResourceUsage::default()
+            })
     };
 
     Ok(Json(NodeDetail {
@@ -95,6 +108,16 @@ async fn detail(
         container_count: cluster_state.assignments_on(&name).count(),
         usage,
     }))
+}
+
+fn internal_usage_path(name: &str) -> String {
+    format!("/api/nodes/internal/{name}/usage")
+}
+
+/// Node-to-node: always this node's own reading, regardless of `name` — a
+/// node only ever forwards to the node it is actually asking about.
+async fn internal_usage(_auth: InternalAuth, State(_state): State<AppState>) -> Json<ResourceUsage> {
+    Json(local_resource_usage())
 }
 
 fn local_resource_usage() -> ResourceUsage {

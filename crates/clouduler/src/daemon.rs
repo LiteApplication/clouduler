@@ -95,6 +95,16 @@ pub async fn run(
     // swapping in a new binary.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
 
+    // Shared by the api's cross-node forwarding and by self-update's peer
+    // calls. Accepts invalid certs for both: peers are authenticated by an
+    // HMAC header, not TLS trust, since every node's certificate is self
+    // signed until ACME issues a real one, and there is no shared CA to check
+    // it against.
+    let internal_http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .context("building the internal node-to-node http client")?;
+
     let api = start_api(StartApiArgs {
         cfg: &cfg,
         node,
@@ -104,6 +114,7 @@ pub async fn run(
         data_dir: &data_dir,
         docker: docker.clone(),
         shutdown: shutdown_tx,
+        http: internal_http.clone(),
     })
     .await;
 
@@ -164,9 +175,9 @@ pub async fn run(
     let overlay = crate::overlay::start(&cfg, &node_name, &cluster, connected.clone());
     let egress = crate::egress::start(&cfg, &node_name, &cluster, connected.clone());
 
-    let self_update = connected
-        .clone()
-        .and_then(|docker| start_self_update(&cfg, &node_name, &cluster, docker, &data_dir));
+    let self_update = connected.clone().and_then(|docker| {
+        start_self_update(&cfg, &node_name, &cluster, docker, &data_dir, internal_http.clone())
+    });
 
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
@@ -248,6 +259,7 @@ struct StartApiArgs<'a> {
     data_dir: &'a Path,
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
     shutdown: tokio::sync::watch::Sender<()>,
+    http: reqwest::Client,
 }
 
 async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>> {
@@ -260,6 +272,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         data_dir,
         docker,
         shutdown,
+        http,
     } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -300,6 +313,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         plain_listen_addr,
         self_update_artifact_path: self_update_artifact_path(data_dir),
         shutdown,
+        http,
     };
 
     let server = match cl_api::ApiServer::new(options).await {
@@ -335,18 +349,11 @@ fn start_self_update(
     cluster: &Arc<ClusterNode>,
     docker: cl_docker::Docker,
     data_dir: &Path,
+    http: reqwest::Client,
 ) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
     let node = cfg.node(node_name)?;
     let orchestrator_key = load_cluster_key(cfg, node)?;
     let worker_key = load_cluster_key(cfg, node)?;
-
-    let http = reqwest::Client::builder()
-        // Peers are authenticated by the HMAC header, not by TLS trust: every
-        // node's certificate is self signed until ACME issues a real one, and
-        // there is no shared CA to check it against.
-        .danger_accept_invalid_certs(true)
-        .build()
-        .ok()?;
 
     let checkout_dir = data_dir.join("self-update").join("checkout");
     let artifact_path = self_update_artifact_path(data_dir);

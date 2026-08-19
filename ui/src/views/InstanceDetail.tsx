@@ -185,7 +185,14 @@ function InstanceLogs({ id }: { id: string }) {
   const [tail, setTail] = useState(200);
   const [search, setSearch] = useState('');
   const url = `/api/instances/${encodeURIComponent(id)}/logs?follow=${follow}&tail=${tail}`;
-  const { items, connected } = useEventSource<LogLine>(url, { limit: 2000 });
+  const { items, connected } = useEventSource<LogLine>(url, {
+    limit: 2000,
+    events: ['stdout', 'stderr'],
+    mapItem: (data, eventType) => {
+      const line = data as { text: string; timestamp: string };
+      return { timestamp: line.timestamp, message: line.text, stream: eventType as 'stdout' | 'stderr' };
+    },
+  });
 
   const visible = search ? items.filter((l) => l.message.includes(search)) : items;
 
@@ -233,7 +240,7 @@ function InstanceLogs({ id }: { id: string }) {
 function InstanceStats({ id }: { id: string }) {
   const { items, connected } = useEventSource<InstanceStatsSample>(
     `/api/instances/${encodeURIComponent(id)}/stats`,
-    { limit: 60 },
+    { limit: 60, events: ['stats'] },
   );
   const latest = items[items.length - 1];
 
@@ -260,7 +267,7 @@ function InstanceStats({ id }: { id: string }) {
           <span className="stat-label">Memory</span>
         </span>
         <span className="stat-value">
-          {formatBytes(latest.mem_used_bytes)} / {formatBytes(latest.mem_limit_bytes)}
+          {formatBytes(latest.memory_used_bytes)} / {formatBytes(latest.memory_limit_bytes)}
         </span>
       </div>
       <div className="card stat">
@@ -269,7 +276,7 @@ function InstanceStats({ id }: { id: string }) {
           <span className="stat-label">Network</span>
         </span>
         <span className="stat-value" style={{ fontSize: 16 }}>
-          rx {formatBytes(latest.net_rx_bytes)} / tx {formatBytes(latest.net_tx_bytes)}
+          rx {formatBytes(latest.network_rx_bytes)} / tx {formatBytes(latest.network_tx_bytes)}
         </span>
       </div>
       <div className="card stat">
@@ -278,7 +285,7 @@ function InstanceStats({ id }: { id: string }) {
           <span className="stat-label">Disk IO</span>
         </span>
         <span className="stat-value" style={{ fontSize: 16 }}>
-          r {formatBytes(latest.block_read_bytes)} / w {formatBytes(latest.block_write_bytes)}
+          r {formatBytes(latest.io_read_bytes)} / w {formatBytes(latest.io_write_bytes)}
         </span>
       </div>
     </div>

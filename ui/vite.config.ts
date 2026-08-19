@@ -1,10 +1,13 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
-// The Rust side serves ui/dist as static files off whatever path the daemon
-// is mounted at, so assets must be referenced relatively, not from root.
+// The Rust side always serves ui/dist from the domain root (see
+// cl-api/src/ui.rs's SPA fallback), never off a sub-path, so assets must be
+// referenced absolutely: a relative reference resolves against whatever
+// client-side route the browser is on, which breaks a hard reload of any
+// path but `/` (e.g. `/devices` would look for `/devices/assets/...`).
 export default defineConfig({
-  base: './',
+  base: '/',
   plugins: [react()],
   build: {
     outDir: 'dist',

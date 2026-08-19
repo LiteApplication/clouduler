@@ -56,7 +56,7 @@ ipnet = { version = "2", features = ["serde"] }
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 rcgen = "0.14"
 redb = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rtnetlink = "0.22"
 rustls = "0.23"
 rustls-pemfile = "2"

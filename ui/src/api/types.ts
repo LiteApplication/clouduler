@@ -397,14 +397,13 @@ export interface ValidationResult {
 // ---- stats ----
 
 export interface InstanceStatsSample {
-  timestamp: string;
   cpu_percent: number;
-  mem_used_bytes: number;
-  mem_limit_bytes: number;
-  net_rx_bytes: number;
-  net_tx_bytes: number;
-  block_read_bytes: number;
-  block_write_bytes: number;
+  memory_used_bytes: number;
+  memory_limit_bytes: number;
+  network_rx_bytes: number;
+  network_tx_bytes: number;
+  io_read_bytes: number;
+  io_write_bytes: number;
 }
 
 export interface LogLine {

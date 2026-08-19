@@ -135,6 +135,10 @@ async fn serve(config: &ClusterConfig) -> Server {
         plain_listen_addr: None,
         self_update_artifact_path: dir.path().join("self-update-artifact"),
         shutdown: tokio::sync::watch::channel(()).0,
+        http: reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("building the test http client"),
     })
     .await
     .expect("build api");

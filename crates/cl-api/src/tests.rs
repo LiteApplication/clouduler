@@ -131,6 +131,10 @@ async fn harness() -> Harness {
         rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
         self_update_artifact_path: dir.path().join("self-update-artifact"),
         shutdown,
+        http: reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("building the test http client"),
     };
 
     let router = build_router(state.clone());
@@ -907,6 +911,97 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
 
     assert_eq!(value[0]["state"], "unknown");
     assert_eq!(value[0]["running"], serde_json::Value::Null);
+}
+
+// ---- cross-node forwarding (internal_peer) ----
+//
+// A live two-node forward is exercised manually (there is no second node in
+// this harness to bind a real listener for), so these cover the two things
+// that would silently break the feature: the internal routes staying behind
+// `InternalAuth` rather than being reachable by anyone who can guess a path,
+// and a correctly signed request getting the same real, local-only answer
+// `summarize_local`/`local_resource_usage` give a same-node caller.
+
+#[tokio::test]
+async fn internal_instance_and_node_routes_reject_an_unsigned_request() {
+    let h = harness().await;
+    h.state
+        .cluster
+        .submit(cl_raft::Request::Assign {
+            instance: "blog.web.0".parse().unwrap(),
+            node: "n0".into(),
+            drives: Default::default(),
+        })
+        .await
+        .expect("assign");
+
+    for path in ["/api/instances/internal/blog.web.0/summary", "/api/nodes/internal/n0/usage"] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path} answered without a signature");
+    }
+}
+
+async fn signed_get(h: &Harness, path: &str) -> axum::response::Response {
+    let key_guard = h.state.key.read().await;
+    let signature = cl_secret::internal_auth::sign(key_guard.as_ref().expect("test cluster holds a key"), path);
+    drop(key_guard);
+    h.router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header(cl_update::internal_client::AUTH_HEADER, signature)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_correctly_signed_internal_summary_request_answers_locally() {
+    let h = harness().await;
+    h.state
+        .cluster
+        .submit(cl_raft::Request::Assign {
+            instance: "blog.web.0".parse().unwrap(),
+            node: "n0".into(),
+            drives: Default::default(),
+        })
+        .await
+        .expect("assign");
+
+    let resp = signed_get(&h, "/api/instances/internal/blog.web.0/summary").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["id"], "blog.web.0");
+    assert_eq!(value["node"], "n0");
+}
+
+#[tokio::test]
+async fn a_correctly_signed_internal_usage_request_answers_with_a_real_reading() {
+    let h = harness().await;
+    let resp = signed_get(&h, "/api/nodes/internal/n0/usage").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // `local: true` is the signal a forwarding caller relies on to tell a
+    // real reading from the zeroed fallback it uses when a peer cannot be
+    // reached at all.
+    assert_eq!(value["local"], true);
+    assert!(value["cpu_count"].as_u64().unwrap() > 0);
 }
 
 // ---- the api/ui contract ----
