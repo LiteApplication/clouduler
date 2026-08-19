@@ -69,6 +69,7 @@ services:
     sysctls:
       net.core.somaxconn: "1024"
     stop_grace_period: 30s
+    stop_signal: SIGINT
     deploy: {...}
     x-clouduler: {...}
 ```
@@ -89,6 +90,10 @@ overlay hostname.
 - `sysctls` accepts a mapping or a `key=value` list.
 - `stop_grace_period` and all `deploy:` durations use humantime syntax
   (`30s`, `2m`, `1h30m`).
+- `stop_signal` overrides the signal sent on a graceful stop (e.g. `SIGINT`
+  for a database that treats `SIGTERM` as a slow, wait-for-clients shutdown).
+  Left unset, the image's own `STOPSIGNAL` applies (usually `SIGTERM`). Must
+  be a `SIG*` name or a plain signal number.
 - `restart` is one of `no`, `always`, `on-failure`, `on-failure:N`,
   `unless-stopped`.
 
@@ -189,6 +194,12 @@ proxy:
     tls: true                # default true
     middlewares: [redirect_https, strip_prefix]
     sticky: true              # optional
+
+    # Reverse proxy behaviour, all optional
+    max_body_size: 10MB       # 413 above this; unset means no limit
+    websockets: true          # default true
+    preserve_host: false      # default false
+    response_timeout: 30s     # unset waits forever
 ```
 
 Fields: `host` (a bare label like `gitlab` is qualified with the network's
@@ -197,6 +208,22 @@ domain, e.g. `gitlab.example.com`; a name containing a dot is used as is),
 an HTTP route needs somewhere to qualify its hostname against), `port`, and
 the optional `path_prefix`, `tls` (defaults to `true`), `middlewares` and
 `sticky`.
+
+#### Reverse proxy settings
+
+Every one of these is optional, and the default is the behaviour that existed
+before it was configurable, so adding them to an existing stack changes
+nothing until you set one.
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `max_body_size` | unlimited | Largest request body to forward. A declared `Content-Length` over the cap is refused with 413 before the body is read at all; a chunked body is cut off mid-stream once it passes the cap. Accepts `10MB`, `10MiB`, `10M` or a plain byte count. |
+| `websockets` | `true` | Whether `Upgrade` requests are proxied. Turning it off answers them with 400, which is worth doing on a route that should never see one. |
+| `preserve_host` | `false` | Forward the client's `Host` instead of rewriting it to the backend's address. Needed by anything that builds absolute URLs or virtual hosts on the header. |
+| `response_timeout` | none | How long the backend has to return response headers, connection time included. Answers 504 when it runs out. Do not set this on a route serving an event stream or a long download — it applies to headers, but a backend that is slow to *start* answering will be cut off. |
+
+Byte sizes take decimal (`kb`, `mb`, `gb`) or binary (`kib`, `mib`, `gib`)
+suffixes; a bare `k`/`m`/`g` is binary, and a plain number is bytes.
 
 #### Middlewares
 
@@ -218,6 +245,12 @@ middlewares:
         Cache-Control: no-store
       remove_request: [X-Debug]
       remove_response: [Server]
+  - cors:
+      origins: ["https://app.example.com"]   # or ["*"] for any origin
+      methods: [GET, POST]                    # default: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS
+      headers: []                             # empty echoes the browser's requested headers
+      allow_credentials: false
+      max_age: 10m
 ```
 
 - `redirect_https`: answer plain HTTP with a redirect to the same URL over TLS.
@@ -226,9 +259,15 @@ middlewares:
   plaintext password here would end up in the cluster database and in shell
   history.
 - `headers`: header rewriting in both directions.
+- `cors`: cross-origin access control. An `OPTIONS` preflight is answered
+  directly, without reaching the container; a real request from an allowed
+  origin gets `Access-Control-Allow-*` added to the response. `origins:
+  ["*"]` cannot be combined with `allow_credentials: true` — browsers reject
+  that pairing, so it is rejected here instead of failing confusingly at
+  request time.
 
-Naming `basic_auth` or `headers` as a bare string is an error, since neither
-does anything useful without settings.
+Naming `basic_auth`, `headers` or `cors` as a bare string is an error, since
+none of them do anything useful without settings.
 
 ### `expose`
 

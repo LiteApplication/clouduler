@@ -147,9 +147,18 @@ export interface ClusterState {
 // ---- /api/status ----
 
 export interface ClusterStatus {
+  /** The node that answered, which is not necessarily the leader. */
+  node: string;
+  is_leader: boolean;
+  /** Named to match the Rust field. Reading `quorum` here silently yielded
+   *  `undefined`, so `!status.quorum` was always true and the overview showed
+   *  "Quorum lost" on a perfectly healthy cluster. */
+  has_quorum: boolean;
   leader: string | null;
-  term: number;
-  quorum: boolean;
+  /** Raft voters, and how many of them this node can currently reach. Not the
+   *  same as managers_*: a manager is only a voter once raft has added it. */
+  voters: number;
+  reachable: number;
   managers_total: number;
   managers_reachable: number;
   version: string;
@@ -253,6 +262,8 @@ export interface WebConfig {
   address: string;
   network: string;
   port: number;
+  through_proxy: boolean;
+  backend_port: number;
 }
 
 export interface FailoverConfig {
@@ -299,11 +310,37 @@ export interface AcmeConfig {
   contact_email?: string | null;
 }
 
+/** A proxy route backed by a fixed address instead of a stack's containers. */
+export interface StaticRoute {
+  host: string;
+  network: string;
+  /** `host:port`, resolved fresh on every reconcile pass. */
+  backend: string;
+  path_prefix?: string | null;
+  tls: boolean;
+  max_body_size?: string | null;
+  websockets: boolean;
+  preserve_host: boolean;
+  response_timeout?: string | null;
+}
+
 export interface ProxyConfig {
   enabled: boolean;
   http_port: number;
   https_port: number;
   acme: AcmeConfig;
+  static_routes: StaticRoute[];
+}
+
+/** A UI-managed redirect. Not part of cluster.yaml; see /api/redirects. */
+export interface RedirectRule {
+  id: string;
+  host: string;
+  network: string;
+  path_prefix?: string | null;
+  target: string;
+  preserve_path: boolean;
+  status: 301 | 302 | 307 | 308;
 }
 
 export interface ClusterConfig {

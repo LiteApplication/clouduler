@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::body::Incoming;
 use hyper::header::{HeaderValue, HOST};
 use hyper::server::conn::http1;
@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
 use crate::error::Result;
 use crate::middleware;
-use crate::route::{Route, RouteTable, STICKY_COOKIE};
+use crate::route::{RedirectTarget, Route, RouteTable, STICKY_COOKIE};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// The single body type every response and outbound request in this crate
@@ -165,6 +165,72 @@ fn bad_gateway(reason: impl std::fmt::Display) -> Response<ProxyBody> {
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
+fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
+    Response::builder()
+        .status(status)
+        .body(text_body(message.to_string()))
+        .unwrap_or_else(|_| Response::new(empty_body()))
+}
+
+/// Rejects a request whose TCP peer does not sit inside the route's
+/// `allowed_subnet`. A route with no restriction (a public network) always
+/// passes. This is a check on the real socket peer, not a header, so it
+/// cannot be spoofed by a client claiming a different address.
+fn gate_by_network(route: &Route, peer: SocketAddr) -> Option<Response<ProxyBody>> {
+    let subnet = route.options.allowed_subnet?;
+    if subnet.contains(&peer.ip()) {
+        return None;
+    }
+    Some(status_response(
+        StatusCode::FORBIDDEN,
+        "this route is only reachable from its own network",
+    ))
+}
+
+/// Answers a redirect route directly, never touching a backend.
+fn respond_redirect(
+    redirect: &RedirectTarget,
+    path_and_query: &str,
+) -> Response<ProxyBody> {
+    let location = if redirect.preserve_path {
+        format!("{}{path_and_query}", redirect.url)
+    } else {
+        redirect.url.clone()
+    };
+    let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::FOUND);
+    Response::builder()
+        .status(status)
+        .header(hyper::header::LOCATION, location)
+        .body(empty_body())
+        .unwrap_or_else(|_| Response::new(empty_body()))
+}
+
+/// Reject an oversized body before reading it, when the client declared one.
+///
+/// This is the cheap half of the limit: a `Content-Length` over the cap is
+/// refused without touching the body at all, so an upload that was never going
+/// to be accepted does not get streamed across the network first. A chunked
+/// request has no length to check, and is caught by `Limited` while streaming.
+fn declared_length_exceeds(headers: &hyper::HeaderMap, max: u64) -> bool {
+    headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_some_and(|len| len > max)
+}
+
+/// Apply the route's body cap, if it has one. `Limited` fails the body mid
+/// stream once the cap is passed, which surfaces to the backend as a broken
+/// request rather than a truncated one.
+fn limited_body(body: Incoming, max: Option<u64>) -> ProxyBody {
+    match max {
+        Some(max) => Limited::new(incoming_to_proxy_body(body), max as usize)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as BoxError)
+            .boxed(),
+        None => incoming_to_proxy_body(body),
+    }
+}
+
 async fn handle_http(
     req: Request<Incoming>,
     routes: Arc<RouteTable>,
@@ -183,12 +249,17 @@ async fn handle_http(
         return Ok(not_found(&host, &path));
     };
 
+    if let Some(resp) = gate_by_network(&route, peer) {
+        return Ok(resp);
+    }
+
+    let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+
+    if let Some(redirect) = &route.redirect {
+        return Ok(respond_redirect(redirect, path_and_query));
+    }
+
     if route.tls {
-        let path_and_query = req
-            .uri()
-            .path_and_query()
-            .map(|p| p.as_str())
-            .unwrap_or("/");
         let resp = middleware::redirect_https(&host, path_and_query)
             .body(empty_body())
             .unwrap_or_else(|_| Response::new(empty_body()));
@@ -215,6 +286,15 @@ async fn handle_https(
     let Some(route) = route_for(&routes, &req) else {
         return Ok(not_found(&host, &path));
     };
+
+    if let Some(resp) = gate_by_network(&route, peer) {
+        return Ok(resp);
+    }
+
+    if let Some(redirect) = &route.redirect {
+        let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        return Ok(respond_redirect(redirect, path_and_query));
+    }
 
     Ok(proxy(req, &route, "https", peer, &client).await)
 }
@@ -243,6 +323,14 @@ fn apply_route_middlewares(route: &Route, req: &mut Request<Incoming>) {
     }
 }
 
+/// The route's `cors` middleware, if it has one.
+fn cors_policy(route: &Route) -> Option<&cl_config::CorsPolicy> {
+    route.middlewares.iter().find_map(|m| match m {
+        cl_config::Middleware::Cors(policy) => Some(policy),
+        _ => None,
+    })
+}
+
 async fn proxy(
     mut req: Request<Incoming>,
     route: &Route,
@@ -252,12 +340,55 @@ async fn proxy(
 ) -> Response<ProxyBody> {
     apply_route_middlewares(route, &mut req);
 
+    let cors = cors_policy(route);
+    let origin = req
+        .headers()
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    if let Some(policy) = cors {
+        if middleware::is_cors_preflight(req.method(), req.headers()) {
+            let requested = req
+                .headers()
+                .get("access-control-request-headers")
+                .and_then(|v| v.to_str().ok());
+            let mut resp = Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(empty_body())
+                .unwrap_or_else(|_| Response::new(empty_body()));
+            if let Some(origin) = &origin {
+                for (name, value) in middleware::cors_response_headers(policy, origin, requested) {
+                    resp.headers_mut().insert(name, value);
+                }
+            }
+            return resp;
+        }
+    }
+
     let sticky_cookie = extract_cookie(req.headers(), STICKY_COOKIE);
     let Some(picked) = route.pick(sticky_cookie.as_deref()) else {
         return bad_gateway("no backend available for route");
     };
 
+    let options = &route.options;
+
+    if let Some(max) = options.max_body_size {
+        if declared_length_exceeds(req.headers(), max) {
+            return status_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("request body exceeds the {max} byte limit for this route"),
+            );
+        }
+    }
+
     if middleware::is_upgrade(req.headers()) {
+        if !options.websockets {
+            return status_response(
+                StatusCode::BAD_REQUEST,
+                "connection upgrades are not enabled for this route",
+            );
+        }
         return match proxy_websocket(req, picked.addr, scheme, peer).await {
             Ok(resp) => resp,
             Err(e) => bad_gateway(e),
@@ -273,13 +404,32 @@ async fn proxy(
         return bad_gateway("could not build backend uri");
     };
     parts.uri = uri;
-    if let Ok(host) = HeaderValue::from_str(&picked.addr.to_string()) {
-        parts.headers.insert(HOST, host);
+    // Rewriting Host to the backend address is the default because most
+    // containers ignore it; preserve_host leaves the client's value alone for
+    // the ones that build absolute URLs or virtual host on it.
+    if !options.preserve_host {
+        if let Ok(host) = HeaderValue::from_str(&picked.addr.to_string()) {
+            parts.headers.insert(HOST, host);
+        }
     }
 
-    let outbound = Request::from_parts(parts, incoming_to_proxy_body(body));
+    let outbound = Request::from_parts(parts, limited_body(body, options.max_body_size));
 
-    let mut resp = match client.request(outbound).await {
+    let sent = client.request(outbound);
+    let result = match options.response_timeout {
+        Some(limit) => match tokio::time::timeout(limit, sent).await {
+            Ok(result) => result,
+            Err(_) => {
+                return status_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    &format!("{} did not respond within {limit:?}", picked.addr),
+                )
+            }
+        },
+        None => sent.await,
+    };
+
+    let mut resp = match result {
         Ok(resp) => {
             let (rparts, rbody) = resp.into_parts();
             let mut rparts = rparts;
@@ -292,6 +442,11 @@ async fn proxy(
     if let Some(value) = picked.set_cookie {
         if let Ok(v) = HeaderValue::from_str(&format!("{STICKY_COOKIE}={value}; Path=/; HttpOnly")) {
             resp.headers_mut().insert(hyper::header::SET_COOKIE, v);
+        }
+    }
+    if let (Some(policy), Some(origin)) = (cors, &origin) {
+        for (name, value) in middleware::cors_response_headers(policy, origin, None) {
+            resp.headers_mut().insert(name, value);
         }
     }
     resp

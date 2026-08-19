@@ -12,6 +12,7 @@ import type {
   NodeAddress,
   NodeConfig,
   PublicAddress,
+  StaticRoute,
 } from '../../api/types';
 import { Icon } from '../../components/Icon';
 import {
@@ -403,11 +404,30 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
       />
       <PortField
         id="web-port"
-        label="Port"
+        label="Direct HTTPS port"
         value={draft.web.port}
         onChange={(port) => setDraft({ ...draft, web: { ...draft.web, port } })}
+        hint="Always listening, even when the dashboard is also published through the proxy. This is the way back in if the proxy cannot bind its ports."
         disabled={disabled}
       />
+      <CheckboxField
+        id="web-through-proxy"
+        label="Publish the dashboard through the reverse proxy"
+        value={draft.web.through_proxy}
+        onChange={(through_proxy) => setDraft({ ...draft, web: { ...draft.web, through_proxy } })}
+        hint="Serves it on the standard HTTPS port with the same Let's Encrypt certificate and Cloudflare record as any other route."
+        disabled={disabled || !draft.proxy.enabled}
+      />
+      {draft.web.through_proxy && (
+        <PortField
+          id="web-backend-port"
+          label="Proxy backend port"
+          value={draft.web.backend_port}
+          onChange={(backend_port) => setDraft({ ...draft, web: { ...draft.web, backend_port } })}
+          hint="Loopback only, plain HTTP, reachable only by this node's proxy. Must differ from every other port here."
+          disabled={disabled}
+        />
+      )}
     </div>
   );
 }
@@ -467,7 +487,7 @@ export function SecretsSection({ draft, setDraft, disabled }: SectionProps) {
 export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
   const a = draft.auth;
   const set = (patch: Partial<ClusterConfig['auth']>) => setDraft({ ...draft, auth: { ...a, ...patch } });
-  const hasOidc = a.oidc !== null;
+  const hasOidc = a.oidc != null;
 
   return (
     <div className="card">
@@ -603,6 +623,135 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
           />
         </>
       )}
+      <StaticRoutesEditor draft={draft} setDraft={setDraft} disabled={disabled} />
+    </div>
+  );
+}
+
+/** Routes backed by a fixed address instead of a stack's containers. */
+function StaticRoutesEditor({ draft, setDraft, disabled }: SectionProps) {
+  const routes = draft.proxy.static_routes;
+
+  const update = (i: number, patch: Partial<StaticRoute>) => {
+    const next = routes.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+    setDraft({ ...draft, proxy: { ...draft.proxy, static_routes: next } });
+  };
+
+  const add = () => {
+    const next: StaticRoute = {
+      host: '',
+      network: Object.keys(draft.networks)[0] ?? '',
+      backend: '',
+      path_prefix: null,
+      tls: true,
+      max_body_size: null,
+      websockets: true,
+      preserve_host: false,
+      response_timeout: null,
+    };
+    setDraft({ ...draft, proxy: { ...draft.proxy, static_routes: [...routes, next] } });
+  };
+
+  const remove = (i: number) => {
+    setDraft({ ...draft, proxy: { ...draft.proxy, static_routes: routes.filter((_, idx) => idx !== i) } });
+  };
+
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h3>Static backends</h3>
+      </div>
+      <p className="field-hint">
+        Routes for a service clouduler does not run itself — another box on the network, a third
+        party endpoint. See docs/proxy.md.
+      </p>
+      {routes.map((route, i) => (
+        <div className="card section" key={i}>
+          <div className="section-head">
+            <h3 className="flex-row">
+              <Icon name="external" /> {route.host || '(new route)'}
+            </h3>
+            {!disabled && (
+              <button className="danger" onClick={() => remove(i)}>
+                <Icon name="trash" /> Remove
+              </button>
+            )}
+          </div>
+          <TextField
+            id={`static-route-${i}-host`}
+            label="Host"
+            value={route.host}
+            onChange={(host) => update(i, { host })}
+            hint="A bare label gets the network's domain appended."
+            disabled={disabled}
+          />
+          <SelectField
+            id={`static-route-${i}-network`}
+            label="Network"
+            value={route.network}
+            onChange={(network) => update(i, { network })}
+            options={Object.keys(draft.networks).map((n) => ({ value: n, label: n }))}
+            disabled={disabled}
+          />
+          <TextField
+            id={`static-route-${i}-backend`}
+            label="Backend"
+            value={route.backend}
+            onChange={(backend) => update(i, { backend })}
+            hint="host:port. Resolved fresh on every reconcile pass."
+            disabled={disabled}
+          />
+          <TextField
+            id={`static-route-${i}-prefix`}
+            label="Path prefix"
+            value={route.path_prefix ?? ''}
+            onChange={(v) => update(i, { path_prefix: v || null })}
+            disabled={disabled}
+          />
+          <CheckboxField
+            id={`static-route-${i}-tls`}
+            label="TLS"
+            value={route.tls}
+            onChange={(tls) => update(i, { tls })}
+            disabled={disabled}
+          />
+          <CheckboxField
+            id={`static-route-${i}-websockets`}
+            label="Allow websockets"
+            value={route.websockets}
+            onChange={(websockets) => update(i, { websockets })}
+            disabled={disabled}
+          />
+          <CheckboxField
+            id={`static-route-${i}-preserve-host`}
+            label="Preserve client Host header"
+            value={route.preserve_host}
+            onChange={(preserve_host) => update(i, { preserve_host })}
+            disabled={disabled}
+          />
+          <TextField
+            id={`static-route-${i}-max-body`}
+            label="Max body size"
+            value={route.max_body_size ?? ''}
+            onChange={(v) => update(i, { max_body_size: v || null })}
+            hint="e.g. 10MB. Blank means unlimited."
+            disabled={disabled}
+          />
+          <DurationField
+            id={`static-route-${i}-timeout`}
+            label="Response timeout"
+            value={route.response_timeout ?? ''}
+            onChange={(v) => update(i, { response_timeout: v || null })}
+            hint="Blank waits forever."
+            disabled={disabled}
+          />
+        </div>
+      ))}
+      {!disabled && (
+        <button onClick={add}>
+          <Icon name="plus" /> Add static backend
+        </button>
+      )}
     </div>
   );
 }
@@ -614,7 +763,7 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
       <CheckboxField
         id="cf-enabled"
         label="Manage DNS through Cloudflare"
-        value={cf !== null}
+        value={cf != null}
         onChange={(enabled) => setDraft({ ...draft, cloudflare: enabled ? { api_token_file: null, zones: [] } : null })}
         disabled={disabled}
       />

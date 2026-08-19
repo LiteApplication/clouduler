@@ -8,6 +8,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
+use crate::stack::{ByteSize, Middleware};
 
 /// Default port for the node to node RPC channel (raft, drive sync, proxy backhaul).
 pub const DEFAULT_RPC_PORT: u16 = 7373;
@@ -208,6 +209,10 @@ pub enum NetworkKind {
     Private,
     /// Reachable from the internet. Records resolve to the node public address.
     Public,
+    /// Not an overlay: a node's address on this network names a local host
+    /// interface (a VPN tunnel, usually) that a service attached to it
+    /// egresses through, instead of the node's normal route out.
+    Egress,
 }
 
 impl NetworkKind {
@@ -295,6 +300,17 @@ pub struct Node {
     /// the mountpoint everywhere else.
     #[serde(default)]
     pub drives: BTreeMap<String, PathBuf>,
+
+    /// Free-form labels this node carries, matched by
+    /// `deploy.placement.constraints` as `node.labels.<key>`.
+    ///
+    /// A label says what a node *is* — it has fast storage, it can send mail,
+    /// its disk is external and replicated — so a stack can ask for a class of
+    /// node instead of naming one. Pinning to `node.hostname` is the blunt
+    /// alternative and it makes every stack file a record of today's topology.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+
     #[serde(default = "default_rpc_port")]
     pub rpc_port: u16,
     /// Where this node keeps its database and working files. Overrides the
@@ -318,11 +334,14 @@ fn default_rpc_port() -> u16 {
 }
 
 /// A node address on one network. Bare IP on subnetted networks, an address
-/// block on public ones.
+/// block on public ones, a host interface name on egress networks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum NodeAddress {
     Ip(IpAddr),
+    // Tried after `Ip`, so a bare IP string still parses as one; only a
+    // non-IP bare string falls through to here.
+    Interface(String),
     Public(PublicAddress),
 }
 
@@ -330,14 +349,21 @@ impl NodeAddress {
     pub fn as_ip(&self) -> Option<IpAddr> {
         match self {
             NodeAddress::Ip(ip) => Some(*ip),
-            NodeAddress::Public(_) => None,
+            NodeAddress::Interface(_) | NodeAddress::Public(_) => None,
+        }
+    }
+
+    pub fn as_interface(&self) -> Option<&str> {
+        match self {
+            NodeAddress::Interface(name) => Some(name),
+            NodeAddress::Ip(_) | NodeAddress::Public(_) => None,
         }
     }
 
     pub fn as_public(&self) -> Option<&PublicAddress> {
         match self {
             NodeAddress::Public(p) => Some(p),
-            NodeAddress::Ip(_) => None,
+            NodeAddress::Ip(_) | NodeAddress::Interface(_) => None,
         }
     }
 }
@@ -372,12 +398,40 @@ pub struct WebConfig {
     pub network: String,
     #[serde(default = "default_web_port")]
     pub port: u16,
+
+    /// Publish the dashboard as a route on the reverse proxy, so it is reached
+    /// on the standard HTTPS port with the same Let's Encrypt certificate and
+    /// Cloudflare record as any other service.
+    ///
+    /// The direct listener on `port` stays up either way. That is deliberate:
+    /// it is the way back in when the proxy cannot bind its ports or a config
+    /// edit breaks routing, and locking the operator out of the ui that fixes
+    /// the proxy would be the worst possible failure mode.
+    #[serde(default = "default_true_bool")]
+    pub through_proxy: bool,
+
+    /// Loopback port the proxy forwards dashboard traffic to.
+    ///
+    /// The proxy speaks plain HTTP to its backends, so the api opens a second
+    /// listener for it. Bound to 127.0.0.1 only, never the overlay: the
+    /// dashboard carries session cookies and the overlay is not encrypted.
+    /// Each node's proxy therefore reaches its own api, which is what we want
+    /// anyway since a non-leader already redirects to the leader.
+    #[serde(default = "default_web_backend_port")]
+    pub backend_port: u16,
 }
 
 /// Not 443: the reverse proxy owns the standard ports, since those are where
 /// the cluster's own services are published. The admin ui takes the odd one.
 fn default_web_port() -> u16 {
     8443
+}
+
+/// Loopback port the api opens for the reverse proxy.
+pub const DEFAULT_WEB_BACKEND_PORT: u16 = 8444;
+
+fn default_web_backend_port() -> u16 {
+    DEFAULT_WEB_BACKEND_PORT
 }
 
 /// The reverse proxy in front of every `x-clouduler.proxy` route.
@@ -399,6 +453,11 @@ pub struct ProxyConfig {
     pub https_port: u16,
     #[serde(default)]
     pub acme: AcmeConfig,
+    /// Routes published straight from a fixed address rather than a stack's
+    /// containers, for a service clouduler does not run: another box on the
+    /// network, a third party endpoint.
+    #[serde(default)]
+    pub static_routes: Vec<StaticRoute>,
 }
 
 impl Default for ProxyConfig {
@@ -408,8 +467,39 @@ impl Default for ProxyConfig {
             http_port: default_http_port(),
             https_port: default_https_port(),
             acme: AcmeConfig::default(),
+            static_routes: Vec::new(),
         }
     }
+}
+
+/// A proxy route whose backend is a fixed address instead of a stack's
+/// containers. Resolved by DNS on every reconcile pass, so a hostname backend
+/// picks up a changed address without the config being touched.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StaticRoute {
+    /// Bare label gets the network's domain appended, same as a stack route.
+    pub host: String,
+    /// Declared network this route is published on.
+    pub network: String,
+    /// `host:port` of the backend. A hostname is resolved fresh on every
+    /// reconcile pass; every address it resolves to becomes a backend, round
+    /// robined like a multi replica service.
+    pub backend: String,
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default = "default_true_bool")]
+    pub tls: bool,
+    #[serde(default)]
+    pub middlewares: Vec<Middleware>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_size: Option<ByteSize>,
+    #[serde(default = "default_true_bool")]
+    pub websockets: bool,
+    #[serde(default)]
+    pub preserve_host: bool,
+    #[serde(default, with = "humantime_serde::option")]
+    pub response_timeout: Option<Duration>,
 }
 
 fn default_http_port() -> u16 {
@@ -578,6 +668,7 @@ impl fmt::Display for NetworkKind {
             NetworkKind::Internal => f.write_str("internal"),
             NetworkKind::Private => f.write_str("private"),
             NetworkKind::Public => f.write_str("public"),
+            NetworkKind::Egress => f.write_str("egress"),
         }
     }
 }

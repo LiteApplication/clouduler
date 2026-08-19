@@ -37,6 +37,7 @@ fn node(name: &str) -> NodeState {
         rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
         drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
         availability: Availability::Active,
+        labels: Default::default(),
     }
 }
 

@@ -724,6 +724,7 @@ name = "cl-dns"
 version = "0.1.0"
 dependencies = [
  "cl-config",
+ "hickory-resolver",
  "reqwest",
  "serde",
  "serde_json",
@@ -807,6 +808,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "instant-acme",
+ "ipnet",
  "rcgen",
  "rustls",
  "rustls-pemfile",

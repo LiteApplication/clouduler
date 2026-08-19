@@ -86,9 +86,11 @@ async fn list_dns(_identity: Identity, State(state): State<AppState>) -> Json<Ve
     )
 }
 
-/// Same story as renewal: the reconcile loop lives in `cl-dns`. There is no
-/// command to force a pass, so this reports what the api can actually promise
-/// today rather than pretending to trigger one.
+/// The reconcile loop itself runs in the daemon (`clouduler::proxy`, every
+/// 60s on the leader), not in this crate, and there is no channel from here
+/// to nudge it early. This reports what the api can actually promise today
+/// (a pass is already running periodically) rather than pretending to force
+/// an immediate one.
 async fn reconcile(_admin: RequireAdmin) -> StatusCode {
     StatusCode::ACCEPTED
 }

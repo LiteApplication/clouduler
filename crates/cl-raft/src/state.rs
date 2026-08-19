@@ -42,6 +42,10 @@ pub struct NodeState {
     /// Drives this node implements, mapped to its local backing directory.
     pub drives: BTreeMap<String, PathBuf>,
     pub availability: Availability,
+    /// Labels from the cluster config, replicated so the scheduler can match
+    /// `node.labels.<key>` constraints without reading the config file.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 impl NodeState {
@@ -984,6 +988,7 @@ mod tests {
                 .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
                 .collect(),
             availability: Availability::Active,
+            labels: Default::default(),
         }
     }
 

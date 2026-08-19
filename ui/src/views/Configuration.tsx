@@ -1,148 +1,27 @@
 // Cluster configuration, split into subpages so an operator edits one topic
-// at a time instead of scrolling one giant form. The draft lives here, above
-// the subpages, so moving between them never drops an unsaved edit; the
-// action bar at the bottom is likewise shared and always shows how many
-// fields differ from what the cluster is running.
+// at a time instead of scrolling one giant form. The subpage list lives in the
+// app sidebar (see Layout), and the draft they all edit lives in
+// ConfigDraftProvider above both, so moving between them never drops an
+// unsaved edit. The action bar sits at the top of the page, under the header,
+// and always shows how many fields differ from what the cluster is running.
 
 import { useEffect, useState } from 'react';
-import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { ClusterConfig, PendingConfig, ValidationError } from '../api/types';
+import type { PendingConfig, ValidationError } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
-import { diffConfig } from '../lib/configDiff';
-import { Icon, type IconName } from '../components/Icon';
-import {
-  AuthSection,
-  CloudflareSection,
-  ClusterSection,
-  DrivesSection,
-  FailoverSection,
-  NetworksSection,
-  NodesSection,
-  ProxySection,
-  SecretsSection,
-  WebSection,
-  type SectionProps,
-} from './config/sections';
-
-function clone<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v));
-}
-
-interface Page {
-  slug: string;
-  label: string;
-  icon: IconName;
-  blurb: string;
-  /** Top-level config keys this page owns, used for its unsaved-change count. */
-  keys: string[];
-  Component: (props: SectionProps) => JSX.Element;
-}
-
-const PAGES: Page[] = [
-  {
-    slug: 'cluster',
-    label: 'Cluster',
-    icon: 'cloud',
-    blurb: 'Identity of the cluster itself.',
-    keys: ['cluster'],
-    Component: ClusterSection,
-  },
-  {
-    slug: 'networks',
-    label: 'Networks',
-    icon: 'network',
-    blurb: 'The internal overlay plus any private or public networks nodes are reachable on.',
-    keys: ['networks'],
-    Component: NetworksSection,
-  },
-  {
-    slug: 'nodes',
-    label: 'Nodes',
-    icon: 'nodes',
-    blurb: 'Per-node role, ports, addresses and drive mounts.',
-    keys: ['nodes'],
-    Component: NodesSection,
-  },
-  {
-    slug: 'drives',
-    label: 'Drives',
-    icon: 'drives',
-    blurb: 'How each drive is replicated or served across the cluster.',
-    keys: ['drives'],
-    Component: DrivesSection,
-  },
-  {
-    slug: 'web',
-    label: 'Web UI',
-    icon: 'overview',
-    blurb: 'Where this console listens and under which name it is published.',
-    keys: ['web'],
-    Component: WebSection,
-  },
-  {
-    slug: 'proxy',
-    label: 'Reverse proxy',
-    icon: 'external',
-    blurb: 'Published routes and the ACME certificates that front them.',
-    keys: ['proxy'],
-    Component: ProxySection,
-  },
-  {
-    slug: 'failover',
-    label: 'Failover',
-    icon: 'activity',
-    blurb: 'Timers deciding when a node is considered gone and its work moves.',
-    keys: ['failover'],
-    Component: FailoverSection,
-  },
-  {
-    slug: 'secrets',
-    label: 'Secrets',
-    icon: 'key',
-    blurb: 'Where the cluster key lives and whether a node may create one.',
-    keys: ['secrets'],
-    Component: SecretsSection,
-  },
-  {
-    slug: 'auth',
-    label: 'Auth',
-    icon: 'lock',
-    blurb: 'API keys, session lifetime and the OIDC provider.',
-    keys: ['auth'],
-    Component: AuthSection,
-  },
-  {
-    slug: 'cloudflare',
-    label: 'Cloudflare',
-    icon: 'certificate',
-    blurb: 'DNS records clouduler keeps in sync with your zones.',
-    keys: ['cloudflare'],
-    Component: CloudflareSection,
-  },
-];
+import { Icon } from '../components/Icon';
+import { useConfigDraft } from './config/draft';
+import { CONFIG_PAGES, pageForPath } from './config/pages';
+import type { SectionProps } from './config/sections';
 
 export function Configuration() {
   const { isAdmin } = useAuth();
   const navigate = useNavigate();
-  const [original, setOriginal] = useState<ClusterConfig | null>(null);
-  const [draft, setDraft] = useState<ClusterConfig | null>(null);
+  const { original, draft, setDraft, discard, reload, diff, loadError } = useConfigDraft();
   const [errors, setErrors] = useState<ValidationError[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConfig | null>(null);
   const [busy, setBusy] = useState(false);
-
-  const load = () => {
-    api
-      .getConfiguration()
-      .then((cfg) => {
-        setOriginal(cfg);
-        setDraft(clone(cfg));
-      })
-      .catch((e) => setLoadError(e instanceof ApiError ? e.message : String(e)));
-  };
-
-  useEffect(load, []);
 
   // Poll for an armed rollback timer, ours or someone else's, so a page
   // reload mid-window still shows the countdown instead of hiding it.
@@ -167,9 +46,6 @@ export function Configuration() {
       </p>
     );
   }
-
-  const diff = diffConfig(original, draft);
-  const countFor = (page: Page) => diff.filter((d) => page.keys.some((k) => d.path === k || d.path.startsWith(`${k}.`))).length;
 
   const validate = async () => {
     try {
@@ -202,13 +78,13 @@ export function Configuration() {
   const confirm = async () => {
     await api.confirmConfiguration();
     setPending(await api.pendingConfiguration());
-    load();
+    reload();
   };
 
   const rollback = async () => {
     await api.rollbackConfiguration();
     setPending(await api.pendingConfiguration());
-    load();
+    reload();
   };
 
   const sectionProps: SectionProps = { draft, setDraft, disabled: !isAdmin };
@@ -226,97 +102,6 @@ export function Configuration() {
                 : `${diff.length} unapplied change${diff.length > 1 ? 's' : ''}`}
             </p>
           </div>
-        </div>
-      </div>
-
-      {pending?.armed && (
-        <div className="banner banner-warn pending-banner" role="alert">
-          <div className="flex-row">
-            <Icon name="clock" />
-            <strong>A config change is pending confirmation.</strong>
-          </div>
-          <span className="countdown">{pending.seconds_left ?? '?'}s</span>
-          <span>
-            If you do not confirm before the timer runs out, the previous config is restored automatically. This
-            protects you from editing away the network you are connected over.
-          </span>
-          <div className="btn-row">
-            <button className="primary" onClick={confirm}>
-              <Icon name="check" /> Confirm new config
-            </button>
-            <button className="danger" onClick={rollback}>
-              <Icon name="restart" /> Roll back now
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div className="config-layout">
-        <nav className="config-nav" aria-label="Configuration sections">
-          {PAGES.map((page) => {
-            const changed = countFor(page);
-            return (
-              <NavLink
-                key={page.slug}
-                to={page.slug}
-                className={({ isActive }) => `config-nav-link${isActive ? ' active' : ''}`}
-              >
-                <Icon name={page.icon} />
-                <span className="config-nav-label">{page.label}</span>
-                {changed > 0 && <span className="change-dot" aria-label={`${changed} changed`}>{changed}</span>}
-              </NavLink>
-            );
-          })}
-          <NavLink to="review" className={({ isActive }) => `config-nav-link${isActive ? ' active' : ''}`}>
-            <Icon name="check-circle" />
-            <span className="config-nav-label">Review</span>
-            {diff.length > 0 && <span className="change-dot">{diff.length}</span>}
-          </NavLink>
-        </nav>
-
-        <div className="config-page">
-          <Routes>
-            <Route index element={<Navigate to="cluster" replace />} />
-            {PAGES.map(({ slug, label, blurb, icon, Component }) => (
-              <Route
-                key={slug}
-                path={slug}
-                element={
-                  <>
-                    <div className="section-head">
-                      <h2>
-                        <Icon name={icon} /> {label}
-                      </h2>
-                    </div>
-                    <p className="page-sub" style={{ marginBottom: 16 }}>
-                      {blurb}
-                    </p>
-                    <Component {...sectionProps} />
-                  </>
-                }
-              />
-            ))}
-            <Route
-              path="review"
-              element={<ReviewPage diff={diff} onGo={(slug) => navigate(`/configuration/${slug}`)} />}
-            />
-            <Route path="*" element={<Navigate to="cluster" replace />} />
-          </Routes>
-
-          {errors.length > 0 && (
-            <div className="banner banner-bad" role="alert" style={{ marginTop: 16 }}>
-              <Icon name="alert" />
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {errors.map((e, i) => (
-                  <li key={i}>
-                    {e.path && <span className="mono">{e.path}</span>}
-                    {e.path && ': '}
-                    {e.message}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       </div>
 
@@ -340,7 +125,7 @@ export function Configuration() {
             <button onClick={() => navigate('/configuration/review')} disabled={diff.length === 0}>
               <Icon name="file" /> Review
             </button>
-            <button onClick={() => setDraft(clone(original))} disabled={diff.length === 0}>
+            <button onClick={discard} disabled={diff.length === 0}>
               <Icon name="restart" /> Discard
             </button>
             <button className="primary" onClick={apply} disabled={busy || diff.length === 0}>
@@ -349,6 +134,73 @@ export function Configuration() {
           </div>
         </div>
       )}
+
+      {pending?.armed && (
+        <div className="banner banner-warn pending-banner" role="alert">
+          <div className="flex-row">
+            <Icon name="clock" />
+            <strong>A config change is pending confirmation.</strong>
+          </div>
+          <span className="countdown">{pending.seconds_left ?? '?'}s</span>
+          <span>
+            If you do not confirm before the timer runs out, the previous config is restored automatically. This
+            protects you from editing away the network you are connected over.
+          </span>
+          <div className="btn-row">
+            <button className="primary" onClick={confirm}>
+              <Icon name="check" /> Confirm new config
+            </button>
+            <button className="danger" onClick={rollback}>
+              <Icon name="restart" /> Roll back now
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="config-page">
+        <Routes>
+          <Route index element={<Navigate to="cluster" replace />} />
+          {CONFIG_PAGES.map(({ slug, label, blurb, icon, Component }) => (
+            <Route
+              key={slug}
+              path={slug}
+              element={
+                <>
+                  <div className="section-head">
+                    <h2>
+                      <Icon name={icon} /> {label}
+                    </h2>
+                  </div>
+                  <p className="page-sub" style={{ marginBottom: 16 }}>
+                    {blurb}
+                  </p>
+                  <Component {...sectionProps} />
+                </>
+              }
+            />
+          ))}
+          <Route
+            path="review"
+            element={<ReviewPage diff={diff} onGo={(slug) => navigate(`/configuration/${slug}`)} />}
+          />
+          <Route path="*" element={<Navigate to="cluster" replace />} />
+        </Routes>
+
+        {errors.length > 0 && (
+          <div className="banner banner-bad" role="alert" style={{ marginTop: 16 }}>
+            <Icon name="alert" />
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {errors.map((e, i) => (
+                <li key={i}>
+                  {e.path && <span className="mono">{e.path}</span>}
+                  {e.path && ': '}
+                  {e.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -397,8 +249,7 @@ function ReviewPage({
           </thead>
           <tbody>
             {diff.map((d) => {
-              const top = d.path.split('.')[0];
-              const page = PAGES.find((p) => p.keys.includes(top));
+              const page = pageForPath(d.path);
               return (
                 <tr key={d.path}>
                   <td className="mono">{d.path}</td>

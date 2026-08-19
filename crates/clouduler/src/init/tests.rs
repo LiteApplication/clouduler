@@ -90,6 +90,7 @@ async fn serve(config: &ClusterConfig) -> Server {
             rpc_addr,
             drives: BTreeMap::new(),
             availability: Availability::Active,
+            labels: Default::default(),
         }))
         .await
         .expect("seed roster");
@@ -126,6 +127,9 @@ async fn serve(config: &ClusterConfig) -> Server {
         tls_cert_pem: cert.cert.pem().into_bytes(),
         tls_key_pem: cert.signing_key.serialize_pem().into_bytes(),
         listen_addr,
+        // This harness drives the join flow over TLS; the proxy's plain
+        // backend listener plays no part in it.
+        plain_listen_addr: None,
     })
     .await
     .expect("build api");

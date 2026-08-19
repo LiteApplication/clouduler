@@ -117,6 +117,7 @@ impl Harness {
             rpc_addr: free_addr(),
             drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/unused"))]),
             availability: Availability::Active,
+            labels: Default::default(),
         }))
         .await
         .unwrap();
@@ -126,6 +127,7 @@ impl Harness {
             rpc_addr: target_addr,
             drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/unused"))]),
             availability: Availability::Active,
+            labels: Default::default(),
         }))
         .await
         .unwrap();

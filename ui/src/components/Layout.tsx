@@ -7,6 +7,8 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useClusterStore } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Icon, type IconName } from './Icon';
+import { CONFIG_PAGES } from '../views/config/pages';
+import { changesFor, useConfigDraft } from '../views/config/draft';
 import { Logo } from './Logo';
 import { useTheme, type ThemeChoice } from '../theme';
 
@@ -18,6 +20,8 @@ interface NavItem {
   end?: boolean;
   /** Shown in the phone tab bar as well as the drawer. */
   tab?: boolean;
+  /** Expands into a submenu while the section is open. */
+  submenu?: { to: string; label: string; icon: IconName; keys?: string[] }[];
 }
 
 const LINKS: NavItem[] = [
@@ -27,8 +31,23 @@ const LINKS: NavItem[] = [
   { to: '/instances', label: 'Instances', short: 'Instances', icon: 'instances', tab: true },
   { to: '/configs-secrets', label: 'Configs & Secrets', short: 'Secrets', icon: 'secrets' },
   { to: '/drives', label: 'Drives & Volumes', short: 'Drives', icon: 'drives' },
-  { to: '/configuration', label: 'Configuration', short: 'Config', icon: 'settings' },
+  {
+    to: '/configuration',
+    label: 'Configuration',
+    short: 'Config',
+    icon: 'settings',
+    submenu: [
+      ...CONFIG_PAGES.map((p) => ({
+        to: `/configuration/${p.slug}`,
+        label: p.label,
+        icon: p.icon,
+        keys: p.keys,
+      })),
+      { to: '/configuration/review', label: 'Review', icon: 'check-circle' as IconName },
+    ],
+  },
   { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
+  { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },
 ];
 
 const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
@@ -87,17 +106,37 @@ export function Layout({ children }: { children: ReactNode }) {
           </span>
         </NavLink>
 
-        {LINKS.map((link) => (
-          <NavLink
-            key={link.to}
-            to={link.to}
-            end={link.end}
-            className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
-          >
-            <Icon name={link.icon} />
-            {link.label}
-          </NavLink>
-        ))}
+        {LINKS.map((link) => {
+          const open = link.submenu && location.pathname.startsWith(link.to);
+          return (
+            <div key={link.to} className="nav-group">
+              <NavLink
+                to={link.to}
+                end={link.end}
+                className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+              >
+                <Icon name={link.icon} />
+                {link.label}
+                {link.submenu && <Icon name="chevron-right" className={`nav-caret${open ? ' open' : ''}`} />}
+              </NavLink>
+              {open && (
+                <div className="nav-sub" role="group" aria-label={`${link.label} sections`}>
+                  {link.submenu!.map((sub) => (
+                    <NavLink
+                      key={sub.to}
+                      to={sub.to}
+                      className={({ isActive }) => `nav-link nav-sublink${isActive ? ' active' : ''}`}
+                    >
+                      <Icon name={sub.icon} />
+                      <span className="nav-sublabel">{sub.label}</span>
+                      <ConfigChanges keys={sub.keys} />
+                    </NavLink>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
 
         <div className="sidebar-foot">
           <div className="status-line">
@@ -152,5 +191,20 @@ export function Layout({ children }: { children: ReactNode }) {
         </button>
       </nav>
     </div>
+  );
+}
+
+/**
+ * Unsaved-edit count for one configuration subpage, so the sidebar shows where
+ * a staged change lives. With no keys (the Review entry) it counts the lot.
+ */
+function ConfigChanges({ keys }: { keys?: string[] }) {
+  const { diff } = useConfigDraft();
+  const count = keys ? changesFor(diff, keys) : diff.length;
+  if (count === 0) return null;
+  return (
+    <span className="change-dot" aria-label={`${count} changed`}>
+      {count}
+    </span>
   );
 }

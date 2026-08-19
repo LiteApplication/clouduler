@@ -124,6 +124,9 @@ pub struct ContainerSpec {
     pub restart_policy: RestartPolicy,
     pub resources: ResourceLimits,
     pub healthcheck: Option<Healthcheck>,
+    /// Signal sent on a graceful stop. `None` leaves the image's own
+    /// `STOPSIGNAL` (usually `SIGTERM`) in effect.
+    pub stop_signal: Option<String>,
 }
 
 impl ContainerSpec {
@@ -243,6 +246,7 @@ impl ContainerSpec {
             healthcheck: self.bollard_healthcheck(),
             host_config: Some(self.host_config()),
             networking_config: self.networking_config(),
+            stop_signal: self.stop_signal.clone(),
             ..Default::default()
         }
     }

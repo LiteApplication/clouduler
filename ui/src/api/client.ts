@@ -18,6 +18,7 @@ import type {
   Identity,
   InstanceState,
   PendingConfig,
+  RedirectRule,
   SecretEntry,
   SecretPutRequest,
   ValidationResult,
@@ -87,10 +88,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, body?.error ?? res.statusText, body?.detail);
   }
 
-  if (res.status === 204) {
+  // A success with no body is not a failure. 204 has none by definition, and
+  // a good part of the api answers a write with a bare 200 and nothing in it
+  // (PUT /api/config among them). res.json() throws on an empty body, which
+  // surfaced as "apply failed" on requests that had actually succeeded — so
+  // read the body as text and only parse when there is something to parse.
+  const text = await res.text();
+  if (text.length === 0) {
     return undefined as T;
   }
-  return res.json() as Promise<T>;
+  return JSON.parse(text) as T;
 }
 
 function get<T>(path: string): Promise<T> {
@@ -185,6 +192,13 @@ export const api = {
   // cloudflare: the token is write-only, so there is no getter for its value
   cloudflareToken: () => get<CloudflareTokenStatus>('/api/cloudflare/token'),
   setCloudflareToken: (token: string) => put<void>('/api/cloudflare/token', { token }),
+
+  // redirects: UI-managed, not part of cluster.yaml — see docs/proxy.md
+  listRedirects: () => get<RedirectRule[]>('/api/redirects'),
+  createRedirect: (body: Omit<RedirectRule, 'id'>) => post<RedirectRule>('/api/redirects', body),
+  updateRedirect: (id: string, body: Omit<RedirectRule, 'id'>) =>
+    put<RedirectRule>(`/api/redirects/${encodeURIComponent(id)}`, body),
+  removeRedirect: (id: string) => del<void>(`/api/redirects/${encodeURIComponent(id)}`),
 
   // certificates & dns
   listCertificates: () => get<CertificateState[]>('/api/certificates'),

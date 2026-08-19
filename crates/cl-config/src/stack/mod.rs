@@ -1,6 +1,7 @@
 //! Stack files: the Docker Swarm / Compose v3 subset clouduler schedules from,
 //! plus the `x-clouduler` extensions documented in `docs/stacks.md`.
 
+mod bytesize;
 mod de;
 mod deploy;
 mod objects;
@@ -14,7 +15,11 @@ mod volume;
 pub use deploy::{
     Deploy, DeployMode, DeployRestartPolicy, Placement, ResourceSpec, Resources, UpdateConfig,
 };
-pub use extensions::{ExposePort, Middleware, ProxyRoute, ServiceExtensions, StackDefaults, VolumeSyncOverride};
+pub use bytesize::ByteSize;
+pub use extensions::{
+    CorsPolicy, ExposePort, Middleware, ProxyRoute, ServiceExtensions, StackDefaults,
+    VolumeSyncOverride,
+};
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};
 pub use port::{PortMapping, PortRange, Protocol};
@@ -118,6 +123,10 @@ pub struct Service {
     pub sysctls: BTreeMap<String, String>,
     #[serde(default, with = "humantime_serde::option")]
     pub stop_grace_period: Option<Duration>,
+    /// Signal sent on a graceful stop, e.g. `SIGINT`. Defaults to the image's
+    /// own `STOPSIGNAL` (usually `SIGTERM`) when unset.
+    #[serde(default)]
+    pub stop_signal: Option<String>,
     /// Cluster configs mounted into this service.
     #[serde(default)]
     pub configs: Vec<ObjectRef>,
@@ -401,6 +410,17 @@ services:
         let raw_no_defaults = "services:\n  c:\n    image: x\n    volumes:\n      - fast/data:/data\n";
         let stack2 = StackFile::parse(raw_no_defaults).unwrap();
         assert_eq!(stack2.sync_interval("c", "data", &cluster), cluster.drives["fast"].sync_interval);
+    }
+
+    #[test]
+    fn stop_signal_accepts_a_sig_name_and_rejects_junk() {
+        let raw = "services:\n  a:\n    image: x\n    stop_signal: SIGINT\n";
+        let stack = StackFile::parse(raw).unwrap();
+        assert_eq!(stack.services["a"].stop_signal.as_deref(), Some("SIGINT"));
+
+        let raw = "services:\n  a:\n    image: x\n    stop_signal: sigint\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("stop_signal"));
     }
 
     #[test]

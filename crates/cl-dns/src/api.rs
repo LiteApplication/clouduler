@@ -12,14 +12,20 @@ const DEFAULT_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 const MAX_ATTEMPTS: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 
-/// A DNS record type clouduler manages. Cloudflare supports more, but this
-/// is all we ever write.
+/// A DNS record type clouduler manages. Cloudflare supports many more (MX,
+/// SRV, NS, CAA...), and a real zone has them: `Other` absorbs anything we
+/// don't write ourselves, so listing every record in a zone that also has,
+/// say, mail records doesn't fail to parse at all. `list_records`/`plan`
+/// only ever act on the four variants we actually manage; an `Other` record
+/// is never matched by anything we build and so is always left alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordType {
     A,
     AAAA,
     CNAME,
     TXT,
+    #[serde(other)]
+    Other,
 }
 
 /// A Cloudflare DNS record, as returned by or sent to the API.
@@ -143,6 +149,16 @@ impl Cloudflare {
             .expect("zone cache poisoned")
             .insert(name.to_string(), zone.id.clone());
         Ok(zone.id)
+    }
+
+    /// Resolves a zone id back to its name. Used to find the zone apex to
+    /// query authoritative nameservers directly for, when confirming a
+    /// challenge record has actually propagated rather than just landed in
+    /// Cloudflare's control plane.
+    pub async fn zone_name(&self, zone_id: &str) -> Result<String> {
+        let url = format!("{}/zones/{}", self.base_url, zone_id);
+        let zone: Zone = self.request(reqwest::Method::GET, &url, None::<()>).await?;
+        Ok(zone.name)
     }
 
     /// Lists records in a zone, optionally filtered by name and/or type.
@@ -297,6 +313,11 @@ fn record_type_str(kind: RecordType) -> &'static str {
         RecordType::AAAA => "AAAA",
         RecordType::CNAME => "CNAME",
         RecordType::TXT => "TXT",
+        // Never actually sent: nothing constructs a query or a record input
+        // with this variant, since it exists only to absorb record types we
+        // read but don't write. A real request for literally "OTHER" would
+        // be a Cloudflare 400, which is a fine way to notice a bug here.
+        RecordType::Other => "OTHER",
     }
 }
 
@@ -410,6 +431,33 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].id.as_deref(), Some("r1"));
         assert_eq!(records[1].id.as_deref(), Some("r2"));
+    }
+
+    /// A real zone has record types clouduler doesn't manage (MX, SRV, NS...).
+    /// Listing it unfiltered must not fail to parse just because one of them
+    /// showed up; it should come back as `RecordType::Other` and be ignored
+    /// by anything that only looks for the four types clouduler writes.
+    #[tokio::test]
+    async fn unmanaged_record_types_do_not_break_parsing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/zones/zone1/dns_records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true, "errors": [], "messages": [],
+                "result": [
+                    { "id": "r1", "zone_id": "zone1", "name": "example.com", "type": "MX", "content": "mail.example.com", "priority": 10, "ttl": 300, "proxied": false },
+                    { "id": "r2", "zone_id": "zone1", "name": "a.example.com", "type": "A", "content": "1.1.1.1", "ttl": 1, "proxied": false }
+                ],
+                "result_info": { "page": 1, "total_pages": 1 }
+            })))
+            .mount(&server)
+            .await;
+
+        let cf = Cloudflare::with_base_url("tok", server.uri());
+        let records = cf.list_records("zone1", None, None).await.expect("parses despite the MX record");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, RecordType::Other);
+        assert_eq!(records[1].kind, RecordType::A);
     }
 
     #[tokio::test]

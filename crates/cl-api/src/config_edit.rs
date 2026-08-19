@@ -127,6 +127,8 @@ mod tests {
                 address: "cloud".into(),
                 network: "internal".into(),
                 port: 8443,
+            through_proxy: true,
+            backend_port: 8444,
             },
             data_dir: "/var/lib/clouduler".into(),
             failover: Default::default(),

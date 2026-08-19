@@ -118,6 +118,8 @@ struct AddNodeRequest {
     rpc_addr: std::net::SocketAddr,
     #[serde(default)]
     drives: std::collections::BTreeMap<String, std::path::PathBuf>,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 async fn add(
@@ -132,6 +134,7 @@ async fn add(
             role: body.role,
             rpc_addr: body.rpc_addr,
             drives: body.drives,
+            labels: body.labels,
             availability: Availability::Active,
         }),
     )

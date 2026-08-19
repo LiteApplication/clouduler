@@ -11,6 +11,7 @@ pub mod drives;
 pub mod instances;
 pub mod nodes;
 pub mod objects;
+pub mod redirects;
 pub mod stacks;
 
 use axum::Router;
@@ -30,4 +31,5 @@ pub fn router() -> Router<AppState> {
         .merge(config::router())
         .merge(cloudflare::router())
         .merge(certs::router())
+        .merge(redirects::router())
 }

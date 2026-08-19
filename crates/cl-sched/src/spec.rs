@@ -99,6 +99,7 @@ pub fn build(
         restart_policy: restart_policy(service),
         resources: resources(service),
         healthcheck: healthcheck(service),
+        stop_signal: service.stop_signal.clone(),
     }
 }
 

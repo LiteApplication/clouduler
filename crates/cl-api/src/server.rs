@@ -84,11 +84,15 @@ pub struct ApiServerOptions {
     pub tls_cert_pem: Vec<u8>,
     pub tls_key_pem: Vec<u8>,
     pub listen_addr: SocketAddr,
+    /// Plain HTTP listener the reverse proxy forwards dashboard traffic to.
+    /// `None` leaves it off. Always a loopback address; see `WebConfig`.
+    pub plain_listen_addr: Option<SocketAddr>,
 }
 
 pub struct ApiServer {
     router: Router,
     listen_addr: SocketAddr,
+    plain_listen_addr: Option<SocketAddr>,
     tls_cert_pem: Vec<u8>,
     tls_key_pem: Vec<u8>,
 }
@@ -149,19 +153,38 @@ impl ApiServer {
         Ok(Self {
             router: build_router(state),
             listen_addr: options.listen_addr,
+            plain_listen_addr: options.plain_listen_addr,
             tls_cert_pem: options.tls_cert_pem,
             tls_key_pem: options.tls_key_pem,
         })
     }
 
+    /// Serve until one of the listeners stops.
+    ///
+    /// The TLS listener is the one an operator reaches directly and is never
+    /// optional: it is the way back in when the proxy cannot bind its ports.
+    /// The plain one exists only for the reverse proxy, which speaks HTTP to
+    /// its backends, and is bound to loopback so nothing off this machine can
+    /// reach the dashboard without TLS.
     pub async fn serve(self) -> Result<(), ApiError> {
         let config = axum_server::tls_rustls::RustlsConfig::from_pem(self.tls_cert_pem, self.tls_key_pem)
             .await
             .map_err(|e| ApiError::Internal(format!("loading tls config: {e}")))?;
-        axum_server::bind_rustls(self.listen_addr, config)
-            .serve(self.router.into_make_service())
-            .await
-            .map_err(|e| ApiError::Internal(format!("serving: {e}")))
+
+        let tls = axum_server::bind_rustls(self.listen_addr, config)
+            .serve(self.router.clone().into_make_service());
+
+        let Some(plain_addr) = self.plain_listen_addr else {
+            return tls
+                .await
+                .map_err(|e| ApiError::Internal(format!("serving: {e}")));
+        };
+
+        let plain = axum_server::bind(plain_addr).serve(self.router.into_make_service());
+        tokio::select! {
+            result = tls => result.map_err(|e| ApiError::Internal(format!("serving tls: {e}"))),
+            result = plain => result.map_err(|e| ApiError::Internal(format!("serving plain http: {e}"))),
+        }
     }
 }
 

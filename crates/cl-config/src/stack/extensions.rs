@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::stack::bytesize::ByteSize;
 use crate::stack::port::Protocol;
 
 /// Behaviours a proxy route can layer on.
@@ -35,6 +36,7 @@ pub enum Middleware {
     StripPrefix,
     BasicAuth(BasicAuth),
     Headers(Headers),
+    Cors(CorsPolicy),
 }
 
 /// Wire form. serde_yaml renders an externally tagged enum as a yaml tag
@@ -57,7 +59,7 @@ impl TryFrom<RawMiddleware> for Middleware {
                 "strip_prefix" => Ok(Middleware::StripPrefix),
                 // Naming one that needs settings without giving any is a
                 // mistake worth reporting rather than defaulting.
-                "basic_auth" | "headers" => {
+                "basic_auth" | "headers" | "cors" => {
                     Err(format!("middleware {name} needs settings, use a map"))
                 }
                 other => Err(format!("unknown middleware {other}")),
@@ -80,6 +82,9 @@ impl TryFrom<RawMiddleware> for Middleware {
                     "headers" => serde_yaml::from_value(value)
                         .map(Middleware::Headers)
                         .map_err(|e| format!("headers: {e}")),
+                    "cors" => serde_yaml::from_value(value)
+                        .map(Middleware::Cors)
+                        .map_err(|e| format!("cors: {e}")),
                     "redirect_https" => Ok(Middleware::RedirectHttps),
                     "strip_prefix" => Ok(Middleware::StripPrefix),
                     other => Err(format!("unknown middleware {other}")),
@@ -102,6 +107,10 @@ impl From<Middleware> for RawMiddleware {
                 name,
                 serde_yaml::to_value(headers).unwrap_or(serde_yaml::Value::Null),
             )])),
+            Middleware::Cors(cors) => RawMiddleware::Configured(BTreeMap::from([(
+                name,
+                serde_yaml::to_value(cors).unwrap_or(serde_yaml::Value::Null),
+            )])),
         }
     }
 }
@@ -114,8 +123,39 @@ impl Middleware {
             Middleware::StripPrefix => "strip_prefix",
             Middleware::BasicAuth(_) => "basic_auth",
             Middleware::Headers(_) => "headers",
+            Middleware::Cors(_) => "cors",
         }
     }
+}
+
+/// Cross-origin access control for one route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CorsPolicy {
+    /// Origins allowed to read the response. `["*"]` allows any origin, but
+    /// is rejected together with `allow_credentials`: a browser refuses to
+    /// pair a wildcard origin with credentials, so the combination could
+    /// only ever surface as a confusing runtime failure.
+    pub origins: Vec<String>,
+    #[serde(default = "default_cors_methods")]
+    pub methods: Vec<String>,
+    /// Headers a request may set. Empty means whatever the browser asked for
+    /// in `Access-Control-Request-Headers` is echoed back, which is the
+    /// common case and avoids listing every header a client might send.
+    #[serde(default)]
+    pub headers: Vec<String>,
+    #[serde(default)]
+    pub allow_credentials: bool,
+    /// How long a browser may cache a preflight result.
+    #[serde(default, with = "humantime_serde::option")]
+    pub max_age: Option<Duration>,
+}
+
+fn default_cors_methods() -> Vec<String> {
+    ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 /// HTTP basic auth in front of a route.
@@ -168,6 +208,31 @@ pub struct ProxyRoute {
     pub middlewares: Vec<Middleware>,
     #[serde(default)]
     pub sticky: Option<bool>,
+
+    /// Largest request body to forward, e.g. `10MB`. Anything bigger is
+    /// answered with 413 and never reaches the container. Unset means no
+    /// limit, which is the right default for an upload-heavy service and the
+    /// wrong one for anything exposed to the internet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_size: Option<ByteSize>,
+
+    /// Let `Upgrade` requests through, which is what a websocket needs. On by
+    /// default: a route that does not use websockets is unaffected, and one
+    /// that does would otherwise fail in a way that is tedious to diagnose.
+    #[serde(default = "default_true")]
+    pub websockets: bool,
+
+    /// Forward the client's `Host` header instead of rewriting it to the
+    /// backend's address. Off by default because most containers do not care,
+    /// but anything that builds absolute URLs or does virtual hosting needs it.
+    #[serde(default)]
+    pub preserve_host: bool,
+
+    /// How long to wait for the backend's response headers, connection time
+    /// included. Unset waits forever, which ties up a connection when a
+    /// container wedges.
+    #[serde(default, with = "humantime_serde::option")]
+    pub response_timeout: Option<Duration>,
 }
 
 fn default_true() -> bool {
@@ -248,6 +313,59 @@ proxy:
         assert!(route.tls);
         assert_eq!(route.middlewares, vec![Middleware::RedirectHttps, Middleware::StripPrefix]);
         assert_eq!(route.sticky, Some(true));
+    }
+
+    #[test]
+    fn parses_the_reverse_proxy_settings() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            r#"
+proxy:
+  - host: files
+    network: wan
+    port: 80
+    max_body_size: 10MB
+    websockets: false
+    preserve_host: true
+    response_timeout: 30s
+"#,
+        )
+        .expect("parse");
+        let route = &ext.proxy[0];
+        assert_eq!(route.max_body_size, Some(ByteSize(10_000_000)));
+        assert!(!route.websockets);
+        assert!(route.preserve_host);
+        assert_eq!(route.response_timeout, Some(Duration::from_secs(30)));
+    }
+
+    /// Every new knob is optional, and the defaults have to be the behaviour
+    /// that existed before they were added: no cap, no timeout, host rewritten,
+    /// and websockets working without anyone asking for them.
+    #[test]
+    fn the_proxy_settings_default_to_the_previous_behaviour() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n",
+        )
+        .expect("parse");
+        let route = &ext.proxy[0];
+        assert_eq!(route.max_body_size, None);
+        assert!(route.websockets, "websockets must stay on by default");
+        assert!(!route.preserve_host);
+        assert_eq!(route.response_timeout, None);
+    }
+
+    /// The settings are stack-file settings: this asserts they survive a real
+    /// stack file end to end, not just a hand written fragment.
+    #[test]
+    fn the_example_stack_carries_its_proxy_settings() {
+        let raw = include_str!("../../../../examples/stacks/gitlab.yaml");
+        let file: serde_yaml::Value = serde_yaml::from_str(raw).expect("example parses");
+        let ext = &file["services"]["gitlab"]["x-clouduler"];
+        let ext: ServiceExtensions = serde_yaml::from_value(ext.clone()).expect("extensions parse");
+        let route = &ext.proxy[0];
+        assert_eq!(route.max_body_size, Some(ByteSize(2 * 1024 * 1024 * 1024)));
+        assert!(route.preserve_host);
+        assert!(route.websockets);
+        assert_eq!(route.response_timeout, Some(Duration::from_secs(120)));
     }
 
     #[test]
@@ -346,6 +464,41 @@ proxy:
             }
             other => panic!("expected headers, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cors_middleware_parses_with_defaults() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            r#"
+proxy:
+  - host: api
+    network: wan
+    port: 80
+    middlewares:
+      - cors:
+          origins: ["https://app.example.com"]
+"#,
+        )
+        .expect("parse");
+        match &ext.proxy[0].middlewares[0] {
+            Middleware::Cors(cors) => {
+                assert_eq!(cors.origins, vec!["https://app.example.com"]);
+                assert_eq!(cors.methods, default_cors_methods());
+                assert!(cors.headers.is_empty());
+                assert!(!cors.allow_credentials);
+                assert_eq!(cors.max_age, None);
+            }
+            other => panic!("expected cors, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_cors_is_rejected() {
+        let err = serde_yaml::from_str::<ServiceExtensions>(
+            "proxy:\n  - host: api\n    network: wan\n    port: 80\n    middlewares: [cors]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs settings"), "{err}");
     }
 
     #[test]

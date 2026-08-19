@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, NotLeaderError, api, setUnauthorizedHandler } from './client';
 
-function mockFetch(response: Partial<Response> & { json?: () => Promise<unknown> }) {
+function mockFetch(response: Partial<Response> & { json?: () => Promise<unknown>; text?: () => Promise<string> }) {
+  const json = response.json ?? (async () => ({}));
   const full = {
     ok: response.status ? response.status >= 200 && response.status < 300 : true,
     status: 200,
     statusText: 'OK',
     headers: new Headers(),
-    json: async () => ({}),
+    json,
+    // Default the text body to whatever json would have returned, so tests
+    // that only care about the parsed shape keep stubbing json alone. The
+    // empty-body cases stub text directly.
+    text: async () => JSON.stringify(await json()),
     ...response,
   } as Response;
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(full));
@@ -64,5 +69,18 @@ describe('api client error handling', () => {
     mockFetch({ status: 200, json: async () => ({ leader: 'n1', quorum: true }) });
     const status = await api.status();
     expect(status.leader).toBe('n1');
+  });
+
+  // Most of the write routes answer 200 with an empty body rather than 204.
+  // Parsing that as json throws, and the caller reports a successful apply as
+  // a failure.
+  it('resolves a 200 with an empty body instead of failing to parse it', async () => {
+    mockFetch({ status: 200, text: async () => '' });
+    await expect(api.applyConfiguration({} as never, '60s')).resolves.toBeUndefined();
+  });
+
+  it('resolves a 204 with no body', async () => {
+    mockFetch({ status: 204, text: async () => '' });
+    await expect(api.removeStack('gitlab')).resolves.toBeUndefined();
   });
 });

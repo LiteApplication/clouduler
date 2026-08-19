@@ -63,6 +63,9 @@ pub enum DnsError {
     #[error("timed out waiting for {0} to propagate")]
     PropagationTimeout(String),
 
+    #[error("dns resolution failed: {0}")]
+    Resolve(String),
+
     #[error("refused to delete unowned record {0}")]
     NotOwned(String),
 }

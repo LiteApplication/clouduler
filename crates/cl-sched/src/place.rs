@@ -75,6 +75,16 @@ impl Constraint {
     }
 
     fn matches(&self, node: &NodeState) -> bool {
+        // A label the node does not carry is a real answer, not a missing one:
+        // `node.labels.fast == true` must exclude a node without the label,
+        // and `node.labels.fast != true` must include it. Treating an absent
+        // label as an empty string gets both, where returning None would make
+        // the negative form exclude every node in the cluster.
+        if let Some(key) = self.key.strip_prefix("node.labels.") {
+            let actual = node.labels.get(key).map(String::as_str).unwrap_or("");
+            return (actual == self.value) == self.equal;
+        }
+
         let actual = match self.key.as_str() {
             "node.hostname" | "node.id" => Some(node.name.clone()),
             "node.role" => Some(
@@ -245,7 +255,66 @@ mod tests {
                 .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
                 .collect(),
             availability: Availability::Active,
+            labels: Default::default(),
         }
+    }
+
+    fn labelled(name: &str, labels: &[(&str, &str)]) -> NodeState {
+        let mut node = node(name, Role::Worker, &[]);
+        node.labels = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        node
+    }
+
+    fn constraint(raw: &str) -> Constraint {
+        Constraint::parse(raw).expect("parses")
+    }
+
+    #[test]
+    fn a_label_constraint_matches_the_nodes_carrying_it() {
+        let fast = labelled("n1", &[("fast", "true")]);
+        let slow = labelled("n2", &[]);
+        let c = constraint("node.labels.fast == true");
+        assert!(c.matches(&fast));
+        assert!(!c.matches(&slow));
+    }
+
+    /// The trap: a node without the label has to *pass* the negative form.
+    /// Treating an absent label as "no answer" would make `!=` exclude every
+    /// node in the cluster, which is silently the opposite of what was asked.
+    #[test]
+    fn a_negated_label_constraint_includes_nodes_without_the_label() {
+        let tagged = labelled("n1", &[("mail", "true")]);
+        let untagged = labelled("n2", &[]);
+        let c = constraint("node.labels.mail != true");
+        assert!(!c.matches(&tagged));
+        assert!(c.matches(&untagged));
+    }
+
+    #[test]
+    fn a_label_with_a_different_value_does_not_match() {
+        let node = labelled("n1", &[("tier", "cold")]);
+        assert!(!constraint("node.labels.tier == hot").matches(&node));
+        assert!(constraint("node.labels.tier == cold").matches(&node));
+    }
+
+    /// Dots are legal inside a label key, so only the first three segments are
+    /// the prefix.
+    #[test]
+    fn a_dotted_label_key_is_matched_whole() {
+        let node = labelled("n1", &[("storage.kind", "nvme")]);
+        assert!(constraint("node.labels.storage.kind == nvme").matches(&node));
+    }
+
+    /// A key that is not a label and not one of the built-ins still matches
+    /// nothing, rather than being read as an empty label.
+    #[test]
+    fn an_unknown_non_label_key_still_matches_nothing() {
+        let node = labelled("n1", &[]);
+        assert!(!constraint("node.platform.os == linux").matches(&node));
+        assert!(!constraint("node.platform.os != linux").matches(&node));
     }
 
     fn cluster() -> ClusterState {

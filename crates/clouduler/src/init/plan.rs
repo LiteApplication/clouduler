@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use cl_config::{
     ClusterConfig, ClusterMeta, Drive, DriveMode, Network, NetworkKind, Node, NodeAddress, NodeRole,
-    WebConfig, DEFAULT_RPC_PORT,
+    WebConfig, DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,
 };
 use ipnet::IpNet;
 
@@ -53,6 +53,9 @@ impl NodePlan {
                 .into_iter()
                 .collect(),
             drives: self.drives.clone(),
+            // init does not ask about labels; they are a day-two concern, set
+            // from the config file or the ui once the cluster exists.
+            labels: Default::default(),
             rpc_port: self.rpc_port,
             data_dir: self.data_dir.clone(),
             generate_secret_key: self.generate_secret_key,
@@ -99,6 +102,11 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
             address: plan.web_address.clone(),
             network: INTERNAL_NETWORK.to_string(),
             port: plan.web_port,
+            // A new cluster publishes the dashboard through its own proxy, so
+            // it gets a real certificate as soon as ACME is configured rather
+            // than sitting on the self signed one.
+            through_proxy: true,
+            backend_port: DEFAULT_WEB_BACKEND_PORT,
         },
         data_dir: PathBuf::from("/var/lib/clouduler"),
         failover: Default::default(),

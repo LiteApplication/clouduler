@@ -82,6 +82,14 @@ web:
   # where the stacks you deploy are published. Refused if it collides with
   # either proxy port.
   port: 8443
+  # Also publish the dashboard through the reverse proxy, so it picks up the
+  # Let's Encrypt certificate and the Cloudflare record like any other route.
+  # The direct listener on `port` above stays up either way; it is the way
+  # back in if the proxy cannot bind its ports.
+  through_proxy: true
+  # Loopback port the proxy forwards dashboard traffic to. Never bound on a
+  # real interface: that hop is plain HTTP and carries session cookies.
+  backend_port: 8444
 
 # What happens when a node drops out of the cluster.
 #
@@ -122,3 +130,10 @@ proxy:
     directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
     # Where the CA sends expiry warnings.
     contact_email: ops@example.com
+  # A route for something clouduler does not run itself, backed by a fixed
+  # address instead of a stack's containers. `backend` is resolved fresh on
+  # every reconcile pass. See docs/proxy.md.
+  static_routes:
+    - host: printer
+      network: lan
+      backend: 192.168.1.50:9100

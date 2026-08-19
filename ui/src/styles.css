@@ -1289,71 +1289,57 @@ kbd {
   }
 }
 
-/* ---- configuration subpages ---- */
+/* ---- sidebar submenus ---- */
 
-.config-layout {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: var(--space-5);
-  align-items: start;
-}
-
-.config-nav {
-  position: sticky;
-  top: var(--space-4);
+.nav-group {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: var(--space-2);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-1);
 }
 
-.config-nav-link {
+.nav-caret {
+  margin-left: auto;
+  width: 15px;
+  height: 15px;
+  opacity: 0.55;
+  transition: transform 0.16s var(--ease);
+}
+
+.nav-caret.open {
+  transform: rotate(90deg);
+  opacity: 0.9;
+}
+
+.nav-sub {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: 8px var(--space-3);
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  text-decoration: none;
-  font-weight: 550;
-  font-size: 13.5px;
-  white-space: nowrap;
-  transition: background 0.14s var(--ease), color 0.14s var(--ease);
+  flex-direction: column;
+  gap: 1px;
+  /* the rail lines the children up under the parent's icon */
+  margin: 2px 0 var(--space-2) 19px;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
 }
 
-.config-nav-link .icon {
-  width: 17px;
-  height: 17px;
-  opacity: 0.85;
+.nav-sublink {
+  padding: 6px var(--space-3);
+  font-size: 13px;
+  font-weight: 500;
 }
 
-.config-nav-link:hover {
-  background: var(--surface-2);
-  color: var(--text);
+.nav-sublink .icon {
+  width: 15px;
+  height: 15px;
 }
 
-.config-nav-link.active {
-  color: var(--text);
-  background: linear-gradient(
-    100deg,
-    color-mix(in srgb, var(--primary) 20%, transparent),
-    color-mix(in srgb, var(--accent) 14%, transparent)
-  );
+.nav-sublink.active::before {
+  display: none;
 }
 
-.config-nav-link.active .icon {
-  color: var(--accent);
-  opacity: 1;
-}
-
-.config-nav-label {
+.nav-sublabel {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .change-dot {
@@ -1372,8 +1358,6 @@ kbd {
 
 .config-page {
   min-width: 0;
-  /* room for the sticky action bar so it never covers the last field */
-  padding-bottom: 72px;
 }
 
 .pending-banner {
@@ -1384,8 +1368,9 @@ kbd {
 
 .action-bar {
   position: sticky;
-  bottom: var(--space-3);
+  top: var(--space-3);
   z-index: 30;
+  margin-bottom: var(--space-4);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1409,39 +1394,9 @@ kbd {
 }
 
 @media (max-width: 820px) {
-  .config-layout {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-4);
-  }
-
-  /* the section list becomes a scrollable pill row above the page */
-  .config-nav {
-    position: static;
-    flex-direction: row;
-    overflow-x: auto;
-    padding: var(--space-2);
-    gap: var(--space-2);
-    scrollbar-width: none;
-  }
-
-  .config-nav::-webkit-scrollbar {
-    display: none;
-  }
-
-  .config-nav-link {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-  }
-
-  .config-page {
-    padding-bottom: var(--space-3);
-  }
-
+  /* the phone header is fixed, so the bar parks just under it */
   .action-bar {
-    position: fixed;
-    left: var(--space-3);
-    right: var(--space-3);
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--space-2));
+    top: calc(var(--topbar-h) + env(safe-area-inset-top) + var(--space-2));
     justify-content: center;
   }
 

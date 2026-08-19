@@ -19,6 +19,7 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use cl_config::CorsPolicy;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 
 /// Hop-by-hop headers per RFC 7230 section 6.1, stripped in both directions.
@@ -137,6 +138,70 @@ pub fn apply_headers(headers: &mut HeaderMap, ops: &HeaderOps) {
     }
 }
 
+/// Whether `policy` allows `origin` to read the response.
+pub fn cors_origin_allowed(policy: &CorsPolicy, origin: &str) -> bool {
+    policy.origins.iter().any(|o| o == "*" || o == origin)
+}
+
+/// Whether this request is a CORS preflight: an `OPTIONS` carrying the header
+/// a browser only sends ahead of a cross-origin request it expects to need
+/// approval for.
+pub fn is_cors_preflight(method: &http::Method, headers: &HeaderMap) -> bool {
+    method == http::Method::OPTIONS && headers.contains_key("access-control-request-method")
+}
+
+/// `Access-Control-*` response headers for a request from `origin`, or none
+/// if the policy does not allow it. `requested_headers` is the preflight's
+/// `Access-Control-Request-Headers`, echoed back when the policy names none
+/// of its own.
+pub fn cors_response_headers(
+    policy: &CorsPolicy,
+    origin: &str,
+    requested_headers: Option<&str>,
+) -> Vec<(HeaderName, HeaderValue)> {
+    if !cors_origin_allowed(policy, origin) {
+        return Vec::new();
+    }
+    // A wildcard policy still echoes the caller's origin rather than sending
+    // `*` back, since that is what lets `Vary: Origin` responses cache
+    // correctly per origin and is required at all once credentials are on
+    // (rejected together with a wildcard origin at config validation time,
+    // but the reflection is harmless either way).
+    let mut out = vec![
+        (
+            HeaderName::from_static("access-control-allow-origin"),
+            HeaderValue::from_str(origin).unwrap_or_else(|_| HeaderValue::from_static("*")),
+        ),
+        (HeaderName::from_static("vary"), HeaderValue::from_static("Origin")),
+        (
+            HeaderName::from_static("access-control-allow-methods"),
+            HeaderValue::from_str(&policy.methods.join(", ")).unwrap_or_else(|_| HeaderValue::from_static("*")),
+        ),
+    ];
+    let allow_headers = if policy.headers.is_empty() {
+        requested_headers.map(str::to_string)
+    } else {
+        Some(policy.headers.join(", "))
+    };
+    if let Some(value) = allow_headers.and_then(|v| HeaderValue::from_str(&v).ok()) {
+        out.push((HeaderName::from_static("access-control-allow-headers"), value));
+    }
+    if policy.allow_credentials {
+        out.push((
+            HeaderName::from_static("access-control-allow-credentials"),
+            HeaderValue::from_static("true"),
+        ));
+    }
+    if let Some(max_age) = policy.max_age {
+        out.push((
+            HeaderName::from_static("access-control-max-age"),
+            HeaderValue::from_str(&max_age.as_secs().to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +278,70 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {token}")).unwrap(),
         );
         assert!(!check_basic_auth(&headers, &creds));
+    }
+
+    fn cors_policy(origins: &[&str]) -> CorsPolicy {
+        CorsPolicy {
+            origins: origins.iter().map(|s| s.to_string()).collect(),
+            methods: vec!["GET".to_string(), "POST".to_string()],
+            headers: Vec::new(),
+            allow_credentials: false,
+            max_age: None,
+        }
+    }
+
+    #[test]
+    fn cors_allows_a_listed_origin_and_rejects_others() {
+        let policy = cors_policy(&["https://app.example.com"]);
+        assert!(cors_origin_allowed(&policy, "https://app.example.com"));
+        assert!(!cors_origin_allowed(&policy, "https://evil.example.com"));
+    }
+
+    #[test]
+    fn cors_wildcard_allows_any_origin() {
+        let policy = cors_policy(&["*"]);
+        assert!(cors_origin_allowed(&policy, "https://anything.example.com"));
+    }
+
+    #[test]
+    fn cors_headers_are_empty_for_a_disallowed_origin() {
+        let policy = cors_policy(&["https://app.example.com"]);
+        assert!(cors_response_headers(&policy, "https://evil.example.com", None).is_empty());
+    }
+
+    #[test]
+    fn cors_headers_reflect_the_allowed_origin_and_methods() {
+        let policy = cors_policy(&["https://app.example.com"]);
+        let headers = cors_response_headers(&policy, "https://app.example.com", None);
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, v)| v.to_str().unwrap())
+        };
+        assert_eq!(get("access-control-allow-origin"), Some("https://app.example.com"));
+        assert_eq!(get("access-control-allow-methods"), Some("GET, POST"));
+        assert_eq!(get("access-control-allow-credentials"), None);
+    }
+
+    #[test]
+    fn cors_echoes_requested_headers_when_the_policy_names_none() {
+        let policy = cors_policy(&["*"]);
+        let headers = cors_response_headers(&policy, "https://app.example.com", Some("X-Custom"));
+        let allow_headers = headers
+            .iter()
+            .find(|(n, _)| n.as_str() == "access-control-allow-headers")
+            .map(|(_, v)| v.to_str().unwrap());
+        assert_eq!(allow_headers, Some("X-Custom"));
+    }
+
+    #[test]
+    fn cors_preflight_detected_by_method_and_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("access-control-request-method", HeaderValue::from_static("POST"));
+        assert!(is_cors_preflight(&http::Method::OPTIONS, &headers));
+        assert!(!is_cors_preflight(&http::Method::GET, &headers));
+        assert!(!is_cors_preflight(&http::Method::OPTIONS, &HeaderMap::new()));
     }
 
     #[test]

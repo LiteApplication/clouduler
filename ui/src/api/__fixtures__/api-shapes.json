@@ -1,0 +1,103 @@
+{
+  "cloudflareTokenStatus": {
+    "configured": false,
+    "path": null,
+    "present_on_this_node": false
+  },
+  "clusterConfig": {
+    "auth": {
+      "api_keys": true,
+      "session_ttl": "12h"
+    },
+    "cluster": {
+      "name": "test"
+    },
+    "data_dir": "<tmp>",
+    "drives": {},
+    "failover": {
+      "fence_timeout": "15s",
+      "node_timeout": "30s",
+      "probe_interval": "5s"
+    },
+    "networks": {
+      "internal": {
+        "type": "internal"
+      }
+    },
+    "nodes": {},
+    "proxy": {
+      "acme": {
+        "enabled": false
+      },
+      "enabled": true,
+      "http_port": 80,
+      "https_port": 443,
+      "static_routes": []
+    },
+    "secrets": {
+      "generate_if_missing": true,
+      "key_file": "/etc/clouduler/secrets.key"
+    },
+    "web": {
+      "address": "cloud",
+      "backend_port": 8444,
+      "network": "internal",
+      "port": 8443,
+      "through_proxy": true
+    }
+  },
+  "clusterKeyStatus": {
+    "fingerprint": "<volatile>",
+    "held": true
+  },
+  "identity": {
+    "role": "admin",
+    "subject": "<volatile>"
+  },
+  "pendingConfig": {
+    "armed": false,
+    "seconds_left": null
+  },
+  "state": {
+    "assignments": {},
+    "certificates": {},
+    "cluster_config": null,
+    "configs": {
+      "_clouduler_api_keys": {
+        "content": "<volatile>",
+        "name": "_clouduler_api_keys",
+        "owner": null,
+        "revision": 1
+      }
+    },
+    "dns_records": {},
+    "nodes": {
+      "n0": {
+        "availability": "active",
+        "drives": {},
+        "labels": {},
+        "name": "n0",
+        "role": "manager",
+        "rpc_addr": "<volatile>"
+      }
+    },
+    "overlay": null,
+    "secrets": {},
+    "stacks": {},
+    "unreachable": [],
+    "version": 2,
+    "volumes": {}
+  },
+  "status": {
+    "has_quorum": true,
+    "is_leader": true,
+    "leader": "n0",
+    "managers_reachable": 1,
+    "managers_total": 1,
+    "node": "n0",
+    "reachable": 1,
+    "state_version": 0,
+    "version": "0.1.0",
+    "voters": 1
+  }
+}

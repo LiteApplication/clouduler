@@ -96,6 +96,7 @@ fn node_state(name: &str, addr: SocketAddr) -> NodeState {
         rpc_addr: addr,
         drives: BTreeMap::new(),
         availability: Availability::Active,
+        labels: Default::default(),
     }
 }
 

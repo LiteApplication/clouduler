@@ -10,15 +10,16 @@ mod validate;
 pub use cluster::{
     qualify, AuthConfig, CloudflareConfig, ClusterConfig, DriveMode, FailoverConfig, OidcConfig,
     SecretsConfig, ClusterMeta, Drive, Network, NetworkKind, Node,
-    NodeAddress, NodeRole, PublicAddress, WebConfig, DEFAULT_RPC_PORT,
+    NodeAddress, NodeRole, ProxyConfig, PublicAddress, StaticRoute, WebConfig, DEFAULT_RPC_PORT,
+    DEFAULT_WEB_BACKEND_PORT,
 };
 pub use bundle::{BundledFile, StackBundle};
 pub use error::{ConfigError, Result};
 pub use stack::{
-    ObjectRef, SECRET_DIR,
-    Command, Deploy, DeployMode, DeployRestartPolicy, Healthcheck, HealthcheckTest, Middleware,
-    Placement, PortMapping, PortRange, ProxyRoute, ResourceSpec, Resources, RestartPolicy,
-    ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile, StackNetwork,
-    StackSecret, StackVolume, Protocol, UpdateConfig, VolumeMount, VolumeSyncOverride,
-    DEFAULT_SYNC_INTERVAL,
+    ByteSize, ObjectRef, SECRET_DIR,
+    Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, Healthcheck, HealthcheckTest,
+    Middleware, Placement, PortMapping, PortRange, ProxyRoute, ResourceSpec, Resources,
+    RestartPolicy, ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile,
+    StackNetwork, StackSecret, StackVolume, Protocol, UpdateConfig, VolumeMount,
+    VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
 };

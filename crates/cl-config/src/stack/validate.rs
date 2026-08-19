@@ -17,6 +17,24 @@ impl StackFile {
         self.validate_depends_on()?;
         self.validate_service_networks_declared()?;
         self.validate_no_duplicate_ports()?;
+        self.validate_stop_signals()?;
+        Ok(())
+    }
+
+    fn validate_stop_signals(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(signal) = &svc.stop_signal else { continue };
+            let valid = signal
+                .strip_prefix("SIG")
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_uppercase()))
+                || (!signal.is_empty() && signal.chars().all(|c| c.is_ascii_digit()));
+            if !valid {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}.stop_signal"),
+                    format!("\"{signal}\" is not a signal name (e.g. SIGINT) or number"),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -149,6 +167,17 @@ impl StackFile {
                         format!("{at}.network"),
                         format!("network {} has no domain, so it cannot serve an HTTP route", route.network),
                     ));
+                }
+                for cors in route.middlewares.iter().filter_map(|m| match m {
+                    crate::stack::Middleware::Cors(c) => Some(c),
+                    _ => None,
+                }) {
+                    if cors.allow_credentials && cors.origins.iter().any(|o| o == "*") {
+                        return Err(ConfigError::invalid(
+                            format!("{at}.middlewares"),
+                            "cors: allow_credentials cannot be combined with a wildcard origin, browsers reject the pair",
+                        ));
+                    }
                 }
             }
             for (idx, expose) in ext.expose.iter().enumerate() {

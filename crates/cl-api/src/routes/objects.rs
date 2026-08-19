@@ -12,8 +12,15 @@ use serde::{Deserialize, Serialize};
 use crate::auth::keys::API_KEYS_CONFIG;
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
+use crate::redirects::REDIRECTS_CONFIG;
 use crate::secrets::{self, Charset};
 use crate::server::AppState;
+
+/// Config names clouduler itself owns and never shows through the generic
+/// config routes.
+fn is_reserved(name: &str) -> bool {
+    name == API_KEYS_CONFIG || name == REDIRECTS_CONFIG
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -40,7 +47,7 @@ async fn list_configs(_identity: Identity, State(state): State<AppState>) -> Jso
             .values()
             // The api key store rides along as a config object internally,
             // but it is not a user config and must never appear here.
-            .filter(|c| c.name != API_KEYS_CONFIG)
+            .filter(|c| !is_reserved(&c.name))
             .map(|c| ConfigSummary {
                 name: c.name.clone(),
                 size: c.len(),
@@ -64,7 +71,7 @@ async fn get_config(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<ConfigDetail>, ApiError> {
-    if name == API_KEYS_CONFIG {
+    if is_reserved(&name) {
         return Err(ApiError::NotFound(format!("no config {name}")));
     }
     let cluster_state = state.cluster.state().await;
@@ -91,7 +98,7 @@ async fn put_config(
     Path(name): Path<String>,
     Json(body): Json<PutConfigRequest>,
 ) -> Result<StatusCode, ApiError> {
-    if name == API_KEYS_CONFIG {
+    if is_reserved(&name) {
         return Err(ApiError::BadRequest(format!("{name} is a reserved name")));
     }
     let response = state
@@ -114,7 +121,7 @@ async fn delete_config(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    if name == API_KEYS_CONFIG {
+    if is_reserved(&name) {
         return Err(ApiError::BadRequest(format!("{name} is a reserved name")));
     }
     let response = state

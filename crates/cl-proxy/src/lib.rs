@@ -22,8 +22,9 @@ pub use acme::{
 pub use certs::{ensure_crypto_provider, parse_certified_key, CertResolver, CertStore};
 pub use error::{ProxyError, Result};
 pub use middleware::{
-    apply_headers, basic_auth_challenge, check_basic_auth, is_upgrade, redirect_https,
-    strip_hop_by_hop, strip_prefix, BasicAuthCreds, HeaderOps,
+    apply_headers, basic_auth_challenge, check_basic_auth, cors_origin_allowed,
+    cors_response_headers, is_cors_preflight, is_upgrade, redirect_https, strip_hop_by_hop,
+    strip_prefix, BasicAuthCreds, HeaderOps,
 };
-pub use route::{Picked, Route, RouteTable, STICKY_COOKIE};
+pub use route::{Picked, RedirectTarget, Route, RouteOptions, RouteTable, STICKY_COOKIE};
 pub use server::{ProxyBody, ProxyServer};

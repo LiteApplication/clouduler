@@ -224,3 +224,293 @@ fn parse_response(raw: &str) -> SimpleResponse {
     }
     SimpleResponse { status, headers, body }
 }
+
+// ---- per-route proxy settings ----
+
+/// Stand up a proxy in front of one route and return its plain HTTP address.
+async fn serve_route(route: Route) -> SocketAddr {
+    let routes = Arc::new(RouteTable::new(vec![route]));
+    let certs = Arc::new(CertStore::new());
+    let server = Arc::new(ProxyServer::new(routes, certs));
+    let http_addr = free_addr();
+    tokio::spawn(async move { server.serve_http(http_addr).await.unwrap() });
+    wait_for_port(http_addr).await;
+    http_addr
+}
+
+fn plain_route(backend: SocketAddr, options: cl_proxy::RouteOptions) -> Route {
+    Route::new("app.test", None, false, vec![], false, "svc", vec![backend]).with_options(options)
+}
+
+async fn post_body(addr: SocketAddr, len: usize) -> SimpleResponse {
+    let body = "x".repeat(len);
+    let raw = raw_request(
+        addr,
+        &format!(
+            "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}"
+        ),
+    )
+    .await;
+    parse_response(&raw)
+}
+
+#[tokio::test]
+async fn a_body_over_the_limit_is_refused_with_413() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            max_body_size: Some(16),
+            ..cl_proxy::RouteOptions::permissive()
+        },
+    ))
+    .await;
+
+    let resp = post_body(addr, 64).await;
+    assert_eq!(resp.status, 413);
+    // The backend must never have been contacted, so nothing it echoes back
+    // should be present.
+    assert!(!resp.headers.contains_key("x-echo-host"), "{:?}", resp.headers);
+}
+
+#[tokio::test]
+async fn a_body_within_the_limit_is_forwarded() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            max_body_size: Some(1024),
+            ..cl_proxy::RouteOptions::permissive()
+        },
+    ))
+    .await;
+
+    let resp = post_body(addr, 64).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, "POST /upload");
+}
+
+#[tokio::test]
+async fn a_route_with_no_limit_forwards_any_body() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(backend, cl_proxy::RouteOptions::permissive())).await;
+    let resp = post_body(addr, 100_000).await;
+    assert_eq!(resp.status, 200);
+}
+
+/// The default rewrites Host to the backend's address, which is what most
+/// containers want; preserve_host is for the ones that build absolute URLs.
+#[tokio::test]
+async fn host_is_rewritten_to_the_backend_by_default() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(backend, cl_proxy::RouteOptions::permissive())).await;
+    let resp = reqwest_like_get(addr, "app.test", "/").await;
+    assert_eq!(resp.headers.get("x-echo-host").unwrap(), &backend.to_string());
+}
+
+#[tokio::test]
+async fn preserve_host_forwards_the_clients_host_header() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            preserve_host: true,
+            ..cl_proxy::RouteOptions::permissive()
+        },
+    ))
+    .await;
+    let resp = reqwest_like_get(addr, "app.test", "/").await;
+    assert_eq!(resp.headers.get("x-echo-host").unwrap(), "app.test");
+}
+
+#[tokio::test]
+async fn an_upgrade_is_rejected_when_websockets_are_off() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            websockets: false,
+            ..cl_proxy::RouteOptions::default()
+        },
+    ))
+    .await;
+
+    let raw = raw_request(
+        addr,
+        "GET /ws HTTP/1.1\r\nHost: app.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+    )
+    .await;
+    assert_eq!(parse_response(&raw).status, 400);
+}
+
+/// A slow backend must not hold the connection open forever when the route
+/// sets a deadline.
+#[tokio::test]
+async fn a_backend_past_the_response_timeout_gives_504() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            // Accept and then never answer.
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(stream);
+            });
+        }
+    });
+
+    let addr = serve_route(plain_route(
+        slow,
+        cl_proxy::RouteOptions {
+            response_timeout: Some(Duration::from_millis(150)),
+            ..cl_proxy::RouteOptions::permissive()
+        },
+    ))
+    .await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/").await;
+    assert_eq!(resp.status, 504);
+}
+
+// ---- network gating ----
+
+#[tokio::test]
+async fn a_route_restricted_to_a_subnet_that_excludes_the_client_is_forbidden() {
+    let backend = spawn_echo_backend().await;
+    // The test client always connects from 127.0.0.1; a subnet that does not
+    // contain it stands in for "this request did not arrive on that network".
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            allowed_subnet: Some("10.0.0.0/8".parse().unwrap()),
+            ..cl_proxy::RouteOptions::permissive()
+        },
+    ))
+    .await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/").await;
+    assert_eq!(resp.status, 403);
+}
+
+#[tokio::test]
+async fn a_route_restricted_to_a_subnet_that_includes_the_client_is_served() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            allowed_subnet: Some("127.0.0.0/8".parse().unwrap()),
+            ..cl_proxy::RouteOptions::permissive()
+        },
+    ))
+    .await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/").await;
+    assert_eq!(resp.status, 200);
+}
+
+#[tokio::test]
+async fn a_public_route_has_no_subnet_restriction() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(plain_route(backend, cl_proxy::RouteOptions::permissive())).await;
+    let resp = reqwest_like_get(addr, "app.test", "/").await;
+    assert_eq!(resp.status, 200);
+}
+
+// ---- redirects ----
+
+#[tokio::test]
+async fn a_redirect_route_never_touches_a_backend() {
+    let route = Route::new("old.test", None, false, vec![], false, "redirect", vec![]).with_redirect(
+        cl_proxy::RedirectTarget {
+            url: "https://new.test".to_string(),
+            preserve_path: false,
+            status: 301,
+        },
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "old.test", "/anything").await;
+    assert_eq!(resp.status, 301);
+    assert_eq!(resp.headers.get("location").unwrap(), "https://new.test");
+}
+
+#[tokio::test]
+async fn a_redirect_route_can_preserve_the_path_and_query() {
+    let route = Route::new("old.test", None, false, vec![], false, "redirect", vec![]).with_redirect(
+        cl_proxy::RedirectTarget {
+            url: "https://new.test".to_string(),
+            preserve_path: true,
+            status: 302,
+        },
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "old.test", "/a/b?x=1").await;
+    assert_eq!(resp.status, 302);
+    assert_eq!(resp.headers.get("location").unwrap(), "https://new.test/a/b?x=1");
+}
+
+// ---- CORS ----
+
+fn cors_route(backend: SocketAddr, policy: cl_config::CorsPolicy) -> Route {
+    Route::new("app.test", None, false, vec![Middleware::Cors(policy)], false, "svc", vec![backend])
+}
+
+fn open_cors() -> cl_config::CorsPolicy {
+    cl_config::CorsPolicy {
+        origins: vec!["https://app.example.com".to_string()],
+        methods: vec!["GET".to_string(), "POST".to_string()],
+        headers: Vec::new(),
+        allow_credentials: false,
+        max_age: None,
+    }
+}
+
+#[tokio::test]
+async fn a_cors_preflight_is_answered_without_reaching_the_backend() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(cors_route(backend, open_cors())).await;
+
+    let raw = raw_request(
+        addr,
+        "OPTIONS /api HTTP/1.1\r\nHost: app.test\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Method: POST\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let resp = parse_response(&raw);
+    assert_eq!(resp.status, 204);
+    assert_eq!(resp.headers.get("access-control-allow-origin").unwrap(), "https://app.example.com");
+    assert!(resp.body.is_empty());
+}
+
+#[tokio::test]
+async fn a_real_cors_request_carries_the_allow_headers() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(cors_route(backend, open_cors())).await;
+
+    let raw = raw_request(
+        addr,
+        "GET /api HTTP/1.1\r\nHost: app.test\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let resp = parse_response(&raw);
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.headers.get("access-control-allow-origin").unwrap(), "https://app.example.com");
+}
+
+#[tokio::test]
+async fn a_disallowed_cors_origin_gets_no_allow_headers() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_route(cors_route(backend, open_cors())).await;
+
+    let raw = raw_request(
+        addr,
+        "GET /api HTTP/1.1\r\nHost: app.test\r\nOrigin: https://evil.example.com\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let resp = parse_response(&raw);
+    assert_eq!(resp.status, 200);
+    assert!(!resp.headers.contains_key("access-control-allow-origin"));
+}

@@ -13,7 +13,9 @@ import { InstanceDetail } from './views/InstanceDetail';
 import { ConfigsSecrets } from './views/ConfigsSecrets';
 import { Drives } from './views/Drives';
 import { Configuration } from './views/Configuration';
+import { ConfigDraftProvider } from './views/config/draft';
 import { Certificates } from './views/Certificates';
+import { Redirects } from './views/Redirects';
 
 export function App() {
   const { identity, loading } = useAuth();
@@ -29,22 +31,25 @@ export function App() {
 
   return (
     <ClusterStoreProvider>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Overview />} />
-          <Route path="/nodes" element={<Nodes />} />
-          <Route path="/nodes/:name" element={<NodeDetail />} />
-          <Route path="/stacks" element={<Stacks />} />
-          <Route path="/stacks/:name" element={<StackDetail />} />
-          <Route path="/instances" element={<Instances />} />
-          <Route path="/instances/:id" element={<InstanceDetail />} />
-          <Route path="/configs-secrets" element={<ConfigsSecrets />} />
-          <Route path="/drives" element={<Drives />} />
-          <Route path="/configuration/*" element={<Configuration />} />
-          <Route path="/certificates" element={<Certificates />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Layout>
+      <ConfigDraftProvider>
+        <Layout>
+          <Routes>
+            <Route path="/" element={<Overview />} />
+            <Route path="/nodes" element={<Nodes />} />
+            <Route path="/nodes/:name" element={<NodeDetail />} />
+            <Route path="/stacks" element={<Stacks />} />
+            <Route path="/stacks/:name" element={<StackDetail />} />
+            <Route path="/instances" element={<Instances />} />
+            <Route path="/instances/:id" element={<InstanceDetail />} />
+            <Route path="/configs-secrets" element={<ConfigsSecrets />} />
+            <Route path="/drives" element={<Drives />} />
+            <Route path="/configuration/*" element={<Configuration />} />
+            <Route path="/certificates" element={<Certificates />} />
+            <Route path="/redirects" element={<Redirects />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Layout>
+      </ConfigDraftProvider>
     </ClusterStoreProvider>
   );
 }

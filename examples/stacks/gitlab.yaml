@@ -36,6 +36,17 @@ services:
           port: 80
           tls: true
           middlewares: [redirect_https]
+          # Reverse proxy behaviour for this route. All optional; each one
+          # defaults to how the proxy behaved before it was configurable.
+          #
+          # Git pushes over HTTP send large packs, so the cap is generous.
+          max_body_size: 2GiB
+          # GitLab builds absolute URLs from the Host header.
+          preserve_host: true
+          # The web IDE and job log tailing are websockets.
+          websockets: true
+          # Generous: a big repo takes a while to start answering.
+          response_timeout: 120s
       expose:
         - port: 22
           published: 2222

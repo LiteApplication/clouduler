@@ -15,6 +15,49 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use cl_config::Middleware;
+use ipnet::IpNet;
+
+/// Per-route proxy behaviour that is not about matching or backend choice.
+///
+/// Split out from `Route` so adding a knob does not mean touching every
+/// `Route::new` call site, and so the defaults live in exactly one place.
+#[derive(Debug, Clone, Default)]
+pub struct RouteOptions {
+    /// Reject a request body larger than this with 413. `None` is unlimited.
+    pub max_body_size: Option<u64>,
+    /// Allow `Upgrade` requests (websockets) through.
+    pub websockets: bool,
+    /// Forward the client's `Host` rather than rewriting it to the backend.
+    pub preserve_host: bool,
+    /// Cap on how long the backend has to return response headers.
+    pub response_timeout: Option<std::time::Duration>,
+    /// Restricts this route to clients whose TCP peer address falls inside
+    /// this subnet. Set for a route published on an internal or private
+    /// network; `None` for a public one, which is reachable from anywhere.
+    pub allowed_subnet: Option<IpNet>,
+}
+
+impl RouteOptions {
+    /// Websockets on, everything else unset — what a route that configures
+    /// nothing gets.
+    pub fn permissive() -> Self {
+        Self {
+            websockets: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Where a redirect route sends the client, instead of a backend.
+#[derive(Debug, Clone)]
+pub struct RedirectTarget {
+    /// Destination URL, e.g. `https://new.example.com`.
+    pub url: String,
+    /// Append the request's original path and query to `url`.
+    pub preserve_path: bool,
+    /// 301, 302, 307 or 308.
+    pub status: u16,
+}
 
 /// One published HTTP route, with every replica backing it.
 #[derive(Debug)]
@@ -24,8 +67,12 @@ pub struct Route {
     pub tls: bool,
     pub middlewares: Vec<Middleware>,
     pub sticky: bool,
+    pub options: RouteOptions,
     /// Stack/service/instance label, for logging.
     pub instance: String,
+    /// When set, this route answers with a redirect instead of proxying to a
+    /// backend; `backends` is unused for it.
+    pub redirect: Option<RedirectTarget>,
     backends: Vec<SocketAddr>,
     next: AtomicUsize,
 }
@@ -46,10 +93,22 @@ impl Route {
             tls,
             middlewares,
             sticky,
+            options: RouteOptions::permissive(),
             instance: instance.into(),
+            redirect: None,
             backends,
             next: AtomicUsize::new(0),
         }
+    }
+
+    pub fn with_options(mut self, options: RouteOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_redirect(mut self, redirect: RedirectTarget) -> Self {
+        self.redirect = Some(redirect);
+        self
     }
 
     fn prefix_len(&self) -> usize {

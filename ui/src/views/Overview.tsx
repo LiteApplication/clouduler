@@ -14,7 +14,8 @@ export function Overview() {
     const load = () => api.status().then((s) => !cancelled && setStatus(s)).catch(() => {});
     load();
     // Version bumps arrive over the event stream; polling status here is just
-    // a cheap way to keep quorum/term fresh, which the state event doesn't carry.
+    // a cheap way to keep quorum and leadership fresh, which the state event
+    // doesn't carry.
     const id = setInterval(load, 10_000);
     return () => {
       cancelled = true;
@@ -33,7 +34,7 @@ export function Overview() {
   const nodes = Object.values(cluster.nodes);
   const unreachable = cluster.unreachable;
   const fenced = nodes.filter((n) => unreachable.includes(n.name));
-  const hasQuorumProblem = status ? !status.quorum : false;
+  const hasQuorumProblem = status ? !status.has_quorum : false;
 
   const instances = Object.values(cluster.assignments);
   const volumes = Object.values(cluster.volumes);

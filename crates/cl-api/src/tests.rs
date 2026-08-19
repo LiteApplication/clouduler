@@ -66,6 +66,7 @@ async fn harness() -> Harness {
         rpc_addr: addr,
         drives: BTreeMap::new(),
         availability: Availability::Active,
+        labels: Default::default(),
     }))
     .await
     .expect("submit");
@@ -98,6 +99,8 @@ async fn harness() -> Harness {
             address: "cloud".into(),
             network: "internal".into(),
             port: 8443,
+            through_proxy: true,
+            backend_port: 8444,
         },
         data_dir: dir.path().to_path_buf(),
         failover: Default::default(),
@@ -582,6 +585,105 @@ async fn nodes_list_reflects_the_cluster_state() {
     assert_eq!(nodes[0]["name"], "n0");
 }
 
+#[tokio::test]
+async fn redirects_can_be_created_listed_and_removed() {
+    let h = harness().await;
+    let body = r#"{"host":"old","network":"internal","target":"https://new.example.com","preserve_path":true,"status":301}"#;
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/redirects")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["target"], "https://new.example.com");
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/redirects")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/redirects/{id}"))
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_redirect_with_an_unknown_network_is_rejected() {
+    let h = harness().await;
+    let body = r#"{"host":"old","network":"nope","target":"https://new.example.com","status":301}"#;
+
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/redirects")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_redirect_with_an_invalid_status_is_rejected() {
+    let h = harness().await;
+    let body = r#"{"host":"old","network":"internal","target":"https://new.example.com","status":200}"#;
+
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/redirects")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 /// A brand new cluster mints its first api key once it has a leader.
 ///
 /// The api starts before any election finishes, so the write has nowhere to go
@@ -702,6 +804,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             rpc_addr: free_addr(),
             drives: BTreeMap::new(),
             availability: Availability::Active,
+            labels: Default::default(),
         }))
         .await
         .expect("add n1");
@@ -736,4 +839,134 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
 
     assert_eq!(value[0]["state"], "unknown");
     assert_eq!(value[0]["running"], serde_json::Value::Null);
+}
+
+// ---- the api/ui contract ----
+//
+// Three separate bugs shipped because a field was renamed on one side of the
+// wire and not the other: the config rollback countdown (`remaining_seconds`
+// vs `seconds_left`), and the overview's quorum banner (`has_quorum` vs
+// `quorum`), which showed "Quorum lost" on a healthy cluster for as long as it
+// existed. Nothing failed in either language: Rust did not know what the ui
+// read, and TypeScript types are erased at runtime, so the ui happily read
+// `undefined` and carried on.
+//
+// This test records the real serialized body of every endpoint the ui reads
+// into a fixture the ui's own test suite imports. On the TypeScript side those
+// fixtures are *assigned to the interfaces*, so `tsc` fails the build if an
+// interface declares a field the server does not actually send. The fixture is
+// generated from real responses, so it cannot drift from the server; the
+// assignment is checked by the compiler, so it cannot drift from the ui.
+//
+// Regenerate after an intentional api change:
+//
+//     UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
+const API_SHAPES_FIXTURE: &str = "../../ui/src/api/__fixtures__/api-shapes.json";
+
+/// Pin the values that differ run to run, so the fixture records the shape and
+/// not one run's accidents.
+///
+/// Replacements keep the original JSON type. That matters: the ui assigns these
+/// fixtures to its interfaces, and a field typed as a string union (`role`,
+/// `type`, `availability`) would stop typechecking if its value were blanked.
+/// So this is a short explicit list of volatile keys rather than a blanket
+/// "erase every leaf".
+fn normalize(value: &mut serde_json::Value, tempdir: &str) {
+    /// Random per run: generated ids, hashes, key fingerprints, ephemeral ports.
+    const VOLATILE_STRINGS: &[&str] = &["fingerprint", "subject", "rpc_addr", "content"];
+    const VOLATILE_NUMBERS: &[&str] = &["state_version"];
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                if VOLATILE_STRINGS.contains(&key.as_str()) && v.is_string() {
+                    *v = serde_json::json!("<volatile>");
+                } else if VOLATILE_NUMBERS.contains(&key.as_str()) && v.is_number() {
+                    *v = serde_json::json!(0);
+                } else {
+                    normalize(v, tempdir);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                normalize(v, tempdir);
+            }
+        }
+        serde_json::Value::String(text) if text.contains(tempdir) => {
+            *text = text.replace(tempdir, "<tmp>");
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
+    let h = harness().await;
+
+    let mut shapes = serde_json::Map::new();
+    for (name, uri) in [
+        ("status", "/api/status"),
+        ("state", "/api/state"),
+        ("identity", "/auth/me"),
+        ("pendingConfig", "/api/config/pending"),
+        ("clusterConfig", "/api/config"),
+        ("cloudflareTokenStatus", "/api/cloudflare/token"),
+        ("clusterKeyStatus", "/api/secrets/key"),
+    ] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {}", h.admin_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri} did not answer 200");
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{uri} is not json: {e}"));
+        shapes.insert(name.to_string(), value);
+    }
+
+    // The harness runs in a fresh tempdir and the state version moves as the
+    // harness sets itself up, so the values are not stable across runs. Only
+    // the *shape* is the contract, so the volatile ones are blanked rather
+    // than making the test flaky.
+    let mut shapes = serde_json::Value::Object(shapes);
+    let tempdir = h.state.config_path.parent().unwrap().to_string_lossy().to_string();
+    normalize(&mut shapes, &tempdir);
+
+    let rendered = serde_json::to_string_pretty(&shapes).unwrap() + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(API_SHAPES_FIXTURE);
+
+    if std::env::var("UPDATE_API_FIXTURES").is_ok() {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create fixture dir");
+        std::fs::write(&path, &rendered).expect("write fixture");
+        return;
+    }
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {}: {e}\nregenerate with: UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes",
+            path.display()
+        )
+    });
+
+    // Compare parsed, so formatting or key order never fails the test.
+    let expected: serde_json::Value = serde_json::from_str(&existing).expect("fixture is json");
+    let actual: serde_json::Value = serde_json::from_str(&rendered).expect("rendered is json");
+    assert_eq!(
+        actual, expected,
+        "the api response shape changed.\nIf that was intended, regenerate the fixture the ui \
+         typechecks against:\n    UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes\n\
+         and run the ui tests, which will fail if a TypeScript interface no longer matches."
+    );
 }

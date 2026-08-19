@@ -16,15 +16,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use cl_api::redirects::RedirectStore;
 use cl_config::{qualify, ClusterConfig};
-use cl_dns::Cloudflare;
+use cl_dns::{Cloudflare, DesiredRecord};
 use cl_proxy::{
-    ensure_crypto_provider, issue_certificate, AcmeConfig, CertStore, Route, RouteTable,
-    ZoneResolver, DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
+    ensure_crypto_provider, issue_certificate, AcmeConfig, CertStore, RedirectTarget, Route,
+    RouteOptions, RouteTable, ZoneResolver, DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{CertificateState, ClusterState, Request};
+use cl_raft::state::{dns_key, CertificateState, ClusterState, DnsRecordState, Request};
+use ipnet::IpNet;
 use tracing::{info, warn};
+
+/// Restricts a route to clients on `network`, when that network is subnetted
+/// (internal or private). A public network is reachable from anywhere, so it
+/// gets no restriction.
+fn allowed_subnet(cfg: &ClusterConfig, network: &str) -> Option<IpNet> {
+    let net = cfg.networks.get(network)?;
+    net.kind.is_subnetted().then_some(net.subnet).flatten()
+}
 
 /// How often routes and certificates are rebuilt from state.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
@@ -87,6 +97,15 @@ pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, data_dir: &Path) -
         tasks.push(tokio::spawn(run_acme(acme, cfg.clone(), cluster.clone())));
     }
 
+    if let Some((cloudflare, zone_names)) = cloudflare_setup(cfg, "dns record publishing") {
+        tasks.push(tokio::spawn(run_dns_reconcile(
+            cfg.clone(),
+            cluster.clone(),
+            cloudflare,
+            zone_names,
+        )));
+    }
+
     Some(Proxy { tasks })
 }
 
@@ -104,7 +123,8 @@ async fn reconcile_loop(
         ticker.tick().await;
         let state = cluster.state().await;
 
-        let built = routes_for(&cfg, &state);
+        let mut built = routes_for(&cfg, &state);
+        built.extend(static_backend_routes(&cfg).await);
         if built.len() != published {
             info!(routes = built.len(), "reverse proxy routes changed");
             published = built.len();
@@ -128,31 +148,168 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
         let instance = format!("{}.{}", placement.stack, placement.service);
         for entry in &placement.extensions.proxy {
             let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
-            routes.push(Route::new(
+            routes.push(
+                Route::new(
+                    qualify(&entry.host, domain),
+                    entry.path_prefix.clone(),
+                    entry.tls,
+                    entry.middlewares.clone(),
+                    entry.sticky.unwrap_or(false),
+                    instance.clone(),
+                    placement
+                        .addresses
+                        .iter()
+                        .map(|ip| SocketAddr::from((*ip, entry.port)))
+                        .collect(),
+                )
+                .with_options(RouteOptions {
+                    max_body_size: entry.max_body_size.map(|s| s.bytes()),
+                    websockets: entry.websockets,
+                    preserve_host: entry.preserve_host,
+                    response_timeout: entry.response_timeout,
+                    allowed_subnet: allowed_subnet(cfg, &entry.network),
+                }),
+            );
+        }
+    }
+
+    routes.extend(redirect_routes_for(cfg, state));
+
+    if let Some(dashboard) = dashboard_route(cfg) {
+        routes.push(dashboard);
+    }
+    routes
+}
+
+/// Routes for the UI-managed redirects, stored outside `cluster.yaml`; see
+/// `cl_api::redirects`. A redirect never proxies to a backend, so this needs
+/// no DNS resolution and can run synchronously alongside the placement based
+/// routes above.
+fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
+    RedirectStore::load(state)
+        .rules
+        .into_iter()
+        .map(|rule| {
+            let domain = cfg.networks.get(&rule.network).and_then(|n| n.domain.as_deref());
+            Route::new(
+                qualify(&rule.host, domain),
+                rule.path_prefix.clone(),
+                // Always true, so the old hostname gets a certificate and can
+                // answer the redirect over https too, not just http.
+                true,
+                Vec::new(),
+                false,
+                format!("clouduler.redirect.{}", rule.id),
+                Vec::new(),
+            )
+            .with_options(RouteOptions {
+                allowed_subnet: allowed_subnet(cfg, &rule.network),
+                ..RouteOptions::default()
+            })
+            .with_redirect(RedirectTarget {
+                url: rule.target,
+                preserve_path: rule.preserve_path,
+                status: rule.status,
+            })
+        })
+        .collect()
+}
+
+/// The dashboard, published like any other route.
+///
+/// Putting it in the same table is the whole point: it picks up the Let's
+/// Encrypt certificate and the Cloudflare record from the machinery that
+/// already runs for every service, instead of needing its own.
+///
+/// The backend is this node's own api over loopback. Each node's proxy serves
+/// its own api rather than load balancing across the cluster, for two reasons:
+/// the hop carries session cookies and the overlay is not encrypted, and a
+/// non-leader api already redirects to the leader, so spreading the load would
+/// only add a redirect.
+///
+/// `preserve_host` is on because the api builds its OIDC redirect URL from the
+/// request, and `websockets` because `/api/events` and the log streams are
+/// server-sent events that must not be buffered or capped.
+fn dashboard_route(cfg: &ClusterConfig) -> Option<Route> {
+    if !cfg.proxy.enabled || !cfg.web.through_proxy {
+        return None;
+    }
+    Some(
+        Route::new(
+            cfg.web_fqdn(),
+            None,
+            true,
+            Vec::new(),
+            false,
+            "clouduler.dashboard",
+            vec![SocketAddr::from(([127, 0, 0, 1], cfg.web.backend_port))],
+        )
+        .with_options(RouteOptions {
+            preserve_host: true,
+            websockets: true,
+            // No body cap and no response timeout: a stack file upload can be
+            // large, and the event stream never returns headers late but does
+            // stay open indefinitely.
+            allowed_subnet: allowed_subnet(cfg, &cfg.web.network),
+            ..RouteOptions::default()
+        }),
+    )
+}
+
+/// Static/external backend routes: `proxy.static_routes` in `cluster.yaml`,
+/// for a service clouduler does not run itself. `backend` is resolved by DNS
+/// on every reconcile pass, so a hostname backend picks up a changed address
+/// without touching the config; a plain IP resolves to itself immediately.
+async fn static_backend_routes(cfg: &ClusterConfig) -> Vec<Route> {
+    let mut routes = Vec::with_capacity(cfg.proxy.static_routes.len());
+    for entry in &cfg.proxy.static_routes {
+        let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
+        let backends = match tokio::net::lookup_host(&entry.backend).await {
+            Ok(addrs) => addrs.collect(),
+            Err(e) => {
+                warn!(host = %entry.host, backend = %entry.backend, error = %e, "could not resolve static backend");
+                Vec::new()
+            }
+        };
+        routes.push(
+            Route::new(
                 qualify(&entry.host, domain),
                 entry.path_prefix.clone(),
                 entry.tls,
                 entry.middlewares.clone(),
-                entry.sticky.unwrap_or(false),
-                instance.clone(),
-                placement
-                    .addresses
-                    .iter()
-                    .map(|ip| SocketAddr::from((*ip, entry.port)))
-                    .collect(),
-            ));
-        }
+                false,
+                format!("clouduler.static.{}", entry.host),
+                backends,
+            )
+            .with_options(RouteOptions {
+                max_body_size: entry.max_body_size.map(|s| s.bytes()),
+                websockets: entry.websockets,
+                preserve_host: entry.preserve_host,
+                response_timeout: entry.response_timeout,
+                allowed_subnet: allowed_subnet(cfg, &entry.network),
+            }),
+        );
     }
     routes
 }
 
 /// Every hostname the proxy terminates TLS for, and so needs a certificate.
+///
+/// Static routes are folded in directly from config rather than through
+/// `static_backend_routes`, so listing hostnames that need a certificate
+/// never depends on DNS resolving for their backend.
 fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<String> {
     let mut hosts: BTreeSet<String> = routes_for(cfg, state)
         .into_iter()
         .filter(|r| r.tls)
         .map(|r| r.host)
         .collect();
+    for entry in &cfg.proxy.static_routes {
+        if entry.tls {
+            let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
+            hosts.insert(qualify(&entry.host, domain));
+        }
+    }
     // The ui is served by the api on its own port, but its certificate is
     // issued the same way and stored in the same place.
     hosts.insert(cfg.web_fqdn());
@@ -166,28 +323,38 @@ struct Acme {
     zones: Vec<String>,
 }
 
+/// A Cloudflare client and the zone names it's allowed to write to, or
+/// `None` with the reason logged. Shared by certificate issuance and DNS
+/// record publishing: both need the same client and the same zone list, and
+/// neither should run without a readable token.
+fn cloudflare_setup(cfg: &ClusterConfig, context: &str) -> Option<(Cloudflare, Vec<String>)> {
+    let cloudflare = cfg.cloudflare.as_ref()?;
+    let token = match cl_dns::load_token(cloudflare) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            info!("no cloudflare token yet, {context} will not run");
+            return None;
+        }
+        Err(e) => {
+            warn!(error = %e, "cannot read the cloudflare token, {context} will not run");
+            return None;
+        }
+    };
+    Some((Cloudflare::new(token), cloudflare.zones.clone()))
+}
+
 /// Read the ACME setup out of the config, or say why there is none.
 fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
     if !cfg.proxy.acme.enabled {
         return None;
     }
-    let Some(cloudflare) = &cfg.cloudflare else {
+    if cfg.cloudflare.is_none() {
         // Rejected by validation, so only reachable through a config that
         // was already stored when the rule did not exist.
         warn!("certificate issuance needs a cloudflare section");
         return None;
-    };
-    let token = match cl_dns::load_token(cloudflare) {
-        Ok(Some(token)) => token,
-        Ok(None) => {
-            info!("no cloudflare token yet, certificates will not be issued");
-            return None;
-        }
-        Err(e) => {
-            warn!(error = %e, "cannot read the cloudflare token");
-            return None;
-        }
-    };
+    }
+    let (cloudflare, zones) = cloudflare_setup(cfg, "certificate issuance")?;
 
     let mut config = AcmeConfig {
         contact_emails: cfg.proxy.acme.contact_email.clone().into_iter().collect(),
@@ -200,8 +367,8 @@ fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
     Some(Acme {
         config,
         credentials: data_dir.join("acme-account.json"),
-        cloudflare: Cloudflare::new(token),
-        zones: cloudflare.zones.clone(),
+        cloudflare,
+        zones,
     })
 }
 
@@ -320,6 +487,158 @@ impl ZoneResolver for Zones {
     }
 }
 
+/// How often DNS records are reconciled against Cloudflare. Not as tight as
+/// the routing table (`RECONCILE_INTERVAL`): a hostname appearing a minute
+/// late is a much smaller problem than a route disappearing for a minute.
+const DNS_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Publishes A/AAAA/CNAME records for every hostname the reverse proxy
+/// answers (stack routes, static routes, redirects) plus the web ui, on
+/// every node — the proxy runs on all of them and forwards internally, so
+/// any node's address is a valid way in. Leader only, same reasoning as
+/// certificate issuance: several nodes reconciling at once would race each
+/// other's writes.
+async fn run_dns_reconcile(cfg: ClusterConfig, cluster: Arc<ClusterNode>, cf: Cloudflare, zone_names: Vec<String>) {
+    let zones = match Zones::resolve(&cf, &zone_names).await {
+        Ok(zones) => zones,
+        Err(e) => {
+            warn!(error = %e, "cannot resolve the cloudflare zones, dns records will not be published");
+            return;
+        }
+    };
+
+    let mut ticker = tokio::time::interval(DNS_RECONCILE_INTERVAL);
+    loop {
+        ticker.tick().await;
+        if !cluster.is_leader() {
+            continue;
+        }
+        let state = cluster.state().await;
+        reconcile_dns(&cfg, &cluster, &cf, &zones, &state).await;
+    }
+}
+
+/// Every hostname a node's address needs to answer for: the web ui plus
+/// every route the proxy publishes, whether it comes from a stack's
+/// containers, a static backend, or a redirect. All answered identically
+/// regardless of which node a request lands on, so every node's address is
+/// published, not just the one running the container.
+fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<(String, String)> {
+    let mut hosts = BTreeSet::new();
+    hosts.insert((cfg.web.address.clone(), cfg.web.network.clone()));
+
+    for placement in crate::placement::service_placements(state) {
+        for entry in &placement.extensions.proxy {
+            hosts.insert((entry.host.clone(), entry.network.clone()));
+        }
+    }
+    for entry in &cfg.proxy.static_routes {
+        hosts.insert((entry.host.clone(), entry.network.clone()));
+    }
+    for rule in RedirectStore::load(state).rules {
+        hosts.insert((rule.host, rule.network));
+    }
+    hosts
+}
+
+/// Resolves `desired_dns_hosts` against every node, deduplicated. A node with
+/// no address on a given hostname's network is skipped rather than failing
+/// the whole pass: a private network only some nodes sit on is normal.
+fn desired_records(cfg: &ClusterConfig, state: &ClusterState) -> Vec<DesiredRecord> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (host, network) in desired_dns_hosts(cfg, state) {
+        for node in cfg.nodes.values() {
+            let Ok(records) = cl_dns::records_for(cfg, &host, &network, node) else {
+                continue;
+            };
+            for record in records {
+                let key = (format!("{:?}", record.kind), record.fqdn.clone(), record.content.clone());
+                if seen.insert(key) {
+                    out.push(record);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One reconcile pass: computes desired records, groups them by the
+/// Cloudflare zone that covers each fqdn, and converges each zone's live
+/// records to match. Failures on one zone don't stop the others.
+async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Cloudflare, zones: &Zones, state: &ClusterState) {
+    let mut by_zone: std::collections::HashMap<(String, String), Vec<DesiredRecord>> = std::collections::HashMap::new();
+    for record in desired_records(cfg, state) {
+        let Some(zone_id) = zones.zone_id_for(&record.fqdn) else {
+            warn!(fqdn = %record.fqdn, "no cloudflare zone covers this name, not publishing a dns record");
+            continue;
+        };
+        let zone_name = zones
+            .zones
+            .iter()
+            .find(|(_, id)| id == &zone_id)
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default();
+        by_zone.entry((zone_id, zone_name)).or_default().push(record);
+    }
+
+    for ((zone_id, zone_name), desired) in by_zone {
+        if let Err(e) = reconcile_zone(cluster, &cfg.cluster.name, cf, &zone_id, &zone_name, desired, state).await {
+            warn!(zone = %zone_name, error = %e, "dns reconcile failed for this zone");
+        }
+    }
+}
+
+async fn reconcile_zone(
+    cluster: &Arc<ClusterNode>,
+    cluster_name: &str,
+    cf: &Cloudflare,
+    zone_id: &str,
+    zone_name: &str,
+    desired: Vec<DesiredRecord>,
+    state: &ClusterState,
+) -> cl_dns::Result<()> {
+    let mut live = cf.list_records(zone_id, None, None).await?;
+    let plan = cl_dns::plan(cluster_name, &desired, &live);
+    if !plan.is_empty() {
+        cl_dns::apply(cf, zone_id, &plan).await?;
+        live = cf.list_records(zone_id, None, None).await?;
+    }
+
+    let mut want_keys = BTreeSet::new();
+    for record in &desired {
+        let record_type = format!("{:?}", record.kind);
+        let provider_id = live
+            .iter()
+            .find(|r| r.name == record.fqdn && format!("{:?}", r.kind) == record_type && r.content == record.content)
+            .and_then(|r| r.id.clone());
+        let entry = DnsRecordState {
+            fqdn: record.fqdn.clone(),
+            record_type,
+            content: record.content.clone(),
+            zone: zone_name.to_string(),
+            provider_id,
+        };
+        let key = dns_key(&entry.fqdn, &entry.record_type, &entry.content);
+        want_keys.insert(key.clone());
+        if state.dns_records.get(&key) != Some(&entry) {
+            if let Err(e) = cluster.submit(Request::UpsertDnsRecord(entry)).await {
+                warn!(fqdn = %record.fqdn, error = %e, "could not record the published dns entry");
+            }
+        }
+    }
+
+    for (key, existing) in &state.dns_records {
+        if existing.zone == zone_name && !want_keys.contains(key) {
+            if let Err(e) = cluster.submit(Request::RemoveDnsRecord { key: key.clone() }).await {
+                warn!(%key, error = %e, "could not remove the stale dns entry");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,9 +648,18 @@ mod tests {
         ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
     }
 
+    /// The routes a stack published, without the dashboard the daemon adds
+    /// alongside them.
+    fn service_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
+        routes_for(cfg, state)
+            .into_iter()
+            .filter(|r| r.instance != "clouduler.dashboard")
+            .collect()
+    }
+
     #[test]
     fn a_route_carries_every_replica_as_a_backend() {
-        let routes = routes_for(&cfg(), &state_with(SPEC, 2));
+        let routes = service_routes(&cfg(), &state_with(SPEC, 2));
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].backends().len(), 2);
         assert_eq!(routes[0].backends()[0].port(), 80);
@@ -341,7 +669,7 @@ mod tests {
     /// published on, which is how `blog` becomes a name a browser can reach.
     #[test]
     fn a_bare_host_gets_the_network_domain() {
-        let routes = routes_for(&cfg(), &state_with(SPEC, 1));
+        let routes = service_routes(&cfg(), &state_with(SPEC, 1));
         assert_eq!(routes[0].host, "blog.example.com");
     }
 
@@ -351,9 +679,75 @@ mod tests {
     fn a_route_with_no_backends_is_still_published() {
         let mut state = state_with(SPEC, 1);
         state.assignments.clear();
-        let routes = routes_for(&cfg(), &state);
+        let routes = service_routes(&cfg(), &state);
         assert_eq!(routes.len(), 1);
         assert!(routes[0].backends().is_empty());
+    }
+
+    /// The point of the dashboard route: it is in the same table as everything
+    /// else, so the certificate and DNS machinery picks it up for free.
+    #[test]
+    fn the_dashboard_is_published_as_a_route_on_its_own_hostname() {
+        let cfg = cfg();
+        let routes = routes_for(&cfg, &state_with(SPEC, 1));
+        let dashboard = routes
+            .iter()
+            .find(|r| r.instance == "clouduler.dashboard")
+            .expect("the dashboard is routed");
+        assert_eq!(dashboard.host, cfg.web_fqdn());
+        assert!(dashboard.tls);
+    }
+
+    /// Loopback only, and pointed at the api's plain listener rather than the
+    /// TLS one: the proxy speaks http to its backends and the hop must not
+    /// leave the machine.
+    #[test]
+    fn the_dashboard_backend_is_this_nodes_own_api_over_loopback() {
+        let cfg = cfg();
+        let route = dashboard_route(&cfg).expect("routed");
+        let backend = route.backends()[0];
+        assert!(backend.ip().is_loopback(), "{backend}");
+        assert_eq!(backend.port(), cfg.web.backend_port);
+        assert_ne!(backend.port(), cfg.web.port, "must not point at the tls listener");
+    }
+
+    /// The api derives its OIDC redirect from the request, and the event
+    /// streams must not be capped or timed out.
+    #[test]
+    fn the_dashboard_route_preserves_host_and_allows_streams() {
+        let route = dashboard_route(&cfg()).expect("routed");
+        assert!(route.options.preserve_host);
+        assert!(route.options.websockets);
+        assert_eq!(route.options.max_body_size, None);
+        assert_eq!(route.options.response_timeout, None);
+    }
+
+    #[test]
+    fn turning_off_through_proxy_removes_the_dashboard_route() {
+        let mut cfg = cfg();
+        cfg.web.through_proxy = false;
+        assert!(dashboard_route(&cfg).is_none());
+        assert!(routes_for(&cfg, &state_with(SPEC, 1))
+            .iter()
+            .all(|r| r.instance != "clouduler.dashboard"));
+    }
+
+    /// A disabled proxy has no listeners, so a route pointing at the dashboard
+    /// would be a promise nothing keeps.
+    #[test]
+    fn a_disabled_proxy_publishes_no_dashboard_route() {
+        let mut cfg = cfg();
+        cfg.proxy.enabled = false;
+        assert!(dashboard_route(&cfg).is_none());
+    }
+
+    /// The dashboard's certificate used to be a special case bolted onto
+    /// tls_hosts. It should now arrive through the route like any other name.
+    #[test]
+    fn the_dashboard_hostname_still_gets_a_certificate() {
+        let cfg = cfg();
+        let hosts = tls_hosts(&cfg, &state_with(SPEC, 1));
+        assert!(hosts.contains(&cfg.web_fqdn()));
     }
 
     #[test]
@@ -362,6 +756,177 @@ mod tests {
         let hosts = tls_hosts(&cfg, &state_with(SPEC, 1));
         assert!(hosts.contains(&cfg.web_fqdn()));
         assert!(hosts.contains("blog.example.com"));
+    }
+
+    /// A route on a private network only accepts clients on that network's
+    /// subnet; a route on the public `wan` network gets no such restriction.
+    #[test]
+    fn a_route_on_a_private_network_is_gated_to_its_subnet() {
+        const LAN_SPEC: &str = "\
+networks:
+  default: {}
+services:
+  web:
+    image: nginx
+    networks: [default]
+    x-clouduler:
+      proxy:
+        - host: files
+          network: lan
+          port: 80
+";
+        let routes = service_routes(&cfg(), &state_with(LAN_SPEC, 1));
+        let subnet = routes[0].options.allowed_subnet.expect("private network is gated");
+        assert!(subnet.contains(&std::net::IpAddr::from([192, 168, 1, 50])));
+        assert!(!subnet.contains(&std::net::IpAddr::from([8, 8, 8, 8])));
+    }
+
+    #[test]
+    fn a_route_on_the_public_network_is_not_gated() {
+        let routes = service_routes(&cfg(), &state_with(SPEC, 1));
+        assert_eq!(routes[0].options.allowed_subnet, None);
+    }
+
+    #[test]
+    fn redirect_rules_become_redirect_routes() {
+        let mut state = state_with(SPEC, 0);
+        let store = cl_api::redirects::RedirectStore {
+            rules: vec![cl_api::redirects::RedirectRule {
+                id: "r1".into(),
+                host: "old".into(),
+                network: "wan".into(),
+                path_prefix: None,
+                target: "https://new.example.com".into(),
+                preserve_path: true,
+                status: 301,
+            }],
+        };
+        state.configs.insert(
+            cl_api::redirects::REDIRECTS_CONFIG.to_string(),
+            cl_raft::state::ConfigEntry {
+                name: cl_api::redirects::REDIRECTS_CONFIG.to_string(),
+                content: store.encode(),
+                revision: 1,
+                owner: None,
+            },
+        );
+
+        let cfg = cfg();
+        let route = redirect_routes_for(&cfg, &state)
+            .into_iter()
+            .find(|r| r.host == "old.example.com")
+            .expect("redirect route published");
+        let redirect = route.redirect.expect("carries a redirect target");
+        assert_eq!(redirect.url, "https://new.example.com");
+        assert!(redirect.preserve_path);
+        assert_eq!(redirect.status, 301);
+        assert!(route.tls);
+    }
+
+    #[tokio::test]
+    async fn a_static_route_resolves_its_backend_and_is_gated() {
+        let mut cfg = cfg();
+        cfg.proxy.static_routes.clear();
+        cfg.proxy.static_routes.push(cl_config::StaticRoute {
+            host: "files".into(),
+            network: "lan".into(),
+            backend: "127.0.0.1:9999".into(),
+            path_prefix: None,
+            tls: true,
+            middlewares: Vec::new(),
+            max_body_size: None,
+            websockets: true,
+            preserve_host: false,
+            response_timeout: None,
+        });
+
+        let routes = static_backend_routes(&cfg).await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].host, "files.lan.example.com");
+        assert_eq!(routes[0].backends(), &[SocketAddr::from(([127, 0, 0, 1], 9999))]);
+        assert!(routes[0].options.allowed_subnet.is_some());
+    }
+
+    #[test]
+    fn a_static_routes_hostname_still_gets_a_certificate_without_dns() {
+        let mut cfg = cfg();
+        cfg.proxy.static_routes.push(cl_config::StaticRoute {
+            host: "files".into(),
+            network: "wan".into(),
+            backend: "does-not-resolve.invalid:9999".into(),
+            path_prefix: None,
+            tls: true,
+            middlewares: Vec::new(),
+            max_body_size: None,
+            websockets: true,
+            preserve_host: false,
+            response_timeout: None,
+        });
+        let hosts = tls_hosts(&cfg, &state_with(SPEC, 1));
+        assert!(hosts.contains("files.example.com"));
+    }
+
+    #[test]
+    fn desired_dns_hosts_includes_the_dashboard_and_published_routes() {
+        let hosts = desired_dns_hosts(&cfg(), &state_with(SPEC, 1));
+        assert!(hosts.contains(&("cloud".to_string(), "tailscale".to_string())));
+        assert!(hosts.contains(&("blog".to_string(), "wan".to_string())));
+    }
+
+    #[test]
+    fn desired_dns_hosts_includes_static_routes_and_redirects() {
+        let mut cfg = cfg();
+        cfg.proxy.static_routes.push(cl_config::StaticRoute {
+            host: "printer".into(),
+            network: "lan".into(),
+            backend: "192.168.1.50:9100".into(),
+            path_prefix: None,
+            tls: true,
+            middlewares: Vec::new(),
+            max_body_size: None,
+            websockets: true,
+            preserve_host: false,
+            response_timeout: None,
+        });
+
+        let mut state = state_with(SPEC, 0);
+        let store = cl_api::redirects::RedirectStore {
+            rules: vec![cl_api::redirects::RedirectRule {
+                id: "r1".into(),
+                host: "old".into(),
+                network: "wan".into(),
+                path_prefix: None,
+                target: "https://new.example.com".into(),
+                preserve_path: true,
+                status: 301,
+            }],
+        };
+        state.configs.insert(
+            cl_api::redirects::REDIRECTS_CONFIG.to_string(),
+            cl_raft::state::ConfigEntry {
+                name: cl_api::redirects::REDIRECTS_CONFIG.to_string(),
+                content: store.encode(),
+                revision: 1,
+                owner: None,
+            },
+        );
+
+        let hosts = desired_dns_hosts(&cfg, &state);
+        assert!(hosts.contains(&("printer".to_string(), "lan".to_string())));
+        assert!(hosts.contains(&("old".to_string(), "wan".to_string())));
+    }
+
+    /// The dashboard is on `tailscale`, which every node in the reference
+    /// config has an address on, so both nodes get a record.
+    #[test]
+    fn desired_records_publish_every_nodes_address() {
+        let records = desired_records(&cfg(), &state_with(SPEC, 1));
+        let dashboard: Vec<_> = records.iter().filter(|r| r.fqdn == "cloud.int.example.com").collect();
+        assert_eq!(dashboard.len(), cfg().nodes.len(), "{dashboard:?}");
+        assert!(dashboard.iter().all(|r| r.kind == cl_dns::RecordType::A));
+        let contents: std::collections::BTreeSet<_> = dashboard.iter().map(|r| r.content.as_str()).collect();
+        assert!(contents.contains("10.10.0.1"));
+        assert!(contents.contains("10.10.0.2"));
     }
 
     #[test]

@@ -237,6 +237,12 @@ async fn start_api(
     };
 
     let listen_addr = SocketAddr::from(([0, 0, 0, 0], cfg.web.port));
+    // Loopback only: this listener has no TLS, and the proxy that talks to it
+    // runs on this same machine.
+    let plain_listen_addr = cfg
+        .web
+        .through_proxy
+        .then(|| SocketAddr::from(([127, 0, 0, 1], cfg.web.backend_port)));
     let options = cl_api::ApiServerOptions {
         cluster: cluster.clone(),
         docker,
@@ -248,6 +254,7 @@ async fn start_api(
         tls_cert_pem: cert_pem.into_bytes(),
         tls_key_pem: key_pem.into_bytes(),
         listen_addr,
+        plain_listen_addr,
     };
     let _ = data_dir;
 
@@ -557,6 +564,11 @@ fn to_state(
         },
         rpc_addr,
         drives: node.drives.clone(),
+        // Straight from the config, not merged with what is stored: the config
+        // is the source of truth for what a node is, so removing a label there
+        // has to actually remove it, or a stack keeps landing on a node that
+        // no longer qualifies.
+        labels: node.labels.clone(),
         availability: current
             .map(|c| c.availability)
             .unwrap_or(Availability::Active),

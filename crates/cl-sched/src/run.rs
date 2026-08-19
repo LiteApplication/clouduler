@@ -368,6 +368,7 @@ mod tests {
                 .map(|d| (d.to_string(), PathBuf::from(format!("/srv/{d}"))))
                 .collect(),
             availability: Availability::Active,
+            labels: Default::default(),
         }
     }
 

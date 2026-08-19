@@ -26,6 +26,44 @@ leaving a listener that silently failed to bind. This is why `web.port`
 defaults to 8443 and not 443: the standard ports belong to the services the
 cluster publishes, and the admin ui takes the odd one.
 
+## The dashboard
+
+The dashboard is published as a route in the same table as everything else,
+controlled by `web.through_proxy` (default on):
+
+```yaml
+web:
+  address: cloud
+  network: tailscale
+  port: 8443           # direct https listener, always up
+  through_proxy: true  # also publish through the reverse proxy
+  backend_port: 8444   # loopback port the proxy forwards to
+```
+
+The point is that it then gets the Let's Encrypt certificate and the
+Cloudflare record from the machinery that already runs for every service,
+rather than needing its own path for each. On the standard HTTPS port it
+serves a real certificate; the direct `web.port` listener falls back to a
+self-signed one until ACME has issued.
+
+Three things about this are deliberate:
+
+- **The direct listener on `web.port` stays up regardless.** It is the way
+  back in when the proxy cannot bind its ports (they are below 1024 and need
+  root) or when a config edit breaks routing. Locking the operator out of the
+  ui that fixes the proxy would be the worst available failure mode.
+- **The backend is this node's own api over loopback**, not a load balanced
+  pool across the cluster. The proxy speaks plain HTTP to its backends, and
+  that hop carries session cookies while the overlay is not encrypted, so it
+  must not leave the machine. A non-leader api already redirects to the
+  leader, so spreading the load would only add a redirect anyway.
+- **The route sets `preserve_host` and no timeouts.** The api derives its
+  OIDC redirect URL from the request host, and `/api/events` plus the log and
+  stats streams are server-sent events that must not be capped or timed out.
+
+`backend_port` may not collide with `web.port` or either proxy port; the
+validator refuses all three.
+
 Routes and certificates are rebuilt from replicated state every five seconds.
 A route with no running backend is still published and answers 502, since a
 redeploy briefly having nothing behind it is not the same as the hostname not
@@ -35,7 +73,11 @@ being configured, and a 404 is what a client would cache.
 
 A route is built from one `ProxyRoute` entry (`host`, `network`, `port`,
 `path_prefix`, `tls`, `middlewares`, `sticky`) plus the overlay address of
-every running replica of the service instance. The routing table
+every running replica of the service instance. Per-route behaviour that is
+about neither matching nor backend choice — `max_body_size`, `websockets`,
+`preserve_host`, `response_timeout` — is carried separately in
+`RouteOptions`, so adding a knob does not touch every `Route::new` call
+site. The routing table
 (`RouteTable`) is rebuilt wholesale on every placement change and swapped in
 atomically (`arc_swap`), so request handling never blocks on a reload and
 never sees a half-updated table.
@@ -68,6 +110,62 @@ carrying a valid `cl_sticky` cookie goes straight to that backend without
 consuming a round-robin slot. If the cookied backend is no longer in the
 pool, the proxy falls back to round robin and issues a new cookie.
 
+## Static/external backends
+
+Most routes come from a stack's `x-clouduler.proxy` and follow its containers
+automatically. A route for something clouduler does not run at all — another
+box on the network, a third party endpoint — is declared directly in
+`cluster.yaml` instead, under `proxy.static_routes`:
+
+```yaml
+proxy:
+  static_routes:
+    - host: printer
+      network: lan
+      backend: 192.168.1.50:9100
+      tls: true
+      # path_prefix, middlewares, max_body_size, websockets, preserve_host
+      # and response_timeout all work the same as on a stack's proxy route.
+```
+
+`backend` is `host:port`; a hostname is resolved fresh on every reconcile
+pass (every 5s), so a DNS change on the backend takes effect without editing
+the config, and every address it resolves to becomes a backend, round robined
+the same way multiple replicas of a service are. These entries can also be
+managed from the web ui's Reverse proxy configuration page, since they are
+part of `cluster.yaml` and go through the same config-draft flow as
+`proxy.http_port` and the rest.
+
+## Network gating
+
+Both listeners bind `0.0.0.0` on every node, since a route's hostname can
+resolve to any node. That means a route published on a `private` (or
+`internal`) network would otherwise be reachable from any interface a node
+has, including a public one. To prevent that, every route built from a
+network with a subnet (`internal` or `private`) only accepts a connection
+whose real TCP peer address falls inside that subnet; anything else gets
+`403`. A route on a `public` network has no subnet and so no restriction —
+it is meant to be reachable from anywhere.
+
+This is a check on the actual socket peer, not a header, so it cannot be
+spoofed by a client claiming a different address. It applies uniformly to
+stack routes, static backends, redirects and the dashboard. There is no
+per-route opt-out and no forward-auth layer yet; both are deliberately out of
+scope for now.
+
+## Redirects
+
+Simple host/URL redirects are managed entirely from the web ui, not
+`cluster.yaml` — they are expected to change often enough that editing the
+config file for each one would be annoying. A redirect rule is a source
+`host` (optionally with a `path_prefix`) on a given `network`, a destination
+`target` URL, whether to append the original path and query
+(`preserve_path`), and a status code (`301`/`302`/`307`/`308`). A matching
+request gets a `Location` response built from the rule and never reaches a
+backend at all. Rules are stored in replicated state under a reserved config
+name (see `cl_api::redirects`) and exposed at `/api/redirects`
+(`GET`/`POST`/`PUT /{id}`/`DELETE /{id}`, admin only to write).
+
 ## Middlewares
 
 Applied in this fixed order, regardless of the order they're listed in the
@@ -84,6 +182,9 @@ stack file:
 3. **`basic_auth`** — challenges the request with HTTP basic auth, short
    circuiting with 401 on failure.
 4. **`headers`** — adds or removes headers on the proxied request.
+5. **`cors`** — see below. Answers a preflight directly; adds
+   `Access-Control-Allow-*` to a real request's response when its `Origin` is
+   allowed.
 
 `basic_auth` credentials and the `headers` additions/removals are not yet
 modeled in `cl-config` (`Middleware` there is a bare enum tag with no
@@ -94,6 +195,35 @@ for their parameters exists, the proxy wires them as no-ops: a route that
 lists `basic_auth` or `headers` is accepted but currently enforces nothing
 extra. This is a known gap, not an oversight, tracked against the day
 `ProxyRoute` grows per-middleware config.
+
+### CORS
+
+Unlike `basic_auth`/`headers`, `cors` does carry its settings and is fully
+enforced, since cross-origin access control is a property of the stack's own
+application. Declared on a service's proxy route in the stack file:
+
+```yaml
+x-clouduler:
+  proxy:
+    - host: api
+      network: wan
+      port: 80
+      middlewares:
+        - cors:
+            origins: ["https://app.example.com"]
+            methods: [GET, POST]        # default: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS
+            headers: []                 # empty echoes the browser's Access-Control-Request-Headers
+            allow_credentials: false
+            max_age: 10m
+```
+
+An `OPTIONS` preflight (one carrying `Access-Control-Request-Method`) is
+answered directly with the allow headers and never reaches the backend. A
+real request gets the same headers added to whatever the backend returned,
+when its `Origin` matches (`origins: ["*"]` matches any). `allow_credentials`
+cannot be combined with a wildcard origin — browsers reject that pairing, so
+it is rejected at stack validation time instead of failing confusingly at
+request time.
 
 ## Forwarded headers
 
@@ -121,6 +251,33 @@ responds `101 Switching Protocols`, takes both the client and backend
 connections out of HTTP handling (`hyper::upgrade::on`) and splices the two
 raw byte streams together with `tokio::io::copy_bidirectional`. If the
 backend does not upgrade, its normal response is relayed as-is.
+
+## DNS records
+
+Every hostname the reverse proxy answers for — stack routes, static
+backends, redirects — plus the web ui's own address needs an actual DNS
+record pointing somewhere, or nothing but a certificate exists for it.
+`clouduler::proxy::run_dns_reconcile` publishes these automatically: every 60
+seconds, on the leader only, it computes the desired record set from
+`ClusterConfig` and replicated state (`cl_dns::records_for`/`plan`/`apply`),
+diffs it against each Cloudflare zone's live records, and converges. Gated
+only on a `cloudflare` section with a readable token being present — unlike
+certificate issuance, it does not additionally require `proxy.acme.enabled`,
+since a plain A record has nothing to do with TLS.
+
+Because every node runs the reverse proxy and forwards internally, a
+hostname's records point at **every** node's address on the declared
+network, not just the node a stack's containers happen to be placed on —
+`n1.example.com` failing does not need `blog.example.com`'s DNS to change
+for `n2` to keep answering it. Records are tagged with an ownership TXT
+record the same way `cl_dns::reconcile` always has, so a zone can be shared
+with records clouduler doesn't manage.
+
+Applied changes are also written to replicated state
+(`Request::UpsertDnsRecord`/`RemoveDnsRecord`), which is what the ui's
+Certificates & DNS page reads (`GET /api/dns`) — that page was reading real
+state from day one, but nothing was ever writing to it until this loop
+existed to do so.
 
 ## Certificates
 
@@ -153,8 +310,16 @@ fallback is already cached.
 2. For each pending authorization, fetch the `dns-01` challenge, compute its
    key authorization digest, and call `cl_dns::set_challenge` to create the
    `_acme-challenge.<domain>` TXT record.
-3. `cl_dns::await_propagation` polls Cloudflare's own API until that record
-   is visible, then the challenge is marked ready.
+3. `cl_dns::await_propagation` confirms the record is visible two ways before
+   the challenge is marked ready: first a quick poll of Cloudflare's own API
+   (fails fast if the record was never created), then a poll of the zone's
+   actual authoritative nameservers, resolved fresh and queried directly
+   rather than through a possibly cache-poisoned recursive resolver. The
+   first check alone used to be treated as "propagated," but a Cloudflare API
+   write can land in their control plane several seconds before it's visible
+   on the edge network the CA actually queries, which read as a real,
+   repeatable "order not ready: Invalid" failure — Let's Encrypt had already
+   attempted and failed the DNS-01 lookup by the time we asked it to.
 4. Once every authorization is satisfied, poll the order to `Ready`,
    finalize it (which generates the certificate key and CSR internally via
    `instant-acme`), and poll for the issued chain.
