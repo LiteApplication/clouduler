@@ -2,9 +2,9 @@
 // a phone the sidebar becomes an off-canvas drawer with a top bar and a
 // bottom tab bar for the destinations an operator reaches most often.
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { useClusterStore } from '../state/store';
+import { useClusterState, useClusterStore } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Icon, type IconName } from './Icon';
 import { CONFIG_GROUPS, CONFIG_PAGES } from '../views/config/pages';
@@ -28,35 +28,24 @@ type SubmenuEntry =
   | { heading: string }
   | { to: string; label: string; icon: IconName; keys?: string[] };
 
-const LINKS: NavItem[] = [
-  { to: '/', label: 'Overview', short: 'Home', icon: 'overview', end: true, tab: true },
-  { to: '/nodes', label: 'Nodes', short: 'Nodes', icon: 'nodes', tab: true },
-  { to: '/stacks', label: 'Stacks', short: 'Stacks', icon: 'stacks', tab: true },
-  { to: '/instances', label: 'Instances', short: 'Instances', icon: 'instances', tab: true },
-  { to: '/configs-secrets', label: 'Configs & Secrets', short: 'Secrets', icon: 'secrets' },
-  { to: '/drives', label: 'Drives & Volumes', short: 'Drives', icon: 'drives' },
-  {
-    to: '/configuration',
-    label: 'Configuration',
-    short: 'Config',
-    icon: 'settings',
-    submenu: [
-      ...CONFIG_GROUPS.flatMap((group) => [
-        { heading: group } as SubmenuEntry,
-        ...CONFIG_PAGES.filter((p) => p.group === group).map((p) => ({
-          to: `/configuration/${p.slug}`,
-          label: p.label,
-          icon: p.icon,
-          keys: p.keys,
-        })),
-      ]),
-      { to: '/configuration/review', label: 'Review', icon: 'check-circle' as IconName },
-    ],
-  },
-  { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
-  { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },
-  { to: '/self-update', label: 'Self-update', short: 'Update', icon: 'refresh' },
-];
+const CONFIGURATION_LINK: NavItem = {
+  to: '/configuration',
+  label: 'Configuration',
+  short: 'Config',
+  icon: 'settings',
+  submenu: [
+    ...CONFIG_GROUPS.flatMap((group) => [
+      { heading: group } as SubmenuEntry,
+      ...CONFIG_PAGES.filter((p) => p.group === group).map((p) => ({
+        to: `/configuration/${p.slug}`,
+        label: p.label,
+        icon: p.icon,
+        keys: p.keys,
+      })),
+    ]),
+    { to: '/configuration/review', label: 'Review', icon: 'check-circle' as IconName },
+  ],
+};
 
 const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
   { value: 'light', icon: 'sun', label: 'Light theme' },
@@ -66,6 +55,7 @@ const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
 
 export function Layout({ children }: { children: ReactNode }) {
   const { status } = useClusterStore();
+  const cluster = useClusterState();
   const { identity, isAdmin } = useAuth();
   const { choice, setChoice } = useTheme();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -81,7 +71,43 @@ export function Layout({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [drawerOpen]);
 
-  const current = LINKS.find((l) => (l.end ? location.pathname === l.to : location.pathname.startsWith(l.to)));
+  // Each node gets its own submenu entry -- its config (role, ports,
+  // addresses, drives) lives on its detail page now, not a Configuration
+  // subpage, so this is the only place it's reachable besides the table.
+  const nodeNames = useMemo(() => Object.keys(cluster?.nodes ?? {}).sort(), [cluster]);
+
+  const links: NavItem[] = useMemo(
+    () => [
+      { to: '/', label: 'Overview', short: 'Home', icon: 'overview', end: true, tab: true },
+      {
+        to: '/nodes',
+        label: 'Nodes',
+        short: 'Nodes',
+        icon: 'nodes',
+        tab: true,
+        submenu:
+          nodeNames.length > 0
+            ? nodeNames.map((name) => ({
+                to: `/nodes/${encodeURIComponent(name)}`,
+                label: name,
+                icon: 'nodes' as IconName,
+                keys: [`nodes.${name}`],
+              }))
+            : undefined,
+      },
+      { to: '/stacks', label: 'Stacks', short: 'Stacks', icon: 'stacks', tab: true },
+      { to: '/instances', label: 'Instances', short: 'Instances', icon: 'instances', tab: true },
+      { to: '/configs-secrets', label: 'Configs & Secrets', short: 'Secrets', icon: 'secrets' },
+      { to: '/drives', label: 'Drives & Volumes', short: 'Drives', icon: 'drives' },
+      CONFIGURATION_LINK,
+      { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
+      { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },
+      { to: '/self-update', label: 'Self-update', short: 'Update', icon: 'refresh' },
+    ],
+    [nodeNames],
+  );
+
+  const current = links.find((l) => (l.end ? location.pathname === l.to : location.pathname.startsWith(l.to)));
   const live = status === 'open';
 
   return (
@@ -114,7 +140,7 @@ export function Layout({ children }: { children: ReactNode }) {
           </span>
         </NavLink>
 
-        {LINKS.map((link) => {
+        {links.map((link) => {
           const open = link.submenu && location.pathname.startsWith(link.to);
           return (
             <div key={link.to} className="nav-group">
@@ -193,7 +219,7 @@ export function Layout({ children }: { children: ReactNode }) {
       <main className="main">{children}</main>
 
       <nav className="tabbar" aria-label="Primary">
-        {LINKS.filter((l) => l.tab).map((link) => (
+        {links.filter((l) => l.tab).map((link) => (
           <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => `tab${isActive ? ' active' : ''}`}>
             <Icon name={link.icon} />
             {link.short}

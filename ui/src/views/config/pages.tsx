@@ -10,7 +10,6 @@ import {
   DrivesSection,
   FailoverSection,
   NetworksSection,
-  NodesSection,
   ProxySection,
   SecretsSection,
   WebSection,
@@ -60,15 +59,6 @@ export const CONFIG_PAGES: ConfigPage[] = [
     group: 'Network & Access',
     keys: ['networks'],
     Component: NetworksSection,
-  },
-  {
-    slug: 'nodes',
-    label: 'Nodes',
-    icon: 'nodes',
-    blurb: 'Per-node role, ports, addresses and drive mounts.',
-    group: 'Network & Access',
-    keys: ['nodes'],
-    Component: NodesSection,
   },
   {
     slug: 'web',
@@ -126,8 +116,17 @@ export const CONFIG_PAGES: ConfigPage[] = [
   },
 ];
 
-/** Page owning a given diff path, so Review can link straight to its editor. */
+/** Page owning a given diff path, so Review can link straight to its editor.
+ *  A `nodes.<name>.*` path has no page of its own -- that config now lives on
+ *  the node's own detail page -- so it never matches here; see
+ *  `nodePathTarget` for that case. */
 export function pageForPath(path: string): ConfigPage | undefined {
   const top = path.split('.')[0];
   return CONFIG_PAGES.find((p) => p.keys.includes(top));
+}
+
+/** The node detail route owning a `nodes.<name>.*` diff path, if any. */
+export function nodePathTarget(path: string): string | undefined {
+  const match = /^nodes\.([^.]+)/.exec(path);
+  return match ? `/nodes/${encodeURIComponent(match[1])}` : undefined;
 }

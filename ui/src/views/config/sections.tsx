@@ -32,6 +32,12 @@ export interface SectionProps {
   draft: ClusterConfig;
   setDraft: (c: ClusterConfig) => void;
   disabled: boolean;
+  /** The config as last fetched from the cluster, before any staged edits.
+   *  Lets a section tell an already-applied network from one that only
+   *  exists in the unsaved draft (e.g. just added by "Add network"), which
+   *  a rename against the live `/api/config/networks/{name}/rename` cannot
+   *  know about yet. */
+  original: ClusterConfig;
 }
 
 export function ClusterSection({ draft, setDraft, disabled }: SectionProps) {
@@ -77,7 +83,7 @@ function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newName: st
   };
 }
 
-export function NetworksSection({ draft, setDraft, disabled }: SectionProps) {
+export function NetworksSection({ draft, setDraft, disabled, original }: SectionProps) {
   const entries = Object.entries(draft.networks);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -110,6 +116,18 @@ export function NetworksSection({ draft, setDraft, disabled }: SectionProps) {
   const submitRename = async (oldName: string) => {
     const newName = renameValue.trim();
     if (!newName || newName === oldName) {
+      setRenaming(null);
+      return;
+    }
+    if (draft.networks[newName]) {
+      setRenameError(`a network named ${newName} already exists`);
+      return;
+    }
+    // A network only "Add network" staged, never applied, exists nowhere the
+    // server knows to rename -- renaming it is just a local key swap on the
+    // draft, the same as `addNetwork` picking the name in the first place.
+    if (!(oldName in original.networks)) {
+      setDraft(renameNetworkInDraft(draft, oldName, newName));
       setRenaming(null);
       return;
     }
@@ -296,38 +314,10 @@ export function DrivesSection({ draft, setDraft, disabled }: SectionProps) {
   );
 }
 
-export function NodesSection({ draft, setDraft, disabled }: SectionProps) {
-  const entries = Object.entries(draft.nodes);
-
-  const update = (name: string, patch: Partial<NodeConfig>) => {
-    setDraft({ ...draft, nodes: { ...draft.nodes, [name]: { ...draft.nodes[name], ...patch } } });
-  };
-
-  const remove = (name: string) => {
-    const next = { ...draft.nodes };
-    delete next[name];
-    setDraft({ ...draft, nodes: next });
-  };
-
-  return (
-    <>
-      {entries.map(([name, node]) => (
-        <NodeCard
-          key={name}
-          name={name}
-          node={node}
-          networks={draft.networks}
-          onChange={(patch) => update(name, patch)}
-          onRemove={() => remove(name)}
-          disabled={disabled}
-        />
-      ))}
-      {entries.length === 0 && <p className="muted">No nodes in the config yet.</p>}
-    </>
-  );
-}
-
-function NodeCard({
+/** A node's config-level card: role, ports, addresses and drive mounts. Used
+ *  standalone on a node's detail page (see `NodeDetail`), scoped to just that
+ *  one node rather than listed alongside every other node. */
+export function NodeCard({
   name,
   node,
   networks,
@@ -440,12 +430,19 @@ function NodeCard({
               open_ports: pub.open_ports ?? [],
               ...patch,
             };
-            const empty = !merged.ipv4 && !merged.ipv6 && !merged.domain;
+            const empty = !merged.ipv4 && !merged.ipv6 && !merged.domain && merged.open_ports.length === 0;
             setAddress(netName, empty ? null : merged);
           };
           return (
             <div key={netName} className="card" style={{ marginBottom: 8 }}>
-              <strong>{netName}</strong> <span className="faint">(public)</span>
+              <div className="section-head">
+                <strong>{netName}</strong> <span className="faint">(public)</span>
+                {!disabled && addr !== undefined && (
+                  <button className="danger" onClick={() => setAddress(netName, null)}>
+                    <Icon name="trash" /> Remove
+                  </button>
+                )}
+              </div>
               <TextField
                 id={`node-${name}-${netName}-ipv4`}
                 label="IPv4"
@@ -479,14 +476,26 @@ function NodeCard({
         }
         const ip = typeof addr === 'string' ? addr : '';
         return (
-          <IpField
-            key={netName}
-            id={`node-${name}-${netName}-ip`}
-            label={`${netName} (${net.type})`}
-            value={ip}
-            onChange={(v) => setAddress(netName, v || null)}
-            disabled={disabled}
-          />
+          <div key={netName} className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
+            <div style={{ flex: 1 }}>
+              <IpField
+                id={`node-${name}-${netName}-ip`}
+                label={`${netName} (${net.type})`}
+                value={ip}
+                onChange={(v) => setAddress(netName, v || null)}
+                disabled={disabled}
+              />
+            </div>
+            {!disabled && net.type !== 'internal' && addr !== undefined && (
+              <button
+                className="danger"
+                onClick={() => setAddress(netName, null)}
+                aria-label={`remove ${netName} from ${name}`}
+              >
+                <Icon name="trash" /> Remove
+              </button>
+            )}
+          </div>
         );
       })}
 
@@ -519,6 +528,7 @@ function OpenPortsEditor({
   onChange: (ports: OpenPort[]) => void;
   disabled: boolean;
 }) {
+  const [adding, setAdding] = useState(false);
   const [port, setPort] = useState(0);
   const [protocol, setProtocol] = useState<PortProtocol>('tcp');
 
@@ -526,6 +536,7 @@ function OpenPortsEditor({
     if (!port || ports.some((p) => p.port === port && p.protocol === protocol)) return;
     onChange([...ports, { port, protocol }].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol)));
     setPort(0);
+    setAdding(false);
   };
 
   const remove = (target: OpenPort) => {
@@ -548,7 +559,12 @@ function OpenPortsEditor({
           )}
         </div>
       ))}
-      {!disabled && (
+      {!disabled && !adding && (
+        <button type="button" onClick={() => setAdding(true)}>
+          <Icon name="plus" /> Add port
+        </button>
+      )}
+      {!disabled && adding && (
         <div className="flex-row" style={{ gap: 8 }}>
           <PortField id={`${idPrefix}-open-port`} label="Port" value={port} onChange={setPort} disabled={disabled} />
           <SelectField
@@ -563,7 +579,10 @@ function OpenPortsEditor({
             disabled={disabled}
           />
           <button type="button" onClick={add} disabled={!port}>
-            <Icon name="plus" /> Add
+            <Icon name="check" /> Add
+          </button>
+          <button type="button" onClick={() => setAdding(false)}>
+            Cancel
           </button>
         </div>
       )}

@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { NodeDetail as NodeDetailT, LogLine } from '../api/types';
+import type { LogLine, NodeAddress, NodeDetail as NodeDetailT } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { formatBytes, formatUptime } from '../lib/format';
 import { useEventSource } from '../hooks/useEventSource';
 import { Icon } from '../components/Icon';
+import { useConfigApply, useConfigDraft } from './config/draft';
+import { PendingBanner } from './config/PendingBanner';
+import { NodeCard } from './config/sections';
 
 export function NodeDetail() {
   const { name = '' } = useParams();
@@ -17,6 +20,18 @@ export function NodeDetail() {
   const [detail, setDetail] = useState<NodeDetailT | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showLogs, setShowLogs] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const { original, draft, setDraft, reload } = useConfigDraft();
+  const {
+    errors: configErrors,
+    pending,
+    busy,
+    apply,
+    confirm: confirmConfig,
+    rollback: rollbackConfig,
+    clearErrors,
+  } = useConfigApply(reload);
+  const [rollbackAfter, setRollbackAfter] = useState(60);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,6 +59,27 @@ export function NodeDetail() {
     } catch (e) {
       alert(e instanceof ApiError ? e.message : 'failed to decommission');
     }
+  };
+
+  const configNode = draft?.nodes[name];
+
+  const startEditing = () => {
+    clearErrors();
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    // Drop just this node's staged edits, in case the operator changed their
+    // mind -- other unrelated staged edits elsewhere in the draft stay put.
+    if (original && draft) setDraft({ ...draft, nodes: { ...draft.nodes, [name]: original.nodes[name] } });
+    clearErrors();
+    setEditing(false);
+  };
+
+  const save = async () => {
+    if (!draft) return;
+    const ok = await apply(draft, `${rollbackAfter}s`);
+    if (ok) setEditing(false);
   };
 
   if (!node) {
@@ -156,6 +192,180 @@ export function NodeDetail() {
       <div className="section">
         <div className="section-head">
           <h2>
+            <Icon name="settings" /> Configuration
+          </h2>
+          {isAdmin && !editing && configNode && (
+            <button onClick={startEditing}>
+              <Icon name="edit" /> Edit
+            </button>
+          )}
+        </div>
+
+        {pending?.armed && <PendingBanner pending={pending} onConfirm={confirmConfig} onRollback={rollbackConfig} />}
+
+        {draft && !configNode && (
+          <p className="muted">This node is not in the cluster config yet.</p>
+        )}
+        {!draft && (
+          <p className="loading">
+            <span className="spinner" /> Loading configuration...
+          </p>
+        )}
+
+        {configNode && !editing && (
+          <>
+            <div className="card-grid">
+              <div className="card stat">
+                <span className="stat-head">
+                  <Icon name="crown" />
+                  <span className="stat-label">Role</span>
+                </span>
+                <span className="stat-value">{configNode.role}</span>
+              </div>
+              <div className="card stat">
+                <span className="stat-head">
+                  <Icon name="network" />
+                  <span className="stat-label">RPC port</span>
+                </span>
+                <span className="stat-value">{configNode.rpc_port}</span>
+              </div>
+              <div className="card stat">
+                <span className="stat-head">
+                  <Icon name="drives" />
+                  <span className="stat-label">Data dir</span>
+                </span>
+                <span className="stat-value mono">{configNode.data_dir ?? 'cluster default'}</span>
+              </div>
+              <div className="card stat">
+                <span className="stat-head">
+                  <Icon name="key" />
+                  <span className="stat-label">Creates cluster key</span>
+                </span>
+                <span className="stat-value">
+                  {configNode.generate_secret_key === null || configNode.generate_secret_key === undefined
+                    ? 'follows cluster setting'
+                    : configNode.generate_secret_key
+                      ? 'yes'
+                      : 'never'}
+                </span>
+              </div>
+            </div>
+
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Network</th>
+                    <th>Address</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(configNode.network).map(([net, addr]) => (
+                    <tr key={net}>
+                      <td>{net}</td>
+                      <td className="mono">{describeAddress(addr)}</td>
+                    </tr>
+                  ))}
+                  {Object.keys(configNode.network).length === 0 && (
+                    <tr>
+                      <td colSpan={2} className="empty-cell">
+                        no networks configured
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="table-wrap" style={{ marginTop: 12 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Drive</th>
+                    <th>Local path</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(configNode.drives).map(([drive, path]) => (
+                    <tr key={drive}>
+                      <td>{drive}</td>
+                      <td className="mono">{path}</td>
+                    </tr>
+                  ))}
+                  {Object.keys(configNode.drives).length === 0 && (
+                    <tr>
+                      <td colSpan={2} className="empty-cell">
+                        no drives configured
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        {configNode && editing && draft && (
+          <>
+            <NodeCard
+              name={name}
+              node={configNode}
+              networks={draft.networks}
+              onChange={(patch) =>
+                setDraft({ ...draft, nodes: { ...draft.nodes, [name]: { ...configNode, ...patch } } })
+              }
+              onRemove={() => {
+                if (!confirm(`Remove ${name} from the cluster config? This does not decommission it.`)) return;
+                const next = { ...draft.nodes };
+                delete next[name];
+                setDraft({ ...draft, nodes: next });
+              }}
+              disabled={!isAdmin || busy}
+            />
+            {configErrors.length > 0 && (
+              <div className="banner banner-bad" role="alert">
+                <Icon name="alert" />
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {configErrors.map((e, i) => (
+                    <li key={i}>
+                      {e.path && <span className="mono">{e.path}</span>}
+                      {e.path && ': '}
+                      {e.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="btn-row">
+              <label
+                className="rollback-after"
+                title="If this edit affects networks, nodes, the web ui, the reverse proxy or Cloudflare, saving arms an auto-rollback timer."
+              >
+                <Icon name="clock" /> Rollback after
+                <input
+                  type="number"
+                  min={5}
+                  max={3600}
+                  value={rollbackAfter}
+                  onChange={(e) => setRollbackAfter(Math.max(5, Number(e.target.value) || 60))}
+                  disabled={busy}
+                />
+                s
+              </label>
+              <button onClick={cancelEditing} disabled={busy}>
+                <Icon name="restart" /> Cancel
+              </button>
+              <button className="primary" onClick={save} disabled={busy}>
+                <Icon name="upload" /> Save
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="section">
+        <div className="section-head">
+          <h2>
             <Icon name="drives" /> Drives
           </h2>
         </div>
@@ -182,7 +392,7 @@ export function NodeDetail() {
       <div className="section">
         <div className="section-head">
           <h2>
-            <Icon name="network" /> Addresses
+            <Icon name="network" /> RPC address
           </h2>
         </div>
         <div className="card mono">{node.rpc_addr}</div>
@@ -202,6 +412,18 @@ export function NodeDetail() {
       </div>
     </div>
   );
+}
+
+/** Read-only one-line summary of a node's address on one network. */
+function describeAddress(addr: NodeAddress): string {
+  if (typeof addr === 'string') return addr;
+  const ports = addr.open_ports.map((p) => `${p.port}/${p.protocol}`).join(', ');
+  if ('interface' in addr) {
+    return ports ? `${addr.interface} (open: ${ports})` : addr.interface;
+  }
+  const parts = [addr.ipv4, addr.ipv6, addr.domain].filter((v): v is string => !!v);
+  const base = parts.length > 0 ? parts.join(', ') : '(no address set)';
+  return ports ? `${base} — open: ${ports}` : base;
 }
 
 function NodeLogs({ name }: { name: string }) {

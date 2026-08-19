@@ -7,7 +7,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api, ApiError } from '../../api/client';
-import type { ClusterConfig } from '../../api/types';
+import type { ClusterConfig, PendingConfig, ValidationError } from '../../api/types';
 import { diffConfig, type DiffEntry } from '../../lib/configDiff';
 import { normalizeConfig } from '../../lib/configNormalize';
 
@@ -33,7 +33,10 @@ export function ConfigDraftProvider({ children }: { children: ReactNode }) {
   const [original, setOriginal] = useState<ClusterConfig | null>(null);
   const [draft, setDraft] = useState<ClusterConfig | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const onConfigPage = useLocation().pathname.startsWith('/configuration');
+  // Node detail pages also edit a slice of this same config (see
+  // `NodeCard` on `NodeDetail`), so they need the draft loaded too.
+  const pathname = useLocation().pathname;
+  const onConfigPage = pathname.startsWith('/configuration') || pathname.startsWith('/nodes/');
 
   const reload = useCallback(() => {
     api
@@ -75,4 +78,80 @@ export function useConfigDraft(): ConfigDraftValue {
 /** How many staged changes fall under the given top-level config keys. */
 export function changesFor(diff: DiffEntry[], keys: string[]): number {
   return diff.filter((d) => keys.some((k) => d.path === k || d.path.startsWith(`${k}.`))).length;
+}
+
+export interface ConfigApply {
+  errors: ValidationError[];
+  pending: PendingConfig | null;
+  busy: boolean;
+  validate: (config: ClusterConfig) => Promise<boolean>;
+  apply: (config: ClusterConfig, rollbackAfter: string) => Promise<boolean>;
+  confirm: () => Promise<void>;
+  rollback: () => Promise<void>;
+  clearErrors: () => void;
+}
+
+/**
+ * Validate/apply/confirm/rollback against `/api/config`, plus the pending
+ * rollback timer poll -- shared by `Configuration` (the whole draft) and
+ * `NodeDetail` (just one node's slice of it), since both submit the same
+ * `ClusterConfig` through the same connection-sensitive-edit safety net.
+ */
+export function useConfigApply(reload: () => void): ConfigApply {
+  const [errors, setErrors] = useState<ValidationError[]>([]);
+  const [pending, setPending] = useState<PendingConfig | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Poll for an armed rollback timer, ours or someone else's, so a page
+  // reload mid-window still shows the countdown instead of hiding it.
+  useEffect(() => {
+    const check = () => api.pendingConfiguration().then(setPending).catch(() => {});
+    check();
+    const id = setInterval(check, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const validate = useCallback(async (config: ClusterConfig) => {
+    try {
+      const result = await api.validateConfiguration(config);
+      setErrors(result.errors);
+      return result.valid;
+    } catch (e) {
+      setErrors([{ path: '', message: e instanceof ApiError ? e.message : 'validation failed' }]);
+      return false;
+    }
+  }, []);
+
+  const apply = useCallback(
+    async (config: ClusterConfig, rollbackAfter: string) => {
+      setBusy(true);
+      try {
+        const ok = await validate(config);
+        if (!ok) return false;
+        await api.applyConfiguration(config, rollbackAfter);
+        setPending(await api.pendingConfiguration());
+        return true;
+      } catch (e) {
+        setErrors([{ path: '', message: e instanceof ApiError ? e.message : 'apply failed' }]);
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [validate],
+  );
+
+  const confirm = useCallback(async () => {
+    await api.confirmConfiguration();
+    setPending(await api.pendingConfiguration());
+    reload();
+  }, [reload]);
+
+  const rollback = useCallback(async () => {
+    await api.rollbackConfiguration();
+    setPending(await api.pendingConfiguration());
+    reload();
+  }, [reload]);
+
+  return { errors, pending, busy, validate, apply, confirm, rollback, clearErrors: () => setErrors([]) };
 }
