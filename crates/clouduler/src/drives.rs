@@ -4,17 +4,22 @@
 //! node's config says it implements:
 //!
 //! - a bulk transfer listener, so peers can pull manifests and deltas for the
-//!   replicated volumes this node holds;
+//!   replicated volumes this node holds, and so a served drive's other
+//!   `served_by` candidates can pull the backup copy `SyncScheduler` pushes
+//!   them;
 //! - a sync scheduler, walking those volumes and pushing changes out on each
 //!   drive's interval;
-//! - for served drives, either the server (on the node named `served_by`) or a
-//!   FUSE mount of it (on every other node implementing the drive).
+//! - for served drives, the server runs on every `served_by` candidate (only
+//!   the active one is actually pointed at by mounting clients), and a FUSE
+//!   mount of whichever candidate is currently active runs on every other
+//!   node implementing the drive. A background watcher repoints those mounts
+//!   when the active candidate changes.
 //!
 //! A node implementing nothing starts none of it and that is a normal setup,
 //! not a degraded one.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,10 +94,13 @@ pub fn start(
         .context("node has no address on the internal network")?;
 
     // Anything this node backs with a real directory has to exist before a
-    // container tries to bind mount it. Served drives are excluded: their
-    // local path is a mountpoint, created by the mount step below.
+    // container tries to bind mount it. A drive this node only mounts is
+    // excluded: its local path is a mountpoint, created by the mount step
+    // below, not a directory this node owns.
     for (name, path) in &node.drives {
-        if cfg.drives.get(name).is_some_and(|d| d.is_served()) && cfg.drives[name].served_by.as_deref() != Some(node_name) {
+        let is_served = cfg.drives.get(name).is_some_and(|d| d.is_served());
+        let is_mount_only = is_served && !cfg.drives[name].served_by.iter().any(|s| s == node_name);
+        if is_mount_only {
             continue;
         }
         if let Err(e) = std::fs::create_dir_all(path) {
@@ -100,16 +108,23 @@ pub fn start(
         }
     }
 
-    let replicated: Vec<&String> = node
+    // Every drive this node backs with a real local copy needs the bulk
+    // transfer listener and sync scheduler: a replicated drive's peers pull
+    // deltas from it, and a served drive's other `served_by` candidates do
+    // the same once this node is (or was) the active server.
+    let local_copy: Vec<&String> = node
         .drives
         .keys()
-        .filter(|name| !cfg.drives.get(*name).is_some_and(|d| d.is_served()))
+        .filter(|name| {
+            !cfg.drives.get(*name).is_some_and(|d| d.is_served())
+                || cfg.drives[*name].served_by.iter().any(|s| s == node_name)
+        })
         .collect();
 
-    if !replicated.is_empty() {
+    if !local_copy.is_empty() {
         let addr = SocketAddr::new(internal_ip, drive_port(node.rpc_port));
         let serving = registry.clone();
-        info!(%addr, drives = replicated.len(), "drive transport listening");
+        info!(%addr, drives = local_copy.len(), "drive transport listening");
         drives.tasks.push(tokio::spawn(async move {
             if let Err(e) = transport::serve(addr, serving).await {
                 warn!(error = %e, "drive transport stopped");
@@ -123,30 +138,33 @@ pub fn start(
         }));
     }
 
-    start_served(cfg, node, node_name, &mut drives, internal_ip)?;
+    start_served(cfg, node, node_name, &mut drives, internal_ip, cluster)?;
     Ok(drives)
 }
 
-/// Serve the drives this node holds, and mount the ones it does not.
+/// Serve the drives this node is a `served_by` candidate for (every
+/// candidate runs the server, not just the active one), and mount the drives
+/// it only uses, pointed at whichever candidate is active right now.
 fn start_served(
     cfg: &ClusterConfig,
     node: &Node,
     node_name: &str,
     drives: &mut Drives,
-    internal_ip: std::net::IpAddr,
+    internal_ip: IpAddr,
+    cluster: &Arc<ClusterNode>,
 ) -> Result<()> {
     let mut specs = Vec::new();
+    // Every resolved candidate address per served drive this node mounts,
+    // so the failover watcher can repoint a mount without re-reading `cfg`.
+    let mut candidate_addrs: BTreeMap<String, BTreeMap<String, SocketAddr>> = BTreeMap::new();
 
     for (index, (name, drive)) in cfg.drives.iter().enumerate() {
-        if !drive.is_served() || !node.implements(name) {
+        if !drive.is_served() || !node.implements(name) || drive.served_by.is_empty() {
             continue;
         }
-        let Some(server_name) = drive.served_by.as_deref() else {
-            continue;
-        };
         let local = node.drives[name].clone();
 
-        if server_name == node_name {
+        if drive.served_by.iter().any(|s| s == node_name) {
             let addr = SocketAddr::new(internal_ip, served_port(node.rpc_port, index));
             info!(drive = %name, %addr, path = %local.display(), "serving drive");
             let root = local;
@@ -159,19 +177,28 @@ fn start_served(
             continue;
         }
 
-        let Some(server) = cfg.node(server_name) else {
-            warn!(drive = %name, server = %server_name, "drive is served by a node that is not in the config");
+        let mut addrs = BTreeMap::new();
+        for server_name in &drive.served_by {
+            let Some(server) = cfg.node(server_name) else {
+                warn!(drive = %name, server = %server_name, "drive is served by a node that is not in the config");
+                continue;
+            };
+            let Some(server_ip) = cfg.internal_ip(server) else {
+                warn!(drive = %name, server = %server_name, "the serving node has no internal address");
+                continue;
+            };
+            addrs.insert(server_name.clone(), SocketAddr::new(server_ip, served_port(server.rpc_port, index)));
+        }
+        // Best guess for the mount at startup: the highest priority
+        // candidate that resolved. Wrong only until the failover watcher's
+        // first tick, which corrects it if a lower priority candidate is
+        // actually the one currently reachable.
+        let Some(initial) = drive.served_by.iter().find_map(|s| addrs.get(s).copied()) else {
+            warn!(drive = %name, "none of this drive's serving candidates could be resolved");
             continue;
         };
-        let Some(server_ip) = cfg.internal_ip(server) else {
-            warn!(drive = %name, server = %server_name, "the serving node has no internal address");
-            continue;
-        };
-        specs.push(MountSpec {
-            drive: name.clone(),
-            mountpoint: local,
-            server: SocketAddr::new(server_ip, served_port(server.rpc_port, index)),
-        });
+        specs.push(MountSpec { drive: name.clone(), mountpoint: local, server: initial });
+        candidate_addrs.insert(name.clone(), addrs);
     }
 
     if specs.is_empty() {
@@ -198,11 +225,59 @@ fn start_served(
         Ok(()) => {
             info!(drives = ?names, "mounted served drives");
             drives.mounted = names;
-            drives.mounts = Some(manager);
+            drives.mounts = Some(manager.clone());
+
+            let served_by: BTreeMap<String, Vec<String>> =
+                candidate_addrs.keys().map(|name| (name.clone(), cfg.drives[name].served_by.clone())).collect();
+            let watch_manager = manager.clone();
+            let watch_cluster = cluster.clone();
+            drives.tasks.push(tokio::spawn(async move {
+                watch_active_servers(watch_cluster, watch_manager, served_by, candidate_addrs).await;
+            }));
+            drives.tasks.push(tokio::spawn(async move {
+                manager.supervise(Duration::from_secs(30)).await;
+            }));
         }
         Err(e) => warn!(error = %e, "could not mount the served drives"),
     }
     Ok(())
+}
+
+/// Repoints each served drive's mount at whichever `served_by` candidate is
+/// currently active (the highest priority one that's reachable), so a
+/// mounting node keeps working when the server it was pointed at goes down,
+/// and switches back once a higher priority candidate recovers.
+async fn watch_active_servers(
+    cluster: Arc<ClusterNode>,
+    manager: Arc<MountManager>,
+    served_by: BTreeMap<String, Vec<String>>,
+    candidate_addrs: BTreeMap<String, BTreeMap<String, SocketAddr>>,
+) {
+    let mut current: BTreeMap<String, String> = BTreeMap::new();
+    let mut ticker = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        let state = cluster.state().await;
+
+        for (drive, candidates) in &served_by {
+            let Some(active) = candidates.iter().find(|n| !state.unreachable.contains(*n)) else {
+                // Every candidate is down; leave the mount pointed where it
+                // is, since EIO is exactly the right behaviour and there's
+                // nothing better to switch to.
+                continue;
+            };
+            if current.get(drive) == Some(active) {
+                continue;
+            }
+            let Some(&addr) = candidate_addrs.get(drive).and_then(|m| m.get(active)) else {
+                continue;
+            };
+            if manager.update_server(drive, addr) {
+                info!(drive = %drive, server = %active, %addr, "served drive failed over to a new active server");
+                current.insert(drive.clone(), active.clone());
+            }
+        }
+    }
 }
 
 /// Per drive sync intervals, straight out of the config.

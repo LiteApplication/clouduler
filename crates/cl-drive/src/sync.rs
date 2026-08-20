@@ -7,6 +7,15 @@
 //! per replica, reporting the generation reached back through raft. A guard
 //! keyed by volume id stops two syncs of the same volume overlapping if a
 //! slow sync runs past its own next tick.
+//!
+//! A served drive's volumes go through the same loop, just with a different
+//! notion of "am I the source" and "who are the targets": the source is
+//! whichever candidate `DriveRegistry::active_server` currently names, not
+//! `VolumeState.primary` (which, for a served drive, is the node an
+//! instance happens to run on, not the node holding the data), and the
+//! targets are the drive's other `served_by` candidates, not every node
+//! that implements the drive, since a plain mounting node has no local copy
+//! to sync into.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -121,15 +130,16 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             let now = Instant::now();
 
             for (id, volume) in &state.volumes {
-                if volume.primary != self.registry.node() {
-                    continue;
-                }
                 if !self.registry.implements(&id.drive) {
                     continue;
                 }
-                if self.registry.is_served(&id.drive) {
-                    // One copy, always consistent: periodic delta sync has
-                    // nothing to do for a served drive.
+                let is_served = self.registry.is_served(&id.drive);
+                let is_source = if is_served {
+                    self.registry.active_server(&id.drive, &state.unreachable) == Some(self.registry.node())
+                } else {
+                    volume.primary == self.registry.node()
+                };
+                if !is_source {
                     continue;
                 }
 
@@ -149,12 +159,23 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 }
                 *due_at = now + interval;
 
-                let targets: Vec<ReplicaTarget> = state
-                    .nodes
-                    .iter()
-                    .filter(|(name, n)| *name != self.registry.node() && n.implements(&id.drive))
-                    .map(|(name, n)| ReplicaTarget { node: name.clone(), addr: n.rpc_addr })
-                    .collect();
+                let targets: Vec<ReplicaTarget> = if is_served {
+                    self.registry
+                        .served_candidates(&id.drive)
+                        .iter()
+                        .filter(|name| name.as_str() != self.registry.node())
+                        .filter_map(|name| {
+                            state.nodes.get(name).map(|n| ReplicaTarget { node: name.clone(), addr: n.rpc_addr })
+                        })
+                        .collect()
+                } else {
+                    state
+                        .nodes
+                        .iter()
+                        .filter(|(name, n)| *name != self.registry.node() && n.implements(&id.drive))
+                        .map(|(name, n)| ReplicaTarget { node: name.clone(), addr: n.rpc_addr })
+                        .collect()
+                };
 
                 self.run_one(id.clone(), volume.generation, targets).await;
             }

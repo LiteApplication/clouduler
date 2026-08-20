@@ -263,18 +263,25 @@ pub enum DriveMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Drive {
-    /// How often volumes on this drive replicate to the other implementing
-    /// nodes. Ignored for a served drive, which has only one copy.
+    /// How often this drive syncs. For a replicated drive, how often each
+    /// node's copy syncs to the others. For a served drive, how often the
+    /// active server pushes its data out to the other nodes named in
+    /// `served_by`, so one of them can take over with reasonably current
+    /// data if the active server goes down.
     #[serde(with = "humantime_serde", default = "default_sync_interval")]
     pub sync_interval: Duration,
 
     #[serde(default)]
     pub mode: DriveMode,
 
-    /// Node holding the data for a served drive. The others mount it from
-    /// there; the path they map the drive to is the mountpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub served_by: Option<String>,
+    /// Nodes that can hold the data for a served drive, in priority order.
+    /// The active server is the first of these that is currently reachable;
+    /// the rest keep a synced-to-`sync_interval` backup copy and stand ready
+    /// to take over. Every node named here maps the drive to the real
+    /// directory holding its copy; every other implementing node gets a
+    /// mountpoint instead, always pointed at whichever server is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_by: Vec<String>,
 }
 
 impl Drive {

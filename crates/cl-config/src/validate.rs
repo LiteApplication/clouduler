@@ -236,34 +236,43 @@ impl ClusterConfig {
                 ));
             }
 
-            match (drive.is_served(), &drive.served_by) {
-                (true, None) => {
+            match (drive.is_served(), drive.served_by.is_empty()) {
+                (true, true) => {
                     return Err(ConfigError::invalid(
                         format!("drives.{name}.served_by"),
-                        "a served drive must name the node holding the data",
+                        "a served drive must name at least one node holding the data",
                     ))
                 }
-                (false, Some(_)) => {
+                (false, false) => {
                     return Err(ConfigError::invalid(
                         format!("drives.{name}.served_by"),
                         "only a served drive has a serving node, set mode: served",
                     ))
                 }
-                (true, Some(server)) => {
-                    let Some(node) = self.nodes.get(server) else {
-                        return Err(ConfigError::invalid(
-                            format!("drives.{name}.served_by"),
-                            format!("no node named {server}"),
-                        ));
-                    };
-                    if !node.implements(name) {
-                        return Err(ConfigError::invalid(
-                            format!("drives.{name}.served_by"),
-                            format!("{server} must map {name} to the directory holding the data"),
-                        ));
+                (true, false) => {
+                    let mut seen = std::collections::HashSet::new();
+                    for server in &drive.served_by {
+                        if !seen.insert(server) {
+                            return Err(ConfigError::invalid(
+                                format!("drives.{name}.served_by"),
+                                format!("{server} is listed more than once"),
+                            ));
+                        }
+                        let Some(node) = self.nodes.get(server) else {
+                            return Err(ConfigError::invalid(
+                                format!("drives.{name}.served_by"),
+                                format!("no node named {server}"),
+                            ));
+                        };
+                        if !node.implements(name) {
+                            return Err(ConfigError::invalid(
+                                format!("drives.{name}.served_by"),
+                                format!("{server} must map {name} to the directory holding its copy"),
+                            ));
+                        }
                     }
                 }
-                (false, None) => {}
+                (false, true) => {}
             }
         }
         Ok(())
@@ -802,14 +811,14 @@ cloudflare:
     #[test]
     fn a_served_drive_needs_a_serving_node() {
         let err = parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).unwrap_err();
-        assert!(err.to_string().contains("must name the node holding the data"));
+        assert!(err.to_string().contains("must name at least one node holding the data"));
     }
 
     #[test]
     fn a_replicated_drive_rejects_a_serving_node() {
         let err = parse(&[(
             "fast: { sync_interval: 5m }",
-            "fast: { sync_interval: 5m, served_by: n1 }",
+            "fast: { sync_interval: 5m, served_by: [n1] }",
         )])
         .unwrap_err();
         assert!(err.to_string().contains("only a served drive"));
@@ -819,21 +828,41 @@ cloudflare:
     fn the_serving_node_must_implement_the_drive() {
         let err = parse(&[(
             "fast: { sync_interval: 5m }",
-            "fast: { mode: served, served_by: nowhere }",
+            "fast: { mode: served, served_by: [nowhere] }",
         )])
         .unwrap_err();
         assert!(err.to_string().contains("no node named nowhere"));
     }
 
     #[test]
+    fn a_served_drive_rejects_a_duplicate_server() {
+        let err = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { mode: served, served_by: [n1, n1] }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("is listed more than once"));
+    }
+
+    #[test]
     fn a_served_drive_is_accepted() {
         let cfg = parse(&[(
             "fast: { sync_interval: 5m }",
-            "fast: { mode: served, served_by: n1 }",
+            "fast: { mode: served, served_by: [n1] }",
         )])
         .expect("valid");
         assert!(cfg.drives["fast"].is_served());
-        assert_eq!(cfg.drives["fast"].served_by.as_deref(), Some("n1"));
+        assert_eq!(cfg.drives["fast"].served_by, vec!["n1".to_string()]);
+    }
+
+    #[test]
+    fn a_served_drive_accepts_multiple_backup_servers() {
+        let cfg = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { mode: served, served_by: [n1, n2] }",
+        )])
+        .expect("valid");
+        assert_eq!(cfg.drives["fast"].served_by, vec!["n1".to_string(), "n2".to_string()]);
     }
 
     #[test]

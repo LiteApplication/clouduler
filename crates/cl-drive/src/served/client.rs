@@ -22,7 +22,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -157,7 +157,10 @@ impl<T: Clone> Cache<T> {
 
 /// FUSE filesystem for a mounted served drive.
 pub struct ClientFs {
-    server: SocketAddr,
+    /// Shared so a failover watcher can repoint this mount at a new server
+    /// after the previous one drops out, without needing to reach back
+    /// through `fuser::spawn_mount`, which takes ownership of `self`.
+    server: Arc<Mutex<SocketAddr>>,
     rt: tokio::runtime::Handle,
     conn: AsyncMutex<Option<Connection>>,
     config: ClientConfig,
@@ -178,7 +181,7 @@ impl ClientFs {
 
     pub fn with_config(server: SocketAddr, rt: tokio::runtime::Handle, config: ClientConfig) -> Self {
         Self {
-            server,
+            server: Arc::new(Mutex::new(server)),
             rt,
             conn: AsyncMutex::new(None),
             attrs: Mutex::new(Cache::new(config.ttl)),
@@ -186,6 +189,14 @@ impl ClientFs {
             config,
             inodes: Mutex::new(Inodes::new()),
         }
+    }
+
+    /// A handle to the server address this mount is currently pointed at,
+    /// so the caller can retarget it after handing `self` to
+    /// `fuser::spawn_mount` (which takes ownership) once a served drive's
+    /// active server changes.
+    pub fn server_handle(&self) -> Arc<Mutex<SocketAddr>> {
+        self.server.clone()
     }
 
     fn path_of(&self, ino: u64) -> Option<String> {
@@ -224,7 +235,8 @@ impl ClientFs {
     }
 
     async fn connect(&self) -> io::Result<Connection> {
-        let stream = tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(self.server))
+        let server = *self.server.lock().expect("server addr lock");
+        let stream = tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(server))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect to served drive timed out"))??;
         Ok(frame(stream))

@@ -203,8 +203,8 @@ pub fn drive_definition(mode: DriveMode, server: &str) -> Drive {
         sync_interval: std::time::Duration::from_secs(15 * 60),
         mode,
         served_by: match mode {
-            DriveMode::Served => Some(server.to_string()),
-            DriveMode::Replicated => None,
+            DriveMode::Served => vec![server.to_string()],
+            DriveMode::Replicated => Vec::new(),
         },
     }
 }
@@ -292,7 +292,7 @@ mod tests {
             .insert("bulk".into(), PathBuf::from("/srv/bulk"));
 
         let config = new_cluster(&plan).expect("valid");
-        assert_eq!(config.drives["bulk"].served_by.as_deref(), Some("n1"));
+        assert_eq!(config.drives["bulk"].served_by, vec!["n1".to_string()]);
     }
 
     #[test]

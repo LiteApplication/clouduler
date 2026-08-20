@@ -5,7 +5,7 @@
 //! (reject `..`, empty and absolute components) rather than canonicalizing,
 //! since the target path may not exist yet.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cl_config::ClusterConfig;
@@ -19,8 +19,13 @@ use crate::error::{DriveError, Result};
 pub enum DriveRole {
     /// A replicated drive: this node's copy is kept current by delta sync.
     Replicate,
-    /// A served drive, and this is the node holding the real data.
+    /// A served drive, and this is the currently active server: the first
+    /// node in `served_by` that is reachable.
     Serve,
+    /// A served drive, and this node is one of the other candidates in
+    /// `served_by`: it keeps a synced backup copy but isn't answering
+    /// requests right now, and takes over if the active server drops out.
+    Standby,
     /// A served drive, held by another node; this node mounts it over FUSE.
     Mount,
 }
@@ -29,10 +34,11 @@ pub enum DriveRole {
 pub struct DriveRegistry {
     node: String,
     drives: BTreeMap<String, PathBuf>,
-    /// Serving node for each drive in `served` mode. A drive absent here is
-    /// replicated. Present so `role` can tell serving from mounting without
-    /// every caller having to carry the cluster config around.
-    served_by: BTreeMap<String, String>,
+    /// Candidate serving nodes for each drive in `served` mode, in priority
+    /// order. A drive absent here is replicated. Present so `role` can tell
+    /// serving from mounting without every caller having to carry the
+    /// cluster config around.
+    served_by: BTreeMap<String, Vec<String>>,
 }
 
 impl DriveRegistry {
@@ -45,7 +51,7 @@ impl DriveRegistry {
             .drives
             .iter()
             .filter(|(_, drive)| drive.is_served())
-            .map(|(name, drive)| (name.clone(), drive.served_by.clone().unwrap_or_default()))
+            .map(|(name, drive)| (name.clone(), drive.served_by.clone()))
             .collect();
         Ok(Self {
             node: node.to_string(),
@@ -65,29 +71,47 @@ impl DriveRegistry {
         }
     }
 
-    /// Mark drives as served, mapping each to the node holding its data.
-    /// For tests and standalone tools that build a registry by hand.
-    pub fn with_served_by(mut self, served_by: BTreeMap<String, String>) -> Self {
+    /// Mark drives as served, mapping each to its candidate serving nodes in
+    /// priority order. For tests and standalone tools that build a registry
+    /// by hand.
+    pub fn with_served_by(mut self, served_by: BTreeMap<String, Vec<String>>) -> Self {
         self.served_by = served_by;
         self
     }
 
-    /// Whether this node serves, mounts, or replicates a drive. Unknown
-    /// drives (this node doesn't implement it) come back as `Replicate`,
-    /// same as the default for an ordinary drive; callers that care check
-    /// `implements` first.
-    pub fn role(&self, drive: &str) -> DriveRole {
-        match self.served_by.get(drive) {
-            Some(server) if server == &self.node => DriveRole::Serve,
-            Some(_) => DriveRole::Mount,
-            None => DriveRole::Replicate,
+    /// The candidate serving nodes for a served drive, in priority order. An
+    /// empty slice for a drive this registry doesn't know as served.
+    pub fn served_candidates(&self, drive: &str) -> &[String] {
+        self.served_by.get(drive).map_or(&[], Vec::as_slice)
+    }
+
+    /// The node currently serving a drive: the first candidate not in
+    /// `unreachable`. `None` if every candidate is unreachable, or this
+    /// isn't a served drive.
+    pub fn active_server<'a>(&'a self, drive: &str, unreachable: &BTreeSet<String>) -> Option<&'a str> {
+        self.served_candidates(drive).iter().map(String::as_str).find(|n| !unreachable.contains(*n))
+    }
+
+    /// Whether this node serves, mounts, backs up, or replicates a drive.
+    /// Unknown drives (this node doesn't implement it) come back as
+    /// `Replicate`, same as the default for an ordinary drive; callers that
+    /// care check `implements` first.
+    pub fn role(&self, drive: &str, unreachable: &BTreeSet<String>) -> DriveRole {
+        let candidates = self.served_candidates(drive);
+        if candidates.is_empty() {
+            return DriveRole::Replicate;
+        }
+        if !candidates.iter().any(|n| n == &self.node) {
+            return DriveRole::Mount;
+        }
+        match self.active_server(drive, unreachable) {
+            Some(active) if active == self.node => DriveRole::Serve,
+            _ => DriveRole::Standby,
         }
     }
 
     /// Whether a drive is served (either by this node or another), as
-    /// opposed to replicated. The sync scheduler uses this to skip served
-    /// drives entirely: a served drive has one copy, so periodic delta sync
-    /// makes no sense for it.
+    /// opposed to replicated.
     pub fn is_served(&self, drive: &str) -> bool {
         self.served_by.contains_key(drive)
     }
@@ -259,7 +283,7 @@ mod tests {
     #[test]
     fn role_is_replicate_for_a_drive_with_no_serving_node() {
         let reg = registry();
-        assert_eq!(reg.role("fast"), DriveRole::Replicate);
+        assert_eq!(reg.role("fast", &BTreeSet::new()), DriveRole::Replicate);
         assert!(!reg.is_served("fast"));
     }
 
@@ -269,17 +293,51 @@ mod tests {
             "n1",
             BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
         )
-        .with_served_by(BTreeMap::from([("fast".to_string(), "n1".to_string())]));
-        assert_eq!(serving.role("fast"), DriveRole::Serve);
+        .with_served_by(BTreeMap::from([("fast".to_string(), vec!["n1".to_string()])]));
+        assert_eq!(serving.role("fast", &BTreeSet::new()), DriveRole::Serve);
         assert!(serving.is_served("fast"));
 
         let mounting = DriveRegistry::from_drives(
             "n2",
             BTreeMap::from([("fast".to_string(), PathBuf::from("/mnt/fast"))]),
         )
-        .with_served_by(BTreeMap::from([("fast".to_string(), "n1".to_string())]));
-        assert_eq!(mounting.role("fast"), DriveRole::Mount);
+        .with_served_by(BTreeMap::from([("fast".to_string(), vec!["n1".to_string()])]));
+        assert_eq!(mounting.role("fast", &BTreeSet::new()), DriveRole::Mount);
         assert!(mounting.is_served("fast"));
+    }
+
+    #[test]
+    fn standby_takes_over_when_the_active_server_is_unreachable() {
+        let served_by = BTreeMap::from([("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])]);
+
+        let primary = DriveRegistry::from_drives(
+            "n1",
+            BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
+        )
+        .with_served_by(served_by.clone());
+        let backup = DriveRegistry::from_drives(
+            "n2",
+            BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
+        )
+        .with_served_by(served_by);
+
+        assert_eq!(primary.role("fast", &BTreeSet::new()), DriveRole::Serve);
+        assert_eq!(backup.role("fast", &BTreeSet::new()), DriveRole::Standby);
+        assert_eq!(primary.active_server("fast", &BTreeSet::new()), Some("n1"));
+
+        let n1_down = BTreeSet::from(["n1".to_string()]);
+        assert_eq!(primary.role("fast", &n1_down), DriveRole::Standby);
+        assert_eq!(backup.role("fast", &n1_down), DriveRole::Serve);
+        assert_eq!(primary.active_server("fast", &n1_down), Some("n2"));
+    }
+
+    #[test]
+    fn active_server_is_none_when_every_candidate_is_unreachable() {
+        let reg = DriveRegistry::from_drives("n1", BTreeMap::new())
+            .with_served_by(BTreeMap::from([("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])]));
+        let all_down = BTreeSet::from(["n1".to_string(), "n2".to_string()]);
+        assert_eq!(reg.active_server("fast", &all_down), None);
+        assert_eq!(reg.role("fast", &all_down), DriveRole::Standby);
     }
 
     #[test]

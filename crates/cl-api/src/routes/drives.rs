@@ -23,7 +23,12 @@ pub fn router() -> Router<AppState> {
 struct DriveSummary {
     name: String,
     mode: String,
-    served_by: Option<String>,
+    /// Candidate serving nodes for a served drive, in priority order.
+    served_by: Vec<String>,
+    /// The candidate currently answering requests: the first of `served_by`
+    /// that's reachable. `None` for a replicated drive, or when every
+    /// candidate is unreachable.
+    active_server: Option<String>,
     sync_interval: String,
     /// Nodes that implement this drive, with whether each one is currently
     /// reachable.
@@ -47,6 +52,11 @@ async fn list_drives(_identity: Identity, State(state): State<AppState>) -> Json
                 name: name.clone(),
                 mode: format!("{:?}", drive.mode).to_lowercase(),
                 served_by: drive.served_by.clone(),
+                active_server: drive
+                    .served_by
+                    .iter()
+                    .find(|n| !cluster_state.unreachable.contains(*n))
+                    .cloned(),
                 sync_interval: humantime::format_duration(drive.sync_interval).to_string(),
                 nodes: cluster_state
                     .nodes

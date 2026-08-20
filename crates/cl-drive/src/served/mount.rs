@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::warn;
@@ -65,6 +65,9 @@ fn mount_permission_from(euid: u32, fuse_conf: &Path) -> Result<MountPermission>
 struct ActiveMount {
     spec: MountSpec,
     session: fuser::BackgroundSession,
+    /// Shared with the mount's `ClientFs`, so `update_server` can repoint it
+    /// at a new active server without unmounting.
+    server: Arc<Mutex<SocketAddr>>,
 }
 
 /// Mounts and unmounts every served drive this node uses. One instance per
@@ -110,6 +113,7 @@ impl MountManager {
             .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
 
         let fs = ClientFs::with_config(spec.server, self.rt.clone(), self.config);
+        let server = fs.server_handle();
         let options = vec![
             fuser::MountOption::FSName(format!("clouduler-{}", spec.drive)),
             fuser::MountOption::Subtype("clouduler".into()),
@@ -132,8 +136,26 @@ impl MountManager {
         let session = fuser::spawn_mount(fs, &spec.mountpoint, &session_config)
             .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
 
-        self.mounts.lock().expect("mount table lock").insert(spec.drive.clone(), ActiveMount { spec, session });
+        self.mounts.lock().expect("mount table lock").insert(spec.drive.clone(), ActiveMount { spec, session, server });
         Ok(())
+    }
+
+    /// Repoint an already-mounted drive at a new server address, for when a
+    /// served drive's active server has failed over to a different node.
+    /// The next request the mount makes reconnects to the new address; the
+    /// FUSE session itself is untouched. A no-op (returns `false`) if
+    /// `drive` isn't currently mounted.
+    pub fn update_server(&self, drive: &str, addr: SocketAddr) -> bool {
+        let mut mounts = self.mounts.lock().expect("mount table lock");
+        let Some(active) = mounts.get_mut(drive) else {
+            return false;
+        };
+        *active.server.lock().expect("server addr lock") = addr;
+        // Kept in step so a later remount (triggered by the session dying,
+        // not by this failover) reconnects to the current server rather
+        // than the one this mount started with.
+        active.spec.server = addr;
+        true
     }
 
     /// Unmount one drive. A drive not currently mounted is a no-op, not an
@@ -244,5 +266,13 @@ mod tests {
         let manager = MountManager::new(rt);
         assert!(!manager.is_mounted("fast"));
         assert!(manager.unmount_all().is_ok());
+    }
+
+    #[test]
+    fn update_server_is_a_no_op_for_an_unmounted_drive() {
+        let rt = tokio::runtime::Handle::try_current()
+            .unwrap_or_else(|_| tokio::runtime::Runtime::new().unwrap().handle().clone());
+        let manager = MountManager::new(rt);
+        assert!(!manager.update_server("fast", "127.0.0.1:9000".parse().unwrap()));
     }
 }
