@@ -76,3 +76,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [profile.release]
 lto = "thin"
 strip = true
+
+[profile.dev]
+# Full debug info isn't needed for day-to-day iteration and is the slowest
+# part of a debug build to emit; line tables alone still give useful panic
+# backtraces.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"

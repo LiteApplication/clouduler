@@ -24,6 +24,10 @@ pub struct ObjectRef {
     pub mode: Option<u32>,
     pub uid: Option<String>,
     pub gid: Option<String>,
+    /// Environment variable name to expose the value under, instead of
+    /// mounting it as a file. Mutually exclusive with `target`/`mode`/`uid`/
+    /// `gid`, which only make sense for a file.
+    pub env: Option<String>,
 }
 
 impl ObjectRef {
@@ -34,7 +38,14 @@ impl ObjectRef {
             mode: None,
             uid: None,
             gid: None,
+            env: None,
         }
+    }
+
+    /// True when this reference is exposed as an environment variable rather
+    /// than mounted as a file.
+    pub fn is_env(&self) -> bool {
+        self.env.is_some()
     }
 
     /// Path inside the container for a secret.
@@ -76,6 +87,8 @@ struct LongObjectRef {
     uid: Option<String>,
     #[serde(default)]
     gid: Option<String>,
+    #[serde(default)]
+    env: Option<String>,
 }
 
 /// Compose writes modes as `0444`, which yaml reads as the decimal 444 unless
@@ -123,12 +136,24 @@ impl TryFrom<RawObjectRef> for ObjectRef {
                         ));
                     }
                 }
+                if long.env.is_some()
+                    && (long.target.is_some() || long.mode.is_some() || long.uid.is_some() || long.gid.is_some())
+                {
+                    return Err(
+                        "env cannot be combined with target, mode, uid, or gid: it is not mounted as a file"
+                            .into(),
+                    );
+                }
+                if long.env.as_deref().is_some_and(|e| e.trim().is_empty()) {
+                    return Err("env needs a variable name".into());
+                }
                 Ok(ObjectRef {
                     source: long.source,
                     target: long.target,
                     mode: long.mode.map(Mode::resolve).transpose()?,
                     uid: long.uid,
                     gid: long.gid,
+                    env: long.env,
                 })
             }
         }
@@ -137,7 +162,7 @@ impl TryFrom<RawObjectRef> for ObjectRef {
 
 impl From<ObjectRef> for RawObjectRef {
     fn from(r: ObjectRef) -> Self {
-        if r.target.is_none() && r.mode.is_none() && r.uid.is_none() && r.gid.is_none() {
+        if r.target.is_none() && r.mode.is_none() && r.uid.is_none() && r.gid.is_none() && r.env.is_none() {
             return RawObjectRef::Short(r.source);
         }
         RawObjectRef::Long(LongObjectRef {
@@ -146,6 +171,7 @@ impl From<ObjectRef> for RawObjectRef {
             mode: r.mode.map(|m| Mode::Number(octal_digits(m))),
             uid: r.uid,
             gid: r.gid,
+            env: r.env,
         })
     }
 }

@@ -47,6 +47,14 @@ impl Materialized {
     }
 }
 
+/// What an instance's configs and secrets resolve to: files to bind mount,
+/// and secrets exposed as environment variables instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prepared {
+    pub mounts: Vec<Materialized>,
+    pub env: Vec<(String, String)>,
+}
+
 /// Writes objects out for one instance.
 pub struct Materializer {
     root: PathBuf,
@@ -74,18 +82,19 @@ impl Materializer {
     }
 
     /// Write every config and secret the instance references and return the
-    /// mounts for them.
+    /// mounts and environment variables for them.
     pub fn prepare(
         &self,
         state: &ClusterState,
         instance: &InstanceId,
         configs: &[ObjectRef],
         secrets: &[ObjectRef],
-    ) -> Result<Vec<Materialized>> {
+    ) -> Result<Prepared> {
         let dir = self.instance_dir(instance);
         create_private_dir(&dir)?;
 
         let mut out = Vec::new();
+        let mut env = Vec::new();
 
         for reference in configs {
             let entry = state.configs.get(&reference.source).ok_or_else(|| {
@@ -141,6 +150,17 @@ impl Materializer {
                     reason: e.to_string(),
                 })?;
 
+            if let Some(var) = &reference.env {
+                // Never touches disk: it goes straight into the container's
+                // environment, the same as a value from `environment:`.
+                let value = String::from_utf8(plaintext).map_err(|_| SchedError::BadObject {
+                    name: reference.source.clone(),
+                    reason: "secret is not valid UTF-8, so it cannot be an environment variable".into(),
+                })?;
+                env.push((var.clone(), value));
+                continue;
+            }
+
             out.push(self.write_object(
                 &dir,
                 reference,
@@ -151,7 +171,7 @@ impl Materializer {
             )?);
         }
 
-        Ok(out)
+        Ok(Prepared { mounts: out, env })
     }
 
     fn write_object(
@@ -309,14 +329,16 @@ mod tests {
                     mode: None,
                     uid: None,
                     gid: None,
+                    env: None,
                 }],
                 &[ObjectRef::new("db_password")],
             )
             .expect("prepare");
 
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.mounts.len(), 2);
+        assert!(out.env.is_empty());
 
-        let config = &out[0];
+        let config = &out.mounts[0];
         assert_eq!(
             std::fs::read(&config.host_path).expect("read"),
             b"server { listen 80; }"
@@ -324,7 +346,7 @@ mod tests {
         assert_eq!(config.container_path, PathBuf::from("/etc/nginx/nginx.conf"));
         assert!(config.mount().read_only);
 
-        let secret = &out[1];
+        let secret = &out.mounts[1];
         assert_eq!(std::fs::read(&secret.host_path).expect("read"), b"hunter2");
         // The docker location, so existing images work unchanged.
         assert_eq!(
@@ -392,14 +414,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&out[0].host_path)
+            let mode = std::fs::metadata(&out.mounts[0].host_path)
                 .expect("meta")
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o444, "the requested mode wins");
 
             // The directory itself must not be readable by other users.
-            let parent = out[0].host_path.parent().expect("parent");
+            let parent = out.mounts[0].host_path.parent().expect("parent");
             let dir_mode = std::fs::metadata(parent).expect("meta").permissions().mode();
             assert_eq!(dir_mode & 0o077, 0);
         }
@@ -423,6 +445,7 @@ mod tests {
                     mode: Some(0o400),
                     uid: None,
                     gid: None,
+                    env: None,
                 }],
             )
             .expect("prepare");
@@ -430,7 +453,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&out[0].host_path)
+            let mode = std::fs::metadata(&out.mounts[0].host_path)
                 .expect("meta")
                 .permissions()
                 .mode();
@@ -448,10 +471,10 @@ mod tests {
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
-        assert!(out[0].host_path.exists());
+        assert!(out.mounts[0].host_path.exists());
 
         m.clean(&instance()).expect("clean");
-        assert!(!out[0].host_path.exists());
+        assert!(!out.mounts[0].host_path.exists());
         // Cleaning twice is not an error, the reconcile loop may retry.
         m.clean(&instance()).expect("clean again");
     }
@@ -496,11 +519,70 @@ mod tests {
             .prepare(&state, &instance(), &[ObjectRef::new("nginx_conf")], &[])
             .expect("prepare");
 
-        assert_eq!(first[0].host_path, second[0].host_path);
+        assert_eq!(first.mounts[0].host_path, second.mounts[0].host_path);
         assert_eq!(
-            std::fs::read(&second[0].host_path).expect("read"),
+            std::fs::read(&second.mounts[0].host_path).expect("read"),
             b"server { listen 8080; }"
         );
-        assert_eq!(second[0].revision, 2);
+        assert_eq!(second.mounts[0].revision, 2);
+    }
+
+    #[test]
+    fn a_secret_can_be_exposed_as_an_environment_variable_instead_of_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let out = m
+            .prepare(
+                &state,
+                &instance(),
+                &[],
+                &[ObjectRef {
+                    source: "db_password".into(),
+                    target: None,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    env: Some("DB_PASSWORD".into()),
+                }],
+            )
+            .expect("prepare");
+
+        assert!(out.mounts.is_empty(), "an env secret is not mounted as a file");
+        assert_eq!(out.env, vec![("DB_PASSWORD".to_string(), "hunter2".to_string())]);
+    }
+
+    #[test]
+    fn a_non_utf8_secret_cannot_become_an_environment_variable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let mut state = ClusterState::default();
+        let sealed = Sealed::seal(&key, "binary_secret", &[0xff, 0xfe]).expect("seal");
+        state.apply(&Request::PutSecret {
+            name: "binary_secret".into(),
+            sealed: sealed.blob,
+            key_fingerprint: key.fingerprint(),
+            owner: None,
+        });
+
+        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let err = m
+            .prepare(
+                &state,
+                &instance(),
+                &[],
+                &[ObjectRef {
+                    source: "binary_secret".into(),
+                    target: None,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    env: Some("BINARY_SECRET".into()),
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(err, SchedError::BadObject { .. }));
     }
 }

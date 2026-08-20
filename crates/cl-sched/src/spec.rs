@@ -37,6 +37,7 @@ pub fn build(
     instance: &InstanceId,
     service: &Service,
     objects: &[Materialized],
+    object_env: &[(String, String)],
     drive_roots: &BTreeMap<String, PathBuf>,
     placement: Placement,
     digest: Option<&str>,
@@ -66,6 +67,12 @@ pub fn build(
         .collect();
     mounts.extend(objects.iter().map(|o| o.mount()));
 
+    // Secrets given an `env:` target take priority over a same-named plain
+    // `environment:` entry, since naming one explicitly is the more specific
+    // choice.
+    let mut env: BTreeMap<String, String> = service.environment.clone();
+    env.extend(object_env.iter().cloned());
+
     ContainerSpec {
         name: instance.container_name(),
         // A pinned digest wins, so a restart cannot silently pull something new.
@@ -76,11 +83,7 @@ pub fn build(
         stack: instance.stack.clone(),
         service: instance.service.clone(),
         instance: instance.to_string(),
-        env: service
-            .environment
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        env: env.into_iter().collect(),
         command: service.command.as_ref().map(command_words),
         labels,
         mounts,
@@ -259,7 +262,7 @@ mod tests {
     #[test]
     fn a_minimal_service_builds() {
         let s = service("services:\n  web:\n    image: nginx\n");
-        let spec = build(&instance(), &s, &[], &roots(), Placement::default(), None, 1);
+        let spec = build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1);
 
         assert_eq!(spec.name, "site_web_0");
         assert_eq!(spec.image, "nginx");
@@ -281,7 +284,7 @@ mod tests {
             zone: Some("int.example.com".into()),
             egress_network: None,
         };
-        let spec = build(&instance(), &s, &[], &roots(), placement, None, 1);
+        let spec = build(&instance(), &s, &[], &[], &roots(), placement, None, 1);
 
         assert_eq!(spec.network.as_deref(), Some("site_default"));
         assert_eq!(spec.ip, Some(std::net::Ipv4Addr::new(10, 244, 0, 7)));
@@ -293,7 +296,7 @@ mod tests {
     #[test]
     fn a_digest_pins_the_image() {
         let s = service("services:\n  web:\n    image: nginx:latest\n");
-        let spec = build(&instance(), &s, &[], &roots(), Placement::default(), Some("sha256:abc"), 1);
+        let spec = build(&instance(), &s, &[], &[], &roots(), Placement::default(), Some("sha256:abc"), 1);
         assert_eq!(spec.image, "nginx@sha256:abc");
     }
 
@@ -318,7 +321,7 @@ mod tests {
             revision: 1,
         }];
 
-        let spec = build(&instance(), &s, &objects, &roots(), Placement::default(), None, 1);
+        let spec = build(&instance(), &s, &objects, &[], &roots(), Placement::default(), None, 1);
         assert_eq!(spec.mounts.len(), 1);
         assert!(spec.mounts[0].read_only);
         assert_eq!(spec.mounts[0].container_path, "/etc/nginx/nginx.conf");
@@ -329,7 +332,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    volumes:\n      - \"fast/data:/data\"\n      - \"bulk/backup:/backup:ro\"\n",
         );
-        let spec = build(&instance(), &s, &[], &roots(), Placement::default(), None, 1);
+        let spec = build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1);
 
         assert_eq!(spec.mounts.len(), 2);
         assert_eq!(spec.mounts[0].host_path, "/srv/fast/data");
@@ -344,11 +347,23 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    environment:\n      TZ: UTC\n    labels:\n      team: infra\n",
         );
-        let spec = build(&instance(), &s, &[], &roots(), Placement::default(), None, 3);
+        let spec = build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 3);
 
         assert!(spec.env.contains(&("TZ".to_string(), "UTC".to_string())));
         assert_eq!(spec.labels["team"], "infra");
         assert_eq!(spec.labels[LABEL_REVISION], "3");
+    }
+
+    #[test]
+    fn secret_env_vars_carry_over_and_win_over_plain_environment() {
+        let s = service(
+            "services:\n  web:\n    image: nginx\n    environment:\n      DB_PASSWORD: placeholder\n",
+        );
+        let object_env = vec![("DB_PASSWORD".to_string(), "hunter2".to_string())];
+        let spec = build(&instance(), &s, &[], &object_env, &roots(), Placement::default(), None, 1);
+
+        assert!(spec.env.contains(&("DB_PASSWORD".to_string(), "hunter2".to_string())));
+        assert!(spec.mounts.is_empty(), "an env secret is not also mounted");
     }
 
     #[test]
@@ -363,7 +378,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    deploy:\n      resources:\n        limits:\n          cpus: \"1.5\"\n          memory: 512M\n",
         );
-        let spec = build(&instance(), &s, &[], &roots(), Placement::default(), None, 1);
+        let spec = build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1);
 
         assert_eq!(spec.resources.memory_bytes, Some(512 * 1024 * 1024));
         assert_eq!(spec.resources.nano_cpus, Some(1_500_000_000));
@@ -381,13 +396,13 @@ mod tests {
     fn restart_policies_map_across() {
         let s = service("services:\n  web:\n    image: nginx\n    restart: always\n");
         assert_eq!(
-            build(&instance(), &s, &[], &roots(), Placement::default(), None, 1).restart_policy,
+            build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1).restart_policy,
             RestartPolicy::Always
         );
 
         let s = service("services:\n  web:\n    image: nginx\n");
         assert_eq!(
-            build(&instance(), &s, &[], &roots(), Placement::default(), None, 1).restart_policy,
+            build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1).restart_policy,
             RestartPolicy::No
         );
     }
@@ -397,7 +412,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    healthcheck:\n      disable: true\n",
         );
-        assert!(build(&instance(), &s, &[], &roots(), Placement::default(), None, 1).healthcheck.is_none());
+        assert!(build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1).healthcheck.is_none());
     }
 
     #[test]
@@ -405,7 +420,7 @@ mod tests {
         let s = service(
             "services:\n  web:\n    image: nginx\n    healthcheck:\n      test: curl -f localhost\n      retries: 3\n",
         );
-        let check = build(&instance(), &s, &[], &roots(), Placement::default(), None, 1)
+        let check = build(&instance(), &s, &[], &[], &roots(), Placement::default(), None, 1)
             .healthcheck
             .expect("healthcheck");
         assert_eq!(check.test[0], "CMD-SHELL");

@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useClusterState, useClusterStore } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
+import { api } from '../api/client';
 import { Icon, type IconName } from './Icon';
 import { CONFIG_GROUPS, CONFIG_PAGES } from '../views/config/pages';
 import { changesFor, useConfigDraft } from '../views/config/draft';
@@ -59,7 +60,14 @@ export function Layout({ children }: { children: ReactNode }) {
   const { identity, isAdmin } = useAuth();
   const { choice, setChoice } = useTheme();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [clusterName, setClusterName] = useState<string | null>(null);
   const location = useLocation();
+
+  // The event stream carries raft state, not cluster.yaml, so the name shown
+  // here needs its own one-shot fetch.
+  useEffect(() => {
+    api.getConfiguration().then((cfg) => setClusterName(cfg.cluster.name), () => {});
+  }, []);
 
   // A drawer that survives navigation would cover the page just opened.
   useEffect(() => setDrawerOpen(false), [location.pathname]);
@@ -123,7 +131,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </button>
         <span className="topbar-title">
           <Logo size={26} className="brand-mark" />
-          {current?.label ?? 'clouduler'}
+          {current?.label ?? clusterName ?? 'clouduler'}
         </span>
         <span className="topbar-spacer" />
         <span className={`live-dot ${live ? 'on' : 'off'}`} title={live ? 'live' : status} />
@@ -135,7 +143,7 @@ export function Layout({ children }: { children: ReactNode }) {
         <NavLink to="/" className="sidebar-brand">
           <Logo size={32} className="brand-mark" />
           <span>
-            clouduler
+            {clusterName ?? 'clouduler'}
             <span className="brand-sub">cluster console</span>
           </span>
         </NavLink>

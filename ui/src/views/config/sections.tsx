@@ -341,6 +341,31 @@ export function NodeCard({
     onChange({ network: nextNetwork });
   };
 
+  // Internal is mandatory for every node, so it's always shown. Every other
+  // kind is opt-in per node: only render its editor once explicitly added,
+  // and offer the rest through "Add network" below.
+  const networkEntries = Object.entries(networks);
+  // A wireguard network has no value to write into the draft until its
+  // config is imported (the interface name comes back from that call), so
+  // "adding" one just reveals its import form -- tracked here rather than
+  // in node.network -- until the operator actually imports something.
+  const [pendingWireguard, setPendingWireguard] = useState<string[]>([]);
+  const joinableNetworks = networkEntries.filter(
+    ([netName, net]) => net.type !== 'internal' && !(netName in node.network) && !pendingWireguard.includes(netName),
+  );
+  const [addingNetwork, setAddingNetwork] = useState('');
+
+  const addNetworkDefault = (netName: string) => {
+    const net = networks[netName];
+    if (!net) return;
+    if (net.type === 'wireguard') {
+      setPendingWireguard((prev) => (prev.includes(netName) ? prev : [...prev, netName]));
+      return;
+    }
+    const value: NodeAddress = net.type === 'public' ? { ipv4: null, ipv6: null, domain: null, open_ports: [] } : '';
+    setAddress(netName, value);
+  };
+
   return (
     <div className="card section">
       <div className="section-head">
@@ -400,8 +425,15 @@ export function NodeCard({
       <h4 className="flex-row">
         <Icon name="network" /> Network addresses
       </h4>
-      {Object.entries(networks).map(([netName, net]) => {
+      {networkEntries.map(([netName, net]) => {
         const addr = node.network[netName];
+        if (net.type === 'internal') {
+          // always shown, falls through below
+        } else if (net.type === 'wireguard') {
+          if (!(netName in node.network) && !pendingWireguard.includes(netName)) return null;
+        } else if (!(netName in node.network)) {
+          return null;
+        }
         if (net.type === 'wireguard') {
           const wg: InterfaceAddress | null =
             typeof addr === 'string'
@@ -416,6 +448,9 @@ export function NodeCard({
               netName={netName}
               addr={wg}
               onChange={(v) => setAddress(netName, v ? { interface: v.interface, open_ports: v.open_ports } : null)}
+              onCancel={
+                wg === null ? () => setPendingWireguard((prev) => prev.filter((n) => n !== netName)) : undefined
+              }
               disabled={disabled}
             />
           );
@@ -437,9 +472,14 @@ export function NodeCard({
             <div key={netName} className="card" style={{ marginBottom: 8 }}>
               <div className="section-head">
                 <strong>{netName}</strong> <span className="faint">(public)</span>
-                {!disabled && addr !== undefined && (
-                  <button className="danger" onClick={() => setAddress(netName, null)}>
-                    <Icon name="trash" /> Remove
+                {!disabled && (
+                  <button
+                    className="ghost"
+                    onClick={() => setAddress(netName, null)}
+                    aria-label={`remove ${netName} from ${name}`}
+                    title={`Remove ${netName} from this node`}
+                  >
+                    <Icon name="close" />
                   </button>
                 )}
               </div>
@@ -486,18 +526,47 @@ export function NodeCard({
                 disabled={disabled}
               />
             </div>
-            {!disabled && net.type !== 'internal' && addr !== undefined && (
+            {!disabled && net.type !== 'internal' && (
               <button
-                className="danger"
+                className="ghost"
                 onClick={() => setAddress(netName, null)}
                 aria-label={`remove ${netName} from ${name}`}
+                title={`Remove ${netName} from this node`}
               >
-                <Icon name="trash" /> Remove
+                <Icon name="close" />
               </button>
             )}
           </div>
         );
       })}
+
+      {!disabled && joinableNetworks.length > 0 && (
+        <div className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <SelectField
+              id={`node-${name}-add-network`}
+              label="Add network"
+              value={addingNetwork}
+              onChange={setAddingNetwork}
+              options={[
+                { value: '', label: '(choose a network)' },
+                ...joinableNetworks.map(([netName]) => ({ value: netName, label: netName })),
+              ]}
+              disabled={disabled}
+            />
+          </div>
+          <button
+            onClick={() => {
+              if (!addingNetwork) return;
+              addNetworkDefault(addingNetwork);
+              setAddingNetwork('');
+            }}
+            disabled={!addingNetwork}
+          >
+            <Icon name="plus" /> Add
+          </button>
+        </div>
+      )}
 
       <h4 className="flex-row">
         <Icon name="drives" /> Drives
@@ -602,12 +671,16 @@ function WireguardAddressField({
   netName,
   addr,
   onChange,
+  onCancel,
   disabled,
 }: {
   nodeName: string;
   netName: string;
   addr: InterfaceAddress | null;
   onChange: (addr: InterfaceAddress | null) => void;
+  /** Drops this network from the node before any config has been imported
+   *  for it -- i.e. undoes "Add network" rather than removing a live one. */
+  onCancel?: () => void;
   disabled: boolean;
 }) {
   const [mode, setMode] = useState<'paste' | 'file'>('paste');
@@ -675,7 +748,21 @@ function WireguardAddressField({
 
   return (
     <div className="card" style={{ marginBottom: 8 }}>
-      <strong>{netName}</strong> <span className="faint">(wireguard)</span>
+      <div className="section-head">
+        <span>
+          <strong>{netName}</strong> <span className="faint">(wireguard)</span>
+        </span>
+        {!disabled && onCancel && (
+          <button
+            className="ghost"
+            onClick={onCancel}
+            aria-label={`remove ${netName} from ${nodeName}`}
+            title={`Remove ${netName} from this node`}
+          >
+            <Icon name="close" />
+          </button>
+        )}
+      </div>
       <div className="field">
         <label>Config source</label>
         <div className="segmented" role="tablist">

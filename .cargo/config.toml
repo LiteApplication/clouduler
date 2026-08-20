@@ -1,0 +1,9 @@
+# Local build-speed tuning. Scoped to the host target only, so it does not
+# touch the aarch64 cross-build recipe (see memory: clouduler-piosny-deployment),
+# which sets its own linker via env vars.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[build]
+rustc-wrapper = "sccache"

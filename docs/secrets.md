@@ -2,12 +2,13 @@
 
 Both are cluster objects: they live in the replicated database, so every manager
 holds them and a container can start on any node without anything having been
-copied there by hand. Both are mounted into containers as files.
+copied there by hand. By default, both are mounted into containers as files; a
+secret can instead be exposed as an environment variable.
 
 The difference is that a config is stored as written and a secret is encrypted
 before it ever reaches the database.
 
-## Mounting
+## Mounting as a file
 
 Docker's own configs and secrets are a swarm feature, so clouduler does the same
 job itself: the node writes each object to a file under its data directory and
@@ -31,13 +32,70 @@ services:
         mode: 0400
 ```
 
-The short form is just the object name. The long form sets `target`, `mode`,
-`uid` and `gid`. A bare `0444` is read as octal, as in compose.
+The short form (`- db_password`) is just the object name, using every default
+below. The long form sets any of these fields explicitly:
+
+| Field | Applies to | Default | Meaning |
+|---|---|---|---|
+| `source` | configs, secrets | *(required)* | Name of the cluster object to mount. |
+| `target` | configs, secrets | `/run/secrets/<source>` for a secret, `/<source>` for a config | Absolute path inside the container the file is bind mounted at. |
+| `mode` | configs, secrets | `0444` | Octal file permissions. A bare `0444` is read as octal, as in compose; quoting it (`"0444"`) works too. |
+| `uid` | configs, secrets | unset | Owning user of the file inside the container. |
+| `gid` | configs, secrets | unset | Owning group of the file inside the container. |
+| `env` | secrets only | unset | Environment variable name to expose the secret's value under, instead of mounting a file. See [Exposing a secret as an environment variable](#exposing-a-secret-as-an-environment-variable). |
 
 Mounts are always read only. A container has no business editing the cluster's
 copy of a config, and a writable secret file is a leak waiting to happen. Each
 instance gets its own object directory, mode 0700, and it is removed when the
 container goes away, so a secret does not outlive the container that needed it.
+
+## Exposing a secret as an environment variable
+
+Some images only know how to read configuration from the environment, and
+otherwise need an entrypoint script that shells out to `cat` a file into a
+variable before starting. Give the secret's long form an `env` key instead of
+`target`/`mode`/`uid`/`gid` and clouduler sets the environment variable
+directly, with no wrapper script and no file ever touching disk:
+
+```yaml
+services:
+  headplane:
+    image: ghcr.io/tale/headplane
+    secrets:
+      - source: headplane_cookie_secret
+        env: HEADPLANE_SERVER__COOKIE_SECRET
+      - source: headplane_api_key
+        env: HEADPLANE_HEADSCALE__API_KEY
+      - source: headplane_oidc_client_secret
+        env: HEADPLANE_OIDC__CLIENT_SECRET
+```
+
+This replaces the earlier workaround of writing an entrypoint that does:
+
+```yaml
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export HEADPLANE_SERVER__COOKIE_SECRET="$$(cat /run/secrets/headplane_cookie_secret)"
+        exec /usr/local/bin/node /app/build/server/index.js
+```
+
+| Behavior | File secret (`target`) | Env secret (`env`) |
+|---|---|---|
+| Where the plaintext lands | A file under the node's data directory, bind mounted read only | Nowhere on disk — passed directly into the container's environment |
+| Visible via `docker inspect` / `/proc/<pid>/environ` | No | Yes, like any other environment variable |
+| `target`, `mode`, `uid`, `gid` | Allowed | Rejected — an env secret is not a file, so these have nothing to apply to |
+| Combining with `environment:` on the same name | N/A | The secret's value wins over a same-named entry in the service's `environment:` block |
+| Value encoding | Raw bytes | Must be valid UTF-8; a binary secret given an `env` target fails to deploy |
+
+## Choosing between the two
+
+| | File (default) | Environment variable |
+|---|---|---|
+| Best for | Images that read a path (`cat /run/secrets/x`, a config flag pointing at a file) | Images that only read `process.env` / `os.environ`, with no file-reading option |
+| Exposure | Owner-only file mode, read only, scoped to the one instance | Whole environment, same as `environment:` |
+| Setup | None — matches docker's own convention | None — no entrypoint wrapper needed |
 
 ## Where objects come from
 
