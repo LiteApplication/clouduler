@@ -26,6 +26,10 @@ export interface NodeState {
   arch: string;
   /** Blake3 hash (hex) of the currently running binary. */
   binary_hash: string;
+  /** This node's X25519 public key, base64. Null until it has reported in at
+   *  least once. Lets a key-holding node deliver the cluster key to it
+   *  without the plaintext ever crossing the network. */
+  node_pubkey: string | null;
 }
 
 export interface ResourceUsage {
@@ -157,7 +161,18 @@ export interface ClusterState {
   dns_records: Record<string, DnsRecordState>;
   unreachable: string[];
   overlay: string | null;
+  /** The cluster key, wrapped once per node -- see WrappedKeyEntry. Ciphertext
+   *  only; the plaintext key never appears in this state. */
+  wrapped_keys: Record<string, WrappedKeyEntry>;
   version: number;
+}
+
+/** The cluster secret key, encrypted to one node's public key. */
+export interface WrappedKeyEntry {
+  ephemeral_public: string;
+  sealed: string;
+  key_fingerprint: string;
+  target_pubkey: string;
 }
 
 // ---- /api/status ----
@@ -309,6 +324,8 @@ export interface FailoverConfig {
 export interface SecretsConfig {
   key_file: string;
   generate_if_missing: boolean;
+  /** Path to this node's own asymmetric keypair, generated on first launch. */
+  node_key_file: string;
 }
 
 export interface OidcConfig {

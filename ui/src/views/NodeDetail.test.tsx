@@ -7,7 +7,7 @@ import type { ClusterConfig, ClusterState } from '../api/types';
 
 const cluster: ClusterState = {
   nodes: {
-    n1: { name: 'n1', role: 'manager', rpc_addr: '10.10.0.1:7373', drives: { fast: '/srv/fast' }, availability: 'active', egress_networks: [], networks: ['internal'], open_ports: {}, arch: 'x86_64', binary_hash: '' },
+    n1: { name: 'n1', role: 'manager', rpc_addr: '10.10.0.1:7373', drives: { fast: '/srv/fast' }, availability: 'active', egress_networks: [], networks: ['internal'], open_ports: {}, arch: 'x86_64', binary_hash: '', node_pubkey: null },
   },
   stacks: {},
   assignments: {},
@@ -17,6 +17,7 @@ const cluster: ClusterState = {
   certificates: {},
   dns_records: {},
   unreachable: [],
+  wrapped_keys: {},
   overlay: null,
   version: 1,
 };
@@ -39,7 +40,11 @@ const clusterConfig: ClusterConfig = {
     },
   },
   proxy: { acme: { enabled: false }, enabled: true, http_port: 80, https_port: 443 },
-  secrets: { generate_if_missing: true, key_file: '/etc/clouduler/secrets.key' },
+  secrets: {
+    generate_if_missing: true,
+    key_file: '/etc/clouduler/secrets.key',
+    node_key_file: '/etc/clouduler/node.key',
+  },
   web: { address: 'cloud', backend_port: 8444, network: 'internal', port: 8443, through_proxy: true },
   cloudflare: null,
   self_update: null,

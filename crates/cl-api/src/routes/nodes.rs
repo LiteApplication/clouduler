@@ -164,6 +164,7 @@ async fn add(
             open_ports: Default::default(),
             arch: String::new(),
             binary_hash: String::new(),
+            node_pubkey: None,
         }),
     )
     .await?;

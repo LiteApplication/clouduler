@@ -52,8 +52,9 @@ struct Server {
 }
 
 /// Stand up one node's api on loopback with a self signed certificate, exactly
-/// as a freshly initialised cluster serves it.
-async fn serve(config: &ClusterConfig) -> Server {
+/// as a freshly initialised cluster serves it. `key` stands in for whatever
+/// this node already holds on disk, `None` matching a fresh, keyless node.
+async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Server {
     // main does this at startup; tests never run main.
     crate::install_crypto_provider();
 
@@ -96,6 +97,7 @@ async fn serve(config: &ClusterConfig) -> Server {
             open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
+            node_pubkey: Default::default(),
         }))
         .await
         .expect("seed roster");
@@ -128,7 +130,7 @@ async fn serve(config: &ClusterConfig) -> Server {
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: config.clone(),
         key_path: dir.path().join("secrets.key"),
-        key: None,
+        key,
         tls_cert_pem: cert.cert.pem().into_bytes(),
         tls_key_pem: cert.signing_key.serialize_pem().into_bytes(),
         listen_addr,
@@ -141,6 +143,7 @@ async fn serve(config: &ClusterConfig) -> Server {
             .danger_accept_invalid_certs(true)
             .build()
             .expect("building the test http client"),
+        node_keypair: None,
     })
     .await
     .expect("build api");
@@ -171,7 +174,7 @@ async fn wait_until_listening(addr: SocketAddr) {
 
 #[tokio::test]
 async fn a_node_fetches_the_config_adds_itself_and_the_cluster_keeps_it() {
-    let server = serve(&founding_config()).await;
+    let server = serve(&founding_config(), None).await;
     let peer = super::join::Peer::connect(&server.address, server.token.clone(), None)
         .expect("client");
 
@@ -198,7 +201,7 @@ async fn a_node_fetches_the_config_adds_itself_and_the_cluster_keeps_it() {
 /// every node's copy, not just the one that answered the request.
 #[tokio::test]
 async fn the_pushed_config_lands_in_the_replicated_state() {
-    let server = serve(&founding_config()).await;
+    let server = serve(&founding_config(), None).await;
     let peer = super::join::Peer::connect(&server.address, server.token.clone(), None)
         .expect("client");
 
@@ -222,7 +225,7 @@ async fn the_pushed_config_lands_in_the_replicated_state() {
 /// would vanish from the cluster a minute after joining it.
 #[tokio::test]
 async fn the_join_is_confirmed_so_it_does_not_roll_itself_back() {
-    let server = serve(&founding_config()).await;
+    let server = serve(&founding_config(), None).await;
     let peer = super::join::Peer::connect(&server.address, server.token.clone(), None)
         .expect("client");
 
@@ -246,7 +249,7 @@ async fn the_join_is_confirmed_so_it_does_not_roll_itself_back() {
 
 #[tokio::test]
 async fn a_matching_certificate_pin_is_accepted() {
-    let server = serve(&founding_config()).await;
+    let server = serve(&founding_config(), None).await;
     let peer = super::join::Peer::connect(
         &server.address,
         server.token.clone(),
@@ -259,7 +262,7 @@ async fn a_matching_certificate_pin_is_accepted() {
 
 #[tokio::test]
 async fn a_certificate_that_is_not_the_pinned_one_stops_the_join() {
-    let server = serve(&founding_config()).await;
+    let server = serve(&founding_config(), None).await;
     let wrong = super::join::fingerprint(b"some other certificate");
     let peer =
         super::join::Peer::connect(&server.address, server.token.clone(), Some(wrong)).expect("client");
@@ -269,10 +272,85 @@ async fn a_certificate_that_is_not_the_pinned_one_stops_the_join() {
 
 #[tokio::test]
 async fn a_bad_api_key_is_reported_as_a_bad_api_key() {
-    let server = serve(&founding_config()).await;
+    let server = serve(&founding_config(), None).await;
     let peer = super::join::Peer::connect(&server.address, "cl_nope_nope".into(), None)
         .expect("client");
 
     let error = peer.fetch_config().await.unwrap_err().to_string();
     assert!(error.contains("api key"), "{error}");
+}
+
+/// The whole point of the per-node keypair scheme: a joining node ends up
+/// with a working cluster key without anyone copying a file by hand.
+///
+/// n1 holds the plaintext key from the start (standing in for a founding
+/// node). n2 is represented only at the raft level -- it publishes a real
+/// keypair's public half, exactly as `report_self` would after `n2` actually
+/// joined and started -- and a second `ApiServer` is stood up against that
+/// same shared cluster with `n2`'s private half and no key on disk, standing
+/// in for n2's own daemon. Both servers' background reconciliation loops
+/// (`spawn_wrap_for_new_nodes` on n1, `spawn_unwrap_own_key` on n2) are real,
+/// not mocked, and this proves they actually meet in the middle through raft.
+#[tokio::test]
+async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_step() {
+    let cluster_key = cl_secret::ClusterKey::generate();
+    let expected = cluster_key.encode();
+    let server = serve(&founding_config(), Some(cluster_key)).await;
+
+    let n2_addr = free_addr();
+    let n2_keypair = cl_secret::NodeKeypair::generate();
+    server
+        .cluster
+        .submit(cl_raft::Request::UpsertNode(NodeState {
+            name: "n2".into(),
+            role: ClusterRole::Worker,
+            rpc_addr: n2_addr,
+            drives: BTreeMap::new(),
+            availability: Availability::Active,
+            labels: Default::default(),
+            egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
+            node_pubkey: Some(n2_keypair.public_key_encoded()),
+        }))
+        .await
+        .expect("seed n2's roster entry with a published pubkey");
+
+    let dir = TempDir::new().expect("tempdir");
+    let n2_key_path = dir.path().join("n2-secrets.key");
+    let cert = rcgen::generate_simple_self_signed(vec!["n2.example.com".into()]).expect("cert");
+    let n2_listen_addr = free_addr();
+    let _n2_server = cl_api::ApiServer::new(cl_api::ApiServerOptions {
+        cluster: server.cluster.clone(),
+        docker: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        node_name: "n2".into(),
+        config_path: dir.path().join("cluster.yaml"),
+        cluster_config: founding_config(),
+        key_path: n2_key_path.clone(),
+        key: None,
+        tls_cert_pem: cert.cert.pem().into_bytes(),
+        tls_key_pem: cert.signing_key.serialize_pem().into_bytes(),
+        listen_addr: n2_listen_addr,
+        plain_listen_addr: None,
+        self_update_artifact_path: dir.path().join("self-update-artifact"),
+        shutdown: tokio::sync::watch::channel(()).0,
+        http: reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("building the test http client"),
+        node_keypair: Some(n2_keypair),
+    })
+    .await
+    .expect("build n2's api");
+
+    for _ in 0..200 {
+        if n2_key_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let delivered = cl_secret::ClusterKey::load(&n2_key_path).expect("n2 wrote a key file");
+    assert_eq!(delivered.encode(), expected);
 }

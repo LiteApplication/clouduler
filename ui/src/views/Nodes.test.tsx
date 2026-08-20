@@ -6,7 +6,7 @@ import type { ClusterState } from '../api/types';
 
 const cluster: ClusterState = {
   nodes: {
-    n1: { name: 'n1', role: 'manager', rpc_addr: '10.10.0.1:7373', drives: {}, availability: 'active', egress_networks: [], networks: [], open_ports: {}, arch: 'x86_64', binary_hash: '' },
+    n1: { name: 'n1', role: 'manager', rpc_addr: '10.10.0.1:7373', drives: {}, availability: 'active', egress_networks: [], networks: [], open_ports: {}, arch: 'x86_64', binary_hash: '', node_pubkey: null },
   },
   stacks: {},
   assignments: {},
@@ -16,6 +16,7 @@ const cluster: ClusterState = {
   certificates: {},
   dns_records: {},
   unreachable: [],
+  wrapped_keys: {},
   overlay: null,
   version: 1,
 };

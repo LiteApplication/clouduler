@@ -72,6 +72,7 @@ async fn harness() -> Harness {
         open_ports: Default::default(),
         arch: Default::default(),
         binary_hash: Default::default(),
+        node_pubkey: Default::default(),
     }))
     .await
     .expect("submit");
@@ -1011,6 +1012,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
+            node_pubkey: Default::default(),
         }))
         .await
         .expect("add n1");

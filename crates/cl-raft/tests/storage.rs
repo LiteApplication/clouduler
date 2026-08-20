@@ -43,6 +43,7 @@ fn node(name: &str) -> NodeState {
         open_ports: Default::default(),
         arch: Default::default(),
         binary_hash: Default::default(),
+        node_pubkey: Default::default(),
     }
 }
 

@@ -55,6 +55,8 @@ pub async fn run(
     );
 
     let key = load_cluster_key(&cfg, node);
+    let node_keypair = load_node_keypair(&cfg);
+    let node_pubkey = node_keypair.as_ref().map(cl_secret::NodeKeypair::public_key_encoded);
 
     let cluster = ClusterNode::start(Options {
         name: node_name.clone(),
@@ -115,6 +117,7 @@ pub async fn run(
         docker: docker.clone(),
         shutdown: shutdown_tx,
         http: internal_http.clone(),
+        node_keypair,
     })
     .await;
 
@@ -218,7 +221,7 @@ pub async fn run(
     ));
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
-    let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone()));
+    let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => { result?; }
@@ -280,6 +283,7 @@ struct StartApiArgs<'a> {
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
     shutdown: tokio::sync::watch::Sender<()>,
     http: reqwest::Client,
+    node_keypair: Option<cl_secret::NodeKeypair>,
 }
 
 async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>> {
@@ -293,6 +297,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         docker,
         shutdown,
         http,
+        node_keypair,
     } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -334,6 +339,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         self_update_artifact_path: self_update_artifact_path(data_dir),
         shutdown,
         http,
+        node_keypair,
     };
 
     let server = match cl_api::ApiServer::new(options).await {
@@ -458,6 +464,29 @@ pub(crate) fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<Clust
         }
         Err(e) => {
             warn!(error = %e, "cannot use the cluster key, secrets will not be available");
+            None
+        }
+    }
+}
+
+/// Load this node's own asymmetric keypair, creating it on first launch.
+///
+/// Every node has one, unlike the cluster key: it is what lets another node
+/// wrap a copy of the cluster key for this one without ever putting the
+/// plaintext on the wire. Not fatal on failure -- a node that somehow cannot
+/// get one just never receives an automatic key delivery, the same steady
+/// state as before this existed.
+pub(crate) fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> {
+    let path = &cfg.secrets.node_key_file;
+    match cl_secret::NodeKeypair::load_or_create(path) {
+        Ok((keypair, created)) => {
+            if created {
+                info!(path = %path.display(), public = %keypair.public_key_encoded(), "generated this node's keypair");
+            }
+            Some(keypair)
+        }
+        Err(e) => {
+            warn!(error = %e, "cannot use this node's keypair, automatic key delivery will not work");
             None
         }
     }
@@ -748,6 +777,7 @@ fn to_state(
         // non-leader — runs about itself.
         arch: current.map(|c| c.arch.clone()).unwrap_or_default(),
         binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
+        node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
     }
 }
 
@@ -760,7 +790,7 @@ fn to_state(
 /// such an entry keeps whatever was stored (empty) forever otherwise, since
 /// `to_state` only fills a field in when the node is being created for the
 /// first time.
-async fn report_self(node_name: String, cluster: Arc<ClusterNode>) {
+async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: Option<String>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
@@ -770,16 +800,17 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>) {
         };
         let arch = std::env::consts::ARCH.to_string();
         let binary_hash = current_binary_hash();
-        if current.arch == arch && current.binary_hash == binary_hash {
+        if current.arch == arch && current.binary_hash == binary_hash && current.node_pubkey == node_pubkey {
             continue;
         }
         let desired = NodeState {
             arch,
             binary_hash,
+            node_pubkey: node_pubkey.clone(),
             ..current.clone()
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {
-            warn!(error = %e, "could not report this node's arch and binary hash");
+            warn!(error = %e, "could not report this node's arch, binary hash and public key");
         }
     }
 }

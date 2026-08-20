@@ -71,6 +71,12 @@ pub struct NodeState {
     /// on the freshly built binary rather than just coming back.
     #[serde(default)]
     pub binary_hash: String,
+    /// This node's X25519 public key, base64, self-reported once its local
+    /// keypair exists. `None` until then. Lets any node holding the cluster
+    /// secret key wrap a copy for this one without ever transmitting the
+    /// plaintext key itself — see `wrapped_keys` on `ClusterState`.
+    #[serde(default)]
+    pub node_pubkey: Option<String>,
 }
 
 impl NodeState {
@@ -196,6 +202,35 @@ impl fmt::Debug for SecretEntry {
             .field("name", &self.name)
             .field("revision", &self.revision)
             .field("key_fingerprint", &self.key_fingerprint)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The cluster secret key, encrypted to one node's public key so only that
+/// node can recover it. Written by whichever node currently holds the
+/// plaintext key; the plaintext itself never appears here or anywhere else in
+/// this state machine.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct WrappedKeyEntry {
+    /// Base64 of the one-time ephemeral public key used for this wrap, from
+    /// `cl_secret::WrappedKey::ephemeral_public`.
+    pub ephemeral_public: String,
+    /// Base64 of nonce followed by ciphertext, from `cl_secret::Sealed`.
+    pub sealed: String,
+    /// Fingerprint of the key that was wrapped, for observability.
+    pub key_fingerprint: String,
+    /// The recipient public key this was wrapped for. Compared against the
+    /// node's current `node_pubkey` to notice a keypair rotation and
+    /// re-wrap, rather than serving a copy nobody can open any more.
+    pub target_pubkey: String,
+}
+
+/// Prints no ciphertext, same reasoning as `SecretEntry`'s `Debug`.
+impl fmt::Debug for WrappedKeyEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WrappedKeyEntry")
+            .field("key_fingerprint", &self.key_fingerprint)
+            .field("target_pubkey", &self.target_pubkey)
             .finish_non_exhaustive()
     }
 }
@@ -358,6 +393,10 @@ pub struct ClusterState {
     pub secrets: BTreeMap<String, SecretEntry>,
     pub certificates: BTreeMap<String, CertificateState>,
     pub dns_records: BTreeMap<String, DnsRecordState>,
+    /// This cluster's secret key, wrapped once per node, keyed by node name.
+    /// See `WrappedKeyEntry`.
+    #[serde(default)]
+    pub wrapped_keys: BTreeMap<String, WrappedKeyEntry>,
     /// Nodes the leader has stopped hearing from. Observed rather than
     /// configured, so it is kept apart from `availability`, which is what the
     /// operator asked for.
@@ -485,6 +524,13 @@ pub enum Request {
     },
     RemoveSecret {
         name: String,
+    },
+    /// Written by whichever node currently holds the plaintext cluster key,
+    /// once it sees `node` publish a pubkey with no wrapped copy yet (or a
+    /// stale one, after a keypair rotation).
+    PutWrappedKey {
+        node: String,
+        entry: WrappedKeyEntry,
     },
     /// Overlay address book. Allocation goes through raft so two nodes cannot
     /// hand out the same address for the same stack network.
@@ -631,6 +677,18 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::PutWrappedKey { node, entry } => {
+                let current = self
+                    .nodes
+                    .get(node)
+                    .ok_or_else(|| format!("unknown node {node}"))?;
+                if current.node_pubkey.as_deref() != Some(entry.target_pubkey.as_str()) {
+                    return Err(format!("node {node} has not published the public key this was wrapped for"));
+                }
+                self.wrapped_keys.insert(node.clone(), entry.clone());
+                Ok(())
+            }
+
             Request::SetOverlayAllocations { allocations } => {
                 self.overlay = Some(allocations.clone());
                 Ok(())
@@ -668,6 +726,7 @@ impl ClusterState {
                 }
                 self.nodes.remove(node);
                 self.unreachable.remove(node);
+                self.wrapped_keys.remove(node);
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
                 }
@@ -1043,6 +1102,7 @@ mod tests {
             open_ports: Default::default(),
             arch: Default::default(),
             binary_hash: Default::default(),
+            node_pubkey: Default::default(),
         }
     }
 
@@ -1143,6 +1203,87 @@ mod tests {
         });
         state.apply(&Request::RemoveNode { node: "n1".into() });
         assert!(state.unreachable.is_empty());
+    }
+
+    fn wrapped_key_entry(target_pubkey: &str) -> WrappedKeyEntry {
+        WrappedKeyEntry {
+            ephemeral_public: "eph".into(),
+            sealed: "blob".into(),
+            key_fingerprint: "fp".into(),
+            target_pubkey: target_pubkey.into(),
+        }
+    }
+
+    #[test]
+    fn put_wrapped_key_requires_a_known_node() {
+        let mut state = cluster();
+        let rejected = state.apply(&Request::PutWrappedKey {
+            node: "nowhere".into(),
+            entry: wrapped_key_entry("pub"),
+        });
+        assert!(rejected.error.unwrap().contains("unknown node nowhere"));
+    }
+
+    #[test]
+    fn put_wrapped_key_requires_a_matching_published_pubkey() {
+        let mut state = cluster();
+        // n1 has not published a pubkey yet.
+        let rejected = state.apply(&Request::PutWrappedKey {
+            node: "n1".into(),
+            entry: wrapped_key_entry("pub"),
+        });
+        assert!(rejected.error.is_some());
+        assert!(state.wrapped_keys.is_empty());
+    }
+
+    #[test]
+    fn put_wrapped_key_accepts_and_overwrites() {
+        let mut state = cluster();
+        let mut n1 = state.nodes.get("n1").unwrap().clone();
+        n1.node_pubkey = Some("pub-a".into());
+        state.apply(&Request::UpsertNode(n1));
+
+        assert!(state
+            .apply(&Request::PutWrappedKey {
+                node: "n1".into(),
+                entry: wrapped_key_entry("pub-a"),
+            })
+            .is_ok());
+        assert_eq!(state.wrapped_keys["n1"].target_pubkey, "pub-a");
+
+        // A rotated keypair: the old wrapped entry no longer matches.
+        let mut n1 = state.nodes.get("n1").unwrap().clone();
+        n1.node_pubkey = Some("pub-b".into());
+        state.apply(&Request::UpsertNode(n1));
+        let rejected = state.apply(&Request::PutWrappedKey {
+            node: "n1".into(),
+            entry: wrapped_key_entry("pub-a"),
+        });
+        assert!(rejected.error.is_some());
+
+        assert!(state
+            .apply(&Request::PutWrappedKey {
+                node: "n1".into(),
+                entry: wrapped_key_entry("pub-b"),
+            })
+            .is_ok());
+        assert_eq!(state.wrapped_keys["n1"].target_pubkey, "pub-b");
+    }
+
+    #[test]
+    fn removing_a_node_clears_its_wrapped_key() {
+        let mut state = cluster();
+        let mut n1 = state.nodes.get("n1").unwrap().clone();
+        n1.node_pubkey = Some("pub-a".into());
+        state.apply(&Request::UpsertNode(n1));
+        state.apply(&Request::PutWrappedKey {
+            node: "n1".into(),
+            entry: wrapped_key_entry("pub-a"),
+        });
+        assert!(!state.wrapped_keys.is_empty());
+
+        state.apply(&Request::RemoveNode { node: "n1".into() });
+        assert!(!state.wrapped_keys.contains_key("n1"));
     }
 
     #[test]

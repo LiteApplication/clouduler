@@ -302,6 +302,12 @@ impl ClusterConfig {
                 "must be an absolute path",
             ));
         }
+        if !self.secrets.node_key_file.is_absolute() {
+            return Err(ConfigError::invalid(
+                "secrets.node_key_file",
+                "must be an absolute path",
+            ));
+        }
         Ok(())
     }
 

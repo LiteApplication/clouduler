@@ -33,7 +33,8 @@
     },
     "secrets": {
       "generate_if_missing": true,
-      "key_file": "/etc/clouduler/secrets.key"
+      "key_file": "/etc/clouduler/secrets.key",
+      "node_key_file": "/etc/clouduler/node.key"
     },
     "web": {
       "address": "cloud",
@@ -83,6 +84,7 @@
         "labels": {},
         "name": "n0",
         "networks": [],
+        "node_pubkey": null,
         "open_ports": {},
         "role": "manager",
         "rpc_addr": "<volatile>"
@@ -93,7 +95,8 @@
     "stacks": {},
     "unreachable": [],
     "version": 2,
-    "volumes": {}
+    "volumes": {},
+    "wrapped_keys": {}
   },
   "status": {
     "has_quorum": true,

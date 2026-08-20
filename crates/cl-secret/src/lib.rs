@@ -12,8 +12,12 @@
 mod error;
 pub mod internal_auth;
 mod key;
+mod keypair;
 mod seal;
+mod wrap;
 
 pub use error::{Result, SecretError};
 pub use key::{ClusterKey, KEY_BYTES};
+pub use keypair::{NodeKeypair, PUBLIC_KEY_BYTES};
 pub use seal::{Sealed, NONCE_BYTES};
+pub use wrap::WrappedKey;

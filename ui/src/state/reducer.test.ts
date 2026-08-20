@@ -12,6 +12,7 @@ function state(version: number): ClusterState {
     secrets: {},
     certificates: {},
     dns_records: {},
+    wrapped_keys: {},
     unreachable: [],
     overlay: null,
     version,

@@ -310,6 +310,7 @@ mod tests {
             open_ports: Default::default(),
             arch: arch.to_string(),
             binary_hash: String::new(),
+            node_pubkey: None,
         }
     }
 

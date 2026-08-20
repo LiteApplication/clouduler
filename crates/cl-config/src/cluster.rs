@@ -66,10 +66,22 @@ pub struct SecretsConfig {
     /// path cannot quietly create a second, useless key.
     #[serde(default = "default_true_bool")]
     pub generate_if_missing: bool,
+
+    /// Path to this node's own asymmetric keypair. Every node has one of
+    /// these, generated on first launch if missing — unlike `key_file`,
+    /// there is no "receiving node" concept for it. Its public half is
+    /// published into the cluster roster so another node holding `key_file`
+    /// can wrap a copy of the cluster key for this one.
+    #[serde(default = "default_node_key_file")]
+    pub node_key_file: PathBuf,
 }
 
 fn default_key_file() -> PathBuf {
     PathBuf::from("/etc/clouduler/secrets.key")
+}
+
+fn default_node_key_file() -> PathBuf {
+    PathBuf::from("/etc/clouduler/node.key")
 }
 
 fn default_true_bool() -> bool {
@@ -81,6 +93,7 @@ impl Default for SecretsConfig {
         Self {
             key_file: default_key_file(),
             generate_if_missing: true,
+            node_key_file: default_node_key_file(),
         }
     }
 }

@@ -9,6 +9,7 @@ pub mod cluster;
 pub mod config;
 pub mod drives;
 pub mod instances;
+pub mod key_distribution;
 pub mod nodes;
 pub mod objects;
 pub mod redirects;

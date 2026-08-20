@@ -104,6 +104,9 @@ pub struct ApiServerOptions {
     pub self_update_artifact_path: PathBuf,
     pub shutdown: tokio::sync::watch::Sender<()>,
     pub http: reqwest::Client,
+    /// This node's own asymmetric keypair, used only to unwrap a cluster key
+    /// delivered automatically through raft. See `routes::key_distribution`.
+    pub node_keypair: Option<cl_secret::NodeKeypair>,
 }
 
 pub struct ApiServer {
@@ -145,6 +148,7 @@ impl ApiServer {
             None => None,
         };
 
+        let node_keypair = options.node_keypair;
         let state = AppState {
             cluster: options.cluster,
             docker: options.docker,
@@ -169,6 +173,13 @@ impl ApiServer {
         // Backgrounded because at this point the cluster usually has no leader
         // yet and the write would have nowhere to go.
         routes::auth_keys::spawn_bootstrap_first_key(state.clone());
+
+        // Deliver the cluster key to nodes that lack it, and receive it here
+        // if this node is the one lacking it -- both backgrounded for the
+        // same reason: no leader yet on a fresh cluster, or simply nothing to
+        // do until another node publishes or wraps a key.
+        routes::key_distribution::spawn_wrap_for_new_nodes(state.clone());
+        routes::key_distribution::spawn_unwrap_own_key(state.clone(), state.node_name.clone(), node_keypair);
 
         Ok(Self {
             router: build_router(state),
