@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { DriveStatus } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
+import { RelationDiagram, type RelationEdge, type RelationNode } from '../components/RelationDiagram';
+import { Meter } from '../components/Meter';
+import { Donut, type DonutSegment } from '../components/Donut';
 
 export function Drives() {
   const cluster = useClusterState();
@@ -37,6 +40,37 @@ export function Drives() {
 
   const volumes = cluster ? Object.values(cluster.volumes) : [];
 
+  const modeSegmentsAll: DonutSegment[] = [
+    { label: 'Replicated', value: drives.filter((d) => d.mode === 'replicated').length, tone: 'primary' },
+    { label: 'Served', value: drives.filter((d) => d.mode === 'served').length, tone: 'warn' },
+  ];
+  const modeSegments = modeSegmentsAll.filter((s) => s.value > 0);
+
+  const { driveNodes, hostChips, edges } = useMemo(() => {
+    const driveNodes: RelationNode[] = drives.map((d) => ({
+      id: d.name,
+      label: d.name,
+      sub: d.mode,
+      icon: <Icon name="drives" />,
+    }));
+    const hostNames = Array.from(new Set(drives.flatMap((d) => d.nodes.map((n) => n.node)))).sort();
+    const hostChips: RelationNode[] = hostNames.map((name) => ({
+      id: name,
+      label: name,
+      icon: <Icon name="nodes" />,
+      tone: drives.some((d) => d.nodes.some((n) => n.node === name && !n.reachable)) ? 'bad' : undefined,
+    }));
+    const edges: RelationEdge[] = drives.flatMap((d) =>
+      d.nodes.map((n) => ({
+        from: d.name,
+        to: n.node,
+        tone: !n.reachable ? 'bad' : d.served_by === n.node ? 'accent' : 'neutral',
+        dashed: d.mode === 'served' && d.served_by !== n.node,
+      })),
+    );
+    return { driveNodes, hostChips, edges };
+  }, [drives]);
+
   return (
     <div>
       <div className="page-header">
@@ -54,6 +88,38 @@ export function Drives() {
       {error && (
         <div className="banner banner-warn">
           <Icon name="alert" /> {error}
+        </div>
+      )}
+
+      {drives.length > 0 && (
+        <div className="section">
+          <div className="section-head">
+            <h2>
+              <Icon name="drives" /> Drive modes
+            </h2>
+          </div>
+          <div className="card">
+            <Donut segments={modeSegments} centerLabel={String(drives.length)} />
+          </div>
+        </div>
+      )}
+
+      {drives.length > 0 && (
+        <div className="section">
+          <div className="section-head">
+            <h2>
+              <Icon name="network" /> Drive topology
+            </h2>
+          </div>
+          <div className="card">
+            <RelationDiagram
+              leftTitle="Drives"
+              rightTitle="Nodes"
+              left={driveNodes}
+              right={hostChips}
+              edges={edges}
+            />
+          </div>
         </div>
       )}
 
@@ -132,10 +198,13 @@ export function Drives() {
                     <td>{v.id}</td>
                     <td>{v.generation}</td>
                     <td>{v.primary}</td>
-                    <td>
-                      <Badge tone={inSync === total ? 'good' : 'warn'}>
-                        {inSync}/{total}
-                      </Badge>
+                    <td style={{ minWidth: 110 }}>
+                      <Meter
+                        label=""
+                        value={inSync}
+                        max={total}
+                        tone={inSync === total ? 'good' : 'warn'}
+                      />
                     </td>
                     <td className="wrap">
                       {Object.entries(v.replicas)

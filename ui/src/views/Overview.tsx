@@ -4,6 +4,7 @@ import type { ClusterStatus } from '../api/types';
 import { useClusterState } from '../state/store';
 import { Badge } from '../components/Badge';
 import { Icon, type IconName } from '../components/Icon';
+import { Donut, type DonutSegment } from '../components/Donut';
 
 export function Overview() {
   const cluster = useClusterState();
@@ -39,6 +40,21 @@ export function Overview() {
   const instances = Object.values(cluster.assignments);
   const volumes = Object.values(cluster.volumes);
   const outOfSyncVolumes = volumes.filter((v) => v.generation !== (v.replicas[v.primary] ?? -1));
+
+  const nodeSegmentsAll: DonutSegment[] = [
+    { label: 'Active', value: nodes.filter((n) => n.availability === 'active').length, tone: 'good' },
+    { label: 'Draining', value: nodes.filter((n) => n.availability === 'drain').length, tone: 'warn' },
+    { label: 'Decommissioned', value: nodes.filter((n) => n.availability === 'decommissioned').length, tone: 'neutral' },
+    { label: 'Unreachable', value: fenced.length, tone: 'bad' },
+  ];
+  const nodeSegments = nodeSegmentsAll.filter((s) => s.value > 0);
+
+  const migrating = instances.filter((i) => i.migration).length;
+  const instanceSegmentsAll: DonutSegment[] = [
+    { label: 'Running', value: instances.filter((i) => i.desired === 'running').length, tone: 'good' },
+    { label: 'Stopped', value: instances.filter((i) => i.desired === 'stopped').length, tone: 'neutral' },
+  ];
+  const instanceSegments = instanceSegmentsAll.filter((s) => s.value > 0);
 
   return (
     <div>
@@ -84,6 +100,36 @@ export function Overview() {
         <Stat icon="instances" label="Instances" value={String(instances.length)} />
         <Stat icon="drives" label="Volumes" value={String(volumes.length)} />
       </div>
+
+      {(nodeSegments.length > 0 || instanceSegments.length > 0) && (
+        <div className="card-grid card-grid-2">
+          {nodeSegments.length > 0 && (
+            <div className="card">
+              <div className="section-head">
+                <h2>
+                  <Icon name="nodes" /> Node availability
+                </h2>
+              </div>
+              <Donut segments={nodeSegments} centerLabel={String(nodes.length)} />
+            </div>
+          )}
+          {instanceSegments.length > 0 && (
+            <div className="card">
+              <div className="section-head">
+                <h2>
+                  <Icon name="instances" /> Instance state
+                </h2>
+              </div>
+              <Donut segments={instanceSegments} centerLabel={String(instances.length)} />
+              {migrating > 0 && (
+                <p className="faint" style={{ margin: 'var(--space-3) 0 0' }}>
+                  {migrating} migrating right now
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="section">
         <div className="section-head">

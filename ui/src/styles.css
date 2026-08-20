@@ -197,11 +197,7 @@ pre {
 
 .nav-link.active {
   color: var(--text);
-  background: linear-gradient(
-    100deg,
-    color-mix(in srgb, var(--primary) 20%, transparent),
-    color-mix(in srgb, var(--accent) 14%, transparent)
-  );
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .nav-link.active .icon {
@@ -250,7 +246,7 @@ pre {
   font-size: 12px;
   font-weight: 700;
   color: var(--on-accent);
-  background: linear-gradient(135deg, var(--secondary), var(--accent));
+  background: var(--accent);
 }
 
 .identity-name {
@@ -440,6 +436,10 @@ pre {
   margin-bottom: var(--space-5);
 }
 
+.card-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
 .stat {
   position: relative;
   display: flex;
@@ -447,22 +447,11 @@ pre {
   align-items: flex-start;
   gap: var(--space-1);
   overflow: hidden;
-  transition: transform 0.16s var(--ease), box-shadow 0.16s var(--ease);
+  transition: box-shadow 0.16s var(--ease);
 }
 
 .stat:hover {
-  transform: translateY(-1px);
   box-shadow: var(--shadow-2);
-}
-
-/* gradient hairline along the top edge of every stat card */
-.stat::after {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto;
-  height: 2px;
-  background: linear-gradient(90deg, var(--primary), var(--accent));
-  opacity: 0.55;
 }
 
 .stat-head {
@@ -498,6 +487,214 @@ pre {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.07em;
+}
+
+/* ---- charts: donut ---- */
+
+.donut-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.donut-center {
+  font-size: 20px;
+  font-weight: 750;
+  fill: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.donut-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.donut-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-pill);
+  flex: none;
+}
+
+.donut-legend-label {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.donut-legend-value {
+  margin-left: auto;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- charts: meter ---- */
+
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.meter + .meter {
+  margin-top: var(--space-3);
+}
+
+.meter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.meter-head > span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.meter-head .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+}
+
+.meter-track {
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 0.3s var(--ease);
+}
+
+/* ---- schema / relation diagram ---- */
+
+.relation-diagram {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-5);
+}
+
+.relation-lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.relation-col {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.relation-col-right {
+  align-items: flex-end;
+}
+
+.relation-col-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+
+.relation-col-right .relation-col-title {
+  align-self: flex-end;
+}
+
+.relation-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px var(--space-3);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 75%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-1);
+  font-size: 13px;
+  font-weight: 600;
+  max-width: 100%;
+  width: fit-content;
+}
+
+.relation-chip .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+  flex: none;
+}
+
+.relation-chip-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relation-chip-sub {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-faint);
+}
+
+.relation-chip-bad {
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+}
+.relation-chip-bad .icon {
+  color: var(--bad);
+}
+.relation-chip-warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.relation-chip-warn .icon {
+  color: var(--warn);
+}
+
+@media (max-width: 640px) {
+  .relation-diagram {
+    grid-template-columns: 1fr;
+  }
+  .relation-lines {
+    display: none;
+  }
+  .relation-col-right {
+    align-items: flex-start;
+  }
+  .relation-col-right .relation-col-title {
+    align-self: flex-start;
+  }
 }
 
 /* ---- tables ---- */
@@ -809,16 +1006,15 @@ button:disabled {
 }
 
 button.primary {
-  background: linear-gradient(135deg, var(--secondary), var(--accent));
+  background: var(--accent);
   border-color: transparent;
   color: var(--on-accent);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 32%, transparent);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
 button.primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--secondary), var(--accent));
   filter: brightness(1.08);
-  box-shadow: 0 4px 18px color-mix(in srgb, var(--accent) 42%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 34%, transparent);
 }
 
 button.danger {
@@ -968,10 +1164,7 @@ button.icon-btn {
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--accent);
 }
 
 kbd {

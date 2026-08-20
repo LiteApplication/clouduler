@@ -8,6 +8,7 @@ import { Badge } from '../components/Badge';
 import { formatBytes, formatUptime } from '../lib/format';
 import { useEventSource } from '../hooks/useEventSource';
 import { Icon } from '../components/Icon';
+import { Meter } from '../components/Meter';
 import { useConfigApply, useConfigDraft } from './config/draft';
 import { PendingBanner } from './config/PendingBanner';
 import { NodeCard } from './config/sections';
@@ -159,35 +160,49 @@ export function NodeDetail() {
           <span className="stat-value">{instances.length}</span>
         </div>
         {detail?.usage.local && (
-          <>
-            <div className="card stat">
-              <span className="stat-head">
-                <Icon name="cpu" />
-                <span className="stat-label">CPU</span>
-              </span>
-              <span className="stat-value">
-                {detail.usage.load_1m.toFixed(2)} / {detail.usage.cpu_count}
-              </span>
-            </div>
-            <div className="card stat">
-              <span className="stat-head">
-                <Icon name="memory" />
-                <span className="stat-label">Memory</span>
-              </span>
-              <span className="stat-value">
-                {formatBytes(detail.usage.memory_used_bytes)} / {formatBytes(detail.usage.memory_total_bytes)}
-              </span>
-            </div>
-            <div className="card stat">
-              <span className="stat-head">
-                <Icon name="clock" />
-                <span className="stat-label">Uptime</span>
-              </span>
-              <span className="stat-value">{formatUptime(detail.usage.uptime_seconds)}</span>
-            </div>
-          </>
+          <div className="card stat">
+            <span className="stat-head">
+              <Icon name="clock" />
+              <span className="stat-label">Uptime</span>
+            </span>
+            <span className="stat-value">{formatUptime(detail.usage.uptime_seconds)}</span>
+          </div>
         )}
       </div>
+
+      {detail?.usage.local && (
+        <div className="section">
+          <div className="section-head">
+            <h2>
+              <Icon name="activity" /> Resource usage
+            </h2>
+          </div>
+          <div className="card">
+            <Meter
+              label={
+                <>
+                  <Icon name="cpu" /> CPU load (1m)
+                </>
+              }
+              value={detail.usage.load_1m}
+              max={detail.usage.cpu_count}
+              display={`${detail.usage.load_1m.toFixed(2)} / ${detail.usage.cpu_count} cores`}
+              tone={detail.usage.load_1m > detail.usage.cpu_count ? 'bad' : 'primary'}
+            />
+            <Meter
+              label={
+                <>
+                  <Icon name="memory" /> Memory
+                </>
+              }
+              value={detail.usage.memory_used_bytes}
+              max={detail.usage.memory_total_bytes}
+              display={`${formatBytes(detail.usage.memory_used_bytes)} / ${formatBytes(detail.usage.memory_total_bytes)}`}
+              tone={detail.usage.memory_used_bytes / detail.usage.memory_total_bytes > 0.9 ? 'bad' : 'accent'}
+            />
+          </div>
+        </div>
+      )}
 
       <div className="section">
         <div className="section-head">
@@ -361,41 +376,6 @@ export function NodeDetail() {
             </div>
           </>
         )}
-      </div>
-
-      <div className="section">
-        <div className="section-head">
-          <h2>
-            <Icon name="drives" /> Drives
-          </h2>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Drive</th>
-                <th>Local path</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(node.drives).map(([drive, path]) => (
-                <tr key={drive}>
-                  <td>{drive}</td>
-                  <td className="mono">{path}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="section">
-        <div className="section-head">
-          <h2>
-            <Icon name="network" /> RPC address
-          </h2>
-        </div>
-        <div className="card mono">{node.rpc_addr}</div>
       </div>
 
       <div className="section">

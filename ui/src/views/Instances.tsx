@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import type { InstanceState } from '../api/types';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
+import { Donut, type DonutSegment } from '../components/Donut';
 
 export function Instances() {
   const [instances, setInstances] = useState<InstanceState[] | null>(null);
@@ -32,6 +33,21 @@ export function Instances() {
     (i) => i.id.includes(filter) || i.node.includes(filter) || (i.image ?? '').includes(filter),
   );
 
+  const stateSegmentsAll: DonutSegment[] = [
+    { label: 'Running', value: instances.filter((i) => i.state === 'running').length, tone: 'good' },
+    { label: 'Stopped', value: instances.filter((i) => i.state === 'stopped').length, tone: 'neutral' },
+    { label: 'Unknown', value: instances.filter((i) => i.state === 'unknown').length, tone: 'warn' },
+  ];
+  const stateSegments = stateSegmentsAll.filter((s) => s.value > 0);
+
+  const healthSegmentsAll: DonutSegment[] = [
+    { label: 'Healthy', value: instances.filter((i) => i.health === 'healthy').length, tone: 'good' },
+    { label: 'Unhealthy', value: instances.filter((i) => i.health === 'unhealthy').length, tone: 'bad' },
+    { label: 'Starting', value: instances.filter((i) => i.health === 'starting').length, tone: 'warn' },
+    { label: 'No healthcheck', value: instances.filter((i) => i.health === 'none').length, tone: 'neutral' },
+  ];
+  const healthSegments = healthSegmentsAll.filter((s) => s.value > 0);
+
   return (
     <div>
       <div className="page-header">
@@ -55,6 +71,28 @@ export function Instances() {
           />
         </div>
       </div>
+
+      {instances.length > 0 && (
+        <div className="card-grid card-grid-2">
+          <div className="card">
+            <div className="section-head">
+              <h2>
+                <Icon name="instances" /> By state
+              </h2>
+            </div>
+            <Donut segments={stateSegments} centerLabel={String(instances.length)} />
+          </div>
+          <div className="card">
+            <div className="section-head">
+              <h2>
+                <Icon name="activity" /> By health
+              </h2>
+            </div>
+            <Donut segments={healthSegments} centerLabel={String(instances.length)} />
+          </div>
+        </div>
+      )}
+
       <div className="table-wrap">
         <table>
           <thead>

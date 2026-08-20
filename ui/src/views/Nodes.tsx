@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
@@ -6,11 +6,39 @@ import { Badge } from '../components/Badge';
 import { api } from '../api/client';
 import { AddNodeForm } from './AddNodeForm';
 import { Icon } from '../components/Icon';
+import { RelationDiagram, type RelationEdge, type RelationNode } from '../components/RelationDiagram';
 
 export function Nodes() {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
   const [showAdd, setShowAdd] = useState(false);
+
+  const nodes = useMemo(() => Object.values(cluster?.nodes ?? {}), [cluster]);
+  const unreachable = cluster?.unreachable ?? [];
+
+  const { networkNodes, nodeChips, edges } = useMemo(() => {
+    const networkNames = Array.from(new Set(nodes.flatMap((n) => n.networks))).sort();
+    const networkNodes: RelationNode[] = networkNames.map((name) => ({
+      id: name,
+      label: name,
+      icon: <Icon name="network" />,
+    }));
+    const nodeChips: RelationNode[] = nodes.map((n) => ({
+      id: n.name,
+      label: n.name,
+      sub: n.role,
+      icon: <Icon name="nodes" />,
+      tone: unreachable.includes(n.name) ? 'bad' : n.availability === 'drain' ? 'warn' : undefined,
+    }));
+    const edges: RelationEdge[] = nodes.flatMap((n) =>
+      n.networks.map((net) => ({
+        from: net,
+        to: n.name,
+        tone: unreachable.includes(n.name) ? 'bad' : n.egress_networks.includes(net) ? 'accent' : 'neutral',
+      })),
+    );
+    return { networkNodes, nodeChips, edges };
+  }, [nodes, unreachable]);
 
   if (!cluster) {
     return (
@@ -19,7 +47,6 @@ export function Nodes() {
       </p>
     );
   }
-  const nodes = Object.values(cluster.nodes);
 
   return (
     <div>
@@ -43,6 +70,25 @@ export function Nodes() {
       </div>
 
       {showAdd && <AddNodeForm onDone={() => setShowAdd(false)} />}
+
+      {networkNodes.length > 0 && (
+        <div className="section">
+          <div className="section-head">
+            <h2>
+              <Icon name="network" /> Network map
+            </h2>
+          </div>
+          <div className="card">
+            <RelationDiagram
+              leftTitle="Networks"
+              rightTitle="Nodes"
+              left={networkNodes}
+              right={nodeChips}
+              edges={edges}
+            />
+          </div>
+        </div>
+      )}
 
       <div className="table-wrap">
         <table>
