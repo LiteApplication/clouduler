@@ -13,7 +13,7 @@ describe('normalizeConfig', () => {
     expect(cfg.auth.oidc).toBeNull();
     expect(cfg.cloudflare).toBeNull();
     expect(cfg.proxy.acme.directory_url).toBeNull();
-    expect(cfg.drives['bulk-media'].served_by).toBeNull();
+    expect(cfg.drives['bulk-media'].served_by).toEqual([]);
     expect(cfg.nodes.piosny.generate_secret_key).toBeNull();
   });
 

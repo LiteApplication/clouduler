@@ -64,8 +64,8 @@ export function Drives() {
       d.nodes.map((n) => ({
         from: d.name,
         to: n.node,
-        tone: !n.reachable ? 'bad' : d.served_by === n.node ? 'accent' : 'neutral',
-        dashed: d.mode === 'served' && d.served_by !== n.node,
+        tone: !n.reachable ? 'bad' : d.active_server === n.node ? 'accent' : 'neutral',
+        dashed: d.mode === 'served' && d.active_server !== n.node,
       })),
     );
     return { driveNodes, hostChips, edges };
@@ -147,7 +147,7 @@ export function Drives() {
                   <td>
                     <Badge tone={d.mode === 'served' ? 'warn' : 'neutral'}>{d.mode}</Badge>
                   </td>
-                  <td>{d.served_by ?? '-'}</td>
+                  <td>{d.served_by.length > 0 ? d.served_by.join(', ') : '-'}</td>
                   <td>{d.sync_interval}</td>
                   <td className="wrap">
                     {d.nodes.length === 0

@@ -52,7 +52,7 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
     })),
     drives: mapValues(cfg.drives, (drive) => ({
       ...drive,
-      served_by: nullable(drive.served_by),
+      served_by: drive.served_by ?? [],
     })),
     nodes: mapValues(cfg.nodes, (node) => ({
       ...node,

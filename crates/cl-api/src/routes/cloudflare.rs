@@ -51,6 +51,10 @@ struct SetTokenRequest {
 /// is safe now that there is exactly one copy of it, replicated to every
 /// node, rather than a file an operator would otherwise have to update by
 /// hand on each manager.
+///
+/// Settable whether or not `cloudflare` is currently enabled in the config,
+/// so a token can be staged ahead of flipping DNS management on rather than
+/// forcing that ordering on the operator.
 async fn set_token(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -59,12 +63,6 @@ async fn set_token(
     let token = body.token.trim().to_string();
     if token.is_empty() {
         return Err(ApiError::BadRequest("the token is empty".into()));
-    }
-    {
-        let config = state.cluster_config.read().await;
-        if config.cloudflare.is_none() {
-            return Err(ApiError::Conflict("cloudflare is not enabled in the config".into()));
-        }
     }
 
     let key_guard = state.key.read().await;

@@ -234,8 +234,35 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
   );
 }
 
-export function DrivesSection({ draft, setDraft, disabled }: SectionProps) {
+/** Applies the same key rename the server does, to every place a drive name
+ *  appears in a `ClusterConfig`, so the draft stays in sync with a
+ *  `renameDrive` call without wiping any other unrelated staged edit. */
+function renameDriveInDraft(draft: ClusterConfig, oldName: string, newName: string): ClusterConfig {
+  const drives = { ...draft.drives };
+  const drive = drives[oldName];
+  delete drives[oldName];
+  drives[newName] = drive;
+
+  const nodes = Object.fromEntries(
+    Object.entries(draft.nodes).map(([nodeName, node]) => {
+      if (!(oldName in node.drives)) return [nodeName, node];
+      const nodeDrives = { ...node.drives };
+      const path = nodeDrives[oldName];
+      delete nodeDrives[oldName];
+      nodeDrives[newName] = path;
+      return [nodeName, { ...node, drives: nodeDrives }];
+    }),
+  );
+
+  return { ...draft, drives, nodes };
+}
+
+export function DrivesSection({ draft, setDraft, disabled, original }: SectionProps) {
   const entries = Object.entries(draft.drives);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
 
   const update = (name: string, patch: Partial<ClusterConfig['drives'][string]>) => {
     setDraft({ ...draft, drives: { ...draft.drives, [name]: { ...draft.drives[name], ...patch } } });
@@ -247,7 +274,7 @@ export function DrivesSection({ draft, setDraft, disabled }: SectionProps) {
     while (draft.drives[name]) name = `drive${i++}`;
     setDraft({
       ...draft,
-      drives: { ...draft.drives, [name]: { sync_interval: '15m', mode: 'replicated', served_by: null } },
+      drives: { ...draft.drives, [name]: { sync_interval: '15m', mode: 'replicated', served_by: [] } },
     });
   };
 
@@ -257,20 +284,85 @@ export function DrivesSection({ draft, setDraft, disabled }: SectionProps) {
     setDraft({ ...draft, drives: next });
   };
 
+  const startRename = (name: string) => {
+    setRenaming(name);
+    setRenameValue(name);
+    setRenameError(null);
+  };
+
+  const submitRename = async (oldName: string) => {
+    const newName = renameValue.trim();
+    if (!newName || newName === oldName) {
+      setRenaming(null);
+      return;
+    }
+    if (draft.drives[newName]) {
+      setRenameError(`a drive named ${newName} already exists`);
+      return;
+    }
+    // A drive only "Add drive" staged, never applied, exists nowhere the
+    // server knows to rename -- renaming it is just a local key swap on the
+    // draft, the same as `add` picking the name in the first place.
+    if (!(oldName in original.drives)) {
+      setDraft(renameDriveInDraft(draft, oldName, newName));
+      setRenaming(null);
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      await api.renameDrive(oldName, newName);
+      setDraft(renameDriveInDraft(draft, oldName, newName));
+      setRenaming(null);
+    } catch (e) {
+      setRenameError(e instanceof ApiError ? e.message : 'rename failed');
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
   return (
     <>
       {entries.map(([name, drive]) => (
         <div className="card section" key={name}>
           <div className="section-head">
-            <h3 className="flex-row">
-              <Icon name="drives" /> {name}
-            </h3>
+            {renaming === name ? (
+              <div className="flex-row" style={{ gap: 8 }}>
+                <input
+                  className="mono"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  disabled={renameBusy}
+                  aria-label={`rename drive ${name}`}
+                />
+                <button onClick={() => submitRename(name)} disabled={renameBusy}>
+                  <Icon name="check" /> Save
+                </button>
+                <button onClick={() => setRenaming(null)} disabled={renameBusy}>
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <h3 className="flex-row">
+                <Icon name="drives" /> {name}
+                {!disabled && (
+                  <button className="ghost" onClick={() => startRename(name)} aria-label={`rename ${name}`}>
+                    <Icon name="edit" />
+                  </button>
+                )}
+              </h3>
+            )}
             {!disabled && (
               <button className="danger" onClick={() => remove(name)}>
                 <Icon name="trash" /> Remove
               </button>
             )}
           </div>
+          {renaming === name && renameError && (
+            <p className="field-error">
+              <Icon name="alert-circle" /> {renameError}
+            </p>
+          )}
           <SelectField
             id={`drive-${name}-mode`}
             label="Mode"
@@ -291,15 +383,11 @@ export function DrivesSection({ draft, setDraft, disabled }: SectionProps) {
               disabled={disabled}
             />
           ) : (
-            <SelectField
+            <ServedByField
               id={`drive-${name}-servedby`}
-              label="Served by"
-              value={drive.served_by ?? ''}
-              onChange={(served_by) => update(name, { served_by: served_by || null })}
-              options={[
-                { value: '', label: '(choose a node)' },
-                ...Object.keys(draft.nodes).map((n) => ({ value: n, label: n })),
-              ]}
+              servedBy={drive.served_by}
+              nodeNames={Object.keys(draft.nodes)}
+              onChange={(served_by) => update(name, { served_by })}
               disabled={disabled}
             />
           )}
@@ -311,6 +399,87 @@ export function DrivesSection({ draft, setDraft, disabled }: SectionProps) {
         </button>
       )}
     </>
+  );
+}
+
+/** Picks the ordered list of candidate serving nodes for a served drive. The
+ *  first checked node, in the order checked, is the active server; the rest
+ *  are standby backups in priority order -- reorder with the arrows. */
+function ServedByField({
+  id,
+  servedBy,
+  nodeNames,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  servedBy: string[];
+  nodeNames: string[];
+  onChange: (servedBy: string[]) => void;
+  disabled?: boolean;
+}) {
+  const toggle = (node: string) => {
+    if (servedBy.includes(node)) onChange(servedBy.filter((n) => n !== node));
+    else onChange([...servedBy, node]);
+  };
+  const move = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= servedBy.length) return;
+    const next = [...servedBy];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+
+  return (
+    <div className="field">
+      <label id={`${id}-label`}>Served by</label>
+      <span className="field-hint">
+        The active server is the first reachable candidate; the rest keep a synced backup copy.
+      </span>
+      {nodeNames.map((node) => (
+        <label className="flex-row" key={node} htmlFor={`${id}-${node}`}>
+          <input
+            id={`${id}-${node}`}
+            type="checkbox"
+            checked={servedBy.includes(node)}
+            onChange={() => toggle(node)}
+            disabled={disabled}
+          />
+          {node}
+        </label>
+      ))}
+      {servedBy.length > 0 && (
+        <ol style={{ marginTop: 8 }}>
+          {servedBy.map((node, i) => (
+            <li key={node} className="flex-row">
+              {node}
+              {!disabled && (
+                <>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => move(i, -1)}
+                    disabled={i === 0}
+                    aria-label={`move ${node} up`}
+                  >
+                    &#9650;
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => move(i, 1)}
+                    disabled={i === servedBy.length - 1}
+                    aria-label={`move ${node} down`}
+                  >
+                    &#9660;
+                  </button>
+                </>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
   );
 }
 
@@ -1070,22 +1239,23 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
         disabled={disabled}
       />
       {cf && (
-        <>
-          <CloudflareToken disabled={disabled} />
-          <TextField
-            id="cf-zones"
-            label="Zones (comma separated)"
-            value={cf.zones.join(', ')}
-            onChange={(v) =>
-              setDraft({
-                ...draft,
-                cloudflare: { ...cf, zones: v.split(',').map((z) => z.trim()).filter(Boolean) },
-              })
-            }
-            disabled={disabled}
-          />
-        </>
+        <TextField
+          id="cf-zones"
+          label="Zones (comma separated)"
+          value={cf.zones.join(', ')}
+          onChange={(v) =>
+            setDraft({
+              ...draft,
+              cloudflare: { ...cf, zones: v.split(',').map((z) => z.trim()).filter(Boolean) },
+            })
+          }
+          disabled={disabled}
+        />
       )}
+      {/* The token is its own sealed secret, independent of `cf` and the rest
+          of the draft -- see CloudflareToken. Kept settable even with DNS
+          management off, so a token can be staged ahead of flipping it on. */}
+      <CloudflareToken disabled={disabled} />
     </div>
   );
 }

@@ -199,6 +199,12 @@ export const api = {
   // flow does not know about.
   renameNetwork: (name: string, newName: string) =>
     post<void>(`/api/config/networks/${encodeURIComponent(name)}/rename`, { new_name: newName }),
+  // Renames a drive everywhere it is referenced: cluster.yaml (the drives
+  // key and every node's drive-to-path map) and every deployed stack's
+  // volume mounts. Not part of the generic apply flow above, same reason as
+  // renameNetwork.
+  renameDrive: (name: string, newName: string) =>
+    post<void>(`/api/config/drives/${encodeURIComponent(name)}/rename`, { new_name: newName }),
 
   // cloudflare: the token is write-only, so there is no getter for its value
   cloudflareToken: () => get<CloudflareTokenStatus>('/api/cloudflare/token'),

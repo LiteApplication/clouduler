@@ -234,7 +234,12 @@ export interface DriveNodeStatus {
 export interface DriveStatus {
   name: string;
   mode: DriveMode;
-  served_by: string | null;
+  /** Candidate serving nodes for a served drive, in priority order. */
+  served_by: string[];
+  /** The candidate currently answering requests: the first of `served_by`
+   *  that's reachable. `null` for a replicated drive, or when every
+   *  candidate is unreachable. */
+  active_server: string | null;
   sync_interval: string;
   /** Nodes that implement this drive. */
   nodes: DriveNodeStatus[];
@@ -290,7 +295,8 @@ export type DriveModeConfig = 'replicated' | 'served';
 export interface DriveConfig {
   sync_interval: string;
   mode: DriveModeConfig;
-  served_by: string | null;
+  /** Candidate serving nodes for a served drive, in priority order. */
+  served_by: string[];
 }
 
 export type NodeRoleConfig = 'manager' | 'worker';

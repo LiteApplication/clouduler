@@ -11,7 +11,15 @@
       "name": "test"
     },
     "data_dir": "<tmp>",
-    "drives": {},
+    "drives": {
+      "fast": {
+        "mode": "served",
+        "served_by": [
+          "n0"
+        ],
+        "sync_interval": "15m"
+      }
+    },
     "failover": {
       "fence_timeout": "15s",
       "node_timeout": "30s",
@@ -48,6 +56,23 @@
     "fingerprint": "<volatile>",
     "held": true
   },
+  "drives": [
+    {
+      "active_server": "n0",
+      "mode": "served",
+      "name": "fast",
+      "nodes": [
+        {
+          "node": "n0",
+          "reachable": true
+        }
+      ],
+      "served_by": [
+        "n0"
+      ],
+      "sync_interval": "15m"
+    }
+  ],
   "identity": {
     "role": "admin",
     "subject": "<volatile>"
@@ -79,7 +104,9 @@
         "arch": "",
         "availability": "active",
         "binary_hash": "",
-        "drives": {},
+        "drives": {
+          "fast": "/mnt/fast"
+        },
         "egress_networks": [],
         "labels": {},
         "name": "n0",
@@ -94,7 +121,7 @@
     "secrets": {},
     "stacks": {},
     "unreachable": [],
-    "version": 2,
+    "version": 3,
     "volumes": {},
     "wrapped_keys": {}
   },

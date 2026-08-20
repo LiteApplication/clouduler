@@ -455,7 +455,7 @@ async fn setting_the_cloudflare_token_can_be_rotated() {
 }
 
 #[tokio::test]
-async fn setting_a_cloudflare_token_without_cloudflare_enabled_is_a_conflict() {
+async fn setting_a_cloudflare_token_without_cloudflare_enabled_still_stores_it() {
     let h = harness().await;
     let resp = h
         .router
@@ -470,7 +470,7 @@ async fn setting_a_cloudflare_token_without_cloudflare_enabled_is_a_conflict() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
 /// Calling `POST ssh-key` twice must return the same public key rather than
@@ -845,6 +845,72 @@ async fn renaming_a_network_updates_config_stacks_and_redirects() {
 }
 
 #[tokio::test]
+async fn renaming_a_drive_updates_config_and_stacks() {
+    let h = harness().await;
+
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        cfg.drives.insert(
+            "fast".to_string(),
+            cl_config::Drive {
+                sync_interval: Duration::from_secs(900),
+                mode: cl_config::DriveMode::Replicated,
+                served_by: vec![],
+            },
+        );
+        cfg.nodes.insert(
+            "n0".into(),
+            cl_config::Node {
+                role: cl_config::NodeRole::Manager,
+                network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()))]),
+                drives: BTreeMap::from([("fast".to_string(), "/mnt/fast".into())]),
+                labels: BTreeMap::new(),
+                rpc_port: cl_config::DEFAULT_RPC_PORT,
+                data_dir: None,
+                generate_secret_key: None,
+            },
+        );
+        let net = cfg.networks.get_mut("internal").unwrap();
+        net.subnet = Some("10.10.0.0/24".parse().unwrap());
+        net.domain = Some("test.local".to_string());
+    }
+
+    let spec = "services:\n  web:\n    image: nginx\n    volumes: [fast/data:/data]\n";
+    h.state
+        .cluster
+        .submit(cl_raft::Request::DeployStack { name: "site".into(), spec: spec.into() })
+        .await
+        .expect("deploy stack");
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/drives/fast/rename")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"new_name":"bulk"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let cfg = h.state.cluster_config.read().await;
+    assert!(cfg.drives.contains_key("bulk"));
+    assert!(!cfg.drives.contains_key("fast"));
+    assert_eq!(cfg.nodes["n0"].drives.get("bulk").map(|p| p.to_str().unwrap()), Some("/mnt/fast"));
+    drop(cfg);
+
+    let state = h.state.cluster.state().await;
+    let stack = state.stacks.get("site").expect("stack still exists");
+    assert!(stack.spec.contains("bulk/data"));
+    assert!(!stack.spec.contains("fast/data"));
+}
+
+#[tokio::test]
 async fn a_redirect_with_an_unknown_network_is_rejected() {
     let h = harness().await;
     let body = r#"{"host":"old","network":"nope","target":"https://new.example.com","status":301}"#;
@@ -1203,6 +1269,32 @@ fn normalize(value: &mut serde_json::Value, tempdir: &str) {
 async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
     let h = harness().await;
 
+    // Give the config a served drive n0 implements, so `/api/drives` returns
+    // a real item instead of `[]` -- an empty array can't prove the item
+    // shape, which is why it's still skipped for stacks/instances/certificates
+    // below. Served (rather than replicated) exercises `active_server` as a
+    // string, not just its `null` case.
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        cfg.drives.insert(
+            "fast".to_string(),
+            cl_config::Drive {
+                sync_interval: Duration::from_secs(900),
+                mode: cl_config::DriveMode::Served,
+                served_by: vec!["n0".to_string()],
+            },
+        );
+    }
+    let node = h.state.cluster.state().await.nodes["n0"].clone();
+    h.state
+        .cluster
+        .submit(cl_raft::Request::UpsertNode(NodeState {
+            drives: BTreeMap::from([("fast".to_string(), "/mnt/fast".into())]),
+            ..node
+        }))
+        .await
+        .expect("submit node drives");
+
     let mut shapes = serde_json::Map::new();
     for (name, uri) in [
         ("status", "/api/status"),
@@ -1215,6 +1307,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("selfUpdateSshKey", "/api/self-update/ssh-key"),
         ("selfUpdateRepo", "/api/self-update/repo"),
         ("selfUpdateRun", "/api/self-update/run"),
+        ("drives", "/api/drives"),
     ] {
         let resp = h
             .router

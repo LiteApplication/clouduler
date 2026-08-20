@@ -26,7 +26,7 @@ const clusterConfig: ClusterConfig = {
   auth: { api_keys: true, session_ttl: '12h', oidc: null },
   cluster: { name: 'test' },
   data_dir: '/var/lib/clouduler',
-  drives: { fast: { sync_interval: '5m', mode: 'replicated', served_by: null } },
+  drives: { fast: { sync_interval: '5m', mode: 'replicated', served_by: [] } },
   failover: { fence_timeout: '15s', node_timeout: '30s', probe_interval: '5s' },
   networks: { internal: { type: 'internal', subnet: '10.10.0.0/24', domain: null } },
   nodes: {

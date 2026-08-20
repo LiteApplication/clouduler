@@ -56,17 +56,21 @@ elif command -v docker >/dev/null 2>&1; then
     log "building the $BUILDER_IMAGE image (once)"
     docker build -t "$BUILDER_IMAGE" -q - >&2 <<'DOCKERFILE'
 FROM rust:alpine
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev sccache perl make
 DOCKERFILE
   fi
   # Cargo's home has to be somewhere this uid can write, and keeping it under
-  # target/ means the download cache survives between runs.
+  # target/ means the download cache survives between runs. The repo's
+  # .cargo/config.toml sets build.rustc-wrapper = "sccache" unconditionally
+  # (not scoped to a target), so it applies here too; SCCACHE_DIR keeps its
+  # cache under target/ for the same bind-mount-ownership reason as CARGO_HOME.
   docker run --rm \
     -v "$REPO_ROOT:/src" \
     -w /src \
     -u "$(id -u):$(id -g)" \
     -e CARGO_HOME=/src/target/musl-cargo-home \
     -e CARGO_TARGET_DIR=/src/target \
+    -e SCCACHE_DIR=/src/target/musl-sccache \
     "$BUILDER_IMAGE" \
     cargo build --release --target "$TARGET" -p clouduler >&2
 else

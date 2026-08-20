@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/config/rollback", post(rollback))
         .route("/api/config/pending", get(pending))
         .route("/api/config/networks/{name}/rename", post(rename_network))
+        .route("/api/config/drives/{name}/rename", post(rename_drive))
 }
 
 async fn get_config(_identity: Identity, State(state): State<AppState>) -> Json<ClusterConfig> {
@@ -230,6 +231,90 @@ fn rename_network_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
         for expose in ext.expose.iter_mut() {
             if expose.network == old {
                 expose.network = new.to_string();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+#[derive(Deserialize)]
+struct RenameDriveRequest {
+    new_name: String,
+}
+
+/// Rename a drive everywhere it is referenced: the cluster config (the
+/// `drives` key, every node's drive-to-path map) and every deployed stack
+/// whose volumes mount from it.
+///
+/// Unlike a network rename this never touches replicated volume state: a
+/// volume's raft-tracked generation and replica set are keyed by
+/// drive/volume id, so the next reconcile pass registers a fresh entry under
+/// the new id the moment a stack's volume mount is renamed here -- exactly
+/// as it would if the drive had been renamed by hand across two applies. The
+/// data itself is untouched, since a node's `drives` path mapping moves with
+/// the rename rather than changing.
+async fn rename_drive(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(old_name): Path<String>,
+    Json(body): Json<RenameDriveRequest>,
+) -> Result<StatusCode, ApiError> {
+    let new_name = body.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err(ApiError::BadRequest("new_name must not be empty".into()));
+    }
+    if new_name == old_name {
+        return Ok(StatusCode::OK);
+    }
+
+    let mut config = state.cluster_config.read().await.clone();
+    if !config.drives.contains_key(&old_name) {
+        return Err(ApiError::BadRequest(format!("no drive named {old_name}")));
+    }
+    if config.drives.contains_key(&new_name) {
+        return Err(ApiError::BadRequest(format!("a drive named {new_name} already exists")));
+    }
+
+    let drive = config.drives.remove(&old_name).expect("checked above");
+    config.drives.insert(new_name.clone(), drive);
+    for node in config.nodes.values_mut() {
+        if let Some(path) = node.drives.remove(&old_name) {
+            node.drives.insert(new_name.clone(), path);
+        }
+    }
+    config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    apply_config(&state, &config).await?;
+
+    let cluster_state = state.cluster.state().await;
+    for (stack_name, stack) in &cluster_state.stacks {
+        let Ok(mut file) = StackFile::parse(&stack.spec) else { continue };
+        if !rename_drive_in_stack(&mut file, &old_name, &new_name) {
+            continue;
+        }
+        let spec = serde_yaml::to_string(&file).map_err(ApiError::internal)?;
+        let response = state
+            .cluster
+            .submit(cl_raft::Request::DeployStack { name: stack_name.clone(), spec })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::Internal(format!("renaming drive in stack {stack_name}: {msg}")));
+        }
+    }
+
+    Ok(StatusCode::OK)
+}
+
+/// Renames `old` to `new` in every service's volume mounts that source from
+/// it. Returns whether anything changed, so the caller can skip stacks that
+/// never mention it.
+fn rename_drive_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
+    let mut changed = false;
+    for svc in file.services.values_mut() {
+        for v in svc.volumes.iter_mut() {
+            if v.drive.as_deref() == Some(old) {
+                v.drive = Some(new.to_string());
                 changed = true;
             }
         }

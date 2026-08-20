@@ -18,9 +18,12 @@
 //     UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
 //
 // Deliberately NOT covered: endpoints whose bodies are arrays of items keyed
-// by cluster contents the harness has none of (stacks, instances, drives,
+// by cluster contents the harness has none of (stacks, instances,
 // certificates). A fixture of `[]` proves nothing about the item shape, so
-// pretending otherwise would be worse than the gap.
+// pretending otherwise would be worse than the gap. `drives` used to be in
+// this list too, until the Rust fixture setup started giving the harness a
+// served drive so the item shape (including `active_server` as a string, not
+// just its `null` case) is covered like everything else here.
 
 import { describe, expect, it } from 'vitest';
 import shapes from './__fixtures__/api-shapes.json';
@@ -30,6 +33,7 @@ import type {
   ClusterState,
   ClusterStatus,
   CloudflareTokenStatus,
+  DriveStatus,
   Identity,
   PendingConfig,
 } from './types';
@@ -43,6 +47,7 @@ const pending: PendingConfig = shapes.pendingConfig;
 const config: ClusterConfig = shapes.clusterConfig as unknown as ClusterConfig;
 const cloudflare: CloudflareTokenStatus = shapes.cloudflareTokenStatus;
 const clusterKey: ClusterKeyStatus = shapes.clusterKeyStatus;
+const drives: DriveStatus[] = shapes.drives as unknown as DriveStatus[];
 
 /** Keys the ui reads by name, per endpoint. */
 const READ_BY_UI: Record<string, [object, string[]]> = {
@@ -53,6 +58,7 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   clusterKeyStatus: [clusterKey, ['fingerprint', 'held']],
   state: [state, ['nodes', 'stacks', 'assignments', 'unreachable', 'version']],
   clusterConfig: [config, ['cluster', 'networks', 'nodes', 'web', 'proxy']],
+  drives: [drives[0], ['name', 'mode', 'served_by', 'active_server', 'sync_interval', 'nodes']],
 };
 
 describe('api response shapes match what the ui reads', () => {

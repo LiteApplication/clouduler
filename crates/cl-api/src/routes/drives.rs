@@ -22,7 +22,7 @@ pub fn router() -> Router<AppState> {
 #[derive(Serialize)]
 struct DriveSummary {
     name: String,
-    mode: String,
+    mode: cl_config::DriveMode,
     /// Candidate serving nodes for a served drive, in priority order.
     served_by: Vec<String>,
     /// The candidate currently answering requests: the first of `served_by`
@@ -50,7 +50,7 @@ async fn list_drives(_identity: Identity, State(state): State<AppState>) -> Json
             .iter()
             .map(|(name, drive)| DriveSummary {
                 name: name.clone(),
-                mode: format!("{:?}", drive.mode).to_lowercase(),
+                mode: drive.mode,
                 served_by: drive.served_by.clone(),
                 active_server: drive
                     .served_by
