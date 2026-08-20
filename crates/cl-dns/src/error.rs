@@ -37,22 +37,6 @@ pub enum DnsError {
     #[error("record {0} not found")]
     RecordNotFound(String),
 
-    #[error("cannot read api token from {path}: {source}")]
-    TokenRead {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("api token file {0} is world readable, refusing to use it")]
-    TokenPermissions(std::path::PathBuf),
-
-    #[error("api token file {0} is empty")]
-    TokenEmpty(std::path::PathBuf),
-
-    #[error("no api token configured")]
-    TokenMissing,
-
     #[error("gave up after {attempts} attempts: {source}")]
     RetriesExhausted {
         attempts: u32,

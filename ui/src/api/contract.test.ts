@@ -49,7 +49,7 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   status: [status, ['has_quorum', 'leader', 'managers_total', 'managers_reachable', 'version', 'state_version']],
   identity: [identity, ['subject', 'role']],
   pendingConfig: [pending, ['armed', 'seconds_left']],
-  cloudflareTokenStatus: [cloudflare, ['configured', 'path', 'present_on_this_node']],
+  cloudflareTokenStatus: [cloudflare, ['configured']],
   clusterKeyStatus: [clusterKey, ['fingerprint', 'held']],
   state: [state, ['nodes', 'stacks', 'assignments', 'unreachable', 'version']],
   clusterConfig: [config, ['cluster', 'networks', 'nodes', 'web', 'proxy']],

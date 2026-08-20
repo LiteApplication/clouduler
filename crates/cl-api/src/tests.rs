@@ -373,8 +373,8 @@ async fn an_invalid_config_reports_the_field_that_broke() {
     assert_eq!(body["errors"][0]["path"], "data_dir");
 }
 
-/// The token is write-only: the status route says whether one exists and where,
-/// never what it is.
+/// The token is write-only: the status route says whether one exists, never
+/// what it is.
 #[tokio::test]
 async fn the_cloudflare_token_status_never_carries_the_token() {
     let h = harness().await;
@@ -401,6 +401,56 @@ async fn the_cloudflare_token_status_never_carries_the_token() {
     // The harness config has no cloudflare section at all.
     assert_eq!(body["configured"], false);
     assert!(body.get("token").is_none());
+}
+
+/// Unlike the self-update repo, the token can be set more than once: it is
+/// replicated as a cluster secret rather than written to a file on whichever
+/// node answered the request, so rotating it is just overwriting that secret.
+#[tokio::test]
+async fn setting_the_cloudflare_token_can_be_rotated() {
+    let h = harness().await;
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        cfg.cloudflare = Some(cl_config::CloudflareConfig {
+            zones: vec!["example.com".to_string()],
+        });
+    }
+
+    let put = |token: &str| {
+        h.router.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/cloudflare/token")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+                .unwrap(),
+        )
+    };
+
+    assert_eq!(put("cf-token-1").await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(put("cf-token-2").await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let status = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/cloudflare/token")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(status.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["configured"], true);
 }
 
 #[tokio::test]
@@ -456,7 +506,7 @@ async fn generating_the_self_update_ssh_key_twice_returns_the_same_public_key() 
 }
 
 /// The repo section is write-once: once set, `PUT` again is a conflict rather
-/// than a silent overwrite, exactly like the cloudflare token.
+/// than a silent overwrite.
 #[tokio::test]
 async fn setting_the_self_update_repo_twice_is_a_conflict() {
     let h = harness().await;

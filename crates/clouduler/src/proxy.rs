@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET;
 use cl_api::redirects::RedirectStore;
 use cl_api::static_routes::StaticRouteStore;
 use cl_config::{qualify, ClusterConfig};
@@ -26,6 +27,7 @@ use cl_proxy::{
 };
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{dns_key, CertificateState, ClusterState, DnsRecordState, Request};
+use cl_secret::{ClusterKey, Sealed};
 use ipnet::IpNet;
 use tracing::{info, warn};
 
@@ -58,7 +60,7 @@ impl Proxy {
     }
 }
 
-pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, data_dir: &Path) -> Option<Proxy> {
+pub fn start(cfg: &ClusterConfig, node_name: &str, cluster: &Arc<ClusterNode>, data_dir: &Path) -> Option<Proxy> {
     if !cfg.proxy.enabled {
         info!("the reverse proxy is disabled");
         return None;
@@ -94,17 +96,22 @@ pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, data_dir: &Path) -
         certs,
     )));
 
+    // Loaded once, like the materializer's own key, rather than reopened on
+    // every tick. `None` when there is no cloudflare section at all, so a
+    // cluster that does not use it never touches the key file for this.
+    let key: Option<Arc<ClusterKey>> = cfg
+        .cloudflare
+        .is_some()
+        .then(|| cfg.nodes.get(node_name).and_then(|node| crate::daemon::load_cluster_key(cfg, node)))
+        .flatten()
+        .map(Arc::new);
+
     if let Some(acme) = acme_setup(cfg, data_dir) {
-        tasks.push(tokio::spawn(run_acme(acme, cfg.clone(), cluster.clone())));
+        tasks.push(tokio::spawn(run_acme(acme, cfg.clone(), cluster.clone(), key.clone())));
     }
 
-    if let Some((cloudflare, zone_names)) = cloudflare_setup(cfg, "dns record publishing") {
-        tasks.push(tokio::spawn(run_dns_reconcile(
-            cfg.clone(),
-            cluster.clone(),
-            cloudflare,
-            zone_names,
-        )));
+    if cfg.cloudflare.is_some() {
+        tasks.push(tokio::spawn(run_dns_reconcile(cfg.clone(), cluster.clone(), key)));
     }
 
     Some(Proxy { tasks })
@@ -321,31 +328,56 @@ fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<String> {
 struct Acme {
     config: AcmeConfig,
     credentials: PathBuf,
-    cloudflare: Cloudflare,
-    zones: Vec<String>,
+}
+
+/// Opens the cloudflare token out of replicated secrets, decrypting with this
+/// node's cluster key. Re-read on every call rather than resolved once at
+/// startup: the token is set (and can be rotated) from the web ui while the
+/// daemon is already running, and at the moment this node starts, replication
+/// may not have caught up to a token set on another node yet.
+async fn cloudflare_token(cluster: &ClusterNode, key: Option<&ClusterKey>) -> Option<String> {
+    let key = key?;
+    let state = cluster.state().await;
+    let entry = state.secrets.get(CLOUDFLARE_TOKEN_SECRET)?;
+    match Sealed::from_blob(entry.sealed.clone()).open(key, CLOUDFLARE_TOKEN_SECRET) {
+        Ok(plaintext) => match String::from_utf8(plaintext) {
+            Ok(token) => Some(token),
+            Err(_) => {
+                warn!("the cloudflare token secret is not utf8");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "cannot open the cloudflare token secret");
+            None
+        }
+    }
 }
 
 /// A Cloudflare client and the zone names it's allowed to write to, or
 /// `None` with the reason logged. Shared by certificate issuance and DNS
 /// record publishing: both need the same client and the same zone list, and
 /// neither should run without a readable token.
-fn cloudflare_setup(cfg: &ClusterConfig, context: &str) -> Option<(Cloudflare, Vec<String>)> {
+async fn cloudflare_setup(
+    cfg: &ClusterConfig,
+    cluster: &ClusterNode,
+    key: Option<&ClusterKey>,
+    context: &str,
+) -> Option<(Cloudflare, Vec<String>)> {
     let cloudflare = cfg.cloudflare.as_ref()?;
-    let token = match cl_dns::load_token(cloudflare) {
-        Ok(Some(token)) => token,
-        Ok(None) => {
+    let token = match cloudflare_token(cluster, key).await {
+        Some(token) => token,
+        None => {
             info!("no cloudflare token yet, {context} will not run");
-            return None;
-        }
-        Err(e) => {
-            warn!(error = %e, "cannot read the cloudflare token, {context} will not run");
             return None;
         }
     };
     Some((Cloudflare::new(token), cloudflare.zones.clone()))
 }
 
-/// Read the ACME setup out of the config, or say why there is none.
+/// Read the ACME setup out of the config, or say why there is none. The
+/// cloudflare client itself is resolved per tick in `run_acme`, not here,
+/// since the token can arrive or rotate after this runs.
 fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
     if !cfg.proxy.acme.enabled {
         return None;
@@ -356,7 +388,6 @@ fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
         warn!("certificate issuance needs a cloudflare section");
         return None;
     }
-    let (cloudflare, zones) = cloudflare_setup(cfg, "certificate issuance")?;
 
     let mut config = AcmeConfig {
         contact_emails: cfg.proxy.acme.contact_email.clone().into_iter().collect(),
@@ -369,8 +400,6 @@ fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
     Some(Acme {
         config,
         credentials: data_dir.join("acme-account.json"),
-        cloudflare,
-        zones,
     })
 }
 
@@ -378,7 +407,7 @@ fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
 /// node leads. One loop rather than two, so a certificate is never ordered
 /// twice in a pass by an issuing task and a renewing one disagreeing about
 /// what is stored.
-async fn run_acme(acme: Acme, cfg: ClusterConfig, cluster: Arc<ClusterNode>) {
+async fn run_acme(acme: Acme, cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: Option<Arc<ClusterKey>>) {
     let account = match cl_proxy::load_or_create_account(&acme.config, &acme.credentials).await {
         Ok(account) => account,
         Err(e) => {
@@ -390,29 +419,26 @@ async fn run_acme(acme: Acme, cfg: ClusterConfig, cluster: Arc<ClusterNode>) {
         warn!("issuing against the acme staging directory, certificates will not be trusted");
     }
 
-    let zones = match Zones::resolve(&acme.cloudflare, &acme.zones).await {
-        Ok(zones) => Arc::new(zones),
-        Err(e) => {
-            warn!(error = %e, "cannot resolve the cloudflare zones");
-            return;
-        }
-    };
-
     let mut ticker = tokio::time::interval(ISSUANCE_INTERVAL);
     loop {
         ticker.tick().await;
         if !cluster.is_leader() {
             continue;
         }
-        issue_missing(&cfg, &cluster, &account, &acme.cloudflare, zones.as_ref()).await;
-        cl_proxy::renewal_tick(
-            &cluster,
-            &account,
-            &acme.cloudflare,
-            zones.as_ref(),
-            DEFAULT_PROPAGATION_TIMEOUT,
-        )
-        .await;
+        let Some((cloudflare, zone_names)) =
+            cloudflare_setup(&cfg, &cluster, key.as_deref(), "certificate issuance").await
+        else {
+            continue;
+        };
+        let zones = match Zones::resolve(&cloudflare, &zone_names).await {
+            Ok(zones) => zones,
+            Err(e) => {
+                warn!(error = %e, "cannot resolve the cloudflare zones");
+                continue;
+            }
+        };
+        issue_missing(&cfg, &cluster, &account, &cloudflare, &zones).await;
+        cl_proxy::renewal_tick(&cluster, &account, &cloudflare, &zones, DEFAULT_PROPAGATION_TIMEOUT).await;
     }
 }
 
@@ -500,21 +526,25 @@ const DNS_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// any node's address is a valid way in. Leader only, same reasoning as
 /// certificate issuance: several nodes reconciling at once would race each
 /// other's writes.
-async fn run_dns_reconcile(cfg: ClusterConfig, cluster: Arc<ClusterNode>, cf: Cloudflare, zone_names: Vec<String>) {
-    let zones = match Zones::resolve(&cf, &zone_names).await {
-        Ok(zones) => zones,
-        Err(e) => {
-            warn!(error = %e, "cannot resolve the cloudflare zones, dns records will not be published");
-            return;
-        }
-    };
-
+async fn run_dns_reconcile(cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: Option<Arc<ClusterKey>>) {
     let mut ticker = tokio::time::interval(DNS_RECONCILE_INTERVAL);
     loop {
         ticker.tick().await;
         if !cluster.is_leader() {
             continue;
         }
+        let Some((cf, zone_names)) =
+            cloudflare_setup(&cfg, &cluster, key.as_deref(), "dns record publishing").await
+        else {
+            continue;
+        };
+        let zones = match Zones::resolve(&cf, &zone_names).await {
+            Ok(zones) => zones,
+            Err(e) => {
+                warn!(error = %e, "cannot resolve the cloudflare zones, dns records will not be published");
+                continue;
+            }
+        };
         let state = cluster.state().await;
         reconcile_dns(&cfg, &cluster, &cf, &zones, &state).await;
     }

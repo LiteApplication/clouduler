@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::keys::API_KEYS_CONFIG;
 use crate::auth::{Identity, RequireAdmin};
+use crate::cloudflare::is_reserved_cloudflare_secret;
 use crate::error::ApiError;
 use crate::redirects::REDIRECTS_CONFIG;
 use crate::secrets::{self, Charset};
@@ -31,7 +32,9 @@ fn is_reserved(name: &str) -> bool {
 /// Secret names clouduler itself owns and never shows through the generic
 /// secret listing route.
 fn is_reserved_secret(name: &str) -> bool {
-    super::self_update::is_reserved_secret(name) || is_reserved_wireguard_secret(name)
+    super::self_update::is_reserved_secret(name)
+        || is_reserved_wireguard_secret(name)
+        || is_reserved_cloudflare_secret(name)
 }
 
 pub fn router() -> Router<AppState> {

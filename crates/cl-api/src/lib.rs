@@ -1,6 +1,7 @@
 //! The HTTP API and the web ui it serves. See docs/api.md for the contract.
 
 pub mod auth;
+pub mod cloudflare;
 pub mod config_edit;
 pub mod docker_stats;
 pub mod error;

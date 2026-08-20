@@ -71,9 +71,7 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
           }
         : null,
     },
-    cloudflare: cfg.cloudflare
-      ? { ...cfg.cloudflare, api_token_file: nullable(cfg.cloudflare.api_token_file) }
-      : null,
+    cloudflare: cfg.cloudflare ? { ...cfg.cloudflare } : null,
     proxy: {
       ...cfg.proxy,
       acme: {

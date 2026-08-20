@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use cl_config::ClusterConfig;
@@ -218,18 +219,35 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(api)
-        .fallback(get(ui::serve))
+        .fallback(get(serve_ui))
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
+/// Only the leader serves the dashboard: a follower's replicated state can lag
+/// behind, and a client that loaded the page from one node then had requests
+/// bounce between nodes as leadership moved was a worse experience than one
+/// redirect up front. A follower instead sends the browser straight to the
+/// leader's address, where every subsequent asset and api call lands on the
+/// same node the page was actually served from.
+async fn serve_ui(State(state): State<AppState>, request: Request) -> Response {
+    if state.cluster.is_leader() {
+        return ui::serve(request).await;
+    }
+    match leader_location(&state).await {
+        Some(leader) => {
+            let target = format!("{}{}", leader.trim_end_matches('/'), request.uri().path());
+            Redirect::temporary(&target).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE, "no cluster leader elected yet").into_response(),
+    }
+}
+
 /// Only the leader has a fully caught up view of the cluster and can accept
 /// writes, so every `/api` and `/auth` route bounces elsewhere when this node
-/// is not it. The ui's static files are served regardless, so a client that
-/// lands on a follower still gets a working page that then retries the api
-/// call against the address in `Location`.
+/// is not it.
 async fn redirect_non_leader(
     State(state): State<AppState>,
     request: axum::extract::Request,

@@ -432,14 +432,6 @@ impl ClusterConfig {
                 "list at least one zone clouduler may write to",
             ));
         }
-        if let Some(path) = &cf.api_token_file {
-            if !path.is_absolute() {
-                return Err(ConfigError::invalid(
-                    "cloudflare.api_token_file",
-                    "must be an absolute path",
-                ));
-            }
-        }
         // Every network domain must sit under a zone or its records cannot be written.
         for (name, net) in &self.networks {
             if let Some(domain) = &net.domain {
@@ -499,7 +491,6 @@ nodes:
     drives: { fast: /mnt/fast }
 web: { address: cloud, network: tailscale }
 cloudflare:
-  api_token_file: /etc/clouduler/cf.token
   zones: [example.com]
 "#;
 
@@ -701,12 +692,6 @@ cloudflare:
     fn network_domain_must_be_covered_by_a_zone() {
         let err = parse(&[("zones: [example.com]", "zones: [other.com]")]).unwrap_err();
         assert!(err.to_string().contains("not covered by any configured cloudflare zone"));
-    }
-
-    #[test]
-    fn cloudflare_token_may_be_omitted() {
-        let cfg = parse(&[("  api_token_file: /etc/clouduler/cf.token\n", "")]).unwrap();
-        assert!(cfg.cloudflare.unwrap().api_token_file.is_none());
     }
 
     #[test]

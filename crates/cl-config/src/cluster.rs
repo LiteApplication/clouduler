@@ -37,8 +37,8 @@ pub struct ClusterConfig {
     pub cloudflare: Option<CloudflareConfig>,
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Git-based cluster self-update. Write-once through the web ui, like
-    /// `cloudflare`: once set, further changes go through this file by hand.
+    /// Git-based cluster self-update. Write-once through the web ui: once
+    /// set, further changes go through this file by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_update: Option<SelfUpdateConfig>,
 }
@@ -618,11 +618,10 @@ pub struct SelfUpdateConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CloudflareConfig {
-    /// Path to a file holding the API token. Left out when the token is set
-    /// from the web ui instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_token_file: Option<PathBuf>,
-    /// Zones clouduler is allowed to write records into.
+    /// Zones clouduler is allowed to write records into. The api token itself
+    /// is not here: it is sealed and stored as a cluster secret (set from the
+    /// web ui), so every node replicates it instead of only the one an
+    /// operator happened to log into.
     pub zones: Vec<String>,
 }
 

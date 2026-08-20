@@ -119,8 +119,8 @@ failover:
   probe_interval: 5s
 
 cloudflare:
-  # If not specified, needs to be filled in from the GUI
-  api_token_file: /etc/clouduler/cf.token
+  # The api token itself is set from the web ui and stored as a replicated
+  # cluster secret, not here.
   zones:
     - example.com
 

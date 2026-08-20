@@ -132,7 +132,7 @@ pub async fn run(
     // overlay rather than waiting for anything to be scheduled.
     let internal_dns = crate::internal_dns::start(&cfg, &cluster);
     let exposed = crate::expose::start(&cluster);
-    let proxy = crate::proxy::start(&cfg, &cluster, &data_dir);
+    let proxy = crate::proxy::start(&cfg, &node_name, &cluster, &data_dir);
 
     // Worth waiting for: on a node that has just booted, dockerd is often a
     // second or two behind us, and a node that gave up on docker for the life

@@ -327,15 +327,12 @@ export interface AuthConfig {
 }
 
 export interface CloudflareConfig {
-  api_token_file: string | null;
   zones: string[];
 }
 
 /** GET /api/cloudflare/token. The token value itself is never returned. */
 export interface CloudflareTokenStatus {
   configured: boolean;
-  path: string | null;
-  present_on_this_node: boolean;
 }
 
 export interface AcmeConfig {

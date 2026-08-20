@@ -344,8 +344,10 @@ the result back. Every five minutes the leader:
    ui's own fqdn, that has none stored yet;
 2. runs `renewal_tick` over everything that does have one.
 
-Cloudflare zone ids are resolved once at startup from `cloudflare.zones`, since
-`ZoneResolver` is synchronous and cannot look one up mid-order. The longest
+Cloudflare zone ids are resolved from `cloudflare.zones` at the start of every
+issuance/renewal pass, not cached across ticks: the token is a replicated
+cluster secret rather than a file read once at startup, so it can be set or
+rotated from the web ui while the daemon is already running. The longest
 matching zone wins, so a delegated subdomain zone is preferred over its parent.
 
 The api serves the ui with the stored certificate for its own fqdn when there

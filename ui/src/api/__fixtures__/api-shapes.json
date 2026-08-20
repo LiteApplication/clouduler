@@ -1,8 +1,6 @@
 {
   "cloudflareTokenStatus": {
-    "configured": false,
-    "path": null,
-    "present_on_this_node": false
+    "configured": false
   },
   "clusterConfig": {
     "auth": {

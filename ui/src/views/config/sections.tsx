@@ -1066,7 +1066,7 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
         id="cf-enabled"
         label="Manage DNS through Cloudflare"
         value={cf != null}
-        onChange={(enabled) => setDraft({ ...draft, cloudflare: enabled ? { api_token_file: null, zones: [] } : null })}
+        onChange={(enabled) => setDraft({ ...draft, cloudflare: enabled ? { zones: [] } : null })}
         disabled={disabled}
       />
       {cf && (
@@ -1096,9 +1096,9 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
  *
  * It sits outside the config draft on purpose. The token is written by its own
  * endpoint the moment Save is pressed, not on Apply, because it is not a config
- * value that can be diffed, rolled back or shown: once stored it is never
- * readable again, so this box disappears as soon as one is set and rotating
- * means replacing the file on disk.
+ * value that can be diffed or rolled back. Sealed and replicated as a cluster
+ * secret, so every node has it, and can be rotated at any time by submitting a
+ * new one -- it just overwrites the old.
  */
 function CloudflareToken({ disabled }: { disabled: boolean }) {
   const [status, setStatus] = useState<CloudflareTokenStatus | null>(null);
@@ -1132,27 +1132,14 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
     );
   }
 
-  if (status.configured) {
-    return (
-      <div className="field">
-        <label>API token</label>
-        <p className="muted">
-          Stored in <span className="mono">{status.path}</span>. It cannot be shown again; replace that file to
-          rotate it.
-        </p>
-        {!status.present_on_this_node && (
-          <span className="field-error">
-            <Icon name="alert-circle" />
-            That file is missing on this node, so DNS challenges from here will fail. Copy it across.
-          </span>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="field">
       <label htmlFor="cf-token">API token</label>
+      {status.configured && (
+        <p className="muted">
+          A token is stored, replicated to every node. It cannot be shown again; enter a new one below to rotate it.
+        </p>
+      )}
       <input
         id="cf-token"
         type="password"
@@ -1162,10 +1149,12 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
         autoComplete="off"
         disabled={disabled || busy}
       />
-      <span className="field-hint">
-        Saved to the config directory as soon as you press Save, separately from the rest of this page. You will not
-        be able to read it back.
-      </span>
+      {!status.configured && (
+        <span className="field-hint">
+          Sealed and stored as soon as you press Save, separately from the rest of this page. You will not be able to
+          read it back.
+        </span>
+      )}
       {error && (
         <span className="field-error">
           <Icon name="alert-circle" /> {error}
@@ -1174,7 +1163,7 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
       <div className="btn-row" style={{ marginTop: 8 }}>
         <button onClick={save} disabled={disabled || busy || token.trim().length === 0}>
           {busy ? <span className="spinner" /> : <Icon name="key" />}
-          {busy ? 'Saving...' : 'Save token'}
+          {busy ? 'Saving...' : status.configured ? 'Rotate token' : 'Save token'}
         </button>
       </div>
     </div>
