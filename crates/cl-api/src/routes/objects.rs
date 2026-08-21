@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn the_self_update_deploy_key_is_excluded_from_the_generic_secret_listing() {
-        assert!(is_reserved_secret(cl_update::plan::DEPLOY_KEY_SECRET));
+        assert!(is_reserved_secret(cl_update::plan::GITHUB_TOKEN_SECRET));
         assert!(!is_reserved_secret("db_password"));
     }
 }

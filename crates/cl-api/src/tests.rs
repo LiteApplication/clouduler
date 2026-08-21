@@ -473,37 +473,40 @@ async fn setting_a_cloudflare_token_without_cloudflare_enabled_still_stores_it()
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
-/// Calling `POST ssh-key` twice must return the same public key rather than
-/// generating (and sealing) a second, orphaned keypair.
+/// Setting the self-update GitHub token stores it as a sealed secret, and
+/// the status route only ever reports whether one is configured.
 #[tokio::test]
-async fn generating_the_self_update_ssh_key_twice_returns_the_same_public_key() {
+async fn setting_the_self_update_github_token_marks_it_configured() {
     let h = harness().await;
-    let generate = || {
-        h.router.clone().oneshot(
+    let put = h.router.clone().oneshot(
+        Request::builder()
+            .method("PUT")
+            .uri("/api/self-update/github-token")
+            .header("authorization", format!("Bearer {}", h.admin_key))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"token":"ghp_test"}"#))
+            .unwrap(),
+    );
+    assert_eq!(put.await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let status = h
+        .router
+        .clone()
+        .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/api/self-update/ssh-key")
+                .uri("/api/self-update/github-token")
                 .header("authorization", format!("Bearer {}", h.admin_key))
                 .body(Body::empty())
                 .unwrap(),
         )
-    };
-
-    let first = generate().await.unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    let first_body: serde_json::Value = serde_json::from_slice(
-        &http_body_util::BodyExt::collect(first.into_body()).await.unwrap().to_bytes(),
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(status.into_body()).await.unwrap().to_bytes(),
     )
     .unwrap();
-
-    let second = generate().await.unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
-    let second_body: serde_json::Value = serde_json::from_slice(
-        &http_body_util::BodyExt::collect(second.into_body()).await.unwrap().to_bytes(),
-    )
-    .unwrap();
-
-    assert_eq!(first_body["public_key"], second_body["public_key"]);
+    assert_eq!(body["configured"], true);
 }
 
 /// The repo section is write-once: once set, `PUT` again is a conflict rather
@@ -511,7 +514,7 @@ async fn generating_the_self_update_ssh_key_twice_returns_the_same_public_key() 
 #[tokio::test]
 async fn setting_the_self_update_repo_twice_is_a_conflict() {
     let h = harness().await;
-    let body = r#"{"git_url":"git@example.com:org/repo.git","git_branch":"main","ssh_public_key":"ssh-ed25519 AAAA test"}"#;
+    let body = r#"{"release_url":"https://github.com/LiteApplication/clouduler"}"#;
     let put = || {
         h.router.clone().oneshot(
             Request::builder()
@@ -1304,7 +1307,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("clusterConfig", "/api/config"),
         ("cloudflareTokenStatus", "/api/cloudflare/token"),
         ("clusterKeyStatus", "/api/secrets/key"),
-        ("selfUpdateSshKey", "/api/self-update/ssh-key"),
+        ("selfUpdateGithubToken", "/api/self-update/github-token"),
         ("selfUpdateRepo", "/api/self-update/repo"),
         ("selfUpdateRun", "/api/self-update/run"),
         ("drives", "/api/drives"),

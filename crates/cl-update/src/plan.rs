@@ -9,13 +9,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::release::ReleaseAsset;
+
 /// Reserved config name the run state is stored under. Never exposed through
 /// the generic `/api/configs` routes.
 pub const RUN_CONFIG: &str = "_clouduler_self_update_run";
 
-/// Reserved secret name the sealed ssh deploy key is stored under. Never
-/// exposed through the generic `/api/secrets` routes.
-pub const DEPLOY_KEY_SECRET: &str = "_clouduler_self_update_deploy_key";
+/// Reserved secret name the sealed GitHub API token is stored under. Never
+/// exposed through the generic `/api/secrets` routes. Optional: only needed
+/// for a private repo, or to avoid GitHub's low unauthenticated rate limit.
+pub const GITHUB_TOKEN_SECRET: &str = "_clouduler_self_update_github_token";
 
 /// One node's progress through a run, in the order it must be crossed.
 ///
@@ -26,13 +29,8 @@ pub const DEPLOY_KEY_SECRET: &str = "_clouduler_self_update_deploy_key";
 #[serde(rename_all = "snake_case")]
 pub enum NodePhase {
     Idle,
-    AssignedBuild,
-    Cloning,
-    Building,
-    Built { sha256: String },
-    BuildFailed { reason: String },
-    AwaitingArtifact,
     Fetching,
+    FetchFailed { reason: String },
     Ready,
     Restarting,
     Done,
@@ -41,33 +39,24 @@ pub enum NodePhase {
 
 impl NodePhase {
     /// The phase this one may advance to on success. `None` for a phase that
-    /// is either terminal or whose next step depends on which branch a node
-    /// took (build vs. fetch), which the caller decides rather than this enum.
+    /// is either terminal or whose next step the caller decides (`Fetching`
+    /// ends at either `Ready` or `FetchFailed`, decided by the worker).
     pub fn next(&self) -> Option<NodePhase> {
         use NodePhase::*;
         match self {
-            Idle => Some(AssignedBuild),
-            AssignedBuild => Some(Cloning),
-            Cloning => Some(Building),
-            AwaitingArtifact => Some(Fetching),
-            Fetching => Some(Ready),
+            Idle => Some(Fetching),
             Ready => Some(Restarting),
             Restarting => Some(Done),
-            // Building's success path ends at `Built{sha256}`, which carries
-            // data the plain enum ordering can't express as "next".
-            Building | Built { .. } | BuildFailed { .. } | Done | RestartFailed { .. } => None,
+            Fetching | FetchFailed { .. } | Done | RestartFailed { .. } => None,
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            NodePhase::Done | NodePhase::BuildFailed { .. } | NodePhase::RestartFailed { .. }
-        )
+        matches!(self, NodePhase::Done | NodePhase::FetchFailed { .. } | NodePhase::RestartFailed { .. })
     }
 
     pub fn is_failed(&self) -> bool {
-        matches!(self, NodePhase::BuildFailed { .. } | NodePhase::RestartFailed { .. })
+        matches!(self, NodePhase::FetchFailed { .. } | NodePhase::RestartFailed { .. })
     }
 }
 
@@ -77,10 +66,20 @@ pub struct UpdateRunState {
     /// Unique per run, so a worker that missed the start of a run (restarted
     /// mid-flight) can tell "still the run I was doing" from "a new one".
     pub id: String,
-    /// Resolved commit sha, once at least one builder has cloned.
-    pub target_commit: Option<String>,
-    /// arch -> node name doing the build for that arch.
-    pub arch_builders: BTreeMap<String, String>,
+    /// Set once the leader has resolved the release this run targets, along
+    /// with `owner`/`repo`, needed by workers to build each asset's download
+    /// url.
+    pub release_tag: Option<String>,
+    pub owner: Option<String>,
+    pub repo: Option<String>,
+    /// arch -> the asset resolved for it, agreed on once by the leader so
+    /// every worker downloads the same bytes even if a newer release lands
+    /// on GitHub mid-rollout.
+    pub assets: BTreeMap<String, ReleaseAsset>,
+    /// arch -> blake3 hash of the downloaded binary, filled in as the first
+    /// node of each arch reports `Ready`, and used to confirm a restarted
+    /// node actually came back on it.
+    pub arch_hashes: BTreeMap<String, String>,
     pub per_node: BTreeMap<String, NodePhase>,
     /// Unix seconds.
     pub started_at: i64,
@@ -99,8 +98,11 @@ impl UpdateRunState {
     pub fn new(id: String, nodes: impl IntoIterator<Item = String>, started_at: i64) -> Self {
         Self {
             id,
-            target_commit: None,
-            arch_builders: BTreeMap::new(),
+            release_tag: None,
+            owner: None,
+            repo: None,
+            assets: BTreeMap::new(),
+            arch_hashes: BTreeMap::new(),
             per_node: nodes.into_iter().map(|n| (n, NodePhase::Idle)).collect(),
             started_at,
             finished_at: None,
@@ -145,11 +147,7 @@ mod tests {
     #[test]
     fn forward_progression_follows_the_declared_order() {
         let mut phase = NodePhase::Idle;
-        let expected = [
-            NodePhase::AssignedBuild,
-            NodePhase::Cloning,
-            NodePhase::Building,
-        ];
+        let expected = [NodePhase::Fetching];
         for next in expected {
             let advanced = phase.next().expect("has a next phase");
             assert_eq!(advanced, next);
@@ -158,27 +156,23 @@ mod tests {
     }
 
     #[test]
-    fn built_and_terminal_phases_have_no_declared_next() {
-        assert!(NodePhase::Built { sha256: "abc".into() }.next().is_none());
+    fn fetching_and_terminal_phases_have_no_declared_next() {
+        assert!(NodePhase::Fetching.next().is_none());
         assert!(NodePhase::Done.next().is_none());
-        assert!(NodePhase::BuildFailed { reason: "x".into() }.next().is_none());
+        assert!(NodePhase::FetchFailed { reason: "x".into() }.next().is_none());
     }
 
     #[test]
     fn failed_phases_are_terminal_and_reported_as_failed() {
-        let failed = NodePhase::BuildFailed { reason: "no such branch".into() };
+        let failed = NodePhase::FetchFailed { reason: "no such asset".into() };
         assert!(failed.is_terminal());
         assert!(failed.is_failed());
-        assert!(!NodePhase::Building.is_failed());
+        assert!(!NodePhase::Fetching.is_failed());
     }
 
     #[test]
     fn a_run_completes_only_once_every_node_is_done() {
-        let mut run = UpdateRunState::new(
-            "run-1".into(),
-            ["a".to_string(), "b".to_string()],
-            0,
-        );
+        let mut run = UpdateRunState::new("run-1".into(), ["a".to_string(), "b".to_string()], 0);
         assert!(!run.is_complete());
         run.per_node.insert("a".into(), NodePhase::Done);
         assert!(!run.is_complete());
@@ -198,10 +192,7 @@ mod tests {
     #[test]
     fn a_node_failure_marks_the_run_as_failed() {
         let mut run = UpdateRunState::new("run-1".into(), ["a".to_string()], 0);
-        run.per_node.insert(
-            "a".into(),
-            NodePhase::RestartFailed { reason: "never came back".into() },
-        );
+        run.per_node.insert("a".into(), NodePhase::RestartFailed { reason: "never came back".into() });
         assert!(run.has_failed());
     }
 }

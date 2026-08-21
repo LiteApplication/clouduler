@@ -281,9 +281,11 @@ impl Scheduler {
             let spec = spec::build(
                 instance,
                 service,
-                &objects.mounts,
-                &objects.env,
-                &drive_roots,
+                spec::Materialization {
+                    objects: &objects.mounts,
+                    env: &objects.env,
+                    drive_roots: &drive_roots,
+                },
                 placement,
                 assignment.image_digest.as_deref(),
                 stack.revision,

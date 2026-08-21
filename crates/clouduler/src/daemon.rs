@@ -198,9 +198,7 @@ pub async fn run(
     let overlay = crate::overlay::start(&cfg, &node_name, &cluster, connected.clone());
     let egress = crate::egress::start(&cfg, &node_name, &cluster, connected.clone());
 
-    let self_update = connected.clone().and_then(|docker| {
-        start_self_update(&cfg, &node_name, &cluster, docker, &data_dir, internal_http.clone())
-    });
+    let self_update = start_self_update(&cfg, &node_name, &cluster, &data_dir, internal_http.clone());
 
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
@@ -365,15 +363,15 @@ fn self_update_artifact_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Wire up the leader-gated orchestrator and the per-node worker for
-/// git-based self-update, alongside the scheduler. Both need a cluster key
-/// (to unseal the deploy key and to sign internal node-to-node calls), so a
-/// node without one runs neither: it could not build or fetch anything it
-/// would then be unable to verify came from a trusted peer.
+/// GitHub-release-based self-update, alongside the scheduler. Both need a
+/// cluster key (to unseal the optional GitHub token and to sign internal
+/// node-to-node calls), so a node without one runs neither. Unlike the old
+/// build pipeline this needs no docker connection: downloading a prebuilt
+/// binary and swapping it in are both plain filesystem operations.
 fn start_self_update(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: cl_docker::Docker,
     data_dir: &Path,
     http: reqwest::Client,
 ) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
@@ -381,7 +379,6 @@ fn start_self_update(
     let orchestrator_key = load_cluster_key(cfg, node)?;
     let worker_key = load_cluster_key(cfg, node)?;
 
-    let checkout_dir = data_dir.join("self-update").join("checkout");
     let artifact_path = self_update_artifact_path(data_dir);
     if let Some(parent) = artifact_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -396,11 +393,9 @@ fn start_self_update(
     let worker = cl_update::worker::Worker {
         node_name: node_name.to_string(),
         cluster: cluster.clone(),
-        docker,
         cluster_key: worker_key,
         http,
         cluster_config: cfg.clone(),
-        checkout_dir,
         artifact_path,
     };
 

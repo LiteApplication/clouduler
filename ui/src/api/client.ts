@@ -22,8 +22,8 @@ import type {
   SecretEntry,
   SecretPutRequest,
   SelfUpdateConfig,
+  SelfUpdateGithubTokenStatus,
   SelfUpdateRunState,
-  SelfUpdateSshKeyStatus,
   StaticRouteRule,
   ValidationResult,
   VolumeState,
@@ -246,9 +246,9 @@ export const api = {
   listDns: () => get<DnsRecordState[]>('/api/dns'),
   reconcileDns: () => post<void>('/api/dns/reconcile'),
 
-  // self-update: generate the deploy key first, then set the repo
-  generateSelfUpdateSshKey: () => post<SelfUpdateSshKeyStatus & { public_key: string }>('/api/self-update/ssh-key'),
-  selfUpdateSshKey: () => get<SelfUpdateSshKeyStatus>('/api/self-update/ssh-key'),
+  // self-update: the github token is write-only, so there is no getter for its value
+  selfUpdateGithubToken: () => get<SelfUpdateGithubTokenStatus>('/api/self-update/github-token'),
+  setSelfUpdateGithubToken: (token: string) => put<void>('/api/self-update/github-token', { token }),
   setSelfUpdateRepo: (body: SelfUpdateConfig) => put<void>('/api/self-update/repo', body),
   selfUpdateRepo: () => get<SelfUpdateConfig | null>('/api/self-update/repo'),
   startSelfUpdate: () => post<SelfUpdateRunState>('/api/self-update/run'),

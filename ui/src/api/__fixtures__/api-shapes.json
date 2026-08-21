@@ -81,11 +81,11 @@
     "armed": false,
     "seconds_left": null
   },
+  "selfUpdateGithubToken": {
+    "configured": false
+  },
   "selfUpdateRepo": null,
   "selfUpdateRun": null,
-  "selfUpdateSshKey": {
-    "public_key": null
-  },
   "state": {
     "assignments": {},
     "certificates": {},
@@ -134,7 +134,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.1.0",
+    "version": "0.2.0",
     "voters": 1
   }
 }

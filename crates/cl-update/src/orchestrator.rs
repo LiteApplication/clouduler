@@ -1,21 +1,23 @@
-//! The leader-gated background loop that drives one self-update run: picks a
-//! builder per architecture, waits for builds, then rolls the restart out one
-//! node at a time. Modeled on `cl_sched::run::Scheduler`: only the leader
-//! decides, every node's own worker loop carries out the parts that touch
-//! its own docker and its own binary.
+//! The leader-gated background loop that drives one self-update run: resolves
+//! the target release, waits for every node to fetch its architecture's
+//! asset, then rolls the restart out one node at a time. Modeled on
+//! `cl_sched::run::Scheduler`: only the leader decides, every node's own
+//! worker loop carries out the parts that touch its own filesystem and its
+//! own binary.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use cl_raft::state::{NodeState, Request, Role};
 use cl_raft::ClusterNode;
-use cl_secret::ClusterKey;
+use cl_secret::{ClusterKey, Sealed};
 use tracing::{info, warn};
 
 use crate::internal_client;
 use crate::peers;
-use crate::plan::{NodePhase, UpdateRunState, RUN_CONFIG};
+use crate::plan::{NodePhase, UpdateRunState, GITHUB_TOKEN_SECRET, RUN_CONFIG};
+use crate::release;
 
 /// How often the leader checks the run's progress. Same order of magnitude
 /// as `cl_sched::run::Scheduler`'s sweep: fast enough that a stalled step
@@ -26,25 +28,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// covers the binary swap, a services restart, and this process rejoining
 /// raft and reporting a fresh `binary_hash`.
 const RESTART_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// One reachable, schedulable node per distinct arch, chosen deterministically
-/// (lowest name) so a re-run of this function against unchanged input always
-/// picks the same builder.
-pub fn pick_builders(
-    nodes: &BTreeMap<String, NodeState>,
-    unreachable: &BTreeSet<String>,
-) -> BTreeMap<String, String> {
-    let mut builders = BTreeMap::new();
-    for (name, node) in nodes {
-        if unreachable.contains(name) || node.arch.is_empty() {
-            continue;
-        }
-        builders
-            .entry(node.arch.clone())
-            .or_insert_with(|| name.clone());
-    }
-    builders
-}
 
 /// Restart order: workers first, then non-leader managers, then the leader
 /// last, each group sorted by name for determinism. Keeping the leader
@@ -70,28 +53,6 @@ pub fn restart_order(nodes: &BTreeMap<String, NodeState>, leader: &str) -> Vec<S
         order.push(leader.to_string());
     }
     order
-}
-
-/// Once every node building for an arch reports `Built`, every other node of
-/// that arch that is still `Idle` moves to `AwaitingArtifact`. Nodes doing the
-/// building for their own arch skip straight from `Built` to `Ready` via the
-/// worker loop, since they already hold the binary; this only concerns
-/// everyone else.
-pub fn advance_awaiting_artifact(run: &mut UpdateRunState, nodes: &BTreeMap<String, NodeState>) {
-    for (arch, builder) in run.arch_builders.clone() {
-        let built = matches!(run.per_node.get(&builder), Some(NodePhase::Built { .. }));
-        if !built {
-            continue;
-        }
-        for (name, node) in nodes {
-            if node.arch != arch || name == &builder {
-                continue;
-            }
-            if run.per_node.get(name) == Some(&NodePhase::Idle) {
-                run.per_node.insert(name.clone(), NodePhase::AwaitingArtifact);
-            }
-        }
-    }
 }
 
 pub struct Orchestrator {
@@ -126,24 +87,12 @@ impl Orchestrator {
             return Ok(());
         }
 
-        if run.arch_builders.is_empty() {
-            let builders = pick_builders(&state.nodes, &state.unreachable);
-            if builders.is_empty() {
-                run.fail("no reachable node reports an architecture", now());
-                return self.save(run).await;
-            }
-            for (arch, node) in &builders {
-                run.per_node.insert(node.clone(), NodePhase::AssignedBuild);
-                info!(arch, node, "assigned self-update build");
-            }
-            run.arch_builders = builders;
-            return self.save(run).await;
+        if run.release_tag.is_none() {
+            return self.resolve_release(run).await;
         }
 
-        advance_awaiting_artifact(&mut run, &state.nodes);
-
         if run.has_failed() {
-            run.fail("a node reported a build or fetch failure", now());
+            run.fail("a node reported a fetch or restart failure", now());
             return self.save(run).await;
         }
 
@@ -179,8 +128,44 @@ impl Orchestrator {
         }
     }
 
+    /// Resolve the configured release (once) into a tag and a per-arch asset
+    /// map, then hand every node its assignment. Every node moves straight to
+    /// `Fetching`: there is no build step left to gate on.
+    async fn resolve_release(&self, mut run: UpdateRunState) -> Result<(), String> {
+        let Some(self_update) = self.cluster_config.self_update.as_ref() else {
+            run.fail("no self-update release is configured", now());
+            return self.save(run).await;
+        };
+        let token = self.unseal_github_token().await;
+
+        match release::resolve(&self_update.release_url, token.as_deref()).await {
+            Ok(resolved) => {
+                run.release_tag = Some(resolved.tag.clone());
+                run.owner = Some(resolved.owner);
+                run.repo = Some(resolved.repo);
+                run.assets = resolved.assets;
+                for phase in run.per_node.values_mut() {
+                    if *phase == NodePhase::Idle {
+                        *phase = NodePhase::Fetching;
+                    }
+                }
+                info!(tag = %resolved.tag, "self-update resolved a release");
+            }
+            Err(e) => run.fail(format!("resolving the release: {e}"), now()),
+        }
+        self.save(run).await
+    }
+
+    async fn unseal_github_token(&self) -> Option<String> {
+        let state = self.cluster.state().await;
+        let entry = state.secrets.get(GITHUB_TOKEN_SECRET)?;
+        let sealed = Sealed::from_blob(entry.sealed.clone());
+        let plaintext = sealed.open(&self.cluster_key, GITHUB_TOKEN_SECRET).ok()?;
+        String::from_utf8(plaintext).ok()
+    }
+
     /// Once a node is restarting, it counts as done when it is reachable
-    /// again and reports the hash its arch's build produced; it counts as
+    /// again and reports the hash its arch's download produced; it counts as
     /// failed once `RESTART_TIMEOUT` passes without that.
     fn check_restart_progress(
         &self,
@@ -192,14 +177,7 @@ impl Orchestrator {
             run.fail(format!("{name} left the cluster mid-restart"), now());
             return;
         };
-        let expected_hash = run
-            .arch_builders
-            .get(&node.arch)
-            .and_then(|builder| run.per_node.get(builder))
-            .and_then(|phase| match phase {
-                NodePhase::Built { sha256 } => Some(sha256.clone()),
-                _ => None,
-            });
+        let expected_hash = run.arch_hashes.get(&node.arch).cloned();
 
         let back = !state.unreachable.contains(name)
             && expected_hash.as_deref() == Some(node.binary_hash.as_str());
@@ -315,36 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn one_builder_is_picked_per_distinct_arch() {
-        let nodes = BTreeMap::from([
-            ("a".to_string(), node("a", Role::Manager, "x86_64")),
-            ("b".to_string(), node("b", Role::Worker, "x86_64")),
-            ("c".to_string(), node("c", Role::Worker, "aarch64")),
-        ]);
-        let builders = pick_builders(&nodes, &BTreeSet::new());
-        assert_eq!(builders.len(), 2);
-        assert_eq!(builders["x86_64"], "a");
-        assert_eq!(builders["aarch64"], "c");
-    }
-
-    #[test]
-    fn an_unreachable_node_is_never_picked_as_a_builder() {
-        let nodes = BTreeMap::from([
-            ("a".to_string(), node("a", Role::Manager, "x86_64")),
-            ("b".to_string(), node("b", Role::Worker, "x86_64")),
-        ]);
-        let unreachable = BTreeSet::from(["a".to_string()]);
-        let builders = pick_builders(&nodes, &unreachable);
-        assert_eq!(builders["x86_64"], "b");
-    }
-
-    #[test]
-    fn nodes_with_no_reported_arch_are_skipped() {
-        let nodes = BTreeMap::from([("a".to_string(), node("a", Role::Manager, ""))]);
-        assert!(pick_builders(&nodes, &BTreeSet::new()).is_empty());
-    }
-
-    #[test]
     fn restart_order_puts_workers_first_then_managers_then_the_leader_last() {
         let nodes = BTreeMap::from([
             ("leader".to_string(), node("leader", Role::Manager, "x86_64")),
@@ -354,29 +302,5 @@ mod tests {
         ]);
         let order = restart_order(&nodes, "leader");
         assert_eq!(order, vec!["w1", "w2", "mgr2", "leader"]);
-    }
-
-    #[test]
-    fn awaiting_artifact_only_moves_idle_non_builder_nodes_of_the_built_arch() {
-        let nodes = BTreeMap::from([
-            ("builder".to_string(), node("builder", Role::Manager, "x86_64")),
-            ("other".to_string(), node("other", Role::Worker, "x86_64")),
-            ("different_arch".to_string(), node("different_arch", Role::Worker, "aarch64")),
-        ]);
-        let mut run = UpdateRunState::new(
-            "run-1".into(),
-            ["builder".to_string(), "other".to_string(), "different_arch".to_string()],
-            0,
-        );
-        run.arch_builders.insert("x86_64".to_string(), "builder".to_string());
-        run.per_node.insert(
-            "builder".to_string(),
-            NodePhase::Built { sha256: "abc".into() },
-        );
-
-        advance_awaiting_artifact(&mut run, &nodes);
-
-        assert_eq!(run.per_node["other"], NodePhase::AwaitingArtifact);
-        assert_eq!(run.per_node["different_arch"], NodePhase::Idle);
     }
 }

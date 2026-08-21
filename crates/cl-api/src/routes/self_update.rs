@@ -1,13 +1,12 @@
-//! `/api/self-update/*`: repo settings, run control, and the node-to-node
-//! internal routes that move the built artifact and trigger a restart.
+//! `/api/self-update/*`: release settings, run control, and the node-to-node
+//! internal route that triggers a restart.
 //!
-//! Order of operations, enforced by the handlers below: generate the deploy
-//! key first (`POST ssh-key`), add it as a deploy key on the git host by
-//! hand, then set the repo (`PUT repo`), which is write-once like the
-//! Cloudflare token (`routes::cloudflare::set_token` is the template).
+//! The GitHub token is optional and write-only, like the Cloudflare token
+//! (`routes::cloudflare::set_token` is the template): it's only needed for a
+//! private repo or to avoid GitHub's low unauthenticated rate limit. The
+//! release url is write-once like the Cloudflare token too.
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -15,7 +14,7 @@ use cl_config::SelfUpdateConfig;
 use cl_raft::Request as ClusterRequest;
 use cl_secret::Sealed;
 use cl_update::orchestrator::load_run;
-use cl_update::plan::{UpdateRunState, DEPLOY_KEY_SECRET, RUN_CONFIG};
+use cl_update::plan::{UpdateRunState, GITHUB_TOKEN_SECRET, RUN_CONFIG};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::internal::InternalAuth;
@@ -30,56 +29,58 @@ pub fn is_reserved_config(name: &str) -> bool {
 }
 
 pub fn is_reserved_secret(name: &str) -> bool {
-    name == DEPLOY_KEY_SECRET
+    name == GITHUB_TOKEN_SECRET
 }
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/self-update/ssh-key", post(generate_ssh_key).get(get_ssh_key))
+        .route("/api/self-update/github-token", get(github_token_status).put(set_github_token))
         .route("/api/self-update/repo", put(set_repo).get(get_repo))
         .route("/api/self-update/run", post(start_run).get(get_run))
         .route("/api/self-update/cancel", post(cancel_run))
-        .route("/api/self-update/internal/artifact/{arch}", get(internal_artifact))
         .route("/api/self-update/internal/restart", post(internal_restart))
 }
 
 #[derive(Serialize)]
-struct SshKeyResponse {
-    public_key: String,
+struct GithubTokenStatus {
+    /// True once a token is stored, which is what the ui keys the "you cannot
+    /// see or change this here" state off.
+    configured: bool,
 }
 
-/// Idempotent: a second call recovers the same public key from the already
-/// sealed private half rather than generating a new pair, so retrying a
-/// timed out request never orphans the deploy key already added on the git
-/// host.
-async fn generate_ssh_key(
+async fn github_token_status(_identity: Identity, State(state): State<AppState>) -> Json<GithubTokenStatus> {
+    let cluster_state = state.cluster.state().await;
+    Json(GithubTokenStatus { configured: cluster_state.secrets.contains_key(GITHUB_TOKEN_SECRET) })
+}
+
+#[derive(Deserialize)]
+struct SetGithubTokenRequest {
+    token: String,
+}
+
+/// Seals and stores the token, replacing whatever was there before.
+async fn set_github_token(
     _admin: RequireAdmin,
     State(state): State<AppState>,
-) -> Result<Json<SshKeyResponse>, ApiError> {
-    let cluster_state = state.cluster.state().await;
+    Json(body): Json<SetGithubTokenRequest>,
+) -> Result<StatusCode, ApiError> {
+    let token = body.token.trim().to_string();
+    if token.is_empty() {
+        return Err(ApiError::BadRequest("the token is empty".into()));
+    }
+
     let key_guard = state.key.read().await;
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-
-    if let Some(existing) = cluster_state.secrets.get(DEPLOY_KEY_SECRET) {
-        let sealed = Sealed::from_blob(existing.sealed.clone());
-        let plaintext = sealed.open(key, DEPLOY_KEY_SECRET).map_err(ApiError::internal)?;
-        let private = String::from_utf8(plaintext).map_err(ApiError::internal)?;
-        let public_key = cl_update::keypair::derive_public(&private).map_err(ApiError::internal)?;
-        return Ok(Json(SshKeyResponse { public_key }));
-    }
-
-    let pair = cl_update::keypair::generate().map_err(ApiError::internal)?;
-    let sealed = Sealed::seal(key, DEPLOY_KEY_SECRET, pair.private_openssh.as_bytes())
-        .map_err(ApiError::internal)?;
+    let sealed = Sealed::seal(key, GITHUB_TOKEN_SECRET, token.as_bytes()).map_err(ApiError::internal)?;
     let key_fingerprint = key.fingerprint();
     drop(key_guard);
 
     let response = state
         .cluster
         .submit(ClusterRequest::PutSecret {
-            name: DEPLOY_KEY_SECRET.to_string(),
+            name: GITHUB_TOKEN_SECRET.to_string(),
             sealed: sealed.blob,
             key_fingerprint,
             owner: None,
@@ -89,30 +90,12 @@ async fn generate_ssh_key(
     if let Some(msg) = response.error {
         return Err(ApiError::BadRequest(msg));
     }
-
-    Ok(Json(SshKeyResponse { public_key: pair.public_openssh }))
-}
-
-#[derive(Serialize)]
-struct SshKeyStatus {
-    public_key: Option<String>,
-}
-
-/// The public key is only ever surfaced by `POST` before the repo is set:
-/// once it is, the value copied into `ClusterConfig.self_update` is the one
-/// place it can be read back from without holding the cluster key.
-async fn get_ssh_key(_identity: Identity, State(state): State<AppState>) -> Json<SshKeyStatus> {
-    let config = state.cluster_config.read().await;
-    Json(SshKeyStatus {
-        public_key: config.self_update.as_ref().map(|c| c.ssh_public_key.clone()),
-    })
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
 struct SetRepoRequest {
-    git_url: String,
-    git_branch: String,
-    ssh_public_key: String,
+    release_url: String,
 }
 
 /// Write-once, exactly like `cloudflare::set_token`: further changes go
@@ -122,22 +105,18 @@ async fn set_repo(
     State(state): State<AppState>,
     Json(body): Json<SetRepoRequest>,
 ) -> Result<StatusCode, ApiError> {
-    if body.git_url.trim().is_empty() || body.git_branch.trim().is_empty() {
-        return Err(ApiError::BadRequest("git_url and git_branch are required".into()));
+    if body.release_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("release_url is required".into()));
     }
 
     let mut config = state.cluster_config.read().await.clone();
     if config.self_update.is_some() {
         return Err(ApiError::Conflict(
-            "a self-update repo is already configured; edit the config file to change it".into(),
+            "a self-update release is already configured; edit the config file to change it".into(),
         ));
     }
 
-    config.self_update = Some(SelfUpdateConfig {
-        git_url: body.git_url,
-        git_branch: body.git_branch,
-        ssh_public_key: body.ssh_public_key,
-    });
+    config.self_update = Some(SelfUpdateConfig { release_url: body.release_url.trim().to_string() });
     super::config::apply_config(&state, &config).await?;
     Ok(StatusCode::OK)
 }
@@ -152,7 +131,7 @@ async fn start_run(
 ) -> Result<Json<UpdateRunState>, ApiError> {
     let config = state.cluster_config.read().await;
     if config.self_update.is_none() {
-        return Err(ApiError::Conflict("no self-update repo is configured".into()));
+        return Err(ApiError::Conflict("no self-update release is configured".into()));
     }
     drop(config);
 
@@ -210,26 +189,9 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Raw bytes of the artifact this node currently holds staged for `arch`.
-///
-/// Serves whatever is on disk without checking it actually matches this
-/// node's own reported arch: the peer asking already knows which node builds
-/// its architecture, so there is nothing this node could sanity check that
-/// the caller has not already decided.
-async fn internal_artifact(
-    _auth: InternalAuth,
-    State(state): State<AppState>,
-    Path(_arch): Path<String>,
-) -> Result<Bytes, ApiError> {
-    let bytes = tokio::fs::read(&state.self_update_artifact_path)
-        .await
-        .map_err(|_| ApiError::NotFound("no artifact staged on this node".into()))?;
-    Ok(Bytes::from(bytes))
-}
-
-/// Swap in the artifact already fetched via `internal_artifact` (or built
-/// locally) and trigger the same clean shutdown `SIGINT` drives. The unit's
-/// `Restart=always` brings the process back up running the new binary.
+/// Swap in the artifact this node already downloaded and trigger the same
+/// clean shutdown `SIGINT` drives. The unit's `Restart=always` brings the
+/// process back up running the new binary.
 async fn internal_restart(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     let current_exe = std::env::current_exe().map_err(ApiError::internal)?;
     cl_update::install::install_binary(&state.self_update_artifact_path, &current_exe)
