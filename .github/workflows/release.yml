@@ -45,6 +45,15 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      # .cargo/config.toml wires the host target to clang+mold and sets
+      # [build] rustc-wrapper = "sccache" globally, so both targets need
+      # sccache on PATH and the x86_64 leg needs mold too.
+      - name: install mold
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
       - name: build
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cc }}

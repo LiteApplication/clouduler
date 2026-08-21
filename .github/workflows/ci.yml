@@ -20,6 +20,10 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # .cargo/config.toml wires the host target to clang+mold and sccache
+      # for local build speed; CI needs the same tools on PATH.
+      - run: sudo apt-get update && sudo apt-get install -y mold
+      - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
@@ -45,6 +49,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y mold
+      - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo build -p clouduler
       # The shipped examples have to stay valid, or the first thing a new user
       # copies is broken.
@@ -76,6 +82,9 @@ jobs:
       # its docker fallback. The guest rootfs is Alpine, so a glibc binary will
       # not start there.
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 musl-tools e2fsprogs
+      # .cargo/config.toml sets [build] rustc-wrapper = "sccache" globally, so
+      # build-binary.sh's cargo invocation needs sccache on PATH too.
+      - uses: mozilla-actions/sccache-action@v0.0.7
       # GitHub's runners expose /dev/kvm on some images and not others. The
       # harness falls back to TCG on its own, which is slow but works.
       - run: sudo chmod 666 /dev/kvm || echo "no kvm, the suite will run under TCG"
