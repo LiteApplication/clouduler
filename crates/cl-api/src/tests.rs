@@ -138,6 +138,7 @@ async fn harness() -> Harness {
             .danger_accept_invalid_certs(true)
             .build()
             .expect("building the test http client"),
+        tls_fingerprint: "test:fingerprint".to_string(),
     };
 
     let router = build_router(state.clone());

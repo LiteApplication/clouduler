@@ -233,6 +233,7 @@ GET    /api/config/pending              read    what is armed and how long is le
 ```
 GET    /api/certificates                read    fqdn, expiry, never keys
 POST   /api/certificates/:fqdn/renew
+GET    /api/tls-fingerprint             read    fingerprint of the cert this node is serving now
 GET    /api/dns                         read    records clouduler owns
 POST   /api/dns/reconcile               force a reconcile pass
 ```

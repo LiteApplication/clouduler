@@ -14,6 +14,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/certificates", get(list_certificates))
         .route("/api/certificates/{fqdn}/renew", post(renew))
+        .route("/api/tls-fingerprint", get(tls_fingerprint))
         .route("/api/dns", get(list_dns))
         .route("/api/dns/reconcile", post(reconcile))
 }
@@ -40,6 +41,21 @@ async fn list_certificates(_identity: Identity, State(state): State<AppState>) -
             })
             .collect(),
     )
+}
+
+#[derive(Serialize)]
+struct TlsFingerprint {
+    fingerprint: String,
+}
+
+/// The fingerprint of the certificate this node is actually serving over
+/// TLS, for the "Add a node" flow to hand a joining node its
+/// `--tls-fingerprint` pin without the operator having to compare it by
+/// hand.
+async fn tls_fingerprint(_identity: Identity, State(state): State<AppState>) -> Json<TlsFingerprint> {
+    Json(TlsFingerprint {
+        fingerprint: state.tls_fingerprint.clone(),
+    })
 }
 
 /// Renewal itself is `cl-dns`'s job (it holds the ACME account and ownership

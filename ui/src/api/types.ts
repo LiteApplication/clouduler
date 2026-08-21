@@ -265,6 +265,10 @@ export interface ClusterKeyStatus {
   held: boolean;
 }
 
+export interface TlsFingerprint {
+  fingerprint: string;
+}
+
 // ---- config ----
 
 export type NetworkKind = 'internal' | 'private' | 'public' | 'egress' | 'wireguard';

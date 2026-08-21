@@ -26,6 +26,7 @@ import type {
   SelfUpdateGithubTokenStatus,
   SelfUpdateRunState,
   StaticRouteRule,
+  TlsFingerprint,
   ValidationResult,
   VolumeState,
   WireguardIngressRule,
@@ -247,6 +248,7 @@ export const api = {
   // certificates & dns
   listCertificates: () => get<CertificateState[]>('/api/certificates'),
   renewCertificate: (fqdn: string) => post<void>(`/api/certificates/${encodeURIComponent(fqdn)}/renew`),
+  tlsFingerprint: () => get<TlsFingerprint>('/api/tls-fingerprint'),
   listDns: () => get<DnsRecordState[]>('/api/dns'),
   reconcileDns: () => post<void>('/api/dns/reconcile'),
 

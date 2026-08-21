@@ -68,6 +68,12 @@ pub struct AppState {
     /// are authenticated by the HMAC header, not TLS trust, since every
     /// node's certificate is self signed until ACME issues a real one.
     pub http: reqwest::Client,
+    /// SHA-256 fingerprint of the certificate this instance is actually
+    /// serving over TLS, in the same colon-hex form `clouduler init` prints
+    /// and pins with `--tls-fingerprint`. Computed once at startup from the
+    /// same bytes handed to the TLS listener, so it always matches what a
+    /// joining node sees, self signed or issued.
+    pub tls_fingerprint: String,
 }
 
 impl AppState {
@@ -117,9 +123,30 @@ pub struct ApiServer {
     tls_key_pem: Vec<u8>,
 }
 
+/// SHA-256 fingerprint of the leaf certificate in a PEM chain, colon-hex
+/// formatted to match `clouduler init`'s `join::fingerprint`.
+fn leaf_fingerprint(chain_pem: &[u8]) -> Result<String, ApiError> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let text = std::str::from_utf8(chain_pem)
+        .map_err(|e| ApiError::Internal(format!("tls certificate is not valid utf8: {e}")))?;
+    let body = text
+        .split("-----BEGIN CERTIFICATE-----")
+        .nth(1)
+        .and_then(|rest| rest.split("-----END CERTIFICATE-----").next())
+        .ok_or_else(|| ApiError::Internal("no certificate found in tls chain".to_string()))?;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body.split_whitespace().collect::<String>())
+        .map_err(|e| ApiError::Internal(format!("tls certificate is not valid base64: {e}")))?;
+    let digest = Sha256::digest(&der);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(":"))
+}
+
 impl ApiServer {
     pub async fn new(options: ApiServerOptions) -> Result<Self, ApiError> {
         let session_ttl = options.cluster_config.auth.session_ttl;
+        let tls_fingerprint = leaf_fingerprint(&options.tls_cert_pem)?;
         let key = Arc::new(RwLock::new(options.key));
         let oidc = match &options.cluster_config.auth.oidc {
             Some(cfg) => {
@@ -161,6 +188,7 @@ impl ApiServer {
             self_update_artifact_path: options.self_update_artifact_path,
             shutdown: options.shutdown,
             http: options.http,
+            tls_fingerprint,
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the
@@ -305,4 +333,52 @@ async fn leader_location(state: &AppState) -> Option<String> {
         .find(|(name, _)| cl_raft::node_id(name) == leader_id)?;
     let port = state.cluster_config.read().await.web.port;
     Some(format!("https://{}:{port}/", node.rpc_addr.ip()))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::leaf_fingerprint;
+
+    #[test]
+    fn hashes_the_decoded_leaf_certificate() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        let der = b"not a real certificate, just some bytes to hash";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+        let pem = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n");
+
+        let expected = Sha256::digest(der)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(leaf_fingerprint(pem.as_bytes()).unwrap(), expected);
+    }
+
+    #[test]
+    fn only_hashes_the_first_certificate_in_a_chain() {
+        let der_a = b"leaf";
+        let der_b = b"intermediate, should be ignored";
+        use base64::Engine;
+        let a = base64::engine::general_purpose::STANDARD.encode(der_a);
+        let b = base64::engine::general_purpose::STANDARD.encode(der_b);
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{a}\n-----END CERTIFICATE-----\n\
+             -----BEGIN CERTIFICATE-----\n{b}\n-----END CERTIFICATE-----\n"
+        );
+
+        use sha2::{Digest, Sha256};
+        let expected = Sha256::digest(der_a)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(leaf_fingerprint(pem.as_bytes()).unwrap(), expected);
+    }
+
+    #[test]
+    fn errors_without_a_certificate_marker() {
+        assert!(leaf_fingerprint(b"not a pem at all").is_err());
+    }
 }
