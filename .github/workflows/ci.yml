@@ -25,9 +25,19 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Regenerate before the real test run so the fixture the ui typechecks
+      # against always reflects what this commit's backend actually returns,
+      # rather than failing on drift (e.g. a version bump) a human forgot to
+      # regenerate locally.
+      - run: UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
       - run: cargo test --workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-shapes-fixture
+          path: ui/src/api/__fixtures__/api-shapes.json
 
   ui:
+    needs: rust
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -39,6 +49,13 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      # Overwrite the committed fixture with the one the rust job just
+      # generated from a live backend, so the ui always typechecks against
+      # what the backend actually returns on this commit.
+      - uses: actions/download-artifact@v4
+        with:
+          name: api-shapes-fixture
+          path: ui/src/api/__fixtures__
       - run: npm ci
       - run: npm run build
       - run: npx vitest run
