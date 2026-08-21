@@ -197,6 +197,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               { value: 'public', label: 'Public' },
               { value: 'wireguard', label: 'WireGuard' },
             ]}
+            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet -- nodes get an IPv4/IPv6/domain address block instead. WireGuard is configured per node by importing a wg-quick config below."
             disabled={disabled}
           />
           {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && (
@@ -205,6 +206,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               label="Subnet"
               value={net.subnet ?? ''}
               onChange={(subnet) => updateNetwork(name, { subnet: subnet || null })}
+              hint="The address range nodes on this network get their addresses from, e.g. 10.10.0.0/24."
               disabled={disabled}
             />
           )}
@@ -372,6 +374,7 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
               { value: 'replicated', label: 'Replicated' },
               { value: 'served', label: 'Served' },
             ]}
+            hint="Replicated keeps a synced copy on every node that implements this drive, resynced on the interval below. Served keeps one active copy on a single node, with the rest as standby backups -- pick the candidate order below."
             disabled={disabled}
           />
           {drive.mode === 'replicated' ? (
@@ -380,6 +383,7 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
               label="Sync interval"
               value={drive.sync_interval}
               onChange={(sync_interval) => update(name, { sync_interval })}
+              hint="How often each replica resyncs against the primary copy, e.g. 15m. A stack can override this per volume."
               disabled={disabled}
             />
           ) : (
@@ -490,6 +494,7 @@ export function NodeCard({
   name,
   node,
   networks,
+  drives,
   onChange,
   onRemove,
   disabled,
@@ -497,6 +502,7 @@ export function NodeCard({
   name: string;
   node: NodeConfig;
   networks: ClusterConfig['networks'];
+  drives: ClusterConfig['drives'];
   onChange: (patch: Partial<NodeConfig>) => void;
   onRemove: () => void;
   disabled: boolean;
@@ -556,6 +562,7 @@ export function NodeCard({
           { value: 'manager', label: 'Manager' },
           { value: 'worker', label: 'Worker' },
         ]}
+        hint="Managers take part in raft consensus and can become leader; workers only run stacks. A cluster needs at least one manager, and an odd number of managers to keep quorum decisive."
         disabled={disabled}
       />
       <PortField
@@ -563,6 +570,7 @@ export function NodeCard({
         label="RPC port"
         value={node.rpc_port}
         onChange={(rpc_port) => onChange({ rpc_port })}
+        hint="The port other nodes dial, on this node's internal-network address, to reach its cluster RPC service."
         disabled={disabled}
       />
       <TextField
@@ -570,6 +578,7 @@ export function NodeCard({
         label="Data dir override"
         value={node.data_dir ?? ''}
         onChange={(data_dir) => onChange({ data_dir: data_dir || null })}
+        hint="Overrides the cluster-wide data directory for this node only. Leave blank to use the cluster default."
         disabled={disabled}
       />
       {/* A node that joined an existing cluster is set to "never", because a
@@ -588,6 +597,7 @@ export function NodeCard({
           { value: 'true', label: 'Yes, this node may create it' },
           { value: 'false', label: 'Never, it can only be given the key' },
         ]}
+        hint="Only the first node bootstrapping a brand new cluster should be allowed to generate the key. A node joining an existing cluster should be set to 'Never', since a second key could not open secrets the rest of the cluster already sealed."
         disabled={disabled}
       />
 
@@ -657,6 +667,7 @@ export function NodeCard({
                 label="IPv4"
                 value={pub.ipv4 ?? ''}
                 onChange={(v) => update({ ipv4: v || null })}
+                hint="This node's public IPv4 address on this network. Publishes an A record if the network has a domain."
                 disabled={disabled}
               />
               <TextField
@@ -664,6 +675,7 @@ export function NodeCard({
                 label="IPv6"
                 value={pub.ipv6 ?? ''}
                 onChange={(v) => update({ ipv6: v || null })}
+                hint="This node's public IPv6 address on this network. Publishes an AAAA record if the network has a domain."
                 disabled={disabled}
               />
               <TextField
@@ -671,6 +683,7 @@ export function NodeCard({
                 label="Domain (CNAME)"
                 value={pub.domain ?? ''}
                 onChange={(v) => update({ domain: v || null })}
+                hint="Points this node's DNS record at another hostname instead of a fixed IP, e.g. for a dynamic-DNS address."
                 disabled={disabled}
               />
               <OpenPortsEditor
@@ -692,6 +705,11 @@ export function NodeCard({
                 label={`${netName} (${net.type})`}
                 value={ip}
                 onChange={(v) => setAddress(netName, v || null)}
+                hint={
+                  net.type === 'internal'
+                    ? "This node's fixed address on the internal network, inside its subnet. Required for every node -- raft, drive sync and the container overlay all use it."
+                    : "This node's fixed address on this network, inside its subnet."
+                }
                 disabled={disabled}
               />
             </div>
@@ -745,6 +763,7 @@ export function NodeCard({
         onChange={(entries) => onChange({ drives: Object.fromEntries(entries.filter(([k]) => k)) })}
         keyLabel="Drive"
         valueLabel="Local path"
+        keyOptions={Object.keys(drives)}
         disabled={disabled}
       />
     </div>
@@ -996,6 +1015,7 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
         value={draft.web.network}
         onChange={(network) => setDraft({ ...draft, web: { ...draft.web, network } })}
         options={Object.keys(draft.networks).map((n) => ({ value: n, label: n }))}
+        hint="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use."
         disabled={disabled}
       />
       <PortField
@@ -1038,6 +1058,7 @@ export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
         label="Node timeout"
         value={f.node_timeout}
         onChange={(node_timeout) => set({ node_timeout })}
+        hint="How long a node can go unreachable before the leader marks it unreachable and reschedules its work elsewhere, e.g. 30s. Must be longer than the fence timeout, so a node has fenced itself before the rest of the cluster gives up on it."
         disabled={disabled}
       />
       <DurationField
@@ -1046,13 +1067,14 @@ export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
         value={f.fence_timeout}
         onChange={(fence_timeout) => set({ fence_timeout })}
         disabled={disabled}
-        hint="Must be shorter than the node timeout."
+        hint="How long a node can go without raft quorum before it stops its own containers, e.g. 15s. Must be shorter than the node timeout and longer than the probe interval -- this ordering is what stops a replicated volume from ending up with two writers."
       />
       <DurationField
         id="fo-probe"
         label="Probe interval"
         value={f.probe_interval}
         onChange={(probe_interval) => set({ probe_interval })}
+        hint="How often the leader probes every node's reachability, e.g. 5s. Must be shorter than the fence timeout, so a node cannot be declared dead before it has had the chance to fence itself."
         disabled={disabled}
       />
     </div>
@@ -1074,6 +1096,7 @@ export function SecretsSection({ draft, setDraft, disabled }: SectionProps) {
         label="Generate a key if missing"
         value={s.generate_if_missing}
         onChange={(generate_if_missing) => set({ generate_if_missing })}
+        hint="Cluster-wide default for whether a node may create the secret-sealing key if it doesn't have one yet. Each node can override this under its own Nodes page card, e.g. to forbid it on a node joining an existing cluster."
         disabled={disabled}
       />
     </div>
@@ -1100,6 +1123,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
         label="Session TTL"
         value={a.session_ttl}
         onChange={(session_ttl) => set({ session_ttl })}
+        hint="How long a browser session stays signed in before it has to log in again, e.g. 12h."
         disabled={disabled}
       />
       <CheckboxField
@@ -1120,6 +1144,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
               : null,
           })
         }
+        hint="Register clouduler as an app with your identity provider (Authentik, Keycloak, Google, Okta, etc.) first, with its redirect/callback URL set to https://<the dashboard's address>/auth/oidc/callback -- the address configured on the Web page."
         disabled={disabled}
       />
       {a.oidc && (
@@ -1129,6 +1154,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Issuer"
             value={a.oidc.issuer}
             onChange={(issuer) => set({ oidc: { ...a.oidc!, issuer } })}
+            hint="Your provider's base URL. Must start with https://. Discovery is fetched from <issuer>/.well-known/openid-configuration, e.g. https://accounts.google.com or https://your-tenant.eu.auth0.com."
             disabled={disabled}
           />
           <TextField
@@ -1136,6 +1162,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Client ID"
             value={a.oidc.client_id}
             onChange={(client_id) => set({ oidc: { ...a.oidc!, client_id } })}
+            hint="The client/application ID your provider issued when you registered clouduler as an app."
             disabled={disabled}
           />
           <TextField
@@ -1143,6 +1170,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Client secret file"
             value={a.oidc.client_secret_file ?? ''}
             onChange={(v) => set({ oidc: { ...a.oidc!, client_secret_file: v || null } })}
+            hint="Path, on this node's own disk, to a file holding the client secret your provider issued alongside the client ID. Kept out of cluster.yaml so the config stays safe to commit. Leave blank only if your provider supports a public/secretless client."
             disabled={disabled}
           />
           <TextField
@@ -1150,6 +1178,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Admin claim"
             value={a.oidc.admin_claim}
             onChange={(admin_claim) => set({ oidc: { ...a.oidc!, admin_claim } })}
+            hint="Name of the claim in the ID token that lists the user's groups or roles, e.g. groups. Check what your provider actually sends -- it varies (roles, groups, https://your-app/roles, ...)."
             disabled={disabled}
           />
           <TextField
@@ -1157,6 +1186,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Admin value"
             value={a.oidc.admin_value ?? ''}
             onChange={(v) => set({ oidc: { ...a.oidc!, admin_value: v || null } })}
+            hint="A user whose admin claim contains this value gets the admin role; everyone else who signs in successfully gets read-only viewer access. Leave blank and nobody gets admin through OIDC."
             disabled={disabled}
           />
         </div>
@@ -1175,6 +1205,7 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="Publish routes through the reverse proxy"
         value={p.enabled}
         onChange={(enabled) => set({ enabled })}
+        hint="Terminates HTTP/HTTPS for every service route declared under a stack's x-clouduler.proxy and forwards to its container. Both ports below are bound on every node, on every address, since a route follows its container as it moves."
         disabled={disabled}
       />
       <PortField
@@ -1182,6 +1213,7 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="HTTP port"
         value={p.http_port}
         onChange={(http_port) => set({ http_port })}
+        hint="Usually 80. Below 1024, so the daemon needs root to bind it."
         disabled={disabled || !p.enabled}
       />
       <PortField
@@ -1189,7 +1221,7 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="HTTPS port"
         value={p.https_port}
         onChange={(https_port) => set({ https_port })}
-        hint="Must differ from the web ui's port, which listens on the same addresses."
+        hint="Usually 443. Must differ from the web ui's port, which listens on the same addresses."
         disabled={disabled || !p.enabled}
       />
       <CheckboxField
@@ -1197,6 +1229,7 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="Issue certificates with ACME"
         value={p.acme.enabled}
         onChange={(enabled) => set({ acme: { ...p.acme, enabled } })}
+        hint="Automatically obtains and renews TLS certificates via ACME DNS-01 for every published route's hostname. Requires Cloudflare DNS management to be configured below -- DNS-01 is the only challenge type supported."
         disabled={disabled || !p.enabled}
       />
       {p.acme.enabled && (
@@ -1236,6 +1269,7 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
         label="Manage DNS through Cloudflare"
         value={cf != null}
         onChange={(enabled) => setDraft({ ...draft, cloudflare: enabled ? { zones: [] } : null })}
+        hint="Lets clouduler write DNS records for network and route domains, and is required if ACME certificate issuance is turned on above (DNS-01 challenges go through Cloudflare)."
         disabled={disabled}
       />
       {cf && (
@@ -1249,6 +1283,7 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
               cloudflare: { ...cf, zones: v.split(',').map((z) => z.trim()).filter(Boolean) },
             })
           }
+          hint="Zone names clouduler may write records to, e.g. example.com, other-example.com. Every network domain and the dashboard's own address must fall under one of these zones."
           disabled={disabled}
         />
       )}
@@ -1305,6 +1340,10 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
   return (
     <div className="field">
       <label htmlFor="cf-token">API token</label>
+      <span className="field-hint">
+        Create one at the Cloudflare dashboard under My Profile &gt; API Tokens, scoped to Zone / DNS / Edit for the
+        zones listed above.
+      </span>
       {status.configured && (
         <p className="muted">
           A token is stored, replicated to every node. It cannot be shown again; enter a new one below to rotate it.

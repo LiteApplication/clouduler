@@ -228,14 +228,10 @@ impl ClusterConfig {
 
     fn validate_drives(&self) -> Result<()> {
         for (name, drive) in &self.drives {
-            // A drive nobody implements can never host a volume, so it is a typo.
-            if !self.nodes.values().any(|n| n.implements(name)) {
-                return Err(ConfigError::invalid(
-                    format!("drives.{name}"),
-                    "no node implements this drive",
-                ));
-            }
-
+            // A drive nobody implements yet just can't host a volume until a
+            // node is given a local path for it -- scheduling already rejects
+            // placement onto a node that doesn't implement a drive, so this is
+            // left for the operator to fill in rather than blocked here.
             match (drive.is_served(), drive.served_by.is_empty()) {
                 (true, true) => {
                     return Err(ConfigError::invalid(
@@ -629,10 +625,12 @@ cloudflare:
     }
 
     #[test]
-    fn unimplemented_drive_is_rejected() {
-        let err = parse(&[("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: {}")])
-            .unwrap_err();
-        assert!(err.to_string().contains("no node implements this drive"));
+    fn unimplemented_drive_is_allowed() {
+        // A drive can be declared before any node is given a local path for
+        // it -- scheduling rejects placement onto a node lacking it, and that
+        // is enough; config validation doesn't need to block staging it.
+        parse(&[("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: { sync_interval: 5m }")])
+            .unwrap();
     }
 
     #[test]

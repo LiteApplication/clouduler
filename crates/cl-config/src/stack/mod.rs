@@ -280,11 +280,15 @@ networks:
     type: internal
     subnet: 10.10.0.0/24
     domain: cl.test
+  wan:
+    type: public
+    domain: wan.test
 nodes:
   n1:
     role: manager
     network:
       cluster: 10.10.0.1
+      wan: { ipv4: 203.0.113.1 }
 web:
   address: api
   network: cluster

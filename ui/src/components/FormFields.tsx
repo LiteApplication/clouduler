@@ -64,6 +64,7 @@ export function SelectField<T extends string>({
   value,
   onChange,
   options,
+  hint,
   disabled,
 }: FieldProps<T> & { options: { value: T; label: string }[] }) {
   return (
@@ -76,6 +77,7 @@ export function SelectField<T extends string>({
           </option>
         ))}
       </select>
+      {hint && <span className="field-hint">{hint}</span>}
     </div>
   );
 }
@@ -158,18 +160,23 @@ export function PortField({ id, label, value, onChange, hint, disabled }: FieldP
   );
 }
 
-/** Editable key/value list, for node drive maps and similar. */
+/** Editable key/value list, for node drive maps and similar. When
+ *  `keyOptions` is given, the key is picked from that list (e.g. the drives
+ *  declared cluster-wide) instead of typed freehand, so it can't drift from
+ *  the name the rest of the config actually uses. */
 export function KeyValueList({
   entries,
   onChange,
   keyLabel,
   valueLabel,
+  keyOptions,
   disabled,
 }: {
   entries: [string, string][];
   onChange: (entries: [string, string][]) => void;
   keyLabel: string;
   valueLabel: string;
+  keyOptions?: string[];
   disabled?: boolean;
 }) {
   const update = (i: number, key: string, value: string) => {
@@ -178,7 +185,10 @@ export function KeyValueList({
     onChange(next);
   };
   const remove = (i: number) => onChange(entries.filter((_, idx) => idx !== i));
-  const add = () => onChange([...entries, ['', '']]);
+  const usedKeys = new Set(entries.map(([k]) => k));
+  const nextOption = keyOptions?.find((k) => !usedKeys.has(k)) ?? '';
+  const add = () => onChange([...entries, [nextOption, '']]);
+  const canAdd = keyOptions === undefined || nextOption !== '';
 
   return (
     <div className="field">
@@ -192,14 +202,33 @@ export function KeyValueList({
       </div>
       {entries.map(([k, v], i) => (
         <div className="flex-row" key={i} style={{ marginBottom: 4 }}>
-          <input
-            type="text"
-            value={k}
-            onChange={(e) => update(i, e.target.value, v)}
-            aria-label={`${keyLabel} ${i + 1}`}
-            disabled={disabled}
-            style={{ flex: 1 }}
-          />
+          {keyOptions ? (
+            <select
+              value={k}
+              onChange={(e) => update(i, e.target.value, v)}
+              aria-label={`${keyLabel} ${i + 1}`}
+              disabled={disabled}
+              style={{ flex: 1 }}
+            >
+              {k && !keyOptions.includes(k) && <option value={k}>{k}</option>}
+              {keyOptions
+                .filter((opt) => opt === k || !usedKeys.has(opt))
+                .map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={k}
+              onChange={(e) => update(i, e.target.value, v)}
+              aria-label={`${keyLabel} ${i + 1}`}
+              disabled={disabled}
+              style={{ flex: 1 }}
+            />
+          )}
           <input
             type="text"
             value={v}
@@ -215,7 +244,10 @@ export function KeyValueList({
           )}
         </div>
       ))}
-      {!disabled && (
+      {!disabled && keyOptions?.length === 0 && (
+        <p className="muted">No drives are declared yet -- add one under Configuration &gt; Drives first.</p>
+      )}
+      {!disabled && canAdd && (
         <button type="button" onClick={add}>
           Add
         </button>

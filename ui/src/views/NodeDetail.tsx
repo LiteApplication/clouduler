@@ -326,6 +326,7 @@ export function NodeDetail() {
               name={name}
               node={configNode}
               networks={draft.networks}
+              drives={draft.drives}
               onChange={(patch) =>
                 setDraft({ ...draft, nodes: { ...draft.nodes, [name]: { ...configNode, ...patch } } })
               }
