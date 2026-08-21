@@ -1,7 +1,7 @@
 // The configuration draft, held above both the sidebar and the Configuration
 // view. The sidebar submenu shows a per-page count of unsaved edits, and the
 // pages themselves edit the same object, so the draft cannot live inside the
-// Configuration view any more -- it would unmount the moment you navigated
+// Configuration view any more, as it would unmount the moment you navigated
 // away and quietly drop the edits.
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
@@ -93,7 +93,7 @@ export interface ConfigApply {
 
 /**
  * Validate/apply/confirm/rollback against `/api/config`, plus the pending
- * rollback timer poll -- shared by `Configuration` (the whole draft) and
+ * rollback timer poll, shared by `Configuration` (the whole draft) and
  * `NodeDetail` (just one node's slice of it), since both submit the same
  * `ClusterConfig` through the same connection-sensitive-edit safety net.
  */
@@ -130,6 +130,7 @@ export function useConfigApply(reload: () => void): ConfigApply {
         if (!ok) return false;
         await api.applyConfiguration(config, rollbackAfter);
         setPending(await api.pendingConfiguration());
+        reload();
         return true;
       } catch (e) {
         setErrors([{ path: '', message: e instanceof ApiError ? e.message : 'apply failed' }]);
@@ -138,7 +139,7 @@ export function useConfigApply(reload: () => void): ConfigApply {
         setBusy(false);
       }
     },
-    [validate],
+    [validate, reload],
   );
 
   const confirm = useCallback(async () => {

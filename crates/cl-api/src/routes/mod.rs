@@ -12,6 +12,7 @@ pub mod instances;
 pub mod key_distribution;
 pub mod nodes;
 pub mod objects;
+pub mod oidc;
 pub mod redirects;
 pub mod self_update;
 pub mod stacks;
@@ -34,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .merge(drives::router())
         .merge(config::router())
         .merge(cloudflare::router())
+        .merge(oidc::router())
         .merge(certs::router())
         .merge(redirects::router())
         .merge(static_routes::router())

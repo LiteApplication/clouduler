@@ -284,9 +284,9 @@ async fn a_bad_api_key_is_reported_as_a_bad_api_key() {
 /// with a working cluster key without anyone copying a file by hand.
 ///
 /// n1 holds the plaintext key from the start (standing in for a founding
-/// node). n2 is represented only at the raft level -- it publishes a real
+/// node). n2 is represented only at the raft level; it publishes a real
 /// keypair's public half, exactly as `report_self` would after `n2` actually
-/// joined and started -- and a second `ApiServer` is stood up against that
+/// joined and started, and a second `ApiServer` is stood up against that
 /// same shared cluster with `n2`'s private half and no key on disk, standing
 /// in for n2's own daemon. Both servers' background reconciliation loops
 /// (`spawn_wrap_for_new_nodes` on n1, `spawn_unwrap_own_key` on n2) are real,

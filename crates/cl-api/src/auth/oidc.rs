@@ -11,6 +11,7 @@
 //! trusted bytes, not a second source of trust.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
@@ -18,9 +19,13 @@ use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
-use tokio::sync::{Mutex, OnceCell};
+use cl_raft::ClusterNode;
+use cl_secret::{ClusterKey, Sealed};
+use tokio::sync::{Mutex, OnceCell, RwLock};
+use tracing::warn;
 
 use crate::error::ApiError;
+use crate::oidc::OIDC_CLIENT_SECRET;
 
 use super::{Identity, Role};
 
@@ -30,7 +35,6 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub struct OidcSettings {
     pub issuer: String,
     pub client_id: String,
-    pub client_secret: Option<String>,
     pub redirect_url: String,
     pub scopes: Vec<String>,
     pub admin_claim: String,
@@ -54,10 +58,20 @@ pub struct OidcAuthenticator {
     /// to rebuild since it does no IO, unlike discovery itself.
     metadata: OnceCell<CoreProviderMetadata>,
     pending: Mutex<HashMap<String, PendingLogin>>,
+    /// Where the client secret actually lives: a sealed cluster secret,
+    /// opened fresh on every login rather than resolved once at startup, so
+    /// it can be set or rotated from the web ui while the api is already
+    /// running. See `crate::routes::oidc`.
+    cluster: Arc<ClusterNode>,
+    key: Arc<RwLock<Option<ClusterKey>>>,
 }
 
 impl OidcAuthenticator {
-    pub fn new(settings: OidcSettings) -> Result<Self, ApiError> {
+    pub fn new(
+        settings: OidcSettings,
+        cluster: Arc<ClusterNode>,
+        key: Arc<RwLock<Option<ClusterKey>>>,
+    ) -> Result<Self, ApiError> {
         let http = openidconnect::reqwest::ClientBuilder::new()
             // Discovery and token requests go to a fixed, configured issuer;
             // there is no reason for either hop to follow a redirect, and
@@ -70,7 +84,34 @@ impl OidcAuthenticator {
             http,
             metadata: OnceCell::new(),
             pending: Mutex::new(HashMap::new()),
+            cluster,
+            key,
         })
+    }
+
+    /// Opens the client secret out of replicated secrets, decrypting with
+    /// this node's cluster key. `None` when there is no key, no secret
+    /// stored yet, or the stored bytes cannot be opened -- a provider that
+    /// requires a client secret then fails authentication rather than
+    /// silently trying with none.
+    async fn client_secret(&self) -> Option<String> {
+        let key_guard = self.key.read().await;
+        let key = key_guard.as_ref()?;
+        let state = self.cluster.state().await;
+        let entry = state.secrets.get(OIDC_CLIENT_SECRET)?;
+        match Sealed::from_blob(entry.sealed.clone()).open(key, OIDC_CLIENT_SECRET) {
+            Ok(plaintext) => match String::from_utf8(plaintext) {
+                Ok(secret) => Some(secret),
+                Err(_) => {
+                    warn!("the oidc client secret is not utf8");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "cannot open the oidc client secret");
+                None
+            }
+        }
     }
 
     /// Discover the provider once and cache it. Building a `CoreClient` from
@@ -101,7 +142,7 @@ impl OidcAuthenticator {
         let client = CoreClient::from_provider_metadata(
             metadata.clone(),
             ClientId::new(self.settings.client_id.clone()),
-            self.settings.client_secret.clone().map(ClientSecret::new),
+            self.client_secret().await.map(ClientSecret::new),
         )
         .set_redirect_uri(redirect);
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -147,7 +188,7 @@ impl OidcAuthenticator {
         let client = CoreClient::from_provider_metadata(
             metadata.clone(),
             ClientId::new(self.settings.client_id.clone()),
-            self.settings.client_secret.clone().map(ClientSecret::new),
+            self.client_secret().await.map(ClientSecret::new),
         )
         .set_redirect_uri(redirect);
         let token_response = client

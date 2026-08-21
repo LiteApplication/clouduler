@@ -21,7 +21,7 @@ const WRAP_RETRY: Duration = Duration::from_secs(5);
 const UNWRAP_RETRY: Duration = Duration::from_secs(5);
 
 /// Wrap this node's held cluster key for every node that has published a
-/// public key but has no current wrapped copy yet -- including one whose
+/// public key but has no current wrapped copy yet, including one whose
 /// existing copy targets a stale public key, after a keypair rotation.
 ///
 /// Any node currently holding the plaintext key runs this, not just the
@@ -94,7 +94,7 @@ pub fn spawn_wrap_for_new_nodes(state: AppState) {
 }
 
 /// Watch for this node's own wrapped key showing up in raft, unwrap it with
-/// the local private key, and install it live -- same effect as an operator
+/// the local private key, and install it live (the same effect as an operator
 /// pasting it through `POST /api/secrets/key`, just automatic.
 ///
 /// Returns immediately, with nothing to watch for, on a node that already

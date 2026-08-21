@@ -245,7 +245,7 @@ export function KeyValueList({
         </div>
       ))}
       {!disabled && keyOptions?.length === 0 && (
-        <p className="muted">No drives are declared yet -- add one under Configuration &gt; Drives first.</p>
+        <p className="muted">No drives are declared yet. Add one under Configuration &gt; Drives first.</p>
       )}
       {!disabled && canAdd && (
         <button type="button" onClick={add}>

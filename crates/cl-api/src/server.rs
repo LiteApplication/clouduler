@@ -120,30 +120,25 @@ pub struct ApiServer {
 impl ApiServer {
     pub async fn new(options: ApiServerOptions) -> Result<Self, ApiError> {
         let session_ttl = options.cluster_config.auth.session_ttl;
+        let key = Arc::new(RwLock::new(options.key));
         let oidc = match &options.cluster_config.auth.oidc {
             Some(cfg) => {
-                let client_secret = match &cfg.client_secret_file {
-                    Some(path) => Some(
-                        std::fs::read_to_string(path)
-                            .map_err(|e| ApiError::Internal(format!("reading {}: {e}", path.display())))?
-                            .trim()
-                            .to_string(),
-                    ),
-                    None => None,
-                };
                 let redirect_url = format!(
                     "https://{}/auth/oidc/callback",
                     options.cluster_config.web_fqdn()
                 );
-                Some(Arc::new(OidcAuthenticator::new(crate::auth::oidc::OidcSettings {
-                    issuer: cfg.issuer.clone(),
-                    client_id: cfg.client_id.clone(),
-                    client_secret,
-                    redirect_url,
-                    scopes: cfg.scopes.clone(),
-                    admin_claim: cfg.admin_claim.clone(),
-                    admin_value: cfg.admin_value.clone(),
-                })?))
+                Some(Arc::new(OidcAuthenticator::new(
+                    crate::auth::oidc::OidcSettings {
+                        issuer: cfg.issuer.clone(),
+                        client_id: cfg.client_id.clone(),
+                        redirect_url,
+                        scopes: cfg.scopes.clone(),
+                        admin_claim: cfg.admin_claim.clone(),
+                        admin_value: cfg.admin_value.clone(),
+                    },
+                    options.cluster.clone(),
+                    key.clone(),
+                )?))
             }
             None => None,
         };
@@ -156,7 +151,7 @@ impl ApiServer {
             config_path: options.config_path,
             cluster_config: Arc::new(RwLock::new(options.cluster_config)),
             key_path: options.key_path,
-            key: Arc::new(RwLock::new(options.key)),
+            key,
             sessions: Arc::new(SessionStore::new()),
             oidc,
             pending_edit: Arc::new(Mutex::new(None)),
@@ -175,7 +170,7 @@ impl ApiServer {
         routes::auth_keys::spawn_bootstrap_first_key(state.clone());
 
         // Deliver the cluster key to nodes that lack it, and receive it here
-        // if this node is the one lacking it -- both backgrounded for the
+        // if this node is the one lacking it, both backgrounded for the
         // same reason: no leader yet on a fresh cluster, or simply nothing to
         // do until another node publishes or wraps a key.
         routes::key_distribution::spawn_wrap_for_new_nodes(state.clone());

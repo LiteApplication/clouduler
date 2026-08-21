@@ -71,7 +71,7 @@ export function NodeDetail() {
 
   const cancelEditing = () => {
     // Drop just this node's staged edits, in case the operator changed their
-    // mind -- other unrelated staged edits elsewhere in the draft stay put.
+    // mind; other unrelated staged edits elsewhere in the draft stay put.
     if (original && draft) setDraft({ ...draft, nodes: { ...draft.nodes, [name]: original.nodes[name] } });
     clearErrors();
     setEditing(false);

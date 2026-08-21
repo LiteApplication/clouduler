@@ -139,9 +139,10 @@ pub struct OidcConfig {
     /// Issuer URL. Discovery happens at `<issuer>/.well-known/openid-configuration`.
     pub issuer: String,
     pub client_id: String,
-    /// Kept out of the config file so the config stays safe to commit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_secret_file: Option<PathBuf>,
+    /// The client secret itself is not here: it is sealed and stored as a
+    /// replicated cluster secret (set from the web ui), so every node has it
+    /// instead of only the one an operator happened to log into, and the
+    /// config stays safe to commit.
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
     /// Claim listing the user's groups or roles.
@@ -407,7 +408,7 @@ impl NodeAddress {
 /// A node's address on an egress or wireguard network: the local host
 /// interface (a VPN tunnel, usually) a service on this network egresses
 /// through. `open_ports` names ports the tunnel's far end forwards back to
-/// this node -- a VPN provider's port forwarding feature, e.g. AirVPN -- so
+/// this node (e.g. a VPN provider's port forwarding feature like AirVPN), so
 /// the scheduler only places a service exposing one on a node where it will
 /// actually arrive, the same way `PublicAddress::open_ports` works for a
 /// public network's router.

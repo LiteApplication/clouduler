@@ -1,6 +1,6 @@
 // The individual configuration pages. Each one edits a slice of the draft
 // config it is handed; none of them own state, so switching pages never
-// loses an edit -- the draft lives in the Configuration shell above them.
+// loses an edit because the draft lives in the Configuration shell above them.
 
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../../api/client';
@@ -12,6 +12,7 @@ import type {
   NetworkKind,
   NodeAddress,
   NodeConfig,
+  OidcClientSecretStatus,
   OpenPort,
   PortProtocol,
   PublicAddress,
@@ -124,7 +125,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
       return;
     }
     // A network only "Add network" staged, never applied, exists nowhere the
-    // server knows to rename -- renaming it is just a local key swap on the
+    // server knows to rename: renaming it is just a local key swap on the
     // draft, the same as `addNetwork` picking the name in the first place.
     if (!(oldName in original.networks)) {
       setDraft(renameNetworkInDraft(draft, oldName, newName));
@@ -197,7 +198,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               { value: 'public', label: 'Public' },
               { value: 'wireguard', label: 'WireGuard' },
             ]}
-            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet -- nodes get an IPv4/IPv6/domain address block instead. WireGuard is configured per node by importing a wg-quick config below."
+            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. WireGuard is configured per node by importing a wg-quick config below."
             disabled={disabled}
           />
           {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && (
@@ -303,7 +304,7 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
       return;
     }
     // A drive only "Add drive" staged, never applied, exists nowhere the
-    // server knows to rename -- renaming it is just a local key swap on the
+    // server knows to rename: renaming it is just a local key swap on the
     // draft, the same as `add` picking the name in the first place.
     if (!(oldName in original.drives)) {
       setDraft(renameDriveInDraft(draft, oldName, newName));
@@ -374,7 +375,7 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
               { value: 'replicated', label: 'Replicated' },
               { value: 'served', label: 'Served' },
             ]}
-            hint="Replicated keeps a synced copy on every node that implements this drive, resynced on the interval below. Served keeps one active copy on a single node, with the rest as standby backups -- pick the candidate order below."
+            hint="Replicated keeps a synced copy on every node that implements this drive, resynced on the interval below. Served keeps one active copy on a single node, with the rest as standby backups (pick the candidate order below)."
             disabled={disabled}
           />
           {drive.mode === 'replicated' ? (
@@ -408,7 +409,7 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
 
 /** Picks the ordered list of candidate serving nodes for a served drive. The
  *  first checked node, in the order checked, is the active server; the rest
- *  are standby backups in priority order -- reorder with the arrows. */
+ *  are standby backups in priority order. Reorder with the arrows. */
 function ServedByField({
   id,
   servedBy,
@@ -522,8 +523,8 @@ export function NodeCard({
   const networkEntries = Object.entries(networks);
   // A wireguard network has no value to write into the draft until its
   // config is imported (the interface name comes back from that call), so
-  // "adding" one just reveals its import form -- tracked here rather than
-  // in node.network -- until the operator actually imports something.
+  // "adding" one just reveals its import form (tracked here rather than
+  // in node.network) until the operator actually imports something.
   const [pendingWireguard, setPendingWireguard] = useState<string[]>([]);
   const joinableNetworks = networkEntries.filter(
     ([netName, net]) => net.type !== 'internal' && !(netName in node.network) && !pendingWireguard.includes(netName),
@@ -707,7 +708,7 @@ export function NodeCard({
                 onChange={(v) => setAddress(netName, v || null)}
                 hint={
                   net.type === 'internal'
-                    ? "This node's fixed address on the internal network, inside its subnet. Required for every node -- raft, drive sync and the container overlay all use it."
+                    ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
                     : "This node's fixed address on this network, inside its subnet."
                 }
                 disabled={disabled}
@@ -867,7 +868,7 @@ function WireguardAddressField({
   addr: InterfaceAddress | null;
   onChange: (addr: InterfaceAddress | null) => void;
   /** Drops this network from the node before any config has been imported
-   *  for it -- i.e. undoes "Add network" rather than removing a live one. */
+   *  for it (i.e. undoes \"Add network\" rather than removing a live one). */
   onCancel?: () => void;
   disabled: boolean;
 }) {
@@ -1067,7 +1068,7 @@ export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
         value={f.fence_timeout}
         onChange={(fence_timeout) => set({ fence_timeout })}
         disabled={disabled}
-        hint="How long a node can go without raft quorum before it stops its own containers, e.g. 15s. Must be shorter than the node timeout and longer than the probe interval -- this ordering is what stops a replicated volume from ending up with two writers."
+        hint="How long a node can go without raft quorum before it stops its own containers, e.g. 15s. Must be shorter than the node timeout and longer than the probe interval; this ordering is what stops a replicated volume from ending up with two writers."
       />
       <DurationField
         id="fo-probe"
@@ -1136,7 +1137,6 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
               ? {
                   issuer: '',
                   client_id: '',
-                  client_secret_file: null,
                   scopes: ['openid', 'profile', 'email'],
                   admin_claim: 'groups',
                   admin_value: null,
@@ -1144,7 +1144,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
               : null,
           })
         }
-        hint="Register clouduler as an app with your identity provider (Authentik, Keycloak, Google, Okta, etc.) first, with its redirect/callback URL set to https://<the dashboard's address>/auth/oidc/callback -- the address configured on the Web page."
+        hint="Register clouduler as an app with your identity provider (Authentik, Keycloak, Google, Okta, etc.) first, with its redirect/callback URL set to https://<the dashboard's address>/auth/oidc/callback, which is the address configured on the Web page."
         disabled={disabled}
       />
       {a.oidc && (
@@ -1165,20 +1165,17 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             hint="The client/application ID your provider issued when you registered clouduler as an app."
             disabled={disabled}
           />
-          <TextField
-            id="oidc-secretfile"
-            label="Client secret file"
-            value={a.oidc.client_secret_file ?? ''}
-            onChange={(v) => set({ oidc: { ...a.oidc!, client_secret_file: v || null } })}
-            hint="Path, on this node's own disk, to a file holding the client secret your provider issued alongside the client ID. Kept out of cluster.yaml so the config stays safe to commit. Leave blank only if your provider supports a public/secretless client."
-            disabled={disabled}
-          />
+          {/* The client secret is its own sealed secret, independent of `a.oidc`
+              and the rest of the draft (see OidcClientSecret). Kept settable
+              even while OIDC is being configured, so a secret can be staged
+              ahead of turning it on. */}
+          <OidcClientSecret disabled={disabled} />
           <TextField
             id="oidc-adminclaim"
             label="Admin claim"
             value={a.oidc.admin_claim}
             onChange={(admin_claim) => set({ oidc: { ...a.oidc!, admin_claim } })}
-            hint="Name of the claim in the ID token that lists the user's groups or roles, e.g. groups. Check what your provider actually sends -- it varies (roles, groups, https://your-app/roles, ...)."
+            hint="Name of the claim in the ID token that lists the user's groups or roles, e.g. groups. Check what your provider actually sends, as it varies (roles, groups, https://your-app/roles, ...)."
             disabled={disabled}
           />
           <TextField
@@ -1191,6 +1188,91 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The client secret, set here rather than by naming a file the operator has
+ * to create over ssh first.
+ *
+ * It sits outside the config draft on purpose, same reasoning as
+ * `CloudflareToken`. The secret is written by its own endpoint the moment
+ * Save is pressed, not on Apply, because it is not a config value that can be
+ * diffed or rolled back. Sealed and replicated as a cluster secret, so every
+ * node has it, and can be rotated at any time by submitting a new one; it
+ * just overwrites the old.
+ */
+function OidcClientSecret({ disabled }: { disabled: boolean }) {
+  const [status, setStatus] = useState<OidcClientSecretStatus | null>(null);
+  const [secret, setSecret] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.oidcClientSecret().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setOidcClientSecret(secret.trim());
+      setSecret('');
+      setStatus(await api.oidcClientSecret());
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'could not save the client secret');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Checking the client secret...
+      </p>
+    );
+  }
+
+  return (
+    <div className="field">
+      <label htmlFor="oidc-secret">Client secret</label>
+      <span className="field-hint">
+        The client secret your provider issued alongside the client ID. Leave unset only if your provider supports a
+        public/secretless client.
+      </span>
+      {status.configured && (
+        <p className="muted">
+          A secret is stored, replicated to every node. It cannot be shown again; enter a new one below to rotate it.
+        </p>
+      )}
+      <input
+        id="oidc-secret"
+        type="password"
+        value={secret}
+        onChange={(e) => setSecret(e.target.value)}
+        placeholder="OIDC client secret"
+        autoComplete="off"
+        disabled={disabled || busy}
+      />
+      {!status.configured && (
+        <span className="field-hint">
+          Sealed and stored as soon as you press Save, separately from the rest of this page. You will not be able to
+          read it back.
+        </span>
+      )}
+      {error && (
+        <span className="field-error">
+          <Icon name="alert-circle" /> {error}
+        </span>
+      )}
+      <div className="btn-row" style={{ marginTop: 8 }}>
+        <button onClick={save} disabled={disabled || busy || secret.trim().length === 0}>
+          {busy ? <span className="spinner" /> : <Icon name="key" />}
+          {busy ? 'Saving...' : status.configured ? 'Rotate secret' : 'Save secret'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1229,7 +1311,7 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="Issue certificates with ACME"
         value={p.acme.enabled}
         onChange={(enabled) => set({ acme: { ...p.acme, enabled } })}
-        hint="Automatically obtains and renews TLS certificates via ACME DNS-01 for every published route's hostname. Requires Cloudflare DNS management to be configured below -- DNS-01 is the only challenge type supported."
+        hint="Automatically obtains and renews TLS certificates via ACME DNS-01 for every published route's hostname. Requires Cloudflare DNS management to be configured below, as DNS-01 is the only challenge type supported."
         disabled={disabled || !p.enabled}
       />
       {p.acme.enabled && (
@@ -1288,7 +1370,7 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
         />
       )}
       {/* The token is its own sealed secret, independent of `cf` and the rest
-          of the draft -- see CloudflareToken. Kept settable even with DNS
+          of the draft (see CloudflareToken). Kept settable even with DNS
           management off, so a token can be staged ahead of flipping it on. */}
       <CloudflareToken disabled={disabled} />
     </div>
@@ -1303,7 +1385,7 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
  * endpoint the moment Save is pressed, not on Apply, because it is not a config
  * value that can be diffed or rolled back. Sealed and replicated as a cluster
  * secret, so every node has it, and can be rotated at any time by submitting a
- * new one -- it just overwrites the old.
+ * new one; it just overwrites the old.
  */
 function CloudflareToken({ disabled }: { disabled: boolean }) {
   const [status, setStatus] = useState<CloudflareTokenStatus | null>(null);

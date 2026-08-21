@@ -17,6 +17,7 @@ import type {
   DriveStatus,
   Identity,
   InstanceState,
+  OidcClientSecretStatus,
   PendingConfig,
   RedirectRule,
   SecretEntry,
@@ -147,8 +148,6 @@ export const api = {
   removeNode: (name: string) => del<void>(`/api/nodes/${encodeURIComponent(name)}`),
 
   // stacks
-  listStacks: () => get<Record<string, import('./types').StackState>>('/api/stacks'),
-  getStack: (name: string) => get<import('./types').StackState>(`/api/stacks/${encodeURIComponent(name)}`),
   deployStack: (
     name: string,
     body: { spec: string; configs?: Record<string, string>; secrets?: Record<string, string> },
@@ -195,7 +194,7 @@ export const api = {
   pendingConfiguration: () => get<PendingConfig>('/api/config/pending'),
   // Renames a network everywhere it is referenced: cluster.yaml, every
   // deployed stack, and the redirect/static-route/wireguard-ingress stores.
-  // Not part of the generic apply flow above -- it fans out to state that
+  // Not part of the generic apply flow above because it fans out to state that
   // flow does not know about.
   renameNetwork: (name: string, newName: string) =>
     post<void>(`/api/config/networks/${encodeURIComponent(name)}/rename`, { new_name: newName }),
@@ -209,6 +208,11 @@ export const api = {
   // cloudflare: the token is write-only, so there is no getter for its value
   cloudflareToken: () => get<CloudflareTokenStatus>('/api/cloudflare/token'),
   setCloudflareToken: (token: string) => put<void>('/api/cloudflare/token', { token }),
+
+  // oidc: the client secret is write-only, same reasoning as the cloudflare token
+  oidcClientSecret: () => get<OidcClientSecretStatus>('/api/oidc/client-secret'),
+  setOidcClientSecret: (clientSecret: string) =>
+    put<void>('/api/oidc/client-secret', { client_secret: clientSecret }),
 
   // redirects: UI-managed, not part of cluster.yaml — see docs/proxy.md
   listRedirects: () => get<RedirectRule[]>('/api/redirects'),

@@ -117,8 +117,8 @@ export const CONFIG_PAGES: ConfigPage[] = [
 ];
 
 /** Page owning a given diff path, so Review can link straight to its editor.
- *  A `nodes.<name>.*` path has no page of its own -- that config now lives on
- *  the node's own detail page -- so it never matches here; see
+ *  A `nodes.<name>.*` path has no page of its own because that config now lives on
+ *  the node's own detail page, so it never matches here; see
  *  `nodePathTarget` for that case. */
 export function pageForPath(path: string): ConfigPage | undefined {
   const top = path.split('.')[0];

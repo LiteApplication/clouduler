@@ -13,6 +13,7 @@ use crate::auth::keys::API_KEYS_CONFIG;
 use crate::auth::{Identity, RequireAdmin};
 use crate::cloudflare::is_reserved_cloudflare_secret;
 use crate::error::ApiError;
+use crate::oidc::is_reserved_oidc_secret;
 use crate::redirects::REDIRECTS_CONFIG;
 use crate::secrets::{self, Charset};
 use crate::server::AppState;
@@ -35,6 +36,7 @@ fn is_reserved_secret(name: &str) -> bool {
     super::self_update::is_reserved_secret(name)
         || is_reserved_wireguard_secret(name)
         || is_reserved_cloudflare_secret(name)
+        || is_reserved_oidc_secret(name)
 }
 
 pub fn router() -> Router<AppState> {

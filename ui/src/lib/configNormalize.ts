@@ -66,7 +66,6 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
       oidc: cfg.auth.oidc
         ? {
             ...cfg.auth.oidc,
-            client_secret_file: nullable(cfg.auth.oidc.client_secret_file),
             admin_value: nullable(cfg.auth.oidc.admin_value),
           }
         : null,

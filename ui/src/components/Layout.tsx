@@ -79,7 +79,7 @@ export function Layout({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [drawerOpen]);
 
-  // Each node gets its own submenu entry -- its config (role, ports,
+  // Each node gets its own submenu entry for its config (role, ports,
   // addresses, drives) lives on its detail page now, not a Configuration
   // subpage, so this is the only place it's reachable besides the table.
   const nodeNames = useMemo(() => Object.keys(cluster?.nodes ?? {}).sort(), [cluster]);

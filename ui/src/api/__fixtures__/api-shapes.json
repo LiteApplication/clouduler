@@ -77,6 +77,9 @@
     "role": "admin",
     "subject": "<volatile>"
   },
+  "oidcClientSecretStatus": {
+    "configured": false
+  },
   "pendingConfig": {
     "armed": false,
     "seconds_left": null
@@ -87,8 +90,23 @@
   "selfUpdateRepo": null,
   "selfUpdateRun": null,
   "state": {
-    "assignments": {},
-    "certificates": {},
+    "assignments": {
+      "web.app.0": {
+        "desired": "running",
+        "image_digest": null,
+        "instance": "web.app.0",
+        "migration": null,
+        "node": "n0"
+      }
+    },
+    "certificates": {
+      "example.test": {
+        "chain_pem": "chain",
+        "fqdn": "example.test",
+        "key_pem": "",
+        "not_after": 0
+      }
+    },
     "cluster_config": null,
     "configs": {
       "_clouduler_api_keys": {
@@ -98,7 +116,15 @@
         "revision": 1
       }
     },
-    "dns_records": {},
+    "dns_records": {
+      "example.test|A|127.0.0.1": {
+        "content": "<volatile>",
+        "fqdn": "example.test",
+        "provider_id": null,
+        "record_type": "A",
+        "zone": "test"
+      }
+    },
     "nodes": {
       "n0": {
         "arch": "",
@@ -111,19 +137,55 @@
         "labels": {},
         "name": "n0",
         "networks": [],
-        "node_pubkey": null,
+        "node_pubkey": "target",
         "open_ports": {},
         "role": "manager",
         "rpc_addr": "<volatile>"
       }
     },
     "overlay": null,
-    "secrets": {},
-    "stacks": {},
+    "secrets": {
+      "web.secret": {
+        "key_fingerprint": "fp",
+        "name": "web.secret",
+        "owner": "web",
+        "revision": 1,
+        "sealed": ""
+      }
+    },
+    "stacks": {
+      "web": {
+        "configs": [
+          "web.conf"
+        ],
+        "name": "web",
+        "revision": 1,
+        "secrets": [
+          "web.secret"
+        ],
+        "spec": "services: {}"
+      }
+    },
     "unreachable": [],
-    "version": 3,
-    "volumes": {},
-    "wrapped_keys": {}
+    "version": 12,
+    "volumes": {
+      "fast/v0": {
+        "generation": 1,
+        "id": "fast/v0",
+        "primary": "n0",
+        "replicas": {
+          "n0": 1
+        }
+      }
+    },
+    "wrapped_keys": {
+      "n0": {
+        "ephemeral_public": "eph",
+        "key_fingerprint": "fp",
+        "sealed": "sealed",
+        "target_pubkey": "target"
+      }
+    }
   },
   "status": {
     "has_quorum": true,

@@ -2,7 +2,7 @@
 //! docker client (never actually dialed, since none of the routes exercised
 //! here touch it), driven through the router with `tower::ServiceExt::oneshot`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -471,6 +471,79 @@ async fn setting_a_cloudflare_token_without_cloudflare_enabled_still_stores_it()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// The secret is write-only: the status route says whether one exists, never
+/// what it is.
+#[tokio::test]
+async fn the_oidc_client_secret_status_never_carries_the_secret() {
+    let h = harness().await;
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/oidc/client-secret")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["configured"], false);
+    assert!(body.get("client_secret").is_none());
+}
+
+/// Like the Cloudflare token, the secret can be set more than once: it is
+/// replicated as a cluster secret rather than written to a file on whichever
+/// node answered the request, so rotating it is just overwriting that secret.
+#[tokio::test]
+async fn setting_the_oidc_client_secret_can_be_rotated() {
+    let h = harness().await;
+
+    let put = |secret: &str| {
+        h.router.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/oidc/client-secret")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"client_secret":"{secret}"}}"#)))
+                .unwrap(),
+        )
+    };
+
+    assert_eq!(put("oidc-secret-1").await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(put("oidc-secret-2").await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let status = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/oidc/client-secret")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(status.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["configured"], true);
 }
 
 /// Setting the self-update GitHub token stores it as a sealed secret, and
@@ -1293,10 +1366,111 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .cluster
         .submit(cl_raft::Request::UpsertNode(NodeState {
             drives: BTreeMap::from([("fast".to_string(), "/mnt/fast".into())]),
+            node_pubkey: Some("target".to_string()),
             ..node
         }))
         .await
         .expect("submit node drives");
+
+    // Same reasoning as the drive above, for every other collection `state`
+    // carries: an empty map or array can't prove the item shape underneath it
+    // still matches what the ui declares, which is exactly how `labels`
+    // drifted onto `NodeState` unnoticed. One real item each, so a rename in
+    // any of these gets caught the same way.
+    h.state
+        .cluster
+        .submit(cl_raft::Request::DeployStack {
+            name: "web".to_string(),
+            spec: "services: {}".to_string(),
+        })
+        .await
+        .expect("submit stack");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetStackObjects {
+            name: "web".to_string(),
+            configs: BTreeSet::from(["web.conf".to_string()]),
+            secrets: BTreeSet::from(["web.secret".to_string()]),
+        })
+        .await
+        .expect("submit stack objects");
+
+    h.state
+        .cluster
+        .submit(cl_raft::Request::Assign {
+            instance: cl_raft::InstanceId::new("web", "app", 0),
+            node: "n0".to_string(),
+            drives: BTreeSet::new(),
+        })
+        .await
+        .expect("submit assign");
+
+    let volume = cl_raft::VolumeId::new("fast", "v0");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::UpsertVolume {
+            id: volume.clone(),
+            primary: "n0".to_string(),
+        })
+        .await
+        .expect("submit volume");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetVolumeReplica {
+            id: volume,
+            node: "n0".to_string(),
+            generation: 1,
+        })
+        .await
+        .expect("submit volume replica");
+
+    h.state
+        .cluster
+        .submit(cl_raft::Request::PutSecret {
+            name: "web.secret".to_string(),
+            sealed: "c2VhbGVk".to_string(),
+            key_fingerprint: "fp".to_string(),
+            owner: Some("web".to_string()),
+        })
+        .await
+        .expect("submit secret");
+
+    h.state
+        .cluster
+        .submit(cl_raft::Request::StoreCertificate(cl_raft::CertificateState {
+            fqdn: "example.test".to_string(),
+            chain_pem: "chain".to_string(),
+            key_pem: "key".to_string(),
+            not_after: 0,
+        }))
+        .await
+        .expect("submit certificate");
+
+    h.state
+        .cluster
+        .submit(cl_raft::Request::UpsertDnsRecord(cl_raft::DnsRecordState {
+            fqdn: "example.test".to_string(),
+            record_type: "A".to_string(),
+            content: "127.0.0.1".to_string(),
+            zone: "test".to_string(),
+            provider_id: None,
+        }))
+        .await
+        .expect("submit dns record");
+
+    h.state
+        .cluster
+        .submit(cl_raft::Request::PutWrappedKey {
+            node: "n0".to_string(),
+            entry: cl_raft::state::WrappedKeyEntry {
+                ephemeral_public: "eph".to_string(),
+                sealed: "sealed".to_string(),
+                key_fingerprint: "fp".to_string(),
+                target_pubkey: "target".to_string(),
+            },
+        })
+        .await
+        .expect("submit wrapped key");
 
     let mut shapes = serde_json::Map::new();
     for (name, uri) in [
@@ -1306,6 +1480,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("pendingConfig", "/api/config/pending"),
         ("clusterConfig", "/api/config"),
         ("cloudflareTokenStatus", "/api/cloudflare/token"),
+        ("oidcClientSecretStatus", "/api/oidc/client-secret"),
         ("clusterKeyStatus", "/api/secrets/key"),
         ("selfUpdateGithubToken", "/api/self-update/github-token"),
         ("selfUpdateRepo", "/api/self-update/repo"),

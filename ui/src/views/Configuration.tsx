@@ -6,7 +6,7 @@
 // and always shows how many fields differ from what the cluster is running.
 //
 // Per-node config (role, ports, addresses, drive mounts) lives on that node's
-// own detail page instead of a subpage here -- see `NodeDetail` -- since it
+// own detail page instead of a subpage here (see `NodeDetail`), since it
 // reuses the same draft and apply flow (`useConfigApply`) but does not need a
 // tab of its own once every node already has one under Nodes in the sidebar.
 
@@ -101,6 +101,21 @@ export function Configuration() {
         </div>
       )}
 
+      {errors.length > 0 && (
+        <div className="banner banner-bad" role="alert" style={{ marginTop: 16 }}>
+          <Icon name="alert" />
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {errors.map((e, i) => (
+              <li key={i}>
+                {e.path && <span className="mono">{e.path}</span>}
+                {e.path && ': '}
+                {e.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {pending?.armed && <PendingBanner pending={pending} onConfirm={confirm} onRollback={rollback} />}
 
       <div className="config-page">
@@ -131,21 +146,6 @@ export function Configuration() {
           />
           <Route path="*" element={<Navigate to="cluster" replace />} />
         </Routes>
-
-        {errors.length > 0 && (
-          <div className="banner banner-bad" role="alert" style={{ marginTop: 16 }}>
-            <Icon name="alert" />
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {errors.map((e, i) => (
-                <li key={i}>
-                  {e.path && <span className="mono">{e.path}</span>}
-                  {e.path && ': '}
-                  {e.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -49,7 +49,7 @@ struct PutWireguardConfigRequest {
 struct PutWireguardConfigResponse {
     /// The interface name the daemon will bring this tunnel up as. The
     /// caller writes this into `node.network.<network>` via `PUT
-    /// /api/config` to complete the import -- computed here rather than
+    /// /api/config` to complete the import, which is computed here rather than
     /// duplicated client side, so the two can never drift apart.
     interface: String,
 }

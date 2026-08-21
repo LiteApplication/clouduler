@@ -10,7 +10,7 @@
 //!
 //! `rtnetlink` (already used by `vxlan`) can create a bare `wireguard`-type
 //! link, but has no support for the WireGuard generic-netlink family that
-//! sets keys and peers -- that only exists in `wg`(8), so, consistent with
+//! sets keys and peers. That only exists in `wg`(8), so, consistent with
 //! `egress`'s choice to shell out to `iptables` rather than hand-roll it over
 //! netlink, key and peer configuration here shells out to `ip` and `wg` too.
 
@@ -130,7 +130,7 @@ pub fn parse_wg_quick(text: &str) -> Result<WireguardConfig> {
             "listenport" => listen_port = value.parse().ok(),
             // DNS, MTU, Table, PostUp/PostDown and friends: wg-quick-only,
             // clouduler manages routing itself, so these are ignored rather
-            // than rejected -- a config pasted straight from a VPN provider
+            // than rejected, such as a config pasted straight from a VPN provider
             // usually carries them.
             _ => {}
         }
@@ -256,7 +256,7 @@ fn io_err(context: String, source: std::io::Error) -> NetError {
 }
 
 /// One allowed inbound port on a wireguard network's tunnel, forwarded to a
-/// port on this node -- normally a docker container's already-published
+/// port on this node, normally a docker container's already-published
 /// host port.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngressRule {

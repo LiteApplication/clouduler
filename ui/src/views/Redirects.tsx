@@ -1,5 +1,5 @@
 // UI-managed proxy redirects and static/external backends. Neither is part
-// of cluster.yaml -- see docs/proxy.md and cl_api::redirects /
+// of cluster.yaml (see docs/proxy.md and cl_api::redirects /
 // cl_api::static_routes for why these live outside the config-draft flow and
 // apply immediately instead.
 
@@ -620,7 +620,7 @@ function WireguardIngressSection() {
         )}
       </div>
       <p className="field-hint">
-        Ports let in through a wireguard network's tunnel, forwarded to a port on this node -- normally an
+        Ports let in through a wireguard network's tunnel, forwarded to a port on this node, normally an
         already-published docker port bind. Never opens the port anywhere else.
       </p>
       {networkNames.length === 0 && (

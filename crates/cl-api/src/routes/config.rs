@@ -133,7 +133,7 @@ struct RenameNetworkRequest {
 /// stack that names it, and the three out-of-band stores that hold a plain
 /// `network: String` (redirects, static routes, wireguard ingress).
 ///
-/// Not one atomic transaction -- each piece is its own raft log entry -- but
+/// Not one atomic transaction since each piece is its own raft log entry, but
 /// each step is atomic on its own and a failure partway through is surfaced
 /// immediately rather than silently leaving a mismatched reference.
 async fn rename_network(
@@ -250,7 +250,7 @@ struct RenameDriveRequest {
 /// Unlike a network rename this never touches replicated volume state: a
 /// volume's raft-tracked generation and replica set are keyed by
 /// drive/volume id, so the next reconcile pass registers a fresh entry under
-/// the new id the moment a stack's volume mount is renamed here -- exactly
+/// the new id the moment a stack's volume mount is renamed here, exactly
 /// as it would if the drive had been renamed by hand across two applies. The
 /// data itself is untouched, since a node's `drives` path mapping moves with
 /// the rename rather than changing.
@@ -324,7 +324,7 @@ fn rename_drive_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
 
 /// Moves every node's sealed wireguard config secret from the old network's
 /// reserved name to the new one, so the tunnel keeps finding it after the
-/// rename. Submitted as-is (still sealed, no key needed here) -- a
+/// rename. Submitted as-is (still sealed, no key needed here) so that a
 /// put-then-remove per node, since there is no rename request.
 async fn rename_wireguard_secrets(
     state: &AppState,

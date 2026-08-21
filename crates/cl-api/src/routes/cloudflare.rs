@@ -3,7 +3,7 @@
 //! The token is write-only over the api. It is sealed and stored as a
 //! cluster secret (`cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET`), the same
 //! pattern the wireguard config import route uses
-//! (`crate::routes::wireguard::put_config`) -- only its presence is ever
+//! (`crate::routes::wireguard::put_config`); only its presence is ever
 //! reported back, there is no route that returns the value, so a stolen
 //! session cannot read out a token someone else installed.
 //!

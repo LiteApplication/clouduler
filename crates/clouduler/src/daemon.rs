@@ -147,8 +147,8 @@ pub async fn run(
         Some(docker) => {
             let materializer = Materializer::new(&data_dir, key);
             // A wireguard network attaches a container exactly like an
-            // egress one -- its interface is just clouduler-managed instead
-            // of admin-managed -- so it counts here too.
+            // egress one because its interface is just clouduler-managed instead
+            // of admin-managed, so it counts here too.
             let egress_networks = cfg
                 .networks
                 .iter()
@@ -158,9 +158,9 @@ pub async fn run(
                 .map(|(name, _)| name.clone())
                 .collect();
             // Names every network whose reachability from outside depends on
-            // a specific node -- public (its own router) or wireguard (its
+            // a specific node, whether public (its own router) or wireguard (its
             // own tunnel's far end forwarding a port back, e.g. a VPN
-            // provider's port forwarding feature) -- so a raw
+            // provider's port forwarding feature), so a raw
             // `x-clouduler.expose` port on one only ever schedules onto a
             // node that actually has it open (`NodeState::open_ports`).
             let port_gated_networks = cfg
@@ -468,7 +468,7 @@ pub(crate) fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<Clust
 ///
 /// Every node has one, unlike the cluster key: it is what lets another node
 /// wrap a copy of the cluster key for this one without ever putting the
-/// plaintext on the wire. Not fatal on failure -- a node that somehow cannot
+/// plaintext on the wire. Not fatal on failure: a node that somehow cannot
 /// get one just never receives an automatic key delivery, the same steady
 /// state as before this existed.
 pub(crate) fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> {

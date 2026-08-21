@@ -35,6 +35,7 @@ import type {
   CloudflareTokenStatus,
   DriveStatus,
   Identity,
+  OidcClientSecretStatus,
   PendingConfig,
 } from './types';
 
@@ -46,6 +47,7 @@ const identity: Identity = shapes.identity as Identity;
 const pending: PendingConfig = shapes.pendingConfig;
 const config: ClusterConfig = shapes.clusterConfig as unknown as ClusterConfig;
 const cloudflare: CloudflareTokenStatus = shapes.cloudflareTokenStatus;
+const oidcSecret: OidcClientSecretStatus = shapes.oidcClientSecretStatus;
 const clusterKey: ClusterKeyStatus = shapes.clusterKeyStatus;
 const drives: DriveStatus[] = shapes.drives as unknown as DriveStatus[];
 
@@ -55,6 +57,7 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   identity: [identity, ['subject', 'role']],
   pendingConfig: [pending, ['armed', 'seconds_left']],
   cloudflareTokenStatus: [cloudflare, ['configured']],
+  oidcClientSecretStatus: [oidcSecret, ['configured']],
   clusterKeyStatus: [clusterKey, ['fingerprint', 'held']],
   state: [state, ['nodes', 'stacks', 'assignments', 'unreachable', 'version']],
   clusterConfig: [config, ['cluster', 'networks', 'nodes', 'web', 'proxy']],

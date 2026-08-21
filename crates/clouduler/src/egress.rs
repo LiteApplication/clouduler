@@ -16,7 +16,7 @@
 //! instead of one the admin brought up out of band. Once that interface is
 //! up, it is indistinguishable from a plain egress interface to everything
 //! below: the same bridge, kill-switch and docker network logic applies. A
-//! wireguard network additionally gets an ingress ruleset -- ports let in
+//! wireguard network additionally gets an ingress ruleset for ports let in
 //! through the tunnel and forwarded to this node's own address, where an
 //! already-published docker port bind picks them up.
 

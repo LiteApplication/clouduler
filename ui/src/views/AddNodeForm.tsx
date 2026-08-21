@@ -8,7 +8,7 @@ import { Icon } from '../components/Icon';
 //
 // Once registered, the operator still has to actually run `clouduler init`
 // on the physical machine. That command needs an admin api key and this
-// cluster's address -- both of which the admin's already-authenticated
+// cluster's address, both of which the admin's already-authenticated
 // browser can hand over right here, so a fresh single-use key is minted and
 // shown alongside the exact command to paste. No cluster secret key ever
 // needs to travel with it: a joining node gets that automatically once it
@@ -34,7 +34,7 @@ export function AddNodeForm({ onDone }: { onDone: () => void }) {
       const host = window.location.hostname;
       const join = config.web.port === 443 ? host : `${host}:${config.web.port}`;
       setCommand(
-        `clouduler init --yes --join ${join} --token ${key.secret} --role ${role} --node ${name}`,
+        `clouduler init --yes --join ${join} --token ${key.key} --role ${role} --node ${name}`,
       );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to add node');
@@ -58,7 +58,7 @@ export function AddNodeForm({ onDone }: { onDone: () => void }) {
         </h3>
         <p className="page-sub">
           The node is registered. Run this command on the new machine to have it join the
-          cluster -- it carries a one-time api key that will not be shown again.
+          cluster: it carries a one-time api key that will not be shown again.
         </p>
         <pre className="mono">{command}</pre>
         <div className="btn-row">

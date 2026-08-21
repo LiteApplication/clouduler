@@ -14,6 +14,9 @@ export interface NodeState {
   /** drive name -> local backing path */
   drives: Record<string, string>;
   availability: Availability;
+  /** Labels from the cluster config, matched by
+   *  `deploy.placement.constraints` as `node.labels.<key>`. */
+  labels: Record<string, string>;
   /** Egress-kind networks this node has a host interface address for. */
   egress_networks: string[];
   /** Every network this node has any address on. */
@@ -98,16 +101,10 @@ export interface InstanceState {
   migration: { to: string; phase: string } | null;
 }
 
-export interface Attachment {
-  content: string;
-  secret: boolean;
-}
-
 export interface StackState {
   name: string;
   spec: string;
   revision: number;
-  files: Record<string, Attachment>;
   configs: string[];
   secrets: string[];
 }
@@ -161,10 +158,19 @@ export interface ClusterState {
   dns_records: Record<string, DnsRecordState>;
   unreachable: string[];
   overlay: string | null;
-  /** The cluster key, wrapped once per node -- see WrappedKeyEntry. Ciphertext
+  /** The cluster key, wrapped once per node (see WrappedKeyEntry). Ciphertext
    *  only; the plaintext key never appears in this state. */
   wrapped_keys: Record<string, WrappedKeyEntry>;
+  /** The replicated cluster.yaml, null until the first write. Read via
+   *  `/api/config` instead; this is raft's own copy. */
+  cluster_config: ClusterConfigEntry | null;
   version: number;
+}
+
+/** The replicated cluster.yaml and the generation it was written at. */
+export interface ClusterConfigEntry {
+  yaml: string;
+  generation: number;
 }
 
 /** The cluster secret key, encrypted to one node's public key. */
@@ -212,7 +218,7 @@ export interface ApiKey {
 }
 
 export interface ApiKeyCreated extends ApiKey {
-  secret: string;
+  key: string;
 }
 
 // ---- errors ----
@@ -337,7 +343,6 @@ export interface SecretsConfig {
 export interface OidcConfig {
   issuer: string;
   client_id: string;
-  client_secret_file: string | null;
   scopes: string[];
   admin_claim: string;
   admin_value: string | null;
@@ -355,6 +360,11 @@ export interface CloudflareConfig {
 
 /** GET /api/cloudflare/token. The token value itself is never returned. */
 export interface CloudflareTokenStatus {
+  configured: boolean;
+}
+
+/** GET /api/oidc/client-secret. The secret value itself is never returned. */
+export interface OidcClientSecretStatus {
   configured: boolean;
 }
 

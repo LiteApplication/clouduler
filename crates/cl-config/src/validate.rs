@@ -229,16 +229,15 @@ impl ClusterConfig {
     fn validate_drives(&self) -> Result<()> {
         for (name, drive) in &self.drives {
             // A drive nobody implements yet just can't host a volume until a
-            // node is given a local path for it -- scheduling already rejects
+            // node is given a local path for it, because scheduling already rejects
             // placement onto a node that doesn't implement a drive, so this is
             // left for the operator to fill in rather than blocked here.
+            // A served drive with no server named yet just can't be mounted
+            // anywhere until the operator picks one, since the daemon already
+            // skips it in that state, so this is left for the operator to
+            // fill in rather than blocked here.
             match (drive.is_served(), drive.served_by.is_empty()) {
-                (true, true) => {
-                    return Err(ConfigError::invalid(
-                        format!("drives.{name}.served_by"),
-                        "a served drive must name at least one node holding the data",
-                    ))
-                }
+                (true, true) => {}
                 (false, false) => {
                     return Err(ConfigError::invalid(
                         format!("drives.{name}.served_by"),
@@ -330,14 +329,6 @@ impl ClusterConfig {
                 "auth.oidc.client_id",
                 "must not be empty",
             ));
-        }
-        if let Some(path) = &oidc.client_secret_file {
-            if !path.is_absolute() {
-                return Err(ConfigError::invalid(
-                    "auth.oidc.client_secret_file",
-                    "must be an absolute path",
-                ));
-            }
         }
         if !oidc.scopes.iter().any(|s| s == "openid") {
             return Err(ConfigError::invalid(
@@ -627,7 +618,7 @@ cloudflare:
     #[test]
     fn unimplemented_drive_is_allowed() {
         // A drive can be declared before any node is given a local path for
-        // it -- scheduling rejects placement onto a node lacking it, and that
+        // it; scheduling rejects placement onto a node lacking it, and that
         // is enough; config validation doesn't need to block staging it.
         parse(&[("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: { sync_interval: 5m }")])
             .unwrap();
@@ -798,9 +789,12 @@ cloudflare:
     }
 
     #[test]
-    fn a_served_drive_needs_a_serving_node() {
-        let err = parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).unwrap_err();
-        assert!(err.to_string().contains("must name at least one node holding the data"));
+    fn a_served_drive_without_a_serving_node_is_allowed() {
+        // Nobody has picked a server for it yet, but the daemon already
+        // treats that as "nothing to do", so config validation doesn't need
+        // to block staging it.
+        let cfg = parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).expect("valid");
+        assert!(cfg.drives["fast"].served_by.is_empty());
     }
 
     #[test]
