@@ -157,6 +157,9 @@ export interface ClusterState {
   certificates: Record<string, CertificateState>;
   dns_records: Record<string, DnsRecordState>;
   unreachable: string[];
+  /** Node names removed through the API, kept as a tombstone until the name
+   *  is reused, so a stale leader config cannot resurrect them. */
+  removed: string[];
   overlay: string | null;
   /** The cluster key, wrapped once per node (see WrappedKeyEntry). Ciphertext
    *  only; the plaintext key never appears in this state. */

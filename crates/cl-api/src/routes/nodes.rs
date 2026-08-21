@@ -197,12 +197,26 @@ async fn patch_node(
     Ok(StatusCode::OK)
 }
 
+/// Removes the node from the replicated roster and raft membership (the
+/// latter reconciled asynchronously by the leader, see `reap_removed_nodes`
+/// in the daemon), then strips it from the cluster config so a future
+/// restart of any manager does not treat it as newly configured and re-add
+/// it. Order matters: the roster removal is what makes the node's config
+/// entry safe to drop, since `RemoveNode` first checks nothing still runs
+/// there.
 async fn remove(
     _admin: RequireAdmin,
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    submit(&state, ClusterRequest::RemoveNode { node: name }).await?;
+    submit(&state, ClusterRequest::RemoveNode { node: name.clone() }).await?;
+
+    let mut config = state.cluster_config.read().await.clone();
+    if config.nodes.remove(&name).is_some() {
+        config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        super::config::apply_config(&state, &config).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 

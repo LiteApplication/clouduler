@@ -54,6 +54,8 @@ pub async fn run(
         "starting"
     );
 
+    bail_if_removed(&cfg, &node_name, &data_dir).await?;
+
     let key = load_cluster_key(&cfg, node);
     let node_keypair = load_node_keypair(&cfg);
     let node_pubkey = node_keypair.as_ref().map(cl_secret::NodeKeypair::public_key_encoded);
@@ -220,6 +222,7 @@ pub async fn run(
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
+    let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => { result?; }
@@ -228,6 +231,7 @@ pub async fn run(
     info!("shutting down");
     watcher.abort();
     self_report.abort();
+    reaper.abort();
     config_writer.abort();
     detector.abort();
     fencing.abort();
@@ -608,6 +612,64 @@ async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc
     }
 }
 
+/// Ask any other configured peer whether this node was deleted through the
+/// API while it was down, and if so, wipe local secrets rather than let it
+/// rejoin (or keep holding cluster key material for a machine an operator
+/// has already decommissioned).
+///
+/// A restarting node has no way to tell this from its own state: raft simply
+/// stops delivering it new log entries the moment it drops out of
+/// membership, so its own copy of `removed` is frozen at whatever it last
+/// saw before going down. A live peer's copy is authoritative.
+///
+/// An unreachable peer is not evidence of removal - this only acts once a
+/// peer actually confirms it, and gives up quietly if none answer (e.g. this
+/// is the very first node, still forming the cluster, or the network is
+/// briefly partitioned).
+async fn bail_if_removed(cfg: &ClusterConfig, node_name: &str, data_dir: &Path) -> Result<()> {
+    for (name, node) in &cfg.nodes {
+        if name == node_name {
+            continue;
+        }
+        let Some(addr) = cfg.rpc_addr(node) else { continue };
+
+        let client = cl_raft::Client::connect(addr.to_string());
+        let state = match tokio::time::timeout(Duration::from_secs(5), client.state()).await {
+            Ok(Ok(state)) => state,
+            _ => continue,
+        };
+
+        if state.removed.contains(node_name) {
+            warn!(
+                node = %node_name,
+                confirmed_by = %name,
+                "this node was removed from the cluster while it was down; wiping local secrets"
+            );
+            wipe_local_secrets(cfg, data_dir);
+            bail!("removed from the cluster while down; local secrets wiped, re-provision to rejoin");
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Best effort: a file already gone is not a failure, and a removed node
+/// should not fail to start over one leftover file it could not delete.
+fn wipe_local_secrets(cfg: &ClusterConfig, data_dir: &Path) {
+    for path in [&cfg.secrets.key_file, &cfg.secrets.node_key_file] {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = %path.display(), error = %e, "could not remove secret file");
+            }
+        }
+    }
+    if let Err(e) = std::fs::remove_dir_all(data_dir.join("raft")) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(path = %data_dir.join("raft").display(), error = %e, "could not remove local raft state");
+        }
+    }
+}
+
 /// Form the cluster on first boot.
 ///
 /// The first manager by name is the one that forms it. That rule is
@@ -669,6 +731,13 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
     let known = cluster.state().await;
 
     for (name, node) in &cfg.nodes {
+        // Deleted through the API: the config file still lists it until an
+        // operator edits it out, but the roster must not resurrect it just
+        // because this leader's in-memory config is stale.
+        if known.removed.contains(name) {
+            continue;
+        }
+
         let Some(rpc_addr) = cfg.rpc_addr(node) else {
             warn!(node = %name, "skipping node with no internal address");
             continue;
@@ -699,6 +768,30 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Drop nodes removed through the API from actual raft membership.
+///
+/// Separate from `watch_leadership`, which only reruns on a quorum status
+/// change: a plain `RemoveNode` write does not itself change quorum status
+/// (leader, voters, reachability), so a removal could otherwise sit in the
+/// `removed` tombstone set indefinitely without ever being applied to raft
+/// membership. `remove_node` is a no-op once the node is gone, so retrying on
+/// every tick is harmless.
+async fn reap_removed_nodes(cluster: Arc<ClusterNode>, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        if !cluster.is_leader() {
+            continue;
+        }
+        let known = cluster.state().await;
+        for name in &known.removed {
+            if let Err(e) = cluster.remove_node(node_id(name)).await {
+                warn!(node = %name, error = %e, "could not drop removed node from raft membership");
+            }
+        }
+    }
 }
 
 /// `cl_raft::PortProtocol` mirrors `cl_config::Protocol` structurally so

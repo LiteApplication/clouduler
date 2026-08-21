@@ -402,6 +402,13 @@ pub struct ClusterState {
     /// operator asked for.
     #[serde(default)]
     pub unreachable: BTreeSet<String>,
+    /// Names removed through `RemoveNode`, kept as a tombstone until the node
+    /// is added again. Without this, a leader whose in-memory config still
+    /// lists the node (it is only ever reloaded from disk on restart) treats
+    /// it as newly joined the next time it seeds the roster, undoing the
+    /// removal.
+    #[serde(default)]
+    pub removed: BTreeSet<String>,
     /// Overlay subnet and address assignments, as json owned by cl-net. Kept
     /// opaque here so the address book can evolve without touching the state
     /// machine, which every node has to agree on byte for byte.
@@ -695,6 +702,7 @@ impl ClusterState {
             }
 
             Request::UpsertNode(node) => {
+                self.removed.remove(&node.name);
                 self.nodes.insert(node.name.clone(), node.clone());
                 Ok(())
             }
@@ -727,6 +735,7 @@ impl ClusterState {
                 self.nodes.remove(node);
                 self.unreachable.remove(node);
                 self.wrapped_keys.remove(node);
+                self.removed.insert(node.clone());
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
                 }

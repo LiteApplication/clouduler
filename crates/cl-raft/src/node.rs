@@ -267,8 +267,21 @@ impl ClusterNode {
         Ok(())
     }
 
-    /// Drop a node from the voter set, then from membership entirely.
+    /// Drop a node from the voter set, then from membership entirely. A no-op
+    /// if the node is not currently a member, so callers can retry freely.
     pub async fn remove_node(&self, id: NodeId) -> Result<()> {
+        let is_member = self
+            .raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .membership()
+            .nodes()
+            .any(|(node_id, _)| *node_id == id);
+        if !is_member {
+            return Ok(());
+        }
+
         let mut voters = self.voters().await;
         if voters.remove(&id) {
             self.raft

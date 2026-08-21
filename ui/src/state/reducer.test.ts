@@ -15,6 +15,7 @@ function state(version: number): ClusterState {
     wrapped_keys: {},
     cluster_config: null,
     unreachable: [],
+    removed: [],
     overlay: null,
     version,
   };
