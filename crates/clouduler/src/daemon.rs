@@ -585,6 +585,12 @@ fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// Keep the replicated roster in step with the config for as long as this node
 /// leads. Seeding is done on every leadership change rather than once at
 /// startup, because at startup no leader has been elected yet.
+///
+/// `cfg` is only the config this node booted with; a node joining after that
+/// changes the replicated `ClusterConfig`, not this snapshot. So the roster is
+/// seeded from the replicated config (already fresh, since a join pushes it
+/// straight into raft), falling back to `cfg` only for the brief window before
+/// `seed_config` has published anything.
 async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc<ClusterNode>) {
     let mut quorum = cluster.quorum();
     loop {
@@ -601,7 +607,15 @@ async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc
             if let Err(e) = seed_config(&config_path, &cluster).await {
                 warn!(error = %e, "could not publish the cluster config");
             }
-            if let Err(e) = seed_roster(&cfg, &cluster).await {
+
+            let current = match cluster.state().await.cluster_config {
+                Some(entry) => ClusterConfig::parse(&entry.yaml).unwrap_or_else(|e| {
+                    warn!(error = %e, "replicated cluster config failed to parse, using the config this node booted with");
+                    cfg.clone()
+                }),
+                None => cfg.clone(),
+            };
+            if let Err(e) = seed_roster(&current, &cluster).await {
                 warn!(error = %e, "could not publish the node roster");
             }
         }
