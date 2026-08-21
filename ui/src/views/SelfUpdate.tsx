@@ -11,7 +11,7 @@ const RUN_CONFIG = '_clouduler_self_update_run';
 
 /** Shown as the release url placeholder and prefilled default: this
  *  project's own repo, pinned to a specific release tag. */
-const DEFAULT_RELEASE_URL = 'https://github.com/LiteApplication/clouduler/releases/tag/v0.1.0';
+const DEFAULT_RELEASE_URL = 'https://github.com/LiteApplication/clouduler';
 
 /** Decode the run state out of `ClusterState.configs`, the same object the
  *  api reads it from: the config content is base64 json, so it rides the
