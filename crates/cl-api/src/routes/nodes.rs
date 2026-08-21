@@ -90,6 +90,10 @@ async fn detail(
 
     let usage = if name == state.node_name {
         local_resource_usage()
+    } else if cluster_state.unreachable.contains(&name) {
+        // Already known down: skip the round trip rather than pay its
+        // timeout on every poll of a node everyone already knows is gone.
+        ResourceUsage::default()
     } else {
         internal_peer::fetch_json(&state, &name, &internal_usage_path(&name))
             .await

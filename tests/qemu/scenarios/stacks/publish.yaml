@@ -13,12 +13,18 @@ services:
     networks: [cluster]
     x-clouduler:
       proxy:
-        # A bare label, so the cluster network's domain is appended and the
-        # route ends up as app.cl.test. Plain http, because the test asserts
-        # against the proxy's routing, not against a certificate it has no
-        # way to have been issued.
+        # A bare label, so wan's domain is appended and the route ends up as
+        # app.wan.test. Plain http, because the test asserts against the
+        # proxy's routing, not against a certificate it has no way to have
+        # been issued. `wan` (a public network, no subnet) rather than
+        # `cluster` (internal, subnetted): the proxy's network gating
+        # (docs/proxy.md) only accepts a TCP peer inside a subnetted
+        # network's range, and the harness asserts this route from the host
+        # over a hostfwd port that arrives outside "cluster"'s subnet — the
+        # same reason a real deployment would publish this externally on a
+        # public network rather than the internal one.
         - host: app
-          network: cluster
+          network: wan
           port: 80
           tls: false
       expose:

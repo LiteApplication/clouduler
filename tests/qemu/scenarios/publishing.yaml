@@ -17,6 +17,6 @@ steps:
   # Asked of every node, not just the one running the container: a route that
   # only answers where the container landed defeats the point of a proxy on
   # every node.
-  - assert_http_route: { host: app.cl.test, contains: "nginx", timeout: 90 }
+  - assert_http_route: { host: app.wan.test, contains: "nginx", timeout: 90 }
   - assert_published_port: { contains: "nginx", timeout: 90 }
   - assert_healthy: { stack: publish, service: probe, timeout: 120 }

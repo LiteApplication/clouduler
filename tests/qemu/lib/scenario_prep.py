@@ -84,7 +84,10 @@ def main():
         # one 127.0.0.1 for all of them would be rejected by both.
         control_ip = f"127.0.0.{index + 1}"
         node_drives = n.get("drives") or {}
-        node_network = {"cluster": n["ip"]}
+        # 203.0.113.0/24 (RFC 5737 TEST-NET-3): not routable, but a public
+        # network address just needs to exist for placement/gating purposes
+        # in these scenarios, since nothing here does real DNS/ACME with it.
+        node_network = {"cluster": n["ip"], "wan": {"ipv4": f"203.0.113.{index + 1}"}}
         if vpn and name == vpn["egress_node"]:
             # A bare non-IP string is the third `NodeAddress` form: a host
             # interface name, naming eth2 (the vpn-segment netdev) rather
@@ -124,6 +127,15 @@ def main():
         "cluster": {"name": scenario.get("name", "qemu-test")},
         "networks": {
             "cluster": {"type": "internal", "subnet": "10.10.0.0/24", "domain": "cl.test"},
+            # A route on a subnetted network only answers a TCP peer inside
+            # that subnet (docs/proxy.md, "Network gating"); the http_port
+            # forward the publishing scenario asserts against arrives over
+            # each VM's SLIRP nic instead, which is outside "cluster". A
+            # `public` network has no subnet and so no gating, which is also
+            # the correct real-world choice for anything meant to be
+            # reachable from outside the cluster, so stacks that publish an
+            # externally-facing route use this instead of "cluster".
+            "wan": {"type": "public", "domain": "wan.test"},
             **egress_networks_block,
         },
         "drives": drives_block,
@@ -155,6 +167,7 @@ def main():
     control = dict(cluster)
     control["networks"] = {
         "cluster": {"type": "internal", "subnet": "127.0.0.0/8", "domain": "cl.test"},
+        "wan": {"type": "public", "domain": "wan.test"},
         **egress_networks_block,
     }
     control["nodes"] = control_nodes

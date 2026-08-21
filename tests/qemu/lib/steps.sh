@@ -8,9 +8,11 @@
 # re-resolve on each poll rather than pin one node up front, since at the moment
 # it starts there may be no leader at all.
 #
-# Live container state is the exception to "any node will do": only the node
-# running a container can see it, so `instances_everywhere` asks all of them and
-# merges, rather than trusting the leader's `unknown` for everyone else's work.
+# `instances_everywhere` asks a single reachable node for /api/instances: since
+# cross-node forwarding landed (see `summarize` in
+# crates/cl-api/src/routes/instances.rs), any node answers for the whole
+# cluster, not just what it runs locally. It tries a few nodes in case the
+# first one it asks cannot be reached.
 #
 # Sourced by scenario-run.sh, not run directly.
 
@@ -73,15 +75,22 @@ step_assert_stack_clean() {
   fi
 }
 
-# Every instance every running node can see, as one json array. An instance
-# shows up once per node that knows of it, with only its own node reporting a
-# real state, so callers filter on state rather than deduplicating.
+# Every instance in the cluster, as one json array. /api/instances is already
+# a whole-cluster view from any node, so this asks one node rather than every
+# node — merging one copy per node would count each real instance once per
+# node that happened to answer.
 instances_everywhere() {
-  local n
-  for n in $(jq -r '.nodes[].name' "$RUN_DIR/topology.json"); do
+  local n out
+  for n in "$(any_manager)" $(jq -r '.nodes[].name' "$RUN_DIR/topology.json"); do
+    [[ -n "$n" ]] || continue
     vm_running "$n" || continue
-    api_get "$n" /api/instances 2>/dev/null
-  done | jq -s 'add // []'
+    out="$(api_get "$n" /api/instances 2>/dev/null)"
+    if echo "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      echo "$out"
+      return
+    fi
+  done
+  echo '[]'
 }
 
 # A container is up to three sweeps away from running, and the sweeps belong to
