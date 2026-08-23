@@ -19,6 +19,12 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().expect("addr")
 }
 
+/// Deterministic per-name id, purely so these tests can derive the same id
+/// from a name twice without threading a `Uuid` through everything.
+fn test_id(name: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes())
+}
+
 struct Harness {
     _dir: TempDir,
     nodes: Vec<ClusterNode>,
@@ -37,6 +43,7 @@ impl Harness {
             let name = format!("n{i}");
             let node = ClusterNode::start(Options {
                 name: name.clone(),
+                id: test_id(&name),
                 rpc_addr: addr,
                 data_dir: PathBuf::from(dir.path()).join(&name),
                 cluster_name: "test".into(),
@@ -48,7 +55,7 @@ impl Harness {
         }
 
         let members: BTreeMap<_, _> = (0..count)
-            .map(|i| (node_id(&format!("n{i}")), BasicNode::new(addrs[i].to_string())))
+            .map(|i| (node_id(test_id(&format!("n{i}"))), BasicNode::new(addrs[i].to_string())))
             .collect();
         nodes[0].initialize(members).await.expect("initialize");
 
@@ -92,6 +99,7 @@ impl Harness {
 fn node_state(name: &str, addr: SocketAddr) -> NodeState {
     NodeState {
         name: name.to_string(),
+        id: test_id(name),
         role: Role::Manager,
         rpc_addr: addr,
         drives: BTreeMap::new(),
@@ -180,6 +188,7 @@ async fn a_worker_joins_as_a_non_voter() {
     let addr = free_addr();
     let worker = ClusterNode::start(Options {
         name: "w0".into(),
+        id: test_id("w0"),
         rpc_addr: addr,
         data_dir: dir.path().join("w0"),
         cluster_name: "test".into(),
@@ -224,6 +233,7 @@ async fn a_node_without_a_cluster_holds_no_quorum() {
     let dir = TempDir::new().expect("temp dir");
     let node = ClusterNode::start(Options {
         name: "lonely".into(),
+        id: test_id("lonely"),
         rpc_addr: free_addr(),
         data_dir: dir.path().join("lonely"),
         cluster_name: "test".into(),

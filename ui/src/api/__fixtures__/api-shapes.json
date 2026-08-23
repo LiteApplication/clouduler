@@ -33,6 +33,7 @@
     "nodes": {
       "n0": {
         "drives": {},
+        "id": "<volatile>",
         "network": {
           "internal": "127.0.0.1"
         },
@@ -143,6 +144,7 @@
           "fast": "/mnt/fast"
         },
         "egress_networks": [],
+        "id": "<volatile>",
         "labels": {},
         "name": "n0",
         "networks": [],
@@ -181,7 +183,7 @@
     "volumes": {
       "fast/v0": {
         "generation": 1,
-        "id": "fast/v0",
+        "id": "<volatile>",
         "primary": "n0",
         "replicas": {
           "n0": 1
@@ -206,7 +208,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.3.5",
+    "version": "0.3.6",
     "voters": 1
   }
 }

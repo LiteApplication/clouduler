@@ -58,10 +58,12 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
     // main does this at startup; tests never run main.
     crate::install_crypto_provider();
 
+    let n1_id = config.node("n1").expect("founding node in config").id;
     let dir = TempDir::new().expect("tempdir");
     let rpc_addr = free_addr();
     let cluster = ClusterNode::start(Options {
         name: "n1".into(),
+        id: n1_id,
         rpc_addr,
         data_dir: dir.path().join("raft"),
         cluster_name: config.cluster.name.clone(),
@@ -71,7 +73,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
 
     cluster
         .initialize(BTreeMap::from([(
-            cl_raft::node_id("n1"),
+            cl_raft::node_id(n1_id),
             BasicNode::new(rpc_addr.to_string()),
         )]))
         .await
@@ -87,6 +89,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
     cluster
         .submit(cl_raft::Request::UpsertNode(NodeState {
             name: "n1".into(),
+            id: n1_id,
             role: ClusterRole::Manager,
             rpc_addr,
             drives: BTreeMap::new(),
@@ -303,6 +306,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
         .cluster
         .submit(cl_raft::Request::UpsertNode(NodeState {
             name: "n2".into(),
+            id: uuid::Uuid::new_v4(),
             role: ClusterRole::Worker,
             rpc_addr: n2_addr,
             drives: BTreeMap::new(),

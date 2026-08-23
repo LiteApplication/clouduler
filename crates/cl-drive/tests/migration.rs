@@ -71,15 +71,17 @@ impl Harness {
     async fn start() -> Self {
         let dir = TempDir::new().unwrap();
         let addr = free_addr();
+        let n1_id = uuid::Uuid::new_v4();
         let node = ClusterNode::start(Options {
             name: "n1".into(),
+            id: n1_id,
             rpc_addr: addr,
             data_dir: dir.path().join("n1"),
             cluster_name: "test".into(),
         })
         .await
         .unwrap();
-        node.initialize(BTreeMap::from([(node_id("n1"), BasicNode::new(addr.to_string()))]))
+        node.initialize(BTreeMap::from([(node_id(n1_id), BasicNode::new(addr.to_string()))]))
             .await
             .unwrap();
 
@@ -113,6 +115,7 @@ impl Harness {
 
         node.submit(Request::UpsertNode(NodeState {
             name: "source".into(),
+            id: uuid::Uuid::new_v4(),
             role: Role::Manager,
             rpc_addr: free_addr(),
             drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/unused"))]),
@@ -129,6 +132,7 @@ impl Harness {
         .unwrap();
         node.submit(Request::UpsertNode(NodeState {
             name: "target".into(),
+            id: uuid::Uuid::new_v4(),
             role: Role::Manager,
             rpc_addr: target_addr,
             drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/unused"))]),

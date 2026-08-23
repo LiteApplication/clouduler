@@ -42,6 +42,10 @@ drives:
 
 nodes:
   n1:
+    # Identity for raft membership and node removal, minted fresh by
+    # `clouduler init` every time this machine is provisioned. Not something
+    # to hand edit.
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
     role: manager
     # Subnetted networks take a bare IP, public networks take an address block.
     network:
@@ -59,6 +63,7 @@ nodes:
       fast: /srv/clouduler/fast
       bulk: /srv/clouduler/bulk
   n2:
+    id: 9a5b8b0a-6f3f-4c9c-a9a0-6a2c1e6a2a02
     role: manager
     network:
       tailscale: 10.10.0.2
@@ -68,6 +73,7 @@ nodes:
     drives:
       fast: /srv/clouduler/fast
   n3:
+    id: 1c2e6a2a-9f03-4d3f-8e9b-8b2c1e6a2a03
     role: worker
     network:
       tailscale: 10.10.0.3 # will use A

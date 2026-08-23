@@ -54,7 +54,7 @@ pub async fn run(
         "starting"
     );
 
-    bail_if_removed(&cfg, &node_name, &data_dir).await?;
+    bail_if_removed(&cfg, node, &node_name, &data_dir).await?;
 
     let key = load_cluster_key(&cfg, node);
     let node_keypair = load_node_keypair(&cfg);
@@ -62,6 +62,7 @@ pub async fn run(
 
     let cluster = ClusterNode::start(Options {
         name: node_name.clone(),
+        id: node.id,
         rpc_addr,
         data_dir: data_dir.join("raft"),
         cluster_name: cfg.cluster.name.clone(),
@@ -640,7 +641,8 @@ async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc
 /// peer actually confirms it, and gives up quietly if none answer (e.g. this
 /// is the very first node, still forming the cluster, or the network is
 /// briefly partitioned).
-async fn bail_if_removed(cfg: &ClusterConfig, node_name: &str, data_dir: &Path) -> Result<()> {
+async fn bail_if_removed(cfg: &ClusterConfig, this_node: &Node, node_name: &str, data_dir: &Path) -> Result<()> {
+    let own_id = this_node.id;
     for (name, node) in &cfg.nodes {
         if name == node_name {
             continue;
@@ -653,7 +655,7 @@ async fn bail_if_removed(cfg: &ClusterConfig, node_name: &str, data_dir: &Path) 
             _ => continue,
         };
 
-        if state.removed.contains(node_name) {
+        if state.removed.contains(&own_id) {
             warn!(
                 node = %node_name,
                 confirmed_by = %name,
@@ -702,8 +704,8 @@ async fn form_cluster(cfg: &ClusterConfig, node_name: &str, cluster: &ClusterNod
 
     let members: BTreeMap<_, _> = cfg
         .managers()
-        .filter_map(|(name, node)| {
-            Some((node_id(name), BasicNode::new(cfg.rpc_addr(node)?.to_string())))
+        .filter_map(|(_name, node)| {
+            Some((node_id(node.id), BasicNode::new(cfg.rpc_addr(node)?.to_string())))
         })
         .collect();
     info!(members = members.len(), "forming cluster");
@@ -747,8 +749,10 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
     for (name, node) in &cfg.nodes {
         // Deleted through the API: the config file still lists it until an
         // operator edits it out, but the roster must not resurrect it just
-        // because this leader's in-memory config is stale.
-        if known.removed.contains(name) {
+        // because this leader's in-memory config is stale. Keyed by id, not
+        // name, so a node re-provisioned under this name (fresh id) is never
+        // caught by a previous instance's tombstone.
+        if known.removed.contains(&node.id) {
             continue;
         }
 
@@ -762,8 +766,8 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
         // become voters, workers only learners.
         if !known.nodes.contains_key(name) {
             let result = match node.role {
-                NodeRole::Manager => cluster.add_manager(node_id(name), rpc_addr).await,
-                NodeRole::Worker => cluster.add_worker(node_id(name), rpc_addr).await,
+                NodeRole::Manager => cluster.add_manager(node_id(node.id), rpc_addr).await,
+                NodeRole::Worker => cluster.add_worker(node_id(node.id), rpc_addr).await,
             };
             if let Err(e) = result {
                 // Usually the node is not up yet. Retried on the next pass.
@@ -800,9 +804,9 @@ async fn reap_removed_nodes(cluster: Arc<ClusterNode>, interval: Duration) {
             continue;
         }
         let known = cluster.state().await;
-        for name in &known.removed {
-            if let Err(e) = cluster.remove_node(node_id(name)).await {
-                warn!(node = %name, error = %e, "could not drop removed node from raft membership");
+        for id in &known.removed {
+            if let Err(e) = cluster.remove_node(node_id(*id)).await {
+                warn!(node = %id, error = %e, "could not drop removed node from raft membership");
             }
         }
     }
@@ -828,6 +832,7 @@ fn to_state(
 ) -> NodeState {
     NodeState {
         name: name.to_string(),
+        id: node.id,
         role: match node.role {
             NodeRole::Manager => Role::Manager,
             NodeRole::Worker => Role::Worker,

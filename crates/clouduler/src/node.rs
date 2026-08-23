@@ -36,6 +36,7 @@ pub async fn add(
     let response = client
         .submit(Request::UpsertNode(NodeState {
             name: name.clone(),
+            id: uuid::Uuid::new_v4(),
             role,
             rpc_addr,
             drives,

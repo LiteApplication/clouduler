@@ -266,6 +266,7 @@ mod tests {
     fn node(name: &str, role: Role, drives: &[&str]) -> NodeState {
         NodeState {
             name: name.to_string(),
+            id: uuid::Uuid::new_v4(),
             role,
             rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
             drives: drives

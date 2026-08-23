@@ -315,6 +315,10 @@ export interface DriveConfig {
 export type NodeRoleConfig = 'manager' | 'worker';
 
 export interface NodeConfig {
+  // Identity for raft membership and node removal, minted by `clouduler
+  // init` when the node is provisioned. Opaque to the ui, just has to
+  // round-trip on save.
+  id: string;
   role: NodeRoleConfig;
   network: Record<string, NodeAddress>;
   drives: Record<string, string>;

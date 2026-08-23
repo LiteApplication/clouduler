@@ -65,14 +65,15 @@ async fn status(_identity: Identity, State(state): State<AppState>) -> Json<Stat
     })
 }
 
-/// Raft ids are a hash of the node name, so the only way back is to hash every
-/// known name and compare. The roster is a handful of entries, so that is fine.
+/// Raft ids are a hash of the node's config-declared uuid, so the only way
+/// back is to hash every known node's id and compare. The roster is a
+/// handful of entries, so that is fine.
 fn node_name_for(state: &cl_raft::ClusterState, id: u64) -> Option<String> {
     state
         .nodes
-        .keys()
-        .find(|name| cl_raft::node_id(name) == id)
-        .cloned()
+        .values()
+        .find(|node| cl_raft::node_id(node.id) == id)
+        .map(|node| node.name.clone())
 }
 
 async fn state(_identity: Identity, State(state): State<AppState>) -> impl IntoResponse {

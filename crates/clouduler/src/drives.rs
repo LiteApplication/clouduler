@@ -326,6 +326,7 @@ drives:
   fast: { sync_interval: 30s }
 nodes:
   n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
     role: manager
     network: { internal: 10.10.0.1 }
     drives: { fast: /srv/fast, bulk: /srv/bulk }

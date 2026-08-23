@@ -224,9 +224,9 @@ impl Orchestrator {
         let leader_id = self.cluster.quorum().leader()?;
         state
             .nodes
-            .keys()
-            .find(|name| cl_raft::node_id(name) == leader_id)
-            .cloned()
+            .values()
+            .find(|node| cl_raft::node_id(node.id) == leader_id)
+            .map(|node| node.name.clone())
     }
 
     async fn save(&self, run: UpdateRunState) -> Result<(), String> {
@@ -278,6 +278,7 @@ mod tests {
     fn node(name: &str, role: Role, arch: &str) -> NodeState {
         NodeState {
             name: name.to_string(),
+            id: uuid::Uuid::new_v4(),
             role,
             rpc_addr: "10.10.0.1:7373".parse::<SocketAddr>().unwrap(),
             drives: Default::default(),

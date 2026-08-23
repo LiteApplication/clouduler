@@ -23,6 +23,11 @@ pub const INTERNAL_NETWORK: &str = "internal";
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePlan {
     pub name: String,
+    /// Freshly minted every time a `NodePlan` is created, i.e. every
+    /// provisioning event: forming a cluster, joining one, or rejoining
+    /// under an old name with `--force`. See the doc comment on
+    /// `cl_config::Node::id`.
+    pub id: uuid::Uuid,
     pub role: NodeRole,
     pub ip: IpAddr,
     pub rpc_port: u16,
@@ -37,6 +42,7 @@ impl NodePlan {
     pub fn new(name: impl Into<String>, role: NodeRole, ip: IpAddr) -> Self {
         Self {
             name: name.into(),
+            id: uuid::Uuid::new_v4(),
             role,
             ip,
             rpc_port: DEFAULT_RPC_PORT,
@@ -48,6 +54,7 @@ impl NodePlan {
 
     fn to_node(&self, network: &str) -> Node {
         Node {
+            id: self.id,
             role: self.role,
             network: [(network.to_string(), NodeAddress::Ip(self.ip))]
                 .into_iter()

@@ -192,6 +192,7 @@ async fn add(
         &state,
         ClusterRequest::UpsertNode(NodeState {
             name: body.name,
+            id: uuid::Uuid::new_v4(),
             role: body.role,
             rpc_addr: body.rpc_addr,
             drives: body.drives,

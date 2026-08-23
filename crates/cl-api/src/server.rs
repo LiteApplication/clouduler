@@ -330,7 +330,7 @@ async fn leader_location(state: &AppState) -> Option<String> {
     let (_, node) = cluster_state
         .nodes
         .iter()
-        .find(|(name, _)| cl_raft::node_id(name) == leader_id)?;
+        .find(|(_, node)| cl_raft::node_id(node.id) == leader_id)?;
     let port = state.cluster_config.read().await.web.port;
     Some(format!("https://{}:{port}/", node.rpc_addr.ip()))
 }

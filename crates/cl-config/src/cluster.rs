@@ -320,6 +320,13 @@ pub enum NodeRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
+    /// Identity used for raft membership and the removed-node tombstone.
+    /// Minted fresh by `clouduler init` every time a machine is provisioned
+    /// (including a `--force` rejoin under a name the cluster already had),
+    /// so a name freed up by removing a node is never permanently radioactive
+    /// - only the old id stays tombstoned, and the new provisioning event
+    /// never collides with it.
+    pub id: uuid::Uuid,
     pub role: NodeRole,
     /// Networks this node is attached to, keyed by network name. Subnetted
     /// networks take a bare IP, public networks take an address block.

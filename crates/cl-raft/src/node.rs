@@ -32,6 +32,9 @@ const QUORUM_ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub struct Options {
     pub name: String,
+    /// Config-declared identity this node was provisioned with. See
+    /// `cl_config::Node::id`.
+    pub id: uuid::Uuid,
     pub rpc_addr: SocketAddr,
     /// Directory holding the raft database.
     pub data_dir: PathBuf,
@@ -51,7 +54,7 @@ pub struct ClusterNode {
 
 impl ClusterNode {
     pub async fn start(options: Options) -> Result<Self> {
-        let id = node_id(&options.name);
+        let id = node_id(options.id);
 
         std::fs::create_dir_all(&options.data_dir).map_err(|source| ClusterError::Storage {
             path: options.data_dir.clone(),

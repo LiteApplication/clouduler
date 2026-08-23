@@ -98,13 +98,14 @@ fn spawn_rollback_watchdog(state: AppState, after: std::time::Duration) {
 pub(super) async fn apply_config(state: &AppState, config: &ClusterConfig) -> Result<(), ApiError> {
     let yaml = serde_yaml::to_string(config).map_err(ApiError::internal)?;
 
-    let cluster_state = state.cluster.state().await;
-    let expect_generation = cluster_state
+    let expect_generation = state
+        .cluster
+        .state()
+        .await
         .cluster_config
         .as_ref()
         .map(|c| c.generation)
         .unwrap_or(0);
-    let previous_nodes = state.cluster_config.read().await.nodes.keys().cloned().collect::<std::collections::BTreeSet<_>>();
 
     let response = state
         .cluster
@@ -120,22 +121,6 @@ pub(super) async fn apply_config(state: &AppState, config: &ClusterConfig) -> Re
 
     std::fs::write(&state.config_path, yaml).map_err(ApiError::internal)?;
     *state.cluster_config.write().await = config.clone();
-
-    // A name that is new to this edit (not merely still sitting in a config
-    // that had never been stripped of it) but is still in the `removed`
-    // tombstone means the node is rejoining under its old name: clear the
-    // tombstone so `seed_roster` admits it instead of skipping it forever.
-    // Restricting this to newly added names (rather than every name still in
-    // `removed`) leaves the tombstone untouched while a node's own removal is
-    // still in flight, since that config edit only ever drops a name.
-    for name in config.nodes.keys() {
-        if !previous_nodes.contains(name) && cluster_state.removed.contains(name) {
-            let _ = state
-                .cluster
-                .submit(cl_raft::Request::ClearRemovedNode { node: name.clone() })
-                .await;
-        }
-    }
 
     Ok(())
 }

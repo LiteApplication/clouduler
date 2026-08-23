@@ -470,6 +470,7 @@ drives:
   fast: { sync_interval: 5m }
 nodes:
   n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
     role: manager
     network:
       tailscale: 10.10.0.1
@@ -477,6 +478,7 @@ nodes:
       wan: { ipv4: 203.0.113.5, ipv6: "2001:db8::5" }
     drives: { fast: /srv/clouduler/fast }
   n2:
+    id: 9a5b8b0a-6f3f-4c9c-a9a0-6a2c1e6a2a02
     role: worker
     network:
       tailscale: 10.10.0.2

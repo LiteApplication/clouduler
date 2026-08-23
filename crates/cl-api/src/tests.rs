@@ -36,13 +36,16 @@ struct Harness {
     state: AppState,
     _dir: TempDir,
     admin_key: String,
+    n0_id: uuid::Uuid,
 }
 
 async fn harness() -> Harness {
     let dir = TempDir::new().expect("tempdir");
     let addr = free_addr();
+    let n0_id = uuid::Uuid::new_v4();
     let node = ClusterNode::start(Options {
         name: "n0".into(),
+        id: n0_id,
         rpc_addr: addr,
         data_dir: dir.path().join("n0"),
         cluster_name: "test".into(),
@@ -50,7 +53,7 @@ async fn harness() -> Harness {
     .await
     .expect("start node");
 
-    let members = BTreeMap::from([(cl_raft::node_id("n0"), BasicNode::new(addr.to_string()))]);
+    let members = BTreeMap::from([(cl_raft::node_id(n0_id), BasicNode::new(addr.to_string()))]);
     node.initialize(members).await.expect("initialize");
     for _ in 0..200 {
         if node.is_leader() {
@@ -62,6 +65,7 @@ async fn harness() -> Harness {
 
     node.submit(cl_raft::Request::UpsertNode(NodeState {
         name: "n0".into(),
+        id: n0_id,
         role: ClusterRole::Manager,
         rpc_addr: addr,
         drives: BTreeMap::new(),
@@ -103,6 +107,7 @@ async fn harness() -> Harness {
         nodes: BTreeMap::from([(
             "n0".to_string(),
             cl_config::Node {
+                id: n0_id,
                 role: cl_config::NodeRole::Manager,
                 network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("127.0.0.1".parse().unwrap()))]),
                 drives: BTreeMap::new(),
@@ -158,6 +163,7 @@ async fn harness() -> Harness {
         state,
         _dir: dir,
         admin_key: new_key.secret,
+        n0_id,
     }
 }
 
@@ -305,6 +311,7 @@ networks:
     domain: home.test
 nodes:
   n0:
+    id: a6ce0990-6afe-4204-b235-82b1e133702e
     role: manager
     network:
       internal: 10.10.0.1
@@ -796,31 +803,41 @@ async fn nodes_list_reflects_the_cluster_state() {
 }
 
 /// Mirrors what a join does after a node was deleted and rejoins under the
-/// same name: the config push that reintroduces it must also drop it from
-/// the `removed` tombstone, or `seed_roster` would skip it forever.
+/// same name: `clouduler init` mints a fresh id for the new instance, so the
+/// old instance's tombstone (keyed by id, not name) never blocks it, and
+/// `seed_roster` admits it like any other new node. The old id stays
+/// tombstoned forever.
 #[tokio::test]
-async fn rejoining_under_a_removed_name_clears_the_tombstone() {
+async fn rejoining_under_a_removed_name_is_not_blocked_by_the_old_tombstone() {
     let h = harness().await;
+    let old_id = h.n0_id;
 
     h.state
         .cluster
         .submit(cl_raft::Request::RemoveNode { node: "n0".into() })
         .await
         .expect("submit");
-    assert!(h.state.cluster.state().await.removed.contains("n0"));
+    assert!(h.state.cluster.state().await.removed.contains(&old_id));
 
-    // Simulate the config as it looks right after the node was deleted:
-    // stripped of the node, same as what `remove()` would have applied.
+    // Simulate the config as it looks right after the node was deleted
+    // (stripped of the node, same as what `remove()` would have applied),
+    // then re-add "n0" the way a rejoin does: same name, brand new id.
     let mut full_config = h.state.cluster_config.read().await.clone();
     {
         let net = full_config.networks.get_mut("internal").unwrap();
         net.subnet = Some("10.10.0.0/24".parse().unwrap());
         net.domain = Some("test.local".to_string());
     }
-    full_config.nodes.get_mut("n0").unwrap().network.insert(
-        "internal".to_string(),
-        cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()),
-    );
+    let new_id = uuid::Uuid::new_v4();
+    assert_ne!(new_id, old_id);
+    {
+        let n0 = full_config.nodes.get_mut("n0").unwrap();
+        n0.id = new_id;
+        n0.network.insert(
+            "internal".to_string(),
+            cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()),
+        );
+    }
     let mut stripped = full_config.clone();
     stripped.nodes.clear();
     *h.state.cluster_config.write().await = stripped;
@@ -844,7 +861,9 @@ async fn rejoining_under_a_removed_name_clears_the_tombstone() {
     let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
 
-    assert!(!h.state.cluster.state().await.removed.contains("n0"));
+    // The old instance's id is still tombstoned - only the new one is admitted.
+    assert!(h.state.cluster.state().await.removed.contains(&old_id));
+    assert!(!h.state.cluster.state().await.removed.contains(&new_id));
 }
 
 #[tokio::test]
@@ -991,6 +1010,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
         cfg.nodes.insert(
             "n0".into(),
             cl_config::Node {
+                id: uuid::Uuid::new_v4(),
                 role: cl_config::NodeRole::Manager,
                 network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()))]),
                 drives: BTreeMap::from([("fast".to_string(), "/mnt/fast".into())]),
@@ -1198,6 +1218,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
         .cluster
         .submit(cl_raft::Request::UpsertNode(NodeState {
             name: "n1".into(),
+            id: uuid::Uuid::new_v4(),
             role: ClusterRole::Worker,
             rpc_addr: free_addr(),
             drives: BTreeMap::new(),
@@ -1368,7 +1389,7 @@ const API_SHAPES_FIXTURE: &str = "../../ui/src/api/__fixtures__/api-shapes.json"
 /// "erase every leaf".
 fn normalize(value: &mut serde_json::Value, tempdir: &str) {
     /// Random per run: generated ids, hashes, key fingerprints, ephemeral ports.
-    const VOLATILE_STRINGS: &[&str] = &["fingerprint", "subject", "rpc_addr", "content"];
+    const VOLATILE_STRINGS: &[&str] = &["fingerprint", "subject", "rpc_addr", "content", "id"];
     const VOLATILE_NUMBERS: &[&str] = &["state_version"];
 
     match value {

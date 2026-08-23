@@ -37,6 +37,9 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeState {
     pub name: String,
+    /// Config-declared identity (`cl_config::Node::id`) this roster entry was
+    /// created for. See the `removed` field on `ClusterState`.
+    pub id: uuid::Uuid,
     pub role: Role,
     pub rpc_addr: SocketAddr,
     /// Drives this node implements, mapped to its local backing directory.
@@ -402,13 +405,15 @@ pub struct ClusterState {
     /// operator asked for.
     #[serde(default)]
     pub unreachable: BTreeSet<String>,
-    /// Names removed through `RemoveNode`, kept as a tombstone until the node
-    /// is added again. Without this, a leader whose in-memory config still
+    /// Ids (`cl_config::Node::id`) removed through `RemoveNode`, kept as a
+    /// tombstone forever. Without this, a leader whose in-memory config still
     /// lists the node (it is only ever reloaded from disk on restart) treats
     /// it as newly joined the next time it seeds the roster, undoing the
-    /// removal.
+    /// removal. Keyed by id rather than name so the name is free to reuse: a
+    /// node re-provisioned under the same name gets a fresh id and was never
+    /// in this set.
     #[serde(default)]
-    pub removed: BTreeSet<String>,
+    pub removed: BTreeSet<uuid::Uuid>,
     /// Overlay subnet and address assignments, as json owned by cl-net. Kept
     /// opaque here so the address book can evolve without touching the state
     /// machine, which every node has to agree on byte for byte.
@@ -444,13 +449,6 @@ pub enum Request {
         reachable: bool,
     },
     RemoveNode {
-        node: String,
-    },
-    /// Drops a name from the `removed` tombstone without touching anything
-    /// else. Submitted when a node's name reappears in the cluster config
-    /// (e.g. it rejoins), so `seed_roster` stops treating it as a stale
-    /// resurrection and admits it again.
-    ClearRemovedNode {
         node: String,
     },
     DeployStack {
@@ -709,7 +707,7 @@ impl ClusterState {
             }
 
             Request::UpsertNode(node) => {
-                self.removed.remove(&node.name);
+                self.removed.remove(&node.id);
                 self.nodes.insert(node.name.clone(), node.clone());
                 Ok(())
             }
@@ -739,18 +737,15 @@ impl ClusterState {
                 if let Some(inst) = self.assignments.values().find(|a| &a.node == node) {
                     return Err(format!("node {node} still runs {}", inst.instance));
                 }
-                self.nodes.remove(node);
+                let removed = self.nodes.remove(node);
                 self.unreachable.remove(node);
                 self.wrapped_keys.remove(node);
-                self.removed.insert(node.clone());
+                if let Some(removed) = removed {
+                    self.removed.insert(removed.id);
+                }
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
                 }
-                Ok(())
-            }
-
-            Request::ClearRemovedNode { node } => {
-                self.removed.remove(node);
                 Ok(())
             }
 
@@ -1110,6 +1105,7 @@ mod tests {
     fn node(name: &str, drives: &[&str]) -> NodeState {
         NodeState {
             name: name.to_string(),
+            id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()),
             role: Role::Manager,
             rpc_addr: "10.10.0.1:7373".parse().unwrap(),
             drives: drives

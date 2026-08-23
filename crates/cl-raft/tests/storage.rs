@@ -33,6 +33,7 @@ fn openraft_storage_suite() -> Result<(), StorageError> {
 fn node(name: &str) -> NodeState {
     NodeState {
         name: name.to_string(),
+        id: uuid::Uuid::new_v4(),
         role: Role::Manager,
         rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
         drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
