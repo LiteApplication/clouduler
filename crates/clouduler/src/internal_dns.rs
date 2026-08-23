@@ -47,15 +47,6 @@ pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> Option<tokio::t
         }
     };
 
-    let nodes: Vec<(String, Ipv4Addr)> = cfg
-        .nodes
-        .iter()
-        .filter_map(|(name, node)| match cfg.internal_ip(node) {
-            Some(IpAddr::V4(ip)) => Some((name.clone(), ip)),
-            _ => None,
-        })
-        .collect();
-
     let dns = match InternalDns::new(name, &[]) {
         Ok(dns) => Arc::new(dns),
         Err(e) => {
@@ -66,12 +57,24 @@ pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> Option<tokio::t
 
     info!(zone = %origin, "internal dns ready");
     let cluster = cluster.clone();
+    let boot_cfg = cfg.clone();
     Some(tokio::spawn(async move {
-        run(cluster, dns, nodes).await;
+        run(cluster, dns, boot_cfg).await;
     }))
 }
 
-async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, nodes: Vec<(String, Ipv4Addr)>) {
+/// Every node's address on the internal network, by name.
+fn nodes_of(cfg: &ClusterConfig) -> Vec<(String, Ipv4Addr)> {
+    cfg.nodes
+        .iter()
+        .filter_map(|(name, node)| match cfg.internal_ip(node) {
+            Some(IpAddr::V4(ip)) => Some((name.clone(), ip)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: ClusterConfig) {
     // Gateways already being served. A bind that failed is not recorded, so
     // the next pass retries it: the address only exists once the overlay loop
     // has created the bridge, which may be a tick or two away.
@@ -81,6 +84,9 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, nodes: Vec<(Strin
     loop {
         ticker.tick().await;
         let state = cluster.state().await;
+        // Recomputed every pass, not just once at boot, so a node added after
+        // this one started gets an internal-dns answer without a restart.
+        let nodes = nodes_of(&crate::daemon::live_config(&state, &boot_cfg));
 
         let records = zone_for(&state, &nodes);
         if let Err(e) = dns.reload(&records).await {
@@ -157,6 +163,19 @@ mod tests {
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
         let records = zone_for(&state_with(SPEC, 1), &nodes);
         assert_eq!(answer(&records, "n1"), Some(&[Ipv4Addr::new(10, 10, 0, 1)][..]));
+    }
+
+    /// `nodes_of` is recomputed every reload pass from whatever config is
+    /// currently live (see `run`), so a node added after this one started is
+    /// picked up without a restart.
+    #[test]
+    fn nodes_of_reflects_a_newly_added_node() {
+        let cfg = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses");
+        let mut without_n3 = cfg.clone();
+        without_n3.nodes.remove("n3");
+
+        assert!(!nodes_of(&without_n3).iter().any(|(name, _)| name == "n3"));
+        assert!(nodes_of(&cfg).iter().any(|(name, ip)| name == "n3" && *ip == Ipv4Addr::new(10, 10, 0, 3)));
     }
 
     #[test]

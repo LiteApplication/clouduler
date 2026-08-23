@@ -32,7 +32,13 @@ pub struct Tag {
 /// Parses a tag TXT record's content back into cluster and key. Returns
 /// `None` for anything that isn't in our format, e.g. a human's unrelated
 /// TXT record that happens to live under the same name.
+///
+/// Strips one layer of surrounding double quotes first: TXT content is sent
+/// quoted (see `tag_content`) and Cloudflare echoes it back the same way, but
+/// this stays tolerant of an unquoted value too so a tag written before
+/// quoting was added still parses.
 pub fn parse_tag(content: &str) -> Option<Tag> {
+    let content = content.strip_prefix('"').and_then(|c| c.strip_suffix('"')).unwrap_or(content);
     let mut cluster = None;
     let mut key = None;
     for field in content.split(';') {
@@ -92,6 +98,17 @@ mod tests {
         let key = record_key(&rec(RecordType::A, "svc.example.com", "1.2.3.4"));
         let content = tag_content("home", &key);
         let tag = parse_tag(&content).unwrap();
+        assert_eq!(tag.cluster, "home");
+        assert_eq!(tag.key, key);
+    }
+
+    #[test]
+    fn parses_content_wrapped_in_quotes() {
+        // What we actually send (see `reconcile::tag_input`) and what a
+        // provider echoes back for a TXT record.
+        let key = record_key(&rec(RecordType::A, "svc.example.com", "1.2.3.4"));
+        let quoted = format!("\"{}\"", tag_content("home", &key));
+        let tag = parse_tag(&quoted).expect("quoted content still parses");
         assert_eq!(tag.cluster, "home");
         assert_eq!(tag.key, key);
     }

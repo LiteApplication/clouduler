@@ -163,7 +163,9 @@ fn tag_input(cluster: &str, key: &str, fqdn: &str) -> RecordInput {
     RecordInput {
         name: tag_name(fqdn),
         kind: RecordType::TXT,
-        content: tag_content(cluster, key),
+        // TXT content is sent as a quoted <character-string>, same as any
+        // other TXT record; Cloudflare stores and returns it that way too.
+        content: format!("\"{}\"", tag_content(cluster, key)),
         ttl: 1,
         proxied: false,
         comment: Some(format!("clouduler ownership tag ({cluster})")),
@@ -223,6 +225,18 @@ mod tests {
         assert!(p.delete.is_empty());
     }
 
+    /// TXT content is a DNS <character-string>; sent unquoted, Cloudflare
+    /// (and other providers) can split it on whitespace or otherwise mangle
+    /// it. The ownership tag must go out quoted like any other TXT value.
+    #[test]
+    fn the_ownership_tag_is_sent_quoted() {
+        let want = vec![desired(RecordType::A, "svc.example.com", "1.2.3.4")];
+        let p = plan(CLUSTER, &want, &[]);
+        let tag = p.create.iter().find(|r| r.kind == RecordType::TXT).expect("tag created");
+        assert!(tag.content.starts_with('"') && tag.content.ends_with('"'), "{tag:?}");
+        assert_eq!(tag.content, format!("\"{}\"", tag_content(CLUSTER, "A:svc.example.com")));
+    }
+
     #[test]
     fn no_op_when_record_and_tag_already_match() {
         let want = vec![desired(RecordType::A, "svc.example.com", "1.2.3.4")];
@@ -262,6 +276,27 @@ mod tests {
         assert_eq!(p.delete.len(), 2);
         assert!(p.delete.contains(&"r1".to_string()));
         assert!(p.delete.contains(&"t1".to_string()));
+    }
+
+    /// Two nodes used to both get an A record for the dashboard host; now
+    /// only the leader should. A previously-published follower record must
+    /// be cleaned up, not left to collide with the leader's.
+    #[test]
+    fn deletes_a_stale_owned_record_when_fewer_are_desired_for_the_same_name() {
+        let key = "A:cloud.example.com";
+        let want = vec![desired(RecordType::A, "cloud.example.com", "10.0.0.1")];
+        let live_records = vec![
+            live("r1", RecordType::A, "cloud.example.com", "10.0.0.1"),
+            live("r2", RecordType::A, "cloud.example.com", "10.0.0.2"),
+            tag("t1", "cloud.example.com", key),
+        ];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert!(p.create.is_empty(), "{p:?}");
+        // One of the two live records is repointed to the desired content,
+        // the other - now surplus - is deleted; either way exactly one A
+        // record survives at 10.0.0.1 and none stay behind at 10.0.0.2.
+        assert_eq!(p.delete.len(), 1, "{p:?}");
+        assert!(p.update.iter().all(|(_, input)| input.content == "10.0.0.1"), "{p:?}");
     }
 
     #[test]

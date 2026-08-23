@@ -221,7 +221,7 @@ pub async fn run(
         failover.probe_interval,
     ));
 
-    let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone()));
+    let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone(), failover.probe_interval));
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
 
@@ -249,9 +249,7 @@ pub async fn run(
     if let Some(migrations) = migrations {
         migrations.abort();
     }
-    if let Some(overlay) = overlay {
-        overlay.abort();
-    }
+    overlay.abort();
     if let Some(egress) = egress {
         egress.abort();
     }
@@ -583,17 +581,46 @@ fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
+/// The cluster config as replicated state currently has it, falling back to
+/// `boot` only for the brief window before any leader has published one, or
+/// if the replicated copy fails to parse.
+pub(crate) fn live_config(state: &cl_raft::state::ClusterState, boot: &ClusterConfig) -> ClusterConfig {
+    match &state.cluster_config {
+        Some(entry) => ClusterConfig::parse(&entry.yaml).unwrap_or_else(|e| {
+            warn!(error = %e, "replicated cluster config failed to parse, using the config this node booted with");
+            boot.clone()
+        }),
+        None => boot.clone(),
+    }
+}
+
 /// Keep the replicated roster in step with the config for as long as this node
-/// leads. Seeding is done on every leadership change rather than once at
-/// startup, because at startup no leader has been elected yet.
+/// leads. Seeding is done on every leadership change and, in between, on a
+/// timer.
+///
+/// The timer is not just a safety net: a node newly added to the config is
+/// never itself a raft voter/learner yet, so it can never appear in
+/// `quorum`'s `reachable` set, so adding it can never itself flip
+/// `quorum.changed()`. Without the timer, `seed_roster` - the only thing that
+/// calls `add_manager`/`add_worker` - would simply never rerun for it. The
+/// timer breaks that chicken-and-egg deadlock; `probe_interval` is reused
+/// from `failover` for the same reason `reap_removed_nodes` does, a plain
+/// state write doesn't move the raft-metrics needle `quorum.changed()` gates
+/// on.
 ///
 /// `cfg` is only the config this node booted with; a node joining after that
 /// changes the replicated `ClusterConfig`, not this snapshot. So the roster is
 /// seeded from the replicated config (already fresh, since a join pushes it
 /// straight into raft), falling back to `cfg` only for the brief window before
 /// `seed_config` has published anything.
-async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc<ClusterNode>) {
+async fn watch_leadership(
+    cfg: ClusterConfig,
+    config_path: PathBuf,
+    cluster: Arc<ClusterNode>,
+    probe_interval: Duration,
+) {
     let mut quorum = cluster.quorum();
+    let mut ticker = tokio::time::interval(probe_interval);
     loop {
         let status = quorum.status();
         info!(
@@ -609,20 +636,19 @@ async fn watch_leadership(cfg: ClusterConfig, config_path: PathBuf, cluster: Arc
                 warn!(error = %e, "could not publish the cluster config");
             }
 
-            let current = match cluster.state().await.cluster_config {
-                Some(entry) => ClusterConfig::parse(&entry.yaml).unwrap_or_else(|e| {
-                    warn!(error = %e, "replicated cluster config failed to parse, using the config this node booted with");
-                    cfg.clone()
-                }),
-                None => cfg.clone(),
-            };
+            let current = live_config(&cluster.state().await, &cfg);
             if let Err(e) = seed_roster(&current, &cluster).await {
                 warn!(error = %e, "could not publish the node roster");
             }
         }
 
-        if !quorum.changed().await {
-            return;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            changed = quorum.changed() => {
+                if !changed {
+                    return;
+                }
+            }
         }
     }
 }
@@ -937,4 +963,46 @@ fn current_binary_hash() -> String {
         return String::new();
     };
     blake3::hash(&bytes).to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cl_raft::state::{ClusterConfigEntry, ClusterState};
+
+    fn boot_cfg() -> ClusterConfig {
+        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+    }
+
+    #[test]
+    fn live_config_falls_back_to_boot_when_nothing_is_replicated_yet() {
+        let state = ClusterState::default();
+        assert_eq!(live_config(&state, &boot_cfg()), boot_cfg());
+    }
+
+    #[test]
+    fn live_config_prefers_the_replicated_copy() {
+        let mut edited = boot_cfg();
+        edited.cluster.name = "edited".to_string();
+        let state = ClusterState {
+            cluster_config: Some(ClusterConfigEntry {
+                yaml: serde_yaml::to_string(&edited).expect("encodes"),
+                generation: 1,
+            }),
+            ..ClusterState::default()
+        };
+
+        let live = live_config(&state, &boot_cfg());
+        assert_eq!(live.cluster.name, "edited");
+    }
+
+    #[test]
+    fn live_config_falls_back_to_boot_on_unparseable_replicated_yaml() {
+        let state = ClusterState {
+            cluster_config: Some(ClusterConfigEntry { yaml: "not: valid: cluster: config".to_string(), generation: 1 }),
+            ..ClusterState::default()
+        };
+
+        assert_eq!(live_config(&state, &boot_cfg()), boot_cfg());
+    }
 }

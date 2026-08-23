@@ -41,53 +41,43 @@ pub fn start(
     node_name: &str,
     cluster: &Arc<ClusterNode>,
     docker: Option<Docker>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let internal_ip = match cfg.internal_ip(cfg.node(node_name)?) {
-        Some(IpAddr::V4(ip)) => ip,
-        Some(IpAddr::V6(_)) => {
-            // The VXLAN device is created with an IPv4 local address. An IPv6
-            // internal network is a real setup, just not one this supports yet,
-            // and saying so beats failing later with a netlink error.
-            warn!("the internal network is ipv6, the overlay needs an ipv4 underlay");
-            return None;
-        }
-        None => return None,
-    };
-
-    let peers: BTreeSet<Ipv4Addr> = cfg
-        .nodes
-        .iter()
-        .filter(|(name, _)| name.as_str() != node_name)
-        .filter_map(|(_, node)| match cfg.internal_ip(node) {
-            Some(IpAddr::V4(ip)) => Some(ip),
-            _ => None,
-        })
-        .collect();
-
-    // The overlay pool must not overlap anything the cluster already addresses,
-    // or a container's route to a peer node collides with its route to another
-    // container.
-    let cluster_subnets: Vec<IpNet> = cfg.networks.values().filter_map(|n| n.subnet).collect();
-
+) -> tokio::task::JoinHandle<()> {
     let ctx = Context_ {
         node: node_name.to_string(),
         cluster: cluster.clone(),
         docker,
-        internal_ip,
-        peers,
-        cluster_subnets,
+        boot_cfg: cfg.clone(),
     };
 
-    Some(tokio::spawn(async move { ctx.run().await }))
+    tokio::spawn(async move { ctx.run().await })
 }
 
 struct Context_ {
     node: String,
     cluster: Arc<ClusterNode>,
     docker: Option<Docker>,
-    internal_ip: Ipv4Addr,
-    peers: BTreeSet<Ipv4Addr>,
-    cluster_subnets: Vec<IpNet>,
+    boot_cfg: ClusterConfig,
+}
+
+/// Every other node's address on the internal network, used to fill in the
+/// VXLAN FDB. Recomputed on every reconcile tick from whatever config is
+/// currently live, so a node that joins after this one started still gets an
+/// FDB entry without a restart.
+fn peers_of(cfg: &ClusterConfig, node_name: &str) -> BTreeSet<Ipv4Addr> {
+    cfg.nodes
+        .iter()
+        .filter(|(name, _)| name.as_str() != node_name)
+        .filter_map(|(_, node)| match cfg.internal_ip(node) {
+            Some(IpAddr::V4(ip)) => Some(ip),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The subnets the overlay pool must not overlap, or a container's route to a
+/// peer node collides with its route to another container.
+fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
+    cfg.networks.values().filter_map(|n| n.subnet).collect()
 }
 
 impl Context_ {
@@ -116,6 +106,28 @@ impl Context_ {
 
     async fn reconcile(&self, netlink: Option<&Overlay>) -> Result<()> {
         let state = self.cluster.state().await;
+        let cfg = crate::daemon::live_config(&state, &self.boot_cfg);
+
+        // Recomputed from the live config every tick, not just once at boot,
+        // so a node that gains an internal-network address, or a peer that
+        // joins, is picked up without a restart.
+        let internal_ip = match cfg.node(&self.node).and_then(|node| cfg.internal_ip(node)) {
+            Some(IpAddr::V4(ip)) => ip,
+            Some(IpAddr::V6(_)) => {
+                // The VXLAN device is created with an IPv4 local address. An
+                // IPv6 internal network is a real setup, just not one this
+                // supports yet, and saying so beats failing later with a
+                // netlink error.
+                warn!("the internal network is ipv6, the overlay needs an ipv4 underlay");
+                return Ok(());
+            }
+            None => {
+                debug!("this node has no address on the internal network yet, skipping this pass");
+                return Ok(());
+            }
+        };
+        let peers = peers_of(&cfg, &self.node);
+        let cluster_subnets = cluster_subnets_of(&cfg);
 
         // Every stack network the cluster knows about, with the instances on
         // it, and separately the ones with a container on this node. The
@@ -151,11 +163,14 @@ impl Context_ {
 
         let mut allocations = load_allocations(state.overlay.as_deref());
         if self.cluster.is_leader() {
-            self.allocate_missing(&mut allocations, &all).await?;
+            self.allocate_missing(&mut allocations, &all, &cluster_subnets).await?;
         }
 
         for overlay in &mine {
-            if let Err(e) = self.ensure_network(netlink, &allocations, overlay).await {
+            if let Err(e) = self
+                .ensure_network(netlink, &allocations, overlay, internal_ip, &peers)
+                .await
+            {
                 // One broken network must not stop the others being built.
                 warn!(network = %overlay, error = %e, "cannot bring up the overlay network");
             }
@@ -174,12 +189,13 @@ impl Context_ {
         &self,
         allocations: &mut Allocations,
         networks: &BTreeMap<String, BTreeSet<InstanceId>>,
+        cluster_subnets: &[IpNet],
     ) -> Result<()> {
         let mut changed = false;
         for (network, instances) in networks {
             if allocations.subnet(network).is_none() {
                 allocations
-                    .allocate_network(network, &self.cluster_subnets)
+                    .allocate_network(network, cluster_subnets)
                     .with_context(|| format!("allocating a subnet for {network}"))?;
                 changed = true;
                 info!(
@@ -234,6 +250,8 @@ impl Context_ {
         netlink: Option<&Overlay>,
         allocations: &Allocations,
         overlay: &str,
+        internal_ip: Ipv4Addr,
+        peers: &BTreeSet<Ipv4Addr>,
     ) -> Result<()> {
         // Nothing to do until the leader has allocated. On a follower that just
         // means waiting a tick.
@@ -252,9 +270,9 @@ impl Context_ {
         };
 
         let underlay = netlink
-            .underlay_for(self.internal_ip)
+            .underlay_for(internal_ip)
             .await?
-            .with_context(|| format!("no interface holds the internal address {}", self.internal_ip))?;
+            .with_context(|| format!("no interface holds the internal address {internal_ip}"))?;
         let mtu = overlay_mtu(underlay.mtu, false);
 
         let bridge_index = netlink
@@ -265,9 +283,9 @@ impl Context_ {
         // every node computes the same one without another round of consensus.
         let vni = allocate_vni(overlay, &BTreeSet::new());
         let vxlan_index = netlink
-            .ensure_vxlan(&vxlan, vni, underlay.index, self.internal_ip, bridge_index, mtu)
+            .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
             .await?;
-        netlink.reconcile_fdb(&vxlan, vxlan_index, &self.peers).await?;
+        netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
 
         let Some(docker) = &self.docker else {
             return Ok(());
@@ -342,5 +360,40 @@ mod tests {
         let b = allocate_vni("blog_default", &BTreeSet::new());
         assert_eq!(a, b);
         assert_ne!(a, allocate_vni("shop_default", &BTreeSet::new()));
+    }
+
+    fn cfg() -> ClusterConfig {
+        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+    }
+
+    /// `peers_of`/`cluster_subnets_of` are recomputed every reconcile tick from
+    /// whatever config is currently live (see `Context_::reconcile`), rather
+    /// than frozen once at boot - this is what lets a node added after this
+    /// one started get an FDB entry without a restart. Confirms a node absent
+    /// from one config but present in another is picked up as soon as it's in
+    /// the config handed in.
+    #[test]
+    fn peers_of_reflects_a_newly_added_node() {
+        let mut without_n3 = cfg();
+        without_n3.nodes.remove("n3");
+        let before = peers_of(&without_n3, "n1");
+        assert!(!before.contains(&Ipv4Addr::new(10, 10, 0, 3)));
+
+        let after = peers_of(&cfg(), "n1");
+        assert!(after.contains(&Ipv4Addr::new(10, 10, 0, 3)));
+    }
+
+    #[test]
+    fn peers_of_excludes_the_node_itself() {
+        let peers = peers_of(&cfg(), "n1");
+        assert!(!peers.contains(&Ipv4Addr::new(10, 10, 0, 1)));
+        assert!(peers.contains(&Ipv4Addr::new(10, 10, 0, 2)));
+    }
+
+    #[test]
+    fn cluster_subnets_of_lists_every_networks_subnet() {
+        let subnets = cluster_subnets_of(&cfg());
+        assert!(subnets.contains(&"10.10.0.0/24".parse().unwrap()));
+        assert!(subnets.contains(&"192.168.1.0/24".parse().unwrap()));
     }
 }

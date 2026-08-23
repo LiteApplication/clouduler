@@ -526,13 +526,15 @@ const DNS_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// any node's address is a valid way in. Leader only, same reasoning as
 /// certificate issuance: several nodes reconciling at once would race each
 /// other's writes.
-async fn run_dns_reconcile(cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: Option<Arc<ClusterKey>>) {
+async fn run_dns_reconcile(boot_cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: Option<Arc<ClusterKey>>) {
     let mut ticker = tokio::time::interval(DNS_RECONCILE_INTERVAL);
     loop {
         ticker.tick().await;
         if !cluster.is_leader() {
             continue;
         }
+        let state = cluster.state().await;
+        let cfg = crate::daemon::live_config(&state, &boot_cfg);
         let Some((cf, zone_names)) =
             cloudflare_setup(&cfg, &cluster, key.as_deref(), "dns record publishing").await
         else {
@@ -545,19 +547,24 @@ async fn run_dns_reconcile(cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: O
                 continue;
             }
         };
-        let state = cluster.state().await;
         reconcile_dns(&cfg, &cluster, &cf, &zones, &state).await;
     }
 }
 
-/// Every hostname a node's address needs to answer for: the web ui plus
-/// every route the proxy publishes, whether it comes from a stack's
-/// containers, a static backend, or a redirect. All answered identically
-/// regardless of which node a request lands on, so every node's address is
-/// published, not just the one running the container.
-fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<(String, String)> {
+/// Every hostname a node's address needs to answer for: every route the
+/// proxy publishes, whether it comes from a stack's containers, a static
+/// backend, or a redirect. All answered identically regardless of which node
+/// a request lands on, so every node's address is published, not just the
+/// one running the container.
+///
+/// The web ui hostname is deliberately not in here: unlike a proxied route,
+/// it is not just forwarded internally by every node - writes only work on
+/// the leader, see `redirect_non_leader` in `cl_api::server`. Publishing
+/// every node's address for it lets a client's write land on a follower,
+/// which can only 503 and point elsewhere. `desired_records` gives that
+/// hostname the leader's address alone.
+fn desired_dns_hosts(state: &ClusterState) -> BTreeSet<(String, String)> {
     let mut hosts = BTreeSet::new();
-    hosts.insert((cfg.web.address.clone(), cfg.web.network.clone()));
 
     for placement in crate::placement::service_placements(state) {
         for entry in &placement.extensions.proxy {
@@ -573,26 +580,49 @@ fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<(Str
     hosts
 }
 
-/// Resolves `desired_dns_hosts` against every node, deduplicated. A node with
-/// no address on a given hostname's network is skipped rather than failing
-/// the whole pass: a private network only some nodes sit on is normal.
-fn desired_records(cfg: &ClusterConfig, state: &ClusterState) -> Vec<DesiredRecord> {
-    let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (host, network) in desired_dns_hosts(cfg, state) {
+/// The config node matching a raft leader id, if it is known and still in the
+/// config. `None` when leadership is unsettled, in which case the caller
+/// publishes nothing for the leader-only web hostname rather than guess.
+fn leader_node(cfg: &ClusterConfig, leader_id: Option<cl_raft::NodeId>) -> Option<&cl_config::Node> {
+    let leader_id = leader_id?;
+    cfg.nodes.values().find(|node| cl_raft::node_id(node.id) == leader_id)
+}
+
+/// Resolves `desired_dns_hosts` against every node, deduplicated, plus the
+/// web ui hostname against the leader alone. A node with no address on a
+/// given hostname's network is skipped rather than failing the whole pass: a
+/// private network only some nodes sit on is normal.
+fn desired_records(cfg: &ClusterConfig, leader_id: Option<cl_raft::NodeId>, state: &ClusterState) -> Vec<DesiredRecord> {
+    let mut out: Vec<DesiredRecord> = Vec::new();
+    let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
+
+    if let Some(leader) = leader_node(cfg, leader_id) {
+        if let Ok(records) = cl_dns::records_for(cfg, &cfg.web.address, &cfg.web.network, leader) {
+            push_new(&mut out, &mut seen, records);
+        }
+    }
+
+    for (host, network) in desired_dns_hosts(state) {
         for node in cfg.nodes.values() {
             let Ok(records) = cl_dns::records_for(cfg, &host, &network, node) else {
                 continue;
             };
-            for record in records {
-                let key = (format!("{:?}", record.kind), record.fqdn.clone(), record.content.clone());
-                if seen.insert(key) {
-                    out.push(record);
-                }
-            }
+            push_new(&mut out, &mut seen, records);
         }
     }
     out
+}
+
+/// Appends `records` to `out`, skipping any already seen by (type, fqdn,
+/// content) - the same hostname/network combination can turn up more than
+/// once (a stack route and a static route sharing a host, say).
+fn push_new(out: &mut Vec<DesiredRecord>, seen: &mut BTreeSet<(String, String, String)>, records: Vec<DesiredRecord>) {
+    for record in records {
+        let key = (format!("{:?}", record.kind), record.fqdn.clone(), record.content.clone());
+        if seen.insert(key) {
+            out.push(record);
+        }
+    }
 }
 
 /// One reconcile pass: computes desired records, groups them by the
@@ -600,7 +630,7 @@ fn desired_records(cfg: &ClusterConfig, state: &ClusterState) -> Vec<DesiredReco
 /// records to match. Failures on one zone don't stop the others.
 async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Cloudflare, zones: &Zones, state: &ClusterState) {
     let mut by_zone: std::collections::HashMap<(String, String), Vec<DesiredRecord>> = std::collections::HashMap::new();
-    for record in desired_records(cfg, state) {
+    for record in desired_records(cfg, cluster.quorum().leader(), state) {
         let Some(zone_id) = zones.zone_id_for(&record.fqdn) else {
             warn!(fqdn = %record.fqdn, "no cloudflare zone covers this name, not publishing a dns record");
             continue;
@@ -909,15 +939,16 @@ services:
     }
 
     #[test]
-    fn desired_dns_hosts_includes_the_dashboard_and_published_routes() {
-        let hosts = desired_dns_hosts(&cfg(), &state_with(SPEC, 1));
-        assert!(hosts.contains(&("cloud".to_string(), "tailscale".to_string())));
+    fn desired_dns_hosts_includes_published_routes_but_not_the_dashboard() {
+        let hosts = desired_dns_hosts(&state_with(SPEC, 1));
         assert!(hosts.contains(&("blog".to_string(), "wan".to_string())));
+        // The dashboard hostname is leader-only and handled separately by
+        // `desired_records`, not published for every node here.
+        assert!(!hosts.contains(&("cloud".to_string(), "tailscale".to_string())));
     }
 
     #[test]
     fn desired_dns_hosts_includes_static_routes_and_redirects() {
-        let cfg = cfg();
         let mut state =
             with_static_routes(state_with(SPEC, 0), vec![static_route("printer", "lan", "192.168.1.50:9100")]);
         let store = cl_api::redirects::RedirectStore {
@@ -941,22 +972,40 @@ services:
             },
         );
 
-        let hosts = desired_dns_hosts(&cfg, &state);
+        let hosts = desired_dns_hosts(&state);
         assert!(hosts.contains(&("printer".to_string(), "lan".to_string())));
         assert!(hosts.contains(&("old".to_string(), "wan".to_string())));
     }
 
-    /// The dashboard is on `tailscale`, which every node in the reference
-    /// config has an address on, so both nodes get a record.
+    /// `blog` is a proxy route on `wan`, forwarded internally by every node,
+    /// so every node's address is published for it.
     #[test]
-    fn desired_records_publish_every_nodes_address() {
-        let records = desired_records(&cfg(), &state_with(SPEC, 1));
+    fn desired_records_publish_every_nodes_address_for_proxied_routes() {
+        let records = desired_records(&cfg(), None, &state_with(SPEC, 1));
+        let blog: Vec<_> = records.iter().filter(|r| r.fqdn == "blog.example.com").collect();
+        assert_eq!(blog.len(), cfg().nodes.len(), "{blog:?}");
+    }
+
+    /// The dashboard only works on the leader (writes 503 elsewhere), so only
+    /// the leader's address is published for it - never every node's.
+    #[test]
+    fn desired_records_publish_only_the_leaders_address_for_the_dashboard() {
+        let cfg = cfg();
+        let leader = cfg.node("n1").expect("n1 in the reference config");
+        let leader_id = cl_raft::node_id(leader.id);
+
+        let records = desired_records(&cfg, Some(leader_id), &state_with(SPEC, 1));
         let dashboard: Vec<_> = records.iter().filter(|r| r.fqdn == "cloud.int.example.com").collect();
-        assert_eq!(dashboard.len(), cfg().nodes.len(), "{dashboard:?}");
-        assert!(dashboard.iter().all(|r| r.kind == cl_dns::RecordType::A));
-        let contents: std::collections::BTreeSet<_> = dashboard.iter().map(|r| r.content.as_str()).collect();
-        assert!(contents.contains("10.10.0.1"));
-        assert!(contents.contains("10.10.0.2"));
+        assert_eq!(dashboard.len(), 1, "{dashboard:?}");
+        assert_eq!(dashboard[0].content, "10.10.0.1");
+    }
+
+    /// No known leader yet (fresh cluster, election in progress): the
+    /// dashboard gets no record rather than one for every node.
+    #[test]
+    fn desired_records_publish_nothing_for_the_dashboard_with_no_known_leader() {
+        let records = desired_records(&cfg(), None, &state_with(SPEC, 1));
+        assert!(!records.iter().any(|r| r.fqdn == "cloud.int.example.com"));
     }
 
     #[test]
