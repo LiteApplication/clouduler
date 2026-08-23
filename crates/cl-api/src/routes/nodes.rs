@@ -37,17 +37,35 @@ struct NodeSummary {
     container_count: usize,
 }
 
+/// Every node declared in the config, not just the ones the roster has
+/// already admitted to raft: `seed_roster` only publishes a config entry once
+/// it can reach that node's rpc port, so a node that is configured but not
+/// yet (or no longer) up would otherwise vanish from this list instead of
+/// showing as unreachable — indistinguishable from never having been
+/// configured at all, which is exactly the state an operator needs to see to
+/// tell "still joining" apart from "safe to add".
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<NodeSummary>> {
     let cluster_state = state.cluster.state().await;
-    let nodes = cluster_state
+    let config = state.cluster_config.read().await;
+
+    let nodes = config
         .nodes
-        .values()
-        .map(|n| NodeSummary {
-            name: n.name.clone(),
-            role: format!("{:?}", n.role).to_lowercase(),
-            availability: format!("{:?}", n.availability).to_lowercase(),
-            reachable: !cluster_state.unreachable.contains(&n.name),
-            container_count: cluster_state.assignments_on(&n.name).count(),
+        .iter()
+        .map(|(name, configured)| match cluster_state.nodes.get(name) {
+            Some(live) => NodeSummary {
+                name: live.name.clone(),
+                role: format!("{:?}", live.role).to_lowercase(),
+                availability: format!("{:?}", live.availability).to_lowercase(),
+                reachable: !cluster_state.unreachable.contains(name),
+                container_count: cluster_state.assignments_on(name).count(),
+            },
+            None => NodeSummary {
+                name: name.clone(),
+                role: format!("{:?}", configured.role).to_lowercase(),
+                availability: "pending".to_string(),
+                reachable: false,
+                container_count: 0,
+            },
         })
         .collect();
     Json(nodes)
@@ -83,10 +101,26 @@ async fn detail(
     Path(name): Path<String>,
 ) -> Result<Json<NodeDetail>, ApiError> {
     let cluster_state = state.cluster.state().await;
-    let node = cluster_state
-        .nodes
-        .get(&name)
-        .ok_or_else(|| ApiError::NotFound(format!("no node {name}")))?;
+    let node = cluster_state.nodes.get(&name);
+
+    let Some(node) = node else {
+        // Declared in the config but not yet admitted to raft (see `list`):
+        // nothing live to report yet, but the name is real.
+        let config = state.cluster_config.read().await;
+        let configured = config
+            .nodes
+            .get(&name)
+            .ok_or_else(|| ApiError::NotFound(format!("no node {name}")))?;
+        return Ok(Json(NodeDetail {
+            name,
+            role: format!("{:?}", configured.role).to_lowercase(),
+            availability: "pending".to_string(),
+            reachable: false,
+            drives: Vec::new(),
+            container_count: 0,
+            usage: ResourceUsage::default(),
+        }));
+    };
 
     let usage = if name == state.node_name {
         local_resource_usage()
@@ -201,19 +235,31 @@ async fn patch_node(
 /// latter reconciled asynchronously by the leader, see `reap_removed_nodes`
 /// in the daemon), then strips it from the cluster config so a future
 /// restart of any manager does not treat it as newly configured and re-add
-/// it. Order matters: the roster removal is what makes the node's config
-/// entry safe to drop, since `RemoveNode` first checks nothing still runs
-/// there.
+/// it.
+///
+/// The config edit is validated *before* touching the roster, not after: a
+/// node can be named in `drives.*.served_by`, and dropping it from
+/// `config.nodes` first would fail that validation, but by then `RemoveNode`
+/// would already have committed to raft with no way to undo it — leaving the
+/// node gone from the live roster (and tombstoned, so it can never rejoin)
+/// while its entry lingers in the config forever, permanently unremovable
+/// through this same endpoint and blocking a same-named node from ever
+/// joining again. Validating first means a rejected removal leaves
+/// everything untouched.
 async fn remove(
     _admin: RequireAdmin,
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let mut config = state.cluster_config.read().await.clone();
+    let had_entry = config.nodes.remove(&name).is_some();
+    if had_entry {
+        config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    }
+
     submit(&state, ClusterRequest::RemoveNode { node: name.clone() }).await?;
 
-    let mut config = state.cluster_config.read().await.clone();
-    if config.nodes.remove(&name).is_some() {
-        config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if had_entry {
         super::config::apply_config(&state, &config).await?;
     }
 

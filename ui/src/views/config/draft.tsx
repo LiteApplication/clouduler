@@ -33,10 +33,11 @@ export function ConfigDraftProvider({ children }: { children: ReactNode }) {
   const [original, setOriginal] = useState<ClusterConfig | null>(null);
   const [draft, setDraft] = useState<ClusterConfig | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Node detail pages also edit a slice of this same config (see
-  // `NodeCard` on `NodeDetail`), so they need the draft loaded too.
+  // Node pages also need this: the list has to merge in nodes the config
+  // declares but the live roster hasn't admitted yet (see `Nodes`), and node
+  // detail pages edit a slice of this same config (see `NodeCard`).
   const pathname = useLocation().pathname;
-  const onConfigPage = pathname.startsWith('/configuration') || pathname.startsWith('/nodes/');
+  const onConfigPage = pathname.startsWith('/configuration') || pathname.startsWith('/nodes');
 
   const reload = useCallback(() => {
     api

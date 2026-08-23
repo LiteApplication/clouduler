@@ -100,7 +100,18 @@ async fn harness() -> Harness {
             },
         )]),
         drives: BTreeMap::new(),
-        nodes: BTreeMap::new(),
+        nodes: BTreeMap::from([(
+            "n0".to_string(),
+            cl_config::Node {
+                role: cl_config::NodeRole::Manager,
+                network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("127.0.0.1".parse().unwrap()))]),
+                drives: BTreeMap::new(),
+                labels: BTreeMap::new(),
+                rpc_port: cl_config::DEFAULT_RPC_PORT,
+                data_dir: None,
+                generate_secret_key: None,
+            },
+        )]),
         web: WebConfig {
             address: "cloud".into(),
             network: "internal".into(),
@@ -784,6 +795,58 @@ async fn nodes_list_reflects_the_cluster_state() {
     assert_eq!(nodes[0]["name"], "n0");
 }
 
+/// Mirrors what a join does after a node was deleted and rejoins under the
+/// same name: the config push that reintroduces it must also drop it from
+/// the `removed` tombstone, or `seed_roster` would skip it forever.
+#[tokio::test]
+async fn rejoining_under_a_removed_name_clears_the_tombstone() {
+    let h = harness().await;
+
+    h.state
+        .cluster
+        .submit(cl_raft::Request::RemoveNode { node: "n0".into() })
+        .await
+        .expect("submit");
+    assert!(h.state.cluster.state().await.removed.contains("n0"));
+
+    // Simulate the config as it looks right after the node was deleted:
+    // stripped of the node, same as what `remove()` would have applied.
+    let mut full_config = h.state.cluster_config.read().await.clone();
+    {
+        let net = full_config.networks.get_mut("internal").unwrap();
+        net.subnet = Some("10.10.0.0/24".parse().unwrap());
+        net.domain = Some("test.local".to_string());
+    }
+    full_config.nodes.get_mut("n0").unwrap().network.insert(
+        "internal".to_string(),
+        cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()),
+    );
+    let mut stripped = full_config.clone();
+    stripped.nodes.clear();
+    *h.state.cluster_config.write().await = stripped;
+
+    let body = serde_json::to_string(&serde_json::json!({"config": full_config})).unwrap();
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+
+    assert!(!h.state.cluster.state().await.removed.contains("n0"));
+}
+
 #[tokio::test]
 async fn redirects_can_be_created_listed_and_removed() {
     let h = harness().await;
@@ -845,25 +908,15 @@ async fn redirects_can_be_created_listed_and_removed() {
 async fn renaming_a_network_updates_config_stacks_and_redirects() {
     let h = harness().await;
 
-    // `validate()` requires at least one node, which the bare harness config
-    // does not carry (only the raft roster does).
     {
         let mut cfg = h.state.cluster_config.write().await;
-        cfg.nodes.insert(
-            "n0".into(),
-            cl_config::Node {
-                role: cl_config::NodeRole::Manager,
-                network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()))]),
-                drives: BTreeMap::new(),
-                labels: BTreeMap::new(),
-                rpc_port: cl_config::DEFAULT_RPC_PORT,
-                data_dir: None,
-                generate_secret_key: None,
-            },
-        );
         let net = cfg.networks.get_mut("internal").unwrap();
         net.subnet = Some("10.10.0.0/24".parse().unwrap());
         net.domain = Some("test.local".to_string());
+        cfg.nodes.get_mut("n0").unwrap().network.insert(
+            "internal".to_string(),
+            cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()),
+        );
     }
 
     let redirect_body = r#"{"host":"old","network":"internal","target":"https://new.example.com","status":301}"#;

@@ -1,8 +1,10 @@
 mod cli;
+mod config;
 mod daemon;
 mod drives;
 mod internal_dns;
 mod migration;
+mod node;
 mod placement;
 mod overlay;
 mod egress;
@@ -17,7 +19,7 @@ use clap::Parser;
 use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, DriveCommand, NodeCommand, StackCommand};
+use crate::cli::{Cli, Command, ConfigCommand, DriveCommand, NodeCommand, StackCommand};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,12 +49,33 @@ async fn main() -> Result<()> {
             report::summary(&cfg);
             Ok(())
         }
-        Command::Node {
-            command: NodeCommand::List,
-        } => {
-            report::nodes(&cfg);
-            Ok(())
-        }
+        Command::Config {
+            command: ConfigCommand::Reload { via },
+        } => config::reload(&cfg, via.as_deref()).await,
+        Command::Node { command } => match command {
+            NodeCommand::List => {
+                report::nodes(&cfg);
+                Ok(())
+            }
+            NodeCommand::Add {
+                name,
+                role,
+                rpc_addr,
+                drive,
+                label,
+                via,
+            } => {
+                let role = match role {
+                    cli::RoleArg::Manager => cl_raft::state::Role::Manager,
+                    cli::RoleArg::Worker => cl_raft::state::Role::Worker,
+                };
+                node::add(&cfg, name, role, rpc_addr, &drive, &label, via.as_deref()).await
+            }
+            NodeCommand::Remove { name, via } => node::remove(&cfg, &name, via.as_deref()).await,
+            NodeCommand::SetAvailability { name, availability, via } => {
+                node::set_availability(&cfg, &name, availability, via.as_deref()).await
+            }
+        },
         Command::Stack { command } => match command {
             StackCommand::Deploy { file, name, via } => {
                 stack::deploy(&cfg, &file, name, via.as_deref()).await

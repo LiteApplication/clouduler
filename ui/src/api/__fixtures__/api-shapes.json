@@ -30,7 +30,16 @@
         "type": "internal"
       }
     },
-    "nodes": {},
+    "nodes": {
+      "n0": {
+        "drives": {},
+        "network": {
+          "internal": "127.0.0.1"
+        },
+        "role": "manager",
+        "rpc_port": 7373
+      }
+    },
     "proxy": {
       "acme": {
         "enabled": false
@@ -197,7 +206,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.3.3",
+    "version": "0.3.5",
     "voters": 1
   }
 }

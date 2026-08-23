@@ -51,6 +51,14 @@ export function NodeDetail() {
 
   const node = cluster?.nodes[name];
   const instances = cluster ? Object.values(cluster.assignments).filter((a) => a.node === name) : [];
+  const configNode = draft?.nodes[name];
+  // A node the config declares but the live roster hasn't admitted yet (see
+  // `Nodes`) has nothing from `cluster.nodes` to read role/address/
+  // availability off of, so those fall back to the config entry, and actions
+  // that only make sense for a raft-admitted node (drain/activate) hide.
+  const role = node?.role ?? configNode?.role ?? '';
+  const availability = node?.availability ?? 'pending';
+  const rpcAddr = node?.rpc_addr ?? 'not yet reachable';
 
   const decommission = async () => {
     if (!confirm(`Decommission ${name}? It must not be running any work.`)) return;
@@ -61,8 +69,6 @@ export function NodeDetail() {
       alert(e instanceof ApiError ? e.message : 'failed to decommission');
     }
   };
-
-  const configNode = draft?.nodes[name];
 
   const startEditing = () => {
     clearErrors();
@@ -83,11 +89,19 @@ export function NodeDetail() {
     if (ok) setEditing(false);
   };
 
-  if (!node) {
+  if (!node && !configNode) {
+    // Still waiting on either source, or genuinely no such node.
+    if (!cluster || !draft) {
+      return (
+        <p className="loading">
+          <span className="spinner" /> Loading node...
+        </p>
+      );
+    }
     return (
-      <p className="loading">
-        <span className="spinner" /> Loading node...
-      </p>
+      <div className="banner banner-warn">
+        <Icon name="alert" /> No node named {name}.
+      </div>
     );
   }
 
@@ -98,17 +112,17 @@ export function NodeDetail() {
           <Icon name="nodes" />
           <div>
             <h1>{name}</h1>
-            <p className="page-sub mono">{node.rpc_addr}</p>
+            <p className="page-sub mono">{rpcAddr}</p>
           </div>
         </div>
         {isAdmin && (
           <div className="btn-row">
-            {node.availability !== 'drain' && (
+            {node && node.availability !== 'drain' && (
               <button onClick={() => api.setAvailability(name, 'drain')}>
                 <Icon name="download" /> Drain
               </button>
             )}
-            {node.availability !== 'active' && (
+            {node && node.availability !== 'active' && (
               <button onClick={() => api.setAvailability(name, 'active')}>
                 <Icon name="play" /> Activate
               </button>
@@ -132,15 +146,15 @@ export function NodeDetail() {
             <Icon name="crown" />
             <span className="stat-label">Role</span>
           </span>
-          <span className="stat-value">{node.role}</span>
+          <span className="stat-value">{role}</span>
         </div>
         <div className="card stat">
           <span className="stat-head">
             <Icon name="activity" />
             <span className="stat-label">Availability</span>
           </span>
-          <Badge tone={node.availability === 'active' ? 'good' : node.availability === 'drain' ? 'warn' : 'neutral'}>
-            {node.availability}
+          <Badge tone={availability === 'active' ? 'good' : availability === 'drain' ? 'warn' : 'neutral'}>
+            {availability}
           </Badge>
         </div>
         <div className="card stat">

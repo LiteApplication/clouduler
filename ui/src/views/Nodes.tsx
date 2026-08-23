@@ -7,38 +7,76 @@ import { api } from '../api/client';
 import { AddNodeForm } from './AddNodeForm';
 import { Icon } from '../components/Icon';
 import { RelationDiagram, type RelationEdge, type RelationNode } from '../components/RelationDiagram';
+import { useConfigDraft } from './config/draft';
 
 export function Nodes() {
   const cluster = useClusterState();
+  const { original: config } = useConfigDraft();
   const { isAdmin } = useAuth();
   const [showAdd, setShowAdd] = useState(false);
 
   const nodes = useMemo(() => Object.values(cluster?.nodes ?? {}), [cluster]);
   const unreachable = cluster?.unreachable ?? [];
 
+  // The live roster only ever holds a node once the leader has managed to
+  // reach it (see `seed_roster` in the daemon), so a node that is declared in
+  // the config but not yet reachable — still joining, or currently down —
+  // would otherwise be indistinguishable from a name nobody has configured.
+  // Listing it here from the config, flagged as pending, is what tells an
+  // operator "this is already taken" instead of just leaving it invisible.
+  const pendingNames = useMemo(
+    () => Object.keys(config?.nodes ?? {}).filter((name) => !cluster?.nodes[name]),
+    [config, cluster],
+  );
+
   const { networkNodes, nodeChips, edges } = useMemo(() => {
-    const networkNames = Array.from(new Set(nodes.flatMap((n) => n.networks))).sort();
+    const pendingNetworks = pendingNames.flatMap((name) => Object.keys(config?.nodes[name]?.network ?? {}));
+    const networkNames = Array.from(new Set([...nodes.flatMap((n) => n.networks), ...pendingNetworks])).sort();
     const networkNodes: RelationNode[] = networkNames.map((name) => ({
       id: name,
       label: name,
       icon: <Icon name="network" />,
     }));
-    const nodeChips: RelationNode[] = nodes.map((n) => ({
-      id: n.name,
-      label: n.name,
-      sub: n.role,
-      icon: <Icon name="nodes" />,
-      tone: unreachable.includes(n.name) ? 'bad' : n.availability === 'drain' ? 'warn' : undefined,
-    }));
-    const edges: RelationEdge[] = nodes.flatMap((n) =>
-      n.networks.map((net) => ({
-        from: net,
-        to: n.name,
-        tone: unreachable.includes(n.name) ? 'bad' : n.egress_networks.includes(net) ? 'accent' : 'neutral',
+    const nodeChips: RelationNode[] = [
+      ...nodes.map((n) => ({
+        id: n.name,
+        label: n.name,
+        sub: n.role,
+        icon: <Icon name="nodes" />,
+        tone: (unreachable.includes(n.name) ? 'bad' : n.availability === 'drain' ? 'warn' : undefined) as
+          | 'bad'
+          | 'warn'
+          | undefined,
       })),
-    );
+      ...pendingNames.map((name) => ({
+        id: name,
+        label: name,
+        sub: config?.nodes[name]?.role,
+        icon: <Icon name="nodes" />,
+        tone: 'warn' as const,
+      })),
+    ];
+    const edges: RelationEdge[] = [
+      ...nodes.flatMap((n) =>
+        n.networks.map((net) => ({
+          from: net,
+          to: n.name,
+          tone: (unreachable.includes(n.name) ? 'bad' : n.egress_networks.includes(net) ? 'accent' : 'neutral') as
+            | 'bad'
+            | 'accent'
+            | 'neutral',
+        })),
+      ),
+      ...pendingNames.flatMap((name) =>
+        Object.keys(config?.nodes[name]?.network ?? {}).map((net) => ({
+          from: net,
+          to: name,
+          tone: 'bad' as const,
+        })),
+      ),
+    ];
     return { networkNodes, nodeChips, edges };
-  }, [nodes, unreachable]);
+  }, [nodes, unreachable, pendingNames, config]);
 
   if (!cluster) {
     return (
@@ -48,6 +86,8 @@ export function Nodes() {
     );
   }
 
+  const total = nodes.length + pendingNames.length;
+
   return (
     <div>
       <div className="page-header">
@@ -56,8 +96,9 @@ export function Nodes() {
           <div>
             <h1>Nodes</h1>
             <p className="page-sub">
-              {nodes.length} node{nodes.length === 1 ? '' : 's'}
+              {total} node{total === 1 ? '' : 's'}
               {cluster.unreachable.length > 0 && ` · ${cluster.unreachable.length} unreachable`}
+              {pendingNames.length > 0 && ` · ${pendingNames.length} pending`}
             </p>
           </div>
         </div>
@@ -142,7 +183,29 @@ export function Nodes() {
                 )}
               </tr>
             ))}
-            {nodes.length === 0 && (
+            {pendingNames.map((name) => {
+              const configured = config?.nodes[name];
+              return (
+                <tr key={name}>
+                  <td>
+                    <Link className="row-link" to={`/nodes/${encodeURIComponent(name)}`}>
+                      {name}
+                    </Link>
+                  </td>
+                  <td>{configured?.role ?? '-'}</td>
+                  <td className="mono">-</td>
+                  <td>{Object.keys(configured?.drives ?? {}).join(', ') || '-'}</td>
+                  <td>
+                    <Badge tone="neutral">pending</Badge>
+                  </td>
+                  <td>
+                    <Badge tone="bad">no</Badge>
+                  </td>
+                  {isAdmin && <td />}
+                </tr>
+              );
+            })}
+            {total === 0 && (
               <tr>
                 <td colSpan={isAdmin ? 7 : 6} className="empty-cell">
                   no nodes yet

@@ -50,7 +50,12 @@ pub enum Command {
     },
     /// Check the config file and print a summary of the resulting cluster.
     Check,
-    /// Inspect nodes.
+    /// Manage the replicated cluster config. These talk to a running daemon.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Inspect and manage nodes. These talk to a running daemon.
     Node {
         #[command(subcommand)]
         command: NodeCommand,
@@ -181,9 +186,69 @@ pub enum DriveModeArg {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Push the on-disk config file into raft, so it replicates to every
+    /// node. Fails on a permission or read error before it ever contacts the
+    /// cluster. Use after hand editing the file, to apply the change without
+    /// going through the web ui.
+    Reload {
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum NodeCommand {
     /// List the nodes declared in the config.
     List,
+    /// Register a node in the live roster. Does not touch the config file;
+    /// pair with an edit there (or `clouduler config reload`) so a restarted
+    /// manager does not forget about it. Normally a node joins itself with
+    /// `clouduler init --join` instead; this is for registering one by hand.
+    Add {
+        /// Name for the node.
+        name: String,
+        #[arg(long, value_enum)]
+        role: RoleArg,
+        /// Address other nodes use to reach it, host:port.
+        #[arg(long)]
+        rpc_addr: std::net::SocketAddr,
+        /// A drive this node implements, as name=/local/path. Repeatable.
+        #[arg(long, value_name = "NAME=PATH")]
+        drive: Vec<String>,
+        /// A label on this node, as key=value. Repeatable.
+        #[arg(long, value_name = "KEY=VALUE")]
+        label: Vec<String>,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Remove a node from the live roster and, if it is declared there, from
+    /// the config file too.
+    Remove {
+        name: String,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Set whether a node may take new work.
+    SetAvailability {
+        name: String,
+        #[arg(value_enum)]
+        availability: AvailabilityArg,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum AvailabilityArg {
+    /// Normal, schedulable.
+    Active,
+    /// Keeps running what it has, takes nothing new. Set before a migration.
+    Drain,
 }
 
 #[derive(Debug, Subcommand)]

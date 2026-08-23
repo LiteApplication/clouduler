@@ -27,6 +27,11 @@ vi.mock('../state/store', () => ({
   useClusterState: () => cluster,
 }));
 
+let configNodes: Record<string, { role: string; drives?: Record<string, string>; network?: Record<string, string> }> = {};
+vi.mock('./config/draft', () => ({
+  useConfigDraft: () => ({ original: { nodes: configNodes }, draft: null }),
+}));
+
 let isAdmin = false;
 vi.mock('../auth/AuthContext', () => ({
   useAuth: () => ({ isAdmin, identity: { subject: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
@@ -54,5 +59,19 @@ describe('Nodes view role gating', () => {
     renderNodes();
     expect(screen.getByRole('button', { name: /add node/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /drain/i })).toBeInTheDocument();
+  });
+});
+
+describe('a node declared in the config but not yet in the live roster', () => {
+  it('is listed as pending instead of being invisible', () => {
+    isAdmin = false;
+    configNodes = {
+      n1: { role: 'manager' },
+      n2: { role: 'worker', drives: { bulk: '/mnt/bulk' } },
+    };
+    renderNodes();
+    expect(screen.getByText('n2')).toBeInTheDocument();
+    expect(screen.getByText('pending')).toBeInTheDocument();
+    configNodes = {};
   });
 });

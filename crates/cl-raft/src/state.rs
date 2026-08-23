@@ -446,6 +446,13 @@ pub enum Request {
     RemoveNode {
         node: String,
     },
+    /// Drops a name from the `removed` tombstone without touching anything
+    /// else. Submitted when a node's name reappears in the cluster config
+    /// (e.g. it rejoins), so `seed_roster` stops treating it as a stale
+    /// resurrection and admits it again.
+    ClearRemovedNode {
+        node: String,
+    },
     DeployStack {
         name: String,
         spec: String,
@@ -739,6 +746,11 @@ impl ClusterState {
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
                 }
+                Ok(())
+            }
+
+            Request::ClearRemovedNode { node } => {
+                self.removed.remove(node);
                 Ok(())
             }
 
