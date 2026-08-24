@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, ApiError, encodeText } from '../api/client';
 import type { ClusterKeyStatus } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
@@ -30,11 +30,12 @@ export function ConfigsSecrets() {
   const saveConfig = async () => {
     setError(null);
     try {
-      await api.putConfig(configName.trim(), btoa(configContent));
+      await api.putConfig(configName.trim(), encodeText(configContent));
       setShowConfigForm(false);
       setConfigName('');
       setConfigContent('');
     } catch (e) {
+      console.error(`[config] failed to save "${configName}":`, e);
       setError(e instanceof ApiError ? e.message : 'failed to save config');
     }
   };

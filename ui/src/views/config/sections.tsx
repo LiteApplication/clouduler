@@ -3,7 +3,7 @@
 // loses an edit because the draft lives in the Configuration shell above them.
 
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../../api/client';
+import { api, ApiError, encodeText } from '../../api/client';
 import type {
   CloudflareTokenStatus,
   ClusterConfig,
@@ -883,10 +883,11 @@ function WireguardAddressField({
     setError(null);
     setBusy(true);
     try {
-      const result = await api.putWireguardConfig(netName, nodeName, btoa(text));
+      const result = await api.putWireguardConfig(netName, nodeName, encodeText(text));
       onChange({ interface: result.interface, open_ports: [] });
       setText('');
     } catch (err) {
+      console.error(`[wireguard] failed to import config for ${nodeName}/${netName}:`, err);
       setError(err instanceof ApiError ? err.message : 'failed to import wireguard config');
     } finally {
       setBusy(false);

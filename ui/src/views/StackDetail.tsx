@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, ApiError, decodeText, encodeText } from '../api/client';
 import type { StackRequirements, ValidationError } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
@@ -50,7 +50,7 @@ export function StackDetail() {
       for (const key of requirements.file_configs) {
         if (!(key in next)) {
           const existing = cluster?.configs[key];
-          next[key] = existing ? atob(existing.content) : '';
+          next[key] = existing ? decodeText(existing.content) : '';
         }
       }
       return next;
@@ -85,38 +85,44 @@ export function StackDetail() {
     }
     setBusy(true);
     setSubmitError(null);
+    let step = 'validating spec';
     try {
       const result = await api.validateStack(nameInput, spec);
       setErrors(result.errors);
       setRequirements(result.requirements);
       if (!result.valid || !result.requirements) return;
 
+      step = 'encoding config content';
       const configs: Record<string, string> = {};
       for (const key of result.requirements.file_configs) {
         const draft = configDrafts[key];
         if (draft) {
-          configs[key] = btoa(draft);
+          configs[key] = encodeText(draft);
         } else if (!cluster?.configs[key]) {
           setSubmitError(`config "${key}" needs content before this stack can deploy`);
           return;
         }
       }
+      step = 'encoding secret content';
       const secrets: Record<string, string> = {};
       for (const key of result.requirements.file_secrets) {
         const draft = secretDrafts[key];
         if (draft) {
-          secrets[key] = btoa(draft);
+          secrets[key] = encodeText(draft);
         } else if (!cluster?.secrets[key]) {
           setSubmitError(`secret "${key}" needs content before this stack can deploy`);
           return;
         }
       }
 
+      step = 'submitting deploy';
       await api.deployStack(nameInput.trim(), { spec, configs, secrets });
       navigate(`/stacks/${encodeURIComponent(nameInput.trim())}`);
       setEditing(false);
     } catch (e) {
-      setSubmitError(e instanceof ApiError ? e.message : 'deploy failed');
+      const message = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+      console.error(`[deploy] ${nameInput || '(unnamed)'} failed while ${step}:`, e);
+      setSubmitError(`deploy failed while ${step}: ${message}`);
     } finally {
       setBusy(false);
     }
@@ -446,9 +452,10 @@ function ConfigQuickCreate({ name, onDone }: { name: string; onDone: () => void 
     setBusy(true);
     setError(null);
     try {
-      await api.putConfig(name, btoa(content));
+      await api.putConfig(name, encodeText(content));
       onDone();
     } catch (e) {
+      console.error(`[config] failed to save "${name}":`, e);
       setError(e instanceof ApiError ? e.message : 'failed to save config');
     } finally {
       setBusy(false);

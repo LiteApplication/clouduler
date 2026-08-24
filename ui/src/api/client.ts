@@ -63,6 +63,21 @@ export class NotLeaderError extends ApiError {
   }
 }
 
+/**
+ * Config/secret text is stored on the wire as base64. Plain `btoa`/`atob`
+ * only handle Latin1 — any pasted em dash, curly quote, or accented
+ * character throws `InvalidCharacterError`, a plain DOMException that isn't
+ * an ApiError, so it used to blow up deploy/save with no useful message.
+ * Go through UTF-8 bytes instead so arbitrary text round-trips.
+ */
+export function encodeText(text: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+}
+export function decodeText(base64: string): string {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 /** Set once so a 401 anywhere sends the browser to the login screen. */
 let onUnauthorized: (() => void) | null = null;
 export function setUnauthorizedHandler(fn: (() => void) | null) {
@@ -70,15 +85,28 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    credentials: 'include',
-    headers: {
-      Accept: 'application/json',
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...init?.headers,
-    },
-    ...init,
-  });
+  const method = init?.method ?? 'GET';
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      credentials: 'include',
+      headers: {
+        Accept: 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...init?.headers,
+      },
+      ...init,
+    });
+  } catch (e) {
+    // fetch() rejects (rather than resolving with a non-ok response) on
+    // network failure, CORS rejection, a dropped connection, etc. That's not
+    // an ApiError by construction, so every `instanceof ApiError` catch site
+    // in the UI was falling back to a hardcoded, content-free message here.
+    // Wrap it so the real reason survives up to whoever is displaying it.
+    const reason = e instanceof Error ? e.message : String(e);
+    console.error(`[api] ${method} ${path} network error:`, e);
+    throw new ApiError(0, `network error calling ${method} ${path}: ${reason}`);
+  }
 
   if (res.status === 401) {
     onUnauthorized?.();
@@ -86,17 +114,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (res.status === 503 && res.headers.has('Location')) {
-    throw new NotLeaderError(res.headers.get('Location')!);
+    const leaderUrl = res.headers.get('Location')!;
+    console.error(`[api] ${method} ${path} hit a follower, leader is ${leaderUrl}`);
+    throw new NotLeaderError(leaderUrl);
   }
 
   if (!res.ok) {
     let body: ApiErrorBody | null = null;
+    let bodyText: string | null = null;
     try {
-      body = await res.json();
+      bodyText = await res.text();
+      body = bodyText ? JSON.parse(bodyText) : null;
     } catch {
       // body wasn't json, fall through to a generic message below
     }
-    throw new ApiError(res.status, body?.error ?? res.statusText, body?.detail);
+    const message = body?.error ?? res.statusText ?? `HTTP ${res.status}`;
+    console.error(
+      `[api] ${method} ${path} failed: ${res.status} ${message}`,
+      body?.detail ? { detail: body.detail } : bodyText ? { body: bodyText } : undefined,
+    );
+    throw new ApiError(res.status, message, body?.detail);
   }
 
   // A success with no body is not a failure. 204 has none by definition, and

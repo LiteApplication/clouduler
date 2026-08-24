@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, ApiError, encodeText } from '../api/client';
 import type { SecretCharset } from '../api/types';
 import { previewFor, validateGeneratorLength } from '../lib/secretGenerator';
 import { Icon } from '../components/Icon';
@@ -50,12 +50,13 @@ export function SecretForm({
       if (mode === 'paste') {
         await api.putSecret(name.trim(), { value });
       } else if (mode === 'file') {
-        await api.putSecret(name.trim(), { content: btoa(fileContent) });
+        await api.putSecret(name.trim(), { content: encodeText(fileContent) });
       } else {
         await api.putSecret(name.trim(), { generate: { length, charset } });
       }
       onDone();
     } catch (err) {
+      console.error(`[secret] failed to save "${name}":`, err);
       setError(err instanceof ApiError ? err.message : 'failed to save secret');
     } finally {
       setBusy(false);
