@@ -126,12 +126,24 @@ pub struct StackState {
     /// Bumped on every redeploy, so nodes can tell a spec change from a restart.
     pub revision: u64,
     /// Cluster config objects this stack brought with it, so removing the stack
-    /// takes them away too.
+    /// takes them away too. A subset of `used_configs`: only the ones this
+    /// stack bundled a `file:` for, not every config a service references.
     #[serde(default)]
     pub configs: BTreeSet<String>,
-    /// Cluster secrets this stack brought with it.
+    /// Cluster secrets this stack brought with it. Same ownership caveat as
+    /// `configs`.
     #[serde(default)]
     pub secrets: BTreeSet<String>,
+    /// Every cluster config any service in this stack references, whether or
+    /// not the stack bundles its own file for it. Kept alongside `configs`
+    /// so the ui can show a stack's full config usage without the daemon
+    /// having to reparse the spec.
+    #[serde(default)]
+    pub used_configs: BTreeSet<String>,
+    /// Every cluster secret any service in this stack references. Same
+    /// relationship to `secrets` as `used_configs` has to `configs`.
+    #[serde(default)]
+    pub used_secrets: BTreeSet<String>,
 }
 
 /// The cluster config file, replicated so an edit made on one node reaches the
@@ -464,6 +476,10 @@ pub enum Request {
         name: String,
         configs: BTreeSet<String>,
         secrets: BTreeSet<String>,
+        #[serde(default)]
+        used_configs: BTreeSet<String>,
+        #[serde(default)]
+        used_secrets: BTreeSet<String>,
     },
     /// Place an instance. `drives` lists what the instance needs, so the state
     /// machine can refuse a node that does not implement all of them.
@@ -754,6 +770,8 @@ impl ClusterState {
                 let previous = self.stacks.get(name);
                 let configs = previous.map(|s| s.configs.clone()).unwrap_or_default();
                 let secrets = previous.map(|s| s.secrets.clone()).unwrap_or_default();
+                let used_configs = previous.map(|s| s.used_configs.clone()).unwrap_or_default();
+                let used_secrets = previous.map(|s| s.used_secrets.clone()).unwrap_or_default();
                 self.stacks.insert(
                     name.clone(),
                     StackState {
@@ -762,6 +780,8 @@ impl ClusterState {
                         revision,
                         configs,
                         secrets,
+                        used_configs,
+                        used_secrets,
                     },
                 );
                 Ok(())
@@ -790,6 +810,8 @@ impl ClusterState {
                 name,
                 configs,
                 secrets,
+                used_configs,
+                used_secrets,
             } => {
                 let stack = self
                     .stacks
@@ -797,6 +819,8 @@ impl ClusterState {
                     .ok_or_else(|| format!("unknown stack {name}"))?;
                 stack.configs = configs.clone();
                 stack.secrets = secrets.clone();
+                stack.used_configs = used_configs.clone();
+                stack.used_secrets = used_secrets.clone();
                 Ok(())
             }
 
@@ -1683,6 +1707,8 @@ mod tests {
             name: "site".into(),
             configs: BTreeSet::from(["nginx_conf".to_string()]),
             secrets: BTreeSet::new(),
+            used_configs: BTreeSet::new(),
+            used_secrets: BTreeSet::new(),
         });
 
         let rejected = state.apply(&Request::RemoveConfig {
@@ -1713,6 +1739,8 @@ mod tests {
             name: "site".into(),
             configs: BTreeSet::from(["nginx_conf".to_string()]),
             secrets: BTreeSet::from(["db_password".to_string()]),
+            used_configs: BTreeSet::new(),
+            used_secrets: BTreeSet::new(),
         });
 
         state.apply(&Request::RemoveStack {
@@ -1733,6 +1761,8 @@ mod tests {
             name: "site".into(),
             configs: BTreeSet::from(["c".to_string()]),
             secrets: BTreeSet::new(),
+            used_configs: BTreeSet::new(),
+            used_secrets: BTreeSet::new(),
         });
         state.apply(&Request::DeployStack {
             name: "site".into(),

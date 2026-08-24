@@ -105,8 +105,15 @@ export interface StackState {
   name: string;
   spec: string;
   revision: number;
+  /** Configs/secrets this stack bundles its own file for, i.e. owns: only a
+   *  subset of what it uses. Prefer `used_configs`/`used_secrets` for "does
+   *  this stack reference this config" checks. */
   configs: string[];
   secrets: string[];
+  /** Every config/secret any service in this stack references, whether or
+   *  not the stack bundles its own file for it. */
+  used_configs: string[];
+  used_secrets: string[];
 }
 
 /** What a stack needs from the cluster to schedule: computed from its spec by

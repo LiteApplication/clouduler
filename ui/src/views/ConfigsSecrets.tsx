@@ -60,7 +60,7 @@ export function ConfigsSecrets() {
 
   const stacksUsing = (kind: 'configs' | 'secrets', name: string) =>
     Object.values(cluster.stacks)
-      .filter((s) => s[kind].includes(name))
+      .filter((s) => s[kind === 'configs' ? 'used_configs' : 'used_secrets'].includes(name))
       .map((s) => s.name);
 
   return (

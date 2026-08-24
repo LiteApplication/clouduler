@@ -153,6 +153,8 @@ async fn publish_objects(
         }
     }
 
+    let requirements = bundle.parsed.requirements();
+
     // Recorded last, so a failure halfway leaves objects the stack does not yet
     // claim rather than claims with nothing behind them.
     debug!(configs = configs.len(), secrets = secrets.len(), "submitting SetStackObjects");
@@ -161,6 +163,8 @@ async fn publish_objects(
             name: stack.to_string(),
             configs,
             secrets,
+            used_configs: requirements.configs,
+            used_secrets: requirements.secrets,
         })
         .await
         .map_err(|e| anyhow!("{e}"))?;

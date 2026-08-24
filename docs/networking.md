@@ -162,8 +162,14 @@ The daemon binds the resolver on port 53 of every overlay network's gateway
 address, which is an address on this node's own bridge and so belongs to
 clouduler alone; port 53 on the node's real addresses is left for whatever the
 operator runs there. Each container is created with that gateway as its
-resolver and the internal zone as its search domain, so `web.blog` resolves
-without the cluster's domain being written into the stack file.
+resolver and two search domains: its own stack under the zone first (e.g.
+`web.int.example.com` for a container in the `web` stack), then the bare zone.
+That ordering means a bare service name — `headscale`, say, written into a
+config file before it ever ran under clouduler — resolves to the sibling
+service in the same stack (`headscale.headscale.int.example.com`) without the
+file needing to spell out `service.stack`; a fully qualified `service.stack`
+name (for reaching a sibling in *another* stack) still resolves too, via the
+bare-zone entry, exactly as before.
 
 It is also created with `ndots:2`. Docker's own resolver hands a container
 `ndots:0`, which treats any name containing a dot as absolute and skips the

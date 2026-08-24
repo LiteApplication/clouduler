@@ -104,7 +104,16 @@ pub fn build(
         network: placement.network,
         ip: placement.ip,
         dns: placement.resolver.into_iter().map(std::net::IpAddr::V4).collect(),
-        dns_search: placement.zone.iter().cloned().collect(),
+        // The container's own stack goes first, so a bare service name (e.g.
+        // `headscale` from a config file written before it knew it'd run
+        // under clouduler) resolves to the sibling in the same stack without
+        // having to be rewritten to `service.stack`; the bare zone stays
+        // after it so `service.stack` from another stack still resolves.
+        dns_search: placement
+            .zone
+            .iter()
+            .flat_map(|zone| [format!("{}.{zone}", instance.stack), zone.clone()])
+            .collect(),
         // `service.stack` has one dot, and docker's own resolver defaults the
         // container to ndots:0, which makes a name with any dot in it absolute
         // and skips the search list entirely: the short name then comes back
@@ -324,7 +333,10 @@ mod tests {
         assert_eq!(spec.network.as_deref(), Some("site_default"));
         assert_eq!(spec.ip, Some(std::net::Ipv4Addr::new(10, 244, 0, 7)));
         assert_eq!(spec.dns, vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 244, 0, 1))]);
-        assert_eq!(spec.dns_search, vec!["int.example.com".to_string()]);
+        assert_eq!(
+            spec.dns_search,
+            vec!["site.int.example.com".to_string(), "int.example.com".to_string()]
+        );
         assert_eq!(spec.dns_options, vec!["ndots:2".to_string()]);
     }
 

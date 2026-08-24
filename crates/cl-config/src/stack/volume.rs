@@ -71,17 +71,26 @@ impl TryFrom<RawVolume> for VolumeMount {
 }
 
 impl From<VolumeMount> for RawVolume {
+    /// Prefers the short `drive/volume:target[:ro]` form, since that's what
+    /// everyone writes by hand; the long map form is only reached for an
+    /// anonymous, read-only mount, which the short syntax can't express
+    /// (its target-only case is always read-write).
     fn from(v: VolumeMount) -> Self {
-        let source = match (&v.drive, &v.volume) {
-            (Some(d), Some(vol)) => Some(format!("{d}/{vol}")),
-            _ => None,
-        };
-        RawVolume::Long(LongVolume {
-            kind: Some("volume".to_string()),
-            source,
-            target: v.target.to_string_lossy().to_string(),
-            read_only: v.read_only,
-        })
+        let target = v.target.to_string_lossy();
+        match (&v.drive, &v.volume) {
+            (Some(d), Some(vol)) => RawVolume::Short(if v.read_only {
+                format!("{d}/{vol}:{target}:ro")
+            } else {
+                format!("{d}/{vol}:{target}")
+            }),
+            _ if !v.read_only => RawVolume::Short(target.to_string()),
+            _ => RawVolume::Long(LongVolume {
+                kind: Some("volume".to_string()),
+                source: None,
+                target: target.to_string(),
+                read_only: v.read_only,
+            }),
+        }
     }
 }
 
@@ -200,6 +209,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("bind mounts are not supported"));
+    }
+
+    #[test]
+    fn serializes_back_to_the_short_form() {
+        let v = parse("fast/gitlab-data:/data").unwrap();
+        assert_eq!(serde_yaml::to_string(&v).unwrap().trim(), "fast/gitlab-data:/data");
+
+        let v = parse("fast/gitlab-data:/data:ro").unwrap();
+        assert_eq!(serde_yaml::to_string(&v).unwrap().trim(), "fast/gitlab-data:/data:ro");
+
+        let v = parse("/anon").unwrap();
+        assert_eq!(serde_yaml::to_string(&v).unwrap().trim(), "/anon");
+    }
+
+    #[test]
+    fn an_anonymous_read_only_mount_falls_back_to_the_long_form() {
+        // The short syntax's target-only case is always read-write, so this
+        // is the one shape that can't round trip through it.
+        let v: VolumeMount = serde_yaml::from_str("{ target: /data, read_only: true }").unwrap();
+        let encoded = serde_yaml::to_string(&v).unwrap();
+        let reparsed: VolumeMount = serde_yaml::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, v);
     }
 
     #[test]

@@ -79,15 +79,15 @@ enum RawObjectRef {
 #[serde(deny_unknown_fields)]
 struct LongObjectRef {
     source: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     mode: Option<Mode>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     uid: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     gid: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<String>,
 }
 
@@ -238,6 +238,15 @@ mod tests {
             let original = parse(yaml);
             let encoded = serde_yaml::to_string(&original).expect("encode");
             assert_eq!(parse(&encoded), original);
+        }
+    }
+
+    #[test]
+    fn unset_long_form_fields_are_omitted_rather_than_written_as_null() {
+        let r = parse("source: nginx_conf\ntarget: /etc/nginx/nginx.conf\n");
+        let encoded = serde_yaml::to_string(&r).expect("encode");
+        for absent in ["mode", "uid", "gid", "env"] {
+            assert!(!encoded.contains(absent), "unexpected `{absent}` in:\n{encoded}");
         }
     }
 

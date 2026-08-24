@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, decodeText, encodeText } from '../api/client';
 import type { Assignment, InstanceState, LogLine, StackRequirements, StackState, ValidationError } from '../api/types';
@@ -27,6 +27,8 @@ export function StackDetail() {
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [jumpToConfigFiles, setJumpToConfigFiles] = useState(false);
+  const configFilesRef = useRef<HTMLDivElement>(null);
 
   const openEdit = () => {
     setNameInput(name);
@@ -37,6 +39,35 @@ export function StackDetail() {
     setSecretDrafts({});
     setEditing(true);
   };
+
+  // "Config files" jumps straight into the editor's config/secret section
+  // instead of making the admin click Validate first to reveal it: it
+  // validates the current spec itself, using the stack's own spec rather
+  // than the `spec` state (which openEdit only schedules an update for, and
+  // so isn't visible to a validate() called in the same tick).
+  const openConfigFiles = async () => {
+    setNameInput(name);
+    setSpec(stack?.spec ?? '');
+    setErrors([]);
+    setConfigDrafts({});
+    setSecretDrafts({});
+    setEditing(true);
+    setJumpToConfigFiles(true);
+    setSubmitError(null);
+    try {
+      const result = await api.validateStack(name, stack?.spec ?? '');
+      setErrors(result.errors);
+      setRequirements(result.requirements);
+    } catch (e) {
+      setSubmitError(e instanceof ApiError ? e.message : 'validation failed');
+    }
+  };
+
+  useEffect(() => {
+    if (!jumpToConfigFiles || !requirements) return;
+    configFilesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setJumpToConfigFiles(false);
+  }, [jumpToConfigFiles, requirements]);
 
   const onFile = async (file: File) => {
     setSpec(await file.text());
@@ -196,7 +227,7 @@ export function StackDetail() {
         )}
 
         {requirements && (requirements.file_configs.length > 0 || requirements.file_secrets.length > 0) && (
-          <div className="section">
+          <div className="section" ref={configFilesRef}>
             <div className="section-head">
               <h2>
                 <Icon name="file" /> Config &amp; secret files
@@ -288,6 +319,7 @@ export function StackDetail() {
       instances={instances}
       isAdmin={isAdmin}
       openEdit={openEdit}
+      openConfigFiles={openConfigFiles}
       remove={remove}
     />
   );
@@ -299,6 +331,7 @@ function StackDetailBody({
   instances,
   isAdmin,
   openEdit,
+  openConfigFiles,
   remove,
 }: {
   name: string;
@@ -306,6 +339,7 @@ function StackDetailBody({
   instances: Assignment[];
   isAdmin: boolean;
   openEdit: () => void;
+  openConfigFiles: () => void;
   remove: () => void;
 }) {
   const [live, setLive] = useState<Record<string, InstanceState>>({});
@@ -352,6 +386,11 @@ function StackDetailBody({
             <button onClick={openEdit}>
               <Icon name="edit" /> Redeploy
             </button>
+            {(stack.configs.length > 0 || stack.secrets.length > 0) && (
+              <button onClick={openConfigFiles}>
+                <Icon name="file" /> Config files
+              </button>
+            )}
             <button className="danger" onClick={remove}>
               <Icon name="trash" /> Remove
             </button>
@@ -372,14 +411,14 @@ function StackDetailBody({
             <Icon name="file" />
             <span className="stat-label">Configs</span>
           </span>
-          <span className="stat-value">{stack.configs.length}</span>
+          <span className="stat-value">{stack.used_configs.length}</span>
         </div>
         <div className="card stat">
           <span className="stat-head">
             <Icon name="key" />
             <span className="stat-label">Secrets</span>
           </span>
-          <span className="stat-value">{stack.secrets.length}</span>
+          <span className="stat-value">{stack.used_secrets.length}</span>
         </div>
       </div>
 

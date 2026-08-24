@@ -1107,6 +1107,33 @@ async fn redeploying_without_resending_a_config_keeps_it() {
     );
 }
 
+/// A config a service references without bundling a `file:` for it (it must
+/// already exist, created separately) is never "owned" by the stack, but the
+/// ui still needs to know the stack uses it -- that's what `used_configs`
+/// is for, as opposed to the owned-only `configs`.
+#[tokio::test]
+async fn a_config_referenced_without_a_file_shows_up_in_used_configs_not_owned_configs() {
+    let h = harness().await;
+    h.state
+        .cluster
+        .submit(cl_raft::Request::PutConfig {
+            name: "shared_conf".to_string(),
+            content: cl_raft::base64_encode(b"hello"),
+            owner: None,
+        })
+        .await
+        .expect("seed the pre-existing config");
+
+    let spec = "services:\n  web:\n    image: nginx\n    configs: [shared_conf]\nconfigs:\n  shared_conf: {}\n";
+    let status = deploy(&h, "site", &format!(r#"{{"spec":{spec:?}}}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let state = h.state.cluster.state().await;
+    let stack = &state.stacks["site"];
+    assert!(!stack.configs.contains("shared_conf"), "the stack does not own it");
+    assert!(stack.used_configs.contains("shared_conf"), "but the stack does use it");
+}
+
 /// A brand new file-backed config with no content anywhere is a request the
 /// server must reject up front, not accept and leave half-wired.
 #[tokio::test]
@@ -1527,6 +1554,8 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
             name: "web".to_string(),
             configs: BTreeSet::from(["web.conf".to_string()]),
             secrets: BTreeSet::from(["web.secret".to_string()]),
+            used_configs: BTreeSet::from(["web.conf".to_string()]),
+            used_secrets: BTreeSet::from(["web.secret".to_string()]),
         })
         .await
         .expect("submit stack objects");

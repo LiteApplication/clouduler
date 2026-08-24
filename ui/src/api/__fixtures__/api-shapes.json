@@ -175,7 +175,13 @@
         "secrets": [
           "web.secret"
         ],
-        "spec": "services: {}"
+        "spec": "services: {}",
+        "used_configs": [
+          "web.conf"
+        ],
+        "used_secrets": [
+          "web.secret"
+        ]
       }
     },
     "unreachable": [],

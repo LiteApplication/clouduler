@@ -49,6 +49,8 @@ struct StackDetail {
     revision: u64,
     configs: Vec<String>,
     secrets: Vec<String>,
+    used_configs: Vec<String>,
+    used_secrets: Vec<String>,
     requirements: StackRequirements,
 }
 
@@ -73,6 +75,8 @@ async fn detail(
         revision: stack.revision,
         configs: stack.configs.iter().cloned().collect(),
         secrets: stack.secrets.iter().cloned().collect(),
+        used_configs: stack.used_configs.iter().cloned().collect(),
+        used_secrets: stack.used_secrets.iter().cloned().collect(),
         requirements,
     }))
 }
@@ -184,6 +188,8 @@ async fn deploy(
             name,
             configs: requirements.file_configs,
             secrets: requirements.file_secrets,
+            used_configs: requirements.configs,
+            used_secrets: requirements.secrets,
         })
         .await
         .map_err(ApiError::not_leader)?;

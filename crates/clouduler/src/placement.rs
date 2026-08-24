@@ -118,6 +118,8 @@ pub(crate) mod fixtures {
                     revision: 1,
                     configs: Default::default(),
                     secrets: Default::default(),
+                    used_configs: Default::default(),
+                    used_secrets: Default::default(),
                 },
             )]),
             ..Default::default()
