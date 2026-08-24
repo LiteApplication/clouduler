@@ -12,7 +12,7 @@
 //! it is unit tested without privileges. The privileged glue at the bottom
 //! needs CAP_NET_ADMIN and a real `iptables` binary.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
 
 use ipnet::Ipv4Net;
@@ -182,6 +182,33 @@ pub fn apply_egress_iptables(plan: &EgressIptablesPlan) -> Result<()> {
     Ok(())
 }
 
+/// How long to wait for a reply before treating the primary interface as
+/// down. Short: this runs on every reconcile tick, and a node with a truly
+/// dead interface should not stall the rest of that tick's work on it.
+const PROBE_TIMEOUT_SECS: u32 = 2;
+
+/// Args for a single ICMP echo sent out `iface` to `target`, used to decide
+/// whether an egress network's primary interface still reaches the
+/// internet. Pure and unit tested; `probe_reachable` below is the privileged
+/// half that actually runs it.
+pub fn ping_plan(iface: &str, target: IpAddr) -> Vec<String> {
+    argv(&["-I", iface, "-c", "1", "-W", &PROBE_TIMEOUT_SECS.to_string(), &target.to_string()])
+}
+
+/// True if `target` answered a single ICMP echo sent out `iface`. Needs the
+/// `ping` binary (iputils) and CAP_NET_RAW, same as the rest of this module
+/// needs CAP_NET_ADMIN — `ping` handles the raw socket itself. A missing
+/// binary, a permission error, and a real timeout are all indistinguishable
+/// here on purpose: any of them means "cannot confirm this interface still
+/// works," which is exactly when a caller wants to fail over.
+pub fn probe_reachable(iface: &str, target: IpAddr) -> bool {
+    Command::new("ping")
+        .args(ping_plan(iface, target))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn run_iptables(args: &[String]) -> Result<()> {
     let output = Command::new("iptables")
         .args(args)
@@ -261,6 +288,20 @@ mod tests {
         let nat = plan.setup.iter().find(|a| a.contains(&"MASQUERADE".to_string())).expect("a masquerade rule");
         assert!(nat.iter().any(|a| a == "10.245.7.0/24"));
         assert!(nat.windows(2).any(|w| w == ["-o", "wg0"]));
+    }
+
+    #[test]
+    fn the_ping_plan_binds_to_the_given_interface() {
+        let plan = ping_plan("wg0", "1.1.1.1".parse().unwrap());
+        assert!(plan.windows(2).any(|w| w == ["-I", "wg0"]));
+        assert!(plan.last().map(|s| s == "1.1.1.1").unwrap_or(false));
+    }
+
+    #[test]
+    fn a_missing_ping_binary_is_treated_as_unreachable_not_a_panic() {
+        // Regardless of environment, this must never panic; on a host with no
+        // `ping` on PATH it also exercises the "missing binary" fallback.
+        let _ = probe_reachable("lo", "127.0.0.1".parse().unwrap());
     }
 
     #[test]

@@ -306,11 +306,22 @@ export interface PublicAddress {
   open_ports: OpenPort[];
 }
 
+/** Only meaningful on an `egress`-kind network: a second interface to route
+ *  out of, and the address used to probe whether the primary interface still
+ *  reaches the internet. */
+export interface EgressFallback {
+  interface: string;
+  health_check_ip: string;
+}
+
 /** An egress or wireguard network's host interface address. Serializes as a
- *  bare string when `open_ports` is empty. */
+ *  bare string when `open_ports` is empty and `fallback` is unset. */
 export interface InterfaceAddress {
   interface: string;
   open_ports: OpenPort[];
+  /** Absent when unset — the server omits the key entirely rather than
+   *  sending `null`. */
+  fallback?: EgressFallback | null;
 }
 
 export type NodeAddress = string | PublicAddress | InterfaceAddress;

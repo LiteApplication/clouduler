@@ -218,6 +218,17 @@ container is *reached*. An `egress` network is about how one *leaves*: a
 service attached to it gets its outbound traffic forced out a named host
 interface, and nowhere else, instead of the node's normal route.
 
+Unlike most of this daemon's other subsystems, which only see a config
+change once restarted (`watch_cluster_config`, `crates/clouduler/src/daemon.rs`,
+literally logs "restart the daemon to apply it" when it writes a changed
+config to disk), the egress reconcile loop re-reads the config from raft
+every tick (`RECONCILE_INTERVAL`, currently 10s). Add a new `egress`
+network, point a node at an interface for it, or attach a service to it, and
+the bridge, kill-switch and docker network come up on the next tick — no
+restart needed. A node still has to be restarted to notice most *other*
+kinds of config change (a new drive, a new `public` network address, and so
+on); this loop is the one exception.
+
 ```yaml
 networks:
   vpn:
@@ -288,3 +299,37 @@ was never brought up, there is no rule that accepts the bridge's traffic out
 anything else, so it is dropped rather than silently falling back to the
 node's normal WAN. Nothing has to notice the interface is down and react —
 the ruleset simply never had another way out.
+
+### Optional fallback interface
+
+An egress-kind node address can name a second interface plus a
+`health_check_ip`:
+
+```yaml
+nodes:
+  n1:
+    network:
+      vpn:
+        interface: wg0
+        fallback:
+          interface: end0
+          health_check_ip: 1.1.1.1
+```
+
+Every reconcile tick (`crates/clouduler/src/egress.rs::effective_interface`),
+clouduler sends a single ICMP echo to `health_check_ip` out `interface`
+(`cl_net::egress::probe_reachable`, which shells out to `ping -I`, the same
+"shell out to a real network tool" convention `iptables` and `ip` use
+elsewhere in this crate). If it answers, the kill-switch ruleset above is
+built exactly as it would be with no fallback configured. If it doesn't —
+timeout, no route, a missing `ping` binary, anything — the ruleset is
+rebuilt pointed at `fallback.interface` instead, on this tick and every one
+after until the primary starts answering again. There's no separate "back
+up" step: since `apply_egress_iptables` always flushes and repopulates its
+chains from scratch, switching back is just the same rebuild picking the
+other interface once the probe succeeds again.
+
+This only applies to `egress`-kind addresses. A `wireguard`-kind address can
+carry a `fallback` block (the schema is shared), but the reconcile loop
+never probes it — a wireguard tunnel doesn't have a "second interface" to
+fail over to the way a plain egress address does.

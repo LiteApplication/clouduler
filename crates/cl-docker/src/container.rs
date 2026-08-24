@@ -1,6 +1,6 @@
 //! Container lifecycle: create, start, stop, remove, inspect, list.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -294,6 +294,12 @@ pub struct ContainerState {
     pub exit_code: Option<i64>,
     pub labels: HashMap<String, String>,
     pub started_at: Option<String>,
+    /// Docker network names this container is currently attached to. Used to
+    /// notice a running container that should have an egress network
+    /// attached (per its spec) but doesn't yet — e.g. one created before
+    /// that network existed — without needing a separate inspect call just
+    /// to find out.
+    pub networks: BTreeSet<String>,
 }
 
 impl From<bollard::models::ContainerInspectResponse> for ContainerState {
@@ -313,6 +319,11 @@ impl From<bollard::models::ContainerInspectResponse> for ContainerState {
             exit_code: state.exit_code,
             labels: config.and_then(|c| c.labels).unwrap_or_default(),
             started_at: state.started_at,
+            networks: resp
+                .network_settings
+                .and_then(|ns| ns.networks)
+                .map(|m| m.into_keys().collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -339,6 +350,11 @@ impl From<ContainerSummary> for ContainerState {
             exit_code: None,
             labels: summary.labels.unwrap_or_default(),
             started_at: None,
+            networks: summary
+                .network_settings
+                .and_then(|ns| ns.networks)
+                .map(|m| m.into_keys().collect())
+                .unwrap_or_default(),
         }
     }
 }

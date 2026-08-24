@@ -17,7 +17,7 @@ pub enum DeployMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Placement {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<String>,
 }
 
@@ -25,9 +25,9 @@ pub struct Placement {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSpec {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
 }
 
@@ -35,9 +35,9 @@ pub struct ResourceSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ResourceSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reservations: Option<ResourceSpec>,
 }
 
@@ -45,13 +45,13 @@ pub struct Resources {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeployRestartPolicy {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub delay: Option<Duration>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub window: Option<Duration>,
 }
 
@@ -59,13 +59,13 @@ pub struct DeployRestartPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub delay: Option<Duration>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_action: Option<String>,
 }
 
@@ -73,17 +73,17 @@ pub struct UpdateConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Deploy {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<DeployMode>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<Placement>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Resources>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_policy: Option<DeployRestartPolicy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_config: Option<UpdateConfig>,
 }
 

@@ -542,6 +542,7 @@ services:
                 }]
                 .into_iter()
                 .collect(),
+                fallback: None,
             }),
         );
         stack(raw).validate(&cfg).expect("n1's tunnel has the port open");

@@ -137,17 +137,17 @@ pub struct CorsPolicy {
     /// pair a wildcard origin with credentials, so the combination could
     /// only ever surface as a confusing runtime failure.
     pub origins: Vec<String>,
-    #[serde(default = "default_cors_methods")]
+    #[serde(default = "default_cors_methods", skip_serializing_if = "is_default_cors_methods")]
     pub methods: Vec<String>,
     /// Headers a request may set. Empty means whatever the browser asked for
     /// in `Access-Control-Request-Headers` is echoed back, which is the
     /// common case and avoids listing every header a client might send.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub allow_credentials: bool,
     /// How long a browser may cache a preflight result.
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub max_age: Option<Duration>,
 }
 
@@ -158,6 +158,18 @@ fn default_cors_methods() -> Vec<String> {
         .collect()
 }
 
+fn is_default_cors_methods(methods: &[String]) -> bool {
+    methods == default_cors_methods().as_slice()
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 /// HTTP basic auth in front of a route.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -166,8 +178,12 @@ pub struct BasicAuth {
     /// file would end up in the cluster database and in everyone's shell
     /// history.
     pub users: BTreeMap<String, String>,
-    #[serde(default = "default_realm")]
+    #[serde(default = "default_realm", skip_serializing_if = "is_default_realm")]
     pub realm: String,
+}
+
+fn is_default_realm(realm: &str) -> bool {
+    realm == default_realm()
 }
 
 fn default_realm() -> String {
@@ -179,14 +195,14 @@ fn default_realm() -> String {
 #[serde(deny_unknown_fields)]
 pub struct Headers {
     /// Set on the request going to the container.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub request: BTreeMap<String, String>,
     /// Set on the response going back to the client.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub response: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_request: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_response: Vec<String>,
 }
 
@@ -200,13 +216,13 @@ pub struct ProxyRoute {
     pub network: String,
     /// Container port traffic is forwarded to.
     pub port: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub tls: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub middlewares: Vec<Middleware>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticky: Option<bool>,
 
     /// Largest request body to forward, e.g. `10MB`. Anything bigger is
@@ -219,19 +235,19 @@ pub struct ProxyRoute {
     /// Let `Upgrade` requests through, which is what a websocket needs. On by
     /// default: a route that does not use websockets is unaffected, and one
     /// that does would otherwise fail in a way that is tedious to diagnose.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub websockets: bool,
 
     /// Forward the client's `Host` header instead of rewriting it to the
     /// backend's address. Off by default because most containers do not care,
     /// but anything that builds absolute URLs or does virtual hosting needs it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_host: bool,
 
     /// How long to wait for the backend's response headers, connection time
     /// included. Unset waits forever, which ties up a connection when a
     /// container wedges.
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub response_timeout: Option<Duration>,
 }
 
@@ -245,18 +261,22 @@ fn default_true() -> bool {
 pub struct ExposePort {
     pub port: u16,
     pub published: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default_protocol")]
     pub protocol: Protocol,
     pub network: String,
+}
+
+fn is_default_protocol(p: &Protocol) -> bool {
+    *p == Protocol::default()
 }
 
 /// Per volume override of the drive's default sync interval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeSyncOverride {
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub interval: Option<Duration>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
 
@@ -264,15 +284,15 @@ pub struct VolumeSyncOverride {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceExtensions {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy: Vec<ProxyRoute>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<ExposePort>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub volume_sync: BTreeMap<String, VolumeSyncOverride>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
 }
 
@@ -281,11 +301,11 @@ pub struct ServiceExtensions {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StackDefaults {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub volume_sync: BTreeMap<String, VolumeSyncOverride>,
 }
 

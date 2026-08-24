@@ -44,18 +44,18 @@ pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 #[serde(deny_unknown_fields)]
 pub struct StackFile {
     /// Accepted and ignored: clouduler doesn't distinguish compose schema versions.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub services: BTreeMap<String, Service>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub networks: BTreeMap<String, Option<StackNetwork>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub volumes: BTreeMap<String, Option<StackVolume>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub configs: BTreeMap<String, Option<StackConfig>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, Option<StackSecret>>,
-    #[serde(rename = "x-clouduler", default)]
+    #[serde(rename = "x-clouduler", default, skip_serializing_if = "Option::is_none")]
     pub x_clouduler: Option<StackDefaults>,
 }
 
@@ -91,53 +91,53 @@ pub struct StackSecret {
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub image: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Command>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Command>,
-    #[serde(default, deserialize_with = "de::map_or_list")]
+    #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
-    #[serde(default, deserialize_with = "de::path_or_list")]
+    #[serde(default, deserialize_with = "de::path_or_list", skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<PathBuf>,
-    #[serde(default, deserialize_with = "de::map_or_list")]
+    #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortMapping>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub networks: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub healthcheck: Option<Healthcheck>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartPolicy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_add: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_drop: Vec<String>,
-    #[serde(default, deserialize_with = "de::map_or_list")]
+    #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
     pub sysctls: BTreeMap<String, String>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub stop_grace_period: Option<Duration>,
     /// Signal sent on a graceful stop, e.g. `SIGINT`. Defaults to the image's
     /// own `STOPSIGNAL` (usually `SIGTERM`) when unset.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_signal: Option<String>,
     /// Cluster configs mounted into this service.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub configs: Vec<ObjectRef>,
     /// Cluster secrets mounted into this service, at /run/secrets by default.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<ObjectRef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<Deploy>,
-    #[serde(rename = "x-clouduler", default)]
+    #[serde(rename = "x-clouduler", default, skip_serializing_if = "Option::is_none")]
     pub x_clouduler: Option<ServiceExtensions>,
 }
 

@@ -173,7 +173,7 @@ impl Scheduler {
         } else {
             info!(actions = actions.len(), fenced, "reconciling");
         }
-        self.reconciler.apply(&actions, &targets).await?;
+        self.reconciler.apply(&actions, &targets, &actual).await?;
 
         // Objects for instances that have moved on must not linger on disk.
         let keep: BTreeMap<String, ()> = targets

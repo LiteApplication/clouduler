@@ -10,6 +10,16 @@
 //! a container placed here on the very next sweep already has somewhere to
 //! attach.
 //!
+//! The reconcile loop re-reads the cluster config from raft every tick
+//! (`RECONCILE_INTERVAL`) instead of working off the snapshot the daemon
+//! booted with, unlike most of this daemon's other subsystems (`overlay`,
+//! the scheduler's network lists) which still need a restart to notice a
+//! config change. That asymmetry exists because an egress network an
+//! operator just added is otherwise invisible until someone thinks to
+//! restart the node that's supposed to implement it — a bridge nothing is
+//! forwarding through yet has no cost to bringing up a tick late, so there's
+//! no reason to make that operator remember the restart.
+//!
 //! A wireguard-kind network is an egress network whose interface clouduler
 //! itself creates and configures, from a config imported through the api and
 //! stored as a sealed secret (`cl_api::wireguard::wireguard_secret_name`),
@@ -27,7 +37,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cl_api::wireguard::{wireguard_secret_name, WireguardIngressStore};
-use cl_config::{ClusterConfig, NetworkKind, NodeAddress};
+use cl_config::{ClusterConfig, InterfaceAddress, NetworkKind, NodeAddress};
 use cl_docker::{Docker, NetworkSpec};
 use cl_net::egress::{
     apply_egress_iptables, egress_docker_name, egress_gateway, egress_iptables_plan, egress_subnet,
@@ -49,10 +59,10 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const OWNER: &str = "_cluster";
 
 /// Every egress or wireguard network this node implements, network name ->
-/// (kind, host interface). For a wireguard network the interface name is
-/// still the one stored in `node.network`, but it names a tunnel clouduler
-/// manages rather than one the admin set up.
-pub fn interfaces_of(cfg: &ClusterConfig, node_name: &str) -> BTreeMap<String, (NetworkKind, String)> {
+/// (kind, address). For a wireguard network the interface name inside the
+/// address is still the one stored in `node.network`, but it names a tunnel
+/// clouduler manages rather than one the admin set up.
+pub fn interfaces_of(cfg: &ClusterConfig, node_name: &str) -> BTreeMap<String, (NetworkKind, InterfaceAddress)> {
     let Some(node) = cfg.nodes.get(node_name) else {
         return BTreeMap::new();
     };
@@ -60,10 +70,59 @@ pub fn interfaces_of(cfg: &ClusterConfig, node_name: &str) -> BTreeMap<String, (
         .iter()
         .filter(|(_, net)| matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard))
         .filter_map(|(name, net)| match node.network.get(name) {
-            Some(NodeAddress::Interface(iface)) => Some((name.clone(), (net.kind, iface.interface.clone()))),
+            Some(NodeAddress::Interface(addr)) => Some((name.clone(), (net.kind, addr.clone()))),
             _ => None,
         })
         .collect()
+}
+
+/// The interface a network's traffic should actually leave through right
+/// now. Only an `egress`-kind address with a `fallback` configured ever
+/// probes anything; everything else (wireguard tunnels, egress addresses
+/// with no fallback) just uses its configured interface unconditionally, so
+/// a cluster that never opted into this costs nothing extra per tick.
+async fn effective_interface(kind: NetworkKind, addr: &InterfaceAddress, network: &str) -> String {
+    if kind != NetworkKind::Egress {
+        return addr.interface.clone();
+    }
+    let Some(fallback) = &addr.fallback else {
+        return addr.interface.clone();
+    };
+    let primary = addr.interface.clone();
+    let target = fallback.health_check_ip;
+    let primary_iface = primary.clone();
+    let reachable = tokio::task::spawn_blocking(move || cl_net::egress::probe_reachable(&primary_iface, target))
+        .await
+        .unwrap_or(false);
+    if reachable {
+        primary
+    } else {
+        warn!(
+            network = %network, primary = %primary, fallback = %fallback.interface, target = %target,
+            "primary egress interface did not answer a probe, routing out the fallback interface instead",
+        );
+        fallback.interface.clone()
+    }
+}
+
+/// Reads the cluster config raft is currently carrying, parsed the same way
+/// the daemon parses it off disk at boot. Falls back to `previous` — the
+/// last config this loop successfully parsed, starting from the one the
+/// daemon booted with — if raft has nothing yet (a brand new node, mid
+/// bootstrap) or the stored yaml fails to parse (should not happen, since
+/// nothing accepts a config into raft without validating it first, but a
+/// reconcile loop should never crash over it either way).
+async fn live_config(cluster: &ClusterNode, previous: &ClusterConfig) -> ClusterConfig {
+    let Some(entry) = cluster.state().await.cluster_config else {
+        return previous.clone();
+    };
+    match ClusterConfig::parse(&entry.yaml) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(error = %e, "cluster config in raft failed to parse, reconciling egress networks with the last good config instead");
+            previous.clone()
+        }
+    }
 }
 
 pub fn start(
@@ -72,21 +131,10 @@ pub fn start(
     cluster: &Arc<ClusterNode>,
     docker: Option<Docker>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let interfaces = interfaces_of(cfg, node_name);
-    if interfaces.is_empty() {
-        return None;
-    }
     let docker = docker?;
     let cluster = cluster.clone();
     let node_name = node_name.to_string();
-    // Only wireguard networks need it, to open their sealed config; loaded
-    // once, like the materializer's own key, not reloaded every tick.
-    let key = interfaces
-        .values()
-        .any(|(kind, _)| *kind == NetworkKind::Wireguard)
-        .then(|| cfg.nodes.get(&node_name).and_then(|node| crate::daemon::load_cluster_key(cfg, node)))
-        .flatten();
-    let internal_addr = cfg.nodes.get(&node_name).and_then(|node| node.ip_on(cfg.internal_network().0));
+    let boot_cfg = cfg.clone();
 
     Some(tokio::spawn(async move {
         // Netlink needs CAP_NET_ADMIN, same requirement as the overlay.
@@ -102,27 +150,46 @@ pub fn start(
         };
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+        let mut cfg = boot_cfg;
+        // Loaded lazily the first tick a wireguard network shows up, then
+        // kept: the key itself never changes for the life of the process,
+        // even as which networks need it comes and goes with the config.
+        let mut key: Option<ClusterKey> = None;
         loop {
             ticker.tick().await;
-            for (network, (kind, iface)) in &interfaces {
+            cfg = live_config(&cluster, &cfg).await;
+
+            let interfaces = interfaces_of(&cfg, &node_name);
+            if interfaces.is_empty() {
+                continue;
+            }
+            if key.is_none() && interfaces.values().any(|(kind, _)| *kind == NetworkKind::Wireguard) {
+                key = cfg.nodes.get(&node_name).and_then(|node| crate::daemon::load_cluster_key(&cfg, node));
+            }
+            let internal_addr = cfg.nodes.get(&node_name).and_then(|node| node.ip_on(cfg.internal_network().0));
+
+            for (network, (kind, addr)) in &interfaces {
+                let iface = &addr.interface;
                 if *kind == NetworkKind::Wireguard {
                     if let Err(e) = ensure_tunnel(&cluster, key.as_ref(), &node_name, network, iface).await {
                         warn!(network = %network, iface = %iface, error = %e, "cannot bring up the wireguard tunnel");
                         continue;
                     }
                 }
-                if let Err(e) = ensure_one(netlink.as_ref(), &docker, network, iface).await {
-                    warn!(network = %network, iface = %iface, error = %e, "cannot bring up the egress network");
+                let effective = effective_interface(*kind, addr, network).await;
+                if let Err(e) = ensure_one(netlink.as_ref(), &docker, network, &effective).await {
+                    warn!(network = %network, iface = %effective, error = %e, "cannot bring up the egress network");
                 }
             }
 
             if let Some(addr) = internal_addr {
                 let cluster_state = cluster.state().await;
                 let ingress_store = WireguardIngressStore::load(&cluster_state);
-                for (network, (kind, iface)) in &interfaces {
+                for (network, (kind, iface_addr)) in &interfaces {
                     if *kind != NetworkKind::Wireguard {
                         continue;
                     }
+                    let iface = &iface_addr.interface;
                     if let Err(e) = apply_ingress(iface, addr, network, &ingress_store).await {
                         warn!(network = %network, iface = %iface, error = %e, "cannot apply wireguard ingress rules");
                     }
@@ -240,9 +307,9 @@ mod tests {
             .network
             .insert("vpn".to_string(), NodeAddress::Interface(cl_config::InterfaceAddress::new("wg0")));
         let interfaces = interfaces_of(&cfg, "n1");
-        let (kind, iface) = interfaces.get("vpn").expect("vpn implemented");
+        let (kind, addr) = interfaces.get("vpn").expect("vpn implemented");
         assert_eq!(*kind, NetworkKind::Egress);
-        assert_eq!(iface, "wg0");
+        assert_eq!(addr.interface, "wg0");
     }
 
     #[test]
@@ -254,9 +321,9 @@ mod tests {
             .network
             .insert("wg".to_string(), NodeAddress::Interface(cl_config::InterfaceAddress::new("wg-wg")));
         let interfaces = interfaces_of(&cfg, "n1");
-        let (kind, iface) = interfaces.get("wg").expect("wg implemented");
+        let (kind, addr) = interfaces.get("wg").expect("wg implemented");
         assert_eq!(*kind, NetworkKind::Wireguard);
-        assert_eq!(iface, "wg-wg");
+        assert_eq!(addr.interface, "wg-wg");
     }
 
     #[test]
@@ -274,5 +341,34 @@ mod tests {
     #[test]
     fn an_unknown_node_implements_nothing() {
         assert!(interfaces_of(&cfg(), "does-not-exist").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_egress_address_with_no_fallback_never_probes_and_uses_its_interface() {
+        let addr = cl_config::InterfaceAddress::new("wg0");
+        assert_eq!(effective_interface(NetworkKind::Egress, &addr, "vpn").await, "wg0");
+    }
+
+    #[tokio::test]
+    async fn a_wireguard_address_ignores_any_fallback_and_uses_its_own_interface() {
+        let mut addr = cl_config::InterfaceAddress::new("wg-wg");
+        addr.fallback = Some(cl_config::EgressFallback {
+            interface: "end0".to_string(),
+            health_check_ip: "1.1.1.1".parse().unwrap(),
+        });
+        assert_eq!(effective_interface(NetworkKind::Wireguard, &addr, "wg").await, "wg-wg");
+    }
+
+    #[tokio::test]
+    async fn an_egress_address_falls_back_once_the_primary_stops_answering() {
+        // "does-not-exist0" can never be a real interface, so the probe
+        // behind it always fails closed the same way a genuinely dead
+        // interface would, without needing root or a live network.
+        let mut addr = cl_config::InterfaceAddress::new("does-not-exist0");
+        addr.fallback = Some(cl_config::EgressFallback {
+            interface: "end0".to_string(),
+            health_check_ip: "1.1.1.1".parse().unwrap(),
+        });
+        assert_eq!(effective_interface(NetworkKind::Egress, &addr, "vpn").await, "end0");
     }
 }

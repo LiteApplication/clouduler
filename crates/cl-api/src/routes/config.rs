@@ -546,3 +546,88 @@ async fn pending(_identity: Identity, State(state): State<AppState>) -> Json<Pen
     };
     Json(body)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stack-file half of a network rename: the top-level `networks:`
+    /// key, a service's `networks:` list, and the network name buried inside
+    /// `x-clouduler.proxy`/`expose` all have to move together, or the
+    /// renamed network silently stops matching what the service asks for.
+    #[test]
+    fn rename_network_in_stack_updates_the_x_clouduler_block() {
+        let mut file = StackFile::parse(
+            r#"
+services:
+  app:
+    image: nginx
+    networks: [wan]
+    x-clouduler:
+      proxy:
+        - host: app
+          network: wan
+          port: 80
+      expose:
+        - port: 22
+          published: 2222
+          network: wan
+networks:
+  wan: {}
+"#,
+        )
+        .expect("parse");
+
+        assert!(rename_network_in_stack(&mut file, "wan", "public"));
+
+        assert!(file.networks.contains_key("public"));
+        assert!(!file.networks.contains_key("wan"));
+
+        let svc = &file.services["app"];
+        assert_eq!(svc.networks, vec!["public".to_string()]);
+
+        let ext = svc.x_clouduler.as_ref().expect("has x-clouduler");
+        assert_eq!(ext.proxy[0].network, "public");
+        assert_eq!(ext.expose[0].network, "public");
+
+        // Renaming again for a network the stack never mentioned is a no-op.
+        assert!(!rename_network_in_stack(&mut file, "unrelated", "other"));
+    }
+
+    /// Re-serializing a stack file after a rename must not pad it with every
+    /// field's default value: only what the stack actually set should
+    /// reappear.
+    #[test]
+    fn rewritten_stack_file_stays_minimal() {
+        let mut file = StackFile::parse(
+            r#"
+services:
+  app:
+    image: nginx
+    networks: [wan]
+networks:
+  wan: {}
+"#,
+        )
+        .expect("parse");
+        rename_network_in_stack(&mut file, "wan", "public");
+
+        let yaml = serde_yaml::to_string(&file).expect("encode");
+        for absent in [
+            "cap_add",
+            "cap_drop",
+            "depends_on",
+            "env_file",
+            "sysctls",
+            "ports:",
+            "configs:",
+            "secrets:",
+            "x-clouduler",
+        ] {
+            assert!(!yaml.contains(absent), "unexpected default field `{absent}` in:\n{yaml}");
+        }
+
+        let reparsed = StackFile::parse(&yaml).expect("round trips");
+        assert_eq!(reparsed, file);
+    }
+}

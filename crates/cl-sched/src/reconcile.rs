@@ -141,7 +141,7 @@ impl Reconciler {
 
     /// Apply the actions. One failure does not abort the rest: a single broken
     /// container must not stop the node reconciling everything else.
-    pub async fn apply(&self, actions: &[Action], targets: &[Target]) -> Result<()> {
+    pub async fn apply(&self, actions: &[Action], targets: &[Target], actual: &[ContainerState]) -> Result<()> {
         let specs: BTreeMap<&InstanceId, &Target> = targets
             .iter()
             .map(|t| (&t.assignment.instance, t))
@@ -153,7 +153,60 @@ impl Reconciler {
                 warn!(instance = %id, error = %e, "reconcile step failed");
             }
         }
+
+        self.reconcile_egress_attachments(targets, actual).await;
         Ok(())
+    }
+
+    /// Catches a container that should be attached to an egress network but
+    /// isn't yet — almost always one that was already running before the
+    /// network existed to attach it to (`crates/clouduler/src/egress.rs` can
+    /// bring a new `egress`/`wireguard` network up without a restart, but
+    /// that alone does nothing for a container already running without it).
+    /// `Action::Create`/`Action::Recreate` above are the only other place
+    /// this attachment happens, and neither fires again once a container's
+    /// revision is up to date, so nothing else would ever retry it.
+    ///
+    /// Runs unconditionally every tick, for every running target with an
+    /// egress network, rather than trying to track "did this one already get
+    /// fixed": both `connect_network` and `set_default_route` are already
+    /// idempotent (a repeat call is a cheap no-op), and that's simpler than
+    /// keeping that answer correct across reconnects, migrations and
+    /// restarts.
+    async fn reconcile_egress_attachments(&self, targets: &[Target], actual: &[ContainerState]) {
+        let running: BTreeMap<InstanceId, &ContainerState> = actual
+            .iter()
+            .filter_map(|c| {
+                let id = c.labels.get(LABEL_INSTANCE)?.parse::<InstanceId>().ok()?;
+                Some((id, c))
+            })
+            .collect();
+
+        for target in targets {
+            if target.assignment.desired != DesiredState::Running {
+                continue;
+            }
+            let Some(egress) = &target.spec.egress_network else {
+                continue;
+            };
+            let Some(state) = running.get(&target.assignment.instance) else {
+                continue;
+            };
+            if !state.running || state.networks.contains(egress) {
+                continue;
+            }
+
+            let id = &target.assignment.instance;
+            info!(instance = %id, network = %egress, "attaching a running container to its egress network");
+            if let Err(e) = self.docker.connect_network(&state.id, egress, None).await {
+                warn!(instance = %id, network = %egress, error = %e, "cannot attach the egress network");
+                continue;
+            }
+            let name = id.container_name();
+            if let Err(e) = self.docker.set_default_route(&name, egress).await {
+                warn!(instance = %id, network = %egress, error = %e, "cannot route this container's traffic out the egress network");
+            }
+        }
     }
 
     /// Pull the image unless it is already here. Creating a container against
@@ -280,6 +333,7 @@ mod tests {
             exit_code: None,
             labels,
             started_at: None,
+            networks: BTreeSet::new(),
         }
     }
 

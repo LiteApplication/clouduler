@@ -420,13 +420,19 @@ impl NodeAddress {
 /// actually arrive, the same way `PublicAddress::open_ports` works for a
 /// public network's router.
 ///
-/// Serializes as a bare string when `open_ports` is empty, so a plain egress
-/// interface (`vpn: wg0`) round trips unchanged; a map form is used once
-/// ports are declared.
+/// Serializes as a bare string when `open_ports` is empty and `fallback` is
+/// unset, so a plain egress interface (`vpn: wg0`) round trips unchanged; a
+/// map form is used once either is declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceAddress {
     pub interface: String,
     pub open_ports: BTreeSet<OpenPort>,
+    /// Only meaningful on an `egress`-kind network: a second interface to
+    /// route out of instead, while `health_check_ip` stops answering pings
+    /// sent out `interface`. Re-checked every reconcile tick, so it also
+    /// switches back once the primary interface recovers. See
+    /// `[[clouduler-egress-fallback]]` / `docs/networking.md`.
+    pub fallback: Option<EgressFallback>,
 }
 
 impl InterfaceAddress {
@@ -434,8 +440,19 @@ impl InterfaceAddress {
         Self {
             interface: interface.into(),
             open_ports: BTreeSet::new(),
+            fallback: None,
         }
     }
+}
+
+/// A fallback interface for an `egress` network's node address, and the
+/// address used to tell whether the primary interface still has a route to
+/// the internet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EgressFallback {
+    pub interface: String,
+    pub health_check_ip: IpAddr,
 }
 
 impl Serialize for InterfaceAddress {
@@ -443,15 +460,18 @@ impl Serialize for InterfaceAddress {
     where
         S: serde::Serializer,
     {
-        if self.open_ports.is_empty() {
+        if self.open_ports.is_empty() && self.fallback.is_none() {
             serializer.serialize_str(&self.interface)
         } else {
             #[derive(Serialize)]
             struct Full<'a> {
                 interface: &'a str,
                 open_ports: &'a BTreeSet<OpenPort>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                fallback: &'a Option<EgressFallback>,
             }
-            Full { interface: &self.interface, open_ports: &self.open_ports }.serialize(serializer)
+            Full { interface: &self.interface, open_ports: &self.open_ports, fallback: &self.fallback }
+                .serialize(serializer)
         }
     }
 }
@@ -467,6 +487,8 @@ impl<'de> Deserialize<'de> for InterfaceAddress {
             interface: String,
             #[serde(default)]
             open_ports: BTreeSet<OpenPort>,
+            #[serde(default)]
+            fallback: Option<EgressFallback>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -475,8 +497,10 @@ impl<'de> Deserialize<'de> for InterfaceAddress {
             Full(Full),
         }
         Ok(match Raw::deserialize(deserializer)? {
-            Raw::Bare(interface) => InterfaceAddress { interface, open_ports: BTreeSet::new() },
-            Raw::Full(full) => InterfaceAddress { interface: full.interface, open_ports: full.open_ports },
+            Raw::Bare(interface) => InterfaceAddress { interface, open_ports: BTreeSet::new(), fallback: None },
+            Raw::Full(full) => {
+                InterfaceAddress { interface: full.interface, open_ports: full.open_ports, fallback: full.fallback }
+            }
         })
     }
 }

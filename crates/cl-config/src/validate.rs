@@ -197,6 +197,20 @@ impl ClusterConfig {
                                 "must name a non-empty host interface",
                             ));
                         }
+                        if let Some(fallback) = &addr.fallback {
+                            if fallback.interface.trim().is_empty() {
+                                return Err(ConfigError::invalid(
+                                    format!("{at}.fallback"),
+                                    "must name a non-empty host interface",
+                                ));
+                            }
+                            if fallback.interface == addr.interface {
+                                return Err(ConfigError::invalid(
+                                    format!("{at}.fallback"),
+                                    "must name a different interface than the primary one",
+                                ));
+                            }
+                        }
                     }
                     (NetworkKind::Egress | NetworkKind::Wireguard, _) => {
                         return Err(ConfigError::invalid(
@@ -673,6 +687,42 @@ cloudflare:
         let n2_addr = cfg.nodes["n2"].network.get("tailscale").unwrap();
         let reserialized = serde_yaml::to_string(n2_addr).unwrap();
         assert_eq!(reserialized.trim(), "10.10.0.2");
+    }
+
+    #[test]
+    fn egress_fallback_round_trips_and_is_rejected_when_it_matches_the_primary() {
+        let cfg = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: egress }",
+            ),
+            (
+                "      tailscale: 10.10.0.1",
+                "      tailscale: 10.10.0.1\n      vpn: { interface: end0, fallback: { interface: wlan0, health_check_ip: 1.1.1.1 } }",
+            ),
+        ])
+        .expect("valid");
+        let addr = cfg.nodes["n1"].network["vpn"].as_interface_address().expect("interface address");
+        let fallback = addr.fallback.as_ref().expect("fallback set");
+        assert_eq!(fallback.interface, "wlan0");
+        assert_eq!(fallback.health_check_ip, "1.1.1.1".parse::<std::net::IpAddr>().unwrap());
+
+        let yaml = serde_yaml::to_string(&cfg.nodes["n1"].network["vpn"]).unwrap();
+        assert!(yaml.contains("fallback"));
+        assert!(yaml.contains("wlan0"));
+
+        let err = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: egress }",
+            ),
+            (
+                "      tailscale: 10.10.0.1",
+                "      tailscale: 10.10.0.1\n      vpn: { interface: end0, fallback: { interface: end0, health_check_ip: 1.1.1.1 } }",
+            ),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("different interface than the primary"));
     }
 
     #[test]

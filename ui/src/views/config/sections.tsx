@@ -7,6 +7,7 @@ import { api, ApiError, encodeText } from '../../api/client';
 import type {
   CloudflareTokenStatus,
   ClusterConfig,
+  EgressFallback,
   InterfaceAddress,
   NetworkConfig,
   NetworkKind,
@@ -705,14 +706,19 @@ export function NodeCard({
           );
         }
         if (net.type === 'egress') {
-          const iface = typeof addr === 'string' ? addr : addr && 'interface' in addr ? addr.interface : '';
+          const egress: InterfaceAddress =
+            typeof addr === 'string'
+              ? { interface: addr, open_ports: [], fallback: null }
+              : addr && 'interface' in addr
+                ? { interface: addr.interface, open_ports: addr.open_ports ?? [], fallback: addr.fallback ?? null }
+                : { interface: '', open_ports: [], fallback: null };
           return (
             <EgressInterfaceField
               key={netName}
               nodeName={name}
               netName={netName}
-              value={iface}
-              onChange={(v) => setAddress(netName, v || null)}
+              addr={egress}
+              onChange={(v) => setAddress(netName, v.interface ? v : null)}
               disabled={disabled}
             />
           );
@@ -875,22 +881,28 @@ function OpenPortsEditor({
  * non-docker, non-clouduler-managed interfaces via a datalist, fetched once
  * per mount, but stays free text since the interface may not exist yet, or
  * the node may be unreachable right now.
+ *
+ * Optionally also names a fallback interface: every reconcile tick, the
+ * daemon pings `fallback.health_check_ip` out the primary interface, and
+ * routes the network out the fallback instead for as long as that fails —
+ * switching back automatically once the primary answers again.
  */
 function EgressInterfaceField({
   nodeName,
   netName,
-  value,
+  addr,
   onChange,
   disabled,
 }: {
   nodeName: string;
   netName: string;
-  value: string;
-  onChange: (value: string) => void;
+  addr: InterfaceAddress;
+  onChange: (addr: InterfaceAddress) => void;
   disabled: boolean;
 }) {
   const listId = `node-${nodeName}-${netName}-iface-options`;
   const [options, setOptions] = useState<string[]>([]);
+  const [fallbackEnabled, setFallbackEnabled] = useState(!!addr.fallback);
 
   useEffect(() => {
     let cancelled = false;
@@ -907,41 +919,83 @@ function EgressInterfaceField({
     };
   }, [nodeName]);
 
+  const toggleFallback = (enabled: boolean) => {
+    setFallbackEnabled(enabled);
+    onChange({ ...addr, fallback: enabled ? { interface: '', health_check_ip: '' } : null });
+  };
+
+  const updateFallback = (patch: Partial<EgressFallback>) => {
+    onChange({ ...addr, fallback: { ...(addr.fallback ?? { interface: '', health_check_ip: '' }), ...patch } });
+  };
+
   return (
-    <div className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
-      <div style={{ flex: 1 }}>
-        <div className="field">
-          <label htmlFor={`node-${nodeName}-${netName}-iface`}>{`${netName} (egress interface)`}</label>
-          <input
-            id={`node-${nodeName}-${netName}-iface`}
-            className="mono"
-            type="text"
-            list={listId}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
+    <div className="card" style={{ marginBottom: 8 }}>
+      <div className="section-head">
+        <strong>{netName}</strong> <span className="faint">(egress)</span>
+        {!disabled && (
+          <button
+            className="ghost"
+            onClick={() => onChange({ interface: '', open_ports: [], fallback: null })}
+            aria-label={`remove ${netName} from ${nodeName}`}
+            title={`Remove ${netName} from this node`}
+          >
+            <Icon name="close" />
+          </button>
+        )}
+      </div>
+      <div className="field">
+        <label htmlFor={`node-${nodeName}-${netName}-iface`}>Interface</label>
+        <input
+          id={`node-${nodeName}-${netName}-iface`}
+          className="mono"
+          type="text"
+          list={listId}
+          value={addr.interface}
+          onChange={(e) => onChange({ ...addr, interface: e.target.value })}
+          disabled={disabled}
+        />
+        <datalist id={listId}>
+          {options.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
+        <span className="field-hint">
+          The host interface this node's outbound traffic on this network leaves through, e.g. a
+          VPN tunnel or the node's WAN interface. Must already exist on the node — clouduler does
+          not bring it up.
+        </span>
+      </div>
+      <CheckboxField
+        id={`node-${nodeName}-${netName}-fallback-enabled`}
+        label="Fall back to a second interface"
+        value={fallbackEnabled}
+        onChange={toggleFallback}
+        hint="If this node cannot reach an IP through the interface above for one reconcile tick, route this network out a second interface instead until the first one answers again."
+        disabled={disabled}
+      />
+      {fallbackEnabled && (
+        <>
+          <div className="field">
+            <label htmlFor={`node-${nodeName}-${netName}-fallback-iface`}>Fallback interface</label>
+            <input
+              id={`node-${nodeName}-${netName}-fallback-iface`}
+              className="mono"
+              type="text"
+              list={listId}
+              value={addr.fallback?.interface ?? ''}
+              onChange={(e) => updateFallback({ interface: e.target.value })}
+              disabled={disabled}
+            />
+          </div>
+          <IpField
+            id={`node-${nodeName}-${netName}-fallback-healthcheck`}
+            label="Health check IP"
+            value={addr.fallback?.health_check_ip ?? ''}
+            onChange={(v) => updateFallback({ health_check_ip: v })}
+            hint="Checked by pinging it out the primary interface, once per reconcile tick. Pick something reliably up, e.g. 1.1.1.1."
             disabled={disabled}
           />
-          <datalist id={listId}>
-            {options.map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
-          <span className="field-hint">
-            The host interface this node's outbound traffic on this network leaves through, e.g. a
-            VPN tunnel or the node's WAN interface. Must already exist on the node — clouduler does
-            not bring it up.
-          </span>
-        </div>
-      </div>
-      {!disabled && (
-        <button
-          className="ghost"
-          onClick={() => onChange('')}
-          aria-label={`remove ${netName} from ${nodeName}`}
-          title={`Remove ${netName} from this node`}
-        >
-          <Icon name="close" />
-        </button>
+        </>
       )}
     </div>
   );

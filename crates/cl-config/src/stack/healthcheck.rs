@@ -18,18 +18,22 @@ pub enum HealthcheckTest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Healthcheck {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<HealthcheckTest>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub interval: Option<Duration>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub timeout: Option<Duration>,
-    #[serde(default, with = "humantime_serde::option")]
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub start_period: Option<Duration>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub disable: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[cfg(test)]
