@@ -157,13 +157,16 @@ impl Context_ {
             }
         }
 
-        if all.is_empty() {
-            return Ok(());
-        }
-
         let mut allocations = load_allocations(state.overlay.as_deref());
         if self.cluster.is_leader() {
             self.allocate_missing(&mut allocations, &all, &cluster_subnets).await?;
+        }
+
+        if let Err(e) = self.sweep_orphans(netlink, &all).await {
+            // A leftover network is a slow-burn problem (it only bites the
+            // next stack unlucky enough to be handed its subnet), not a
+            // reason to skip bringing up the networks that are wanted now.
+            warn!(error = %e, "sweeping orphaned overlay networks failed");
         }
 
         for overlay in &mine {
@@ -174,6 +177,37 @@ impl Context_ {
                 // One broken network must not stop the others being built.
                 warn!(network = %overlay, error = %e, "cannot bring up the overlay network");
             }
+        }
+        Ok(())
+    }
+
+    /// Tear down any network this daemon still has that no longer belongs to
+    /// a live stack, on both docker's side and ours (bridge + VXLAN device).
+    ///
+    /// Left behind, an orphan keeps its subnet in docker's own IPAM forever;
+    /// nothing else in the cluster remembers it, so the allocator can and
+    /// eventually will hand that same subnet to a new stack network, which
+    /// then fails to come up with a docker pool-overlap error.
+    async fn sweep_orphans(&self, netlink: Option<&Overlay>, wanted: &BTreeMap<String, BTreeSet<InstanceId>>) -> Result<()> {
+        let Some(docker) = &self.docker else {
+            return Ok(());
+        };
+        for name in docker.list_managed_networks().await? {
+            if wanted.contains_key(&name) {
+                continue;
+            }
+            if let Err(e) = docker.remove_network(&name).await {
+                // Still has containers attached, most likely: they haven't
+                // been torn down yet, or this stale entry belongs to a
+                // network name a live stack coincidentally reuses. Either
+                // way, next tick is soon enough to try again.
+                debug!(network = %name, error = %e, "orphaned overlay network not removed yet");
+                continue;
+            }
+            if let Some(netlink) = netlink {
+                netlink.teardown(&bridge_name(&name), &vxlan_name(&name)).await?;
+            }
+            info!(network = %name, "removed orphaned overlay network");
         }
         Ok(())
     }
@@ -192,6 +226,22 @@ impl Context_ {
         cluster_subnets: &[IpNet],
     ) -> Result<()> {
         let mut changed = false;
+
+        // A network no longer belonging to any live stack frees its subnet
+        // back to the pool, so it can be handed to a new stack instead of
+        // sitting reserved forever for a name nothing will ever reconcile
+        // again.
+        let stale_networks: Vec<String> = allocations
+            .network_names()
+            .filter(|name| !networks.contains_key(*name))
+            .map(str::to_string)
+            .collect();
+        for network in stale_networks {
+            allocations.release_network(&network);
+            changed = true;
+            info!(network = %network, "released an overlay subnet no longer in use");
+        }
+
         for (network, instances) in networks {
             if allocations.subnet(network).is_none() {
                 allocations

@@ -198,6 +198,26 @@ impl Docker {
         }
     }
 
+    /// Every overlay network this daemon still has, by name. Lets a caller
+    /// tell an orphan (a network from a stack that no longer exists) apart
+    /// from one that's still wanted, so it can be swept: left behind, an
+    /// orphan keeps its subnet allocated in docker's own IPAM forever, and a
+    /// later stack can be handed that same subnet by the cluster's own
+    /// allocator and fail to create its network with a pool-overlap error.
+    pub async fn list_managed_networks(&self) -> Result<Vec<String>> {
+        let mut filters = HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec![format!("{LABEL_MANAGED}={MANAGED_VALUE}")],
+        );
+        let options = bollard::query_parameters::ListNetworksOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+
+        let networks = self.inner.list_networks(Some(options)).await.map_err(classify)?;
+        Ok(networks.into_iter().filter_map(|n| n.name).collect())
+    }
+
     /// Remove a network. A missing one is success, and one still in use is
     /// reported so a caller sweeping after a stack removal can wait rather than
     /// tear a running container's network out from under it.

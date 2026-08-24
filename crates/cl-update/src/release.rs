@@ -72,6 +72,18 @@ pub struct ResolvedRelease {
     pub assets: BTreeMap<String, ReleaseAsset>,
 }
 
+/// `octocrab::Error::GitHub` has no `#[snafu(display(..))]` override, so its
+/// `Display` falls back to snafu's default of printing just the variant name
+/// ("GitHub") — the actual reason GitHub gave (rate limited, not found, bad
+/// credentials, ...) lives in the wrapped `GitHubError` and would otherwise
+/// be silently dropped from every error message this module produces.
+fn describe(e: &octocrab::Error) -> String {
+    match e {
+        octocrab::Error::GitHub { source, .. } => source.message.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Build an authenticated (if `token` is set) octocrab client. Anonymous
 /// access works fine against public repos, just at GitHub's much lower
 /// unauthenticated rate limit.
@@ -92,14 +104,12 @@ pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedReleas
     let repo_handler = octocrab.repos(&repo_ref.owner, &repo_ref.repo);
     let releases = repo_handler.releases();
     let release = match &repo_ref.tag {
-        Some(tag) => releases
-            .get_by_tag(tag)
-            .await
-            .map_err(|e| format!("fetching release {tag} of {}/{}: {e}", repo_ref.owner, repo_ref.repo))?,
-        None => releases
-            .get_latest()
-            .await
-            .map_err(|e| format!("fetching the latest release of {}/{}: {e}", repo_ref.owner, repo_ref.repo))?,
+        Some(tag) => releases.get_by_tag(tag).await.map_err(|e| {
+            format!("fetching release {tag} of {}/{}: {}", repo_ref.owner, repo_ref.repo, describe(&e))
+        })?,
+        None => releases.get_latest().await.map_err(|e| {
+            format!("fetching the latest release of {}/{}: {}", repo_ref.owner, repo_ref.repo, describe(&e))
+        })?,
     };
 
     let mut assets = BTreeMap::new();

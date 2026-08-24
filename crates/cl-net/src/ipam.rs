@@ -86,6 +86,11 @@ impl Allocations {
         self.networks.get(network).map(|n| n.subnet)
     }
 
+    /// Every network with a subnet allocated, by name.
+    pub fn network_names(&self) -> impl Iterator<Item = &str> {
+        self.networks.keys().map(|s| s.as_str())
+    }
+
     /// Gateway address for a network's subnet: always the first host address.
     pub fn gateway(&self, network: &str) -> Option<Ipv4Addr> {
         self.subnet(network).map(gateway_of)
@@ -326,6 +331,15 @@ mod tests {
         a.release_network("one");
         let s2 = a.allocate_network("two", &[]).unwrap();
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn network_names_lists_every_allocated_network() {
+        let mut a = Allocations::default();
+        a.allocate_network("one", &[]).unwrap();
+        a.allocate_network("two", &[]).unwrap();
+        let names: BTreeSet<&str> = a.network_names().collect();
+        assert_eq!(names, BTreeSet::from(["one", "two"]));
     }
 
     #[test]
