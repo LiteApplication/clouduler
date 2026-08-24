@@ -30,9 +30,18 @@ impl FromRequestParts<AppState> for InternalAuth {
             .as_ref()
             .ok_or_else(|| ApiError::Unauthenticated("this node holds no cluster key".into()))?;
 
-        // Scoped to the exact route path, so a signature captured for one
-        // internal endpoint cannot be replayed against another.
-        let label = parts.uri.path();
+        // Scoped to the exact route path (query string included), so a
+        // signature captured for one internal endpoint cannot be replayed
+        // against another. Must match what the caller signs in
+        // `internal_peer::signature`, which includes the query string for
+        // routes like logs that carry `follow`/`tail`/`since` — using just
+        // `parts.uri.path()` here would reject those with a bad-signature
+        // 401 even though the caller signed correctly.
+        let label = parts
+            .uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or_else(|| parts.uri.path());
         if !cl_secret::internal_auth::verify(key, label, presented) {
             return Err(ApiError::Unauthenticated("bad internal signature".into()));
         }

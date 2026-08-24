@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Overview } from './Overview';
 import type { ClusterState } from '../api/types';
 
@@ -50,8 +50,9 @@ const healthyStatus = {
 };
 
 const status = vi.fn();
+const listInstances = vi.fn();
 vi.mock('../api/client', () => ({
-  api: { status: () => status() },
+  api: { status: () => status(), listInstances: () => listInstances() },
 }));
 
 function renderOverview() {
@@ -63,6 +64,10 @@ function renderOverview() {
 }
 
 describe('Overview quorum banner', () => {
+  beforeEach(() => {
+    listInstances.mockResolvedValue([]);
+  });
+
   it('reports a healthy single-node cluster as healthy', async () => {
     status.mockResolvedValue(healthyStatus);
     renderOverview();

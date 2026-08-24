@@ -204,7 +204,11 @@ impl Docker {
     /// orphan keeps its subnet allocated in docker's own IPAM forever, and a
     /// later stack can be handed that same subnet by the cluster's own
     /// allocator and fail to create its network with a pool-overlap error.
-    pub async fn list_managed_networks(&self) -> Result<Vec<String>> {
+    ///
+    /// `exclude_stacks` are `LABEL_STACK` values owned by another reconciler
+    /// (egress, wireguard) rather than a deployed stack, so this sweep never
+    /// mistakes their networks for orphans of its own.
+    pub async fn list_managed_networks(&self, exclude_stacks: &[&str]) -> Result<Vec<String>> {
         let mut filters = HashMap::new();
         filters.insert(
             "label".to_string(),
@@ -215,7 +219,16 @@ impl Docker {
             .build();
 
         let networks = self.inner.list_networks(Some(options)).await.map_err(classify)?;
-        Ok(networks.into_iter().filter_map(|n| n.name).collect())
+        Ok(networks
+            .into_iter()
+            .filter(|n| {
+                n.labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(LABEL_STACK))
+                    .is_none_or(|stack| !exclude_stacks.contains(&stack.as_str()))
+            })
+            .filter_map(|n| n.name)
+            .collect())
     }
 
     /// Remove a network. A missing one is success, and one still in use is

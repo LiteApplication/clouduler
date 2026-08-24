@@ -37,6 +37,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/internal/{id}/summary", get(internal_summary))
         .route("/api/instances/internal/{id}/logs", get(internal_logs))
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
+        .route("/api/instances/internal/{id}/restart", post(internal_restart))
+        .route("/api/instances/internal/{id}/update", post(internal_update))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -190,6 +192,10 @@ async fn internal_summary(
     Ok(Json(summarize_local(&state, assignment).await))
 }
 
+fn internal_restart_path(instance: &InstanceId) -> String {
+    format!("/api/instances/internal/{instance}/restart")
+}
+
 async fn restart(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -202,17 +208,33 @@ async fn restart(
         .get(&instance)
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
     if assignment.node != state.node_name {
-        return Err(ApiError::Conflict(format!(
-            "instance {id} runs on {}, not this node",
-            assignment.node
-        )));
+        let node = assignment.node.clone();
+        internal_peer::post_empty(&state, &node, &internal_restart_path(&instance)).await?;
+        return Ok(StatusCode::OK);
     }
+    restart_local(&state, &instance).await?;
+    Ok(StatusCode::OK)
+}
+
+async fn restart_local(state: &AppState, instance: &InstanceId) -> Result<(), ApiError> {
     state
         .docker()
         .await?
         .restart(&instance.container_name(), Duration::from_secs(10))
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::internal)
+}
+
+/// Node-to-node: restarts this node's own container. The caller already
+/// checked the assignment and the caller's own admin auth before forwarding
+/// here.
+async fn internal_restart(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance = parse_id(&id)?;
+    restart_local(&state, &instance).await?;
     Ok(StatusCode::OK)
 }
 
@@ -297,6 +319,10 @@ async fn patch_instance(
     Ok(StatusCode::OK)
 }
 
+fn internal_update_path(instance: &InstanceId) -> String {
+    format!("/api/instances/internal/{instance}/update")
+}
+
 async fn update(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -309,11 +335,18 @@ async fn update(
         .get(&instance)
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
     if assignment.node != state.node_name {
-        return Err(ApiError::Conflict(format!(
-            "instance {id} runs on {}, not this node",
-            assignment.node
-        )));
+        let node = assignment.node.clone();
+        internal_peer::post_empty(&state, &node, &internal_update_path(&instance)).await?;
+        return Ok(StatusCode::OK);
     }
+    update_local(&state, instance).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Pulls the instance's current image on this node, records the new digest
+/// (a leader-only raft write, hence still needing `submit` even when this is
+/// not the leader), and restarts the container onto it.
+async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
     let name = instance.container_name();
     let docker = state.docker().await?;
     let current = docker
@@ -328,10 +361,19 @@ async fn update(
         .submit(ClusterRequest::SetImageDigest { instance, digest })
         .await
         .map_err(ApiError::not_leader)?;
-    docker
-        .restart(&name, Duration::from_secs(10))
-        .await
-        .map_err(ApiError::internal)?;
+    docker.restart(&name, Duration::from_secs(10)).await.map_err(ApiError::internal)
+}
+
+/// Node-to-node: updates this node's own container. The caller already
+/// checked the assignment and the caller's own admin auth before forwarding
+/// here.
+async fn internal_update(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance = parse_id(&id)?;
+    update_local(&state, instance).await?;
     Ok(StatusCode::OK)
 }
 

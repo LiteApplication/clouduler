@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Fragment, useEffect, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, decodeText, encodeText } from '../api/client';
-import type { StackRequirements, ValidationError } from '../api/types';
+import type { Assignment, InstanceState, LogLine, StackRequirements, StackState, ValidationError } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { ConstraintTable } from '../components/ConstraintTable';
 import { Icon } from '../components/Icon';
+import { useEventSource } from '../hooks/useEventSource';
 import { SecretForm } from './SecretForm';
 
 export function StackDetail() {
@@ -281,6 +282,62 @@ export function StackDetail() {
     : [];
 
   return (
+    <StackDetailBody
+      name={name}
+      stack={stack}
+      instances={instances}
+      isAdmin={isAdmin}
+      openEdit={openEdit}
+      remove={remove}
+    />
+  );
+}
+
+function StackDetailBody({
+  name,
+  stack,
+  instances,
+  isAdmin,
+  openEdit,
+  remove,
+}: {
+  name: string;
+  stack: StackState;
+  instances: Assignment[];
+  isAdmin: boolean;
+  openEdit: () => void;
+  remove: () => void;
+}) {
+  const [live, setLive] = useState<Record<string, InstanceState>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      api.listInstances().then((list) => {
+        if (cancelled) return;
+        const byId: Record<string, InstanceState> = {};
+        for (const i of list) {
+          if (i.id.startsWith(`${name}.`)) byId[i.id] = i;
+        }
+        setLive(byId);
+      });
+    load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [name]);
+
+  const hasIssue = (a: Assignment) => {
+    const i = live[a.instance];
+    if (!i) return false;
+    if (a.desired === 'running' && i.state !== 'running') return true;
+    if (i.health === 'unhealthy') return true;
+    return false;
+  };
+
+  return (
     <div>
       <div className="page-header">
         <div className="page-title">
@@ -339,23 +396,63 @@ export function StackDetail() {
                 <th>Instance</th>
                 <th>Node</th>
                 <th>Desired</th>
+                <th>State</th>
+                <th>Health</th>
                 <th>Migration</th>
               </tr>
             </thead>
             <tbody>
-              {instances.map((a) => (
-                <tr key={a.instance}>
-                  <td>{a.instance}</td>
-                  <td>{a.node}</td>
-                  <td>
-                    <Badge tone={a.desired === 'running' ? 'good' : 'neutral'}>{a.desired}</Badge>
-                  </td>
-                  <td>{a.migration ? `${a.migration.phase} -> ${a.migration.to}` : '-'}</td>
-                </tr>
-              ))}
+              {instances.map((a) => {
+                const i = live[a.instance];
+                const issue = hasIssue(a);
+                return (
+                  <Fragment key={a.instance}>
+                    <tr>
+                      <td>
+                        <Link className="row-link" to={`/instances/${encodeURIComponent(a.instance)}`}>
+                          {a.instance}
+                        </Link>
+                      </td>
+                      <td>{a.node}</td>
+                      <td>
+                        <Badge tone={a.desired === 'running' ? 'good' : 'neutral'}>{a.desired}</Badge>
+                      </td>
+                      <td>
+                        {i ? (
+                          <Badge tone={i.state === 'running' ? 'good' : issue ? 'bad' : 'neutral'}>{i.state}</Badge>
+                        ) : (
+                          '-'
+                        )}
+                      </td>
+                      <td>
+                        {i ? (
+                          <Badge tone={i.health === 'unhealthy' ? 'bad' : i.health === 'healthy' ? 'good' : 'neutral'}>
+                            {i.health}
+                          </Badge>
+                        ) : (
+                          '-'
+                        )}
+                      </td>
+                      <td>{a.migration ? `${a.migration.phase} -> ${a.migration.to}` : '-'}</td>
+                    </tr>
+                    {issue && (
+                      <tr>
+                        <td colSpan={6} style={{ paddingTop: 0 }}>
+                          <div className="banner banner-bad" role="alert" style={{ marginBottom: 8 }}>
+                            <Icon name="alert-circle" />
+                            {a.instance} is desired {a.desired} but is {i?.state}
+                            {i?.health === 'unhealthy' ? ' and unhealthy' : ''} on {a.node}. Recent logs:
+                          </div>
+                          <InlineInstanceLogs id={a.instance} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
               {instances.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="empty-cell">
+                  <td colSpan={6} className="empty-cell">
                     no instances
                   </td>
                 </tr>
@@ -374,6 +471,40 @@ export function StackDetail() {
           </h2>
         </div>
         <pre>{stack.spec}</pre>
+      </div>
+    </div>
+  );
+}
+
+/** A compact, non-interactive tail of an instance's log, shown inline next to
+ *  a failing instance so the reason it won't start is visible without
+ *  navigating away from the stack. */
+function InlineInstanceLogs({ id }: { id: string }) {
+  const url = `/api/instances/${encodeURIComponent(id)}/logs?follow=false&tail=30`;
+  const { items, connected } = useEventSource<LogLine>(url, {
+    limit: 30,
+    events: ['stdout', 'stderr'],
+    mapItem: (data, eventType) => {
+      const line = data as { text: string; timestamp: string };
+      return { timestamp: line.timestamp, message: line.text, stream: eventType as 'stdout' | 'stderr' };
+    },
+  });
+
+  return (
+    <div className="log-view" aria-live="polite" style={{ maxHeight: 200 }}>
+      {items.map((line, i) => (
+        <div key={i}>
+          <span className="faint">{line.timestamp} </span>
+          <span className={line.stream === 'stderr' ? 'diff-remove' : undefined}>{line.message}</span>
+        </div>
+      ))}
+      {items.length === 0 && (
+        <div className="faint">{connected ? 'no log output yet' : 'connecting...'}</div>
+      )}
+      <div style={{ marginTop: 4 }}>
+        <Link className="row-link" to={`/instances/${encodeURIComponent(id)}`}>
+          <Icon name="terminal" /> view full logs
+        </Link>
       </div>
     </div>
   );

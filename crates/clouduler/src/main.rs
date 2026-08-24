@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod daemon;
 mod drives;
+mod folder_import;
 mod internal_dns;
 mod migration;
 mod node;
@@ -91,6 +92,13 @@ async fn main() -> Result<()> {
         } => {
             report::drives(&cfg);
             Ok(())
+        }
+        Command::FolderImport(args) => {
+            let node = match &args.node {
+                Some(n) => n.clone(),
+                None => hostname()?,
+            };
+            folder_import::run(&cfg, &node, *args).await
         }
         Command::Status => {
             // Filled in once the raft layer can answer live queries.

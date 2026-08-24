@@ -192,7 +192,7 @@ impl Context_ {
         let Some(docker) = &self.docker else {
             return Ok(());
         };
-        for name in docker.list_managed_networks().await? {
+        for name in docker.list_managed_networks(&[crate::egress::OWNER]).await? {
             if wanted.contains_key(&name) {
                 continue;
             }

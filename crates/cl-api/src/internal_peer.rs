@@ -24,6 +24,12 @@ use crate::server::AppState;
 /// cluster-wide instance list is never stuck on one unreachable node.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Forwarded write commands can run a docker restart or an image pull on the
+/// target node before answering, either of which can legitimately take a
+/// while (a large image pull especially), so this is far more generous than
+/// `FETCH_TIMEOUT`.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
+
 async fn peer_base_url(state: &AppState, node: &str) -> Result<String, ApiError> {
     let cfg = state.cluster_config.read().await;
     cl_update::peers::base_url(&cfg, node)
@@ -56,6 +62,28 @@ pub async fn fetch_json<T: DeserializeOwned>(state: &AppState, node: &str, path:
     resp.json::<T>()
         .await
         .map_err(|e| ApiError::Internal(format!("decoding {node}'s response: {e}")))
+}
+
+/// `POST path` (no body) on `node`'s api, for write commands — restart,
+/// update — whose target instance lives on another node. Any manager can
+/// issue these; the receiving node trusts the caller's earlier
+/// `RequireAdmin` check the same way it trusts it for the read-only
+/// forwards above.
+pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), ApiError> {
+    let base = peer_base_url(state, node).await?;
+    let signature = signature(state, path).await?;
+    let resp = state
+        .http
+        .post(format!("{base}{path}"))
+        .header(cl_update::internal_client::AUTH_HEADER, signature)
+        .timeout(WRITE_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(ApiError::Unavailable(format!("{node} answered {}", resp.status())));
+    }
+    Ok(())
 }
 
 /// `GET path` on `node`'s api, proxied straight through as the response body.

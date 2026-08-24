@@ -8,13 +8,9 @@ use clap::{Parser, Subcommand};
 #[command(name = "clouduler", version, about)]
 pub struct Cli {
     /// Cluster config file.
-    #[arg(
-        short,
-        long,
-        global = true,
-        env = "CLOUDULER_CONFIG",
-        default_value = "/etc/clouduler/cluster.yaml"
-    )]
+    ///
+    /// No short flag: `-c` is `folder-import`'s copy method instead.
+    #[arg(long, global = true, env = "CLOUDULER_CONFIG", default_value = "/etc/clouduler/cluster.yaml")]
     pub config: PathBuf,
 
     /// Directory holding this node's local state. Overrides the one in the
@@ -70,8 +66,63 @@ pub enum Command {
         #[command(subcommand)]
         command: DriveCommand,
     },
+    /// Get a local file or folder into a drive volume, then push it out to
+    /// every other node holding a copy right away.
+    ///
+    /// Only works from a node that implements the target drive: for a
+    /// replicated drive that means any node backing it, for a served drive
+    /// the active server or a node that mounts it (a standby candidate is
+    /// refused, since the next sync from the real server would erase what
+    /// was written there).
+    ///
+    ///   sudo clouduler folder-import ~/Downloads/dataset bulk/imports
+    FolderImport(Box<FolderImportArgs>),
     /// Show cluster status.
     Status,
+}
+
+/// `clouduler folder-import [-mlcr] <folder> <drive>/<volume>[/path inside volume]`
+#[derive(Debug, clap::Args)]
+pub struct FolderImportArgs {
+    /// Copy the source in. The default.
+    #[arg(short = 'c', long, conflicts_with_all = ["move", "link"])]
+    pub copy: bool,
+
+    /// Move the source in rather than copying it. Falls back to a copy plus
+    /// removing the source when the two are not on the same filesystem.
+    #[arg(short = 'm', long, conflicts_with_all = ["copy", "link"])]
+    pub r#move: bool,
+
+    /// Symlink the source into the volume instead of duplicating it. Note
+    /// that a symlink replicates as the same path string to every other
+    /// node, so it only resolves there if that path exists there too.
+    #[arg(short = 'l', long, conflicts_with_all = ["copy", "move"])]
+    pub link: bool,
+
+    /// Replace the whole volume with the source rather than placing it
+    /// inside. Takes no sub-path: the target must be `<drive>/<volume>`.
+    #[arg(short = 'r', long)]
+    pub replace: bool,
+
+    /// With --replace, stop any instances mounting the volume first and
+    /// start them again once the swap and sync are done. Without this,
+    /// --replace refuses to touch a volume that is in use.
+    #[arg(short = 'f', long, requires = "replace")]
+    pub force: bool,
+
+    /// File or folder to import.
+    pub source: PathBuf,
+
+    /// Where to import it: `<drive>/<volume>[/path inside volume]`.
+    pub target: String,
+
+    /// Name of this node in the config. Defaults to the hostname, same as `daemon`.
+    #[arg(long, env = "CLOUDULER_NODE")]
+    pub node: Option<String>,
+
+    /// Node to submit the volume bookkeeping through. Defaults to any manager.
+    #[arg(long)]
+    pub via: Option<String>,
 }
 
 /// Everything `clouduler init` can be told up front. Anything left out is

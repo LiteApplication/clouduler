@@ -46,7 +46,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Docker network label for cluster infrastructure that isn't owned by any
 /// one stack, so a future per-stack sweep never mistakes it for orphaned.
-const OWNER: &str = "_cluster";
+pub(crate) const OWNER: &str = "_cluster";
 
 /// Every egress or wireguard network this node implements, network name ->
 /// (kind, host interface). For a wireguard network the interface name is

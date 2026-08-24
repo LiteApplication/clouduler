@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { ClusterStatus } from '../api/types';
+import type { ClusterStatus, InstanceState } from '../api/types';
 import { useClusterState } from '../state/store';
 import { Badge } from '../components/Badge';
 import { Icon, type IconName } from '../components/Icon';
@@ -9,6 +9,7 @@ import { Donut, type DonutSegment } from '../components/Donut';
 export function Overview() {
   const cluster = useClusterState();
   const [status, setStatus] = useState<ClusterStatus | null>(null);
+  const [instanceStates, setInstanceStates] = useState<InstanceState[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -18,6 +19,17 @@ export function Overview() {
     // a cheap way to keep quorum and leadership fresh, which the state event
     // doesn't carry.
     const id = setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.listInstances().then((list) => !cancelled && setInstanceStates(list)).catch(() => {});
+    load();
+    const id = setInterval(load, 5000);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -41,18 +53,27 @@ export function Overview() {
   const volumes = Object.values(cluster.volumes);
   const outOfSyncVolumes = volumes.filter((v) => v.generation !== (v.replicas[v.primary] ?? -1));
 
+  const managers = nodes.filter((n) => n.role === 'manager');
+  const workers = nodes.filter((n) => n.role === 'worker');
+  const fencedNames = new Set(fenced.map((n) => n.name));
+
   const nodeSegmentsAll: DonutSegment[] = [
-    { label: 'Active', value: nodes.filter((n) => n.availability === 'active').length, tone: 'good' },
-    { label: 'Draining', value: nodes.filter((n) => n.availability === 'drain').length, tone: 'warn' },
-    { label: 'Decommissioned', value: nodes.filter((n) => n.availability === 'decommissioned').length, tone: 'neutral' },
-    { label: 'Unreachable', value: fenced.length, tone: 'bad' },
+    { label: 'Managers active', value: managers.filter((n) => n.availability === 'active' && !fencedNames.has(n.name)).length, tone: 'good' },
+    { label: 'Managers draining', value: managers.filter((n) => n.availability === 'drain' && !fencedNames.has(n.name)).length, tone: 'warn' },
+    { label: 'Managers decommissioned', value: managers.filter((n) => n.availability === 'decommissioned' && !fencedNames.has(n.name)).length, tone: 'neutral' },
+    { label: 'Managers unreachable', value: managers.filter((n) => fencedNames.has(n.name)).length, tone: 'bad' },
+    { label: 'Workers active', value: workers.filter((n) => n.availability === 'active' && !fencedNames.has(n.name)).length, tone: 'secondary' },
+    { label: 'Workers draining', value: workers.filter((n) => n.availability === 'drain' && !fencedNames.has(n.name)).length, tone: 'warn' },
+    { label: 'Workers decommissioned', value: workers.filter((n) => n.availability === 'decommissioned' && !fencedNames.has(n.name)).length, tone: 'neutral' },
+    { label: 'Workers unreachable', value: workers.filter((n) => fencedNames.has(n.name)).length, tone: 'bad' },
   ];
   const nodeSegments = nodeSegmentsAll.filter((s) => s.value > 0);
 
   const migrating = instances.filter((i) => i.migration).length;
   const instanceSegmentsAll: DonutSegment[] = [
-    { label: 'Running', value: instances.filter((i) => i.desired === 'running').length, tone: 'good' },
-    { label: 'Stopped', value: instances.filter((i) => i.desired === 'stopped').length, tone: 'neutral' },
+    { label: 'Running', value: instanceStates?.filter((i) => i.state === 'running').length ?? 0, tone: 'good' },
+    { label: 'Stopped', value: instanceStates?.filter((i) => i.state === 'stopped').length ?? 0, tone: 'neutral' },
+    { label: 'Unknown', value: instanceStates?.filter((i) => i.state === 'unknown').length ?? 0, tone: 'warn' },
   ];
   const instanceSegments = instanceSegmentsAll.filter((s) => s.value > 0);
 
