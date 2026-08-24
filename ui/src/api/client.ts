@@ -49,13 +49,15 @@ export class ApiError extends Error {
 
 /**
  * Thrown when a request hit a follower. The leader's URL is on the Location
- * header; callers that care can retry there, everyone else can just show it.
+ * header; callers that care can retry there. It extends ApiError so every
+ * plain `instanceof ApiError` catch site shows this message instead of
+ * falling back to a generic "X failed" with no explanation.
  */
-export class NotLeaderError extends Error {
+export class NotLeaderError extends ApiError {
   leaderUrl: string;
 
   constructor(leaderUrl: string) {
-    super(`not the leader, try ${leaderUrl}`);
+    super(503, `not the leader, try ${leaderUrl}`);
     this.name = 'NotLeaderError';
     this.leaderUrl = leaderUrl;
   }
