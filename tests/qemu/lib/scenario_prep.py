@@ -11,6 +11,7 @@ import secrets
 import socket
 import stat
 import sys
+import uuid
 
 import yaml
 
@@ -67,9 +68,21 @@ def main():
         egress_networks_block[vpn["network"]] = {"type": "egress"}
 
     node_summaries = []
-    cluster_nodes = {}
+    # Built for every node, including ones that `join: true` marks as joining
+    # after the cluster is already up - `cluster_nodes`/`control_nodes` below
+    # are the subset actually written into the run's initial config; the full
+    # dict is what a later `join_node` step pushes via `config reload` and
+    # bakes onto the joining node's own disk, so its id and address exist
+    # exactly once and match everywhere they're used.
+    full_cluster_nodes = {}
+    join_names = {n["name"] for n in nodes if n.get("join")}
     for index, n in enumerate(nodes):
         name = n["name"]
+        # Minted here rather than left to `clouduler init` (which is not part
+        # of this harness): `id` is required by the config schema
+        # (`cl_config::Node`) and used for raft membership identity, so every
+        # node needs one whether it boots immediately or joins later.
+        node_id = str(uuid.uuid4())
         web_port = free_port()
         rpc_port = free_port()
         # The two ports a published service answers on inside the guest: the
@@ -93,7 +106,8 @@ def main():
             # interface name, naming eth2 (the vpn-segment netdev) rather
             # than an address on it.
             node_network[vpn["network"]] = "eth2"
-        cluster_nodes[name] = {
+        full_cluster_nodes[name] = {
+            "id": node_id,
             "role": n["role"],
             "network": node_network,
             "rpc_port": 7373,
@@ -111,6 +125,7 @@ def main():
             "drives": list(node_drives.keys()),
             "vpn_ip": vpn_ips.get(name, ""),
             "vpn_canary": "1" if vpn and name == vpn["canary_node"] else "",
+            "join": name in join_names,
         })
 
     # One cluster key for the whole run, generated here and installed into
@@ -123,58 +138,80 @@ def main():
         f.write(base64.b64encode(secrets.token_bytes(32)).decode() + "\n")
     os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
 
-    cluster = {
-        "cluster": {"name": scenario.get("name", "qemu-test")},
-        "networks": {
-            "cluster": {"type": "internal", "subnet": "10.10.0.0/24", "domain": "cl.test"},
-            # A route on a subnetted network only answers a TCP peer inside
-            # that subnet (docs/proxy.md, "Network gating"); the http_port
-            # forward the publishing scenario asserts against arrives over
-            # each VM's SLIRP nic instead, which is outside "cluster". A
-            # `public` network has no subnet and so no gating, which is also
-            # the correct real-world choice for anything meant to be
-            # reachable from outside the cluster, so stacks that publish an
-            # externally-facing route use this instead of "cluster".
-            "wan": {"type": "public", "domain": "wan.test"},
-            **egress_networks_block,
-        },
-        "drives": drives_block,
-        "nodes": cluster_nodes,
-        "web": {"address": "api", "network": "cluster", "port": 8443},
-        "failover": failover,
-        "secrets": {"key_file": "/etc/clouduler/secrets.key", "generate_if_missing": False},
-    }
-
-    with open(out_cluster_path, "w") as f:
-        yaml.safe_dump(cluster, f, sort_keys=False)
-
-    # control.yaml: same shape, but every node address points at its
-    # host-forwarded loopback address and port, since the CLI runs on the host
-    # and has no route onto the VMs' own cluster network. The internal network
-    # is widened to 127.0.0.0/8 to match, or every node would sit outside its
-    # own subnet and the config would not load at all.
+    # control.yaml's per-node dict, same shape as `full_cluster_nodes` but every
+    # address points at its host-forwarded loopback address and port, since the
+    # CLI runs on the host and has no route onto the VMs' own cluster network.
+    # Only ever the nodes booted at t=0: the cli only ever needs to reach an
+    # already-running manager, never a node still waiting to join, and a
+    # `join_node` step pushes its config change through the leader's own api
+    # instead (see steps.sh) - control.yaml's addresses are host-loopback
+    # ones, meaningless payload content for the *guest* network the joining
+    # node and its new peers actually talk over.
     control_nodes = {}
     for ns in node_summaries:
+        if ns["join"]:
+            continue
         control_network = {"cluster": ns["control_ip"]}
         if vpn and ns["name"] == vpn["egress_node"]:
             control_network[vpn["network"]] = "eth2"
         control_nodes[ns["name"]] = {
+            "id": full_cluster_nodes[ns["name"]]["id"],
             "role": ns["role"],
             "network": control_network,
             "rpc_port": ns["rpc_port"],
             "drives": {d: f"/srv/clouduler/{d}" for d in ns["drives"]},
         }
-    control = dict(cluster)
-    control["networks"] = {
-        "cluster": {"type": "internal", "subnet": "127.0.0.0/8", "domain": "cl.test"},
-        "wan": {"type": "public", "domain": "wan.test"},
-        **egress_networks_block,
-    }
-    control["nodes"] = control_nodes
-    # The cli runs on the host, where /etc/clouduler is not ours to write.
-    control["secrets"] = {"key_file": key_path, "generate_if_missing": False}
+
+    def build_cluster(nodes_block, internal_subnet, key_file):
+        return {
+            "cluster": {"name": scenario.get("name", "qemu-test")},
+            "networks": {
+                "cluster": {"type": "internal", "subnet": internal_subnet, "domain": "cl.test"},
+                # A route on a subnetted network only answers a TCP peer inside
+                # that subnet (docs/proxy.md, "Network gating"); the http_port
+                # forward the publishing scenario asserts against arrives over
+                # each VM's SLIRP nic instead, which is outside "cluster". A
+                # `public` network has no subnet and so no gating, which is also
+                # the correct real-world choice for anything meant to be
+                # reachable from outside the cluster, so stacks that publish an
+                # externally-facing route use this instead of "cluster".
+                "wan": {"type": "public", "domain": "wan.test"},
+                **egress_networks_block,
+            },
+            "drives": drives_block,
+            "nodes": nodes_block,
+            "web": {"address": "api", "network": "cluster", "port": 8443},
+            "failover": failover,
+            "secrets": {"key_file": key_file, "generate_if_missing": False},
+        }
+
+    # Nodes marked `join: true` are left out of the run's *initial* config -
+    # scenario-run.sh only boots the rest at t=0. The "-joined" cluster.yaml
+    # carries every node, including those, and is what a `join_node` step
+    # later bakes onto the joining node's own disk. Its json twin is the
+    # payload a `join_node` step PUTs to the leader's own `/api/config`
+    # (see steps.sh) - real guest (10.10.0.x) addresses throughout, unlike
+    # control.yaml's host-loopback ones, which only the cli (running on the
+    # host) needs and which would be meaningless to every other guest.
+    joined_cluster_path = f"{os.path.splitext(out_cluster_path)[0]}-joined.yaml"
+    joined_cluster_json_path = f"{os.path.splitext(out_cluster_path)[0]}-joined.json"
+
+    base_cluster_nodes = {n: v for n, v in full_cluster_nodes.items() if n not in join_names}
+    full_cluster = build_cluster(full_cluster_nodes, "10.10.0.0/24", "/etc/clouduler/secrets.key")
+
+    with open(out_cluster_path, "w") as f:
+        yaml.safe_dump(build_cluster(base_cluster_nodes, "10.10.0.0/24", "/etc/clouduler/secrets.key"), f, sort_keys=False)
+    with open(joined_cluster_path, "w") as f:
+        yaml.safe_dump(full_cluster, f, sort_keys=False)
+    with open(joined_cluster_json_path, "w") as f:
+        json.dump(full_cluster, f)
+
+    # The internal network is widened to 127.0.0.0/8, or every node would sit
+    # outside its own subnet and the config would not load at all; the cli
+    # also runs on the host, where /etc/clouduler is not ours to write, hence
+    # the real key path instead of the guest's.
     with open(out_control_path, "w") as f:
-        yaml.safe_dump(control, f, sort_keys=False)
+        yaml.safe_dump(build_cluster(control_nodes, "127.0.0.0/8", key_path), f, sort_keys=False)
 
     summary = {
         "name": scenario.get("name", "unnamed"),

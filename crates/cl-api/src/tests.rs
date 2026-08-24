@@ -1060,6 +1060,67 @@ async fn renaming_a_drive_updates_config_and_stacks() {
     assert!(!stack.spec.contains("fast/data"));
 }
 
+async fn deploy(h: &Harness, name: &str, body: &str) -> StatusCode {
+    h.router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/stacks/{name}"))
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// A redeploy that doesn't resend a file-backed config's content must not
+/// forget the stack owns it: `SetStackObjects` used to be handed exactly
+/// whatever the request's `configs` map contained, so a client that only
+/// resends the spec (every browser redeploy, before this test) silently
+/// dropped the stack's claim on configs it never touched.
+#[tokio::test]
+async fn redeploying_without_resending_a_config_keeps_it() {
+    let h = harness().await;
+    let spec = "services:\n  web:\n    image: nginx\n    configs: [site_conf]\nconfigs:\n  site_conf:\n    file: ./site.conf\n";
+
+    let status = deploy(&h, "site", &format!(r#"{{"spec":{spec:?},"configs":{{"site_conf":"aGVsbG8="}}}}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let state = h.state.cluster.state().await;
+    assert!(state.configs.contains_key("site_conf"));
+    assert!(state.stacks["site"].configs.contains("site_conf"));
+    drop(state);
+
+    // Redeploy the same spec, this time without resending the config.
+    let status = deploy(&h, "site", &format!(r#"{{"spec":{spec:?}}}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let state = h.state.cluster.state().await;
+    assert!(state.configs.contains_key("site_conf"), "config must not be dropped");
+    assert!(
+        state.stacks["site"].configs.contains("site_conf"),
+        "stack must still own the config it never stopped referencing"
+    );
+}
+
+/// A brand new file-backed config with no content anywhere is a request the
+/// server must reject up front, not accept and leave half-wired.
+#[tokio::test]
+async fn deploying_a_new_file_config_with_no_content_is_rejected() {
+    let h = harness().await;
+    let spec = "services:\n  web:\n    image: nginx\n    configs: [site_conf]\nconfigs:\n  site_conf:\n    file: ./site.conf\n";
+
+    let status = deploy(&h, "site", &format!(r#"{{"spec":{spec:?}}}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let state = h.state.cluster.state().await;
+    assert!(!state.stacks.contains_key("site"));
+}
+
 #[tokio::test]
 async fn a_redirect_with_an_unknown_network_is_rejected() {
     let h = harness().await;

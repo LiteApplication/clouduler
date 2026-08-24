@@ -1,0 +1,40 @@
+# Same shape as publish.yaml, but `web` is pinned to n4 - the node the
+# online-node-join scenario adds after the cluster is already running. Only
+# reaches "running" and only resolves/routes correctly if the freshly joined
+# node got an overlay address, an internal dns answer and a reverse proxy
+# forwarding path with no restart anywhere else.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  web:
+    image: nginx:1.27-alpine
+    restart: always
+    networks: [cluster]
+    deploy:
+      placement:
+        constraints: ["node.hostname == n4"]
+    x-clouduler:
+      proxy:
+        - host: app
+          network: wan
+          port: 80
+          tls: false
+
+  probe:
+    image: alpine:3.20
+    restart: always
+    networks: [cluster]
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+    # Only passes if the probe's resolver (running wherever the scheduler put
+    # it, not necessarily n4) can reach web.join-target by name over the
+    # overlay - i.e. the newly joined node's FDB entry and container address
+    # are visible cluster-wide, not just locally on n4.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O - http://web.join-target/ > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s

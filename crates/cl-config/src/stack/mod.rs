@@ -9,6 +9,7 @@ mod derived;
 mod extensions;
 mod healthcheck;
 mod port;
+mod requirements;
 mod validate;
 mod volume;
 
@@ -23,6 +24,7 @@ pub use extensions::{
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};
 pub use port::{PortMapping, PortRange, Protocol};
+pub use requirements::StackRequirements;
 pub use volume::VolumeMount;
 
 use std::collections::BTreeMap;

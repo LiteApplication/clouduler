@@ -6,8 +6,20 @@ import { Icon } from '../components/Icon';
 
 type Mode = 'paste' | 'file' | 'generate';
 
-export function SecretForm({ onDone }: { onDone: () => void }) {
-  const [name, setName] = useState('');
+export function SecretForm({
+  onDone,
+  initialName = '',
+  lockName = false,
+}: {
+  onDone: () => void;
+  /** Prefills the name, e.g. when creating a secret a stack is already
+   *  missing rather than starting from a blank form. */
+  initialName?: string;
+  /** Locks the name field, so the created secret is guaranteed to match what
+   *  the caller is waiting on. */
+  lockName?: boolean;
+}) {
+  const [name, setName] = useState(initialName);
   const [mode, setMode] = useState<Mode>('paste');
   const [value, setValue] = useState('');
   const [fileContent, setFileContent] = useState('');
@@ -57,7 +69,14 @@ export function SecretForm({ onDone }: { onDone: () => void }) {
       </h3>
       <div className="field">
         <label htmlFor="secret-name">Name</label>
-        <input id="secret-name" type="text" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input
+          id="secret-name"
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          disabled={lockName}
+          required
+        />
       </div>
 
       <div className="field">

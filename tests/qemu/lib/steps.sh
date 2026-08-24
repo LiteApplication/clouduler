@@ -147,6 +147,96 @@ step_start_node() {
   vm_restart "$node" "$ip" "$mcast" "$idx"
 }
 
+# Boots a node the initial boot loop skipped (scenario declared it with
+# `join: true`) into an already-running, already-quorate cluster: pushes the
+# config that names it straight to the leader's own `/api/config` (the same
+# route the web ui's config editor uses), then starts its VM. Proves a node
+# can be added without restarting anything already running - see
+# docs/networking.md and the online-node-join scenario.
+#
+# Goes through the leader's api rather than `clouduler config reload`
+# deliberately: `config reload` re-serializes and pushes whatever `-c` file
+# it loaded, and this harness's control.yaml deliberately holds host-loopback
+# addresses (127.0.0.x) so the cli, running on the host, can reach a node's
+# forwarded port - pushing that file's content as the cluster's payload would
+# hand every node a rewritten address book full of loopback addresses instead
+# of the real guest (10.10.0.x) ones its peers actually listen on. Posting
+# cluster-joined.json (built from the real addresses) straight to a node's
+# own already-host-forwarded api port sidesteps the mismatch entirely.
+step_join_node() {
+  local node; node="$(echo "$1" | jq -r 'if type=="string" then . else .node end')"
+  local ip web_port rpc_port http_port expose_port host_ip idx mcast
+  ip="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .ip' "$RUN_DIR/topology.json")"
+  web_port="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .web_port' "$RUN_DIR/topology.json")"
+  rpc_port="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .rpc_port' "$RUN_DIR/topology.json")"
+  http_port="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .http_port' "$RUN_DIR/topology.json")"
+  expose_port="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .expose_port' "$RUN_DIR/topology.json")"
+  host_ip="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .control_ip' "$RUN_DIR/topology.json")"
+  idx="$(jq -r --arg n "$node" '[.nodes[].name] | index($n)' "$RUN_DIR/topology.json")"
+  mcast="$(jq -r '.mcast_group' "$RUN_DIR/topology.json")"
+
+  local leader; leader="$(leader_node)" || die "no leader to push the joined config to"
+  local leader_host leader_port
+  leader_host="$(cat "$RUN_DIR/$leader.host_ip")"
+  leader_port="$(cat "$RUN_DIR/$leader.web_port")"
+
+  local payload status
+  payload="$(jq -n --slurpfile cfg "$RUN_DIR/cluster-joined.json" '{config: $cfg[0], rollback_after: "30s"}')"
+  status="$(curl -sk -o /dev/null -w '%{http_code}' -m 10 -X PUT \
+    -H "Authorization: Bearer $(api_key)" -H "Content-Type: application/json" \
+    -d "$payload" "https://$leader_host:$leader_port/api/config")"
+  [[ "$status" == "200" ]] || die "pushing the joined config for $node failed (http $status)"
+
+  # Adding a node changes `nodes`, which arms a rollback watchdog (any edit
+  # that could cut off the connection it arrived over) - confirm immediately
+  # so the addition sticks rather than reverting after 30s.
+  status="$(curl -sk -o /dev/null -w '%{http_code}' -m 10 -X POST \
+    -H "Authorization: Bearer $(api_key)" "https://$leader_host:$leader_port/api/config/confirm")"
+  [[ "$status" == "200" ]] || die "confirming the joined config failed (http $status)"
+  log "pushed the joined config (adds $node) via $leader's api, without touching $leader's own process"
+
+  # The next disk built bakes whatever is currently at cluster.yaml. Existing
+  # nodes' disks were already built at boot and are untouched; only $node's
+  # disk, built by vm_start below, picks up the joined config.
+  cp "$RUN_DIR/cluster-joined.yaml" "$RUN_DIR/cluster.yaml"
+
+  vm_start "$node" "$ip" "$web_port" "$rpc_port" "$mcast" "$idx" "$host_ip" "$http_port" "$expose_port"
+  log "booted $node to join the already-running cluster"
+}
+
+step_record_leader() {
+  local save; save="$(echo "$1" | jq -r '.save_as // "leader"')"
+  local leader; leader="$(leader_node)" || die "no leader to record"
+  echo -n "$leader" > "$RUN_DIR/var_$save"
+  log "recorded the current leader as \$$save: $leader"
+}
+
+step_record_pid() {
+  local node save pid
+  node="$(echo "$1" | jq -r '.node')"
+  save="$(echo "$1" | jq -r '.save_as')"
+  pid="$(vm_pid "$node")"
+  [[ -n "$pid" ]] || die "$node has no recorded pid, is it running?"
+  echo -n "$pid" > "$RUN_DIR/var_$save"
+  log "recorded $node's pid as \$$save: $pid"
+}
+
+# assert_pid_unchanged: { node: n1, was: "${leader_pid}" }
+#
+# Confirms a node's qemu process never restarted, not just that it is running
+# again: a killed-and-respawned node would also read "running" but is a
+# different pid. This is the direct check that adding another node did not
+# require restarting anything already up.
+step_assert_pid_unchanged() {
+  local node was now
+  node="$(echo "$1" | jq -r '.node')"
+  was="$(echo "$1" | jq -r '.was')"
+  now="$(vm_pid "$node")"
+  [[ -n "$now" ]] || die "$node is not running (expected pid $was)"
+  [[ "$now" == "$was" ]] || die "$node was restarted: pid $was -> $now"
+  log "$node never restarted (pid $now unchanged)"
+}
+
 step_sleep() {
   local secs; secs="$(echo "$1" | jq -r 'if type=="number" or type=="string" then . else .seconds end')"
   log "sleeping ${secs}s"

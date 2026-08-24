@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cl_config::StackFile;
+use cl_config::{StackFile, StackRequirements};
 use cl_raft::Request as ClusterRequest;
 use cl_secret::Sealed;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,7 @@ struct StackDetail {
     revision: u64,
     configs: Vec<String>,
     secrets: Vec<String>,
+    requirements: StackRequirements,
 }
 
 async fn detail(
@@ -61,12 +62,18 @@ async fn detail(
         .stacks
         .get(&name)
         .ok_or_else(|| ApiError::NotFound(format!("no stack {name}")))?;
+    // The spec was already validated at deploy time, so a parse failure here
+    // would mean corrupted state, not a bad request.
+    let requirements = StackFile::parse(&stack.spec)
+        .map(|parsed| parsed.requirements())
+        .unwrap_or_default();
     Ok(Json(StackDetail {
         name: stack.name.clone(),
         spec: stack.spec.clone(),
         revision: stack.revision,
         configs: stack.configs.iter().cloned().collect(),
         secrets: stack.secrets.iter().cloned().collect(),
+        requirements,
     }))
 }
 
@@ -89,7 +96,28 @@ async fn deploy(
     Path(name): Path<String>,
     Json(body): Json<DeployRequest>,
 ) -> Result<StatusCode, ApiError> {
-    StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let parsed = StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let requirements = parsed.requirements();
+
+    // The names this stack owns come from its own spec, not from whatever the
+    // caller happened to include in this request: a redeploy that doesn't
+    // resend an unchanged config's content must not drop the stack's claim on
+    // it, and a config renamed out of the spec must not linger as owned.
+    let cluster_state = state.cluster.state().await;
+    for config_name in &requirements.file_configs {
+        if !body.configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
+            return Err(ApiError::BadRequest(format!(
+                "config {config_name} needs content: it has no existing value to keep"
+            )));
+        }
+    }
+    for secret_name in &requirements.file_secrets {
+        if !body.secrets.contains_key(secret_name) && !cluster_state.secrets.contains_key(secret_name) {
+            return Err(ApiError::BadRequest(format!(
+                "secret {secret_name} needs content: it has no existing value to keep"
+            )));
+        }
+    }
 
     let response = state
         .cluster
@@ -103,7 +131,10 @@ async fn deploy(
         return Err(ApiError::BadRequest(msg));
     }
 
-    for (config_name, content) in &body.configs {
+    for config_name in &requirements.file_configs {
+        let Some(content) = body.configs.get(config_name) else {
+            continue;
+        };
         let response = state
             .cluster
             .submit(ClusterRequest::PutConfig {
@@ -118,12 +149,17 @@ async fn deploy(
         }
     }
 
-    if !body.secrets.is_empty() {
+    let secrets_to_write: BTreeMap<_, _> = body
+        .secrets
+        .iter()
+        .filter(|(k, _)| requirements.file_secrets.contains(*k))
+        .collect();
+    if !secrets_to_write.is_empty() {
         let key_guard = state.key.read().await;
         let key = key_guard
             .as_ref()
             .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-        for (secret_name, content) in &body.secrets {
+        for (secret_name, content) in secrets_to_write {
             let plaintext = cl_raft::base64_decode(content).map_err(ApiError::BadRequest)?;
             let sealed = Sealed::seal(key, secret_name, &plaintext).map_err(ApiError::internal)?;
             let response = state
@@ -146,8 +182,8 @@ async fn deploy(
         .cluster
         .submit(ClusterRequest::SetStackObjects {
             name,
-            configs: body.configs.keys().cloned().collect(),
-            secrets: body.secrets.keys().cloned().collect(),
+            configs: requirements.file_configs,
+            secrets: requirements.file_secrets,
         })
         .await
         .map_err(ApiError::not_leader)?;
@@ -180,20 +216,32 @@ struct ValidateRequest {
 }
 
 #[derive(Serialize)]
+struct ValidationError {
+    path: String,
+    message: String,
+}
+
+#[derive(Serialize)]
 struct ValidateResponse {
     valid: bool,
-    error: Option<String>,
+    errors: Vec<ValidationError>,
+    requirements: Option<StackRequirements>,
 }
 
 async fn validate(_identity: Identity, Json(body): Json<ValidateRequest>) -> Json<ValidateResponse> {
     match StackFile::parse(&body.spec) {
-        Ok(_) => Json(ValidateResponse {
+        Ok(parsed) => Json(ValidateResponse {
             valid: true,
-            error: None,
+            errors: Vec::new(),
+            requirements: Some(parsed.requirements()),
         }),
         Err(e) => Json(ValidateResponse {
             valid: false,
-            error: Some(e.to_string()),
+            errors: vec![ValidationError {
+                path: String::new(),
+                message: e.to_string(),
+            }],
+            requirements: None,
         }),
     }
 }

@@ -1,0 +1,43 @@
+# A node added to the config after the cluster is already up and running
+# joins raft, the vxlan overlay, internal dns and public dns without anyone
+# else - in particular not the leader - being restarted. Regression test for
+# the bug where `watch_leadership` only re-seeded the roster on a raft
+# metrics change, which a brand new node could never itself cause (it isn't a
+# raft member yet, so it can never appear in `reachable`), leaving it stuck
+# until the leader was restarted.
+name: online-node-join
+description: a node added to the config after the cluster is running joins without restarting the leader.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  # Not booted at t=0 - `join_node` below boots it after the cluster already
+  # has quorum, having first pushed a config that names it.
+  - { name: n4, role: worker,  ip: 10.10.0.4, join: true }
+
+failover:
+  probe_interval: 2s
+  fence_timeout: 6s
+  node_timeout: 12s
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - assert_leader_elected: { timeout: 10 }
+  - record_leader: { save_as: leader }
+  - record_pid: { node: "${leader}", save_as: leader_pid }
+
+  - join_node: n4
+  - assert_reachable: { node: n4, timeout: 60 }
+
+  # The point of the fix: the leader that was already running never had to
+  # restart to notice and admit the new node.
+  - assert_pid_unchanged: { node: "${leader}", was: "${leader_pid}" }
+
+  # And the rest of the "network graph" the leader would previously have
+  # needed a restart to update - overlay FDB, internal dns, reverse proxy -
+  # comes up for n4 on its own too.
+  - deploy_stack: { file: stacks/join-target.yaml, name: join-target }
+  - wait_running: { stack: join-target, service: web, timeout: 90 }
+  - assert_http_route: { host: app.wan.test, contains: "nginx", timeout: 60 }
+  - assert_healthy: { stack: join-target, service: probe, timeout: 90 }

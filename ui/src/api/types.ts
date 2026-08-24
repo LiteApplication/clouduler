@@ -109,6 +109,24 @@ export interface StackState {
   secrets: string[];
 }
 
+/** What a stack needs from the cluster to schedule: computed from its spec by
+ *  the server, so the ui never has to parse compose yaml itself. */
+export interface StackRequirements {
+  networks: string[];
+  drives: string[];
+  configs: string[];
+  secrets: string[];
+  /** Top-level configs/secrets this stack bundles its own file for: these are
+   *  the ones the editor should offer to upload content for. */
+  file_configs: string[];
+  file_secrets: string[];
+}
+
+/** GET /api/stacks/:name. */
+export interface StackDetailResponse extends StackState {
+  requirements: StackRequirements;
+}
+
 export interface ConfigEntry {
   name: string;
   content: string;
@@ -468,6 +486,10 @@ export interface ValidationError {
 export interface ValidationResult {
   valid: boolean;
   errors: ValidationError[];
+}
+
+export interface StackValidationResult extends ValidationResult {
+  requirements: StackRequirements | null;
 }
 
 // ---- stats ----

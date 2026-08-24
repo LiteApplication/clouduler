@@ -108,6 +108,16 @@ one that no stack file carries. The ui offers three ways to make a secret: paste
 a string, upload or edit a file, or generate a random value of a chosen length
 and character set.
 
+Deploying or redeploying a stack from the web ui shows a field for every
+`file:`-backed name its `configs:`/`secrets:` blocks declare, prefilled with the
+current content where one already exists. Leaving a field blank on a redeploy
+keeps the existing value rather than clearing it; only a name with no existing
+value and a blank field blocks the deploy. A stack's detail page also shows a
+placement table: one row per network, drive, config and secret its services
+need, one column per node, so a service that cannot schedule shows exactly
+which node is missing what — including a button to create a missing config or
+secret inline.
+
 ## Encryption
 
 Secrets are sealed with XChaCha20-Poly1305 before entering the database. The

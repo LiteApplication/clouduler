@@ -51,16 +51,22 @@ python3 "$QEMU_DIR/lib/scenario_prep.py" "$SCENARIO_FILE" \
 
 mkdir -p "$RUN_DIR/cli-scratch"
 
-log "booting $(jq '.nodes | length' "$RUN_DIR/topology.json") nodes"
+log "booting $(jq '[.nodes[] | select((.join // false) != true)] | length' "$RUN_DIR/topology.json") of $(jq '.nodes | length' "$RUN_DIR/topology.json") nodes now (the rest join later, per the scenario's steps)"
 idx=0
 vpn_mcast="$(jq -r '.vpn_mcast_group // ""' "$RUN_DIR/topology.json")"
-while IFS=$'\t' read -r name ip web_port rpc_port host_ip http_port expose_port vpn_ip vpn_canary; do
-  vm_start "$name" "$ip" "$web_port" "$rpc_port" \
-    "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip" \
-    "$http_port" "$expose_port" "$vpn_ip" "$vpn_canary" \
-    "$([[ -n "$vpn_ip$vpn_canary" ]] && echo "$vpn_mcast" || echo "")"
+while IFS=$'\t' read -r name join ip web_port rpc_port host_ip http_port expose_port vpn_ip vpn_canary; do
+  if [[ "$join" != "true" ]]; then
+    vm_start "$name" "$ip" "$web_port" "$rpc_port" \
+      "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip" \
+      "$http_port" "$expose_port" "$vpn_ip" "$vpn_canary" \
+      "$([[ -n "$vpn_ip$vpn_canary" ]] && echo "$vpn_mcast" || echo "")"
+  fi
   idx=$((idx + 1))
-done < <(jq -r '.nodes[] | [.name, .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port, (.vpn_ip // ""), (.vpn_canary // "")] | @tsv' "$RUN_DIR/topology.json")
+# `join` is read right after `name`, before any field that can be empty
+# (vpn_ip/vpn_canary): IFS-whitespace `read` collapses consecutive tab
+# delimiters, so two adjacent empty fields ahead of `join` would silently
+# swallow it and misalign every field after.
+done < <(jq -r '.nodes[] | [.name, ((.join // false) | tostring), .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port, (.vpn_ip // ""), (.vpn_canary // "")] | @tsv' "$RUN_DIR/topology.json")
 
 log "waiting for daemons to come up"
 sleep 5

@@ -39,11 +39,14 @@ x-clouduler: {...}
   outbound traffic out that network's host interface, and the scheduler
   restricts it to nodes that implement that network automatically; no
   `deploy.placement.constraints` entry is needed for that part.
-- `volumes`, `configs`, `secrets` are accepted for compose compatibility.
-  Volumes are not used: a service references drives directly through its own
-  `volumes:` list (see below). `configs`/`secrets` only support a `file:`
-  path today; no service-level `configs:`/`secrets:` key exists yet, so
-  services cannot reference them.
+- `volumes` is accepted for compose compatibility but not used: a service
+  references drives directly through its own `volumes:` list (see below).
+- `configs`/`secrets` declare cluster objects. An entry with `file:` bundles
+  that file's content with the stack at deploy time (or, from the web ui,
+  whatever you type or upload into the matching field); one with no `file:`
+  refers to an object that must already exist. Either way, a service mounts
+  one by name through its own `configs:`/`secrets:` list — see
+  `docs/secrets.md`.
 
 ## Services
 

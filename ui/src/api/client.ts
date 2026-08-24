@@ -25,6 +25,8 @@ import type {
   SelfUpdateConfig,
   SelfUpdateGithubTokenStatus,
   SelfUpdateRunState,
+  StackDetailResponse,
+  StackValidationResult,
   StaticRouteRule,
   TlsFingerprint,
   ValidationResult,
@@ -149,13 +151,14 @@ export const api = {
   removeNode: (name: string) => del<void>(`/api/nodes/${encodeURIComponent(name)}`),
 
   // stacks
+  getStack: (name: string) => get<StackDetailResponse>(`/api/stacks/${encodeURIComponent(name)}`),
   deployStack: (
     name: string,
     body: { spec: string; configs?: Record<string, string>; secrets?: Record<string, string> },
   ) => put<void>(`/api/stacks/${encodeURIComponent(name)}`, body),
   removeStack: (name: string) => del<void>(`/api/stacks/${encodeURIComponent(name)}`),
   validateStack: (name: string, spec: string) =>
-    post<ValidationResult>(`/api/stacks/${encodeURIComponent(name)}/validate`, { spec }),
+    post<StackValidationResult>(`/api/stacks/${encodeURIComponent(name)}/validate`, { spec }),
 
   // instances
   listInstances: () => get<InstanceState[]>('/api/instances'),
