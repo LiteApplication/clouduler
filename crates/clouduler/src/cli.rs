@@ -23,6 +23,12 @@ pub struct Cli {
     #[arg(long, global = true, env = "CLOUDULER_LOG", default_value = "info,openraft=warn")]
     pub log: String,
 
+    /// Log each step a command takes while it changes cluster state: requests
+    /// submitted, nodes contacted, files touched. Raises this crate's own log
+    /// level to debug on top of whatever `--log` already says.
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

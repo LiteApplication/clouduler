@@ -10,6 +10,7 @@ use cl_config::{ClusterConfig, StackBundle};
 use cl_raft::client::Client;
 use cl_raft::state::{base64_encode, Request, MAX_OBJECT_BYTES};
 use cl_secret::{ClusterKey, Sealed};
+use tracing::debug;
 
 /// Pick a node to talk to. Any node will do for a write, since it forwards to
 /// the leader, so prefer the one asked for and otherwise take the first manager.
@@ -32,6 +33,7 @@ pub fn client_for(cfg: &ClusterConfig, via: Option<&str>) -> Result<Client> {
     let addr = cfg
         .rpc_addr(node)
         .ok_or_else(|| anyhow!("node {name} has no address on the internal network"))?;
+    debug!(node = name, %addr, "submitting through");
     Ok(Client::connect(addr.to_string()))
 }
 
@@ -43,6 +45,12 @@ pub async fn deploy(
 ) -> Result<()> {
     let bundle = StackBundle::load(file).with_context(|| format!("reading {}", file.display()))?;
     let name = name.unwrap_or_else(|| bundle.name.clone());
+    debug!(
+        name,
+        services = bundle.parsed.services.len(),
+        files = bundle.files.len(),
+        "loaded bundle"
+    );
 
     // Catch what the cluster would reject anyway, but locally and with a
     // message that names the file.
@@ -61,6 +69,7 @@ pub async fn deploy(
     }
 
     let client = client_for(cfg, via)?;
+    debug!(name, "submitting DeployStack");
     let response = client
         .submit(Request::DeployStack {
             name: name.clone(),
@@ -73,6 +82,7 @@ pub async fn deploy(
         bail!("cluster rejected the stack: {error}");
     }
 
+    debug!(files = bundle.files.len(), "publishing bundled config and secret objects");
     publish_objects(cfg, &client, &name, &bundle).await?;
 
     let stacks = client.state().await.map_err(|e| anyhow!("{e}"))?;
@@ -116,6 +126,7 @@ async fn publish_objects(
     };
 
     for (name, file) in &bundle.files {
+        debug!(name, secret = file.secret, bytes = file.content.len(), "publishing object");
         let request = if file.secret {
             let key = key.as_ref().expect("checked above");
             let sealed = Sealed::seal(key, name, &file.content)
@@ -144,6 +155,7 @@ async fn publish_objects(
 
     // Recorded last, so a failure halfway leaves objects the stack does not yet
     // claim rather than claims with nothing behind them.
+    debug!(configs = configs.len(), secrets = secrets.len(), "submitting SetStackObjects");
     let response = client
         .submit(Request::SetStackObjects {
             name: stack.to_string(),
@@ -211,6 +223,7 @@ pub async fn show(cfg: &ClusterConfig, name: &str, files: bool, via: Option<&str
 }
 
 pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
+    debug!(name, "submitting RemoveStack");
     let response = client_for(cfg, via)?
         .submit(Request::RemoveStack {
             name: name.to_string(),

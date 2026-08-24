@@ -196,9 +196,10 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               { value: 'internal', label: 'Internal' },
               { value: 'private', label: 'Private' },
               { value: 'public', label: 'Public' },
+              { value: 'egress', label: 'Egress' },
               { value: 'wireguard', label: 'WireGuard' },
             ]}
-            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. WireGuard is configured per node by importing a wg-quick config below."
+            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below."
             disabled={disabled}
           />
           {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && (
@@ -224,6 +225,12 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
           {net.type === 'wireguard' && (
             <p className="field-hint">
               Not addressable: import each node's WireGuard config below, under its own card.
+            </p>
+          )}
+          {net.type === 'egress' && (
+            <p className="field-hint">
+              Not addressable by subnet: pick a host interface per node below. Clouduler does not
+              manage the interface itself — it must already exist and be up.
             </p>
           )}
         </div>
@@ -697,6 +704,19 @@ export function NodeCard({
             </div>
           );
         }
+        if (net.type === 'egress') {
+          const iface = typeof addr === 'string' ? addr : addr && 'interface' in addr ? addr.interface : '';
+          return (
+            <EgressInterfaceField
+              key={netName}
+              nodeName={name}
+              netName={netName}
+              value={iface}
+              onChange={(v) => setAddress(netName, v || null)}
+              disabled={disabled}
+            />
+          );
+        }
         const ip = typeof addr === 'string' ? addr : '';
         return (
           <div key={netName} className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
@@ -843,6 +863,85 @@ function OpenPortsEditor({
             Cancel
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * An egress-kind network's node address is a host interface name (`wg0`,
+ * `end0`, ...) rather than an IP: `Docker::set_default_route` forces the
+ * service's outbound traffic out that interface. Suggests the node's current
+ * non-docker, non-clouduler-managed interfaces via a datalist, fetched once
+ * per mount, but stays free text since the interface may not exist yet, or
+ * the node may be unreachable right now.
+ */
+function EgressInterfaceField({
+  nodeName,
+  netName,
+  value,
+  onChange,
+  disabled,
+}: {
+  nodeName: string;
+  netName: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  const listId = `node-${nodeName}-${netName}-iface-options`;
+  const [options, setOptions] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getNodeInterfaces(nodeName)
+      .then((names) => {
+        if (!cancelled) setOptions(names);
+      })
+      .catch((err) => {
+        console.error(`[egress] failed to list interfaces for ${nodeName}:`, err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeName]);
+
+  return (
+    <div className="flex-row" style={{ gap: 8, alignItems: 'flex-end' }}>
+      <div style={{ flex: 1 }}>
+        <div className="field">
+          <label htmlFor={`node-${nodeName}-${netName}-iface`}>{`${netName} (egress interface)`}</label>
+          <input
+            id={`node-${nodeName}-${netName}-iface`}
+            className="mono"
+            type="text"
+            list={listId}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            disabled={disabled}
+          />
+          <datalist id={listId}>
+            {options.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
+          <span className="field-hint">
+            The host interface this node's outbound traffic on this network leaves through, e.g. a
+            VPN tunnel or the node's WAN interface. Must already exist on the node — clouduler does
+            not bring it up.
+          </span>
+        </div>
+      </div>
+      {!disabled && (
+        <button
+          className="ghost"
+          onClick={() => onChange('')}
+          aria-label={`remove ${netName} from ${nodeName}`}
+          title={`Remove ${netName} from this node`}
+        >
+          <Icon name="close" />
+        </button>
       )}
     </div>
   );

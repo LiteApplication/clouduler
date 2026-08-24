@@ -184,6 +184,9 @@ export const api = {
   // nodes
   listNodes: () => get<ClusterState['nodes']>('/api/nodes'),
   getNode: (name: string) => get<import('./types').NodeDetail>(`/api/nodes/${encodeURIComponent(name)}`),
+  // Best-effort autofill for an egress/wireguard network's host interface
+  // field — non-docker/non-clouduler-managed interfaces seen on that node.
+  getNodeInterfaces: (name: string) => get<string[]>(`/api/nodes/${encodeURIComponent(name)}/interfaces`),
   addNode: (node: unknown) => post<void>('/api/nodes', node),
   setAvailability: (name: string, availability: 'active' | 'drain') =>
     patch<void>(`/api/nodes/${encodeURIComponent(name)}`, { availability }),

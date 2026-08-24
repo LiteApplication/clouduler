@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::state::{Availability, NodeState, Request, Role};
+use tracing::debug;
 
 use crate::cli::AvailabilityArg;
 use crate::init::plan::parse_drive_arg;
@@ -33,6 +34,15 @@ pub async fn add(
         .collect::<Result<BTreeMap<_, _>>>()?;
 
     let client = client_for(cfg, via)?;
+    debug!(
+        name = name.as_str(),
+        ?role,
+        %rpc_addr,
+        drives = drives.len(),
+        labels = labels.len(),
+        via = via.unwrap_or("<any manager>"),
+        "submitting UpsertNode"
+    );
     let response = client
         .submit(Request::UpsertNode(NodeState {
             name: name.clone(),
@@ -94,6 +104,7 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
     if had_entry {
         config.validate().context("config without this node")?;
     }
+    debug!(name, had_entry, "submitting RemoveNode");
 
     let response = client
         .submit(Request::RemoveNode { node: name.to_string() })
@@ -105,6 +116,7 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
 
     if had_entry {
         let yaml = serde_yaml::to_string(&config).context("re-encoding the config")?;
+        debug!(expect_generation, "submitting PutClusterConfig to drop the node from the config");
         let response = client
             .submit(Request::PutClusterConfig { yaml, expect_generation })
             .await
@@ -132,6 +144,7 @@ pub async fn set_availability(
         AvailabilityArg::Drain => Availability::Drain,
     };
 
+    debug!(name, ?availability, "submitting SetAvailability");
     let response = client_for(cfg, via)?
         .submit(Request::SetAvailability {
             node: name.to_string(),

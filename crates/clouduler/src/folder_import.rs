@@ -23,6 +23,7 @@ use cl_drive::{drive_port, resolve_relative, DeltaEngine, DriveRegistry, DriveRo
 use cl_raft::client::Client;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::state::{ClusterState, DesiredState, Request};
+use tracing::debug;
 
 use crate::cli::FolderImportArgs;
 use crate::stack::client_for;
@@ -36,6 +37,7 @@ const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 
 pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -> Result<()> {
     let (drive, volume, path) = parse_target(&args.target)?;
+    debug!(drive, volume, path = path.as_deref().unwrap_or(""), "parsed target");
     if args.replace && path.is_some() {
         bail!("--replace takes no sub-path; target must be <drive>/<volume>");
     }
@@ -53,6 +55,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
 
     let id = VolumeId::new(drive.clone(), volume.clone());
     let client = client_for(cfg, args.via.as_deref())?;
+    debug!(via = args.via.as_deref().unwrap_or("<any manager>"), "submitting through");
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
 
     if registry.is_served(&drive) && registry.role(&drive, &state.unreachable) == DriveRole::Standby {
@@ -64,6 +67,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
     let volume_root = registry
         .ensure_volume(&id)
         .with_context(|| format!("preparing the local path for {id}"))?;
+    debug!(root = %volume_root.display(), "volume root");
 
     let mut stopped: Vec<InstanceId> = Vec::new();
     if args.replace {
@@ -75,11 +79,17 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
                     using.iter().map(InstanceId::to_string).collect::<Vec<_>>().join(", ")
                 );
             }
-            set_desired(&client, &using, DesiredState::Stopped).await?;
             let grace = max_stop_grace(&state, &using);
+            debug!(
+                instances = %using.iter().map(InstanceId::to_string).collect::<Vec<_>>().join(", "),
+                wait = ?(grace + STOP_POLL_MARGIN),
+                "stopping instances before replacing the volume"
+            );
+            set_desired(&client, &using, DesiredState::Stopped).await?;
             tokio::time::sleep(grace + STOP_POLL_MARGIN).await;
             stopped = using;
         }
+        debug!("clearing the volume before replacing it");
         clear_directory(&volume_root)?;
         import_replacing(&args, &volume_root)?;
     } else {
@@ -99,10 +109,12 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
                 dest.display()
             );
         }
+        debug!(dest = %dest.display(), "placing source at");
         apply_method(&args, &args.source, &dest)?;
     }
 
     let generation = touch_volume(&client, &id, node_name).await?;
+    debug!(generation, "volume touched, pushing now");
     let pushed = push_now(PushArgs {
         client: &client,
         registry: &registry,
@@ -202,6 +214,7 @@ async fn set_desired(client: &Client, instances: &[InstanceId], desired: Desired
 /// bumps its generation so every other replica is marked stale. Returns the
 /// new generation, for the immediate push below.
 async fn touch_volume(client: &Client, id: &VolumeId, node_name: &str) -> Result<u64> {
+    debug!(%id, primary = node_name, "submitting UpsertVolume");
     let upsert = client
         .submit(Request::UpsertVolume { id: id.clone(), primary: node_name.to_string() })
         .await
@@ -209,6 +222,7 @@ async fn touch_volume(client: &Client, id: &VolumeId, node_name: &str) -> Result
     if let Some(error) = upsert.error {
         bail!("cluster rejected the volume record: {error}");
     }
+    debug!(%id, primary = node_name, "submitting TouchVolume");
     let touch = client
         .submit(Request::TouchVolume { id: id.clone(), primary: node_name.to_string() })
         .await
@@ -257,12 +271,18 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
             .collect()
     };
 
+    debug!(
+        targets = %targets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
+        "pushing to"
+    );
     let engine = DeltaEngine::default();
     let mut failed = Vec::new();
     for (name, addr) in &targets {
         let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
+        debug!(node = name.as_str(), %peer, "syncing volume");
         match engine.sync(volume_root, peer, id, generation).await {
             Ok(_) => {
+                debug!(node = name.as_str(), generation, "recording replica generation");
                 let response = client
                     .submit(Request::SetVolumeReplica { id: id.clone(), node: name.clone(), generation })
                     .await;

@@ -25,7 +25,7 @@ use crate::cli::{Cli, Command, ConfigCommand, DriveCommand, NodeCommand, StackCo
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_tracing(&cli.log)?;
+    init_tracing(&cli.log, cli.verbose)?;
     install_crypto_provider();
 
     // Setting the node up is the one thing that runs without a config, since
@@ -118,9 +118,20 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn init_tracing(filter: &str) -> Result<()> {
+/// Own-crate debug directives `--verbose` layers on top of `--log`, so
+/// `-v` shows what a command is doing without also turning on debug logging
+/// for every dependency (openraft above all, which is noisy even at info).
+const VERBOSE_DIRECTIVES: &str =
+    "clouduler=debug,cl_drive=debug,cl_raft=debug,cl_sched=debug,cl_net=debug,cl_docker=debug,cl_proxy=debug,cl_dns=debug,cl_config=debug";
+
+fn init_tracing(filter: &str, verbose: bool) -> Result<()> {
+    let filter = if verbose {
+        format!("{filter},{VERBOSE_DIRECTIVES}")
+    } else {
+        filter.to_string()
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_new(filter).context("invalid log filter")?)
+        .with_env_filter(EnvFilter::try_new(&filter).context("invalid log filter")?)
         .with_target(false)
         .init();
     Ok(())

@@ -4,6 +4,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::state::Request;
+use tracing::debug;
 
 use crate::stack::client_for;
 
@@ -23,6 +24,7 @@ pub async fn reload(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
         .map(|c| c.generation)
         .unwrap_or(0);
 
+    debug!(expect_generation, bytes = yaml.len(), "submitting PutClusterConfig");
     let response = client
         .submit(Request::PutClusterConfig { yaml, expect_generation })
         .await

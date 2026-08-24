@@ -22,10 +22,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/nodes", get(list).post(add))
         .route("/api/nodes/{name}", get(detail).patch(patch_node).delete(remove))
         .route("/api/nodes/{name}/logs", get(logs))
-        // Node-to-node only, HMAC authenticated: what `detail` forwards to
-        // when asked about a node other than the one answering. See
-        // `internal_peer`.
+        .route("/api/nodes/{name}/interfaces", get(interfaces))
+        // Node-to-node only, HMAC authenticated: what `detail`/`interfaces`
+        // forward to when asked about a node other than the one answering.
+        // See `internal_peer`.
         .route("/api/nodes/internal/{name}/usage", get(internal_usage))
+        .route("/api/nodes/internal/{name}/interfaces", get(internal_interfaces))
 }
 
 #[derive(Serialize)]
@@ -170,6 +172,64 @@ fn local_resource_usage() -> ResourceUsage {
         uptime_seconds: System::uptime(),
         local: true,
     }
+}
+
+/// Host interfaces an operator would plausibly point an `egress` (or
+/// `wireguard`) network's node address at, i.e. not one clouduler or docker
+/// manages itself. Best-effort autofill for the config UI, not a validated
+/// allowlist — the field stays free text so an interface brought up after
+/// the page loaded, or one this filter misses, can still be typed in.
+fn is_managed_interface(name: &str) -> bool {
+    name == "lo"
+        || name.starts_with("docker")
+        || name.starts_with("veth")
+        || name.starts_with("br-")
+        || name.starts_with("clbr-")
+        || name.starts_with("clvx-")
+        || name.starts_with("clex-")
+}
+
+fn local_interfaces() -> Vec<String> {
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let mut names: Vec<String> = networks
+        .keys()
+        .filter(|name| !is_managed_interface(name))
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
+/// Forwards to the node in question the same way `detail` forwards resource
+/// usage: interfaces only exist to answer for on the node that owns them.
+async fn interfaces(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    if name == state.node_name {
+        return Ok(Json(local_interfaces()));
+    }
+    let cluster_state = state.cluster.state().await;
+    if cluster_state.unreachable.contains(&name) {
+        return Ok(Json(Vec::new()));
+    }
+    let names = internal_peer::fetch_json(&state, &name, &internal_interfaces_path(&name))
+        .await
+        .unwrap_or_else(|e| {
+            warn!(node = %name, error = %e, "could not fetch interfaces from its node");
+            Vec::new()
+        });
+    Ok(Json(names))
+}
+
+fn internal_interfaces_path(name: &str) -> String {
+    format!("/api/nodes/internal/{name}/interfaces")
+}
+
+/// Node-to-node: always this node's own interfaces, regardless of `name`.
+async fn internal_interfaces(_auth: InternalAuth, State(_state): State<AppState>) -> Json<Vec<String>> {
+    Json(local_interfaces())
 }
 
 #[derive(Deserialize)]
