@@ -55,8 +55,14 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
         let tag_exists = live.iter().any(|r| is_owning_tag(r, cluster, key));
 
         for want in wants {
-            match haves.pop() {
-                Some(have) if unchanged(have, want) => {}
+            // Prefer a `have` that already matches: picking an arbitrary one
+            // to update instead would try to repoint it to content another
+            // live record already holds, which the provider rejects as a
+            // duplicate and would abort the whole apply before the real
+            // stale records ever get deleted below.
+            let matching = haves.iter().position(|have| unchanged(have, want));
+            match matching.map(|i| haves.remove(i)).or_else(|| haves.pop()) {
+                Some(have) if unchanged(&have, want) => {}
                 Some(have) => {
                     if let Some(id) = &have.id {
                         out.update.push((id.clone(), to_input(cluster, want)));
@@ -111,7 +117,13 @@ pub async fn apply(cf: &Cloudflare, zone_id: &str, plan: &Plan) -> Result<()> {
         }
     }
     for (id, input) in &plan.update {
-        cf.update_record(zone_id, id, input).await?;
+        match cf.update_record(zone_id, id, input).await {
+            Ok(_) => {}
+            Err(e) if e.is_benign_duplicate() => {
+                tracing::debug!(name = %input.name, "record already exists, skipping");
+            }
+            Err(e) => return Err(e),
+        }
     }
     for id in &plan.delete {
         cf.delete_record(zone_id, id).await?;
@@ -297,6 +309,30 @@ mod tests {
         // record survives at 10.0.0.1 and none stay behind at 10.0.0.2.
         assert_eq!(p.delete.len(), 1, "{p:?}");
         assert!(p.update.iter().all(|(_, input)| input.content == "10.0.0.1"), "{p:?}");
+    }
+
+    /// A previous leader failover left one record already pointing at the
+    /// new leader's address, plus stale records for two other nodes. The
+    /// planner must keep the already-correct record as-is and only touch
+    /// the stale ones, rather than picking an arbitrary `have` to "become"
+    /// the desired content - that would try to repoint a stale record to
+    /// content another live record already holds, which real providers
+    /// reject as a duplicate.
+    #[test]
+    fn keeps_the_already_matching_record_instead_of_updating_an_arbitrary_one() {
+        let key = "A:cloud.example.com";
+        let want = vec![desired(RecordType::A, "cloud.example.com", "10.0.0.3")];
+        let live_records = vec![
+            live("r1", RecordType::A, "cloud.example.com", "10.0.0.1"),
+            live("r2", RecordType::A, "cloud.example.com", "10.0.0.2"),
+            live("r3", RecordType::A, "cloud.example.com", "10.0.0.3"),
+            tag("t1", "cloud.example.com", key),
+        ];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert!(p.update.is_empty(), "{p:?}");
+        assert_eq!(p.delete.len(), 2, "{p:?}");
+        assert!(p.delete.contains(&"r1".to_string()));
+        assert!(p.delete.contains(&"r2".to_string()));
     }
 
     #[test]
