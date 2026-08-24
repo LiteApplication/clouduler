@@ -39,7 +39,10 @@ if command -v npm >/dev/null 2>&1 && [ -f ui/package-lock.json ]; then
     (cd ui && npm install --package-lock-only --silent)
 fi
 
-git add Cargo.toml ui/package.json Cargo.lock ui/package-lock.json
+echo "Regenerating api-shapes fixture..."
+UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
+
+git add Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__fixtures__/api-shapes.json
 
 git commit -m "release: v${VERSION}"
 git tag -a "v${VERSION}" -m "v${VERSION}"
