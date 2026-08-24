@@ -62,7 +62,7 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
             // stale records ever get deleted below.
             let matching = haves.iter().position(|have| unchanged(have, want));
             match matching.map(|i| haves.remove(i)).or_else(|| haves.pop()) {
-                Some(have) if unchanged(&have, want) => {}
+                Some(have) if unchanged(have, want) => {}
                 Some(have) => {
                     if let Some(id) = &have.id {
                         out.update.push((id.clone(), to_input(cluster, want)));
