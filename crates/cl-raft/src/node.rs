@@ -30,6 +30,11 @@ use crate::types::Raft;
 /// itself as holding quorum. Three heartbeats gives one lost tick of slack.
 const QUORUM_ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How long `add_manager` waits for a ping before deciding a prospective
+/// voter is not up yet. Short and one-shot: a miss is not fatal, since
+/// `seed_roster` retries on its own timer.
+const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub struct Options {
     pub name: String,
     /// Config-declared identity this node was provisioned with. See
@@ -50,6 +55,25 @@ pub struct ClusterNode {
     shared: Arc<RwLock<StateMachine>>,
     quorum: QuorumWatch,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// Force `data_dir` (a stopped node's own raft storage) to hold a cluster
+/// where this node is the sole voter, so it can restore quorum on its own
+/// the next time it starts.
+///
+/// This is offline disaster recovery, not a `ClusterNode` operation: it
+/// writes straight to `data_dir/raft.redb`, so the daemon owning that
+/// directory must not be running, and it must be called before `start` opens
+/// the store for real. See `Store::force_quorum` for what it actually
+/// changes and why.
+pub async fn force_quorum(
+    data_dir: &std::path::Path,
+    id: uuid::Uuid,
+    addr: SocketAddr,
+) -> Result<()> {
+    let store = Store::open(data_dir.join("raft.redb"))?;
+    store.force_quorum(node_id(id), addr).await?;
+    Ok(())
 }
 
 impl ClusterNode {
@@ -245,12 +269,34 @@ impl ClusterNode {
         self.raft.is_initialized().await.map_err(ClusterError::Fatal)
     }
 
-    /// Add a voting manager to the cluster.
+    /// Add a voting manager to the cluster, but only once it is actually
+    /// reachable.
+    ///
+    /// Promoting to voter the moment the learner is added is unsafe:
+    /// openraft's own blocking wait for the learner to catch up
+    /// (`add_learner(.., true)`) compares replication lag against
+    /// `replication_lag_threshold`, which a freshly formed or lightly used
+    /// cluster's whole log can sit under - so a learner that never actually
+    /// connected can still look "caught up" and get promoted anyway. That
+    /// turns a 1-voter cluster into a 2-voter one with no fault tolerance:
+    /// if the new node in fact never came up, quorum (now requiring both) is
+    /// lost immediately and the cluster locks. So this pings the node
+    /// itself before calling `change_membership`, and if it does not
+    /// answer, leaves it a learner and returns an error - `seed_roster`
+    /// retries on its own timer, same as any other add failure.
     pub async fn add_manager(&self, id: NodeId, addr: SocketAddr) -> Result<()> {
         self.raft
-            .add_learner(id, BasicNode::new(addr.to_string()), true)
+            .add_learner(id, BasicNode::new(addr.to_string()), false)
             .await
             .map_err(ClusterError::membership)?;
+
+        let peer = Peer::connect(&addr.to_string());
+        if !matches!(timeout(CONNECT_PROBE_TIMEOUT, network::ping(&peer)).await, Ok(true)) {
+            return Err(ClusterError::Membership(format!(
+                "{addr} did not answer, not promoting it to voter yet"
+            )));
+        }
+
         let mut voters: BTreeSet<NodeId> = self.voters().await;
         voters.insert(id);
         self.raft
@@ -309,6 +355,17 @@ impl ClusterNode {
             .collect()
     }
 
+    /// Whether `id` currently holds a vote, as opposed to being absent from
+    /// membership entirely or present only as a learner.
+    ///
+    /// `seed_roster` polls this for every configured manager so a node
+    /// demoted by `force_quorum` - or never promoted because it was
+    /// unreachable when `add_manager` last tried - gets promoted again the
+    /// moment it is reachable, with no operator action needed.
+    pub async fn is_voter(&self, id: NodeId) -> bool {
+        self.voters().await.contains(&id)
+    }
+
     /// Submit a write. Applied here when this node leads, otherwise forwarded
     /// to the leader over the same channel raft uses.
     pub async fn submit(&self, request: Request) -> Result<Response> {
@@ -331,6 +388,18 @@ impl ClusterNode {
         forward(&peer, request)
             .await
             .map_err(|msg| ClusterError::Forward { leader, msg })
+    }
+
+    /// The current leader's raft rpc address (`ip:port`), read straight from
+    /// raft's own live membership rather than this node's replicated
+    /// application state, so it stays correct even when the latter is
+    /// lagging or holds a stale id for the leader (e.g. right after the
+    /// leader was re-provisioned under a new id via `force_quorum`/`init
+    /// --join`). `None` if there is no leader right now, or raft's
+    /// membership does not (yet) carry its address.
+    pub async fn leader_rpc_addr(&self) -> Option<String> {
+        let leader = self.quorum.leader()?;
+        self.leader_addr(leader).await
     }
 
     async fn leader_addr(&self, leader: NodeId) -> Option<String> {

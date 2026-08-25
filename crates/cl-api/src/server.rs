@@ -461,16 +461,17 @@ async fn redirect_non_leader(
 /// Best-effort address of the current leader, built from its internal rpc
 /// address plus the configured web port. The cluster does not track a
 /// separate api-facing address per node, so this is the closest thing to it.
+///
+/// Reads the address from raft's own membership (via `leader_rpc_addr`)
+/// rather than the replicated application-level node roster: the roster can
+/// lag behind on a follower, and briefly disagree entirely about a leader's
+/// id after it gets re-provisioned, which used to make a perfectly healthy
+/// leader lookup fail and this node answer with a 503 instead of a redirect.
 async fn leader_location(state: &AppState) -> Option<String> {
-    let quorum = state.cluster.quorum();
-    let leader_id = quorum.leader()?;
-    let cluster_state = state.cluster.state().await;
-    let (_, node) = cluster_state
-        .nodes
-        .iter()
-        .find(|(_, node)| cl_raft::node_id(node.id) == leader_id)?;
+    let addr = state.cluster.leader_rpc_addr().await?;
+    let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&addr);
     let port = state.cluster_config.read().await.web.port;
-    Some(format!("https://{}:{port}/", node.rpc_addr.ip()))
+    Some(format!("https://{ip}:{port}/"))
 }
 
 #[cfg(test)]

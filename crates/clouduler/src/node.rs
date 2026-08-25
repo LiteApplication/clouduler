@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
@@ -13,6 +14,7 @@ use tracing::debug;
 
 use crate::cli::AvailabilityArg;
 use crate::init::plan::parse_drive_arg;
+use crate::init::prompt::Prompt;
 use crate::stack::client_for;
 
 pub async fn add(
@@ -130,6 +132,58 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
     }
 
     println!("removed {name}");
+    Ok(())
+}
+
+/// Disaster recovery for a cluster that has lost quorum for good: force
+/// `name`'s own local raft state to make it the cluster's sole voter.
+///
+/// Unlike every other command in this module, this never talks to a running
+/// daemon - it edits `name`'s own data directory directly, so its daemon
+/// must be stopped first, and `via` does not apply. See
+/// `cl_raft::node::force_quorum` for what actually changes.
+pub async fn force_quorum(
+    cfg: &ClusterConfig,
+    name: &str,
+    data_dir_override: Option<PathBuf>,
+    yes: bool,
+) -> Result<()> {
+    let node = cfg
+        .node(name)
+        .ok_or_else(|| anyhow!("node {name} is not declared in the config"))?;
+    let rpc_addr = cfg
+        .rpc_addr(node)
+        .ok_or_else(|| anyhow!("node {name} has no address on the internal network"))?;
+    let data_dir = data_dir_override
+        .unwrap_or_else(|| node.data_dir(cfg).to_path_buf())
+        .join("raft");
+
+    let mut prompt = Prompt::new(std::io::stdin().lock(), std::io::stdout(), !yes);
+    prompt.say(&format!(
+        "this rewrites the raft log and state machine at {} directly, bypassing consensus, so \
+         that {name} becomes the cluster's sole voter.",
+        data_dir.join("raft.redb").display()
+    ))?;
+    prompt.say(
+        "only do this once every other manager's raft state is confirmed lost for good: a \
+         manager that comes back with its old state intact would now conflict with this node. \
+         make sure this node's own daemon is stopped before continuing.",
+    )?;
+    if !prompt.confirm(&format!("force {name} to be the cluster's sole voter?"), yes)? {
+        bail!("aborted");
+    }
+
+    cl_raft::node::force_quorum(&data_dir, node.id, rpc_addr)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+
+    println!(
+        "{name} is now the cluster's sole voter. Start its daemon; once it is leading again, \
+         any other manager still known to it is promoted back to a voter on its own as soon as \
+         it is reachable - nothing to run there by hand unless its local state is gone too, in \
+         which case it needs `clouduler init --join`. If a lost manager is never coming back, \
+         `clouduler node remove` it instead."
+    );
     Ok(())
 }
 

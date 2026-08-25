@@ -77,6 +77,13 @@ async fn main() -> Result<()> {
             NodeCommand::SetAvailability { name, availability, via } => {
                 node::set_availability(&cfg, &name, availability, via.as_deref()).await
             }
+            NodeCommand::ForceQuorum { node: node_name, yes } => {
+                let node_name = match node_name {
+                    Some(n) => n,
+                    None => hostname()?,
+                };
+                node::force_quorum(&cfg, &node_name, cli.data_dir, yes).await
+            }
         },
         Command::Stack { command } => match command {
             StackCommand::Deploy { file, name, via } => {

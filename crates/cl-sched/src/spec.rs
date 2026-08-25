@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use cl_config::{Command, RestartPolicy as StackRestart, Service};
 use cl_docker::{
     BindMount, ContainerSpec, Healthcheck, PortMapping, PortProtocol, ResourceLimits, RestartPolicy,
+    TmpfsMount,
 };
 use cl_raft::ids::InstanceId;
 
@@ -80,6 +81,19 @@ pub fn build(
         .collect();
     mounts.extend(objects.iter().map(|o| o.mount()));
 
+    let tmpfs: Vec<TmpfsMount> = service
+        .volumes
+        .iter()
+        .filter_map(|v| {
+            let opts = v.tmpfs.as_ref()?;
+            Some(TmpfsMount {
+                container_path: v.target.display().to_string(),
+                size_bytes: opts.size.map(|s| s.bytes() as i64),
+                read_only: v.read_only,
+            })
+        })
+        .collect();
+
     // Secrets given an `env:` target take priority over a same-named plain
     // `environment:` entry, since naming one explicitly is the more specific
     // choice.
@@ -96,10 +110,13 @@ pub fn build(
         stack: instance.stack.clone(),
         service: instance.service.clone(),
         instance: instance.to_string(),
+        hostname: service.hostname.clone(),
         env: env.into_iter().collect(),
         command: service.command.as_ref().map(command_words),
         labels,
         mounts,
+        tmpfs,
+        read_only: service.read_only,
         ports: service.ports.iter().flat_map(port_mappings).collect(),
         network: placement.network,
         ip: placement.ip,
@@ -394,6 +411,50 @@ mod tests {
         assert_eq!(spec.mounts.len(), 1);
         assert!(spec.mounts[0].read_only);
         assert_eq!(spec.mounts[0].container_path, "/etc/nginx/nginx.conf");
+    }
+
+    #[test]
+    fn hostname_and_read_only_carry_over() {
+        let s = service(
+            "services:\n  web:\n    image: nginx\n    hostname: custom-host\n    read_only: true\n",
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
+            Placement::default(),
+            None,
+            1,
+        );
+        assert_eq!(spec.hostname.as_deref(), Some("custom-host"));
+        assert!(spec.read_only);
+    }
+
+    #[test]
+    fn tmpfs_volumes_become_tmpfs_mounts_not_binds() {
+        let s = service(
+            "services:\n  web:\n    image: nginx\n    volumes:\n      - type: tmpfs\n        target: /cache\n        tmpfs:\n          size: 64m\n",
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
+            Placement::default(),
+            None,
+            1,
+        );
+        assert!(spec.mounts.is_empty());
+        assert_eq!(spec.tmpfs.len(), 1);
+        assert_eq!(spec.tmpfs[0].container_path, "/cache");
+        assert_eq!(spec.tmpfs[0].size_bytes, Some(64 * 1024 * 1024));
     }
 
     #[test]

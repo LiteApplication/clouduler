@@ -101,6 +101,89 @@ impl Store {
     pub fn shared_state(&self) -> Arc<RwLock<StateMachine>> {
         self.sm.clone()
     }
+
+    /// Force this node to be the cluster's sole voter, bypassing consensus
+    /// entirely by rewriting the local log and state machine directly.
+    ///
+    /// For a cluster that has lost quorum for good - a voter's local state
+    /// gone forever, with no backup - normal `change_membership` can never
+    /// run again, since driving it through raft itself needs the quorum
+    /// that is missing. This is the same escape hatch etcd's
+    /// `--force-new-cluster` or Consul's `peers.json` recovery provide: it
+    /// appends one synthetic, already-committed membership entry and moves
+    /// on, with no other voter ever asked to agree.
+    ///
+    /// Every node this store already knew about, including the lost voter,
+    /// stays in the new membership's node map - only the voter set shrinks
+    /// to `id` alone. That is deliberate: a worker resumes replicating
+    /// without needing to be re-added as a learner, and the lost voter is
+    /// demoted to a learner rather than dropped, so it can rejoin cleanly
+    /// once it comes back.
+    ///
+    /// Must only run while the daemon owning this data directory is
+    /// stopped: this writes straight past the raft runtime, so anything
+    /// else with the file open would either fail to open it or race this
+    /// write.
+    pub async fn force_quorum(
+        &self,
+        id: NodeId,
+        addr: std::net::SocketAddr,
+    ) -> Result<openraft::Membership<NodeId, crate::types::Node>, StorageError> {
+        let last_index = {
+            let txn = self.db.begin_read().map_err(read_err)?;
+            let table = txn.open_table(LOGS).map_err(read_err)?;
+            let last = table.last().map_err(read_err)?;
+            match last {
+                Some((_, value)) => decode::<Entry>(value.value())?.log_id.index,
+                None => 0,
+            }
+        };
+
+        let current_term = read_meta(&self.db, KEY_VOTE)?
+            .map(|raw| decode::<crate::types::Vote>(&raw))
+            .transpose()?
+            .map(|vote| vote.leader_id.get_term())
+            .unwrap_or(0);
+        let term = current_term + 1;
+
+        let mut sm = self.sm.write().await;
+
+        let mut nodes: std::collections::BTreeMap<NodeId, crate::types::Node> = sm
+            .membership
+            .membership()
+            .nodes()
+            .map(|(node_id, node)| (*node_id, node.clone()))
+            .collect();
+        nodes.insert(id, crate::types::Node::new(addr.to_string()));
+
+        let membership = openraft::Membership::new(vec![std::iter::once(id).collect()], nodes);
+        let log_id = LogId::new(openraft::CommittedLeaderId::new(term, id), last_index + 1);
+
+        let entry = Entry {
+            log_id,
+            payload: EntryPayload::Membership(membership.clone()),
+        };
+        {
+            let txn = self.db.begin_write().map_err(write_err)?;
+            {
+                let mut table = txn.open_table(LOGS).map_err(write_err)?;
+                let encoded = encode(&entry)?;
+                table
+                    .insert(entry.log_id.index, encoded.as_slice())
+                    .map_err(write_err)?;
+            }
+            txn.commit().map_err(write_err)?;
+        }
+
+        write_meta(&self.db, KEY_COMMITTED, &Some(log_id))?;
+        write_meta(&self.db, KEY_VOTE, &crate::types::Vote::new_committed(term, id))?;
+
+        sm.last_applied = Some(log_id);
+        sm.membership = StoredMembership::new(Some(log_id), membership.clone());
+        write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
+
+        Ok(membership)
+    }
 }
 
 // -- log --------------------------------------------------------------------

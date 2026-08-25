@@ -7,16 +7,34 @@ networks:
 services:
   app:
     image: ghcr.io/example/app:1.4.0
+    hostname: app-host
+    read_only: true
     restart: always
     depends_on: [db]
     networks: [wan]
     environment:
       DATABASE_URL: postgres://app@db/app
+    ports:
+      - target: 9000
+        published: 9000
+        mode: host
+    volumes:
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 64m
     x-clouduler:
       proxy:
         - host: app
           network: wan
           port: 8080
+          middlewares:
+            - forward_auth:
+                address: https://auth.example.com/verify
+                auth_response_headers: [X-User]
+            - redirect_regex:
+                regex: "^https://app\\.example\\.com/old/(.*)"
+                replacement: "https://app.example.com/new/$1"
 
   db:
     image: postgres:16

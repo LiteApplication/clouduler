@@ -54,6 +54,8 @@ x-clouduler: {...}
 services:
   gitlab:
     image: gitlab/gitlab-ce:16.9.1-ce.0
+    hostname: gitlab-host
+    read_only: false
     command: ["gitlab-ctl", "reconfigure"]
     entrypoint: /bin/sh
     environment:
@@ -88,6 +90,12 @@ hyphens, not starting or ending with one) because it becomes the service's
 overlay hostname.
 
 - `image` is required; there is no `build:` support.
+- `hostname` overrides the container's hostname. Independent of the service
+  name, which is what other services on the same stack use to reach it over
+  the overlay.
+- `read_only` (default `false`) makes the container's root filesystem
+  read-only. A service that writes outside its declared volumes fails loudly
+  instead of quietly accumulating state nothing backs up.
 - `command`/`entrypoint` accept either a shell string or an exec array.
 - `environment` accepts a mapping or a `KEY=value` list.
 - `env_file` accepts a single path or a list of paths.
@@ -117,6 +125,10 @@ volumes:
   - fast/gitlab-data:/var/opt/gitlab       # drive/volume:/container/path
   - fast/gitlab-config:/etc/gitlab:ro      # read-only
   - /tmp/scratch                           # anonymous, no drive backing
+  - type: tmpfs                            # in-memory, no drive backing
+    target: /cache
+    tmpfs:
+      size: 64m
 ```
 
 `drive/volume:/container/path[:ro]` parses into
@@ -125,6 +137,13 @@ with no source is accepted as an anonymous volume (`drive`/`volume` are
 `None`). A host path on the left (anything starting with `/`) is rejected:
 volumes must live on a drive so they can be replicated and migrated, and a
 host bind ties the container to one machine's filesystem.
+
+A `type: tmpfs` long-form entry is an in-memory volume backed by no drive at
+all — its contents don't survive a container restart and are never
+replicated. `tmpfs.size` is optional (a bare number or `64m`/`64MiB`); left
+unset, docker's own default (half the host's RAM) applies. `type: bind` is
+rejected for the same reason a bare host path is: volumes must either live on
+a drive or be explicitly in-memory, never tied to one machine's filesystem.
 
 ### Ports
 
@@ -138,7 +157,18 @@ ports:
   - target: 80
     published: 8080
     protocol: udp
+    mode: host                   # optional, and the only supported value
 ```
+
+A published port is always bound directly on the node running the container
+— clouduler has no swarm-style ingress mesh, so there is nothing for a
+request landing on a *different* node to be relayed through. `mode: host`
+(the long form only; the short string syntax has no room for it) says this
+explicitly and matches what happens by default. `mode: ingress` is accepted
+syntax, so a stack file copied from real swarm doesn't fail to parse on the
+field alone, but is rejected as a value: there is no mesh to back it. For a
+raw port that should be reachable on whichever node currently runs the
+container, forwarded over the overlay, use `x-clouduler.expose` instead.
 
 ## `deploy`
 
@@ -260,6 +290,14 @@ middlewares:
       headers: []                             # empty echoes the browser's requested headers
       allow_credentials: false
       max_age: 10m
+  - forward_auth:
+      address: https://auth.example.com/verify
+      auth_response_headers: [X-User, X-Email]   # copied from the auth response onto the forwarded request
+      timeout: 5s                                 # optional, unset waits forever
+  - redirect_regex:
+      regex: "^https://old\\.example\\.com/(.*)"
+      replacement: "https://new.example.com/$1"
+      permanent: true                             # default true: 301/308 vs 302/307
 ```
 
 - `redirect_https`: answer plain HTTP with a redirect to the same URL over TLS.
@@ -274,9 +312,25 @@ middlewares:
   ["*"]` cannot be combined with `allow_credentials: true` — browsers reject
   that pairing, so it is rejected here instead of failing confusingly at
   request time.
+- `forward_auth`: delegates authentication to an external HTTP endpoint
+  before the request reaches the container. The endpoint is called with the
+  request's `Cookie`/`Authorization` headers plus `X-Forwarded-Method` and
+  `X-Forwarded-Uri`; a 2xx response lets the request through, with any header
+  named in `auth_response_headers` copied from the auth response onto the
+  request forwarded to the backend (so the backend can see the identity the
+  auth endpoint established); anything else is relayed straight back to the
+  client, and the backend is never contacted. `address` must start with
+  `http://` or `https://`.
+- `redirect_regex`: rewrites the request's URL via regex and redirects to the
+  result, instead of proxying to a backend. Matched against the *full*
+  request URL (`scheme://host/path?query`, not just the path), so a rewrite
+  can change the host too. `replacement` may use `$1`, `$2`, ... from the
+  regex's capture groups. A request that doesn't match falls through to
+  normal proxying. `permanent` (default `true`) picks 301/308 vs 302/307.
 
-Naming `basic_auth`, `headers` or `cors` as a bare string is an error, since
-none of them do anything useful without settings.
+Naming `basic_auth`, `headers`, `cors`, `forward_auth` or `redirect_regex` as
+a bare string is an error, since none of them do anything useful without
+settings.
 
 ### `expose`
 

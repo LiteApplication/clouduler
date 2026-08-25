@@ -18,14 +18,14 @@ pub use deploy::{
 };
 pub use bytesize::ByteSize;
 pub use extensions::{
-    CorsPolicy, ExposePort, Middleware, ProxyRoute, ServiceExtensions, StackDefaults,
-    VolumeSyncOverride,
+    CorsPolicy, ExposePort, ForwardAuth, Middleware, ProxyRoute, RedirectRegex, ServiceExtensions,
+    StackDefaults, VolumeSyncOverride,
 };
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};
-pub use port::{PortMapping, PortRange, Protocol};
+pub use port::{PortMapping, PortRange, Protocol, PublishMode};
 pub use requirements::StackRequirements;
-pub use volume::VolumeMount;
+pub use volume::{TmpfsOptions, VolumeMount};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -91,6 +91,10 @@ pub struct StackSecret {
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub image: String,
+    /// Override the container's hostname. Independent of the service name,
+    /// which is what other services on the same stack use to reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Command>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,6 +127,11 @@ pub struct Service {
     pub cap_drop: Vec<String>,
     #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
     pub sysctls: BTreeMap<String, String>,
+    /// Makes the container's root filesystem read-only. A service that writes
+    /// outside its declared volumes will fail rather than silently
+    /// accumulating state nothing backs up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
     #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
     pub stop_grace_period: Option<Duration>,
     /// Signal sent on a graceful stop, e.g. `SIGINT`. Defaults to the image's

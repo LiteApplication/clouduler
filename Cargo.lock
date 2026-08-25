@@ -753,6 +753,7 @@ version = "0.5.3"
 dependencies = [
  "humantime-serde",
  "ipnet",
+ "regex",
  "serde",
  "serde_yaml",
  "tempfile",
@@ -853,6 +854,8 @@ dependencies = [
  "instant-acme",
  "ipnet",
  "rcgen",
+ "regex",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "serde",

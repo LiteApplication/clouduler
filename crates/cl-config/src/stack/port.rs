@@ -74,6 +74,23 @@ pub struct PortMapping {
     pub published: Option<PortRange>,
     pub target: PortRange,
     pub protocol: Protocol,
+    /// Compose/Swarm's `mode:`. Only settable through the long form; the short
+    /// string syntax has no room for it and always means `Host`.
+    pub mode: PublishMode,
+}
+
+/// Compose/Swarm's port publishing mode. Clouduler has no ingress mesh: a
+/// published port is always bound directly on the single node running the
+/// container, which is what swarm calls `host` mode. `Ingress` is accepted
+/// syntax (so a stack file copied from swarm doesn't fail to parse on the
+/// field alone) but rejected at the value level, since there is no mesh to
+/// back it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PublishMode {
+    #[default]
+    Host,
+    Ingress,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +110,8 @@ struct LongPort {
     host_ip: Option<IpAddr>,
     #[serde(default)]
     protocol: Protocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<PublishMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,11 +140,21 @@ impl TryFrom<RawPort> for PortMapping {
                 let target = long.target.into_range()?;
                 let published = long.published.map(|p| p.into_range()).transpose()?;
                 check_range_lengths(published.as_ref(), &target)?;
+                if long.mode == Some(PublishMode::Ingress) {
+                    return Err(
+                        "mode: ingress is not supported, clouduler has no swarm-style ingress mesh; \
+                         a published port is always bound directly on the node running the container \
+                         (mode: host, the default). For a port forwarded over the overlay to whichever \
+                         node currently runs the container, use x-clouduler.expose instead"
+                            .to_string(),
+                    );
+                }
                 Ok(PortMapping {
                     host_ip: long.host_ip,
                     published,
                     target,
                     protocol: long.protocol,
+                    mode: long.mode.unwrap_or_default(),
                 })
             }
         }
@@ -141,6 +170,9 @@ impl From<PortMapping> for RawPort {
                 .map(|r| RawPortNumber::Str(format!("{}-{}", r.start, r.end))),
             host_ip: p.host_ip,
             protocol: p.protocol,
+            // Host is the implicit default (and only supported value), so it
+            // round trips as absent rather than spelling out `mode: host`.
+            mode: None,
         })
     }
 }
@@ -177,7 +209,7 @@ fn parse_short(raw: &str) -> Result<PortMapping, String> {
 
     check_range_lengths(published.as_ref(), &target)?;
 
-    Ok(PortMapping { host_ip, published, target, protocol })
+    Ok(PortMapping { host_ip, published, target, protocol, mode: PublishMode::default() })
 }
 
 #[cfg(test)]
@@ -230,6 +262,29 @@ mod tests {
     fn mismatched_range_lengths_rejected() {
         let err = serde_yaml::from_str::<PortMapping>("\"8080-8090:80-95\"").unwrap_err();
         assert!(err.to_string().contains("but target range has"));
+    }
+
+    #[test]
+    fn mode_host_is_accepted_and_is_the_default() {
+        let p: PortMapping = serde_yaml::from_str("target: 80\nmode: host\n").unwrap();
+        assert_eq!(p.mode, PublishMode::Host);
+
+        let p = short("80");
+        assert_eq!(p.mode, PublishMode::Host);
+    }
+
+    #[test]
+    fn mode_ingress_is_rejected() {
+        let err = serde_yaml::from_str::<PortMapping>("target: 80\nmode: ingress\n").unwrap_err();
+        assert!(err.to_string().contains("ingress mesh"), "{err}");
+        assert!(err.to_string().contains("expose"), "{err}");
+    }
+
+    #[test]
+    fn mode_round_trips_as_absent() {
+        let p: PortMapping = serde_yaml::from_str("target: 80\nmode: host\n").unwrap();
+        let encoded = serde_yaml::to_string(&p).unwrap();
+        assert!(!encoded.contains("mode"), "{encoded}");
     }
 
     #[test]

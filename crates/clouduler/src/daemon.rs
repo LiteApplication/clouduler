@@ -814,13 +814,44 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             continue;
         };
 
-        // A node the roster has never seen is one that joined after the cluster
-        // was formed, so it still has to be added to raft membership. Managers
-        // become voters, workers only learners.
-        if !known.nodes.contains_key(name) {
+        // Same name, different id: this node was re-provisioned fresh under
+        // an identity `RemoveNode` never tombstoned, because the name never
+        // left the roster - `clouduler init --force` after local state was
+        // lost, or a co-manager `force_quorum` demoted rather than dropped,
+        // just came back under a new id via `init --join`. The old id is
+        // still sitting in raft membership as a learner nothing will ever
+        // reach again, at the same address the new one now owns. Retiring
+        // it here, once, is what lets `reap_removed_nodes` clean it out on
+        // its own timer instead of it lingering forever.
+        if let Some(previous) = known.nodes.get(name) {
+            if previous.id != node.id {
+                let response = cluster
+                    .submit(Request::RetireNodeId { id: previous.id })
+                    .await?;
+                if let Some(error) = response.error {
+                    warn!(node = %name, %error, "could not retire the previous node id");
+                }
+            }
+        }
+
+        // A node the roster has never seen is one that joined after the
+        // cluster was formed, so it still has to be added to raft
+        // membership. A manager gets a second check even once known: unlike
+        // a learner, a voter can be demoted without being dropped from the
+        // roster - `force_quorum`'s disaster recovery does exactly that, on
+        // purpose, so the demoted node comes back as a learner rather than a
+        // stranger. Re-checking here is what turns that back into a voter
+        // the moment it is reachable again, with nothing for an operator to
+        // run by hand.
+        let id = node_id(node.id);
+        let needs_membership = match node.role {
+            NodeRole::Manager => !cluster.is_voter(id).await,
+            NodeRole::Worker => !known.nodes.contains_key(name),
+        };
+        if needs_membership {
             let result = match node.role {
-                NodeRole::Manager => cluster.add_manager(node_id(node.id), rpc_addr).await,
-                NodeRole::Worker => cluster.add_worker(node_id(node.id), rpc_addr).await,
+                NodeRole::Manager => cluster.add_manager(id, rpc_addr).await,
+                NodeRole::Worker => cluster.add_worker(id, rpc_addr).await,
             };
             if let Err(e) = result {
                 // Usually the node is not up yet. Retried on the next pass.

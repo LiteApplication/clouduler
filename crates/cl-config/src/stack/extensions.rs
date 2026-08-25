@@ -27,7 +27,7 @@ use crate::stack::port::Protocol;
 ///       remove_response:
 ///         - Server
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(try_from = "RawMiddleware", into = "RawMiddleware")]
 pub enum Middleware {
     /// Answer plain HTTP with a redirect to the same URL over HTTPS.
@@ -37,6 +37,8 @@ pub enum Middleware {
     BasicAuth(BasicAuth),
     Headers(Headers),
     Cors(CorsPolicy),
+    ForwardAuth(ForwardAuth),
+    RedirectRegex(RedirectRegex),
 }
 
 /// Wire form. serde_yaml renders an externally tagged enum as a yaml tag
@@ -59,7 +61,7 @@ impl TryFrom<RawMiddleware> for Middleware {
                 "strip_prefix" => Ok(Middleware::StripPrefix),
                 // Naming one that needs settings without giving any is a
                 // mistake worth reporting rather than defaulting.
-                "basic_auth" | "headers" | "cors" => {
+                "basic_auth" | "headers" | "cors" | "forward_auth" | "redirect_regex" => {
                     Err(format!("middleware {name} needs settings, use a map"))
                 }
                 other => Err(format!("unknown middleware {other}")),
@@ -85,6 +87,25 @@ impl TryFrom<RawMiddleware> for Middleware {
                     "cors" => serde_yaml::from_value(value)
                         .map(Middleware::Cors)
                         .map_err(|e| format!("cors: {e}")),
+                    "forward_auth" => {
+                        let auth: ForwardAuth =
+                            serde_yaml::from_value(value).map_err(|e| format!("forward_auth: {e}"))?;
+                        if !auth.address.starts_with("http://") && !auth.address.starts_with("https://") {
+                            return Err(format!(
+                                "forward_auth: address \"{}\" must start with http:// or https://",
+                                auth.address
+                            ));
+                        }
+                        Ok(Middleware::ForwardAuth(auth))
+                    }
+                    "redirect_regex" => {
+                        let redirect: RedirectRegex = serde_yaml::from_value(value)
+                            .map_err(|e| format!("redirect_regex: {e}"))?;
+                        if let Err(e) = regex::Regex::new(&redirect.regex) {
+                            return Err(format!("redirect_regex: invalid regex \"{}\": {e}", redirect.regex));
+                        }
+                        Ok(Middleware::RedirectRegex(redirect))
+                    }
                     "redirect_https" => Ok(Middleware::RedirectHttps),
                     "strip_prefix" => Ok(Middleware::StripPrefix),
                     other => Err(format!("unknown middleware {other}")),
@@ -111,6 +132,14 @@ impl From<Middleware> for RawMiddleware {
                 name,
                 serde_yaml::to_value(cors).unwrap_or(serde_yaml::Value::Null),
             )])),
+            Middleware::ForwardAuth(auth) => RawMiddleware::Configured(BTreeMap::from([(
+                name,
+                serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
+            )])),
+            Middleware::RedirectRegex(redirect) => RawMiddleware::Configured(BTreeMap::from([(
+                name,
+                serde_yaml::to_value(redirect).unwrap_or(serde_yaml::Value::Null),
+            )])),
         }
     }
 }
@@ -124,6 +153,8 @@ impl Middleware {
             Middleware::BasicAuth(_) => "basic_auth",
             Middleware::Headers(_) => "headers",
             Middleware::Cors(_) => "cors",
+            Middleware::ForwardAuth(_) => "forward_auth",
+            Middleware::RedirectRegex(_) => "redirect_regex",
         }
     }
 }
@@ -204,6 +235,42 @@ pub struct Headers {
     pub remove_request: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_response: Vec<String>,
+}
+
+/// Delegates authentication to an external HTTP endpoint before forwarding
+/// the request. The endpoint is called with the original request's method,
+/// URI and a subset of its headers; a 2xx response lets the request through,
+/// anything else is relayed back to the client as-is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ForwardAuth {
+    /// The auth endpoint's URL, e.g. `https://auth.example.com/verify`.
+    pub address: String,
+    /// Header names copied from the auth endpoint's response onto the
+    /// request forwarded to the backend, e.g. `X-User`, so the backend can
+    /// see the identity the auth endpoint established.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_response_headers: Vec<String>,
+    /// How long to wait for the auth endpoint. Unset waits forever, which
+    /// ties up the client's connection if it wedges.
+    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Duration>,
+}
+
+/// Rewrites a request's URL via regex and redirects to the result, instead of
+/// the fixed-string target a UI-managed redirect rule uses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RedirectRegex {
+    /// Matched against the full request URL (`scheme://host/path?query`), not
+    /// just the path, so a rewrite can also change the host.
+    pub regex: String,
+    /// The replacement, with `$1`, `$2`, ... substituted from the regex's
+    /// capture groups.
+    pub replacement: String,
+    /// 301/308 (permanent) when true, 302/307 (temporary) when false.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub permanent: bool,
 }
 
 /// One HTTP route published through the reverse proxy.
@@ -537,6 +604,97 @@ proxy:
         )
         .unwrap_err();
         assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn forward_auth_parses_and_validates_the_address() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            r#"
+proxy:
+  - host: site
+    network: wan
+    port: 80
+    middlewares:
+      - forward_auth:
+          address: https://auth.example.com/verify
+          auth_response_headers: [X-User, X-Email]
+          timeout: 5s
+"#,
+        )
+        .expect("parse");
+        match &ext.proxy[0].middlewares[0] {
+            Middleware::ForwardAuth(auth) => {
+                assert_eq!(auth.address, "https://auth.example.com/verify");
+                assert_eq!(auth.auth_response_headers, vec!["X-User", "X-Email"]);
+                assert_eq!(auth.timeout, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected forward_auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_auth_rejects_an_address_with_no_scheme() {
+        let err = serde_yaml::from_str::<ServiceExtensions>(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares:\n      - forward_auth:\n          address: auth.example.com/verify\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("http:// or https://"), "{err}");
+    }
+
+    #[test]
+    fn bare_forward_auth_is_rejected() {
+        let err = serde_yaml::from_str::<ServiceExtensions>(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares: [forward_auth]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs settings"), "{err}");
+    }
+
+    #[test]
+    fn redirect_regex_parses_with_capture_groups() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            r#"
+proxy:
+  - host: site
+    network: wan
+    port: 80
+    middlewares:
+      - redirect_regex:
+          regex: "^/old/(.*)"
+          replacement: "/new/$1"
+          permanent: false
+"#,
+        )
+        .expect("parse");
+        match &ext.proxy[0].middlewares[0] {
+            Middleware::RedirectRegex(r) => {
+                assert_eq!(r.regex, "^/old/(.*)");
+                assert_eq!(r.replacement, "/new/$1");
+                assert!(!r.permanent);
+            }
+            other => panic!("expected redirect_regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redirect_regex_defaults_to_permanent() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares:\n      - redirect_regex:\n          regex: \"^/a$\"\n          replacement: \"/b\"\n",
+        )
+        .expect("parse");
+        match &ext.proxy[0].middlewares[0] {
+            Middleware::RedirectRegex(r) => assert!(r.permanent),
+            other => panic!("expected redirect_regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redirect_regex_rejects_an_invalid_pattern() {
+        let err = serde_yaml::from_str::<ServiceExtensions>(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares:\n      - redirect_regex:\n          regex: \"(unclosed\"\n          replacement: \"/b\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid regex"), "{err}");
     }
 
     #[test]

@@ -40,6 +40,16 @@ pub struct BindMount {
     pub read_only: bool,
 }
 
+/// An in-memory volume with no backing drive.
+#[derive(Debug, Clone)]
+pub struct TmpfsMount {
+    pub container_path: String,
+    /// Maximum size in bytes. `None` leaves docker's own default (half of the
+    /// host's RAM) in effect.
+    pub size_bytes: Option<i64>,
+    pub read_only: bool,
+}
+
 /// TCP or UDP, for published ports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortProtocol {
@@ -104,10 +114,16 @@ pub struct ContainerSpec {
     pub stack: String,
     pub service: String,
     pub instance: String,
+    /// Overrides the container's hostname. `None` leaves docker's own default
+    /// (the short container id) in effect.
+    pub hostname: Option<String>,
     pub env: Vec<(String, String)>,
     pub command: Option<Vec<String>>,
     pub labels: HashMap<String, String>,
     pub mounts: Vec<BindMount>,
+    pub tmpfs: Vec<TmpfsMount>,
+    /// Makes the container's root filesystem read-only.
+    pub read_only: bool,
     pub ports: Vec<PortMapping>,
     pub network: Option<String>,
     /// Fixed address on `network`. Allocated cluster wide and replicated, so
@@ -202,8 +218,25 @@ impl ContainerSpec {
                 .collect()
         });
 
+        let tmpfs = (!self.tmpfs.is_empty()).then(|| {
+            self.tmpfs
+                .iter()
+                .map(|t| {
+                    let mut opts = Vec::new();
+                    if let Some(size) = t.size_bytes {
+                        opts.push(format!("size={size}"));
+                    }
+                    if t.read_only {
+                        opts.push("ro".to_string());
+                    }
+                    (t.container_path.clone(), opts.join(","))
+                })
+                .collect()
+        });
+
         HostConfig {
             binds,
+            tmpfs,
             port_bindings,
             dns: (!self.dns.is_empty()).then(|| self.dns.iter().map(|d| d.to_string()).collect()),
             dns_search: (!self.dns_search.is_empty()).then(|| self.dns_search.clone()),
@@ -212,6 +245,7 @@ impl ContainerSpec {
             network_mode: self.network.clone(),
             memory: self.resources.memory_bytes,
             nano_cpus: self.resources.nano_cpus,
+            readonly_rootfs: Some(self.read_only),
             ..Default::default()
         }
     }
@@ -245,6 +279,7 @@ impl ContainerSpec {
 
         ContainerCreateBody {
             image: Some(self.image.clone()),
+            hostname: self.hostname.clone(),
             cmd: self.command.clone(),
             env: (!self.env.is_empty())
                 .then(|| self.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
@@ -758,6 +793,47 @@ mod tests {
         let body = spec.to_create_body();
         assert!(body.host_config.unwrap().binds.is_none());
         assert!(body.exposed_ports.is_none());
+    }
+
+    #[test]
+    fn hostname_is_set_on_the_create_body() {
+        let mut spec = base_spec();
+        spec.hostname = Some("custom-host".to_string());
+        let body = spec.to_create_body();
+        assert_eq!(body.hostname.as_deref(), Some("custom-host"));
+    }
+
+    #[test]
+    fn no_hostname_leaves_it_unset() {
+        let body = base_spec().to_create_body();
+        assert!(body.hostname.is_none());
+    }
+
+    #[test]
+    fn read_only_sets_the_readonly_rootfs_flag() {
+        let mut spec = base_spec();
+        spec.read_only = true;
+        let body = spec.to_create_body();
+        assert_eq!(body.host_config.unwrap().readonly_rootfs, Some(true));
+    }
+
+    #[test]
+    fn tmpfs_mounts_become_host_config_options() {
+        let mut spec = base_spec();
+        spec.tmpfs.push(TmpfsMount {
+            container_path: "/cache".to_string(),
+            size_bytes: Some(64 * 1024 * 1024),
+            read_only: false,
+        });
+        spec.tmpfs.push(TmpfsMount {
+            container_path: "/scratch".to_string(),
+            size_bytes: None,
+            read_only: true,
+        });
+        let body = spec.to_create_body();
+        let tmpfs = body.host_config.unwrap().tmpfs.expect("tmpfs set");
+        assert_eq!(tmpfs.get("/cache").map(String::as_str), Some("size=67108864"));
+        assert_eq!(tmpfs.get("/scratch").map(String::as_str), Some("ro"));
     }
 
     fn build_test_tar(name: &str, contents: &[u8]) -> Vec<u8> {

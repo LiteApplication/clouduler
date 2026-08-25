@@ -303,6 +303,35 @@ pub enum NodeCommand {
         #[arg(long)]
         via: Option<String>,
     },
+    /// Disaster recovery: force this node to be the cluster's sole voter,
+    /// for a cluster that has lost quorum for good (a manager's raft state
+    /// gone with no backup, so a normal membership change can never be
+    /// driven through consensus again since that itself needs the quorum
+    /// that is missing).
+    ///
+    /// Bypasses raft consensus entirely by rewriting this node's own local
+    /// log and state machine, the way etcd's `--force-new-cluster` or
+    /// Consul's `peers.json` recovery do. Every other node this node already
+    /// knew about stays as a learner - including any lost co-manager, now
+    /// demoted rather than dropped - only the voter set shrinks to this node
+    /// alone. This is meant as a temporary state: once a demoted manager's
+    /// daemon is reachable again, this node promotes it back to a voter on
+    /// its own, on the same timer that adds any other new node. Nothing
+    /// needs to run on that node by hand unless its own local state is gone
+    /// too, in which case it needs `clouduler init --join` before it can be
+    /// reached at all.
+    ///
+    /// This node's daemon MUST be stopped first: it writes straight to the
+    /// data directory's raft.redb, and the running daemon holding that file
+    /// open would make this fail, or race it.
+    ForceQuorum {
+        /// Name of this node in the config. Defaults to the system hostname.
+        #[arg(long, env = "CLOUDULER_NODE")]
+        node: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

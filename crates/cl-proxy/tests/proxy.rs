@@ -453,6 +453,152 @@ async fn a_redirect_route_can_preserve_the_path_and_query() {
     assert_eq!(resp.headers.get("location").unwrap(), "https://new.test/a/b?x=1");
 }
 
+// ---- redirect_regex ----
+
+#[tokio::test]
+async fn redirect_regex_rewrites_and_redirects_on_a_match() {
+    let backend = spawn_echo_backend().await;
+    let route = Route::new(
+        "app.test",
+        None,
+        false,
+        vec![Middleware::RedirectRegex(cl_config::RedirectRegex {
+            regex: "^http://app.test/old/(.*)".to_string(),
+            replacement: "http://app.test/new/$1".to_string(),
+            permanent: true,
+        })],
+        false,
+        "svc",
+        vec![backend],
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/old/thing").await;
+    assert_eq!(resp.status, 308);
+    assert_eq!(resp.headers.get("location").unwrap(), "http://app.test/new/thing");
+}
+
+#[tokio::test]
+async fn redirect_regex_falls_through_to_the_backend_when_it_does_not_match() {
+    let backend = spawn_echo_backend().await;
+    let route = Route::new(
+        "app.test",
+        None,
+        false,
+        vec![Middleware::RedirectRegex(cl_config::RedirectRegex {
+            regex: "^http://app.test/old/(.*)".to_string(),
+            replacement: "http://app.test/new/$1".to_string(),
+            permanent: true,
+        })],
+        false,
+        "svc",
+        vec![backend],
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/unrelated").await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, "GET /unrelated");
+}
+
+#[tokio::test]
+async fn redirect_regex_temporary_uses_307() {
+    let backend = spawn_echo_backend().await;
+    let route = Route::new(
+        "app.test",
+        None,
+        false,
+        vec![Middleware::RedirectRegex(cl_config::RedirectRegex {
+            regex: "^http://app.test/a$".to_string(),
+            replacement: "http://app.test/b".to_string(),
+            permanent: false,
+        })],
+        false,
+        "svc",
+        vec![backend],
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/a").await;
+    assert_eq!(resp.status, 307);
+    assert_eq!(resp.headers.get("location").unwrap(), "http://app.test/b");
+}
+
+// ---- forward_auth ----
+
+async fn spawn_auth_endpoint(allow: bool) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |_req: Request<Incoming>| async move {
+                    let resp = if allow {
+                        Response::builder().status(200).header("x-user", "alice")
+                    } else {
+                        Response::builder().status(401)
+                    };
+                    Ok::<_, Infallible>(resp.body(http_body_util::Full::new(Bytes::new())).unwrap())
+                });
+                let _ = http1::Builder::new().serve_connection(io, svc).await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn forward_auth_allows_the_request_and_attaches_identity_headers() {
+    let backend = spawn_echo_backend().await;
+    let auth = spawn_auth_endpoint(true).await;
+    let route = Route::new(
+        "app.test",
+        None,
+        false,
+        vec![Middleware::ForwardAuth(cl_config::ForwardAuth {
+            address: format!("http://{auth}/verify"),
+            auth_response_headers: vec!["X-User".to_string()],
+            timeout: None,
+        })],
+        false,
+        "svc",
+        vec![backend],
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/protected").await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.headers.get("x-echo-x-user").unwrap(), "alice");
+}
+
+#[tokio::test]
+async fn forward_auth_denies_and_never_reaches_the_backend() {
+    let backend = spawn_echo_backend().await;
+    let auth = spawn_auth_endpoint(false).await;
+    let route = Route::new(
+        "app.test",
+        None,
+        false,
+        vec![Middleware::ForwardAuth(cl_config::ForwardAuth {
+            address: format!("http://{auth}/verify"),
+            auth_response_headers: vec![],
+            timeout: None,
+        })],
+        false,
+        "svc",
+        vec![backend],
+    );
+    let addr = serve_route(route).await;
+
+    let resp = reqwest_like_get(addr, "app.test", "/protected").await;
+    assert_eq!(resp.status, 401);
+    assert!(!resp.headers.contains_key("x-echo-host"), "{:?}", resp.headers);
+}
+
 // ---- CORS ----
 
 fn cors_route(backend: SocketAddr, policy: cl_config::CorsPolicy) -> Route {

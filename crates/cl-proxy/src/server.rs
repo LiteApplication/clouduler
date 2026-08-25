@@ -24,6 +24,7 @@ use tracing::{debug, warn};
 
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
 use crate::error::Result;
+use crate::forward_auth;
 use crate::middleware;
 use crate::route::{RedirectTarget, Route, RouteTable, STICKY_COOKIE};
 
@@ -49,6 +50,10 @@ pub struct ProxyServer {
     routes: Arc<RouteTable>,
     certs: Arc<CertStore>,
     client: Client<HttpConnector, ProxyBody>,
+    /// Separate from `client`: a `forward_auth` endpoint can be external and
+    /// speak TLS, unlike backends, which are always plain HTTP over the
+    /// overlay and reachable through the internal `HttpConnector`.
+    forward_auth_client: reqwest::Client,
 }
 
 impl ProxyServer {
@@ -58,6 +63,7 @@ impl ProxyServer {
             routes,
             certs,
             client,
+            forward_auth_client: reqwest::Client::new(),
         }
     }
 
@@ -70,10 +76,11 @@ impl ProxyServer {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
             let client = self.client.clone();
+            let forward_auth_client = self.forward_auth_client.clone();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let svc = service_fn(move |req| {
-                    handle_http(req, routes.clone(), client.clone(), peer)
+                    handle_http(req, routes.clone(), client.clone(), forward_auth_client.clone(), peer)
                 });
                 if let Err(e) = http1::Builder::new().serve_connection(io, svc).with_upgrades().await {
                     debug!(error = %e, "http connection closed");
@@ -102,10 +109,11 @@ impl ProxyServer {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
             let client = self.client.clone();
+            let forward_auth_client = self.forward_auth_client.clone();
             let certs = self.certs.clone();
             let config = config.clone();
             tokio::spawn(async move {
-                if let Err(e) = accept_tls(stream, peer, config, certs, routes, client).await {
+                if let Err(e) = accept_tls(stream, peer, config, certs, routes, client, forward_auth_client).await {
                     debug!(error = %e, "https connection closed");
                 }
             });
@@ -120,6 +128,7 @@ async fn accept_tls(
     certs: Arc<CertStore>,
     routes: Arc<RouteTable>,
     client: Client<HttpConnector, ProxyBody>,
+    forward_auth_client: reqwest::Client,
 ) -> Result<()> {
     let acceptor = LazyConfigAcceptor::new(Acceptor::default(), stream);
     let start = match acceptor.await {
@@ -139,7 +148,9 @@ async fn accept_tls(
 
     let tls_stream = start.into_stream(config).await?;
     let io = TokioIo::new(tls_stream);
-    let svc = service_fn(move |req| handle_https(req, routes.clone(), client.clone(), peer));
+    let svc = service_fn(move |req| {
+        handle_https(req, routes.clone(), client.clone(), forward_auth_client.clone(), peer)
+    });
     if let Err(e) = http1::Builder::new().serve_connection(io, svc).with_upgrades().await {
         debug!(error = %e, "https connection error");
     }
@@ -231,10 +242,40 @@ fn limited_body(body: Incoming, max: Option<u64>) -> ProxyBody {
     }
 }
 
+/// The full URL a redirect (fixed-string or regex) needs to match/build
+/// against: `{scheme}://{host}{path_and_query}`, mirroring `respond_redirect`.
+fn full_url(scheme: &str, host: &str, path_and_query: &str) -> String {
+    format!("{scheme}://{host}{path_and_query}")
+}
+
+/// Answers with a `redirect_regex` match, if the route carries one and it
+/// matches this request's full URL. `None` means fall through to normal
+/// proxying (or the plain-http-to-https redirect, whichever comes next).
+fn respond_redirect_regex(route: &Route, scheme: &str, host: &str, path_and_query: &str) -> Option<Response<ProxyBody>> {
+    let (regex, cfg) = route.redirect_regex()?;
+    let url = full_url(scheme, host, path_and_query);
+    if !regex.is_match(&url) {
+        return None;
+    }
+    let location = regex.replace(&url, cfg.replacement.as_str()).into_owned();
+    let status = match (cfg.permanent, scheme) {
+        (true, _) => StatusCode::PERMANENT_REDIRECT,
+        (false, _) => StatusCode::TEMPORARY_REDIRECT,
+    };
+    Some(
+        Response::builder()
+            .status(status)
+            .header(hyper::header::LOCATION, location)
+            .body(empty_body())
+            .unwrap_or_else(|_| Response::new(empty_body())),
+    )
+}
+
 async fn handle_http(
     req: Request<Incoming>,
     routes: Arc<RouteTable>,
     client: Client<HttpConnector, ProxyBody>,
+    forward_auth_client: reqwest::Client,
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     let host = req
@@ -259,6 +300,10 @@ async fn handle_http(
         return Ok(respond_redirect(redirect, path_and_query));
     }
 
+    if let Some(resp) = respond_redirect_regex(&route, "http", &host, path_and_query) {
+        return Ok(resp);
+    }
+
     if route.tls {
         let resp = middleware::redirect_https(&host, path_and_query)
             .body(empty_body())
@@ -266,13 +311,14 @@ async fn handle_http(
         return Ok(resp);
     }
 
-    Ok(proxy(req, &route, "http", peer, &client).await)
+    Ok(proxy(req, &route, "http", peer, &client, &forward_auth_client).await)
 }
 
 async fn handle_https(
     req: Request<Incoming>,
     routes: Arc<RouteTable>,
     client: Client<HttpConnector, ProxyBody>,
+    forward_auth_client: reqwest::Client,
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     let host = req
@@ -291,12 +337,17 @@ async fn handle_https(
         return Ok(resp);
     }
 
+    let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+
     if let Some(redirect) = &route.redirect {
-        let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
         return Ok(respond_redirect(redirect, path_and_query));
     }
 
-    Ok(proxy(req, &route, "https", peer, &client).await)
+    if let Some(resp) = respond_redirect_regex(&route, "https", &host, path_and_query) {
+        return Ok(resp);
+    }
+
+    Ok(proxy(req, &route, "https", peer, &client, &forward_auth_client).await)
 }
 
 /// Applies `strip_prefix` and `basic_auth` in that order, ahead of `headers`.
@@ -331,14 +382,46 @@ fn cors_policy(route: &Route) -> Option<&cl_config::CorsPolicy> {
     })
 }
 
+/// The route's `forward_auth` middleware, if it has one.
+fn forward_auth_config(route: &Route) -> Option<&cl_config::ForwardAuth> {
+    route.middlewares.iter().find_map(|m| match m {
+        cl_config::Middleware::ForwardAuth(cfg) => Some(cfg),
+        _ => None,
+    })
+}
+
+/// Turns a `forward_auth::Outcome::Deny` into the response sent to the
+/// client, relaying the auth endpoint's own status/headers/body verbatim.
+fn deny_response(status: StatusCode, headers: hyper::HeaderMap, body: Bytes) -> Response<ProxyBody> {
+    let mut builder = Response::builder().status(status);
+    if let Some(map) = builder.headers_mut() {
+        *map = headers;
+    }
+    builder
+        .body(Full::new(body).map_err(|never| match never {}).boxed())
+        .unwrap_or_else(|_| Response::new(empty_body()))
+}
+
 async fn proxy(
     mut req: Request<Incoming>,
     route: &Route,
     scheme: &str,
     peer: SocketAddr,
     client: &Client<HttpConnector, ProxyBody>,
+    forward_auth_client: &reqwest::Client,
 ) -> Response<ProxyBody> {
     apply_route_middlewares(route, &mut req);
+
+    if let Some(cfg) = forward_auth_config(route) {
+        match forward_auth::check(forward_auth_client, cfg, req.method(), req.uri(), req.headers()).await {
+            forward_auth::Outcome::Deny(status, headers, body) => return deny_response(status, headers, body),
+            forward_auth::Outcome::Allow(allowed) => {
+                for (name, value) in allowed {
+                    req.headers_mut().insert(name, value);
+                }
+            }
+        }
+    }
 
     let cors = cors_policy(route);
     let origin = req

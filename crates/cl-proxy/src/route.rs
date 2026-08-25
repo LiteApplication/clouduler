@@ -11,10 +11,10 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
-use cl_config::Middleware;
+use cl_config::{Middleware, RedirectRegex};
 use ipnet::IpNet;
 
 /// Per-route proxy behaviour that is not about matching or backend choice.
@@ -75,6 +75,11 @@ pub struct Route {
     pub redirect: Option<RedirectTarget>,
     backends: Vec<SocketAddr>,
     next: AtomicUsize,
+    /// Lazily compiled from `middlewares` on first use rather than at
+    /// construction: a `Route` is rebuilt from scratch every reconcile pass
+    /// (`RECONCILE_INTERVAL`), so this compiles the pattern at most once per
+    /// pass rather than once per request.
+    redirect_regex: OnceLock<Option<(regex::Regex, RedirectRegex)>>,
 }
 
 impl Route {
@@ -98,7 +103,26 @@ impl Route {
             redirect: None,
             backends,
             next: AtomicUsize::new(0),
+            redirect_regex: OnceLock::new(),
         }
+    }
+
+    /// The route's `redirect_regex` middleware, compiled and cached on first
+    /// call. `None` when the route carries no such middleware or its pattern
+    /// fails to compile (already validated at parse time in `cl-config`, so
+    /// that should never actually happen here).
+    pub fn redirect_regex(&self) -> Option<(&regex::Regex, &RedirectRegex)> {
+        self.redirect_regex
+            .get_or_init(|| {
+                self.middlewares.iter().find_map(|m| match m {
+                    Middleware::RedirectRegex(cfg) => {
+                        regex::Regex::new(&cfg.regex).ok().map(|re| (re, cfg.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .as_ref()
+            .map(|(re, cfg)| (re, cfg))
     }
 
     pub fn with_options(mut self, options: RouteOptions) -> Self {

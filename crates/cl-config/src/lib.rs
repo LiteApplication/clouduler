@@ -17,9 +17,9 @@ pub use bundle::{BundledFile, StackBundle};
 pub use error::{ConfigError, Result};
 pub use stack::{
     ByteSize, ObjectRef, SECRET_DIR,
-    Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, Healthcheck, HealthcheckTest,
-    Middleware, Placement, PortMapping, PortRange, ProxyRoute, ResourceSpec, Resources,
+    Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, ForwardAuth, Healthcheck, HealthcheckTest,
+    Middleware, Placement, PortMapping, PortRange, ProxyRoute, PublishMode, RedirectRegex, ResourceSpec, Resources,
     RestartPolicy, ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile,
-    StackNetwork, StackRequirements, StackSecret, StackVolume, Protocol, UpdateConfig, VolumeMount,
+    StackNetwork, StackRequirements, StackSecret, StackVolume, Protocol, TmpfsOptions, UpdateConfig, VolumeMount,
     VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
 };

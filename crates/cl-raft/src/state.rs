@@ -487,6 +487,19 @@ pub enum Request {
     RemoveNode {
         node: String,
     },
+    /// Tombstone an id without touching the roster, so `reap_removed_nodes`
+    /// drops it from raft membership on its own timer.
+    ///
+    /// For a roster entry that changes identity while keeping its name: a
+    /// node re-provisioned fresh (`clouduler init --force`) after its old
+    /// state was lost, or one `force_quorum` had demoted to a learner rather
+    /// than dropped, coming back under a new id through `init --join`.
+    /// `RemoveNode` does not fit this case, since it deletes the name's
+    /// whole roster entry, which here still points at a live node under its
+    /// new id.
+    RetireNodeId {
+        id: uuid::Uuid,
+    },
     DeployStack {
         name: String,
         spec: String,
@@ -798,6 +811,11 @@ impl ClusterState {
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
                 }
+                Ok(())
+            }
+
+            Request::RetireNodeId { id } => {
+                self.removed.insert(*id);
                 Ok(())
             }
 

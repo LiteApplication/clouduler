@@ -10,6 +10,7 @@
 mod acme;
 mod certs;
 mod error;
+mod forward_auth;
 mod middleware;
 mod route;
 mod server;
