@@ -15,6 +15,8 @@ const cluster: ClusterState = {
   secrets: {},
   certificates: {},
   dns_records: {},
+  cert_status: {},
+  dns_status: {},
   unreachable: [],
   removed: [],
   wrapped_keys: {},

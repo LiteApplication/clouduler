@@ -26,7 +26,7 @@ use cl_proxy::{
     RouteOptions, RouteTable, ZoneResolver, DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{dns_key, CertificateState, ClusterState, DnsRecordState, Request};
+use cl_raft::state::{dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request};
 use cl_secret::{ClusterKey, Sealed};
 use ipnet::IpNet;
 use tracing::{info, warn};
@@ -591,8 +591,20 @@ async fn issue_missing(
         }
         let Some(zone_id) = zones.zone_id_for(&host) else {
             warn!(%host, "no cloudflare zone covers this name, not issuing");
+            set_cert_status(
+                cluster,
+                &host,
+                ReconcileStatus::Error {
+                    message: "no cloudflare zone covers this hostname".to_string(),
+                    at: now(),
+                },
+            )
+            .await;
             continue;
         };
+        if state.cert_status.get(&host) != Some(&ReconcileStatus::Pending) {
+            set_cert_status(cluster, &host, ReconcileStatus::Pending).await;
+        }
         info!(%host, "ordering a certificate");
         match issue_certificate(
             account,
@@ -614,9 +626,52 @@ async fn issue_missing(
                     warn!(%host, error = %e, "could not store the issued certificate");
                 }
             }
-            Err(e) => warn!(%host, error = %e, "certificate issuance failed"),
+            Err(e) => {
+                warn!(%host, error = %e, "certificate issuance failed");
+                set_cert_status(
+                    cluster,
+                    &host,
+                    ReconcileStatus::Error {
+                        message: e.to_string(),
+                        at: now(),
+                    },
+                )
+                .await;
+            }
         }
     }
+}
+
+/// Submits `Request::SetCertStatus`, logging rather than failing the caller
+/// if the write doesn't land - status is best effort, never load bearing.
+async fn set_cert_status(cluster: &ClusterNode, fqdn: &str, status: ReconcileStatus) {
+    let request = Request::SetCertStatus {
+        fqdn: fqdn.to_string(),
+        status,
+    };
+    if let Err(e) = cluster.submit(request).await {
+        warn!(%fqdn, error = %e, "could not record certificate status");
+    }
+}
+
+/// Submits `Request::SetDnsStatus`, logging rather than failing the caller
+/// if the write doesn't land - status is best effort, never load bearing.
+async fn set_dns_status(cluster: &ClusterNode, fqdn: &str, status: ReconcileStatus) {
+    let request = Request::SetDnsStatus {
+        fqdn: fqdn.to_string(),
+        status,
+    };
+    if let Err(e) = cluster.submit(request).await {
+        warn!(%fqdn, error = %e, "could not record dns status");
+    }
+}
+
+/// Current unix time in seconds, for stamping a `ReconcileStatus::Error`.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Cloudflare zone ids, resolved once at startup. `ZoneResolver` is
@@ -771,6 +826,17 @@ async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Clo
     for record in desired_records(cfg, cluster.quorum().leader(), state) {
         let Some(zone_id) = zones.zone_id_for(&record.fqdn) else {
             warn!(fqdn = %record.fqdn, "no cloudflare zone covers this name, not publishing a dns record");
+            if !state.dns_records.contains_key(&dns_key(&record.fqdn, &format!("{:?}", record.kind), &record.content)) {
+                set_dns_status(
+                    cluster,
+                    &record.fqdn,
+                    ReconcileStatus::Error {
+                        message: "no cloudflare zone covers this hostname".to_string(),
+                        at: now(),
+                    },
+                )
+                .await;
+            }
             continue;
         };
         let zone_name = zones
@@ -783,8 +849,32 @@ async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Clo
     }
 
     for ((zone_id, zone_name), desired) in by_zone {
-        if let Err(e) = reconcile_zone(cluster, &cfg.cluster.name, cf, &zone_id, &zone_name, desired, state).await {
+        // Mark anything not live yet as pending before the round trip, so the
+        // ui has something to show while cloudflare is being talked to.
+        for record in &desired {
+            if !state.dns_records.contains_key(&dns_key(&record.fqdn, &format!("{:?}", record.kind), &record.content))
+                && state.dns_status.get(&record.fqdn) != Some(&ReconcileStatus::Pending)
+            {
+                set_dns_status(cluster, &record.fqdn, ReconcileStatus::Pending).await;
+            }
+        }
+        if let Err(e) = reconcile_zone(cluster, &cfg.cluster.name, cf, &zone_id, &zone_name, desired.clone(), state).await {
             warn!(zone = %zone_name, error = %e, "dns reconcile failed for this zone");
+            let mut hosts: BTreeSet<String> = BTreeSet::new();
+            for record in &desired {
+                hosts.insert(record.fqdn.clone());
+            }
+            for fqdn in hosts {
+                set_dns_status(
+                    cluster,
+                    &fqdn,
+                    ReconcileStatus::Error {
+                        message: e.to_string(),
+                        at: now(),
+                    },
+                )
+                .await;
+            }
         }
     }
 }

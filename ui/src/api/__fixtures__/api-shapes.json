@@ -109,6 +109,7 @@
         "node": "n0"
       }
     },
+    "cert_status": {},
     "certificates": {
       "example.test": {
         "chain_pem": "chain",
@@ -135,6 +136,7 @@
         "zone": "test"
       }
     },
+    "dns_status": {},
     "nodes": {
       "n0": {
         "arch": "",

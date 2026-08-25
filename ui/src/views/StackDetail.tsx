@@ -9,6 +9,19 @@ import { ConstraintTable } from '../components/ConstraintTable';
 import { Icon } from '../components/Icon';
 import { useEventSource } from '../hooks/useEventSource';
 import { SecretForm } from './SecretForm';
+import { statusBadge } from './Certificates';
+
+/** `configs` (service-referenced) and `file_configs` (declared with a bundled
+ *  `file:`) aren't subsets of one another — a declared-but-unreferenced entry
+ *  can be file-only, and a referenced entry can have no `file:` at all — so
+ *  the editable set is their union. */
+function allConfigKeys(requirements: StackRequirements): string[] {
+  return Array.from(new Set([...requirements.configs, ...requirements.file_configs])).sort();
+}
+
+function allSecretKeys(requirements: StackRequirements): string[] {
+  return Array.from(new Set([...requirements.secrets, ...requirements.file_secrets])).sort();
+}
 
 export function StackDetail() {
   const { name = '' } = useParams();
@@ -73,13 +86,15 @@ export function StackDetail() {
     setSpec(await file.text());
   };
 
-  // Seed a draft field for every file-backed config/secret the spec
-  // references, without clobbering anything already typed in.
+  // Seed a draft field for every config/secret the spec references, whether
+  // or not it bundles its own `file:` — a config the stack only refers to by
+  // name still needs somewhere to edit its content, without clobbering
+  // anything already typed in.
   useEffect(() => {
     if (!requirements) return;
     setConfigDrafts((prev) => {
       const next = { ...prev };
-      for (const key of requirements.file_configs) {
+      for (const key of allConfigKeys(requirements)) {
         if (!(key in next)) {
           const existing = cluster?.configs[key];
           next[key] = existing ? decodeText(existing.content) : '';
@@ -89,7 +104,7 @@ export function StackDetail() {
     });
     setSecretDrafts((prev) => {
       const next = { ...prev };
-      for (const key of requirements.file_secrets) {
+      for (const key of allSecretKeys(requirements)) {
         if (!(key in next)) next[key] = '';
       }
       return next;
@@ -145,6 +160,23 @@ export function StackDetail() {
           setSubmitError(`secret "${key}" needs content before this stack can deploy`);
           return;
         }
+      }
+
+      // Configs/secrets the spec only refers to by name (no `file:`) aren't
+      // bundled with the deploy request — the server ignores keys outside
+      // file_configs/file_secrets there — so any edited content for them is
+      // saved directly as a standalone object instead.
+      step = 'saving standalone config content';
+      for (const key of result.requirements.configs) {
+        if (result.requirements.file_configs.includes(key)) continue;
+        const draft = configDrafts[key];
+        if (draft) await api.putConfig(key, encodeText(draft));
+      }
+      step = 'saving standalone secret content';
+      for (const key of result.requirements.secrets) {
+        if (result.requirements.file_secrets.includes(key)) continue;
+        const draft = secretDrafts[key];
+        if (draft) await api.putSecret(key, { content: encodeText(draft) });
       }
 
       step = 'submitting deploy';
@@ -226,7 +258,7 @@ export function StackDetail() {
           </div>
         )}
 
-        {requirements && (requirements.file_configs.length > 0 || requirements.file_secrets.length > 0) && (
+        {requirements && (allConfigKeys(requirements).length > 0 || allSecretKeys(requirements).length > 0) && (
           <div className="section" ref={configFilesRef}>
             <div className="section-head">
               <h2>
@@ -234,13 +266,14 @@ export function StackDetail() {
               </h2>
             </div>
             <p className="page-sub">
-              These come from this spec's <code>configs:</code>/<code>secrets:</code> blocks. Leave a field blank to
-              keep its current value.
+              These are every config/secret this spec references, whether bundled with a <code>file:</code> or an
+              existing standalone object. Leave a field blank to keep its current value.
             </p>
-            {requirements.file_configs.map((key) => (
+            {allConfigKeys(requirements).map((key) => (
               <div className="field" key={`config-${key}`}>
                 <label htmlFor={`config-${key}`}>
                   config: {key} {!cluster?.configs[key] && <Badge tone="warn">new</Badge>}
+                  {!requirements.file_configs.includes(key) && <Badge tone="neutral">standalone</Badge>}
                 </label>
                 <input
                   type="file"
@@ -257,10 +290,11 @@ export function StackDetail() {
                 />
               </div>
             ))}
-            {requirements.file_secrets.map((key) => (
+            {allSecretKeys(requirements).map((key) => (
               <div className="field" key={`secret-${key}`}>
                 <label htmlFor={`secret-${key}`}>
                   secret: {key} {!cluster?.secrets[key] && <Badge tone="warn">new</Badge>}
+                  {!requirements.file_secrets.includes(key) && <Badge tone="neutral">standalone</Badge>}
                 </label>
                 <input
                   type="file"
@@ -609,6 +643,53 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
           <SecretForm initialName={creatingSecret} lockName onDone={() => setCreatingSecret(null)} />
         </div>
       )}
+      {requirements.hosts.length > 0 && <DnsCertTable hosts={requirements.hosts} cluster={cluster} />}
+    </div>
+  );
+}
+
+/** DNS/certificate status for this stack's proxied hostnames. A host counts
+ *  as "live"/"issued" once it has a matching entry in
+ *  `dns_records`/`certificates`; otherwise `dns_status`/`cert_status` carries
+ *  whatever the reconcile loop last recorded (pending, or the last error) —
+ *  see `ReconcileStatus` in cl-raft's state.rs. Neither map carries a stack
+ *  field, so hosts are matched by fqdn against this stack's own spec. */
+function DnsCertTable({ hosts, cluster }: { hosts: string[]; cluster: NonNullable<ReturnType<typeof useClusterState>> }) {
+  const liveDnsHosts = new Set(Object.values(cluster.dns_records).map((r) => r.fqdn));
+
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h2>
+          <Icon name="network" /> DNS &amp; certificates
+        </h2>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Host</th>
+              <th>DNS</th>
+              <th>Certificate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {hosts.map((host) => (
+              <tr key={host}>
+                <td>{host}</td>
+                <td>{liveDnsHosts.has(host) ? <Badge tone="good">live</Badge> : statusBadge(cluster.dns_status[host]) ?? <Badge tone="neutral">unknown</Badge>}</td>
+                <td>
+                  {cluster.certificates[host] ? (
+                    <Badge tone="good">issued</Badge>
+                  ) : (
+                    statusBadge(cluster.cert_status[host]) ?? <Badge tone="neutral">unknown</Badge>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

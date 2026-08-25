@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::api::{Cloudflare, Record, RecordInput, RecordType};
 use crate::desired::DesiredRecord;
-use crate::error::Result;
+use crate::error::{DnsError, Result};
 use crate::ownership::{parse_tag, record_key, tag_content, tag_name};
 
 /// Changes needed to bring a zone's live records in line with desired state.
@@ -113,7 +113,7 @@ pub async fn apply(cf: &Cloudflare, zone_id: &str, plan: &Plan) -> Result<()> {
             Err(e) if e.is_benign_duplicate() => {
                 tracing::debug!(name = %input.name, "record already exists, skipping");
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(record_apply_error(input, e)),
         }
     }
     for (id, input) in &plan.update {
@@ -122,13 +122,22 @@ pub async fn apply(cf: &Cloudflare, zone_id: &str, plan: &Plan) -> Result<()> {
             Err(e) if e.is_benign_duplicate() => {
                 tracing::debug!(name = %input.name, "record already exists, skipping");
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(record_apply_error(input, e)),
         }
     }
     for id in &plan.delete {
         cf.delete_record(zone_id, id).await?;
     }
     Ok(())
+}
+
+fn record_apply_error(input: &RecordInput, source: DnsError) -> DnsError {
+    DnsError::RecordApply {
+        name: input.name.clone(),
+        kind: input.kind,
+        content: input.content.clone(),
+        source: Box::new(source),
+    }
 }
 
 fn desired_key(d: &DesiredRecord) -> String {
@@ -187,6 +196,8 @@ fn tag_input(cluster: &str, key: &str, fqdn: &str) -> RecordInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const CLUSTER: &str = "home";
 
@@ -373,6 +384,37 @@ mod tests {
         assert!(p.update.is_empty());
         assert!(p.delete.is_empty());
         assert_eq!(p.create.len(), 2); // record + tag, will hit "already exists" at apply time
+    }
+
+    /// A non-benign create failure (e.g. a name already claimed by an
+    /// unowned record) must name the offending record in its message - the
+    /// bare Cloudflare error alone doesn't say which record in the batch it
+    /// was about.
+    #[tokio::test]
+    async fn apply_error_names_the_record_that_collided() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/zones/zone1/dns_records"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "success": false,
+                "errors": [{ "code": 81053, "message": "An A, AAAA, or CNAME record with that host already exists." }],
+                "messages": [],
+                "result": null
+            })))
+            .mount(&server)
+            .await;
+
+        let cf = Cloudflare::with_base_url("tok", server.uri());
+        let plan = Plan {
+            create: vec![to_input(CLUSTER, &desired(RecordType::A, "human.example.com", "1.2.3.4"))],
+            update: vec![],
+            delete: vec![],
+        };
+        let err = apply(&cf, "zone1", &plan).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("human.example.com"), "{msg}");
+        assert!(msg.contains("1.2.3.4"), "{msg}");
+        assert!(msg.contains("81053"), "{msg}");
     }
 
     #[test]

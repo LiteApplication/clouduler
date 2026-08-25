@@ -28,12 +28,61 @@ use tracing::debug;
 use crate::cli::FolderImportArgs;
 use crate::stack::client_for;
 
-/// How long to give instances to stop cleanly before touching the volume
-/// they mount, on top of each service's own `stop_grace_period`. There is no
-/// cluster-wide signal for "actually stopped" to poll (container state is
-/// local to whichever node runs it), so this is a fixed wait: the scheduler
-/// sweeps every 10s and a service's own grace period is added on top.
+/// Upper bound on how long to give instances to stop cleanly before
+/// touching the volume they mount, on top of each service's own
+/// `stop_grace_period`: the scheduler sweeps every 10s and a service's own
+/// grace period is added on top. There is no cluster-wide "actually
+/// stopped" signal to poll (container state is local to whichever node runs
+/// it), so for instances on *other* nodes this is the best we can do.
+/// For instances on this node, `wait_for_stopped` polls the local docker
+/// daemon directly and returns as soon as they are all confirmed stopped,
+/// instead of always sleeping the full margin.
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
+
+/// How often to poll local docker while waiting for instances to stop.
+const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Wait for `instances` to stop, returning as soon as that is confirmed or
+/// `deadline` elapses, whichever comes first.
+///
+/// Container state is local to whichever node runs it, so this can only
+/// poll for instances assigned to `node_name`; instances on other nodes have
+/// no cluster-wide "stopped" signal, so we just sleep out whatever's left of
+/// `deadline` for those. If docker isn't reachable, or every affected
+/// instance lives on another node, this degrades to the old fixed sleep.
+async fn wait_for_stopped(state: &ClusterState, node_name: &str, instances: &[InstanceId], deadline: Duration) {
+    let local: Vec<String> = state
+        .assignments
+        .values()
+        .filter(|a| a.node == node_name && instances.contains(&a.instance))
+        .map(|a| a.instance.container_name())
+        .collect();
+    let remote = instances.len() > local.len();
+
+    let Ok(docker) = cl_docker::Docker::connect() else {
+        tokio::time::sleep(deadline).await;
+        return;
+    };
+
+    let start = tokio::time::Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        if elapsed >= deadline {
+            return;
+        }
+        let mut all_stopped = true;
+        for name in &local {
+            match docker.inspect(name).await {
+                Ok(Some(state)) if state.running => all_stopped = false,
+                _ => {}
+            }
+        }
+        if all_stopped && !remote {
+            return;
+        }
+        tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
+    }
+}
 
 pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -> Result<()> {
     let (drive, volume, path) = parse_target(&args.target)?;
@@ -80,13 +129,14 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
                 );
             }
             let grace = max_stop_grace(&state, &using);
+            let deadline = grace + STOP_POLL_MARGIN;
             debug!(
                 instances = %using.iter().map(InstanceId::to_string).collect::<Vec<_>>().join(", "),
-                wait = ?(grace + STOP_POLL_MARGIN),
+                deadline = ?deadline,
                 "stopping instances before replacing the volume"
             );
             set_desired(&client, &using, DesiredState::Stopped).await?;
-            tokio::time::sleep(grace + STOP_POLL_MARGIN).await;
+            wait_for_stopped(&state, node_name, &using, deadline).await;
             stopped = using;
         }
         debug!("clearing the volume before replacing it");

@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::StackFile;
+use crate::cluster::{qualify, ClusterConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StackRequirements {
@@ -24,6 +25,12 @@ pub struct StackRequirements {
     pub file_configs: BTreeSet<String>,
     /// Top level secrets this stack bundles its own file for.
     pub file_secrets: BTreeSet<String>,
+    /// Fully qualified hostnames this stack's services are proxied under.
+    /// Empty until filled in from `StackFile::hosts`, which needs the
+    /// cluster config to resolve a bare label's network domain - not
+    /// available from the stack file alone.
+    #[serde(default)]
+    pub hosts: BTreeSet<String>,
 }
 
 impl StackFile {
@@ -54,11 +61,38 @@ impl StackFile {
 
         r
     }
+
+    /// Every fully qualified hostname this stack's services are proxied
+    /// under, resolved against `cfg`'s per-network domains the same way the
+    /// proxy itself does. Used to show a stack's DNS/certificate status
+    /// without the caller having to re-derive it.
+    pub fn hosts(&self, cfg: &ClusterConfig) -> BTreeSet<String> {
+        let mut hosts = BTreeSet::new();
+        for svc in self.services.values() {
+            let Some(extensions) = &svc.x_clouduler else { continue };
+            for route in &extensions.proxy {
+                let domain = cfg.networks.get(&route.network).and_then(|n| n.domain.as_deref());
+                hosts.insert(qualify(&route.host, domain));
+            }
+        }
+        hosts
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::ClusterConfig;
+
+    const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
+    const GITLAB_YAML: &str = include_str!("../../../../examples/stacks/gitlab.yaml");
+
+    #[test]
+    fn hosts_qualifies_a_bare_label_with_its_networks_domain() {
+        let cluster = ClusterConfig::parse(CLUSTER_YAML).expect("reference cluster is valid");
+        let stack = StackFile::parse(GITLAB_YAML).expect("gitlab stack parses");
+        assert_eq!(stack.hosts(&cluster), BTreeSet::from(["gitlab.example.com".to_string()]));
+    }
 
     #[test]
     fn gathers_networks_drives_configs_and_secrets_across_services() {

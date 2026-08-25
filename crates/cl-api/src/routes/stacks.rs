@@ -66,9 +66,15 @@ async fn detail(
         .ok_or_else(|| ApiError::NotFound(format!("no stack {name}")))?;
     // The spec was already validated at deploy time, so a parse failure here
     // would mean corrupted state, not a bad request.
-    let requirements = StackFile::parse(&stack.spec)
-        .map(|parsed| parsed.requirements())
-        .unwrap_or_default();
+    let requirements = match StackFile::parse(&stack.spec) {
+        Ok(parsed) => {
+            let mut r = parsed.requirements();
+            let cfg = state.cluster_config.read().await;
+            r.hosts = parsed.hosts(&cfg);
+            r
+        }
+        Err(_) => StackRequirements::default(),
+    };
     Ok(Json(StackDetail {
         name: stack.name.clone(),
         spec: stack.spec.clone(),
@@ -234,13 +240,22 @@ struct ValidateResponse {
     requirements: Option<StackRequirements>,
 }
 
-async fn validate(_identity: Identity, Json(body): Json<ValidateRequest>) -> Json<ValidateResponse> {
+async fn validate(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Json(body): Json<ValidateRequest>,
+) -> Json<ValidateResponse> {
     match StackFile::parse(&body.spec) {
-        Ok(parsed) => Json(ValidateResponse {
-            valid: true,
-            errors: Vec::new(),
-            requirements: Some(parsed.requirements()),
-        }),
+        Ok(parsed) => {
+            let mut requirements = parsed.requirements();
+            let cfg = state.cluster_config.read().await;
+            requirements.hosts = parsed.hosts(&cfg);
+            Json(ValidateResponse {
+                valid: true,
+                errors: Vec::new(),
+                requirements: Some(requirements),
+            })
+        }
         Err(e) => Json(ValidateResponse {
             valid: false,
             errors: vec![ValidationError {

@@ -390,6 +390,22 @@ pub struct DnsRecordState {
     pub provider_id: Option<String>,
 }
 
+/// Where a certificate or DNS record stands before it has anything to show
+/// for itself in `certificates`/`dns_records` - set as soon as a hostname
+/// becomes desired, so the ui has something to render instead of silence
+/// between "stack created" and "record live"/"cert issued".  Cleared (the
+/// map entry removed) once the real record/certificate lands, so presence
+/// in `certificates`/`dns_records` alone is always the "ready" case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ReconcileStatus {
+    Pending,
+    Error {
+        message: String,
+        /// Unix seconds, so the ui can show how stale the failure is.
+        at: i64,
+    },
+}
+
 /// Everything the cluster agrees on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClusterState {
@@ -408,6 +424,14 @@ pub struct ClusterState {
     pub secrets: BTreeMap<String, SecretEntry>,
     pub certificates: BTreeMap<String, CertificateState>,
     pub dns_records: BTreeMap<String, DnsRecordState>,
+    /// Pending/error status for a hostname that has no entry in
+    /// `certificates` yet, keyed by fqdn. See `ReconcileStatus`.
+    #[serde(default)]
+    pub cert_status: BTreeMap<String, ReconcileStatus>,
+    /// Pending/error status for a hostname that has no live record in
+    /// `dns_records` yet, keyed by fqdn. See `ReconcileStatus`.
+    #[serde(default)]
+    pub dns_status: BTreeMap<String, ReconcileStatus>,
     /// This cluster's secret key, wrapped once per node, keyed by node name.
     /// See `WrappedKeyEntry`.
     #[serde(default)]
@@ -527,9 +551,21 @@ pub enum Request {
     RemoveCertificate {
         fqdn: String,
     },
+    /// Records that a hostname's certificate is being ordered, or failed to
+    /// be. Superseded by `StoreCertificate` once issuance succeeds.
+    SetCertStatus {
+        fqdn: String,
+        status: ReconcileStatus,
+    },
     UpsertDnsRecord(DnsRecordState),
     RemoveDnsRecord {
         key: String,
+    },
+    /// Records that a hostname's dns record is being reconciled, or failed
+    /// to be. Superseded once `UpsertDnsRecord` lands a live record for it.
+    SetDnsStatus {
+        fqdn: String,
+        status: ReconcileStatus,
     },
     PutConfig {
         name: String,
@@ -967,6 +1003,7 @@ impl ClusterState {
             }
 
             Request::StoreCertificate(cert) => {
+                self.cert_status.remove(&cert.fqdn);
                 self.certificates.insert(cert.fqdn.clone(), cert.clone());
                 Ok(())
             }
@@ -976,7 +1013,13 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::SetCertStatus { fqdn, status } => {
+                self.cert_status.insert(fqdn.clone(), status.clone());
+                Ok(())
+            }
+
             Request::UpsertDnsRecord(record) => {
+                self.dns_status.remove(&record.fqdn);
                 let key = dns_key(&record.fqdn, &record.record_type, &record.content);
                 self.dns_records.insert(key, record.clone());
                 Ok(())
@@ -984,6 +1027,11 @@ impl ClusterState {
 
             Request::RemoveDnsRecord { key } => {
                 self.dns_records.remove(key);
+                Ok(())
+            }
+
+            Request::SetDnsStatus { fqdn, status } => {
+                self.dns_status.insert(fqdn.clone(), status.clone());
                 Ok(())
             }
         }
@@ -1785,5 +1833,49 @@ mod tests {
             })
             .is_ok());
         assert!(state.configs.is_empty());
+    }
+
+    #[test]
+    fn storing_a_certificate_clears_its_pending_status() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::SetCertStatus {
+            fqdn: "app.example.com".into(),
+            status: ReconcileStatus::Pending,
+        });
+        assert_eq!(state.cert_status.get("app.example.com"), Some(&ReconcileStatus::Pending));
+
+        state.apply(&Request::StoreCertificate(CertificateState {
+            fqdn: "app.example.com".into(),
+            chain_pem: "chain".into(),
+            key_pem: "key".into(),
+            not_after: 0,
+        }));
+
+        assert!(state.certificates.contains_key("app.example.com"));
+        assert!(!state.cert_status.contains_key("app.example.com"));
+    }
+
+    #[test]
+    fn upserting_a_dns_record_clears_its_status_for_that_fqdn() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::SetDnsStatus {
+            fqdn: "app.example.com".into(),
+            status: ReconcileStatus::Error {
+                message: "no zone".into(),
+                at: 0,
+            },
+        });
+        assert!(state.dns_status.contains_key("app.example.com"));
+
+        state.apply(&Request::UpsertDnsRecord(DnsRecordState {
+            fqdn: "app.example.com".into(),
+            record_type: "A".into(),
+            content: "10.0.0.1".into(),
+            zone: "example.com".into(),
+            provider_id: Some("rec1".into()),
+        }));
+
+        assert!(state.dns_records.values().any(|r| r.fqdn == "app.example.com"));
+        assert!(!state.dns_status.contains_key("app.example.com"));
     }
 }

@@ -127,6 +127,11 @@ export interface StackRequirements {
    *  the ones the editor should offer to upload content for. */
   file_configs: string[];
   file_secrets: string[];
+  /** Fully qualified hostnames this stack's services are proxied under.
+   *  Cross-reference against `ClusterState.dns_records`/`certificates`/
+   *  `dns_status`/`cert_status` to show this stack's DNS/cert state — those
+   *  maps carry no stack field of their own. */
+  hosts: string[];
 }
 
 /** GET /api/stacks/:name. */
@@ -165,6 +170,12 @@ export interface DnsRecordState {
   provider_id: string | null;
 }
 
+/** Where a certificate or DNS record stands before it has anything to show
+ *  for itself in `certificates`/`dns_records` — see the same type in
+ *  cl-raft's state.rs. `'Pending'` is issuance/publishing in flight;
+ *  `{ Error }` is the last attempt's failure reason and when it happened. */
+export type ReconcileStatus = 'Pending' | { Error: { message: string; at: number } };
+
 export interface VolumeState {
   id: VolumeIdStr;
   generation: number;
@@ -181,6 +192,8 @@ export interface ClusterState {
   secrets: Record<string, SecretEntry>;
   certificates: Record<string, CertificateState>;
   dns_records: Record<string, DnsRecordState>;
+  cert_status: Record<string, ReconcileStatus>;
+  dns_status: Record<string, ReconcileStatus>;
   unreachable: string[];
   /** Node names removed through the API, kept as a tombstone until the name
    *  is reused, so a stale leader config cannot resurrect them. */

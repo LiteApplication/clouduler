@@ -13,6 +13,7 @@ mod expose;
 mod init;
 mod proxy;
 mod report;
+mod secret;
 mod stack;
 
 use anyhow::{Context, Result};
@@ -20,7 +21,7 @@ use clap::Parser;
 use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, ConfigCommand, DriveCommand, NodeCommand, StackCommand};
+use crate::cli::{Cli, Command, ConfigCommand, DriveCommand, NodeCommand, SecretCommand, StackCommand};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -86,6 +87,12 @@ async fn main() -> Result<()> {
                 stack::show(&cfg, &name, files, via.as_deref()).await
             }
             StackCommand::Remove { name, via } => stack::remove(&cfg, &name, via.as_deref()).await,
+        },
+        Command::Secret { command } => match command {
+            SecretCommand::Set { name, value, file, via } => {
+                secret::set(&cfg, &name, value, file.as_deref(), via.as_deref()).await
+            }
+            SecretCommand::List { via } => secret::list(&cfg, via.as_deref()).await,
         },
         Command::Drive {
             command: DriveCommand::List,

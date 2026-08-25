@@ -52,6 +52,18 @@ pub enum DnsError {
 
     #[error("refused to delete unowned record {0}")]
     NotOwned(String),
+
+    /// Wraps a create/update failure with the record that triggered it -
+    /// the bare Cloudflare error alone doesn't say which of the batch's
+    /// records collided.
+    #[error("{name} ({kind:?} -> {content}): {source}")]
+    RecordApply {
+        name: String,
+        kind: crate::api::RecordType,
+        content: String,
+        #[source]
+        source: Box<DnsError>,
+    },
 }
 
 impl DnsError {

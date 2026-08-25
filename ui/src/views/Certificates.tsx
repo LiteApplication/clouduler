@@ -5,6 +5,16 @@ import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { daysUntil, formatUnixSeconds } from '../lib/format';
 import { Icon } from '../components/Icon';
+import type { ReconcileStatus } from '../api/types';
+
+/** `Pending`/`Error` badge for a hostname with nothing issued/published yet.
+ *  `null` once the real record/cert lands, since presence there is itself
+ *  "ready" and needs no separate badge. */
+export function statusBadge(status: ReconcileStatus | undefined) {
+  if (!status) return null;
+  if (status === 'Pending') return <Badge tone="warn">pending</Badge>;
+  return <Badge tone="bad">error: {status.Error.message}</Badge>;
+}
 
 export function Certificates() {
   const cluster = useClusterState();
@@ -14,6 +24,10 @@ export function Certificates() {
 
   const certs = cluster ? Object.values(cluster.certificates) : [];
   const records = cluster ? Object.values(cluster.dns_records) : [];
+  const certStatus = cluster?.cert_status ?? {};
+  const dnsStatus = cluster?.dns_status ?? {};
+  const liveDnsHosts = new Set(records.map((r) => r.fqdn));
+  const pendingDnsHosts = Object.keys(dnsStatus).filter((fqdn) => !liveDnsHosts.has(fqdn));
 
   const renew = async (fqdn: string) => {
     setBusyFqdn(fqdn);
@@ -57,6 +71,8 @@ export function Certificates() {
             <p className="page-sub">
               {certs.length} certificate{certs.length === 1 ? '' : 's'} · {records.length} DNS record
               {records.length === 1 ? '' : 's'}
+              {(Object.keys(certStatus).length > 0 || pendingDnsHosts.length > 0) &&
+                ` · ${Object.keys(certStatus).length + pendingDnsHosts.length} pending`}
             </p>
           </div>
         </div>
@@ -105,7 +121,15 @@ export function Certificates() {
                   </tr>
                 );
               })}
-              {certs.length === 0 && (
+              {Object.entries(certStatus).map(([fqdn, status]) => (
+                <tr key={fqdn}>
+                  <td>{fqdn}</td>
+                  <td>—</td>
+                  <td>{statusBadge(status)}</td>
+                  {isAdmin && <td />}
+                </tr>
+              ))}
+              {certs.length === 0 && Object.keys(certStatus).length === 0 && (
                 <tr>
                   <td colSpan={4} className="empty-cell">
                     no certificates
@@ -136,6 +160,7 @@ export function Certificates() {
                 <th>Type</th>
                 <th>Content</th>
                 <th>Zone</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -145,11 +170,23 @@ export function Certificates() {
                   <td>{r.record_type}</td>
                   <td className="mono">{r.content}</td>
                   <td>{r.zone}</td>
+                  <td>
+                    <Badge tone="good">live</Badge>
+                  </td>
                 </tr>
               ))}
-              {records.length === 0 && (
+              {pendingDnsHosts.map((fqdn) => (
+                <tr key={fqdn}>
+                  <td>{fqdn}</td>
+                  <td>—</td>
+                  <td>—</td>
+                  <td>—</td>
+                  <td>{statusBadge(dnsStatus[fqdn])}</td>
+                </tr>
+              ))}
+              {records.length === 0 && pendingDnsHosts.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="empty-cell">
+                  <td colSpan={5} className="empty-cell">
                     no records
                   </td>
                 </tr>

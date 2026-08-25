@@ -67,6 +67,11 @@ pub enum Command {
         #[command(subcommand)]
         command: StackCommand,
     },
+    /// Manage cluster-wide secrets. These talk to a running daemon.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
+    },
     /// Inspect drives.
     Drive {
         #[command(subcommand)]
@@ -339,6 +344,36 @@ pub enum StackCommand {
     /// Remove a stack and everything it runs.
     Remove {
         name: String,
+        #[arg(long)]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCommand {
+    /// Seal a value and store it in the cluster database, so any node running
+    /// a container that mounts it can decrypt it. Creates the secret if it
+    /// does not exist yet, otherwise bumps its revision.
+    ///
+    /// Sealing happens on this node before anything is sent, so the plaintext
+    /// never crosses the wire or reaches the raft log. That means it needs
+    /// this node's cluster key.
+    Set {
+        /// Name of the secret.
+        name: String,
+        /// Value for the secret. Omit both this and --file to read the value
+        /// from stdin instead, which keeps it out of the shell history.
+        #[arg(long, conflicts_with = "file")]
+        value: Option<String>,
+        /// Read the secret's value from a file instead of stdin.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// List the secrets stored in the cluster. Values are never shown.
+    List {
         #[arg(long)]
         via: Option<String>,
     },
