@@ -216,7 +216,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.5.0",
+    "version": "0.5.2",
     "voters": 1
   }
 }
