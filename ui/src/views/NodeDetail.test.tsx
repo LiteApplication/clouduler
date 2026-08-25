@@ -44,7 +44,7 @@ const clusterConfig: ClusterConfig = {
       generate_secret_key: null,
     },
   },
-  proxy: { acme: { enabled: false }, enabled: true, http_port: 80, https_port: 443 },
+  proxy: { acme: { enabled: false }, enabled: true, http_port: 80, https_port: 443, dns_publish: 'all-nodes' },
   secrets: {
     generate_if_missing: true,
     key_file: '/etc/clouduler/secrets.key',

@@ -12,6 +12,7 @@ proxy:
   enabled: true
   http_port: 80
   https_port: 443
+  dns_publish: all-nodes # or owning-node
   acme:
     enabled: false
     directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
@@ -261,13 +262,34 @@ only on a `cloudflare` section with a readable token being present — unlike
 certificate issuance, it does not additionally require `proxy.acme.enabled`,
 since a plain A record has nothing to do with TLS.
 
-Because every node runs the reverse proxy and forwards internally, a
-hostname's records point at **every** node's address on the declared
-network, not just the node a stack's containers happen to be placed on —
-`n1.example.com` failing does not need `blog.example.com`'s DNS to change
-for `n2` to keep answering it. Records are tagged with an ownership TXT
-record the same way `cl_dns::reconcile` always has, so a zone can be shared
-with records clouduler doesn't manage.
+`proxy.dns_publish` decides what a stack route's record actually says:
+
+- **`all-nodes`** (default): since every node runs the reverse proxy and
+  forwards internally, a hostname's records point at **every** node's
+  address on the declared network, not just the node a stack's containers
+  happen to be placed on — `n1` failing does not need `blog.example.com`'s
+  DNS to change for `n2` to keep answering it. This is Docker Swarm's
+  routing-mesh model: reaching any node reaches the service.
+- **`owning-node`**: DNS does the routing instead of the proxy. Only the
+  node(s) actually running a service's containers (`placement::service_nodes`)
+  are published, and a stale record left on any other node is deleted
+  through the Cloudflare API the next time `plan`/`apply` runs. Static
+  backends and redirects aren't backed by a container, so they still
+  publish every node's address in this mode. Because a hostname can only
+  point at one place, the scheduler enforces an implicit placement
+  constraint in this mode: every instance whose `x-clouduler.proxy` routes
+  publish the same hostname (say, one service serving `/` and another
+  serving `/admin` on the same host) is co-located onto one node
+  (`cl_sched::place`, via `Desired::proxy_hosts`) — a placement request that
+  cannot be satisfied is reported unplaceable rather than silently split
+  across nodes.
+
+Records are tagged with an ownership TXT record the same way
+`cl_dns::reconcile` always has, so a zone can be shared with records
+clouduler doesn't manage. A record apply failure (e.g. a name colliding with
+something else in the zone) is attributed to the specific hostname(s) it
+names, not blanket-applied to every hostname sharing that Cloudflare zone —
+one stack's DNS problem no longer shows up on an unrelated stack's records.
 
 Applied changes are also written to replicated state
 (`Request::UpsertDnsRecord`/`RemoveDnsRecord`), which is what the ui's

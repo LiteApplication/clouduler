@@ -40,6 +40,13 @@ pub struct Desired {
     /// entry on a public-kind network. A node must have the port marked open
     /// on that network (`NodeState::opens_port`) to be a candidate.
     pub bound_ports: BTreeSet<(String, PortProtocol, u16)>,
+    /// Hostnames this instance's `x-clouduler.proxy` routes publish, when the
+    /// cluster's DNS routes at the DNS level instead of through the proxy's
+    /// routing mesh. Populated only in that mode: another instance sharing
+    /// one of these hostnames must land on the same node, since a hostname
+    /// can only point at one place once DNS is the one deciding where a
+    /// request goes. Empty (no constraint) under the swarm-style default.
+    pub proxy_hosts: BTreeSet<String>,
 }
 
 /// Expand a stack into its instances. Replica counts come from
@@ -55,6 +62,7 @@ pub fn expand(
     file: &StackFile,
     egress_networks: &BTreeSet<String>,
     port_gated_networks: &BTreeSet<String>,
+    colocate_proxy_hosts: bool,
 ) -> Vec<Desired> {
     let mut out = Vec::new();
 
@@ -74,6 +82,16 @@ pub fn expand(
                 .as_ref()
                 .and_then(|d| d.replicas)
                 .unwrap_or(1)
+        };
+
+        let proxy_hosts: BTreeSet<String> = if colocate_proxy_hosts {
+            service
+                .x_clouduler
+                .as_ref()
+                .map(|x| x.proxy.iter().map(|r| r.host.clone()).collect())
+                .unwrap_or_default()
+        } else {
+            BTreeSet::new()
         };
 
         for index in 0..replicas {
@@ -102,6 +120,7 @@ pub fn expand(
                             .collect()
                     })
                     .unwrap_or_default(),
+                proxy_hosts: proxy_hosts.clone(),
             });
         }
     }
@@ -132,7 +151,7 @@ services:
     image: nginx
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert_eq!(desired.len(), 1);
         assert_eq!(desired[0].id, InstanceId::new("site", "web", 0));
         assert!(!desired[0].global);
@@ -149,7 +168,7 @@ services:
       replicas: 3
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert_eq!(desired.len(), 3);
         assert_eq!(
             desired.iter().map(|d| d.id.index).collect::<Vec<_>>(),
@@ -168,7 +187,7 @@ services:
       mode: global
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert_eq!(desired.len(), 1);
         assert!(desired[0].global);
     }
@@ -185,7 +204,7 @@ services:
       - "bulk/backups:/backups:ro"
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert_eq!(
             desired[0].drives,
             ["bulk".to_string(), "fast".to_string()].into()
@@ -204,7 +223,7 @@ services:
     networks: [wan]
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert_eq!(desired[0].networks, ["wan".to_string()].into());
     }
 
@@ -227,7 +246,7 @@ services:
 "#,
         );
         let port_gated_networks = ["wan".to_string()].into();
-        let desired = expand("site", &file, &BTreeSet::new(), &port_gated_networks);
+        let desired = expand("site", &file, &BTreeSet::new(), &port_gated_networks, false);
         assert_eq!(
             desired[0].bound_ports,
             [("wan".to_string(), PortProtocol::Tcp, 25)].into()
@@ -235,7 +254,7 @@ services:
 
         // Not in `port_gated_networks` (e.g. a private network) means no port
         // constraint, since only a public router forwards anything in.
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert!(desired[0].bound_ports.is_empty());
     }
 
@@ -254,8 +273,36 @@ services:
       node: n2
 "#,
         );
-        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new());
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
         assert_eq!(desired[0].constraints, vec!["node.role == manager"]);
         assert_eq!(desired[0].pinned_node.as_deref(), Some("n2"));
+    }
+
+    fn proxy_stack() -> StackFile {
+        parse(
+            r#"
+networks:
+  wan: {}
+services:
+  web:
+    image: nginx
+    networks: [wan]
+    x-clouduler:
+      proxy:
+        - host: app.example.com
+          network: wan
+          port: 80
+"#,
+        )
+    }
+
+    #[test]
+    fn proxy_hosts_are_populated_only_when_colocation_is_requested() {
+        let file = proxy_stack();
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        assert!(desired[0].proxy_hosts.is_empty());
+
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), true);
+        assert_eq!(desired[0].proxy_hosts, ["app.example.com".to_string()].into());
     }
 }

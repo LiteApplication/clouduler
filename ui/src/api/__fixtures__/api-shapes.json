@@ -45,6 +45,7 @@
       "acme": {
         "enabled": false
       },
+      "dns_publish": "all-nodes",
       "enabled": true,
       "http_port": 80,
       "https_port": 443

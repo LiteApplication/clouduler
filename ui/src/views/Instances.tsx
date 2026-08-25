@@ -5,6 +5,7 @@ import type { InstanceState } from '../api/types';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
 import { Donut, type DonutSegment } from '../components/Donut';
+import { instanceStateTone } from '../lib/format';
 
 export function Instances() {
   const [instances, setInstances] = useState<InstanceState[] | null>(null);
@@ -36,6 +37,16 @@ export function Instances() {
   const stateSegmentsAll: DonutSegment[] = [
     { label: 'Running', value: instances.filter((i) => i.state === 'running').length, tone: 'good' },
     { label: 'Stopped', value: instances.filter((i) => i.state === 'stopped').length, tone: 'neutral' },
+    {
+      label: 'In transition',
+      value: instances.filter((i) => ['pulling', 'restarting', 'stopping'].includes(i.state)).length,
+      tone: 'warn',
+    },
+    {
+      label: 'Needs attention',
+      value: instances.filter((i) => ['exited', 'pending_placement'].includes(i.state)).length,
+      tone: 'bad',
+    },
     { label: 'Unknown', value: instances.filter((i) => i.state === 'unknown').length, tone: 'warn' },
   ];
   const stateSegments = stateSegmentsAll.filter((s) => s.value > 0);
@@ -108,13 +119,17 @@ export function Instances() {
             {filtered.map((i) => (
               <tr key={i.id}>
                 <td>
-                  <Link className="row-link" to={`/instances/${encodeURIComponent(i.id)}`}>
-                    {i.id}
-                  </Link>
+                  {i.state === 'pending_placement' ? (
+                    i.id
+                  ) : (
+                    <Link className="row-link" to={`/instances/${encodeURIComponent(i.id)}`}>
+                      {i.id}
+                    </Link>
+                  )}
                 </td>
-                <td>{i.node}</td>
+                <td>{i.node || '-'}</td>
                 <td>
-                  <Badge tone={i.state === 'running' ? 'good' : i.health === 'unhealthy' ? 'bad' : 'neutral'}>
+                  <Badge tone={instanceStateTone(i.state)} title={i.placement_error}>
                     {i.state}
                   </Badge>
                 </td>

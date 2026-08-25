@@ -85,11 +85,15 @@ struct Inodes {
 }
 
 impl Inodes {
-    fn new() -> Self {
+    /// Root inode maps to `root` instead of the empty path, so this client
+    /// addresses just the `root` subtree of whatever the server exposes
+    /// (e.g. one volume out of a served drive's whole directory) while every
+    /// path it builds and sends still composes normally off that root.
+    fn new_at(root: String) -> Self {
         let mut path_to_ino = HashMap::new();
         let mut ino_to_path = HashMap::new();
-        path_to_ino.insert(String::new(), ROOT_INO);
-        ino_to_path.insert(ROOT_INO, String::new());
+        path_to_ino.insert(root.clone(), ROOT_INO);
+        ino_to_path.insert(ROOT_INO, root);
         Self { next: ROOT_INO + 1, path_to_ino, ino_to_path }
     }
 
@@ -180,6 +184,13 @@ impl ClientFs {
     }
 
     pub fn with_config(server: SocketAddr, rt: tokio::runtime::Handle, config: ClientConfig) -> Self {
+        Self::at(server, rt, config, String::new())
+    }
+
+    /// Mounts just the `root` subtree of whatever the server exposes, e.g.
+    /// one volume's subdirectory out of a served drive's whole root, rather
+    /// than the drive root itself.
+    pub fn at(server: SocketAddr, rt: tokio::runtime::Handle, config: ClientConfig, root: String) -> Self {
         Self {
             server: Arc::new(Mutex::new(server)),
             rt,
@@ -187,7 +198,7 @@ impl ClientFs {
             attrs: Mutex::new(Cache::new(config.ttl)),
             dirs: Mutex::new(Cache::new(config.ttl)),
             config,
-            inodes: Mutex::new(Inodes::new()),
+            inodes: Mutex::new(Inodes::new_at(root)),
         }
     }
 
@@ -802,13 +813,23 @@ mod tests {
 
     #[test]
     fn root_inode_is_one_and_maps_to_the_empty_path() {
-        let inodes = Inodes::new();
+        let inodes = Inodes::new_at(String::new());
         assert_eq!(inodes.path_of(ROOT_INO), Some(String::new()));
+    }
+
+    /// A client scoped to one volume's subtree sends paths rooted at that
+    /// volume, not at the drive root, so the server resolves them correctly.
+    #[test]
+    fn a_client_rooted_at_a_subpath_composes_child_paths_under_it() {
+        let mut inodes = Inodes::new_at("data".to_string());
+        assert_eq!(inodes.path_of(ROOT_INO), Some("data".to_string()));
+        let ino = inodes.ino_for(&child_path("data", "a.txt"));
+        assert_eq!(inodes.path_of(ino), Some("data/a.txt".to_string()));
     }
 
     #[test]
     fn ino_for_is_stable_for_the_same_path() {
-        let mut inodes = Inodes::new();
+        let mut inodes = Inodes::new_at(String::new());
         let a = inodes.ino_for("a.txt");
         let b = inodes.ino_for("a.txt");
         assert_eq!(a, b);
@@ -818,7 +839,7 @@ mod tests {
 
     #[test]
     fn rename_moves_the_inode_to_the_new_path() {
-        let mut inodes = Inodes::new();
+        let mut inodes = Inodes::new_at(String::new());
         let ino = inodes.ino_for("old.txt");
         inodes.rename("old.txt", "new.txt");
         assert_eq!(inodes.path_of(ino), Some("new.txt".to_string()));
@@ -827,7 +848,7 @@ mod tests {
 
     #[test]
     fn rename_moves_children_of_a_renamed_directory() {
-        let mut inodes = Inodes::new();
+        let mut inodes = Inodes::new_at(String::new());
         let dir_ino = inodes.ino_for("dir");
         let child_ino = inodes.ino_for("dir/child.txt");
         inodes.rename("dir", "moved");

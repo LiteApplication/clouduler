@@ -6,7 +6,7 @@
 //! book), never from the local docker, so every node reaches the same
 //! conclusion about containers it is not running.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use cl_config::{ServiceExtensions, StackFile};
@@ -89,6 +89,18 @@ fn networks_by_stack(state: &ClusterState) -> Vec<(String, String)> {
             let network = file.networks.keys().next()?;
             Some((overlay_name(name, network), name.clone()))
         })
+        .collect()
+}
+
+/// Nodes currently running an instance of `stack`/`service`, from
+/// assignments rather than the overlay address book: DNS needs to know where
+/// the container actually runs, not just its overlay address.
+pub fn service_nodes(state: &ClusterState, stack: &str, service: &str) -> BTreeSet<String> {
+    state
+        .assignments
+        .iter()
+        .filter(|(id, _)| id.stack == stack && id.service == service && wants_running(state, id))
+        .map(|(_, a)| a.node.clone())
         .collect()
 }
 

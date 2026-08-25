@@ -1,13 +1,27 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { InstanceState, InstanceStatsSample, LogLine } from '../api/types';
+import type { InstanceState, InstanceStatsSample, LogLine, StackRequirements } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
+import { ConstraintTable } from '../components/ConstraintTable';
 import { useEventSource } from '../hooks/useEventSource';
-import { formatBytes } from '../lib/format';
+import { formatBytes, instanceStateTone } from '../lib/format';
 import { Icon } from '../components/Icon';
+
+/** `InstanceId` serializes as `stack.service.index`; splitting from the right
+ *  mirrors the server's own `InstanceId::from_str` (`rsplitn(3, '.')`), since
+ *  a stack name could itself contain a dot. */
+function parseInstanceId(id: string): { stack: string; service: string; index: string } | null {
+  const parts = id.split('.');
+  if (parts.length < 3) return null;
+  return {
+    stack: parts.slice(0, parts.length - 2).join('.'),
+    service: parts[parts.length - 2],
+    index: parts[parts.length - 1],
+  };
+}
 
 export function InstanceDetail() {
   const { id = '' } = useParams();
@@ -17,7 +31,8 @@ export function InstanceDetail() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [moveTarget, setMoveTarget] = useState('');
-  const [tab, setTab] = useState<'logs' | 'stats'>('logs');
+  const [tab, setTab] = useState<'logs' | 'stats' | 'placement'>('logs');
+  const parsed = parseInstanceId(id);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,10 +86,21 @@ export function InstanceDetail() {
           <Icon name="instances" />
           <div>
             <h1>{instance.id}</h1>
-            <p className="page-sub">on {instance.node}</p>
+            <p className="page-sub">
+              on {instance.node}
+              {parsed && (
+                <>
+                  {' '}
+                  &middot; from stack{' '}
+                  <Link className="row-link" to={`/stacks/${encodeURIComponent(parsed.stack)}`}>
+                    {parsed.stack}
+                  </Link>
+                </>
+              )}
+            </p>
           </div>
         </div>
-        <Badge tone={instance.state === 'running' ? 'good' : instance.health === 'unhealthy' ? 'bad' : 'neutral'}>
+        <Badge tone={instanceStateTone(instance.state)} title={instance.placement_error}>
           {instance.state}
         </Badge>
       </div>
@@ -86,6 +112,21 @@ export function InstanceDetail() {
       )}
 
       <div className="card-grid">
+        <div className="card stat">
+          <span className="stat-head">
+            <Icon name="stacks" />
+            <span className="stat-label">Stack</span>
+          </span>
+          <span className="stat-value" style={{ fontSize: 16 }}>
+            {parsed ? (
+              <Link className="row-link" to={`/stacks/${encodeURIComponent(parsed.stack)}`}>
+                {parsed.stack}
+              </Link>
+            ) : (
+              '-'
+            )}
+          </span>
+        </div>
         <div className="card stat">
           <span className="stat-head">
             <Icon name="nodes" />
@@ -173,10 +214,66 @@ export function InstanceDetail() {
           <button role="tab" aria-selected={tab === 'stats'} onClick={() => setTab('stats')}>
             <Icon name="activity" /> Stats
           </button>
+          <button role="tab" aria-selected={tab === 'placement'} onClick={() => setTab('placement')}>
+            <Icon name="nodes" /> Placement
+          </button>
         </div>
-        {tab === 'logs' ? <InstanceLogs id={id} /> : <InstanceStats id={id} />}
+        {tab === 'logs' && <InstanceLogs id={id} />}
+        {tab === 'stats' && <InstanceStats id={id} />}
+        {tab === 'placement' &&
+          (parsed ? (
+            <InstancePlacement stack={parsed.stack} service={parsed.service} />
+          ) : (
+            <p className="muted">cannot parse this instance id</p>
+          ))}
       </div>
     </div>
+  );
+}
+
+/** The same per-service placement table the stack view shows, scoped to just
+ *  this instance's service — why this particular container can or cannot run
+ *  on each node. */
+function InstancePlacement({ stack, service }: { stack: string; service: string }) {
+  const cluster = useClusterState();
+  const [requirements, setRequirements] = useState<StackRequirements | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getStack(stack)
+      .then((detail) => api.validateStack(stack, detail.spec))
+      .then((result) => {
+        if (cancelled) return;
+        setRequirements(result.per_service[service] ?? null);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof ApiError ? e.message : 'failed to compute placement');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stack, service]);
+
+  if (error) {
+    return (
+      <p className="field-error">
+        <Icon name="alert-circle" /> {error}
+      </p>
+    );
+  }
+
+  if (!cluster || !requirements) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Loading placement...
+      </p>
+    );
+  }
+
+  return (
+    <ConstraintTable requirements={requirements} cluster={cluster} onCreateConfig={() => {}} onCreateSecret={() => {}} />
   );
 }
 

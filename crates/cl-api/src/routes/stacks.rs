@@ -238,6 +238,10 @@ struct ValidateResponse {
     valid: bool,
     errors: Vec<ValidationError>,
     requirements: Option<StackRequirements>,
+    /// The same breakdown as `requirements`, one entry per service: what the
+    /// ui shows as a separate placement table per container instead of one
+    /// table that can't say which constraint belongs to which service.
+    per_service: BTreeMap<String, StackRequirements>,
 }
 
 async fn validate(
@@ -254,6 +258,7 @@ async fn validate(
                 valid: true,
                 errors: Vec::new(),
                 requirements: Some(requirements),
+                per_service: parsed.service_requirements(),
             })
         }
         Err(e) => Json(ValidateResponse {
@@ -263,6 +268,7 @@ async fn validate(
                 message: e.to_string(),
             }],
             requirements: None,
+            per_service: BTreeMap::new(),
         }),
     }
 }

@@ -10,7 +10,7 @@
 //! same certificate at once would burn the CA's rate limit and race each other
 //! writing the result back.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -744,11 +744,20 @@ async fn run_dns_reconcile(
     }
 }
 
-/// Every hostname a node's address needs to answer for: every route the
-/// proxy publishes, whether it comes from a stack's containers, a static
-/// backend, or a redirect. All answered identically regardless of which node
-/// a request lands on, so every node's address is published, not just the
-/// one running the container.
+/// Every hostname a node's address needs to answer for, mapped to the node
+/// names its DNS record(s) should name.
+///
+/// Under `DnsPublishMode::AllNodes` (the default, Swarm-style routing mesh)
+/// every route is answered identically regardless of which node a request
+/// lands on, so every node's address is published for every hostname, stack
+/// routes and static backends and redirects alike.
+///
+/// Under `DnsPublishMode::OwningNode`, DNS itself does the routing: a stack
+/// route's hostname only names the node(s) actually running that service's
+/// containers (from `placement::service_nodes`), so a client's request goes
+/// straight there instead of bouncing through another node's proxy. Static
+/// backends and redirects are not backed by a container at all, so they keep
+/// naming every node regardless of the mode.
 ///
 /// The web ui hostname is deliberately not in here: unlike a proxied route,
 /// it is not just forwarded internally by every node - writes only work on
@@ -756,19 +765,26 @@ async fn run_dns_reconcile(
 /// every node's address for it lets a client's write land on a follower,
 /// which can only 503 and point elsewhere. `desired_records` gives that
 /// hostname the leader's address alone.
-fn desired_dns_hosts(state: &ClusterState) -> BTreeSet<(String, String)> {
-    let mut hosts = BTreeSet::new();
+fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let mut hosts: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let all_nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
+    let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
 
     for placement in crate::placement::service_placements(state) {
+        let nodes = if owning_node_only {
+            crate::placement::service_nodes(state, &placement.stack, &placement.service)
+        } else {
+            all_nodes.clone()
+        };
         for entry in &placement.extensions.proxy {
-            hosts.insert((entry.host.clone(), entry.network.clone()));
+            hosts.entry((entry.host.clone(), entry.network.clone())).or_default().extend(nodes.clone());
         }
     }
     for entry in StaticRouteStore::load(state).routes {
-        hosts.insert((entry.host, entry.network));
+        hosts.entry((entry.host, entry.network)).or_default().extend(all_nodes.clone());
     }
     for rule in RedirectStore::load(state).rules {
-        hosts.insert((rule.host, rule.network));
+        hosts.entry((rule.host, rule.network)).or_default().extend(all_nodes.clone());
     }
     hosts
 }
@@ -795,8 +811,11 @@ fn desired_records(cfg: &ClusterConfig, leader_id: Option<cl_raft::NodeId>, stat
         }
     }
 
-    for (host, network) in desired_dns_hosts(state) {
-        for node in cfg.nodes.values() {
+    for ((host, network), nodes) in desired_dns_hosts(cfg, state) {
+        for node_name in &nodes {
+            let Some(node) = cfg.nodes.get(node_name) else {
+                continue;
+            };
             let Ok(records) = cl_dns::records_for(cfg, &host, &network, node) else {
                 continue;
             };
@@ -860,11 +879,19 @@ async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Clo
         }
         if let Err(e) = reconcile_zone(cluster, &cfg.cluster.name, cf, &zone_id, &zone_name, desired.clone(), state).await {
             warn!(zone = %zone_name, error = %e, "dns reconcile failed for this zone");
-            let mut hosts: BTreeSet<String> = BTreeSet::new();
-            for record in &desired {
-                hosts.insert(record.fqdn.clone());
-            }
-            for fqdn in hosts {
+            // Attribute the failure to the specific hostname(s) it names, not
+            // every hostname sharing this zone: a collision on one stack's
+            // record must not paint every other stack's (unrelated, and
+            // possibly fine) hostnames with the same error.
+            let affected = e.affected_fqdns();
+            let fqdns: Vec<String> = if affected.is_empty() {
+                // A zone-wide failure (e.g. listing records failed) really
+                // does affect every hostname in this batch.
+                desired.iter().map(|r| r.fqdn.clone()).collect()
+            } else {
+                affected.into_iter().map(str::to_string).collect()
+            };
+            for fqdn in fqdns {
                 set_dns_status(
                     cluster,
                     &fqdn,
@@ -890,10 +917,17 @@ async fn reconcile_zone(
 ) -> cl_dns::Result<()> {
     let mut live = cf.list_records(zone_id, None, None).await?;
     let plan = cl_dns::plan(cluster_name, &desired, &live);
-    if !plan.is_empty() {
-        cl_dns::apply(cf, zone_id, &plan).await?;
+    let apply_result = if plan.is_empty() {
+        Ok(())
+    } else {
+        let result = cl_dns::apply(cf, zone_id, &plan).await;
+        // Re-list regardless of the outcome: `apply` keeps going past a
+        // failing record (see its own doc comment), so whatever did succeed
+        // must still be synced into replicated state below rather than
+        // waiting for the next pass.
         live = cf.list_records(zone_id, None, None).await?;
-    }
+        result
+    };
 
     let mut want_keys = BTreeSet::new();
     for record in &desired {
@@ -902,12 +936,19 @@ async fn reconcile_zone(
             .iter()
             .find(|r| r.name == record.fqdn && format!("{:?}", r.kind) == record_type && r.content == record.content)
             .and_then(|r| r.id.clone());
+        // No live match after a (possibly partial) apply means this record's
+        // create/update actually failed - recording it as published anyway
+        // would both lie to the ui and clear the error status `reconcile_dns`
+        // is about to set for it. Leave it out; the next pass retries it.
+        let Some(provider_id) = provider_id else {
+            continue;
+        };
         let entry = DnsRecordState {
             fqdn: record.fqdn.clone(),
             record_type,
             content: record.content.clone(),
             zone: zone_name.to_string(),
-            provider_id,
+            provider_id: Some(provider_id),
         };
         let key = dns_key(&entry.fqdn, &entry.record_type, &entry.content);
         want_keys.insert(key.clone());
@@ -926,7 +967,7 @@ async fn reconcile_zone(
         }
     }
 
-    Ok(())
+    apply_result
 }
 
 #[cfg(test)]
@@ -1222,11 +1263,11 @@ services:
 
     #[test]
     fn desired_dns_hosts_includes_published_routes_but_not_the_dashboard() {
-        let hosts = desired_dns_hosts(&state_with(SPEC, 1));
-        assert!(hosts.contains(&("blog".to_string(), "wan".to_string())));
+        let hosts = desired_dns_hosts(&cfg(), &state_with(SPEC, 1));
+        assert!(hosts.contains_key(&("blog".to_string(), "wan".to_string())));
         // The dashboard hostname is leader-only and handled separately by
         // `desired_records`, not published for every node here.
-        assert!(!hosts.contains(&("cloud".to_string(), "tailscale".to_string())));
+        assert!(!hosts.contains_key(&("cloud".to_string(), "tailscale".to_string())));
     }
 
     #[test]
@@ -1254,18 +1295,47 @@ services:
             },
         );
 
-        let hosts = desired_dns_hosts(&state);
-        assert!(hosts.contains(&("printer".to_string(), "lan".to_string())));
-        assert!(hosts.contains(&("old".to_string(), "wan".to_string())));
+        let hosts = desired_dns_hosts(&cfg(), &state);
+        assert!(hosts.contains_key(&("printer".to_string(), "lan".to_string())));
+        assert!(hosts.contains_key(&("old".to_string(), "wan".to_string())));
     }
 
     /// `blog` is a proxy route on `wan`, forwarded internally by every node,
-    /// so every node's address is published for it.
+    /// so every node's address is published for it - the swarm-style default.
     #[test]
     fn desired_records_publish_every_nodes_address_for_proxied_routes() {
         let records = desired_records(&cfg(), None, &state_with(SPEC, 1));
         let blog: Vec<_> = records.iter().filter(|r| r.fqdn == "blog.example.com").collect();
         assert_eq!(blog.len(), cfg().nodes.len(), "{blog:?}");
+    }
+
+    /// Under `DnsPublishMode::OwningNode`, only the node actually running
+    /// `blog`'s container is published, not every node - the fixture always
+    /// assigns it to n1.
+    #[test]
+    fn owning_node_mode_publishes_only_the_running_nodes_address() {
+        let mut cfg = cfg();
+        cfg.proxy.dns_publish = cl_config::DnsPublishMode::OwningNode;
+
+        let records = desired_records(&cfg, None, &state_with(SPEC, 1));
+        let blog: Vec<_> = records.iter().filter(|r| r.fqdn == "blog.example.com").collect();
+        // n1 (the only node running the container) publishes both its ipv4
+        // and ipv6 address; n2's cname must not appear.
+        assert_eq!(blog.len(), 2, "{blog:?}");
+        assert!(blog.iter().all(|r| r.content == "203.0.113.5" || r.content == "2001:db8::5"), "{blog:?}");
+    }
+
+    /// A static route is not backed by a container, so `OwningNode` mode
+    /// still publishes it on every node.
+    #[test]
+    fn owning_node_mode_still_publishes_static_routes_on_every_node() {
+        let mut cfg = cfg();
+        cfg.proxy.dns_publish = cl_config::DnsPublishMode::OwningNode;
+        let state = with_static_routes(state_with(SPEC, 0), vec![static_route("printer", "wan", "192.168.1.50:9100")]);
+
+        let records = desired_records(&cfg, None, &state);
+        let printer: Vec<_> = records.iter().filter(|r| r.fqdn == "printer.example.com").collect();
+        assert_eq!(printer.len(), cfg.nodes.len(), "{printer:?}");
     }
 
     /// The dashboard only works on the leader (writes 503 elsewhere), so only

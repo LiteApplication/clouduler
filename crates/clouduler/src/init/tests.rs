@@ -129,6 +129,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
     let server = cl_api::ApiServer::new(cl_api::ApiServerOptions {
         cluster: cluster.clone(),
         docker: std::sync::Arc::new(tokio::sync::RwLock::new(cl_docker::Docker::connect().ok())),
+        pulling: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
         node_name: "n1".into(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: config.clone(),
@@ -330,6 +331,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
     let _n2_server = cl_api::ApiServer::new(cl_api::ApiServerOptions {
         cluster: server.cluster.clone(),
         docker: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        pulling: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
         node_name: "n2".into(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: founding_config(),

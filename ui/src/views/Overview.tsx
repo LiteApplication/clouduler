@@ -73,6 +73,16 @@ export function Overview() {
   const instanceSegmentsAll: DonutSegment[] = [
     { label: 'Running', value: instanceStates?.filter((i) => i.state === 'running').length ?? 0, tone: 'good' },
     { label: 'Stopped', value: instanceStates?.filter((i) => i.state === 'stopped').length ?? 0, tone: 'neutral' },
+    {
+      label: 'In transition',
+      value: instanceStates?.filter((i) => ['pulling', 'restarting', 'stopping'].includes(i.state)).length ?? 0,
+      tone: 'warn',
+    },
+    {
+      label: 'Needs attention',
+      value: instanceStates?.filter((i) => ['exited', 'pending_placement'].includes(i.state)).length ?? 0,
+      tone: 'bad',
+    },
     { label: 'Unknown', value: instanceStates?.filter((i) => i.state === 'unknown').length ?? 0, tone: 'warn' },
   ];
   const instanceSegments = instanceSegmentsAll.filter((s) => s.value > 0);

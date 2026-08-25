@@ -41,6 +41,10 @@ pub struct AppState {
     /// own schedule; the api comes up first and picks the client up whenever
     /// it lands.
     pub docker: Arc<RwLock<Option<Docker>>>,
+    /// Instances this node's reconciler is currently pulling the image for.
+    /// Read by `routes::instances` to report a "pulling" state that a docker
+    /// inspect alone cannot distinguish from "about to be created".
+    pub pulling: cl_sched::PullTracker,
     /// Name of the node this api instance is running on. Used for the local
     /// half of node detail (resource usage, daemon logs) that has no RPC path
     /// to another node's process.
@@ -106,6 +110,7 @@ impl AppState {
 pub struct ApiServerOptions {
     pub cluster: Arc<ClusterNode>,
     pub docker: Arc<RwLock<Option<Docker>>>,
+    pub pulling: cl_sched::PullTracker,
     pub node_name: String,
     pub config_path: PathBuf,
     pub cluster_config: ClusterConfig,
@@ -170,6 +175,7 @@ impl ApiServer {
         let state = AppState {
             cluster: options.cluster,
             docker: options.docker,
+            pulling: options.pulling,
             node_name: options.node_name,
             config_path: options.config_path,
             cluster_config: Arc::new(RwLock::new(options.cluster_config)),

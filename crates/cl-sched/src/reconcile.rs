@@ -4,14 +4,22 @@
 //! daemon. Applying it is the only part that touches the engine.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cl_docker::{ContainerSpec, ContainerState, Docker, LABEL_INSTANCE};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::{Assignment, DesiredState};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::error::Result;
+
+/// Instances whose image this node's reconciler is currently pulling. Shared
+/// with the api so `GET /api/instances` can report "pulling" instead of
+/// guessing from the absence of a container — nothing in a docker inspect
+/// distinguishes "about to be created" from "still fetching the image".
+pub type PullTracker = Arc<RwLock<BTreeSet<InstanceId>>>;
 
 /// What has to happen to one container to bring it in line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,11 +140,12 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<
 /// Carry out a diff against the local docker daemon.
 pub struct Reconciler {
     docker: Docker,
+    pulling: PullTracker,
 }
 
 impl Reconciler {
-    pub fn new(docker: Docker) -> Self {
-        Self { docker }
+    pub fn new(docker: Docker, pulling: PullTracker) -> Self {
+        Self { docker, pulling }
     }
 
     /// Apply the actions. One failure does not abort the rest: a single broken
@@ -212,12 +221,15 @@ impl Reconciler {
     /// Pull the image unless it is already here. Creating a container against
     /// an image the node has never seen fails, and on a fresh node that is
     /// every image.
-    async fn ensure_image(&self, image: &str) -> Result<()> {
+    async fn ensure_image(&self, id: &InstanceId, image: &str) -> Result<()> {
         if self.docker.resolve_digest(image).await?.is_some() {
             return Ok(());
         }
         info!(%image, "pulling");
-        self.docker.pull(image).await?;
+        self.pulling.write().await.insert(id.clone());
+        let result = self.docker.pull(image).await;
+        self.pulling.write().await.remove(id);
+        result?;
         Ok(())
     }
 
@@ -230,7 +242,7 @@ impl Reconciler {
                     warn!(instance = %id, "no spec to create from");
                     return Ok(());
                 };
-                self.ensure_image(&target.spec.image).await?;
+                self.ensure_image(id, &target.spec.image).await?;
                 info!(instance = %id, "creating");
                 let container_id = self.docker.create(&target.spec).await?;
                 if let Some(egress) = &target.spec.egress_network {
@@ -265,7 +277,7 @@ impl Reconciler {
                     warn!(instance = %id, "no spec to recreate from");
                     return Ok(());
                 };
-                self.ensure_image(&target.spec.image).await?;
+                self.ensure_image(id, &target.spec.image).await?;
                 info!(instance = %id, "recreating after a spec change");
                 self.docker.stop(&name, stop_timeout(Some(target))).await.ok();
                 self.docker.remove(&name, true).await.ok();
@@ -290,7 +302,7 @@ fn stop_timeout(target: Option<&Target>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cl_docker::{LABEL_MANAGED, MANAGED_VALUE};
+    use cl_docker::{RunState, LABEL_MANAGED, MANAGED_VALUE};
     use cl_raft::state::Assignment;
     use std::collections::HashMap;
 
@@ -329,6 +341,7 @@ mod tests {
             image: "nginx".into(),
             image_digest: None,
             running,
+            status: if running { RunState::Running } else { RunState::Created },
             health: None,
             exit_code: None,
             labels,

@@ -3,7 +3,7 @@
 //! why a service cannot be placed, and to know which configs/secrets a stack
 //! bundles its own file for (so redeploying can offer to replace them).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +60,30 @@ impl StackFile {
         }
 
         r
+    }
+
+    /// The same breakdown `requirements` computes, but one `StackRequirements`
+    /// per service rather than unioned across the whole stack — what the ui
+    /// needs to show a separate placement table per service instead of one
+    /// table that can't tell you which constraint belongs to which container.
+    /// `file_configs`/`file_secrets` are a stack-level concept (which object
+    /// the stack bundles its own file for) and are left empty here; use
+    /// `requirements()` for those.
+    pub fn service_requirements(&self) -> BTreeMap<String, StackRequirements> {
+        let mut out = BTreeMap::new();
+        for (name, svc) in &self.services {
+            let mut r = StackRequirements::default();
+            r.networks.extend(svc.networks.iter().cloned());
+            for vol in &svc.volumes {
+                if let Some(drive) = &vol.drive {
+                    r.drives.insert(drive.clone());
+                }
+            }
+            r.configs.extend(svc.configs.iter().map(|c| c.source.clone()));
+            r.secrets.extend(svc.secrets.iter().map(|s| s.source.clone()));
+            out.insert(name.clone(), r);
+        }
+        out
     }
 
     /// Every fully qualified hostname this stack's services are proxied
@@ -129,6 +153,41 @@ secrets:
         assert_eq!(r.secrets, BTreeSet::from(["db_password".into()]));
         assert_eq!(r.file_configs, BTreeSet::from(["headscale_config".into()]));
         assert_eq!(r.file_secrets, BTreeSet::from(["db_password".into()]));
+    }
+
+    #[test]
+    fn service_requirements_are_broken_out_per_service_rather_than_unioned() {
+        let spec = r#"
+services:
+  web:
+    image: nginx
+    networks: [internal]
+    secrets:
+      - db_password
+  worker:
+    image: worker
+    networks: [internal, public]
+    volumes:
+      - data/worker:/data
+networks:
+  internal: {}
+  public: {}
+secrets:
+  db_password:
+    file: ./db.secret
+"#;
+        let stack = StackFile::parse(spec).expect("parse");
+        let per_service = stack.service_requirements();
+
+        let web = &per_service["web"];
+        assert_eq!(web.networks, BTreeSet::from(["internal".into()]));
+        assert_eq!(web.secrets, BTreeSet::from(["db_password".into()]));
+        assert!(web.drives.is_empty());
+
+        let worker = &per_service["worker"];
+        assert_eq!(worker.networks, BTreeSet::from(["internal".into(), "public".into()]));
+        assert_eq!(worker.drives, BTreeSet::from(["data".into()]));
+        assert!(worker.secrets.is_empty());
     }
 
     #[test]

@@ -13,8 +13,8 @@ mod network;
 pub use client::Docker;
 pub use container::{
     BindMount, ContainerSpec, ContainerState, HealthState, Healthcheck, PortMapping, PortProtocol,
-    ResourceLimits, RestartPolicy, LABEL_INSTANCE, LABEL_MANAGED, LABEL_SERVICE, LABEL_STACK,
-    MANAGED_VALUE,
+    ResourceLimits, RestartPolicy, RunState, LABEL_INSTANCE, LABEL_MANAGED, LABEL_SERVICE,
+    LABEL_STACK, MANAGED_VALUE,
 };
 pub use error::{DockerError, Result};
 pub use events::ContainerEvent;

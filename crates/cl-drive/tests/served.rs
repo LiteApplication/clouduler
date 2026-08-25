@@ -233,7 +233,7 @@ async fn mount_a_served_drive_and_read_a_file_through_the_kernel() {
     let mountpoint = tempfile::tempdir().unwrap();
     let manager = MountManager::new(tokio::runtime::Handle::current());
     manager
-        .mount_one(MountSpec { drive: "fast".into(), mountpoint: mountpoint.path().to_path_buf(), server: addr })
+        .mount_one(MountSpec { drive: "fast".into(), volume: None, mountpoint: mountpoint.path().to_path_buf(), server: addr })
         .expect("mount");
 
     let content = tokio::task::spawn_blocking({

@@ -7,6 +7,7 @@
 //! given, and the leader never has to reach into anyone else's docker.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +22,8 @@ use tracing::{debug, info, warn};
 
 use crate::materialize::Materializer;
 use crate::place;
-use crate::plan;
-use crate::reconcile::{self, Reconciler, Target, DEFAULT_STOP_GRACE};
+use crate::plan::{self, Desired};
+use crate::reconcile::{self, PullTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
 use crate::spec;
 
 /// How often to sweep, on top of reacting to state changes. A periodic pass
@@ -48,6 +49,9 @@ pub struct Scheduler {
     /// kind change takes effect on the next sweep instead of needing a
     /// restart.
     boot_config: ClusterConfig,
+    /// Instances this node's reconciler is currently pulling the image for,
+    /// shared with the api so it can report a "pulling" instance state.
+    pulling: PullTracker,
 }
 
 impl Scheduler {
@@ -57,6 +61,7 @@ impl Scheduler {
         docker: Arc<RwLock<Option<Docker>>>,
         materializer: Materializer,
         boot_config: ClusterConfig,
+        pulling: PullTracker,
     ) -> Self {
         Self {
             node,
@@ -65,6 +70,7 @@ impl Scheduler {
             materializer,
             zone: None,
             boot_config,
+            pulling,
         }
     }
 
@@ -114,33 +120,15 @@ impl Scheduler {
     /// Leader side: work out where everything belongs and record it.
     async fn schedule(&self, state: &ClusterState) -> crate::Result<()> {
         let live = self.live_config(state);
-        let egress_networks = live.egress_networks();
-        let port_gated_networks = live.port_gated_networks();
+        let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
+        let desired = desired_instances(state, &live.egress_networks(), &live.port_gated_networks(), colocate_proxy_hosts);
 
-        let mut desired = Vec::new();
-        for (name, stack) in &state.stacks {
-            match StackFile::parse(&stack.spec) {
-                Ok(file) => desired.extend(plan::expand(
-                    name,
-                    &file,
-                    &egress_networks,
-                    &port_gated_networks,
-                )),
-                // A stored stack that no longer parses is the operator's
-                // problem, but it must not stop every other stack scheduling.
-                Err(e) => warn!(stack = %name, error = %e, "stored stack does not parse"),
-            }
+        let outcome = place::place(state, &desired, &live.served_drives());
+        for unplaceable in &outcome.unplaceable {
+            warn!(instance = %unplaceable.instance, reason = %unplaceable.reason, "cannot place instance");
         }
 
-        let decisions = match place::place(state, &desired) {
-            Ok(decisions) => decisions,
-            Err(e) => {
-                warn!(error = %e, "placement failed");
-                return Ok(());
-            }
-        };
-
-        for decision in decisions {
+        for decision in outcome.decisions {
             let drives = desired
                 .iter()
                 .find(|d| &d.id == decision.instance())
@@ -173,7 +161,7 @@ impl Scheduler {
         let Some(docker) = self.docker.read().await.clone() else {
             return Ok(());
         };
-        let reconciler = Reconciler::new(docker.clone());
+        let reconciler = Reconciler::new(docker.clone(), self.pulling.clone());
 
         let targets = self.targets(state)?;
         let actual = docker.list_managed().await?;
@@ -200,16 +188,13 @@ impl Scheduler {
     /// Build what this node should be running, materializing each instance's
     /// configs and secrets on the way.
     fn targets(&self, state: &ClusterState) -> crate::Result<Vec<Target>> {
-        let drive_roots = state
-            .nodes
-            .get(&self.node)
-            .map(|n| n.drives.clone())
-            .unwrap_or_default();
+        let live = self.live_config(state);
+        let (drive_roots, dynamic_mounts) = self.drive_roots(state, &live);
 
         // Decoded once per pass rather than per instance: every container on
         // this node reads out of the same address book.
         let allocations = Allocations::decode(state.overlay.as_deref());
-        let egress_networks = self.live_config(state).egress_networks();
+        let egress_networks = live.egress_networks();
 
         let mut targets = Vec::new();
 
@@ -228,6 +213,17 @@ impl Scheduler {
             let Some(service) = file.services.get(&instance.service) else {
                 continue;
             };
+
+            // A served-drive volume this node isn't the active server for is
+            // backed by a FUSE mount the drive subsystem sets up on demand,
+            // not necessarily up yet the first time an instance lands here.
+            // Starting the container against an empty, not-yet-mounted
+            // directory would bind it to the wrong data, so wait rather than
+            // start early; the next sweep tries again.
+            if !volumes_ready(service, &drive_roots, &dynamic_mounts) {
+                debug!(instance = %instance, "waiting for a served drive volume to be mounted");
+                continue;
+            }
 
             // A missing secret or a node without the key is a reason not to
             // start this one container, not to abandon the whole pass.
@@ -313,6 +309,96 @@ impl Scheduler {
 
         Ok(targets)
     }
+
+    /// Where this node resolves each drive's root for mounting purposes, and
+    /// which of those roots are FUSE mountpoints the drive subsystem owns
+    /// (`crate::run::volumes_ready` waits on those before starting a
+    /// container).
+    ///
+    /// A replicated drive always resolves to this node's own declared local
+    /// copy (`NodeState::drives`), exactly as before. A served drive resolves
+    /// the same way only for the node currently serving it; every other node
+    /// — whether or not it declared the drive at all — resolves to a
+    /// per-volume directory under its data dir, which the drive subsystem
+    /// (`clouduler::drives`) is responsible for FUSE-mounting from the active
+    /// server before a container needing it can start.
+    fn drive_roots(
+        &self,
+        state: &ClusterState,
+        live: &ClusterConfig,
+    ) -> (BTreeMap<String, PathBuf>, BTreeSet<String>) {
+        let mut roots = state
+            .nodes
+            .get(&self.node)
+            .map(|n| n.drives.clone())
+            .unwrap_or_default();
+        let mut dynamic = BTreeSet::new();
+
+        let data_dir = live
+            .node(&self.node)
+            .map(|n| n.data_dir(live))
+            .unwrap_or(live.data_dir.as_path());
+
+        for (name, drive) in &live.drives {
+            if !drive.is_served() {
+                continue;
+            }
+            if active_server(drive, &state.unreachable) != Some(self.node.as_str()) {
+                roots.insert(name.clone(), data_dir.join("volume-mounts").join(name));
+                dynamic.insert(name.clone());
+            }
+        }
+
+        (roots, dynamic)
+    }
+}
+
+/// The node currently serving a `Served` drive: the first of `served_by` that
+/// is not reported unreachable. Mirrors `cl_drive::registry::DriveRegistry`'s
+/// `active_server`, computed independently here since placement/mount
+/// resolution only need the answer, not the rest of that crate.
+fn active_server<'a>(drive: &'a cl_config::Drive, unreachable: &BTreeSet<String>) -> Option<&'a str> {
+    drive.served_by.iter().map(String::as_str).find(|n| !unreachable.contains(*n))
+}
+
+/// Whether `path` is itself a mount point (its device differs from its
+/// parent's), the cheap way to tell a live FUSE mount from an ordinary, not
+/// yet mounted local directory without depending on `cl-drive`.
+fn is_mounted(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(parent_meta) = std::fs::metadata(parent) else {
+        return false;
+    };
+    meta.dev() != parent_meta.dev()
+}
+
+/// Whether every served-drive volume this service mounts is actually mounted
+/// on this node yet. A replicated-drive volume, or a served drive this node
+/// is the active server for, is always ready — only a `dynamic` (FUSE, drive
+/// subsystem owned) mount can be not-yet-up.
+fn volumes_ready(
+    service: &cl_config::Service,
+    drive_roots: &BTreeMap<String, PathBuf>,
+    dynamic: &BTreeSet<String>,
+) -> bool {
+    service.volumes.iter().all(|mount| {
+        let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) else {
+            return true;
+        };
+        if !dynamic.contains(drive) {
+            return true;
+        }
+        let Some(root) = drive_roots.get(drive) else {
+            return true;
+        };
+        is_mounted(&root.join(volume))
+    })
 }
 
 /// `UpsertVolume` for every volume a placed instance mounts that the cluster
@@ -380,18 +466,55 @@ pub fn instances_of(state: &ClusterState, stack: &str) -> Vec<InstanceId> {
         .collect()
 }
 
+/// Every instance every deployed stack wants, expanded from its spec against
+/// the cluster's egress/public network sets (see `ClusterConfig::egress_networks`
+/// / `port_gated_networks`). Shared by the scheduler and by anything else (the
+/// api's "why is this instance unplaced" reporting) that needs the same
+/// expansion without duplicating it.
+pub fn desired_instances(
+    state: &ClusterState,
+    egress_networks: &BTreeSet<String>,
+    port_gated_networks: &BTreeSet<String>,
+    colocate_proxy_hosts: bool,
+) -> Vec<Desired> {
+    let mut desired = Vec::new();
+    for (name, stack) in &state.stacks {
+        match StackFile::parse(&stack.spec) {
+            Ok(file) => desired.extend(plan::expand(
+                name,
+                &file,
+                egress_networks,
+                port_gated_networks,
+                colocate_proxy_hosts,
+            )),
+            // A stored stack that no longer parses is the operator's
+            // problem, but it must not stop every other stack scheduling.
+            Err(e) => warn!(stack = %name, error = %e, "stored stack does not parse"),
+        }
+    }
+    desired
+}
+
+/// Drives whose mode is `Served`, read from the replicated cluster config.
+/// Empty (falling back to strict replicated-drive eligibility) if no config
+/// has been published yet or it fails to parse.
+fn served_drives(state: &ClusterState) -> BTreeSet<String> {
+    state
+        .cluster_config
+        .as_ref()
+        .and_then(|entry| ClusterConfig::parse(&entry.yaml).ok())
+        .map(|cfg| cfg.served_drives())
+        .unwrap_or_default()
+}
+
 /// Every request the leader would submit for a state, without submitting them.
 /// Exists so the scheduling decision can be tested without a cluster.
 pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
-    let mut desired = Vec::new();
-    for (name, stack) in &state.stacks {
-        if let Ok(file) = StackFile::parse(&stack.spec) {
-            desired.extend(plan::expand(name, &file, &BTreeSet::new(), &BTreeSet::new()));
-        }
-    }
+    let desired = desired_instances(state, &BTreeSet::new(), &BTreeSet::new(), false);
 
-    let decisions = place::place(state, &desired)?;
-    Ok(decisions
+    let outcome = place::place(state, &desired, &served_drives(state));
+    Ok(outcome
+        .decisions
         .into_iter()
         .map(|decision| {
             let drives = desired

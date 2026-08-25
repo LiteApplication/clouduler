@@ -107,6 +107,10 @@ pub async fn run(
     // lands. A node whose dockerd is slow or absent still has to be reachable,
     // since the web ui is where someone would go to find out why.
     let docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>> = Arc::default();
+    // Shared between the scheduler (which marks/unmarks it around an image
+    // pull) and the api (which reads it to report a "pulling" instance
+    // state) — see `cl_sched::PullTracker`.
+    let pulling: cl_sched::PullTracker = Arc::default();
 
     // Fires the same clean shutdown path `ctrl_c()` drives, so the internal
     // self-update restart route can trigger it programmatically after
@@ -131,6 +135,7 @@ pub async fn run(
         cluster: &cluster,
         data_dir: &data_dir,
         docker: docker.clone(),
+        pulling: pulling.clone(),
         key: key.clone(),
         key_tx,
         shutdown: shutdown_tx,
@@ -159,8 +164,15 @@ pub async fn run(
     let docker_reconnect = tokio::spawn(run_docker_reconnect(docker.clone()));
 
     let materializer = Materializer::new(&data_dir, key_rx.clone());
-    let scheduler = Scheduler::new(node_name.clone(), cluster.clone(), docker.clone(), materializer, cfg.clone())
-        .with_zone(cl_net::dns::zone_origin(&cfg));
+    let scheduler = Scheduler::new(
+        node_name.clone(),
+        cluster.clone(),
+        docker.clone(),
+        materializer,
+        cfg.clone(),
+        pulling.clone(),
+    )
+    .with_zone(cl_net::dns::zone_origin(&cfg));
     let gate = fenced.clone();
     let scheduler = tokio::spawn(scheduler.run(move || gate.load(Ordering::Relaxed)));
 
@@ -242,6 +254,7 @@ struct StartApiArgs<'a> {
     cluster: &'a Arc<ClusterNode>,
     data_dir: &'a Path,
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
+    pulling: cl_sched::PullTracker,
     key: Option<Arc<ClusterKey>>,
     key_tx: tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
     shutdown: tokio::sync::watch::Sender<()>,
@@ -258,6 +271,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         cluster,
         data_dir,
         docker,
+        pulling,
         key,
         key_tx,
         shutdown,
@@ -292,6 +306,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
     let options = cl_api::ApiServerOptions {
         cluster: cluster.clone(),
         docker,
+        pulling,
         node_name: node_name.to_string(),
         config_path: config_path.to_path_buf(),
         cluster_config: cfg.clone(),

@@ -55,6 +55,11 @@ struct InstanceSummary {
     image_digest: Option<String>,
     started_at: Option<String>,
     migration: Option<MigrationSummary>,
+    /// Why this instance has no assignment at all, set only when `state` is
+    /// `"pending_placement"`: no node in the cluster currently satisfies
+    /// what its service needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,10 +69,15 @@ struct MigrationSummary {
 }
 
 /// The state names the ui and the test harness both match on. Kept as strings
-/// rather than a bare bool because "we cannot see it from here" is a distinct
-/// answer from "it is not running".
+/// rather than a bare enum because "we cannot see it from here" is a distinct
+/// answer from "it is not running", and because these cross the wire as-is.
 const STATE_RUNNING: &str = "running";
 const STATE_STOPPED: &str = "stopped";
+const STATE_STOPPING: &str = "stopping";
+const STATE_RESTARTING: &str = "restarting";
+const STATE_EXITED: &str = "exited";
+const STATE_PULLING: &str = "pulling";
+const STATE_PENDING_PLACEMENT: &str = "pending_placement";
 const STATE_UNKNOWN: &str = "unknown";
 
 fn internal_summary_path(instance: &InstanceId) -> String {
@@ -118,12 +128,16 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
     };
 
     let running = container.as_ref().map(|c| c.running);
-    let instance_state = match (local, running) {
-        (true, Some(true)) => STATE_RUNNING,
-        (true, Some(false)) => STATE_STOPPED,
-        // Assigned here but no container yet: it is on its way.
-        (true, None) => STATE_STOPPED,
-        (false, _) => STATE_UNKNOWN,
+    let instance_state = if !local {
+        STATE_UNKNOWN
+    } else {
+        match &container {
+            Some(c) => run_state_to_summary(c.status, assignment.desired),
+            // Assigned here but no container yet: either the image is still
+            // being fetched, or it is about to be created.
+            None if state.pulling.read().await.contains(&assignment.instance) => STATE_PULLING,
+            None => STATE_STOPPED,
+        }
     };
 
     InstanceSummary {
@@ -144,6 +158,28 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
             to: m.to.clone(),
             phase: format!("{:?}", m.phase).to_lowercase(),
         }),
+        placement_error: None,
+    }
+}
+
+/// Translate docker's own lifecycle status into the state string the ui
+/// shows, folding in what the cluster actually asked for: the same
+/// `RunState::Exited` means "it crashed" when we wanted it running, and just
+/// "stopped" when we asked it to stop.
+fn run_state_to_summary(status: cl_docker::RunState, desired: DesiredState) -> &'static str {
+    use cl_docker::RunState;
+    match status {
+        RunState::Running => STATE_RUNNING,
+        RunState::Restarting => STATE_RESTARTING,
+        RunState::Stopping | RunState::Removing => STATE_STOPPING,
+        RunState::Exited | RunState::Dead => {
+            if desired == DesiredState::Running {
+                STATE_EXITED
+            } else {
+                STATE_STOPPED
+            }
+        }
+        RunState::Created | RunState::Paused | RunState::Unknown => STATE_STOPPED,
     }
 }
 
@@ -152,8 +188,44 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<In
     // Concurrent rather than one at a time: a single unreachable node whose
     // instances sit behind `FETCH_TIMEOUT` must not serialize onto the whole
     // list's latency.
-    let out = futures::future::join_all(cluster_state.assignments.values().map(|a| summarize(&state, a))).await;
+    let mut out = futures::future::join_all(cluster_state.assignments.values().map(|a| summarize(&state, a))).await;
+    out.extend(pending_placements(&state, &cluster_state).await);
     Json(out)
+}
+
+/// Instances every deployed stack wants but that have no assignment at all,
+/// because no node in the cluster currently satisfies what they need. Nothing
+/// in `cluster_state.assignments` represents these, so they are computed live
+/// from the same placement logic the scheduler runs, rather than stored.
+async fn pending_placements(state: &AppState, cluster_state: &cl_raft::ClusterState) -> Vec<InstanceSummary> {
+    let config = state.cluster_config.read().await;
+    let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
+    let desired = cl_sched::desired_instances(
+        cluster_state,
+        &config.egress_networks(),
+        &config.port_gated_networks(),
+        colocate_proxy_hosts,
+    );
+    let served_drives = config.served_drives();
+    drop(config);
+
+    cl_sched::place(cluster_state, &desired, &served_drives)
+        .unplaceable
+        .into_iter()
+        .map(|u| InstanceSummary {
+            id: u.instance.to_string(),
+            node: String::new(),
+            desired: "running".to_string(),
+            state: STATE_PENDING_PLACEMENT.to_string(),
+            running: None,
+            health: "none".to_string(),
+            image: None,
+            image_digest: None,
+            started_at: None,
+            migration: None,
+            placement_error: Some(u.reason),
+        })
+        .collect()
 }
 
 fn parse_id(raw: &str) -> Result<InstanceId, ApiError> {

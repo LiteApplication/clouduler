@@ -64,6 +64,25 @@ pub enum DnsError {
         #[source]
         source: Box<DnsError>,
     },
+
+    /// More than one record in a single `apply` call failed. Kept as
+    /// separate entries (rather than joined into one message) so callers can
+    /// attribute each failure to its own hostname instead of marking every
+    /// record in the batch with the same error.
+    #[error("{} records failed to apply: {}", .0.len(), .0.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))]
+    Batch(Vec<DnsError>),
+}
+
+impl DnsError {
+    /// The fqdns this error is actually about, so a caller can mark just
+    /// those hosts as errored instead of every hostname in a batch.
+    pub fn affected_fqdns(&self) -> Vec<&str> {
+        match self {
+            DnsError::RecordApply { name, .. } => vec![name.as_str()],
+            DnsError::Batch(errors) => errors.iter().flat_map(|e| e.affected_fqdns()).collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl DnsError {

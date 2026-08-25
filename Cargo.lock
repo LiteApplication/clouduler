@@ -718,6 +718,7 @@ dependencies = [
  "cl-docker",
  "cl-net",
  "cl-raft",
+ "cl-sched",
  "cl-secret",
  "cl-update",
  "cookie",

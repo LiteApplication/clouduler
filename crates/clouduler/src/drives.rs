@@ -105,23 +105,20 @@ impl Drives {
 struct Running {
     tasks: Vec<JoinHandle<()>>,
     mounts: Option<Arc<MountManager>>,
-    mounted: Vec<String>,
 }
 
 impl Running {
-    /// Stop every task and unmount every served drive this build mounted. A
-    /// FUSE mount outlives the process that made it, so leaving one behind
-    /// means the next pass (or the next daemon start) finds a mountpoint
-    /// whose server is gone and every read on it hangs.
+    /// Stop every task and unmount every served drive volume this build
+    /// mounted. A FUSE mount outlives the process that made it, so leaving
+    /// one behind means the next pass (or the next daemon start) finds a
+    /// mountpoint whose server is gone and every read on it hangs.
     fn teardown(self) {
         for task in self.tasks {
             task.abort();
         }
         if let Some(mounts) = self.mounts {
-            for drive in &self.mounted {
-                if let Err(e) = mounts.unmount(drive) {
-                    warn!(drive = %drive, error = %e, "could not unmount a served drive");
-                }
+            if let Err(e) = mounts.unmount_all() {
+                warn!(error = %e, "could not unmount every served drive volume");
             }
         }
     }
@@ -224,104 +221,123 @@ async fn build(
     };
 
     if node.drives.is_empty() {
-        debug!("this node implements no drives");
+        debug!("this node backs no drives with a local directory");
         *live_registry.write().await = None;
-        return Ok(running);
-    }
+    } else {
+        let registry = Arc::new(
+            DriveRegistry::new(cfg, node_name).context("building this node's drive registry")?,
+        );
+        *live_registry.write().await = Some(registry.clone());
+        let internal_ip = cfg
+            .internal_ip(node)
+            .context("node has no address on the internal network")?;
 
-    let registry = Arc::new(
-        DriveRegistry::new(cfg, node_name).context("building this node's drive registry")?,
-    );
-    *live_registry.write().await = Some(registry.clone());
-    let internal_ip = cfg
-        .internal_ip(node)
-        .context("node has no address on the internal network")?;
-
-    // Anything this node backs with a real directory has to exist before a
-    // container tries to bind mount it. A drive this node only mounts is
-    // excluded: its local path is a mountpoint, created by the mount step
-    // below, not a directory this node owns.
-    for (name, path) in &node.drives {
-        let is_served = cfg.drives.get(name).is_some_and(|d| d.is_served());
-        let is_mount_only = is_served && !cfg.drives[name].served_by.iter().any(|s| s == node_name);
-        if is_mount_only {
-            continue;
-        }
-        if let Err(e) = std::fs::create_dir_all(path) {
-            warn!(drive = %name, path = %path.display(), error = %e, "cannot create the drive directory");
-        }
-    }
-
-    // Every drive this node backs with a real local copy needs the bulk
-    // transfer listener and sync scheduler: a replicated drive's peers pull
-    // deltas from it, and a served drive's other `served_by` candidates do
-    // the same once this node is (or was) the active server.
-    let local_copy: Vec<&String> = node
-        .drives
-        .keys()
-        .filter(|name| {
-            !cfg.drives.get(*name).is_some_and(|d| d.is_served())
-                || cfg.drives[*name].served_by.iter().any(|s| s == node_name)
-        })
-        .collect();
-
-    if !local_copy.is_empty() {
-        let addr = SocketAddr::new(internal_ip, drive_port(node.rpc_port));
-        let serving = registry.clone();
-        info!(%addr, drives = local_copy.len(), "drive transport listening");
-        running.tasks.push(tokio::spawn(async move {
-            if let Err(e) = transport::serve(addr, serving).await {
-                warn!(error = %e, "drive transport stopped");
+        // Anything this node backs with a real directory has to exist before
+        // a container tries to bind mount it. A drive this node only mounts
+        // is excluded: its local path is a mountpoint, created on demand by
+        // `start_volume_mounts`, not a directory this node owns.
+        for (name, path) in &node.drives {
+            let is_served = cfg.drives.get(name).is_some_and(|d| d.is_served());
+            let is_mount_only = is_served && !cfg.drives[name].served_by.iter().any(|s| s == node_name);
+            if is_mount_only {
+                continue;
             }
-        }));
+            if let Err(e) = std::fs::create_dir_all(path) {
+                warn!(drive = %name, path = %path.display(), error = %e, "cannot create the drive directory");
+            }
+        }
 
-        let scheduler = SyncScheduler::new(cluster.clone(), registry.clone(), Arc::new(DeltaEngine::default()));
-        let intervals = DriveIntervals { config_rx: config_rx.clone() };
-        running.tasks.push(tokio::spawn(async move {
-            scheduler.run(&intervals).await;
-        }));
+        // Every drive this node backs with a real local copy needs the bulk
+        // transfer listener and sync scheduler: a replicated drive's peers
+        // pull deltas from it, and a served drive's other `served_by`
+        // candidates do the same once this node is (or was) the active
+        // server.
+        let local_copy: Vec<&String> = node
+            .drives
+            .keys()
+            .filter(|name| {
+                !cfg.drives.get(*name).is_some_and(|d| d.is_served())
+                    || cfg.drives[*name].served_by.iter().any(|s| s == node_name)
+            })
+            .collect();
+
+        if !local_copy.is_empty() {
+            let addr = SocketAddr::new(internal_ip, drive_port(node.rpc_port));
+            let serving = registry.clone();
+            info!(%addr, drives = local_copy.len(), "drive transport listening");
+            running.tasks.push(tokio::spawn(async move {
+                if let Err(e) = transport::serve(addr, serving).await {
+                    warn!(error = %e, "drive transport stopped");
+                }
+            }));
+
+            let scheduler = SyncScheduler::new(cluster.clone(), registry.clone(), Arc::new(DeltaEngine::default()));
+            let intervals = DriveIntervals { config_rx: config_rx.clone() };
+            running.tasks.push(tokio::spawn(async move {
+                scheduler.run(&intervals).await;
+            }));
+        }
+
+        start_serving(cfg, node, node_name, &mut running, internal_ip);
     }
 
-    start_served(cfg, node, node_name, &mut running, internal_ip, cluster)?;
+    start_volume_mounts(cfg, node, node_name, &mut running, cluster)?;
     Ok(running)
 }
 
-/// Serve the drives this node is a `served_by` candidate for (every
-/// candidate runs the server, not just the active one), and mount the drives
-/// it only uses, pointed at whichever candidate is active right now.
-fn start_served(
+/// Serve every served drive this node is a `served_by` candidate for (every
+/// candidate runs the server, not just the active one) — the server always
+/// answers for the whole drive root; which volume a mounting client actually
+/// sees is decided client side (`start_volume_mounts`).
+fn start_serving(cfg: &ClusterConfig, node: &Node, node_name: &str, running: &mut Running, internal_ip: IpAddr) {
+    for (index, (name, drive)) in cfg.drives.iter().enumerate() {
+        if !drive.is_served() || !node.implements(name) || !drive.served_by.iter().any(|s| s == node_name) {
+            continue;
+        }
+        let root = node.drives[name].clone();
+        let addr = SocketAddr::new(internal_ip, served_port(node.rpc_port, index));
+        info!(drive = %name, %addr, path = %root.display(), "serving drive");
+        let drive_name = name.clone();
+        running.tasks.push(tokio::spawn(async move {
+            if let Err(e) = served::serve(addr, root).await {
+                warn!(drive = %drive_name, error = %e, "served drive server stopped");
+            }
+        }));
+    }
+}
+
+/// One served drive's resolved `served_by` candidates, for deciding which
+/// node is the active server and where to reach it, without re-reading
+/// `cfg` on every convergence pass.
+struct ServedDriveInfo {
+    served_by: Vec<String>,
+    candidate_addrs: BTreeMap<String, SocketAddr>,
+}
+
+/// Sets up dynamic, per-volume FUSE mounting for every served drive in the
+/// cluster — not just ones this node declared in `cluster.yaml`, since a
+/// served drive's data is reachable from any node over the internal network.
+/// Resolves every candidate's address once, then hands off to a background
+/// task that mounts and unmounts individual volumes as this node's own
+/// running containers start and stop needing them (`watch_volume_mounts`),
+/// rather than mounting a served drive's whole directory up front the way a
+/// statically declared `Node.drives` entry used to.
+///
+/// A no-op if this process cannot FUSE-mount at all (`mount_permission`), or
+/// if the cluster has no served drives whose candidates resolve.
+fn start_volume_mounts(
     cfg: &ClusterConfig,
     node: &Node,
     node_name: &str,
     running: &mut Running,
-    internal_ip: IpAddr,
     cluster: &Arc<ClusterNode>,
 ) -> Result<()> {
-    let mut specs = Vec::new();
-    // Every resolved candidate address per served drive this node mounts,
-    // so the failover watcher can repoint a mount without re-reading `cfg`.
-    let mut candidate_addrs: BTreeMap<String, BTreeMap<String, SocketAddr>> = BTreeMap::new();
-
+    let mut served_drives = BTreeMap::new();
     for (index, (name, drive)) in cfg.drives.iter().enumerate() {
-        if !drive.is_served() || !node.implements(name) || drive.served_by.is_empty() {
+        if !drive.is_served() || drive.served_by.is_empty() {
             continue;
         }
-        let local = node.drives[name].clone();
-
-        if drive.served_by.iter().any(|s| s == node_name) {
-            let addr = SocketAddr::new(internal_ip, served_port(node.rpc_port, index));
-            info!(drive = %name, %addr, path = %local.display(), "serving drive");
-            let root = local;
-            let drive_name = name.clone();
-            running.tasks.push(tokio::spawn(async move {
-                if let Err(e) = served::serve(addr, root).await {
-                    warn!(drive = %drive_name, error = %e, "served drive server stopped");
-                }
-            }));
-            continue;
-        }
-
-        let mut addrs = BTreeMap::new();
+        let mut candidate_addrs = BTreeMap::new();
         for server_name in &drive.served_by {
             let Some(server) = cfg.node(server_name) else {
                 warn!(drive = %name, server = %server_name, "drive is served by a node that is not in the config");
@@ -331,94 +347,129 @@ fn start_served(
                 warn!(drive = %name, server = %server_name, "the serving node has no internal address");
                 continue;
             };
-            addrs.insert(server_name.clone(), SocketAddr::new(server_ip, served_port(server.rpc_port, index)));
+            candidate_addrs.insert(server_name.clone(), SocketAddr::new(server_ip, served_port(server.rpc_port, index)));
         }
-        // Best guess for the mount at startup: the highest priority
-        // candidate that resolved. Wrong only until the failover watcher's
-        // first tick, which corrects it if a lower priority candidate is
-        // actually the one currently reachable.
-        let Some(initial) = drive.served_by.iter().find_map(|s| addrs.get(s).copied()) else {
+        if candidate_addrs.is_empty() {
             warn!(drive = %name, "none of this drive's serving candidates could be resolved");
             continue;
-        };
-        specs.push(MountSpec { drive: name.clone(), mountpoint: local, server: initial });
-        candidate_addrs.insert(name.clone(), addrs);
+        }
+        served_drives.insert(name.clone(), ServedDriveInfo { served_by: drive.served_by.clone(), candidate_addrs });
     }
 
-    if specs.is_empty() {
+    if served_drives.is_empty() {
         return Ok(());
     }
 
     // FUSE needs root or `user_allow_other` in /etc/fuse.conf. Refusing to
     // start the whole daemon over it would take out a node that is otherwise
-    // healthy and still votes, so this is a warning and the drive is simply
-    // unavailable here. The scheduler will not place work needing it, because
-    // placement checks the drive is implemented, not that it is mounted.
+    // healthy and still votes, so this is a warning and served drives are
+    // simply unavailable here. The scheduler will still place work needing
+    // one, since placement no longer requires this node to implement a
+    // served drive; those instances just never become ready (see
+    // `cl_sched::run::volumes_ready`) until they land somewhere that can
+    // mount it.
     if let Err(e) = served::mount::mount_permission() {
         warn!(
             error = %e,
-            drives = specs.len(),
-            "cannot mount served drives on this node, containers needing them will not run here"
+            "cannot mount served drive volumes on this node, containers needing one will not run here"
         );
         return Ok(());
     }
 
     let manager = Arc::new(MountManager::new(tokio::runtime::Handle::current()));
-    let names: Vec<String> = specs.iter().map(|s| s.drive.clone()).collect();
-    match manager.mount_all(specs) {
-        Ok(()) => {
-            info!(drives = ?names, "mounted served drives");
-            running.mounted = names;
-            running.mounts = Some(manager.clone());
+    running.mounts = Some(manager.clone());
 
-            let served_by: BTreeMap<String, Vec<String>> =
-                candidate_addrs.keys().map(|name| (name.clone(), cfg.drives[name].served_by.clone())).collect();
-            let watch_manager = manager.clone();
-            let watch_cluster = cluster.clone();
-            running.tasks.push(tokio::spawn(async move {
-                watch_active_servers(watch_cluster, watch_manager, served_by, candidate_addrs).await;
-            }));
-            running.tasks.push(tokio::spawn(async move {
-                manager.supervise(Duration::from_secs(30)).await;
-            }));
-        }
-        Err(e) => warn!(error = %e, "could not mount the served drives"),
-    }
+    let data_dir = node.data_dir(cfg).to_path_buf();
+    let watch_cluster = cluster.clone();
+    let watch_node = node_name.to_string();
+    let watch_manager = manager.clone();
+    running.tasks.push(tokio::spawn(async move {
+        watch_volume_mounts(watch_cluster, watch_node, data_dir, served_drives, watch_manager).await;
+    }));
+    running.tasks.push(tokio::spawn(async move {
+        manager.supervise(Duration::from_secs(30)).await;
+    }));
     Ok(())
 }
 
-/// Repoints each served drive's mount at whichever `served_by` candidate is
-/// currently active (the highest priority one that's reachable), so a
-/// mounting node keeps working when the server it was pointed at goes down,
-/// and switches back once a higher priority candidate recovers.
-async fn watch_active_servers(
+/// Converges this node's FUSE mounts against what its own running containers
+/// actually need, one served-drive volume at a time: mounts a volume the
+/// moment an instance here needs it and this node isn't the active server,
+/// retargets it if the active server fails over, and unmounts it once
+/// nothing here needs it any more. Driven off `ClusterState.assignments`
+/// (the leader's placement decisions), the same replicated state
+/// `Scheduler::reconcile` reads, so this and the container it mounts for
+/// converge from the same source of truth.
+async fn watch_volume_mounts(
     cluster: Arc<ClusterNode>,
+    node_name: String,
+    data_dir: std::path::PathBuf,
+    served_drives: BTreeMap<String, ServedDriveInfo>,
     manager: Arc<MountManager>,
-    served_by: BTreeMap<String, Vec<String>>,
-    candidate_addrs: BTreeMap<String, BTreeMap<String, SocketAddr>>,
 ) {
-    let mut current: BTreeMap<String, String> = BTreeMap::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
     loop {
         ticker.tick().await;
         let state = cluster.state().await;
 
-        for (drive, candidates) in &served_by {
-            let Some(active) = candidates.iter().find(|n| !state.unreachable.contains(*n)) else {
-                // Every candidate is down; leave the mount pointed where it
-                // is, since EIO is exactly the right behaviour and there's
-                // nothing better to switch to.
+        let mut needed: BTreeMap<String, MountSpec> = BTreeMap::new();
+        for assignment in state.assignments_on(&node_name) {
+            let Some(stack) = state.stacks.get(&assignment.instance.stack) else {
                 continue;
             };
-            if current.get(drive) == Some(active) {
+            let Ok(file) = cl_config::StackFile::parse(&stack.spec) else {
                 continue;
+            };
+            let Some(service) = file.services.get(&assignment.instance.service) else {
+                continue;
+            };
+            for mount in &service.volumes {
+                let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) else {
+                    continue;
+                };
+                let Some(info) = served_drives.get(drive) else {
+                    continue;
+                };
+                let Some(active) = info.served_by.iter().map(String::as_str).find(|n| !state.unreachable.contains(*n))
+                else {
+                    // No reachable server for this drive right now; nothing
+                    // useful to mount against.
+                    continue;
+                };
+                if active == node_name.as_str() {
+                    // This node holds the real data; the container reads it
+                    // directly, no FUSE involved.
+                    continue;
+                }
+                let Some(&server) = info.candidate_addrs.get(active) else {
+                    continue;
+                };
+                let mountpoint = data_dir.join("volume-mounts").join(drive).join(volume);
+                let spec = MountSpec {
+                    drive: drive.clone(),
+                    volume: Some(volume.clone()),
+                    mountpoint,
+                    server,
+                };
+                needed.insert(spec.key(), spec);
             }
-            let Some(&addr) = candidate_addrs.get(drive).and_then(|m| m.get(active)) else {
-                continue;
-            };
-            if manager.update_server(drive, addr) {
-                info!(drive = %drive, server = %active, %addr, "served drive failed over to a new active server");
-                current.insert(drive.clone(), active.clone());
+        }
+
+        for key in manager.mounted_keys() {
+            if !needed.contains_key(&key) {
+                if let Err(e) = manager.unmount(&key) {
+                    warn!(%key, error = %e, "could not unmount a served drive volume no longer needed here");
+                }
+            }
+        }
+        for (key, spec) in needed {
+            if manager.is_mounted(&key) {
+                manager.update_server(&key, spec.server);
+            } else {
+                info!(drive = %spec.drive, volume = ?spec.volume, server = %spec.server, "mounting served drive volume");
+                if let Err(e) = manager.mount_one(spec) {
+                    warn!(%key, error = %e, "could not mount a served drive volume");
+                }
             }
         }
     }

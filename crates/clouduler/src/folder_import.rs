@@ -387,15 +387,57 @@ fn import_replacing(args: &FolderImportArgs, volume_root: &Path) -> Result<()> {
 fn move_into(src: &Path, dest: &Path) -> Result<()> {
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
-        // EXDEV: source and destination are on different filesystems, which
-        // a plain rename cannot cross (this is exactly what happens when the
-        // destination is a FUSE-mounted served drive).
+        // EXDEV: rename(2) refuses to cross a mount-point boundary even when
+        // both sides are actually the same underlying device — this is
+        // exactly what a bind mount looks like (e.g. the destination is a
+        // FUSE-mounted served drive, or the source is bind-mounted into a
+        // container/chroot from the same disk the volume lives on). link(2)
+        // has no such restriction, only requiring the same device, so when
+        // `same_device` confirms that's the case here, relink the tree
+        // instead of paying for a full byte copy.
         Err(e) if e.raw_os_error() == Some(18) => {
-            copy_into(src, dest)?;
+            if same_device(src, dest)? {
+                hardlink_into(src, dest)?;
+            } else {
+                copy_into(src, dest)?;
+            }
             remove_source(src)
         }
         Err(e) => Err(e).with_context(|| format!("moving {} to {}", src.display(), dest.display())),
     }
+}
+
+/// Whether `src` and `dest` live on the same underlying device, even though
+/// `rename` refused to cross between them (they're on different mount
+/// points, e.g. one or both sides is a bind mount). `dest` doesn't exist
+/// yet, so its parent directory is compared instead — a directory always
+/// exists on the same device as everything created inside it.
+fn same_device(src: &Path, dest: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let src_dev = std::fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?.dev();
+    let dest_parent = dest.parent().ok_or_else(|| anyhow!("{} has no parent directory", dest.display()))?;
+    let dest_dev = std::fs::metadata(dest_parent).with_context(|| format!("reading {}", dest_parent.display()))?.dev();
+    Ok(src_dev == dest_dev)
+}
+
+/// Recreate `src`'s tree at `dest` by hardlinking every regular file rather
+/// than copying its bytes. Only valid within a single device — the caller
+/// checks that with `same_device` first.
+fn hardlink_into(src: &Path, dest: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
+    if meta.is_symlink() {
+        let target = std::fs::read_link(src)?;
+        std::os::unix::fs::symlink(target, dest).with_context(|| format!("recreating symlink at {}", dest.display()))?;
+    } else if meta.is_dir() {
+        std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+        for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+            let entry = entry?;
+            hardlink_into(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::hard_link(src, dest).with_context(|| format!("linking {} to {}", dest.display(), src.display()))?;
+    }
+    Ok(())
 }
 
 fn remove_source(src: &Path) -> Result<()> {
@@ -511,6 +553,39 @@ mod tests {
 
         assert!(!src.exists());
         assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn same_device_is_true_for_two_paths_under_the_same_tempdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        assert!(same_device(&src, &dest.join("child")).unwrap());
+    }
+
+    #[test]
+    fn hardlink_into_links_files_instead_of_copying_their_bytes() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), b"hello").unwrap();
+        fs::write(src.join("sub/b.txt"), b"world").unwrap();
+
+        let dest = tmp.path().join("dest");
+        hardlink_into(&src, &dest).unwrap();
+
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello");
+        assert_eq!(
+            fs::metadata(src.join("a.txt")).unwrap().ino(),
+            fs::metadata(dest.join("a.txt")).unwrap().ino(),
+            "hardlink_into should share the source's inode, not copy its data"
+        );
+        // The source is untouched; move_into is the one that removes it.
+        assert!(src.join("a.txt").exists());
     }
 
     #[test]

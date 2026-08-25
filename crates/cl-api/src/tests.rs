@@ -137,6 +137,7 @@ async fn harness() -> Harness {
     let state = AppState {
         cluster: Arc::new(node),
         docker: Arc::new(RwLock::new(Docker::connect().ok())),
+        pulling: Arc::new(RwLock::new(Default::default())),
         node_name: "n0".to_string(),
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: Arc::new(RwLock::new(cluster_config)),

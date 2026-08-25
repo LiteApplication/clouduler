@@ -42,9 +42,12 @@ nodes:
 
 `served_by` is a priority-ordered list of the nodes that can hold this drive's data. The **active
 server** is always the first node in that list that's currently reachable; validation requires
-every node named there to map the drive to the real directory holding its copy. Every other
-implementing node gets a mountpoint instead: the path is where the drive appears, not where its
-files live on that node's own disk.
+every node named there to map the drive to the real directory holding its copy. Any other node —
+whether or not it declares the drive in `cluster.yaml` at all — can run a container that mounts one
+of its volumes: the scheduler no longer requires a node to implement a served drive to be eligible
+(unlike a replicated one, which still does), and the drive subsystem mounts just that volume there
+over FUSE on demand. A node that does declare the drive purely to mount it (like `n3` above) gets
+the same on-demand per-volume mount; the declared path is not used as a static mountpoint any more.
 
 Volumes work the same way as on a replicated drive: `drive/volume` addressing, created on first
 write. The scheduler still skips a served drive's volumes when deciding what to replicate as a
@@ -93,6 +96,14 @@ translates kernel calls into protocol requests against whichever address it's cu
 at (`ClientFs::server_handle`/`MountManager::update_server`). Reads and writes are chunked (4 MiB
 per request) so a large file is never required to fit in a single frame.
 
+The server always answers for the drive's whole root; scoping to one volume happens client side.
+`ClientFs::at` seeds the FUSE mount's root inode at the volume's subpath (`ClientFs::new`/
+`with_config` mount the drive's whole root, for backward compatibility, by seeding it at the empty
+path instead), so every request the mount sends is already prefixed with that volume's name and
+the server needs no volume concept of its own. `MountSpec::key` (`drive` alone for a whole-drive
+mount, `drive/volume` for a per-volume one) is what `MountManager` keys its mount table by, so
+several volumes of the same drive can be mounted independently.
+
 ## Mount requirements
 
 Mounting needs either the daemon to run as root, or `user_allow_other` set in `/etc/fuse.conf` on
@@ -103,11 +114,23 @@ in system-wide. `served::mount::mount_permission` checks this before attempting 
 with a message naming exactly what's missing, rather than letting the mount syscall fail with a
 bare `EPERM`.
 
-`served::mount::MountManager` owns the lifecycle: `mount_all` at daemon start for every drive this
-node mounts (but does not serve or back up), `unmount_all` on shutdown, `update_server` to repoint
-a mount when the active candidate changes, and a `supervise` loop that remounts a drive if its FUSE
-session exits on its own. Losing the active server briefly does not kill the session or need a
-remount: see below.
+`served::mount::MountManager` owns the lifecycle, keyed per volume rather than per drive:
+`mount_one`/`unmount` bring one volume's mount up or down, `unmount_all` on shutdown, `update_server`
+to repoint a mount when the active candidate changes, and a `supervise` loop that remounts a volume
+if its FUSE session exits on its own. Losing the active server briefly does not kill the session or
+need a remount: see below.
+
+Which volumes are actually mounted on a node is not declared in `cluster.yaml` — it's read off the
+cluster's own placement decisions. A background convergence loop (`clouduler::drives::
+watch_volume_mounts`) polls `ClusterState.assignments` for this node's own running instances,
+resolves each one's stack file to find any served-drive volumes it mounts, and mounts exactly those
+(under `<data_dir>/volume-mounts/<drive>/<volume>`) — skipping any this node happens to be the
+active server for, since those are read locally with no FUSE involved — then unmounts anything no
+longer needed. This is also what makes a node that never declared a served drive in `cluster.yaml`
+usable for it at all: the scheduler is free to place a container there, and this loop mounts what it
+needs a few seconds later. A container whose volume mount isn't up yet simply isn't started until it
+is (`cl_sched::run::volumes_ready`), rather than starting against an empty, not-yet-mounted
+directory.
 
 ## Caching and consistency
 

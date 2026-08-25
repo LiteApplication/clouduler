@@ -588,9 +588,11 @@ fn default_web_backend_port() -> u16 {
 
 /// The reverse proxy in front of every `x-clouduler.proxy` route.
 ///
-/// Both listeners are bound on every node, on all addresses, because a route's
-/// hostname resolves to whichever node is publishing it and that changes as
-/// containers move.
+/// Both listeners are bound on every node, on all addresses: a request can
+/// land on any node and gets forwarded internally to wherever the container
+/// actually runs, the same way Swarm's routing mesh works. `dns_publish`
+/// only decides what the *public* DNS answer says, not where the proxy
+/// itself listens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
@@ -605,6 +607,9 @@ pub struct ProxyConfig {
     pub https_port: u16,
     #[serde(default)]
     pub acme: AcmeConfig,
+    /// How a proxied hostname's DNS record is published.
+    #[serde(default)]
+    pub dns_publish: DnsPublishMode,
 }
 
 impl Default for ProxyConfig {
@@ -614,8 +619,30 @@ impl Default for ProxyConfig {
             http_port: default_http_port(),
             https_port: default_https_port(),
             acme: AcmeConfig::default(),
+            dns_publish: DnsPublishMode::default(),
         }
     }
+}
+
+/// Who a proxied hostname's DNS record names.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DnsPublishMode {
+    /// Every node's address is published for every proxied hostname (like
+    /// Docker Swarm's routing mesh: reaching any node reaches the service,
+    /// since every node forwards internally to wherever the container
+    /// actually runs). Safe default - works regardless of where containers
+    /// land, and needs no placement co-location.
+    #[default]
+    AllNodes,
+    /// Only the node(s) actually running the containers behind a hostname
+    /// are published, and stale records on any other node are deleted from
+    /// the DNS provider. Routing happens at the DNS level instead of inside
+    /// the proxy. Requires every container that publishes the same hostname
+    /// to be scheduled onto the same node - the scheduler enforces this as
+    /// an implicit placement constraint - since a hostname can only point at
+    /// one place.
+    OwningNode,
 }
 
 fn default_http_port() -> u16 {
@@ -717,6 +744,19 @@ impl ClusterConfig {
         self.networks
             .iter()
             .filter(|(_, net)| matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Names of every drive whose mode is `Served`, so placement and mount
+    /// resolution can tell a served drive (one authoritative copy, mounted
+    /// over the internal network by every other node) from a replicated one
+    /// (every implementing node keeps its own full copy) without needing the
+    /// whole `Drive` record.
+    pub fn served_drives(&self) -> std::collections::BTreeSet<String> {
+        self.drives
+            .iter()
+            .filter(|(_, drive)| drive.is_served())
             .map(|(name, _)| name.clone())
             .collect()
     }

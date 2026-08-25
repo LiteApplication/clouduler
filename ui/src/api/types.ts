@@ -87,18 +87,28 @@ export interface Assignment {
 
 /** What GET /api/instances returns: the assignment plus live container state.
  *  `state` is "unknown" for an instance on another node: there is no rpc path
- *  to inspect a container elsewhere, and that is different from "stopped". */
+ *  to inspect a container elsewhere, and that is different from "stopped".
+ *
+ *  `pulling` is a container that does not exist yet because its image is
+ *  still being fetched; `pending_placement` is not a container at all, but a
+ *  service the cluster wants to run and has not found a node for yet — see
+ *  `placement_error`. `stopping`/`restarting`/`exited` come straight from
+ *  docker's own lifecycle status (`exited` only fires when the cluster wanted
+ *  it running, i.e. it crashed rather than being asked to stop). */
 export interface InstanceState {
   id: InstanceId;
   node: string;
   desired: DesiredState;
-  state: 'running' | 'stopped' | 'unknown';
+  state: 'running' | 'stopped' | 'stopping' | 'restarting' | 'exited' | 'pulling' | 'pending_placement' | 'unknown';
   running: boolean | null;
   health: 'healthy' | 'unhealthy' | 'starting' | 'none';
   image: string | null;
   image_digest: string | null;
   started_at: string | null;
   migration: { to: string; phase: string } | null;
+  /** Why no node could run this instance, set only when `state` is
+   *  `"pending_placement"`. */
+  placement_error?: string;
 }
 
 export interface StackState {
@@ -434,11 +444,15 @@ export interface AcmeConfig {
   contact_email?: string | null;
 }
 
+/** Who a proxied hostname's DNS record names. */
+export type DnsPublishMode = "all-nodes" | "owning-node";
+
 export interface ProxyConfig {
   enabled: boolean;
   http_port: number;
   https_port: number;
   acme: AcmeConfig;
+  dns_publish: DnsPublishMode;
 }
 
 /** A UI-managed redirect. Not part of cluster.yaml; see /api/redirects. */
@@ -521,6 +535,9 @@ export interface ValidationResult {
 
 export interface StackValidationResult extends ValidationResult {
   requirements: StackRequirements | null;
+  /** The same breakdown as `requirements`, one entry per service — used to
+   *  show a separate placement table per container. */
+  per_service: Record<string, StackRequirements>;
 }
 
 // ---- stats ----

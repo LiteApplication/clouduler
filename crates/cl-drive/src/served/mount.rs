@@ -10,7 +10,7 @@
 //! Detecting the missing permission up front and naming it produces a
 //! useful error instead of an opaque `EPERM` from deep inside `fuser`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,14 +23,33 @@ use crate::served::client::{ClientConfig, ClientFs};
 
 const FUSE_CONF: &str = "/etc/fuse.conf";
 
-/// One served drive this node mounts, resolved to a concrete server
-/// address by the caller (the daemon knows how to turn `served_by` plus
-/// the cluster config into a `SocketAddr`; this crate does not).
+/// One served drive (or one volume of one) this node mounts, resolved to a
+/// concrete server address by the caller (the daemon knows how to turn
+/// `served_by` plus the cluster config into a `SocketAddr`; this crate does
+/// not).
 #[derive(Debug, Clone)]
 pub struct MountSpec {
     pub drive: String,
+    /// `Some` mounts just that one volume's subtree (the server still
+    /// serves the whole drive root; only the client is scoped), so several
+    /// independent mounts of the same drive can coexist. `None` mounts the
+    /// drive's whole root, as a served drive was mounted before per-volume
+    /// mounting existed.
+    pub volume: Option<String>,
     pub mountpoint: PathBuf,
     pub server: SocketAddr,
+}
+
+impl MountSpec {
+    /// Unique key identifying this mount, used as the `MountManager` table
+    /// key: a bare drive name for a whole-drive mount, `drive/volume` for a
+    /// per-volume one, so two volumes of the same drive don't collide.
+    pub fn key(&self) -> String {
+        match &self.volume {
+            Some(volume) => format!("{}/{volume}", self.drive),
+            None => self.drive.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,12 +112,12 @@ impl MountManager {
     pub fn mount_all(&self, specs: Vec<MountSpec>) -> Result<()> {
         let mut mounted = Vec::new();
         for spec in specs {
-            let drive = spec.drive.clone();
+            let key = spec.key();
             match self.mount_one(spec) {
-                Ok(()) => mounted.push(drive),
+                Ok(()) => mounted.push(key),
                 Err(e) => {
-                    for drive in mounted {
-                        let _ = self.unmount(&drive);
+                    for key in mounted {
+                        let _ = self.unmount(&key);
                     }
                     return Err(e);
                 }
@@ -112,10 +131,11 @@ impl MountManager {
         std::fs::create_dir_all(&spec.mountpoint)
             .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
 
-        let fs = ClientFs::with_config(spec.server, self.rt.clone(), self.config);
+        let key = spec.key();
+        let fs = ClientFs::at(spec.server, self.rt.clone(), self.config, spec.volume.clone().unwrap_or_default());
         let server = fs.server_handle();
         let options = vec![
-            fuser::MountOption::FSName(format!("clouduler-{}", spec.drive)),
+            fuser::MountOption::FSName(format!("clouduler-{}", key.replace('/', "-"))),
             fuser::MountOption::Subtype("clouduler".into()),
             fuser::MountOption::NoAtime,
         ];
@@ -136,18 +156,18 @@ impl MountManager {
         let session = fuser::spawn_mount(fs, &spec.mountpoint, &session_config)
             .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
 
-        self.mounts.lock().expect("mount table lock").insert(spec.drive.clone(), ActiveMount { spec, session, server });
+        self.mounts.lock().expect("mount table lock").insert(key, ActiveMount { spec, session, server });
         Ok(())
     }
 
-    /// Repoint an already-mounted drive at a new server address, for when a
+    /// Repoint an already-mounted key at a new server address, for when a
     /// served drive's active server has failed over to a different node.
     /// The next request the mount makes reconnects to the new address; the
-    /// FUSE session itself is untouched. A no-op (returns `false`) if
-    /// `drive` isn't currently mounted.
-    pub fn update_server(&self, drive: &str, addr: SocketAddr) -> bool {
+    /// FUSE session itself is untouched. A no-op (returns `false`) if `key`
+    /// isn't currently mounted.
+    pub fn update_server(&self, key: &str, addr: SocketAddr) -> bool {
         let mut mounts = self.mounts.lock().expect("mount table lock");
-        let Some(active) = mounts.get_mut(drive) else {
+        let Some(active) = mounts.get_mut(key) else {
             return false;
         };
         *active.server.lock().expect("server addr lock") = addr;
@@ -158,10 +178,11 @@ impl MountManager {
         true
     }
 
-    /// Unmount one drive. A drive not currently mounted is a no-op, not an
-    /// error, so shutdown can call this unconditionally.
-    pub fn unmount(&self, drive: &str) -> Result<()> {
-        let active = self.mounts.lock().expect("mount table lock").remove(drive);
+    /// Unmount one key (see `MountSpec::key`). Not currently mounted is a
+    /// no-op, not an error, so shutdown and convergence can call this
+    /// unconditionally.
+    pub fn unmount(&self, key: &str) -> Result<()> {
+        let active = self.mounts.lock().expect("mount table lock").remove(key);
         if let Some(active) = active {
             active
                 .session
@@ -175,19 +196,25 @@ impl MountManager {
     /// failure so one stuck mount doesn't block the others from coming
     /// down; returns the first error seen, if any.
     pub fn unmount_all(&self) -> Result<()> {
-        let drives: Vec<String> = self.mounts.lock().expect("mount table lock").keys().cloned().collect();
+        let keys: Vec<String> = self.mounts.lock().expect("mount table lock").keys().cloned().collect();
         let mut first_err = None;
-        for drive in drives {
-            if let Err(e) = self.unmount(&drive) {
-                warn!(%drive, error = %e, "failed to unmount served drive");
+        for key in keys {
+            if let Err(e) = self.unmount(&key) {
+                warn!(%key, error = %e, "failed to unmount served drive");
                 first_err.get_or_insert(e);
             }
         }
         first_err.map_or(Ok(()), Err)
     }
 
-    pub fn is_mounted(&self, drive: &str) -> bool {
-        self.mounts.lock().expect("mount table lock").contains_key(drive)
+    /// Every key currently mounted (see `MountSpec::key`), for a caller that
+    /// needs to converge the mount set against what's actually needed.
+    pub fn mounted_keys(&self) -> BTreeSet<String> {
+        self.mounts.lock().expect("mount table lock").keys().cloned().collect()
+    }
+
+    pub fn is_mounted(&self, key: &str) -> bool {
+        self.mounts.lock().expect("mount table lock").contains_key(key)
     }
 
     /// Remount any drive whose FUSE session has exited on its own (a fatal
@@ -202,9 +229,9 @@ impl MountManager {
             mounts.values().filter(|m| m.session.guard.is_finished()).map(|m| m.spec.clone()).collect()
         };
         for spec in dead {
-            let drive = spec.drive.clone();
-            self.mounts.lock().expect("mount table lock").remove(&drive);
-            warn!(%drive, "served drive mount session exited unexpectedly, remounting");
+            let key = spec.key();
+            self.mounts.lock().expect("mount table lock").remove(&key);
+            warn!(%key, "served drive mount session exited unexpectedly, remounting");
             self.mount_one(spec)?;
         }
         Ok(())

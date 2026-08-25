@@ -106,14 +106,33 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
 /// Applies a plan against a zone. Cloudflare's "record already exists"
 /// errors on create are swallowed: they mean a previous run (or a race with
 /// another node) already got us to the desired state.
+///
+/// Deletes run first, before creates and updates: a stale owned record can
+/// share a name with a newly desired record of a different type (e.g. a
+/// hostname that used to resolve via a CNAME now wants a plain A record),
+/// and Cloudflare refuses to create the new record while the old one still
+/// occupies the name. Running deletes first clears the way instead of
+/// failing on that collision every pass.
+///
+/// A failing record does not stop the rest of the plan from applying: one
+/// hostname's bad state must not block every other hostname in the same
+/// zone from converging. All failures are collected and returned together
+/// so the caller can attribute each one to its own record.
 pub async fn apply(cf: &Cloudflare, zone_id: &str, plan: &Plan) -> Result<()> {
+    let mut errors = Vec::new();
+
+    for id in &plan.delete {
+        if let Err(e) = cf.delete_record(zone_id, id).await {
+            errors.push(e);
+        }
+    }
     for input in &plan.create {
         match cf.create_record(zone_id, input).await {
             Ok(_) => {}
             Err(e) if e.is_benign_duplicate() => {
                 tracing::debug!(name = %input.name, "record already exists, skipping");
             }
-            Err(e) => return Err(record_apply_error(input, e)),
+            Err(e) => errors.push(record_apply_error(input, e)),
         }
     }
     for (id, input) in &plan.update {
@@ -122,13 +141,15 @@ pub async fn apply(cf: &Cloudflare, zone_id: &str, plan: &Plan) -> Result<()> {
             Err(e) if e.is_benign_duplicate() => {
                 tracing::debug!(name = %input.name, "record already exists, skipping");
             }
-            Err(e) => return Err(record_apply_error(input, e)),
+            Err(e) => errors.push(record_apply_error(input, e)),
         }
     }
-    for id in &plan.delete {
-        cf.delete_record(zone_id, id).await?;
+
+    match errors.len() {
+        0 => Ok(()),
+        1 => Err(errors.remove(0)),
+        _ => Err(DnsError::Batch(errors)),
     }
-    Ok(())
 }
 
 fn record_apply_error(input: &RecordInput, source: DnsError) -> DnsError {

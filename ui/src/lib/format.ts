@@ -1,5 +1,30 @@
 // Display formatting helpers shared across views.
 
+import type { InstanceState } from '../api/types';
+import type { BadgeTone } from '../components/Badge';
+
+/** Badge tone for an instance's `state`: "running" reads good, a crash or a
+ *  service with nowhere to go reads bad, and everything mid-transition
+ *  (pulling, restarting, stopping) reads warn rather than bad — it isn't
+ *  broken, just not settled yet. */
+export function instanceStateTone(state: InstanceState['state']): BadgeTone {
+  switch (state) {
+    case 'running':
+      return 'good';
+    case 'pulling':
+    case 'restarting':
+    case 'stopping':
+      return 'warn';
+    case 'exited':
+    case 'pending_placement':
+      return 'bad';
+    case 'stopped':
+    case 'unknown':
+    default:
+      return 'neutral';
+  }
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '-';
   if (bytes === 0) return '0 B';

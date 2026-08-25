@@ -279,6 +279,57 @@ impl From<HealthStatusEnum> for HealthState {
     }
 }
 
+/// Docker's own lifecycle status for a container, as reported by inspect/list.
+/// Kept alongside the coarser `running` bool because "restarting" and "exited"
+/// are both `running: false` but mean very different things to an operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunState {
+    #[default]
+    Unknown,
+    Created,
+    Running,
+    Paused,
+    Restarting,
+    /// Between `docker stop` being issued and the process actually exiting.
+    Stopping,
+    Removing,
+    Exited,
+    Dead,
+}
+
+impl From<ContainerStateStatusEnum> for RunState {
+    fn from(value: ContainerStateStatusEnum) -> Self {
+        match value {
+            ContainerStateStatusEnum::CREATED => RunState::Created,
+            ContainerStateStatusEnum::RUNNING => RunState::Running,
+            ContainerStateStatusEnum::PAUSED => RunState::Paused,
+            ContainerStateStatusEnum::RESTARTING => RunState::Restarting,
+            ContainerStateStatusEnum::STOPPING => RunState::Stopping,
+            ContainerStateStatusEnum::REMOVING => RunState::Removing,
+            ContainerStateStatusEnum::EXITED => RunState::Exited,
+            ContainerStateStatusEnum::DEAD => RunState::Dead,
+            ContainerStateStatusEnum::EMPTY => RunState::Unknown,
+        }
+    }
+}
+
+impl From<bollard::models::ContainerSummaryStateEnum> for RunState {
+    fn from(value: bollard::models::ContainerSummaryStateEnum) -> Self {
+        use bollard::models::ContainerSummaryStateEnum as S;
+        match value {
+            S::CREATED => RunState::Created,
+            S::RUNNING => RunState::Running,
+            S::PAUSED => RunState::Paused,
+            S::RESTARTING => RunState::Restarting,
+            S::STOPPING => RunState::Stopping,
+            S::REMOVING => RunState::Removing,
+            S::EXITED => RunState::Exited,
+            S::DEAD => RunState::Dead,
+            S::EMPTY => RunState::Unknown,
+        }
+    }
+}
+
 /// A snapshot of a container's state, owned so callers don't have to hold onto
 /// bollard's types.
 #[derive(Debug, Clone, Default)]
@@ -290,6 +341,8 @@ pub struct ContainerState {
     /// This is not a registry content digest; use `image::resolve_digest` for that.
     pub image_digest: Option<String>,
     pub running: bool,
+    /// Docker's finer-grained lifecycle status; see `RunState`.
+    pub status: RunState,
     pub health: Option<HealthState>,
     pub exit_code: Option<i64>,
     pub labels: HashMap<String, String>,
@@ -315,6 +368,7 @@ impl From<bollard::models::ContainerInspectResponse> for ContainerState {
                 .unwrap_or_default(),
             image_digest: resp.image,
             running: state.status == Some(ContainerStateStatusEnum::RUNNING),
+            status: state.status.map(RunState::from).unwrap_or_default(),
             health: state.health.and_then(|h| h.status).map(HealthState::from),
             exit_code: state.exit_code,
             labels: config.and_then(|c| c.labels).unwrap_or_default(),
@@ -337,6 +391,7 @@ impl From<ContainerSummary> for ContainerState {
             image: summary.image.unwrap_or_default(),
             image_digest: summary.image_id,
             running: summary.state == Some(bollard::models::ContainerSummaryStateEnum::RUNNING),
+            status: summary.state.map(RunState::from).unwrap_or_default(),
             health: summary.health.and_then(|h| h.status).map(|s| match s {
                 bollard::models::ContainerSummaryHealthStatusEnum::STARTING => {
                     HealthState::Starting

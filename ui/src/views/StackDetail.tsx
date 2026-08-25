@@ -8,6 +8,7 @@ import { Badge } from '../components/Badge';
 import { ConstraintTable } from '../components/ConstraintTable';
 import { Icon } from '../components/Icon';
 import { useEventSource } from '../hooks/useEventSource';
+import { instanceStateTone } from '../lib/format';
 import { SecretForm } from './SecretForm';
 import { statusBadge } from './Certificates';
 
@@ -491,11 +492,7 @@ function StackDetailBody({
                         <Badge tone={a.desired === 'running' ? 'good' : 'neutral'}>{a.desired}</Badge>
                       </td>
                       <td>
-                        {i ? (
-                          <Badge tone={i.state === 'running' ? 'good' : issue ? 'bad' : 'neutral'}>{i.state}</Badge>
-                        ) : (
-                          '-'
-                        )}
+                        {i ? <Badge tone={instanceStateTone(i.state)} title={i.placement_error}>{i.state}</Badge> : '-'}
                       </td>
                       <td>
                         {i ? (
@@ -523,7 +520,25 @@ function StackDetailBody({
                   </Fragment>
                 );
               })}
-              {instances.length === 0 && (
+              {Object.values(live)
+                .filter((i) => i.state === 'pending_placement')
+                .map((i) => (
+                  <tr key={i.id}>
+                    <td>{i.id}</td>
+                    <td>-</td>
+                    <td>
+                      <Badge tone="good">running</Badge>
+                    </td>
+                    <td>
+                      <Badge tone={instanceStateTone(i.state)} title={i.placement_error}>
+                        {i.state}
+                      </Badge>
+                    </td>
+                    <td>-</td>
+                    <td>-</td>
+                  </tr>
+                ))}
+              {instances.length === 0 && Object.keys(live).length === 0 && (
                 <tr>
                   <td colSpan={6} className="empty-cell">
                     no instances
@@ -584,11 +599,14 @@ function InlineInstanceLogs({ id }: { id: string }) {
 }
 
 /** Why each node can or cannot run this stack, and a way to fix a missing
- *  config or secret without leaving the page. */
+ *  config or secret without leaving the page. One tab per service/container,
+ *  since a combined table can't say which constraint belongs to which one. */
 function PlacementSection({ stackName, spec }: { stackName: string; spec: string }) {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
   const [requirements, setRequirements] = useState<StackRequirements | null>(null);
+  const [perService, setPerService] = useState<Record<string, StackRequirements>>({});
+  const [service, setService] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creatingConfig, setCreatingConfig] = useState<string | null>(null);
   const [creatingSecret, setCreatingSecret] = useState<string | null>(null);
@@ -598,7 +616,11 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
     api
       .validateStack(stackName, spec)
       .then((result) => {
-        if (!cancelled) setRequirements(result.requirements);
+        if (cancelled) return;
+        setRequirements(result.requirements);
+        setPerService(result.per_service);
+        const names = Object.keys(result.per_service);
+        setService((prev) => (prev && names.includes(prev) ? prev : (names[0] ?? null)));
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof ApiError ? e.message : 'failed to compute placement');
@@ -624,6 +646,8 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
     );
   }
 
+  const serviceNames = Object.keys(perService);
+
   return (
     <div className="section">
       <div className="section-head">
@@ -631,12 +655,27 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
           <Icon name="nodes" /> Placement
         </h2>
       </div>
-      <ConstraintTable
-        requirements={requirements}
-        cluster={cluster}
-        onCreateConfig={(n) => setCreatingConfig(n)}
-        onCreateSecret={(n) => setCreatingSecret(n)}
-      />
+      {serviceNames.length === 0 ? (
+        <p className="muted">no services in this stack</p>
+      ) : (
+        <>
+          <div className="segmented" role="tablist" style={{ marginBottom: 12 }}>
+            {serviceNames.map((name) => (
+              <button key={name} role="tab" aria-selected={service === name} onClick={() => setService(name)}>
+                {name}
+              </button>
+            ))}
+          </div>
+          {service && (
+            <ConstraintTable
+              requirements={perService[service]}
+              cluster={cluster}
+              onCreateConfig={(n) => setCreatingConfig(n)}
+              onCreateSecret={(n) => setCreatingSecret(n)}
+            />
+          )}
+        </>
+      )}
       {isAdmin && creatingConfig && <ConfigQuickCreate name={creatingConfig} onDone={() => setCreatingConfig(null)} />}
       {isAdmin && creatingSecret && (
         <div className="card section">
