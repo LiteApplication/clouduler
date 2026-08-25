@@ -81,6 +81,22 @@ fn mount_permission_from(euid: u32, fuse_conf: &Path) -> Result<MountPermission>
     }
 }
 
+/// Lazily unmount whatever is (or claims to be) at `path`, ignoring every
+/// failure: it's a best-effort cleanup of a stale mount this process never
+/// owned, so a missing mountpoint, a non-mount directory, or a permission
+/// error are all fine to swallow and let the caller's own error handling
+/// take over.
+fn force_unmount(path: &Path) {
+    let Some(cpath) = path.to_str().and_then(|s| std::ffi::CString::new(s).ok()) else {
+        return;
+    };
+    // Safety: `cpath` is a valid NUL-terminated C string for the lifetime of
+    // this call; `umount2` does not retain it past returning.
+    unsafe {
+        libc::umount2(cpath.as_ptr(), libc::MNT_DETACH);
+    }
+}
+
 struct ActiveMount {
     spec: MountSpec,
     session: fuser::BackgroundSession,
@@ -128,8 +144,21 @@ impl MountManager {
 
     pub fn mount_one(&self, spec: MountSpec) -> Result<()> {
         mount_permission()?;
-        std::fs::create_dir_all(&spec.mountpoint)
-            .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
+        if let Err(e) = std::fs::create_dir_all(&spec.mountpoint) {
+            // `create_dir_all` treats a path it can't `stat()` as absent,
+            // then reports the underlying `mkdir` as `AlreadyExists` once it
+            // finds something there after all. That combination means a
+            // stale FUSE mount from a previous process (session gone but
+            // never cleanly unmounted, e.g. after a daemon restart or
+            // crash) is squatting on the mountpoint. Force it off and
+            // retry once before giving up.
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(DriveError::Io { path: spec.mountpoint.clone(), source: e });
+            }
+            force_unmount(&spec.mountpoint);
+            std::fs::create_dir_all(&spec.mountpoint)
+                .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
+        }
 
         let key = spec.key();
         let fs = ClientFs::at(spec.server, self.rt.clone(), self.config, spec.volume.clone().unwrap_or_default());

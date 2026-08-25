@@ -94,6 +94,11 @@ impl ClusterNode {
             // Small state, so snapshot often and keep the log short.
             snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1000),
             max_in_snapshot_log_to_keep: 100,
+            // openraft's default (200ms) is a deadline for shipping the
+            // *whole* snapshot in one RPC. That's fine on localhost but
+            // spuriously times out over a wireguard/VPN link to a remote
+            // node, which then retries forever and spams the log.
+            install_snapshot_timeout: 30_000,
             ..Default::default()
         };
         let config = Arc::new(config.validate()?);

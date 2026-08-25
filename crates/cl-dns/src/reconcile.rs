@@ -26,9 +26,18 @@ impl Plan {
 }
 
 /// Computes the plan to reconcile `live` records toward `desired`, scoped to
-/// records tagged as owned by `cluster`. Never touches a live record that
-/// isn't clouduler's, even if it collides with something desired: those are
-/// left for the create step to fail loudly on rather than overwritten.
+/// records tagged as owned by `cluster`. Never *updates or repoints* a live
+/// record that isn't clouduler's, even if it shares a name with something
+/// desired: content-level collisions are left for the create step to fail
+/// loudly on rather than overwritten.
+///
+/// The one exception is Cloudflare's CNAME-exclusivity rule: a CNAME can't
+/// coexist with *any* other record at the same name, in either direction.
+/// A stale CNAME (or A/AAAA) left over from a previous scheme - or created
+/// by hand - blocks every future create at that name with cloudflare error
+/// 81053/81054 and never gets cleared, since it isn't tagged as ours. Those
+/// specific conflicts are deleted regardless of ownership; see
+/// `delete_conflicting_live_records`.
 pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
     let owned_keys = owned_keys(cluster, live);
 
@@ -100,7 +109,44 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
         }
     }
 
+    delete_conflicting_live_records(desired, live, &mut out);
+
     out
+}
+
+/// Deletes any live record - owned or not - that Cloudflare's CNAME-exclusivity
+/// rule would refuse to let a desired record coexist with: a CNAME can't
+/// share a name with anything else, so a stale CNAME blocking a new A/AAAA
+/// (or a stale A/AAAA blocking a new CNAME) is queued for deletion even
+/// without an ownership tag. Records of the same kind as something desired
+/// are left alone here - they're handled (or deliberately left for `create`
+/// to fail on) by the ownership-scoped logic above.
+fn delete_conflicting_live_records(desired: &[DesiredRecord], live: &[Record], out: &mut Plan) {
+    let mut desired_kinds_by_name: HashMap<&str, HashSet<RecordType>> = HashMap::new();
+    for d in desired {
+        desired_kinds_by_name.entry(d.fqdn.as_str()).or_default().insert(d.kind);
+    }
+
+    let mut already_queued: HashSet<String> = out.delete.iter().cloned().collect();
+    for r in live {
+        if is_tag_record(r) {
+            continue;
+        }
+        let Some(kinds) = desired_kinds_by_name.get(r.name.as_str()) else {
+            continue;
+        };
+        if kinds.contains(&r.kind) {
+            continue;
+        }
+        if r.kind != RecordType::CNAME && !kinds.contains(&RecordType::CNAME) {
+            continue;
+        }
+        if let Some(id) = &r.id {
+            if already_queued.insert(id.clone()) {
+                out.delete.push(id.clone());
+            }
+        }
+    }
 }
 
 /// Applies a plan against a zone. Cloudflare's "record already exists"
@@ -396,15 +442,55 @@ mod tests {
     }
 
     #[test]
-    fn does_not_touch_unowned_record_colliding_with_desired() {
-        // A human already has an A record at this name. Reconciler must not
-        // update or delete it; it can only try (and fail, elsewhere) to create.
+    fn does_not_touch_unowned_same_type_record_colliding_with_desired() {
+        // A human already has an A record at this name. Cloudflare allows
+        // multiple A records at the same name, so this isn't a real
+        // conflict; the reconciler must not update or delete it, only try
+        // (and fail, elsewhere) to create the desired one alongside it.
         let want = vec![desired(RecordType::A, "human.example.com", "1.2.3.4")];
         let live_records = vec![live("r1", RecordType::A, "human.example.com", "9.9.9.9")];
         let p = plan(CLUSTER, &want, &live_records);
         assert!(p.update.is_empty());
         assert!(p.delete.is_empty());
         assert_eq!(p.create.len(), 2); // record + tag, will hit "already exists" at apply time
+    }
+
+    /// Cloudflare forbids a CNAME from coexisting with any other record at
+    /// the same name. A CNAME left over from a previous scheme (or made by
+    /// hand) is invisible to the ownership-scoped matching above, so without
+    /// this it would block the new A record forever with error 81053/81054.
+    #[test]
+    fn deletes_unowned_cname_blocking_a_new_a_record() {
+        let want = vec![desired(RecordType::A, "auth.example.com", "1.2.3.4")];
+        let live_records = vec![live("r1", RecordType::CNAME, "auth.example.com", "osny.example.com")];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert_eq!(p.delete, vec!["r1".to_string()]);
+        assert_eq!(p.create.len(), 2); // record + tag
+    }
+
+    /// Same rule, opposite direction: an unowned A record blocking a new
+    /// CNAME must also be cleared.
+    #[test]
+    fn deletes_unowned_a_record_blocking_a_new_cname() {
+        let want = vec![desired(RecordType::CNAME, "auth.example.com", "osny.example.com")];
+        let live_records = vec![live("r1", RecordType::A, "auth.example.com", "1.2.3.4")];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert_eq!(p.delete, vec!["r1".to_string()]);
+    }
+
+    /// A conflicting record must not be queued twice when it's already
+    /// slated for deletion by the ownership-scoped "no longer desired"
+    /// cleanup (e.g. an owned CNAME being replaced by a desired A record).
+    #[test]
+    fn does_not_double_queue_an_owned_conflicting_record_for_deletion() {
+        let key = "CNAME:auth.example.com";
+        let want = vec![desired(RecordType::A, "auth.example.com", "1.2.3.4")];
+        let live_records = vec![
+            live("r1", RecordType::CNAME, "auth.example.com", "osny.example.com"),
+            tag("t1", "auth.example.com", key),
+        ];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert_eq!(p.delete.iter().filter(|id| id.as_str() == "r1").count(), 1, "{p:?}");
     }
 
     /// A non-benign create failure (e.g. a name already claimed by an

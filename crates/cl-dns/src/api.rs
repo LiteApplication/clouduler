@@ -18,7 +18,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 /// say, mail records doesn't fail to parse at all. `list_records`/`plan`
 /// only ever act on the four variants we actually manage; an `Other` record
 /// is never matched by anything we build and so is always left alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RecordType {
     A,
     AAAA,
