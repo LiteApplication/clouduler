@@ -26,7 +26,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub struct Worker {
     pub node_name: String,
     pub cluster: Arc<ClusterNode>,
-    pub cluster_key: ClusterKey,
+    /// Live rather than a snapshot: a node started with no key still gets
+    /// self-update working once one is delivered to it automatically. `Arc`
+    /// because `ClusterKey` is deliberately not `Clone`.
+    pub cluster_key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     pub http: reqwest::Client,
     pub cluster_config: ClusterConfig,
     /// Where this node stages the binary it downloaded, until it installs it
@@ -101,7 +104,8 @@ impl Worker {
         let state = self.cluster.state().await;
         let entry = state.secrets.get(GITHUB_TOKEN_SECRET)?;
         let sealed = Sealed::from_blob(entry.sealed.clone());
-        let plaintext = sealed.open(&self.cluster_key, GITHUB_TOKEN_SECRET).ok()?;
+        let key = self.cluster_key.borrow().clone()?;
+        let plaintext = sealed.open(&key, GITHUB_TOKEN_SECRET).ok()?;
         String::from_utf8(plaintext).ok()
     }
 

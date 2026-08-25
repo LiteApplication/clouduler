@@ -63,14 +63,14 @@ pub struct OidcAuthenticator {
     /// it can be set or rotated from the web ui while the api is already
     /// running. See `crate::routes::oidc`.
     cluster: Arc<ClusterNode>,
-    key: Arc<RwLock<Option<ClusterKey>>>,
+    key: Arc<RwLock<Option<Arc<ClusterKey>>>>,
 }
 
 impl OidcAuthenticator {
     pub fn new(
         settings: OidcSettings,
         cluster: Arc<ClusterNode>,
-        key: Arc<RwLock<Option<ClusterKey>>>,
+        key: Arc<RwLock<Option<Arc<ClusterKey>>>>,
     ) -> Result<Self, ApiError> {
         let http = openidconnect::reqwest::ClientBuilder::new()
             // Discovery and token requests go to a fixed, configured issuer;

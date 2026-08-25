@@ -40,7 +40,7 @@ pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Option<Docker>,
+    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
 ) -> tokio::task::JoinHandle<()> {
     let ctx = Context_ {
         node: node_name.to_string(),
@@ -55,7 +55,10 @@ pub fn start(
 struct Context_ {
     node: String,
     cluster: Arc<ClusterNode>,
-    docker: Option<Docker>,
+    /// A live view rather than a snapshot: a node started before dockerd was
+    /// up, or reconnected later, picks the overlay work back up without a
+    /// restart.
+    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
     boot_cfg: ClusterConfig,
 }
 
@@ -189,7 +192,7 @@ impl Context_ {
     /// eventually will hand that same subnet to a new stack network, which
     /// then fails to come up with a docker pool-overlap error.
     async fn sweep_orphans(&self, netlink: Option<&Overlay>, wanted: &BTreeMap<String, BTreeSet<InstanceId>>) -> Result<()> {
-        let Some(docker) = &self.docker else {
+        let Some(docker) = self.docker.read().await.clone() else {
             return Ok(());
         };
         for name in docker.list_managed_networks(&[crate::egress::OWNER]).await? {
@@ -337,7 +340,7 @@ impl Context_ {
             .await?;
         netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
 
-        let Some(docker) = &self.docker else {
+        let Some(docker) = self.docker.read().await.clone() else {
             return Ok(());
         };
         let stack = overlay.split('_').next().unwrap_or(overlay).to_string();

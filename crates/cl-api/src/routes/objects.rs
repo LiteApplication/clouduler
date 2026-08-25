@@ -292,7 +292,10 @@ async fn post_key(
     }
     let key = ClusterKey::parse(&body.key).map_err(ApiError::BadRequest)?;
     key.save(&state.key_path).map_err(ApiError::internal)?;
-    *key_guard = Some(key);
+    let key = std::sync::Arc::new(key);
+    *key_guard = Some(key.clone());
+    drop(key_guard);
+    let _ = state.key_tx.send(Some(key));
     Ok(StatusCode::OK)
 }
 

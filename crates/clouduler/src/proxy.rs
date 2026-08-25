@@ -49,30 +49,145 @@ const ISSUANCE_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Handles for everything the proxy runs, so shutdown can stop it.
 pub struct Proxy {
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    supervisor: tokio::task::JoinHandle<()>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl Proxy {
-    pub fn shutdown(self) {
+    /// Signal the supervisor to tear every task down and wait for it to
+    /// finish.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(true);
+        let _ = self.supervisor.await;
+    }
+}
+
+/// The parts of the config that decide which proxy tasks run, compared on
+/// every pass so the supervisor only restarts what actually changed instead
+/// of the whole subsystem on any edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Desired {
+    listen: Option<(u16, u16)>,
+    acme: Option<(Vec<String>, String)>,
+    dns: bool,
+}
+
+fn desired_of(cfg: &ClusterConfig) -> Desired {
+    Desired {
+        listen: cfg.proxy.enabled.then_some((cfg.proxy.http_port, cfg.proxy.https_port)),
+        acme: acme_setup(cfg, Path::new("")).map(|a| (a.config.contact_emails, a.config.directory_url)),
+        dns: cfg.cloudflare.is_some(),
+    }
+}
+
+/// Everything one build of one task group produced.
+struct Group {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Group {
+    fn teardown(self) {
         for task in self.tasks {
             task.abort();
         }
     }
 }
 
-pub fn start(cfg: &ClusterConfig, node_name: &str, cluster: &Arc<ClusterNode>, data_dir: &Path) -> Option<Proxy> {
-    if !cfg.proxy.enabled {
-        info!("the reverse proxy is disabled");
-        return None;
-    }
+pub fn start(
+    cfg: &ClusterConfig,
+    cluster: &Arc<ClusterNode>,
+    data_dir: &Path,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+) -> Proxy {
     ensure_crypto_provider();
+
+    let cluster = cluster.clone();
+    let data_dir = data_dir.to_path_buf();
+    let boot_cfg = cfg.clone();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let supervisor = tokio::spawn(async move {
+        let mut cfg = boot_cfg;
+        let mut desired = desired_of(&cfg);
+        let mut listen = build_listen(&desired, &cluster, &config_rx);
+        let mut acme = build_acme(&desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx);
+        let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
+
+        let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                changed = config_rx_changed(&config_rx) => {
+                    if !changed {
+                        continue;
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && *shutdown_rx.borrow() {
+                        if let Some(group) = listen { group.teardown(); }
+                        if let Some(group) = acme { group.teardown(); }
+                        if let Some(group) = dns { group.teardown(); }
+                        return;
+                    }
+                }
+            }
+
+            cfg = (**config_rx.borrow()).clone();
+            let live = desired_of(&cfg);
+            if live == desired {
+                continue;
+            }
+            info!("reverse proxy config changed, restarting the affected tasks");
+
+            if live.listen != desired.listen {
+                if let Some(group) = listen.take() {
+                    group.teardown();
+                }
+                listen = build_listen(&live, &cluster, &config_rx);
+            }
+            if live.acme != desired.acme {
+                if let Some(group) = acme.take() {
+                    group.teardown();
+                }
+                acme = build_acme(&live, &cfg, &data_dir, &cluster, &config_rx, &key_rx);
+            }
+            if live.dns != desired.dns {
+                if let Some(group) = dns.take() {
+                    group.teardown();
+                }
+                dns = build_dns(&live, &cluster, &config_rx, &key_rx);
+            }
+            desired = live;
+        }
+    });
+
+    Proxy { supervisor, shutdown_tx }
+}
+
+/// Awaits the next change on `config_rx`. Takes a fresh clone each call since
+/// `changed()` needs `&mut self` and this only ever has a shared reference —
+/// cheap, a `Receiver` is just a pointer and a generation counter.
+async fn config_rx_changed(config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>) -> bool {
+    let mut rx = config_rx.clone();
+    rx.changed().await.is_ok()
+}
+
+/// The two listeners plus the routing table/certificate reconcile loop.
+/// `None` when the proxy is disabled.
+fn build_listen(
+    desired: &Desired,
+    cluster: &Arc<ClusterNode>,
+    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+) -> Option<Group> {
+    let (http_port, https_port) = desired.listen?;
 
     let routes = Arc::new(RouteTable::default());
     let certs = Arc::new(CertStore::new());
     let server = Arc::new(cl_proxy::ProxyServer::new(routes.clone(), certs.clone()));
     let mut tasks = Vec::new();
 
-    for (port, tls) in [(cfg.proxy.http_port, false), (cfg.proxy.https_port, true)] {
+    for (port, tls) in [(http_port, false), (https_port, true)] {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let server = server.clone();
         tasks.push(tokio::spawn(async move {
@@ -89,37 +204,47 @@ pub fn start(cfg: &ClusterConfig, node_name: &str, cluster: &Arc<ClusterNode>, d
         info!(%addr, tls, "proxy listening");
     }
 
-    tasks.push(tokio::spawn(reconcile_loop(
-        cfg.clone(),
-        cluster.clone(),
-        routes,
-        certs,
-    )));
+    tasks.push(tokio::spawn(reconcile_loop(config_rx.clone(), cluster.clone(), routes, certs)));
 
-    // Loaded once, like the materializer's own key, rather than reopened on
-    // every tick. `None` when there is no cloudflare section at all, so a
-    // cluster that does not use it never touches the key file for this.
-    let key: Option<Arc<ClusterKey>> = cfg
-        .cloudflare
-        .is_some()
-        .then(|| cfg.nodes.get(node_name).and_then(|node| crate::daemon::load_cluster_key(cfg, node)))
-        .flatten()
-        .map(Arc::new);
+    Some(Group { tasks })
+}
 
-    if let Some(acme) = acme_setup(cfg, data_dir) {
-        tasks.push(tokio::spawn(run_acme(acme, cfg.clone(), cluster.clone(), key.clone())));
+/// The certificate issuance/renewal loop. `None` when ACME issuance is
+/// turned off in config, or there is no Cloudflare section to issue against.
+fn build_acme(
+    desired: &Desired,
+    cfg: &ClusterConfig,
+    data_dir: &Path,
+    cluster: &Arc<ClusterNode>,
+    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+) -> Option<Group> {
+    desired.acme.as_ref()?;
+    let acme = acme_setup(cfg, data_dir)?;
+    Some(Group {
+        tasks: vec![tokio::spawn(run_acme(acme, cluster.clone(), config_rx.clone(), key_rx.clone()))],
+    })
+}
+
+/// The Cloudflare DNS record reconcile loop. `None` when there is no
+/// Cloudflare section at all.
+fn build_dns(
+    desired: &Desired,
+    cluster: &Arc<ClusterNode>,
+    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+) -> Option<Group> {
+    if !desired.dns {
+        return None;
     }
-
-    if cfg.cloudflare.is_some() {
-        tasks.push(tokio::spawn(run_dns_reconcile(cfg.clone(), cluster.clone(), key)));
-    }
-
-    Some(Proxy { tasks })
+    Some(Group {
+        tasks: vec![tokio::spawn(run_dns_reconcile(cluster.clone(), config_rx.clone(), key_rx.clone()))],
+    })
 }
 
 /// Rebuild the routing table and the certificate store from replicated state.
 async fn reconcile_loop(
-    cfg: ClusterConfig,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     cluster: Arc<ClusterNode>,
     routes: Arc<RouteTable>,
     certs: Arc<CertStore>,
@@ -129,6 +254,7 @@ async fn reconcile_loop(
 
     loop {
         ticker.tick().await;
+        let cfg = config_rx.borrow().clone();
         let state = cluster.state().await;
 
         let mut built = routes_for(&cfg, &state);
@@ -407,7 +533,12 @@ fn acme_setup(cfg: &ClusterConfig, data_dir: &Path) -> Option<Acme> {
 /// node leads. One loop rather than two, so a certificate is never ordered
 /// twice in a pass by an issuing task and a renewing one disagreeing about
 /// what is stored.
-async fn run_acme(acme: Acme, cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: Option<Arc<ClusterKey>>) {
+async fn run_acme(
+    acme: Acme,
+    cluster: Arc<ClusterNode>,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+) {
     let account = match cl_proxy::load_or_create_account(&acme.config, &acme.credentials).await {
         Ok(account) => account,
         Err(e) => {
@@ -425,6 +556,8 @@ async fn run_acme(acme: Acme, cfg: ClusterConfig, cluster: Arc<ClusterNode>, key
         if !cluster.is_leader() {
             continue;
         }
+        let cfg = config_rx.borrow().clone();
+        let key = key_rx.borrow().clone();
         let Some((cloudflare, zone_names)) =
             cloudflare_setup(&cfg, &cluster, key.as_deref(), "certificate issuance").await
         else {
@@ -526,7 +659,11 @@ const DNS_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// any node's address is a valid way in. Leader only, same reasoning as
 /// certificate issuance: several nodes reconciling at once would race each
 /// other's writes.
-async fn run_dns_reconcile(boot_cfg: ClusterConfig, cluster: Arc<ClusterNode>, key: Option<Arc<ClusterKey>>) {
+async fn run_dns_reconcile(
+    cluster: Arc<ClusterNode>,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+) {
     let mut ticker = tokio::time::interval(DNS_RECONCILE_INTERVAL);
     loop {
         ticker.tick().await;
@@ -534,7 +671,8 @@ async fn run_dns_reconcile(boot_cfg: ClusterConfig, cluster: Arc<ClusterNode>, k
             continue;
         }
         let state = cluster.state().await;
-        let cfg = crate::daemon::live_config(&state, &boot_cfg);
+        let cfg = config_rx.borrow().clone();
+        let key = key_rx.borrow().clone();
         let Some((cf, zone_names)) =
             cloudflare_setup(&cfg, &cluster, key.as_deref(), "dns record publishing").await
         else {
@@ -708,6 +846,60 @@ mod tests {
 
     fn cfg() -> ClusterConfig {
         ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+    }
+
+    /// `desired_of` is what the supervisor diffs on every pass to decide
+    /// which task groups to restart; these are the changes that must (and
+    /// must not) trip that diff.
+    mod desired {
+        use super::*;
+
+        #[test]
+        fn disabling_the_proxy_changes_the_listen_key() {
+            let mut disabled = cfg();
+            disabled.proxy.enabled = false;
+            assert_ne!(desired_of(&cfg()).listen, desired_of(&disabled).listen);
+            assert!(desired_of(&disabled).listen.is_none());
+        }
+
+        #[test]
+        fn changing_a_listen_port_changes_the_listen_key() {
+            let mut edited = cfg();
+            edited.proxy.https_port += 1;
+            assert_ne!(desired_of(&cfg()).listen, desired_of(&edited).listen);
+        }
+
+        #[test]
+        fn an_unrelated_edit_changes_neither_key() {
+            let mut edited = cfg();
+            edited.cluster.name = "renamed".to_string();
+            assert_eq!(desired_of(&cfg()), desired_of(&edited));
+        }
+
+        #[test]
+        fn adding_a_cloudflare_section_flips_the_dns_key_and_offers_acme() {
+            let mut without = cfg();
+            without.cloudflare = None;
+            let before = desired_of(&without);
+            assert!(!before.dns);
+
+            let after = desired_of(&cfg());
+            assert!(cfg().cloudflare.is_some());
+            assert!(after.dns);
+            assert_ne!(before.dns, after.dns);
+        }
+
+        #[test]
+        fn acme_contact_email_changes_the_acme_key() {
+            let mut edited = cfg();
+            edited.proxy.acme.enabled = true;
+            edited.proxy.acme.contact_email = Some("ops@example.com".to_string());
+            let base = desired_of(&edited);
+
+            edited.proxy.acme.contact_email = Some("someone-else@example.com".to_string());
+            let changed = desired_of(&edited);
+            assert_ne!(base.acme, changed.acme);
+        }
     }
 
     /// The routes a stack published, without the dashboard the daemon adds

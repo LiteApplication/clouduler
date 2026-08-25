@@ -37,28 +37,21 @@ const STOP_GRACE: Duration = Duration::from_secs(30);
 
 /// Watch for migrations this node owns and run them.
 ///
-/// Returns `None` when this node implements no drives: it can hold no volume,
-/// so no migration can name it as the source.
+/// Always spawned now, even for a node that implements no drives at boot:
+/// one added to `node.drives` later becomes a usable migration source or
+/// target as soon as the drive subsystem's live registry picks it up,
+/// without a restart. A node with no registry yet simply claims nothing.
 pub fn start(
-    cfg: &ClusterConfig,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Option<Docker>,
-    registry: Option<Arc<DriveRegistry>>,
-) -> Option<JoinHandle<()>> {
-    let (Some(docker), Some(registry)) = (docker, registry) else {
-        return None;
-    };
-
-    let cfg = cfg.clone();
+    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
+) -> JoinHandle<()> {
     let node_name = node_name.to_string();
     let cluster = cluster.clone();
 
-    Some(tokio::spawn(async move {
-        let control = DockerControl {
-            node: node_name.clone(),
-            docker,
-        };
+    tokio::spawn(async move {
         let engine = DeltaEngine::default();
         // A migration outlives many polls, so the loop has to know which ones
         // it already handed off or it would start a second run of each on
@@ -74,6 +67,7 @@ pub fn start(
                 if !running.lock().await.insert(job.instance.clone()) {
                     continue;
                 }
+                let cfg = config_rx.borrow().clone();
                 let Some(target_addr) = target_addr(&cfg, &job.target_node) else {
                     warn!(
                         instance = %job.instance,
@@ -83,6 +77,16 @@ pub fn start(
                     running.lock().await.remove(&job.instance);
                     continue;
                 };
+                // A dockerd that is not connected right now, or a drive
+                // subsystem mid-rebuild, is not a reason to fail the
+                // migration outright: leave it unclaimed and try again on
+                // the next tick, same as a target with no address.
+                let (Some(docker), Some(registry)) = (docker.read().await.clone(), registry.read().await.clone())
+                else {
+                    running.lock().await.remove(&job.instance);
+                    continue;
+                };
+                let control = DockerControl { node: node_name.clone(), docker };
 
                 info!(
                     instance = %job.instance,
@@ -115,7 +119,7 @@ pub fn start(
                 running.lock().await.remove(&migration.instance);
             }
         }
-    }))
+    })
 }
 
 /// One migration this node has to drive.

@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, RwLock};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use tracing::{info, warn};
 
 use crate::auth::oidc::OidcAuthenticator;
 use crate::auth::session::SessionStore;
@@ -47,13 +48,22 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub cluster_config: Arc<RwLock<ClusterConfig>>,
     pub key_path: PathBuf,
-    pub key: Arc<RwLock<Option<ClusterKey>>>,
+    pub key: Arc<RwLock<Option<Arc<ClusterKey>>>>,
+    /// Broadcasts every key this node comes to hold — automatic delivery
+    /// (`key_distribution`) or a manual upload (`routes::objects::post_key`)
+    /// — to the rest of the daemon (materializer, proxy, self-update), which
+    /// hold `key_tx`'s `Receiver` rather than a snapshot loaded once at boot.
+    pub key_tx: tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
     pub sessions: Arc<SessionStore>,
-    pub oidc: Option<Arc<OidcAuthenticator>>,
+    /// Rebuilt live by `spawn_sync_cluster_config` whenever the replicated
+    /// `auth.oidc` section changes, not just resolved once at boot — so
+    /// turning OIDC on, off, or pointing it at a different issuer takes
+    /// effect on every node without a restart, not just the one that
+    /// accepted the edit.
+    pub oidc: Arc<RwLock<Option<Arc<OidcAuthenticator>>>>,
     pub pending_edit: Arc<Mutex<Option<PendingEdit>>>,
     /// Fixed point `config_edit`'s pure clock counts from.
     pub started_at: Instant,
-    pub session_ttl: Duration,
     pub rollback_after: Duration,
     /// Where a self-update artifact this node built or fetched is staged,
     /// waiting for the internal restart route to install it.
@@ -100,7 +110,8 @@ pub struct ApiServerOptions {
     pub config_path: PathBuf,
     pub cluster_config: ClusterConfig,
     pub key_path: PathBuf,
-    pub key: Option<ClusterKey>,
+    pub key: Option<Arc<ClusterKey>>,
+    pub key_tx: tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
     pub tls_cert_pem: Vec<u8>,
     pub tls_key_pem: Vec<u8>,
     pub listen_addr: SocketAddr,
@@ -121,6 +132,10 @@ pub struct ApiServer {
     plain_listen_addr: Option<SocketAddr>,
     tls_cert_pem: Vec<u8>,
     tls_key_pem: Vec<u8>,
+    /// Needed only to poll for a freshly issued certificate for `fqdn`
+    /// after boot; unrelated to anything a request handler touches.
+    cluster: Arc<ClusterNode>,
+    fqdn: String,
 }
 
 /// SHA-256 fingerprint of the leaf certificate in a PEM chain, colon-hex
@@ -145,30 +160,11 @@ fn leaf_fingerprint(chain_pem: &[u8]) -> Result<String, ApiError> {
 
 impl ApiServer {
     pub async fn new(options: ApiServerOptions) -> Result<Self, ApiError> {
-        let session_ttl = options.cluster_config.auth.session_ttl;
         let tls_fingerprint = leaf_fingerprint(&options.tls_cert_pem)?;
+        let fqdn = options.cluster_config.web_fqdn();
         let key = Arc::new(RwLock::new(options.key));
-        let oidc = match &options.cluster_config.auth.oidc {
-            Some(cfg) => {
-                let redirect_url = format!(
-                    "https://{}/auth/oidc/callback",
-                    options.cluster_config.web_fqdn()
-                );
-                Some(Arc::new(OidcAuthenticator::new(
-                    crate::auth::oidc::OidcSettings {
-                        issuer: cfg.issuer.clone(),
-                        client_id: cfg.client_id.clone(),
-                        redirect_url,
-                        scopes: cfg.scopes.clone(),
-                        admin_claim: cfg.admin_claim.clone(),
-                        admin_value: cfg.admin_value.clone(),
-                    },
-                    options.cluster.clone(),
-                    key.clone(),
-                )?))
-            }
-            None => None,
-        };
+        let oidc = build_oidc(&options.cluster_config, &options.cluster, &key)?;
+        let cluster = options.cluster.clone();
 
         let node_keypair = options.node_keypair;
         let state = AppState {
@@ -179,11 +175,11 @@ impl ApiServer {
             cluster_config: Arc::new(RwLock::new(options.cluster_config)),
             key_path: options.key_path,
             key,
+            key_tx: options.key_tx,
             sessions: Arc::new(SessionStore::new()),
-            oidc,
+            oidc: Arc::new(RwLock::new(oidc)),
             pending_edit: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
-            session_ttl,
             rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
             self_update_artifact_path: options.self_update_artifact_path,
             shutdown: options.shutdown,
@@ -204,15 +200,140 @@ impl ApiServer {
         routes::key_distribution::spawn_wrap_for_new_nodes(state.clone());
         routes::key_distribution::spawn_unwrap_own_key(state.clone(), state.node_name.clone(), node_keypair);
 
+        // Keeps `state.cluster_config` (and, when it changes, `state.oidc`)
+        // in step with the replicated config on every node, not just the one
+        // whose own `PUT /api/config` handler ran. Without this, a node that
+        // only ever learns of a config edit through raft replication would
+        // serve a stale `session_ttl`/OIDC setup and a stale leader address
+        // forever.
+        spawn_sync_cluster_config(state.clone());
+
         Ok(Self {
             router: build_router(state),
             listen_addr: options.listen_addr,
             plain_listen_addr: options.plain_listen_addr,
             tls_cert_pem: options.tls_cert_pem,
             tls_key_pem: options.tls_key_pem,
+            cluster,
+            fqdn,
         })
     }
+}
 
+/// Build the OIDC authenticator this config's `auth.oidc` section describes,
+/// or `None` if it has none. Used both at boot and by
+/// `spawn_sync_cluster_config` when a live config edit changes the section,
+/// so login stays in step with the replicated config on every node, not just
+/// the one that accepted the edit.
+fn build_oidc(
+    cfg: &ClusterConfig,
+    cluster: &Arc<ClusterNode>,
+    key: &Arc<RwLock<Option<Arc<ClusterKey>>>>,
+) -> Result<Option<Arc<OidcAuthenticator>>, ApiError> {
+    let Some(oidc_cfg) = &cfg.auth.oidc else {
+        return Ok(None);
+    };
+    let redirect_url = format!("https://{}/auth/oidc/callback", cfg.web_fqdn());
+    Ok(Some(Arc::new(OidcAuthenticator::new(
+        crate::auth::oidc::OidcSettings {
+            issuer: oidc_cfg.issuer.clone(),
+            client_id: oidc_cfg.client_id.clone(),
+            redirect_url,
+            scopes: oidc_cfg.scopes.clone(),
+            admin_claim: oidc_cfg.admin_claim.clone(),
+            admin_value: oidc_cfg.admin_value.clone(),
+        },
+        cluster.clone(),
+        key.clone(),
+    )?)))
+}
+
+/// How often the replicated cluster config is polled to keep `state.cluster_config`
+/// live. Same order of magnitude as the daemon's own `watch_cluster_config`.
+const CONFIG_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Keep `state.cluster_config` matching the replicated config on every node,
+/// not just the one whose own `PUT /api/config` handler already updates it
+/// in-process for immediate feedback (`routes::config::apply_config`). Also
+/// rebuilds `state.oidc` whenever the `auth.oidc` section actually changes,
+/// so enabling, disabling or repointing OIDC login takes effect everywhere
+/// without a restart.
+fn spawn_sync_cluster_config(state: AppState) {
+    tokio::spawn(async move {
+        let mut applied_generation = 0u64;
+        let mut ticker = tokio::time::interval(CONFIG_SYNC_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let Some(entry) = state.cluster.state().await.cluster_config else {
+                continue;
+            };
+            if entry.generation == applied_generation {
+                continue;
+            }
+            let parsed = match ClusterConfig::parse(&entry.yaml) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    warn!(error = %e, "replicated cluster config failed to parse, not applying it here");
+                    continue;
+                }
+            };
+            applied_generation = entry.generation;
+
+            let oidc_changed = state.cluster_config.read().await.auth.oidc != parsed.auth.oidc;
+            *state.cluster_config.write().await = parsed.clone();
+
+            if oidc_changed {
+                match build_oidc(&parsed, &state.cluster, &state.key) {
+                    Ok(rebuilt) => *state.oidc.write().await = rebuilt,
+                    Err(e) => warn!(error = %e, "could not rebuild the oidc authenticator from the updated config"),
+                }
+            }
+        }
+    });
+}
+
+/// How often to check replicated state for a certificate change. Same order
+/// of magnitude as `crate::proxy::RECONCILE_INTERVAL`, which is the fastest
+/// this could possibly change.
+const CERT_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Poll replicated state for `fqdn`'s certificate and, whenever the stored
+/// bytes differ from what's currently served, reload them into the already
+/// bound TLS listener — the same `RustlsConfig::reload_from_pem` mechanism
+/// `cl_proxy::CertStore` already uses for every other hostname the reverse
+/// proxy terminates, applied here for the web ui's own listener for the
+/// first time. Without this, a self-signed certificate issued at boot (or
+/// one nearing expiry) never gets replaced until the daemon restarts, even
+/// after ACME issues a real one.
+async fn reload_certificate_on_change(
+    cluster: Arc<ClusterNode>,
+    fqdn: String,
+    config: axum_server::tls_rustls::RustlsConfig,
+) {
+    let mut served: Option<Vec<u8>> = None;
+    let mut ticker = tokio::time::interval(CERT_RELOAD_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let Some(stored) = cluster.state().await.certificates.get(&fqdn).cloned() else {
+            continue;
+        };
+        if served.as_deref() == Some(stored.chain_pem.as_bytes()) {
+            continue;
+        }
+        match config
+            .reload_from_pem(stored.chain_pem.clone().into_bytes(), stored.key_pem.clone().into_bytes())
+            .await
+        {
+            Ok(()) => {
+                info!(%fqdn, "reloaded the web ui's tls certificate");
+                served = Some(stored.chain_pem.into_bytes());
+            }
+            Err(e) => warn!(%fqdn, error = %e, "could not reload the web ui's tls certificate"),
+        }
+    }
+}
+
+impl ApiServer {
     /// Serve until one of the listeners stops.
     ///
     /// The TLS listener is the one an operator reaches directly and is never
@@ -224,6 +345,17 @@ impl ApiServer {
         let config = axum_server::tls_rustls::RustlsConfig::from_pem(self.tls_cert_pem, self.tls_key_pem)
             .await
             .map_err(|e| ApiError::Internal(format!("loading tls config: {e}")))?;
+
+        // The self signed cert loaded above is what a brand new cluster
+        // starts with; once ACME issues a real one for this hostname
+        // (`crate::proxy`'s `run_acme`, driven from `clouduler`), reload it
+        // into the already-bound listener instead of leaving the stale one
+        // in place until the next restart.
+        tokio::spawn(reload_certificate_on_change(
+            self.cluster.clone(),
+            self.fqdn.clone(),
+            config.clone(),
+        ));
 
         let tls = axum_server::bind_rustls(self.listen_addr, config)
             .serve(self.router.clone().into_make_service());

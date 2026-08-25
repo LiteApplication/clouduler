@@ -62,8 +62,9 @@ async fn login_with_key(
         })
         .ok_or_else(|| ApiError::Unauthenticated("invalid api key".into()))?;
 
-    let session_id = state.sessions.create(identity.clone(), state.session_ttl).await;
-    Ok((jar.add(session_cookie(session_id, state.session_ttl)), Json(identity)))
+    let session_ttl = state.cluster_config.read().await.auth.session_ttl;
+    let session_id = state.sessions.create(identity.clone(), session_ttl).await;
+    Ok((jar.add(session_cookie(session_id, session_ttl)), Json(identity)))
 }
 
 /// The one place the session cookie's flags are decided, so the api key and
@@ -80,8 +81,8 @@ fn session_cookie(session_id: String, ttl: std::time::Duration) -> Cookie<'stati
 }
 
 async fn login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
-    let oidc = state
-        .oidc
+    let oidc_guard = state.oidc.read().await;
+    let oidc = oidc_guard
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("oidc is not configured".into()))?;
     let url = oidc.start_login().await?;
@@ -99,12 +100,14 @@ async fn callback(
     Query(params): Query<CallbackParams>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
-    let oidc = state
-        .oidc
+    let oidc_guard = state.oidc.read().await;
+    let oidc = oidc_guard
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("oidc is not configured".into()))?;
     let identity = oidc.finish_login(params.code, params.state).await?;
-    let session_id = state.sessions.create(identity, state.session_ttl).await;
-    let cookie = session_cookie(session_id, state.session_ttl);
+    drop(oidc_guard);
+    let session_ttl = state.cluster_config.read().await.auth.session_ttl;
+    let session_id = state.sessions.create(identity, session_ttl).await;
+    let cookie = session_cookie(session_id, session_ttl);
     Ok((jar.add(cookie), Redirect::to("/")))
 }

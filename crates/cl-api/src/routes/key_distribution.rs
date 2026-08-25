@@ -139,7 +139,9 @@ pub fn spawn_unwrap_own_key(state: AppState, node_name: String, keypair: Option<
                 continue;
             }
             info!(fingerprint = %cluster_key.fingerprint(), "received the cluster key automatically");
-            *state.key.write().await = Some(cluster_key);
+            let cluster_key = std::sync::Arc::new(cluster_key);
+            *state.key.write().await = Some(cluster_key.clone());
+            let _ = state.key_tx.send(Some(cluster_key));
             return;
         }
     });

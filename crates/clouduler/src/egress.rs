@@ -12,13 +12,10 @@
 //!
 //! The reconcile loop re-reads the cluster config from raft every tick
 //! (`RECONCILE_INTERVAL`) instead of working off the snapshot the daemon
-//! booted with, unlike most of this daemon's other subsystems (`overlay`,
-//! the scheduler's network lists) which still need a restart to notice a
-//! config change. That asymmetry exists because an egress network an
-//! operator just added is otherwise invisible until someone thinks to
-//! restart the node that's supposed to implement it — a bridge nothing is
-//! forwarding through yet has no cost to bringing up a tick late, so there's
-//! no reason to make that operator remember the restart.
+//! booted with, so an egress network an operator just added comes up on this
+//! node's next tick rather than needing a restart — a bridge nothing is
+//! forwarding through yet has no cost to bringing up a tick late. See
+//! `docs/live-config.md` for the rest of what applies live and what doesn't.
 //!
 //! A wireguard-kind network is an egress network whose interface clouduler
 //! itself creates and configures, from a config imported through the api and
@@ -129,14 +126,14 @@ pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Option<Docker>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let docker = docker?;
+    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+) -> tokio::task::JoinHandle<()> {
     let cluster = cluster.clone();
     let node_name = node_name.to_string();
     let boot_cfg = cfg.clone();
 
-    Some(tokio::spawn(async move {
+    tokio::spawn(async move {
         // Netlink needs CAP_NET_ADMIN, same requirement as the overlay.
         let netlink = match rtnetlink::new_connection() {
             Ok((connection, handle, _)) => {
@@ -151,27 +148,28 @@ pub fn start(
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         let mut cfg = boot_cfg;
-        // Loaded lazily the first tick a wireguard network shows up, then
-        // kept: the key itself never changes for the life of the process,
-        // even as which networks need it comes and goes with the config.
-        let mut key: Option<ClusterKey> = None;
         loop {
             ticker.tick().await;
             cfg = live_config(&cluster, &cfg).await;
+
+            let Some(docker) = docker.read().await.clone() else {
+                continue;
+            };
 
             let interfaces = interfaces_of(&cfg, &node_name);
             if interfaces.is_empty() {
                 continue;
             }
-            if key.is_none() && interfaces.values().any(|(kind, _)| *kind == NetworkKind::Wireguard) {
-                key = cfg.nodes.get(&node_name).and_then(|node| crate::daemon::load_cluster_key(&cfg, node));
-            }
+            // Read fresh every pass rather than cached: a node started with
+            // no key still brings wireguard tunnels up once one is delivered
+            // to it, without a restart.
+            let key = key_rx.borrow().clone();
             let internal_addr = cfg.nodes.get(&node_name).and_then(|node| node.ip_on(cfg.internal_network().0));
 
             for (network, (kind, addr)) in &interfaces {
                 let iface = &addr.interface;
                 if *kind == NetworkKind::Wireguard {
-                    if let Err(e) = ensure_tunnel(&cluster, key.as_ref(), &node_name, network, iface).await {
+                    if let Err(e) = ensure_tunnel(&cluster, key.as_deref(), &node_name, network, iface).await {
                         warn!(network = %network, iface = %iface, error = %e, "cannot bring up the wireguard tunnel");
                         continue;
                     }
@@ -196,7 +194,7 @@ pub fn start(
                 }
             }
         }
-    }))
+    })
 }
 
 /// Open this node's sealed config for `network` and bring the tunnel

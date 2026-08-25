@@ -59,7 +59,12 @@ pub struct Orchestrator {
     pub cluster: Arc<ClusterNode>,
     pub http: reqwest::Client,
     pub cluster_config: cl_config::ClusterConfig,
-    pub cluster_key: ClusterKey,
+    /// Live rather than a snapshot: a node started with no key still gets
+    /// self-update working once one is delivered to it automatically. `Arc`
+    /// because `ClusterKey` is deliberately not `Clone`, and this needs to be
+    /// held across an `.await` (the restart request), which a `watch::Ref`
+    /// guard cannot safely do.
+    pub cluster_key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
 }
 
 impl Orchestrator {
@@ -160,7 +165,8 @@ impl Orchestrator {
         let state = self.cluster.state().await;
         let entry = state.secrets.get(GITHUB_TOKEN_SECRET)?;
         let sealed = Sealed::from_blob(entry.sealed.clone());
-        let plaintext = sealed.open(&self.cluster_key, GITHUB_TOKEN_SECRET).ok()?;
+        let key = self.cluster_key.borrow().clone()?;
+        let plaintext = sealed.open(&key, GITHUB_TOKEN_SECRET).ok()?;
         String::from_utf8(plaintext).ok()
     }
 
@@ -204,7 +210,11 @@ impl Orchestrator {
             run.fail(format!("no address on record for {name}"), now());
             return;
         };
-        match internal_client::trigger_restart(&self.http, &base_url, &self.cluster_key).await {
+        let Some(key) = self.cluster_key.borrow().clone() else {
+            run.fail("this node has no cluster key to sign the restart request with", now());
+            return;
+        };
+        match internal_client::trigger_restart(&self.http, &base_url, &key).await {
             Ok(()) => {
                 run.per_node.insert(name.to_string(), NodePhase::Restarting);
                 run.restart_started_at = Some(now());

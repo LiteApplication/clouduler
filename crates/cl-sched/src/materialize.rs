@@ -16,6 +16,8 @@ use cl_config::ObjectRef;
 use cl_docker::BindMount;
 use cl_raft::ids::InstanceId;
 use cl_raft::state::ClusterState;
+use std::sync::Arc;
+
 use cl_secret::{ClusterKey, Sealed};
 
 use crate::error::{Result, SchedError};
@@ -58,13 +60,17 @@ pub struct Prepared {
 /// Writes objects out for one instance.
 pub struct Materializer {
     root: PathBuf,
-    key: Option<ClusterKey>,
+    /// A live view of the cluster key rather than a snapshot: a node started
+    /// with none still gets secrets materialized once one is delivered to it
+    /// automatically, without a restart. `borrow()` is synchronous and cheap,
+    /// so this stays a plain field read from `prepare`/`has_key`.
+    key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
 }
 
 impl Materializer {
-    /// `data_dir` is this node's data directory. `key` is the cluster key, if
-    /// this node holds one; without it, secrets cannot be materialized.
-    pub fn new(data_dir: &Path, key: Option<ClusterKey>) -> Self {
+    /// `data_dir` is this node's data directory. `key` tracks the cluster
+    /// key live; without one, secrets cannot be materialized.
+    pub fn new(data_dir: &Path, key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>) -> Self {
         Self {
             root: data_dir.join(OBJECT_DIR),
             key,
@@ -72,7 +78,7 @@ impl Materializer {
     }
 
     pub fn has_key(&self) -> bool {
-        self.key.is_some()
+        self.key.borrow().is_some()
     }
 
     /// Directory holding one instance's objects. Per instance rather than
@@ -130,7 +136,8 @@ impl Materializer {
 
             // A node without the key holds only ciphertext, so it must refuse
             // to start the container rather than mount something unusable.
-            let key = self.key.as_ref().ok_or_else(|| SchedError::NoSecretKey {
+            let key_guard = self.key.borrow();
+            let key = key_guard.as_ref().ok_or_else(|| SchedError::NoSecretKey {
                 name: reference.source.clone(),
                 instance: instance.to_string(),
             })?;
@@ -149,6 +156,7 @@ impl Materializer {
                     name: reference.source.clone(),
                     reason: e.to_string(),
                 })?;
+            drop(key_guard);
 
             if let Some(var) = &reference.env {
                 // Never touches disk: it goes straight into the container's
@@ -318,7 +326,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let out = m
             .prepare(
                 &state,
@@ -362,7 +370,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), None);
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
         assert!(!m.has_key());
         let err = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
@@ -376,7 +384,7 @@ mod tests {
         let state = state_with_objects(&ClusterKey::generate());
 
         // A different key: say so plainly rather than reporting corruption.
-        let m = Materializer::new(dir.path(), Some(ClusterKey::generate()));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::generate()))).1);
         let err = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .unwrap_err();
@@ -386,7 +394,7 @@ mod tests {
     #[test]
     fn a_missing_object_names_itself() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let m = Materializer::new(dir.path(), None);
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
         let err = m
             .prepare(
                 &ClusterState::default(),
@@ -406,7 +414,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
@@ -433,7 +441,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let out = m
             .prepare(
                 &state,
@@ -467,7 +475,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
@@ -485,7 +493,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         m.prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
         let other = InstanceId::new("site", "web", 1);
@@ -505,7 +513,7 @@ mod tests {
         let key = ClusterKey::generate();
         let mut state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let first = m
             .prepare(&state, &instance(), &[ObjectRef::new("nginx_conf")], &[])
             .expect("prepare");
@@ -533,7 +541,7 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let out = m
             .prepare(
                 &state,
@@ -567,7 +575,7 @@ mod tests {
             owner: None,
         });
 
-        let m = Materializer::new(dir.path(), Some(ClusterKey::parse(&key.encode()).expect("key")));
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
         let err = m
             .prepare(
                 &state,

@@ -56,9 +56,22 @@ pub async fn run(
 
     bail_if_removed(&cfg, node, &node_name, &data_dir).await?;
 
-    let key = load_cluster_key(&cfg, node);
+    // `ClusterKey` is deliberately not `Clone` (see its doc comment), so it is
+    // wrapped in an `Arc` the moment it is loaded: every subsystem that needs
+    // it shares the one allocation instead of each holding its own copy.
+    let key = load_cluster_key(&cfg, node).map(Arc::new);
     let node_keypair = load_node_keypair(&cfg);
     let node_pubkey = node_keypair.as_ref().map(cl_secret::NodeKeypair::public_key_encoded);
+
+    // Broadcasts the cluster config and cluster key to every subsystem that
+    // needs a cheap, always-current read rather than a snapshot frozen at
+    // boot. `config_tx` is fed by `watch_cluster_config` on every generation
+    // bump it already polls for; `key_tx` is fed by `cl-api`'s existing
+    // in-process key delivery (`spawn_unwrap_own_key`, the manual upload
+    // route), so a node that starts with no key still picks one up live once
+    // another node delivers it.
+    let (config_tx, config_rx) = tokio::sync::watch::channel(Arc::new(cfg.clone()));
+    let (key_tx, key_rx) = tokio::sync::watch::channel(key.clone());
 
     let cluster = ClusterNode::start(Options {
         name: node_name.clone(),
@@ -118,107 +131,63 @@ pub async fn run(
         cluster: &cluster,
         data_dir: &data_dir,
         docker: docker.clone(),
+        key: key.clone(),
+        key_tx,
         shutdown: shutdown_tx,
         http: internal_http.clone(),
         node_keypair,
     })
     .await;
 
-    let drives = match crate::drives::start(&cfg, node, &node_name, &cluster) {
-        Ok(drives) => Some(drives),
-        Err(e) => {
-            // A node whose drives will not start still votes and still runs
-            // anything that needs no volume, so this is not fatal.
-            warn!(error = %e, "drive subsystem did not start");
-            None
-        }
-    };
+    let drives = crate::drives::start(&cfg, &node_name, &cluster, config_rx.clone());
 
     // Containers resolve each other through this, so it comes up alongside the
     // overlay rather than waiting for anything to be scheduled.
     let internal_dns = crate::internal_dns::start(&cfg, &cluster);
     let exposed = crate::expose::start(&cluster);
-    let proxy = crate::proxy::start(&cfg, &node_name, &cluster, &data_dir);
+    let proxy = crate::proxy::start(&cfg, &cluster, &data_dir, config_rx.clone(), key_rx.clone());
 
     // Worth waiting for: on a node that has just booted, dockerd is often a
     // second or two behind us, and a node that gave up on docker for the life
     // of the process would vote but run nothing until someone restarted it.
-    let connected = connect_docker().await;
-    *docker.write().await = connected.clone();
+    *docker.write().await = connect_docker().await;
+    // Keeps retrying afterwards: a node whose dockerd was not up yet during
+    // the wait above, or whose dockerd is later bounced independently of this
+    // process, gets a working `Docker` handle again without a restart. Every
+    // subsystem below holds the same `Arc`, so this is the one place that
+    // needs to notice.
+    let docker_reconnect = tokio::spawn(run_docker_reconnect(docker.clone()));
 
-    let scheduler = match connected.clone() {
-        Some(docker) => {
-            let materializer = Materializer::new(&data_dir, key);
-            // A wireguard network attaches a container exactly like an
-            // egress one because its interface is just clouduler-managed instead
-            // of admin-managed, so it counts here too.
-            let egress_networks = cfg
-                .networks
-                .iter()
-                .filter(|(_, net)| {
-                    matches!(net.kind, cl_config::NetworkKind::Egress | cl_config::NetworkKind::Wireguard)
-                })
-                .map(|(name, _)| name.clone())
-                .collect();
-            // Names every network whose reachability from outside depends on
-            // a specific node, whether public (its own router) or wireguard (its
-            // own tunnel's far end forwarding a port back, e.g. a VPN
-            // provider's port forwarding feature), so a raw
-            // `x-clouduler.expose` port on one only ever schedules onto a
-            // node that actually has it open (`NodeState::open_ports`).
-            let port_gated_networks = cfg
-                .networks
-                .iter()
-                .filter(|(_, net)| {
-                    matches!(net.kind, cl_config::NetworkKind::Public | cl_config::NetworkKind::Wireguard)
-                })
-                .map(|(name, _)| name.clone())
-                .collect();
-            let scheduler = Scheduler::new(
-                node_name.clone(),
-                cluster.clone(),
-                docker,
-                materializer,
-            )
-            .with_zone(cl_net::dns::zone_origin(&cfg))
-            .with_egress_networks(egress_networks)
-            .with_port_gated_networks(port_gated_networks);
-            let gate = fenced.clone();
-            Some(tokio::spawn(
-                scheduler.run(move || gate.load(Ordering::Relaxed)),
-            ))
-        }
-        None => {
-            // A manager with no docker is still useful: it votes, holds state
-            // and serves the ui. It just runs nothing.
-            warn!("no docker daemon, this node will not run containers");
-            None
-        }
-    };
+    let materializer = Materializer::new(&data_dir, key_rx.clone());
+    let scheduler = Scheduler::new(node_name.clone(), cluster.clone(), docker.clone(), materializer, cfg.clone())
+        .with_zone(cl_net::dns::zone_origin(&cfg));
+    let gate = fenced.clone();
+    let scheduler = tokio::spawn(scheduler.run(move || gate.load(Ordering::Relaxed)));
 
     // Built before the scheduler needs it, but idempotent and on a loop, so
     // ordering against a stack deploy does not matter.
-    let overlay = crate::overlay::start(&cfg, &node_name, &cluster, connected.clone());
-    let egress = crate::egress::start(&cfg, &node_name, &cluster, connected.clone());
+    let overlay = crate::overlay::start(&cfg, &node_name, &cluster, docker.clone());
+    let egress = crate::egress::start(&cfg, &node_name, &cluster, docker.clone(), key_rx.clone());
 
-    let self_update = start_self_update(&cfg, &node_name, &cluster, &data_dir, internal_http.clone());
+    let self_update = start_self_update(&cfg, &node_name, &cluster, &data_dir, internal_http.clone(), key_rx.clone());
 
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
     // registry to find the volume on disk, so a node missing either runs no
     // migrations, which is correct: it can hold no volume to move.
     let migrations = crate::migration::start(
-        &cfg,
+        config_rx.clone(),
         &node_name,
         &cluster,
-        connected,
-        drives.as_ref().and_then(crate::drives::Drives::registry),
+        docker.clone(),
+        drives.registry(),
     );
 
     let config_writer = tokio::spawn(watch_cluster_config(
         cluster.clone(),
         config_path.clone(),
         failover.probe_interval,
+        config_tx,
     ));
 
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone(), failover.probe_interval));
@@ -236,9 +205,8 @@ pub async fn run(
     config_writer.abort();
     detector.abort();
     fencing.abort();
-    if let Some(scheduler) = scheduler {
-        scheduler.abort();
-    }
+    docker_reconnect.abort();
+    scheduler.abort();
     if let Some((orchestrator, worker)) = self_update {
         orchestrator.abort();
         worker.abort();
@@ -246,25 +214,17 @@ pub async fn run(
     if let Some(api) = api {
         api.abort();
     }
-    if let Some(migrations) = migrations {
-        migrations.abort();
-    }
+    migrations.abort();
     overlay.abort();
-    if let Some(egress) = egress {
-        egress.abort();
-    }
+    egress.abort();
     if let Some(internal_dns) = internal_dns {
         internal_dns.abort();
     }
     exposed.abort();
-    if let Some(proxy) = proxy {
-        proxy.shutdown();
-    }
+    proxy.shutdown().await;
     // Before the raft shutdown, so the mounts are gone while the runtime that
     // serves their requests is still alive.
-    if let Some(drives) = drives {
-        drives.shutdown();
-    }
+    drives.shutdown().await;
     cluster.shutdown().await?;
     Ok(())
 }
@@ -282,6 +242,8 @@ struct StartApiArgs<'a> {
     cluster: &'a Arc<ClusterNode>,
     data_dir: &'a Path,
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
+    key: Option<Arc<ClusterKey>>,
+    key_tx: tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
     shutdown: tokio::sync::watch::Sender<()>,
     http: reqwest::Client,
     node_keypair: Option<cl_secret::NodeKeypair>,
@@ -290,12 +252,14 @@ struct StartApiArgs<'a> {
 async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>> {
     let StartApiArgs {
         cfg,
-        node,
+        node: _node,
         node_name,
         config_path,
         cluster,
         data_dir,
         docker,
+        key,
+        key_tx,
         shutdown,
         http,
         node_keypair,
@@ -332,7 +296,8 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         config_path: config_path.to_path_buf(),
         cluster_config: cfg.clone(),
         key_path: cfg.secrets.key_file.clone(),
-        key: load_cluster_key(cfg, node),
+        key,
+        key_tx,
         tls_cert_pem: cert_pem.into_bytes(),
         tls_key_pem: key_pem.into_bytes(),
         listen_addr,
@@ -366,21 +331,21 @@ fn self_update_artifact_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Wire up the leader-gated orchestrator and the per-node worker for
-/// GitHub-release-based self-update, alongside the scheduler. Both need a
-/// cluster key (to unseal the optional GitHub token and to sign internal
-/// node-to-node calls), so a node without one runs neither. Unlike the old
-/// build pipeline this needs no docker connection: downloading a prebuilt
-/// binary and swapping it in are both plain filesystem operations.
+/// GitHub-release-based self-update, alongside the scheduler. Both hold a
+/// live `key_rx` rather than a key loaded once: a node started with no
+/// cluster key still gets self-update working once one is delivered to it,
+/// without a restart. Unlike the old build pipeline this needs no docker
+/// connection: downloading a prebuilt binary and swapping it in are both
+/// plain filesystem operations.
 fn start_self_update(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
     data_dir: &Path,
     http: reqwest::Client,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
 ) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
-    let node = cfg.node(node_name)?;
-    let orchestrator_key = load_cluster_key(cfg, node)?;
-    let worker_key = load_cluster_key(cfg, node)?;
+    cfg.node(node_name)?;
 
     let artifact_path = self_update_artifact_path(data_dir);
     if let Some(parent) = artifact_path.parent() {
@@ -391,12 +356,12 @@ fn start_self_update(
         cluster: cluster.clone(),
         http: http.clone(),
         cluster_config: cfg.clone(),
-        cluster_key: orchestrator_key,
+        cluster_key: key_rx.clone(),
     };
     let worker = cl_update::worker::Worker {
         node_name: node_name.to_string(),
         cluster: cluster.clone(),
-        cluster_key: worker_key,
+        cluster_key: key_rx,
         http,
         cluster_config: cfg.clone(),
         artifact_path,
@@ -406,6 +371,42 @@ fn start_self_update(
         tokio::spawn(orchestrator.run()),
         tokio::spawn(worker.run()),
     ))
+}
+
+/// Keep `docker` pointed at a live client for as long as the process runs.
+///
+/// The initial connect in `run` waits `DOCKER_WAIT` and gives up; this picks
+/// up from there and keeps trying, so a node whose dockerd was not up yet at
+/// boot (or whose dockerd is later restarted on its own) gets a working
+/// client again without restarting the daemon. bollard's client normally
+/// reconnects its own socket transparently per call once it has one, so the
+/// steady-state cost here is just a cheap ping.
+async fn run_docker_reconnect(docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>) {
+    const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+    let mut ticker = tokio::time::interval(RETRY_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let alive = match docker.read().await.as_ref() {
+            Some(client) => client.ping().await.is_ok(),
+            None => false,
+        };
+        if alive {
+            continue;
+        }
+        match cl_docker::Docker::connect() {
+            Ok(client) => match client.ping().await {
+                Ok(()) => {
+                    let had_one = docker.read().await.is_some();
+                    *docker.write().await = Some(client);
+                    if !had_one {
+                        info!("docker connected");
+                    }
+                }
+                Err(_) => *docker.write().await = None,
+            },
+            Err(_) => *docker.write().await = None,
+        }
+    }
 }
 
 /// Connect to docker, waiting for it to come up.
@@ -523,21 +524,25 @@ async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig, fenced: 
 }
 
 /// Write the replicated cluster config to this node's config file whenever it
-/// changes.
+/// changes, and broadcast the parsed config to every live subsystem through
+/// `config_tx`.
 ///
 /// This is what makes an edit in the web ui reach every node: the api submits
 /// it through raft, and each daemon lands its own copy here. A node that was
 /// down during the edit picks it up on its next tick after rejoining, rather
 /// than coming back with a stale file.
 ///
-/// Running subsystems are not reconfigured in place, so the file is ahead of
-/// the process until the daemon restarts. That is deliberate: rebuilding the
-/// overlay or the raft membership under a running cluster from a config diff
-/// is not something to do behind the operator's back.
+/// Most of what a config edit can change now applies live, through
+/// `config_tx` (see `docs/live-config.md`) — the file write remains so a
+/// restarted daemon boots from the config the cluster last agreed on, not a
+/// possibly-reverted local copy. What still needs a restart is raft's own
+/// listen address, data dir and cluster identity: rebuilding raft membership
+/// or transport under a running cluster is not something to do unattended.
 async fn watch_cluster_config(
     cluster: Arc<ClusterNode>,
     config_path: PathBuf,
     interval: std::time::Duration,
+    config_tx: tokio::sync::watch::Sender<Arc<ClusterConfig>>,
 ) {
     // Whatever is on disk right now is taken as already applied, so a restart
     // does not rewrite an identical file and log a change that did not happen.
@@ -553,6 +558,13 @@ async fn watch_cluster_config(
             continue;
         }
 
+        match ClusterConfig::parse(&entry.yaml) {
+            Ok(parsed) => {
+                let _ = config_tx.send(Arc::new(parsed));
+            }
+            Err(e) => warn!(error = %e, "replicated cluster config failed to parse, not broadcasting it"),
+        }
+
         let current = std::fs::read_to_string(&config_path).unwrap_or_default();
         if current == entry.yaml {
             written = entry.generation;
@@ -565,7 +577,7 @@ async fn watch_cluster_config(
                 info!(
                     generation = entry.generation,
                     path = %config_path.display(),
-                    "cluster config updated, restart the daemon to apply it"
+                    "cluster config updated"
                 );
             }
             Err(e) => warn!(error = %e, path = %config_path.display(), "cannot write the config file"),

@@ -17,6 +17,17 @@
 //!
 //! A node implementing nothing starts none of it and that is a normal setup,
 //! not a degraded one.
+//!
+//! The whole subsystem is supervised: `start` spawns a task that rebuilds it
+//! (tearing down every task and unmounting, then running the same build this
+//! module always has) whenever this node's drive topology — which drives it
+//! implements, and any served drive's `served_by` list — actually changes in
+//! the live config. A drive's `sync_interval` does not trigger a rebuild; it
+//! is read live by `DriveIntervals` on every sync pass instead, since that is
+//! a far more common edit than adding or removing a whole drive and does not
+//! need anything torn down. Adding a drive, or changing who serves one, both
+//! now take effect without a restart; removing a drive never deletes the
+//! directory it backed, only stops mounting/serving/transporting it.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -31,29 +42,78 @@ use cl_drive::{
 };
 use cl_raft::ids::VolumeId;
 use cl_raft::node::ClusterNode;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-/// Everything the drive subsystem started, kept so shutdown can undo it.
-///
-/// The mounts matter most: a FUSE mount outlives the process that made it, so
-/// leaving one behind means the next daemon start finds a mountpoint whose
-/// server is gone and every read on it hangs.
+/// This node's drive-relevant slice of config: which drives it backs, and
+/// (for a served drive) who else may serve it. Two configs that differ only
+/// in `sync_interval` or in a part of the cluster this node has nothing to
+/// do with compare equal, so the supervisor only rebuilds when something
+/// that actually shaped the running tasks changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Topology {
+    drives: BTreeMap<String, std::path::PathBuf>,
+    served_by: BTreeMap<String, Vec<String>>,
+}
+
+fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
+    let drives = cfg.node(node_name).map(|n| n.drives.clone()).unwrap_or_default();
+    let served_by = cfg
+        .drives
+        .iter()
+        .filter(|(_, d)| d.is_served())
+        .map(|(name, d)| (name.clone(), d.served_by.clone()))
+        .collect();
+    Topology { drives, served_by }
+}
+
+/// How often the supervisor checks the live config for a topology change, on
+/// top of reacting to `config_rx` directly. Matches the order of magnitude of
+/// the rest of this daemon's reconcile loops.
+const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
+
 pub struct Drives {
-    tasks: Vec<JoinHandle<()>>,
-    mounts: Option<Arc<MountManager>>,
-    mounted: Vec<String>,
-    /// This node's drive-name-to-directory map, kept so migration can resolve
-    /// a volume to a real path. `None` when the node implements no drive.
-    registry: Option<Arc<DriveRegistry>>,
+    supervisor: JoinHandle<()>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// This node's drive-name-to-directory map, kept live so migration can
+    /// resolve a volume to a real path even after a topology rebuild.
+    /// `None` while the node implements no drive.
+    registry: Arc<RwLock<Option<Arc<DriveRegistry>>>>,
 }
 
 impl Drives {
-    pub fn registry(&self) -> Option<Arc<DriveRegistry>> {
+    /// A live handle to the current registry, shared with `migration::start`
+    /// so a drive added after boot is usable as a migration source or target
+    /// without a restart.
+    pub fn registry(&self) -> Arc<RwLock<Option<Arc<DriveRegistry>>>> {
         self.registry.clone()
     }
 
-    pub fn shutdown(self) {
+    /// Signal the supervisor to tear everything down and wait for it to
+    /// finish, so the mounts are gone before the process that could still
+    /// answer them (raft, docker) goes away.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(true);
+        let _ = self.supervisor.await;
+    }
+}
+
+/// Everything one build produced, kept only for as long as this build is
+/// current — the next topology change tears it all down and replaces it.
+#[derive(Default)]
+struct Running {
+    tasks: Vec<JoinHandle<()>>,
+    mounts: Option<Arc<MountManager>>,
+    mounted: Vec<String>,
+}
+
+impl Running {
+    /// Stop every task and unmount every served drive this build mounted. A
+    /// FUSE mount outlives the process that made it, so leaving one behind
+    /// means the next pass (or the next daemon start) finds a mountpoint
+    /// whose server is gone and every read on it hangs.
+    fn teardown(self) {
         for task in self.tasks {
             task.abort();
         }
@@ -67,28 +127,112 @@ impl Drives {
     }
 }
 
+/// Never fails synchronously: a node whose drive subsystem cannot start
+/// (missing internal address, bad registry) still votes and serves the ui,
+/// it just runs an empty `Running` until the config that would fix that
+/// arrives, same as any other build failure the supervisor already has to
+/// tolerate on a rebuild.
 pub fn start(
     cfg: &ClusterConfig,
-    node: &Node,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-) -> Result<Drives> {
-    let mut drives = Drives {
-        tasks: Vec::new(),
-        mounts: None,
-        mounted: Vec::new(),
-        registry: None,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+) -> Drives {
+    let boot_cfg = cfg.clone();
+    let node_name = node_name.to_string();
+    let cluster = cluster.clone();
+    let registry: Arc<RwLock<Option<Arc<DriveRegistry>>>> = Arc::default();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let supervisor = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            let mut cfg = boot_cfg;
+            let mut topology = topology_of(&cfg, &node_name);
+            let mut running = match build(&cfg, &node_name, &cluster, &registry, &config_rx).await {
+                Ok(running) => running,
+                Err(e) => {
+                    warn!(error = %e, "drive subsystem did not start");
+                    Running::default()
+                }
+            };
+
+            let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    changed = config_rx_changed(&config_rx) => {
+                        if !changed {
+                            continue;
+                        }
+                    }
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_ok() && *shutdown_rx.borrow() {
+                            running.teardown();
+                            return;
+                        }
+                    }
+                }
+
+                cfg = (**config_rx.borrow()).clone();
+                let live_topology = topology_of(&cfg, &node_name);
+                if live_topology == topology {
+                    continue;
+                }
+                info!("drive topology changed, rebuilding the drive subsystem");
+                topology = live_topology;
+                running.teardown();
+                running = match build(&cfg, &node_name, &cluster, &registry, &config_rx).await {
+                    Ok(running) => running,
+                    Err(e) => {
+                        warn!(error = %e, "drive subsystem did not restart");
+                        *registry.write().await = None;
+                        Running::default()
+                    }
+                };
+            }
+        })
+    };
+
+    Drives { supervisor, shutdown_tx, registry }
+}
+
+/// Awaits the next change on `config_rx`, cloning first so the borrow does
+/// not outlive the await point (`watch::Receiver::changed` needs `&mut self`,
+/// which a shared reference can't give it, so this takes a fresh clone each
+/// call — cheap, a `Receiver` is just a pointer and a generation counter).
+async fn config_rx_changed(config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>) -> bool {
+    let mut rx = config_rx.clone();
+    rx.changed().await.is_ok()
+}
+
+/// Build every task and mount this node's current drive topology calls for,
+/// same as the daemon has always done at startup — now also reachable from
+/// the supervisor's rebuild path, not just from `start`.
+async fn build(
+    cfg: &ClusterConfig,
+    node_name: &str,
+    cluster: &Arc<ClusterNode>,
+    live_registry: &Arc<RwLock<Option<Arc<DriveRegistry>>>>,
+    config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+) -> Result<Running> {
+    let mut running = Running::default();
+
+    let Some(node) = cfg.node(node_name) else {
+        *live_registry.write().await = None;
+        return Ok(running);
     };
 
     if node.drives.is_empty() {
-        info!("this node implements no drives");
-        return Ok(drives);
+        debug!("this node implements no drives");
+        *live_registry.write().await = None;
+        return Ok(running);
     }
 
     let registry = Arc::new(
         DriveRegistry::new(cfg, node_name).context("building this node's drive registry")?,
     );
-    drives.registry = Some(registry.clone());
+    *live_registry.write().await = Some(registry.clone());
     let internal_ip = cfg
         .internal_ip(node)
         .context("node has no address on the internal network")?;
@@ -125,21 +269,21 @@ pub fn start(
         let addr = SocketAddr::new(internal_ip, drive_port(node.rpc_port));
         let serving = registry.clone();
         info!(%addr, drives = local_copy.len(), "drive transport listening");
-        drives.tasks.push(tokio::spawn(async move {
+        running.tasks.push(tokio::spawn(async move {
             if let Err(e) = transport::serve(addr, serving).await {
                 warn!(error = %e, "drive transport stopped");
             }
         }));
 
         let scheduler = SyncScheduler::new(cluster.clone(), registry.clone(), Arc::new(DeltaEngine::default()));
-        let intervals = DriveIntervals::from_config(cfg);
-        drives.tasks.push(tokio::spawn(async move {
+        let intervals = DriveIntervals { config_rx: config_rx.clone() };
+        running.tasks.push(tokio::spawn(async move {
             scheduler.run(&intervals).await;
         }));
     }
 
-    start_served(cfg, node, node_name, &mut drives, internal_ip, cluster)?;
-    Ok(drives)
+    start_served(cfg, node, node_name, &mut running, internal_ip, cluster)?;
+    Ok(running)
 }
 
 /// Serve the drives this node is a `served_by` candidate for (every
@@ -149,7 +293,7 @@ fn start_served(
     cfg: &ClusterConfig,
     node: &Node,
     node_name: &str,
-    drives: &mut Drives,
+    running: &mut Running,
     internal_ip: IpAddr,
     cluster: &Arc<ClusterNode>,
 ) -> Result<()> {
@@ -169,7 +313,7 @@ fn start_served(
             info!(drive = %name, %addr, path = %local.display(), "serving drive");
             let root = local;
             let drive_name = name.clone();
-            drives.tasks.push(tokio::spawn(async move {
+            running.tasks.push(tokio::spawn(async move {
                 if let Err(e) = served::serve(addr, root).await {
                     warn!(drive = %drive_name, error = %e, "served drive server stopped");
                 }
@@ -224,17 +368,17 @@ fn start_served(
     match manager.mount_all(specs) {
         Ok(()) => {
             info!(drives = ?names, "mounted served drives");
-            drives.mounted = names;
-            drives.mounts = Some(manager.clone());
+            running.mounted = names;
+            running.mounts = Some(manager.clone());
 
             let served_by: BTreeMap<String, Vec<String>> =
                 candidate_addrs.keys().map(|name| (name.clone(), cfg.drives[name].served_by.clone())).collect();
             let watch_manager = manager.clone();
             let watch_cluster = cluster.clone();
-            drives.tasks.push(tokio::spawn(async move {
+            running.tasks.push(tokio::spawn(async move {
                 watch_active_servers(watch_cluster, watch_manager, served_by, candidate_addrs).await;
             }));
-            drives.tasks.push(tokio::spawn(async move {
+            running.tasks.push(tokio::spawn(async move {
                 manager.supervise(Duration::from_secs(30)).await;
             }));
         }
@@ -280,33 +424,26 @@ async fn watch_active_servers(
     }
 }
 
-/// Per drive sync intervals, straight out of the config.
-struct DriveIntervals {
-    by_drive: BTreeMap<String, Duration>,
-    default: Duration,
-}
+/// Only reached for a volume on a drive the live config no longer declares,
+/// which is a stale assignment being cleaned up.
+const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-impl DriveIntervals {
-    fn from_config(cfg: &ClusterConfig) -> Self {
-        Self {
-            by_drive: cfg
-                .drives
-                .iter()
-                .map(|(name, drive)| (name.clone(), drive.sync_interval))
-                .collect(),
-            // Only reachable for a volume on a drive the config no longer
-            // declares, which is a stale assignment being cleaned up.
-            default: Duration::from_secs(15 * 60),
-        }
-    }
+/// Per drive sync intervals, read fresh from the live config on every call
+/// rather than a snapshot taken once: changing a drive's `sync_interval` in
+/// the ui takes effect on the sync scheduler's very next pass, without
+/// needing the drive subsystem (or the daemon) to restart.
+struct DriveIntervals {
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
 }
 
 impl IntervalSource for DriveIntervals {
     fn interval_for(&self, volume: &VolumeId) -> Duration {
-        self.by_drive
+        self.config_rx
+            .borrow()
+            .drives
             .get(&volume.drive)
-            .copied()
-            .unwrap_or(self.default)
+            .map(|drive| drive.sync_interval)
+            .unwrap_or(DEFAULT_SYNC_INTERVAL)
     }
 }
 
@@ -336,9 +473,13 @@ web: { address: cloud, network: internal }
         .expect("valid config")
     }
 
+    fn intervals(cfg: ClusterConfig) -> DriveIntervals {
+        DriveIntervals { config_rx: tokio::sync::watch::channel(Arc::new(cfg)).1 }
+    }
+
     #[test]
     fn each_drive_syncs_on_its_own_interval() {
-        let intervals = DriveIntervals::from_config(&config());
+        let intervals = intervals(config());
         assert_eq!(
             intervals.interval_for(&VolumeId::new("fast", "data")),
             Duration::from_secs(30)
@@ -351,10 +492,37 @@ web: { address: cloud, network: internal }
 
     #[test]
     fn a_volume_on_an_undeclared_drive_falls_back_rather_than_spinning() {
-        let intervals = DriveIntervals::from_config(&config());
+        let intervals = intervals(config());
         assert_eq!(
             intervals.interval_for(&VolumeId::new("gone", "data")),
             Duration::from_secs(15 * 60)
         );
+    }
+
+    #[test]
+    fn a_config_update_changes_the_interval_without_rebuilding_anything() {
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(config()));
+        let intervals = DriveIntervals { config_rx: rx };
+        assert_eq!(intervals.interval_for(&VolumeId::new("fast", "data")), Duration::from_secs(30));
+
+        let mut edited = config();
+        edited.drives.get_mut("fast").unwrap().sync_interval = Duration::from_secs(5);
+        tx.send(Arc::new(edited)).unwrap();
+
+        assert_eq!(intervals.interval_for(&VolumeId::new("fast", "data")), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn topology_ignores_a_sync_interval_only_change() {
+        let mut edited = config();
+        edited.drives.get_mut("fast").unwrap().sync_interval = Duration::from_secs(5);
+        assert_eq!(topology_of(&config(), "n1"), topology_of(&edited, "n1"));
+    }
+
+    #[test]
+    fn topology_changes_when_this_nodes_drive_set_changes() {
+        let mut added = config();
+        added.nodes.get_mut("n1").unwrap().drives.insert("new".to_string(), "/srv/new".into());
+        assert_ne!(topology_of(&config(), "n1"), topology_of(&added, "n1"));
     }
 }

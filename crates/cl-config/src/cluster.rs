@@ -697,6 +697,30 @@ impl ClusterConfig {
         self.nodes.get(name)
     }
 
+    /// Names of every network of kind `Egress` or `Wireguard`, the two kinds a
+    /// service's `networks:` entry can join for outbound NAT (a wireguard
+    /// network attaches exactly like an egress one, its interface just being
+    /// clouduler-managed instead of admin-managed).
+    pub fn egress_networks(&self) -> std::collections::BTreeSet<String> {
+        self.networks
+            .iter()
+            .filter(|(_, net)| matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Names of every network whose reachability from outside depends on a
+    /// specific node, whether public (its own router) or wireguard (its own
+    /// tunnel's far end forwarding a port back), so a raw `x-clouduler.expose`
+    /// port on one only ever schedules onto a node that actually has it open.
+    pub fn port_gated_networks(&self) -> std::collections::BTreeSet<String> {
+        self.networks
+            .iter()
+            .filter(|(_, net)| matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn managers(&self) -> impl Iterator<Item = (&String, &Node)> {
         self.nodes.iter().filter(|(_, n)| n.role == NodeRole::Manager)
     }

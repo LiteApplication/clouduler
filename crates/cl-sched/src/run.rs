@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::StackFile;
+use cl_config::{ClusterConfig, StackFile};
 use cl_docker::Docker;
 use cl_net::Allocations;
+use tokio::sync::RwLock;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{ClusterState, DesiredState, Request};
@@ -32,38 +33,38 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 pub struct Scheduler {
     node: String,
     cluster: Arc<ClusterNode>,
-    docker: Docker,
-    reconciler: Reconciler,
+    /// A live view of the docker connection rather than a snapshot: a node
+    /// started before dockerd was up, or whose dockerd is later restarted on
+    /// its own, keeps working once `docker` is reconnected, without a daemon
+    /// restart. `None` is a normal, temporary state, not an error.
+    docker: Arc<RwLock<Option<Docker>>>,
     materializer: Materializer,
     /// Internal DNS zone, written into every container's search list.
     zone: Option<String>,
-    /// Names of every cluster network of kind `Egress`, from the config file
-    /// at startup. Static for the process's life, like the overlay subsystem
-    /// treats the rest of the network topology (see `clouduler::overlay`).
-    egress_networks: BTreeSet<String>,
-    /// Names of every cluster network of kind `Public`, from the config file
-    /// at startup. Tells `plan::expand` which `x-clouduler.expose` entries
-    /// need a node with that port marked open, rather than just an overlay
-    /// attachment.
-    port_gated_networks: BTreeSet<String>,
+    /// The config this node booted with, used only as a fallback until the
+    /// replicated copy is available (`live_config`). Which networks are
+    /// egress- or public-kind is re-derived from the *live* config on every
+    /// pass rather than frozen from this at construction, so a rename or
+    /// kind change takes effect on the next sweep instead of needing a
+    /// restart.
+    boot_config: ClusterConfig,
 }
 
 impl Scheduler {
     pub fn new(
         node: String,
         cluster: Arc<ClusterNode>,
-        docker: Docker,
+        docker: Arc<RwLock<Option<Docker>>>,
         materializer: Materializer,
+        boot_config: ClusterConfig,
     ) -> Self {
         Self {
             node,
             cluster,
-            reconciler: Reconciler::new(docker.clone()),
             docker,
             materializer,
             zone: None,
-            egress_networks: BTreeSet::new(),
-            port_gated_networks: BTreeSet::new(),
+            boot_config,
         }
     }
 
@@ -74,20 +75,18 @@ impl Scheduler {
         self
     }
 
-    /// Set which cluster networks are egress-kind, so a service naming one in
-    /// its `networks:` list gets a second, NAT'd attachment instead of an
-    /// overlay one.
-    pub fn with_egress_networks(mut self, networks: BTreeSet<String>) -> Self {
-        self.egress_networks = networks;
-        self
-    }
-
-    /// Set which cluster networks are public-kind, so a service's
-    /// `x-clouduler.expose` entries on one of them require a node that has
-    /// that port marked open, not just any node implementing the network.
-    pub fn with_port_gated_networks(mut self, networks: BTreeSet<String>) -> Self {
-        self.port_gated_networks = networks;
-        self
+    /// The cluster config as replicated state currently has it, falling back
+    /// to the config this node booted with only for the brief window before
+    /// any leader has published one, or if the replicated copy fails to
+    /// parse.
+    fn live_config(&self, state: &ClusterState) -> ClusterConfig {
+        match &state.cluster_config {
+            Some(entry) => ClusterConfig::parse(&entry.yaml).unwrap_or_else(|e| {
+                warn!(error = %e, "replicated cluster config failed to parse, using the config this node booted with");
+                self.boot_config.clone()
+            }),
+            None => self.boot_config.clone(),
+        }
     }
 
     /// Run until cancelled. `fenced` reports whether this node has lost quorum
@@ -114,14 +113,18 @@ impl Scheduler {
 
     /// Leader side: work out where everything belongs and record it.
     async fn schedule(&self, state: &ClusterState) -> crate::Result<()> {
+        let live = self.live_config(state);
+        let egress_networks = live.egress_networks();
+        let port_gated_networks = live.port_gated_networks();
+
         let mut desired = Vec::new();
         for (name, stack) in &state.stacks {
             match StackFile::parse(&stack.spec) {
                 Ok(file) => desired.extend(plan::expand(
                     name,
                     &file,
-                    &self.egress_networks,
-                    &self.port_gated_networks,
+                    &egress_networks,
+                    &port_gated_networks,
                 )),
                 // A stored stack that no longer parses is the operator's
                 // problem, but it must not stop every other stack scheduling.
@@ -164,8 +167,16 @@ impl Scheduler {
 
     /// Node side: make docker match the assignments naming this node.
     async fn reconcile(&self, state: &ClusterState, fenced: bool) -> crate::Result<()> {
+        // No docker to reconcile against yet (or right now) is not an error:
+        // this pass is simply skipped, and the next one tries again once
+        // `docker` is reconnected.
+        let Some(docker) = self.docker.read().await.clone() else {
+            return Ok(());
+        };
+        let reconciler = Reconciler::new(docker.clone());
+
         let targets = self.targets(state)?;
-        let actual = self.docker.list_managed().await?;
+        let actual = docker.list_managed().await?;
         let actions = reconcile::diff(&targets, &actual, fenced);
 
         if actions.is_empty() {
@@ -173,7 +184,7 @@ impl Scheduler {
         } else {
             info!(actions = actions.len(), fenced, "reconciling");
         }
-        self.reconciler.apply(&actions, &targets, &actual).await?;
+        reconciler.apply(&actions, &targets, &actual).await?;
 
         // Objects for instances that have moved on must not linger on disk.
         let keep: BTreeMap<String, ()> = targets
@@ -198,6 +209,7 @@ impl Scheduler {
         // Decoded once per pass rather than per instance: every container on
         // this node reads out of the same address book.
         let allocations = Allocations::decode(state.overlay.as_deref());
+        let egress_networks = self.live_config(state).egress_networks();
 
         let mut targets = Vec::new();
 
@@ -256,7 +268,7 @@ impl Scheduler {
             placement.egress_network = service
                 .networks
                 .iter()
-                .find(|n| self.egress_networks.contains(*n))
+                .find(|n| egress_networks.contains(*n))
                 .map(|n| cl_net::egress::egress_docker_name(n));
 
             // An instance on its way somewhere else must not be started here
