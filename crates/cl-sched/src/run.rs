@@ -240,7 +240,7 @@ impl Scheduler {
                 }
             };
 
-            let network = file.networks.keys().next().map(|n| overlay_name(&instance.stack, n));
+            let network = overlay_network_name(&file, &live).map(|n| overlay_name(&instance.stack, n));
 
             // A container on a stack network gets the address the leader
             // allocated for it, not one docker picks: the other nodes read
@@ -451,6 +451,18 @@ pub fn overlay_name(stack: &str, network: &str) -> String {
     format!("{stack}_{network}")
 }
 
+/// The one declared network a stack should get a VXLAN overlay built for, if
+/// any: the one of subnet-addressed (internal or private) kind. Only that
+/// kind of network gets a per-instance overlay IP; a stack whose networks
+/// are all public, egress or wireguard needs no overlay at all, and must not
+/// be made to wait forever for an address on one of those instead.
+pub fn overlay_network_name<'a>(file: &'a StackFile, cfg: &ClusterConfig) -> Option<&'a str> {
+    file.networks
+        .keys()
+        .find(|n| cfg.networks.get(n.as_str()).is_some_and(|net| net.kind.is_subnetted()))
+        .map(String::as_str)
+}
+
 /// Drives every instance of a stack needs, for the placement call.
 pub fn drives_for(file: &StackFile) -> BTreeSet<String> {
     file.drives_used()
@@ -561,6 +573,39 @@ services:
     deploy:
       replicas: 2
 "#;
+
+    const CLUSTER: &str = r#"
+cluster: { name: home }
+networks:
+  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+  wan:       { type: egress }
+  public:    { type: public, domain: example.com }
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network:
+      tailscale: 10.10.0.1
+      wan: eth0
+      public: { domain: n1.example.com }
+    drives: {}
+web: { address: cloud, network: tailscale }
+"#;
+
+    #[test]
+    fn overlay_network_name_picks_the_subnetted_one() {
+        let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+
+        let internal = StackFile::parse("networks:\n  tailscale: {}\n  wan: {}\nservices: {}\n").unwrap();
+        assert_eq!(overlay_network_name(&internal, &cfg), Some("tailscale"));
+
+        // A stack whose networks are all public/egress needs no overlay at
+        // all: this is the case that used to send `targets()` into an
+        // infinite wait for an address on the "public" network, which never
+        // gets one.
+        let no_overlay = StackFile::parse("networks:\n  public: {}\n  wan: {}\nservices: {}\n").unwrap();
+        assert_eq!(overlay_network_name(&no_overlay, &cfg), None);
+    }
 
     fn state() -> ClusterState {
         let mut state = ClusterState::default();

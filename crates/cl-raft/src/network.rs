@@ -5,9 +5,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use futures::{SinkExt, StreamExt};
 use openraft::error::{NetworkError, RPCError, RaftError, Unreachable};
-use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
+use openraft::network::{Backoff, RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
@@ -118,15 +120,23 @@ pub struct Channel {
 }
 
 impl Channel {
-    async fn call<E>(&self, request: RpcRequest) -> Result<RpcResponse, NetError<E>>
+    /// Send `request`, giving up after `deadline` rather than letting a dead
+    /// peer's TCP connect hang until raft's own hard_ttl fires. A connect
+    /// that never gets a RST (peer down, firewalled) can take far longer
+    /// than the ~500ms heartbeat timeout, and if we let raft's own timer
+    /// expire instead of ours we surface as `RPCError::Timeout`, which raft
+    /// never backs off on — that's what floods the log every heartbeat for
+    /// as long as the peer stays down. Timing out here first means we report
+    /// `Unreachable`, which raft *does* back off on.
+    async fn call<E>(&self, request: RpcRequest, deadline: Duration) -> Result<RpcResponse, NetError<E>>
     where
         E: std::error::Error,
     {
-        self.peer.call(&request).await.map_err(|e| {
-            // Unreachable rather than NetworkError, so raft backs off on this
-            // peer instead of treating it as a protocol fault.
-            RPCError::Unreachable(Unreachable::new(&e))
-        })
+        match tokio::time::timeout(deadline, self.peer.call(&request)).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(RPCError::Unreachable(Unreachable::new(&e))),
+            Err(elapsed) => Err(RPCError::Unreachable(Unreachable::new(&elapsed))),
+        }
     }
 
     fn unexpected<E>(&self, response: RpcResponse) -> NetError<E>
@@ -148,9 +158,9 @@ impl RaftNetwork<TypeConfig> for Channel {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, NetError> {
-        match self.call(RpcRequest::AppendEntries(rpc)).await? {
+        match self.call(RpcRequest::AppendEntries(rpc), option.soft_ttl()).await? {
             RpcResponse::AppendEntries(response) => Ok(response),
             other => Err(self.unexpected(other)),
         }
@@ -159,12 +169,12 @@ impl RaftNetwork<TypeConfig> for Channel {
     async fn install_snapshot(
         &mut self,
         rpc: InstallSnapshotRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         NetError<RaftError<NodeId, openraft::error::InstallSnapshotError>>,
     > {
-        match self.call(RpcRequest::InstallSnapshot(rpc)).await? {
+        match self.call(RpcRequest::InstallSnapshot(rpc), option.soft_ttl()).await? {
             RpcResponse::InstallSnapshot(response) => Ok(response),
             other => Err(self.unexpected(other)),
         }
@@ -173,12 +183,21 @@ impl RaftNetwork<TypeConfig> for Channel {
     async fn vote(
         &mut self,
         rpc: VoteRequest<NodeId>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, NetError> {
-        match self.call(RpcRequest::Vote(rpc)).await? {
+        match self.call(RpcRequest::Vote(rpc), option.soft_ttl()).await? {
             RpcResponse::Vote(response) => Ok(response),
             other => Err(self.unexpected(other)),
         }
+    }
+
+    /// A dead peer otherwise gets retried at raft's default flat 500ms
+    /// backoff, which is indistinguishable in the logs from no backoff at
+    /// all. Grow it so a long-downed node quiets down instead of logging a
+    /// warn+error pair on every heartbeat forever.
+    fn backoff(&self) -> Backoff {
+        let schedule = [1, 2, 5, 10, 30].into_iter().map(Duration::from_secs);
+        Backoff::new(schedule.chain(std::iter::repeat(Duration::from_secs(30))))
     }
 }
 

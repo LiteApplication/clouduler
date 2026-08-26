@@ -226,6 +226,36 @@ async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
 }
 
 #[tokio::test]
+async fn a_file_bigger_than_one_chunk_arrives_intact() {
+    // Regression test: a file whose single `WholeFile` frame would exceed
+    // the wire's max frame length (a large postgres relation file being the
+    // real-world case that surfaced this) used to abort the sync partway
+    // through, leaving the target with only whatever came before it
+    // alphabetically. `send_whole` now streams anything over
+    // `WHOLE_FILE_CHUNK` as a begin/chunk/end sequence instead.
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let size = cl_drive::transport::WHOLE_FILE_CHUNK + 5 * 1024 * 1024;
+    let mut content = vec![0u8; size];
+    for (i, byte) in content.iter_mut().enumerate() {
+        *byte = (i % 251) as u8;
+    }
+    std::fs::write(src.path().join("big.bin"), &content).unwrap();
+    // A small file sorting after "big.bin" would previously never arrive at
+    // all once the oversized frame aborted the connection.
+    std::fs::write(src.path().join("small.txt"), b"tail file").unwrap();
+
+    let (addr, _registry, _rx) = spawn_receiver(dst.path());
+    let engine = DeltaEngine::default();
+    let stats = engine.sync(src.path(), addr, &volume_id(), 1).await.expect("sync");
+
+    assert_eq!(stats.files_added, 2);
+    assert_eq!(std::fs::read(dst_volume(&dst).join("big.bin")).unwrap(), content);
+    assert_eq!(std::fs::read(dst_volume(&dst).join("small.txt")).unwrap(), b"tail file");
+}
+
+#[tokio::test]
 async fn migrated_manifest_matches_after_verification_scan() {
     // Sanity check that scan+diff sees a synced tree as identical, the
     // property migration verification relies on.

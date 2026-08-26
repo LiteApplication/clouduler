@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::Protocol;
+use cl_config::{ClusterConfig, Protocol};
 use cl_net::expose::{serve_tcp, serve_udp, Routes};
 use cl_raft::node::ClusterNode;
 use cl_raft::state::ClusterState;
@@ -28,19 +28,25 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 /// stopped, usually because something else already holds the port.
 const BIND_RETRY: Duration = Duration::from_secs(30);
 
-pub fn start(cluster: &Arc<ClusterNode>) -> tokio::task::JoinHandle<()> {
+pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> tokio::task::JoinHandle<()> {
+    let cfg = cfg.clone();
     let cluster = cluster.clone();
-    tokio::spawn(async move { run(cluster).await })
+    tokio::spawn(async move { run(cluster, cfg).await })
 }
 
-async fn run(cluster: Arc<ClusterNode>) {
+async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
     let routes = Routes::new();
     let mut listening: BTreeMap<(u16, Protocol), tokio::task::JoinHandle<()>> = BTreeMap::new();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
 
     loop {
         ticker.tick().await;
-        let desired = desired(&cluster.state().await);
+        let state = cluster.state().await;
+        // Recomputed every pass like `internal_dns`'s own live config, so a
+        // network's kind changing (or a node joining) is picked up without a
+        // restart.
+        let live = crate::daemon::live_config(&state, &boot_cfg);
+        let desired = desired(&state, &live);
 
         for ((published, protocol), backend) in &desired {
             routes.set(*published, *backend);
@@ -98,10 +104,10 @@ async fn run(cluster: Arc<ClusterNode>) {
 /// spread, and picking the lowest instance keeps every node choosing the same
 /// one. `None` means the port is published but nothing is running behind it,
 /// which the forwarder answers by refusing the connection rather than hanging.
-fn desired(state: &ClusterState) -> BTreeMap<(u16, Protocol), Option<SocketAddr>> {
+fn desired(state: &ClusterState, cfg: &ClusterConfig) -> BTreeMap<(u16, Protocol), Option<SocketAddr>> {
     let mut out: BTreeMap<(u16, Protocol), Option<SocketAddr>> = BTreeMap::new();
 
-    for placement in crate::placement::service_placements(state) {
+    for placement in crate::placement::service_placements(state, cfg) {
         for entry in &placement.extensions.expose {
             let key = (entry.published, entry.protocol);
             let backend = placement
@@ -131,12 +137,12 @@ fn desired(state: &ClusterState) -> BTreeMap<(u16, Protocol), Option<SocketAddr>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placement::fixtures::{state_with, SPEC};
+    use crate::placement::fixtures::{cluster_config, state_with, SPEC};
     use cl_raft::ids::InstanceId;
 
     #[test]
     fn an_exposed_port_forwards_to_the_container_port() {
-        let desired = desired(&state_with(SPEC, 1));
+        let desired = desired(&state_with(SPEC, 1), &cluster_config());
         let backend = desired[&(2222, Protocol::Tcp)].expect("a backend");
         assert_eq!(backend.port(), 22);
     }
@@ -148,7 +154,7 @@ mod tests {
         let mut state = state_with(SPEC, 1);
         state.assignments.remove(&InstanceId::new("blog", "web", 0));
 
-        let desired = desired(&state);
+        let desired = desired(&state, &cluster_config());
         assert!(desired.contains_key(&(2222, Protocol::Tcp)));
         assert_eq!(desired[&(2222, Protocol::Tcp)], None);
     }
@@ -158,13 +164,13 @@ mod tests {
     #[test]
     fn replicas_are_picked_deterministically() {
         let state = state_with(SPEC, 3);
-        let first = desired(&state);
-        assert_eq!(first, desired(&state));
+        let first = desired(&state, &cluster_config());
+        assert_eq!(first, desired(&state, &cluster_config()));
     }
 
     #[test]
     fn a_stack_exposing_nothing_publishes_nothing() {
         let spec = "networks:\n  default: {}\nservices:\n  web:\n    image: nginx\n";
-        assert!(desired(&state_with(spec, 1)).is_empty());
+        assert!(desired(&state_with(spec, 1), &cluster_config()).is_empty());
     }
 }

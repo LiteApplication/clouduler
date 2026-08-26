@@ -8,3 +8,4 @@ ui/dist
 tests/qemu/cache/
 tests/qemu/work/
 __pycache__/
+.code-graph/

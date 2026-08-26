@@ -278,7 +278,7 @@ async fn reconcile_loop(
 fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
     let mut routes = Vec::new();
 
-    for placement in crate::placement::service_placements(state) {
+    for placement in crate::placement::service_placements(state, cfg) {
         let instance = format!("{}.{}", placement.stack, placement.service);
         for entry in &placement.extensions.proxy {
             let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
@@ -770,7 +770,7 @@ fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(Str
     let all_nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
     let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
 
-    for placement in crate::placement::service_placements(state) {
+    for placement in crate::placement::service_placements(state, cfg) {
         let nodes = if owning_node_only {
             crate::placement::service_nodes(state, &placement.stack, &placement.service)
         } else {
@@ -1044,7 +1044,11 @@ mod tests {
 
     #[test]
     fn a_route_carries_every_replica_as_a_backend() {
-        let routes = service_routes(&cfg(), &state_with(SPEC, 2));
+        // `cfg()` (a real example cluster.yaml) has no network named
+        // "default" - SPEC's stack network - so it can never resolve a
+        // backend address for it. `placement::fixtures::cluster_config`
+        // declares "default" as the internal network SPEC actually needs.
+        let routes = service_routes(&crate::placement::fixtures::cluster_config(), &state_with(SPEC, 2));
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].backends().len(), 2);
         assert_eq!(routes[0].backends()[0].port(), 80);

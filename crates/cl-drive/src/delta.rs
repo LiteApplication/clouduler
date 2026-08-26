@@ -94,6 +94,13 @@ fn transfer_err(e: std::io::Error) -> DriveError {
     DriveError::Transfer { message: e.to_string() }
 }
 
+/// A node that is down rather than merely refusing gives no RST, so a plain
+/// `TcpStream::connect` can sit for the OS's own connect timeout — minutes,
+/// not seconds. A sync loop over several targets (the background scheduler,
+/// or `folder-import`'s immediate push) has to move on and record the
+/// failure instead of hanging on one unreachable peer.
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl DeltaEngine {
     async fn sync_impl(
         &self,
@@ -102,7 +109,10 @@ impl DeltaEngine {
         volume: &VolumeId,
         generation: u64,
     ) -> Result<SyncStats> {
-        let stream = TcpStream::connect(peer).await.map_err(transfer_err)?;
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
+            .await
+            .map_err(|_| DriveError::Transfer { message: format!("connecting to {peer} timed out") })?
+            .map_err(transfer_err)?;
         let mut conn = transport::frame(stream);
 
         transport::send(&mut conn, &Message::Hello { volume: volume.clone(), generation })
@@ -209,20 +219,51 @@ impl DeltaEngine {
         meta: &FileMeta,
         stats: &mut SyncStats,
     ) -> Result<()> {
-        let data = if meta.is_symlink { Vec::new() } else { std::fs::read(src.join(path)).map_err(|source| DriveError::Io { path: src.join(path), source })? };
-        stats.bytes_sent += data.len() as u64;
-        transport::send(
-            conn,
-            &Message::WholeFile {
-                path: path.to_string(),
-                mode: meta.mode,
-                is_symlink: meta.is_symlink,
-                link_target: meta.link_target.clone(),
-                data,
-            },
-        )
-        .await
-        .map_err(transfer_err)
+        if meta.is_symlink {
+            stats.bytes_sent += meta.size;
+            return transport::send(
+                conn,
+                &Message::WholeFile {
+                    path: path.to_string(),
+                    mode: meta.mode,
+                    is_symlink: true,
+                    link_target: meta.link_target.clone(),
+                    data: Vec::new(),
+                },
+            )
+            .await
+            .map_err(transfer_err);
+        }
+
+        stats.bytes_sent += meta.size;
+        if meta.size <= transport::WHOLE_FILE_CHUNK as u64 {
+            let data = std::fs::read(src.join(path)).map_err(|source| DriveError::Io { path: src.join(path), source })?;
+            return transport::send(
+                conn,
+                &Message::WholeFile { path: path.to_string(), mode: meta.mode, is_symlink: false, link_target: None, data },
+            )
+            .await
+            .map_err(transfer_err);
+        }
+
+        // Large regular file: stream it as a `WholeFileBegin`/`WholeFileChunk`*/
+        // `WholeFileEnd` sequence instead of one giant frame. See
+        // `WHOLE_FILE_CHUNK`'s doc comment for why a single frame can't be
+        // trusted to hold an entire file past a few tens of megabytes.
+        transport::send(conn, &Message::WholeFileBegin { path: path.to_string(), mode: meta.mode })
+            .await
+            .map_err(transfer_err)?;
+        let full_path = src.join(path);
+        let mut file = std::fs::File::open(&full_path).map_err(|source| DriveError::Io { path: full_path.clone(), source })?;
+        let mut buf = vec![0u8; transport::WHOLE_FILE_CHUNK];
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf).map_err(|source| DriveError::Io { path: full_path.clone(), source })?;
+            if n == 0 {
+                break;
+            }
+            transport::send(conn, &Message::WholeFileChunk { data: buf[..n].to_vec() }).await.map_err(transfer_err)?;
+        }
+        transport::send(conn, &Message::WholeFileEnd).await.map_err(transfer_err)
     }
 
     async fn send_delta(

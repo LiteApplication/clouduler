@@ -4,6 +4,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -56,9 +57,25 @@ pub struct ProxyServer {
     forward_auth_client: reqwest::Client,
 }
 
+/// How long a backend gets to accept a TCP connection before it's treated as
+/// unreachable. Without this, `HttpConnector` falls back to the OS's own SYN
+/// retry timeout (minutes, not seconds) on a backend that never sends a
+/// SYN-ACK or RST - a route on a node other than the one running its
+/// container relies on this to fail fast instead of hanging the request.
+const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cap on how long a backend has to return response headers when the route
+/// itself doesn't configure `response_timeout`. `RouteOptions::response_timeout`
+/// defaults to `None` (unbounded) - fine when the backend is always reachable
+/// instantly, not fine as the only thing standing between a stalled backend
+/// and a request that never completes.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl ProxyServer {
     pub fn new(routes: Arc<RouteTable>, certs: Arc<CertStore>) -> Self {
-        let client = Client::builder(TokioExecutor::new()).build(HttpConnector::new());
+        let mut connector = HttpConnector::new();
+        connector.set_connect_timeout(Some(BACKEND_CONNECT_TIMEOUT));
+        let client = Client::builder(TokioExecutor::new()).build(connector);
         Self {
             routes,
             certs,
@@ -499,17 +516,15 @@ async fn proxy(
     let outbound = Request::from_parts(parts, limited_body(body, options.max_body_size));
 
     let sent = client.request(outbound);
-    let result = match options.response_timeout {
-        Some(limit) => match tokio::time::timeout(limit, sent).await {
-            Ok(result) => result,
-            Err(_) => {
-                return status_response(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    &format!("{} did not respond within {limit:?}", picked.addr),
-                )
-            }
-        },
-        None => sent.await,
+    let limit = options.response_timeout.unwrap_or(DEFAULT_RESPONSE_TIMEOUT);
+    let result = match tokio::time::timeout(limit, sent).await {
+        Ok(result) => result,
+        Err(_) => {
+            return status_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &format!("{} did not respond within {limit:?}", picked.addr),
+            )
+        }
     };
 
     let mut resp = match result {

@@ -2,17 +2,20 @@
 
 use std::time::Duration;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_config::Service;
-use cl_docker::{LogOptions, Tail};
+use cl_docker::{Docker, ExecSpec, LogOptions, Tail};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::DesiredState;
 use cl_raft::Request as ClusterRequest;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
 use crate::auth::internal::InternalAuth;
@@ -39,6 +42,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
         .route("/api/instances/internal/{id}/restart", post(internal_restart))
         .route("/api/instances/internal/{id}/update", post(internal_update))
+        // Node-to-node only, same as above: the cli resolves which node an
+        // instance runs on itself (see `clouduler exec`) and connects to
+        // that node directly, so there is no public forwarding counterpart
+        // to this one yet.
+        .route("/api/instances/internal/{id}/exec", get(internal_exec))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -544,4 +552,90 @@ async fn internal_stats(
 ) -> Result<Response, ApiError> {
     let instance = parse_id(&id)?;
     serve_stats(&instance).await
+}
+
+#[derive(Deserialize)]
+struct ExecQuery {
+    /// The command, json-encoded (`["sh","-c","ls"]`) so an argument can
+    /// carry spaces or `&` without colliding with query-string parsing.
+    cmd: String,
+    #[serde(default)]
+    tty: bool,
+    user: Option<String>,
+}
+
+impl TryFrom<ExecQuery> for ExecSpec {
+    type Error = ApiError;
+
+    fn try_from(query: ExecQuery) -> Result<Self, Self::Error> {
+        let cmd: Vec<String> =
+            serde_json::from_str(&query.cmd).map_err(|e| ApiError::BadRequest(format!("cmd: {e}")))?;
+        if cmd.is_empty() {
+            return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
+        }
+        Ok(ExecSpec { cmd, tty: query.tty, user: query.user })
+    }
+}
+
+/// Node-to-node only: runs a command in this node's own container over a
+/// websocket, binary frames each way, raw bytes with no framing beyond that
+/// (the container's stdout/stderr are already combined by docker once `tty`
+/// is set, which is the only mode the cli currently drives this with). The
+/// caller already resolved which node to connect to from the replicated
+/// assignment, the same way `internal_logs` and `internal_stats` are reached.
+async fn internal_exec(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ExecQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let instance = parse_id(&id)?;
+    let spec: ExecSpec = query.try_into()?;
+    let docker = state.docker().await?;
+    Ok(ws.on_upgrade(move |socket| bridge_exec(socket, docker, instance.container_name(), spec)))
+}
+
+async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, spec: ExecSpec) {
+    let mut session = match docker.exec(&container, spec).await {
+        Ok(session) => session,
+        Err(e) => {
+            let _ = socket.send(Message::Text(format!("exec: {e}").into())).await;
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Binary(data))) => {
+                        if session.input.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            chunk = session.output.next() => {
+                match chunk {
+                    Some(Ok(chunk)) => {
+                        if socket.send(Message::Binary(chunk.bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    // The command exited, or docker itself errored: either
+                    // way there is nothing left to relay.
+                    Some(Err(e)) => {
+                        let _ = socket.send(Message::Text(format!("exec: {e}").into())).await;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }

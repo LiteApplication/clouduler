@@ -11,7 +11,7 @@
 //! side lives in `delta::DeltaEngine`, which is the thing that decides what
 //! to send).
 
-use std::io;
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,18 @@ use crate::scan::{self, Manifest};
 /// Deltas and whole files can be large; refuse anything absurd so a corrupt
 /// length prefix cannot make us allocate wildly.
 const MAX_FRAME: usize = 256 * 1024 * 1024;
+
+/// Files at or below this size go over the wire as a single `WholeFile`
+/// message. Above it, `send_whole` streams `WholeFileBegin`/`WholeFileChunk`/
+/// `WholeFileEnd` instead: `serde_json` encodes a `Vec<u8>` as a JSON array of
+/// integers, not base64, so a single frame's payload can bloat to several
+/// times the raw byte count. A postgres relation file comfortably exceeds
+/// `MAX_FRAME` once encoded that way, which used to abort the whole sync
+/// partway through and leave the receiver with a half-written volume (e.g. a
+/// PGDATA directory missing everything alphabetically after the oversized
+/// file). Chosen with enough headroom under `MAX_FRAME` that the JSON
+/// encoding of one chunk, plus its message envelope, never gets close.
+pub const WHOLE_FILE_CHUNK: usize = 32 * 1024 * 1024;
 
 /// rpc_port + 1. Keeps bulk transfer off the raft socket without adding a
 /// second port to the config file.
@@ -81,6 +93,12 @@ pub enum Message {
         link_target: Option<String>,
         data: Vec<u8>,
     },
+    /// Starts a chunked whole-file transfer for a regular file too large to
+    /// send as one `WholeFile` frame. Followed by one or more
+    /// `WholeFileChunk`s and a final `WholeFileEnd`.
+    WholeFileBegin { path: String, mode: u32 },
+    WholeFileChunk { data: Vec<u8> },
+    WholeFileEnd,
     Delta { path: String, mode: u32, data: Vec<u8> },
     Rename { from: String, to: String },
     Delete(String),
@@ -160,8 +178,38 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
     let manifest = scan::scan(&root, false)?;
     send(&mut conn, &Message::Ready(manifest)).await.map_err(io_err)?;
 
+    // State for a `WholeFileBegin`/`WholeFileChunk`*/`WholeFileEnd` sequence
+    // in progress: the final target, the temp file it's being written to,
+    // its mode, and the open handle chunks are appended to.
+    let mut chunked: Option<(PathBuf, PathBuf, u32, std::fs::File)> = None;
+
     loop {
         match recv(&mut conn).await.map_err(io_err)? {
+            Some(Message::WholeFileBegin { path, mode }) => {
+                let target = resolve_relative(&root, &path)?;
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|source| DriveError::Io { path: parent.to_path_buf(), source })?;
+                }
+                let tmp = temp_path(&target);
+                let file = std::fs::File::create(&tmp).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+                chunked = Some((target, tmp, mode, file));
+            }
+            Some(Message::WholeFileChunk { data }) => {
+                let (_, tmp, _, file) = chunked.as_mut().ok_or_else(|| DriveError::Transfer {
+                    message: "WholeFileChunk with no WholeFileBegin in progress".into(),
+                })?;
+                file.write_all(&data).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+            }
+            Some(Message::WholeFileEnd) => {
+                let (target, tmp, mode, file) = chunked.take().ok_or_else(|| DriveError::Transfer {
+                    message: "WholeFileEnd with no WholeFileBegin in progress".into(),
+                })?;
+                drop(file);
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+                    .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+                std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io { path: target, source })?;
+            }
             Some(Message::SignatureRequest(path)) => {
                 let target = resolve_relative(&root, &path)?;
                 let data = std::fs::read(&target).unwrap_or_default();
@@ -218,7 +266,10 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
 /// Ask a peer for its manifest without starting a sync. Used by migration
 /// verification to compare source and target after the final delta.
 pub async fn request_manifest(peer: SocketAddr, volume: &VolumeId, hash_content: bool) -> Result<Manifest> {
-    let stream = TcpStream::connect(peer).await.map_err(io_err)?;
+    let stream = tokio::time::timeout(crate::delta::CONNECT_TIMEOUT, TcpStream::connect(peer))
+        .await
+        .map_err(|_| DriveError::Transfer { message: format!("connecting to {peer} timed out") })?
+        .map_err(io_err)?;
     let mut conn = frame(stream);
     send(&mut conn, &Message::ManifestRequest { volume: volume.clone(), hash_content })
         .await
@@ -306,6 +357,9 @@ mod tests {
             link_target: None,
             data: b"hello".to_vec(),
         });
+        msg_round_trip(Message::WholeFileBegin { path: "a.txt".into(), mode: 0o644 });
+        msg_round_trip(Message::WholeFileChunk { data: vec![1, 2, 3] });
+        msg_round_trip(Message::WholeFileEnd);
         msg_round_trip(Message::Delta { path: "a.txt".into(), mode: 0o644, data: vec![4, 5] });
         msg_round_trip(Message::Rename { from: "a.txt".into(), to: "b.txt".into() });
         msg_round_trip(Message::Delete("a.txt".into()));

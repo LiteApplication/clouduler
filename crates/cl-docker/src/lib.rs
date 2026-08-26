@@ -6,6 +6,7 @@ mod client;
 mod container;
 mod error;
 mod events;
+mod exec;
 mod image;
 mod logs;
 mod network;
@@ -18,6 +19,7 @@ pub use container::{
 };
 pub use error::{DockerError, Result};
 pub use events::ContainerEvent;
+pub use exec::{ExecChunk, ExecSession, ExecSpec, ExecStream};
 pub use image::ImageRef;
 pub use logs::{LogLine, LogOptions, LogStream, Tail};
 pub use network::NetworkSpec;

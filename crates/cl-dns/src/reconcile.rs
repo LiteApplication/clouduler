@@ -39,6 +39,7 @@ impl Plan {
 /// specific conflicts are deleted regardless of ownership; see
 /// `delete_conflicting_live_records`.
 pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
+    let desired = normalize_desired(desired);
     let owned_keys = owned_keys(cluster, live);
 
     let mut live_by_key: HashMap<String, Vec<&Record>> = HashMap::new();
@@ -53,7 +54,7 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
     }
 
     let mut desired_by_key: HashMap<String, Vec<&DesiredRecord>> = HashMap::new();
-    for d in desired {
+    for d in &desired {
         desired_by_key.entry(desired_key(d)).or_default().push(d);
     }
 
@@ -109,9 +110,46 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
         }
     }
 
-    delete_conflicting_live_records(desired, live, &mut out);
+    delete_conflicting_live_records(&desired, live, &mut out);
 
     out
+}
+
+/// Collapses a desired set down to something DNS can actually represent
+/// before anything gets diffed against live records: a CNAME can't share a
+/// name with any other record, and can only ever point at one target.
+/// `records_for` computes each node's contribution independently (a node
+/// can publish an IP and a domain at once, and several nodes' answers get
+/// merged for a routing-mesh hostname in `all-nodes` mode), so nothing
+/// upstream guarantees the merged set is valid — this is the one place
+/// that enforces it. An address record (A/AAAA) always wins over a CNAME
+/// for the same name, since an address is usable on its own and a CNAME
+/// isn't once it has to coexist with something; among competing CNAMEs for
+/// the same name, the first one in `desired`'s order survives (`desired`'s
+/// callers build that order deterministically - sorted node names - so this
+/// picks the same target every pass instead of flapping).
+fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
+    let mut has_address: HashSet<&str> = HashSet::new();
+    for d in desired {
+        if d.kind != RecordType::CNAME {
+            has_address.insert(d.fqdn.as_str());
+        }
+    }
+
+    let mut cname_seen: HashSet<&str> = HashSet::new();
+    let mut kept = Vec::with_capacity(desired.len());
+    for d in desired {
+        if d.kind == RecordType::CNAME {
+            if has_address.contains(d.fqdn.as_str()) {
+                continue;
+            }
+            if !cname_seen.insert(d.fqdn.as_str()) {
+                continue;
+            }
+        }
+        kept.push(d.clone());
+    }
+    kept
 }
 
 /// Deletes any live record - owned or not - that Cloudflare's CNAME-exclusivity
@@ -476,6 +514,37 @@ mod tests {
         let live_records = vec![live("r1", RecordType::A, "auth.example.com", "1.2.3.4")];
         let p = plan(CLUSTER, &want, &live_records);
         assert_eq!(p.delete, vec!["r1".to_string()]);
+    }
+
+    /// `records_for` can hand back both an A and a CNAME for the same node
+    /// (one that publishes an IP and a domain at once) - not something
+    /// Cloudflare can represent. The address record must win, and the
+    /// invalid CNAME must never even reach `create`.
+    #[test]
+    fn an_address_record_beats_a_cname_desired_for_the_same_name() {
+        let want = vec![
+            desired(RecordType::A, "auth.example.com", "1.2.3.4"),
+            desired(RecordType::CNAME, "auth.example.com", "soa.example.com"),
+        ];
+        let p = plan(CLUSTER, &want, &[]);
+        assert_eq!(p.create.len(), 2, "{p:?}"); // the A record + its tag
+        assert!(p.create.iter().all(|c| c.kind != RecordType::CNAME), "{p:?}");
+    }
+
+    /// `all-nodes` DNS publish mode merges every node's answer for a shared
+    /// hostname; if two nodes each publish only a domain (no IP), that's two
+    /// different CNAME targets for one name, which DNS cannot represent.
+    /// Only the first one (deterministic on `desired`'s order) may survive.
+    #[test]
+    fn only_the_first_of_several_conflicting_cnames_survives() {
+        let want = vec![
+            desired(RecordType::CNAME, "headscale.example.com", "soa.example.com"),
+            desired(RecordType::CNAME, "headscale.example.com", "osny.example.com"),
+        ];
+        let p = plan(CLUSTER, &want, &[]);
+        let cnames: Vec<_> = p.create.iter().filter(|c| c.kind == RecordType::CNAME).collect();
+        assert_eq!(cnames.len(), 1, "{p:?}");
+        assert_eq!(cnames[0].content, "soa.example.com");
     }
 
     /// A conflicting record must not be queued twice when it's already

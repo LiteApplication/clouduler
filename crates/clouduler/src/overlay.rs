@@ -143,7 +143,7 @@ impl Context_ {
                 continue;
             };
             // Matches how the scheduler picks a network for a container.
-            let Some(network) = file.networks.keys().next() else {
+            let Some(network) = cl_sched::run::overlay_network_name(&file, &cfg) else {
                 continue;
             };
             let overlay = overlay_name(name, network);

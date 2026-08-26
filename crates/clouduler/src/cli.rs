@@ -90,6 +90,55 @@ pub enum Command {
     FolderImport(Box<FolderImportArgs>),
     /// Show cluster status.
     Status,
+    /// Stream a container's output, or every container in a stack.
+    ///
+    /// The target is either an instance id (`stack.service.index`, as shown
+    /// by `clouduler stack show` or the web ui) or a stack name, which
+    /// streams every instance currently running for that stack, each line
+    /// prefixed with which instance it came from.
+    Logs {
+        /// Instance id (`stack.service.index`) or stack name.
+        target: String,
+        /// Keep streaming new lines as they are written.
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Number of lines to show from the end of each container's log.
+        #[arg(short = 'n', long, default_value_t = 200)]
+        tail: u32,
+        /// Node to ask for the cluster's current state. Defaults to any
+        /// manager in the config; the container's own node is then found
+        /// from that state and asked directly for its logs.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Run a command inside a running container, wherever it runs.
+    ///
+    /// Works from any manager: the container's own node is found from the
+    /// cluster state automatically and talked to directly, the same as
+    /// `clouduler logs`. Allocates a pseudo-tty and bridges it to this
+    /// terminal when both stdin and stdout are one, so an interactive shell
+    /// behaves like `docker exec -it`.
+    ///
+    /// A command with its own flags needs `--` first, same as any clap
+    /// command with a trailing argument list:
+    ///
+    ///   clouduler exec site.web.0 -- sh -c "ls -la"
+    Exec {
+        /// Instance id (`stack.service.index`) or stack name. A stack name
+        /// only resolves when it currently has exactly one running instance.
+        target: String,
+        /// User to run as inside the container: `user`, `user:group`, `uid`
+        /// or `uid:gid`. Defaults to the image's own user.
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+        /// Node to ask for the cluster's current state. Defaults to any
+        /// manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+        /// Command to run and its arguments. Defaults to `sh`.
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
 }
 
 /// `clouduler folder-import [-mlcr] <folder> <drive>/<volume>[/path inside volume]`

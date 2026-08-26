@@ -9,8 +9,10 @@ mod node;
 mod placement;
 mod overlay;
 mod egress;
+mod exec;
 mod expose;
 mod init;
+mod logs;
 mod proxy;
 mod report;
 mod secret;
@@ -118,6 +120,13 @@ async fn main() -> Result<()> {
             // Filled in once the raft layer can answer live queries.
             report::summary(&cfg);
             Ok(())
+        }
+        Command::Logs { target, follow, tail, via } => {
+            logs::run(&cfg, &target, logs::LogsArgs { follow, tail }, via.as_deref()).await
+        }
+        Command::Exec { target, user, via, cmd } => {
+            let cmd = if cmd.is_empty() { vec!["sh".to_string()] } else { cmd };
+            exec::run(&cfg, &target, cmd, user, via.as_deref()).await
         }
     }
 }

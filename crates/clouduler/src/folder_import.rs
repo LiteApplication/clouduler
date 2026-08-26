@@ -13,6 +13,7 @@
 //! background sync scheduler uses, rather than waiting for the volume's own
 //! sync interval.
 
+use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -41,6 +42,63 @@ const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 
 /// How often to poll local docker while waiting for instances to stop.
 const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Live one-line progress for a long-running step, redrawn in place with a
+/// carriage return. Only active on a real terminal: piped/logged output gets
+/// no progress line at all, since overwriting a line makes no sense there.
+struct Progress {
+    live: bool,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self { live: std::io::stdout().is_terminal() }
+    }
+
+    fn update(&self, line: &str) {
+        if self.live {
+            print!("\r\x1b[K{line}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    /// End the current progress line so subsequent `println!`s start clean.
+    fn finish(&self) {
+        if self.live {
+            println!();
+        }
+    }
+}
+
+/// Tracks bytes/files copied so far, for [`Progress::update`].
+#[derive(Default)]
+struct CopyProgress {
+    files: u64,
+    bytes: u64,
+}
+
+impl CopyProgress {
+    fn file(&mut self, bytes: u64, progress: &Progress) {
+        self.files += 1;
+        self.bytes += bytes;
+        progress.update(&format!("copying: {} file(s), {} transferred", self.files, human_bytes(self.bytes)));
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
 
 /// Wait for `instances` to stop, returning as soon as that is confirmed or
 /// `deadline` elapses, whichever comes first.
@@ -118,6 +176,9 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
         .with_context(|| format!("preparing the local path for {id}"))?;
     debug!(root = %volume_root.display(), "volume root");
 
+    let progress = Progress::new();
+    let mut copied = CopyProgress::default();
+
     let mut stopped: Vec<InstanceId> = Vec::new();
     if args.replace {
         let using = instances_using(&state, &id);
@@ -141,7 +202,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
         }
         debug!("clearing the volume before replacing it");
         clear_directory(&volume_root)?;
-        import_replacing(&args, &volume_root)?;
+        import_replacing(&args, &volume_root, &mut copied, &progress)?;
     } else {
         let subroot = match &path {
             Some(p) => resolve_relative(&volume_root, p).with_context(|| format!("resolving {p} under {id}"))?,
@@ -160,10 +221,12 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
             );
         }
         debug!(dest = %dest.display(), "placing source at");
-        apply_method(&args, &args.source, &dest)?;
+        apply_method(&args, &args.source, &dest, &mut copied, &progress)?;
     }
+    progress.finish();
 
     let generation = touch_volume(&client, &id, node_name).await?;
+    let progress = Progress::new();
     debug!(generation, "volume touched, pushing now");
     let pushed = push_now(PushArgs {
         client: &client,
@@ -174,8 +237,10 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
         id: &id,
         volume_root: &volume_root,
         generation,
+        progress: &progress,
     })
     .await;
+    progress.finish();
 
     if !stopped.is_empty() {
         set_desired(&client, &stopped, DesiredState::Running).await?;
@@ -298,12 +363,13 @@ struct PushArgs<'a> {
     id: &'a VolumeId,
     volume_root: &'a Path,
     generation: u64,
+    progress: &'a Progress,
 }
 
 /// Push the volume straight to every other node holding a copy, instead of
 /// waiting for that volume's own sync interval to come around.
 async fn push_now(args: PushArgs<'_>) -> PushResult {
-    let PushArgs { client, registry, state, drive, node_name, id, volume_root, generation } = args;
+    let PushArgs { client, registry, state, drive, node_name, id, volume_root, generation, progress } = args;
 
     let targets: Vec<(String, SocketAddr)> = if registry.is_served(drive) {
         registry
@@ -327,9 +393,10 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
     );
     let engine = DeltaEngine::default();
     let mut failed = Vec::new();
-    for (name, addr) in &targets {
+    for (i, (name, addr)) in targets.iter().enumerate() {
         let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
         debug!(node = name.as_str(), %peer, "syncing volume");
+        progress.update(&format!("pushing to {name} ({}/{})", i + 1, targets.len()));
         match engine.sync(volume_root, peer, id, generation).await {
             Ok(_) => {
                 debug!(node = name.as_str(), generation, "recording replica generation");
@@ -349,24 +416,24 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
     PushResult { total: targets.len(), failed }
 }
 
-fn apply_method(args: &FolderImportArgs, src: &Path, dest: &Path) -> Result<()> {
+fn apply_method(args: &FolderImportArgs, src: &Path, dest: &Path, copied: &mut CopyProgress, progress: &Progress) -> Result<()> {
     if args.r#move {
-        move_into(src, dest)
+        move_into(src, dest, copied, progress)
     } else if args.link {
         symlink_into(src, dest)
     } else {
-        copy_into(src, dest)
+        copy_into(src, dest, copied, progress)
     }
 }
 
 /// `--replace`: the volume's directory itself already has its old content
 /// cleared, so the source's entries become its entries directly rather than
 /// nesting under the source's own name.
-fn import_replacing(args: &FolderImportArgs, volume_root: &Path) -> Result<()> {
+fn import_replacing(args: &FolderImportArgs, volume_root: &Path, copied: &mut CopyProgress, progress: &Progress) -> Result<()> {
     if args.source.is_dir() && !args.source.is_symlink() {
         for entry in std::fs::read_dir(&args.source).with_context(|| format!("reading {}", args.source.display()))? {
             let entry = entry?;
-            apply_method(args, &entry.path(), &volume_root.join(entry.file_name()))?;
+            apply_method(args, &entry.path(), &volume_root.join(entry.file_name()), copied, progress)?;
         }
         if args.r#move {
             // Best effort: the source is empty now, but leaving it behind if
@@ -379,12 +446,12 @@ fn import_replacing(args: &FolderImportArgs, volume_root: &Path) -> Result<()> {
             .source
             .file_name()
             .ok_or_else(|| anyhow!("{} has no file name", args.source.display()))?;
-        apply_method(args, &args.source, &volume_root.join(name))?;
+        apply_method(args, &args.source, &volume_root.join(name), copied, progress)?;
     }
     Ok(())
 }
 
-fn move_into(src: &Path, dest: &Path) -> Result<()> {
+fn move_into(src: &Path, dest: &Path, copied: &mut CopyProgress, progress: &Progress) -> Result<()> {
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
         // EXDEV: rename(2) refuses to cross a mount-point boundary even when
@@ -397,9 +464,9 @@ fn move_into(src: &Path, dest: &Path) -> Result<()> {
         // instead of paying for a full byte copy.
         Err(e) if e.raw_os_error() == Some(18) => {
             if same_device(src, dest)? {
-                hardlink_into(src, dest)?;
+                hardlink_into(src, dest, copied, progress)?;
             } else {
-                copy_into(src, dest)?;
+                copy_into(src, dest, copied, progress)?;
             }
             remove_source(src)
         }
@@ -421,9 +488,13 @@ fn same_device(src: &Path, dest: &Path) -> Result<bool> {
 }
 
 /// Recreate `src`'s tree at `dest` by hardlinking every regular file rather
-/// than copying its bytes. Only valid within a single device — the caller
-/// checks that with `same_device` first.
-fn hardlink_into(src: &Path, dest: &Path) -> Result<()> {
+/// than copying its bytes. The caller checks `same_device` first as a cheap
+/// filter, but that check is only a hint: on btrfs, separate subvolumes of
+/// the same filesystem report identical `st_dev` yet still refuse to
+/// hardlink across the subvolume boundary. So every hardlink here still
+/// falls back to a byte copy on `EXDEV`, the same way `move_into` falls back
+/// on `rename`, rather than trusting `same_device` to have been right.
+fn hardlink_into(src: &Path, dest: &Path, copied: &mut CopyProgress, progress: &Progress) -> Result<()> {
     let meta = std::fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
     if meta.is_symlink() {
         let target = std::fs::read_link(src)?;
@@ -432,10 +503,19 @@ fn hardlink_into(src: &Path, dest: &Path) -> Result<()> {
         std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
         for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
             let entry = entry?;
-            hardlink_into(&entry.path(), &dest.join(entry.file_name()))?;
+            hardlink_into(&entry.path(), &dest.join(entry.file_name()), copied, progress)?;
         }
     } else {
-        std::fs::hard_link(src, dest).with_context(|| format!("linking {} to {}", dest.display(), src.display()))?;
+        match std::fs::hard_link(src, dest) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(18) => {
+                std::fs::copy(src, dest).with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("linking {} to {}", dest.display(), src.display()));
+            }
+        }
+        copied.file(meta.len(), progress);
     }
     Ok(())
 }
@@ -459,7 +539,7 @@ fn symlink_into(src: &Path, dest: &Path) -> Result<()> {
         .with_context(|| format!("linking {} at {}", target.display(), dest.display()))
 }
 
-fn copy_into(src: &Path, dest: &Path) -> Result<()> {
+fn copy_into(src: &Path, dest: &Path, copied: &mut CopyProgress, progress: &Progress) -> Result<()> {
     let meta = std::fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
     if meta.is_symlink() {
         let target = std::fs::read_link(src)?;
@@ -468,10 +548,11 @@ fn copy_into(src: &Path, dest: &Path) -> Result<()> {
         std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
         for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
             let entry = entry?;
-            copy_into(&entry.path(), &dest.join(entry.file_name()))?;
+            copy_into(&entry.path(), &dest.join(entry.file_name()), copied, progress)?;
         }
     } else {
         std::fs::copy(src, dest).with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+        copied.file(meta.len(), progress);
     }
     Ok(())
 }
@@ -520,7 +601,7 @@ mod tests {
         fs::write(src.join("sub/b.txt"), b"world").unwrap();
 
         let dest = tmp.path().join("dest");
-        copy_into(&src, &dest).unwrap();
+        copy_into(&src, &dest, &mut CopyProgress::default(), &Progress::new()).unwrap();
 
         assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello");
         assert_eq!(fs::read(dest.join("sub/b.txt")).unwrap(), b"world");
@@ -536,7 +617,7 @@ mod tests {
         std::os::unix::fs::symlink("real.txt", &src).unwrap();
 
         let dest = tmp.path().join("dest-link");
-        copy_into(&src, &dest).unwrap();
+        copy_into(&src, &dest, &mut CopyProgress::default(), &Progress::new()).unwrap();
 
         assert_eq!(fs::read_link(&dest).unwrap(), Path::new("real.txt"));
     }
@@ -549,7 +630,7 @@ mod tests {
         fs::write(src.join("a.txt"), b"hello").unwrap();
 
         let dest = tmp.path().join("dest");
-        move_into(&src, &dest).unwrap();
+        move_into(&src, &dest, &mut CopyProgress::default(), &Progress::new()).unwrap();
 
         assert!(!src.exists());
         assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello");
@@ -576,7 +657,7 @@ mod tests {
         fs::write(src.join("sub/b.txt"), b"world").unwrap();
 
         let dest = tmp.path().join("dest");
-        hardlink_into(&src, &dest).unwrap();
+        hardlink_into(&src, &dest, &mut CopyProgress::default(), &Progress::new()).unwrap();
 
         assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello");
         assert_eq!(

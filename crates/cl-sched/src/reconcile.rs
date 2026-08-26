@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_docker::{ContainerSpec, ContainerState, Docker, LABEL_INSTANCE};
+use cl_docker::{ContainerSpec, ContainerState, Docker, DockerError, LABEL_INSTANCE};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::{Assignment, DesiredState};
 use tokio::sync::RwLock;
@@ -255,7 +255,13 @@ impl Reconciler {
             }
             Action::Start(id) => {
                 info!(instance = %id, "starting");
-                self.docker.start(&name).await?;
+                if let Err(e) = self.docker.start(&name).await {
+                    if let (true, Some(target)) = (is_stale_network_error(&e), target) {
+                        warn!(instance = %id, error = %e, "container's network no longer exists, recreating");
+                        return self.replace(id, target, &name).await;
+                    }
+                    return Err(e.into());
+                }
                 // A fresh start means a fresh pid, so a route pinned to the
                 // old one is gone too: has to be redone every time, not just
                 // on create.
@@ -277,22 +283,49 @@ impl Reconciler {
                     warn!(instance = %id, "no spec to recreate from");
                     return Ok(());
                 };
-                self.ensure_image(id, &target.spec.image).await?;
                 info!(instance = %id, "recreating after a spec change");
-                self.docker.stop(&name, stop_timeout(Some(target))).await.ok();
-                self.docker.remove(&name, true).await.ok();
-                let container_id = self.docker.create(&target.spec).await?;
-                if let Some(egress) = &target.spec.egress_network {
-                    self.docker.connect_network(&container_id, egress, None).await?;
-                }
-                self.docker.start(&name).await?;
-                if let Some(egress) = &target.spec.egress_network {
-                    self.docker.set_default_route(&name, egress).await?;
-                }
+                self.replace(id, target, &name).await?;
             }
         }
         Ok(())
     }
+
+    /// Stops (if running), force-removes, then creates and starts a fresh
+    /// container from `target`'s current spec. Shared by `Action::Recreate`
+    /// (the spec itself changed) and `Action::Start`'s stale-network
+    /// recovery: both need the old container gone before docker will let a
+    /// new one attach cleanly, and `create` picks up whatever the network
+    /// currently is rather than whatever it was when this container was
+    /// last built.
+    async fn replace(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
+        self.ensure_image(id, &target.spec.image).await?;
+        self.docker.stop(name, stop_timeout(Some(target))).await.ok();
+        self.docker.remove(name, true).await.ok();
+        let container_id = self.docker.create(&target.spec).await?;
+        if let Some(egress) = &target.spec.egress_network {
+            self.docker.connect_network(&container_id, egress, None).await?;
+        }
+        self.docker.start(name).await?;
+        if let Some(egress) = &target.spec.egress_network {
+            self.docker.set_default_route(name, egress).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether a docker error is the container's network having been torn down
+/// and rebuilt under it — the overlay bridge still exists by the same name,
+/// but with a fresh docker network id, because it was removed and remade
+/// (e.g. `overlay.rs` rebuilding it fresh after this node's daemon
+/// restarted) while this container was still attached to the old one.
+/// Docker refuses to start it and otherwise nothing ever notices: the
+/// container's spec hasn't changed, so `diff()` keeps deciding `Start`
+/// forever instead of `Recreate`, and the same failure repeats every sweep
+/// until something forces a fresh container. Dockerd has no distinct error
+/// code for this (it comes back as a generic 500), only this message —
+/// same tradeoff `DockerError::is_not_found` already makes for 404s.
+fn is_stale_network_error(e: &DockerError) -> bool {
+    e.to_string().contains("Could not attach to network")
 }
 
 fn stop_timeout(target: Option<&Target>) -> Duration {
@@ -305,6 +338,23 @@ mod tests {
     use cl_docker::{RunState, LABEL_MANAGED, MANAGED_VALUE};
     use cl_raft::state::Assignment;
     use std::collections::HashMap;
+
+    #[test]
+    fn recognises_the_stale_network_error_dockerd_reports_on_start() {
+        let e = DockerError::NotFound(
+            "failed to set up container networking: Could not attach to network \
+             032b9da4a7c728461a048d7b4da2011c2527a8ec9647b994876b041da23b408b: \
+             rpc error: code = NotFound desc = network ... not found"
+                .to_string(),
+        );
+        assert!(is_stale_network_error(&e));
+    }
+
+    #[test]
+    fn an_unrelated_docker_error_is_not_mistaken_for_a_stale_network() {
+        let e = DockerError::NotFound("no such image".to_string());
+        assert!(!is_stale_network_error(&e));
+    }
 
     fn target(service: &str, index: u32, desired: DesiredState, revision: u64) -> Target {
         let instance = InstanceId::new("site", service, index);

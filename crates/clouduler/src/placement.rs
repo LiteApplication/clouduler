@@ -9,11 +9,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
-use cl_config::{ServiceExtensions, StackFile};
+use cl_config::{ClusterConfig, ServiceExtensions, StackFile};
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
 use cl_raft::state::{ClusterState, DesiredState};
-use cl_sched::run::overlay_name;
+use cl_sched::run::{overlay_name, overlay_network_name};
 
 /// One service's declared publishing and the addresses currently backing it.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,13 +27,13 @@ pub struct ServicePlacement {
 }
 
 /// Every instance that has an overlay address, in instance order.
-pub fn instance_addresses(state: &ClusterState) -> Vec<(InstanceId, Ipv4Addr)> {
+pub fn instance_addresses(state: &ClusterState, cfg: &ClusterConfig) -> Vec<(InstanceId, Ipv4Addr)> {
     let Some(allocations) = Allocations::decode(state.overlay.as_deref()) else {
         return Vec::new();
     };
 
     let mut out = BTreeMap::new();
-    for (network, stack) in networks_by_stack(state) {
+    for (network, stack) in networks_by_stack(state, cfg) {
         for (instance, ip) in allocations.instances(&network) {
             // An address the leader has not reclaimed yet still points at a
             // container that is gone. Assignments are the authority.
@@ -47,8 +47,8 @@ pub fn instance_addresses(state: &ClusterState) -> Vec<(InstanceId, Ipv4Addr)> {
 }
 
 /// Every service that publishes something, with its current backends.
-pub fn service_placements(state: &ClusterState) -> Vec<ServicePlacement> {
-    let addresses: BTreeMap<InstanceId, Ipv4Addr> = instance_addresses(state).into_iter().collect();
+pub fn service_placements(state: &ClusterState, cfg: &ClusterConfig) -> Vec<ServicePlacement> {
+    let addresses: BTreeMap<InstanceId, Ipv4Addr> = instance_addresses(state, cfg).into_iter().collect();
     let mut out = Vec::new();
 
     for (name, stack) in &state.stacks {
@@ -78,15 +78,18 @@ pub fn service_placements(state: &ClusterState) -> Vec<ServicePlacement> {
 }
 
 /// The overlay network name each stack's containers sit on. Matches how the
-/// scheduler picks one, so the addresses looked up here are the addresses the
-/// containers actually got.
-fn networks_by_stack(state: &ClusterState) -> Vec<(String, String)> {
+/// scheduler picks one (`cl_sched::run::overlay_network_name`: the declared
+/// network of subnet-addressed kind, not just whichever sorts first), so the
+/// addresses looked up here are the addresses the containers actually got.
+/// A stack with no such network (public/egress/wireguard only) contributes
+/// nothing here, same as it gets no overlay built for it at all.
+fn networks_by_stack(state: &ClusterState, cfg: &ClusterConfig) -> Vec<(String, String)> {
     state
         .stacks
         .iter()
         .filter_map(|(name, stack)| {
             let file = StackFile::parse(&stack.spec).ok()?;
-            let network = file.networks.keys().next()?;
+            let network = overlay_network_name(&file, cfg)?;
             Some((overlay_name(name, network), name.clone()))
         })
         .collect()
@@ -163,6 +166,27 @@ pub(crate) mod fixtures {
         state
     }
 
+    /// A `ClusterConfig` whose "default" network is `internal` kind, matching
+    /// `SPEC`'s network so `overlay_network_name` picks it the same way the
+    /// scheduler and overlay builder do.
+    pub fn cluster_config() -> ClusterConfig {
+        ClusterConfig::parse(
+            "\
+cluster: { name: test }
+networks:
+  default: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+  wan: { type: egress }
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: { default: 10.10.0.1, wan: eth0 }
+web: { address: cloud, network: default }
+",
+        )
+        .expect("valid cluster config")
+    }
+
     pub const SPEC: &str = "\
 networks:
   default: {}
@@ -190,7 +214,7 @@ mod tests {
     #[test]
     fn every_running_instance_gets_an_address() {
         let state = state_with(SPEC, 2);
-        let placed = instance_addresses(&state);
+        let placed = instance_addresses(&state, &cluster_config());
         assert_eq!(placed.len(), 2);
         assert_ne!(placed[0].1, placed[1].1);
     }
@@ -201,7 +225,7 @@ mod tests {
     fn an_instance_without_an_assignment_is_not_published() {
         let mut state = state_with(SPEC, 2);
         state.assignments.remove(&InstanceId::new(STACK, "web", 1));
-        assert_eq!(instance_addresses(&state).len(), 1);
+        assert_eq!(instance_addresses(&state, &cluster_config()).len(), 1);
     }
 
     #[test]
@@ -209,12 +233,12 @@ mod tests {
         let mut state = state_with(SPEC, 1);
         let instance = InstanceId::new(STACK, "web", 0);
         state.assignments.get_mut(&instance).expect("assigned").desired = DesiredState::Stopped;
-        assert!(instance_addresses(&state).is_empty());
+        assert!(instance_addresses(&state, &cluster_config()).is_empty());
     }
 
     #[test]
     fn a_service_carries_every_replica_as_a_backend() {
-        let placements = service_placements(&state_with(SPEC, 3));
+        let placements = service_placements(&state_with(SPEC, 3), &cluster_config());
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].service, "web");
         assert_eq!(placements[0].addresses.len(), 3);
@@ -226,6 +250,40 @@ mod tests {
     #[test]
     fn a_service_publishing_nothing_is_left_out() {
         let spec = "networks:\n  default: {}\nservices:\n  web:\n    image: nginx\n";
-        assert!(service_placements(&state_with(spec, 1)).is_empty());
+        assert!(service_placements(&state_with(spec, 1), &cluster_config()).is_empty());
+    }
+
+    /// The real bug this module used to have: `networks_by_stack` picked
+    /// whichever network sorted first out of a stack's *declared* networks,
+    /// not the one actually carrying the overlay - so a stack whose networks
+    /// happened to sort a public/egress one before its internal one got no
+    /// addresses at all, even though its containers were running fine.
+    #[test]
+    fn a_network_that_sorts_before_the_internal_one_does_not_hide_the_addresses() {
+        let spec = "\
+networks:
+  aegress: {}
+  default: {}
+services:
+  web:
+    image: nginx
+    networks: [aegress, default]
+    x-clouduler:
+      proxy:
+        - host: blog
+          network: aegress
+          port: 80
+";
+        let mut cfg = cluster_config();
+        cfg.networks.insert(
+            "aegress".to_string(),
+            cl_config::Network {
+                kind: cl_config::NetworkKind::Egress,
+                subnet: None,
+                domain: None,
+            },
+        );
+        let state = state_with(spec, 1);
+        assert_eq!(instance_addresses(&state, &cfg).len(), 1);
     }
 }

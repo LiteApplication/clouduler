@@ -86,9 +86,10 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
         let state = cluster.state().await;
         // Recomputed every pass, not just once at boot, so a node added after
         // this one started gets an internal-dns answer without a restart.
-        let nodes = nodes_of(&crate::daemon::live_config(&state, &boot_cfg));
+        let live = crate::daemon::live_config(&state, &boot_cfg);
+        let nodes = nodes_of(&live);
 
-        let records = zone_for(&state, &nodes);
+        let records = zone_for(&state, &live, &nodes);
         if let Err(e) = dns.reload(&records).await {
             warn!(error = %e, "could not rebuild the internal zone");
             continue;
@@ -122,8 +123,8 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
 
 /// The zone as it should be right now: every running container by service
 /// name, plus every node by its own name.
-fn zone_for(state: &ClusterState, nodes: &[(String, Ipv4Addr)]) -> Vec<ZoneRecord> {
-    let instances = crate::placement::instance_addresses(state);
+fn zone_for(state: &ClusterState, cfg: &ClusterConfig, nodes: &[(String, Ipv4Addr)]) -> Vec<ZoneRecord> {
+    let instances = crate::placement::instance_addresses(state, cfg);
     build_records(
         instances.iter().map(|(id, ip)| (id, *ip)),
         nodes.iter().map(|(name, ip)| (name.as_str(), *ip)),
@@ -143,13 +144,13 @@ fn gateways(state: &ClusterState) -> Vec<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placement::fixtures::{state_with, SPEC};
+    use crate::placement::fixtures::{cluster_config, state_with, SPEC};
     use cl_net::dns::answer;
 
     #[test]
     fn a_service_resolves_to_every_replica() {
         let state = state_with(SPEC, 2);
-        let records = zone_for(&state, &[]);
+        let records = zone_for(&state, &cluster_config(), &[]);
 
         let addrs = answer(&records, "web.blog").expect("web.blog resolves");
         assert_eq!(addrs.len(), 2);
@@ -161,7 +162,7 @@ mod tests {
     #[test]
     fn nodes_resolve_by_name() {
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
-        let records = zone_for(&state_with(SPEC, 1), &nodes);
+        let records = zone_for(&state_with(SPEC, 1), &cluster_config(), &nodes);
         assert_eq!(answer(&records, "n1"), Some(&[Ipv4Addr::new(10, 10, 0, 1)][..]));
     }
 
