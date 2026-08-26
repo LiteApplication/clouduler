@@ -4,6 +4,7 @@ pub mod error;
 pub mod materialize;
 pub mod place;
 pub mod plan;
+pub mod rebalance;
 pub mod reconcile;
 pub mod run;
 pub mod spec;

@@ -123,7 +123,7 @@ impl Scheduler {
         let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
         let desired = desired_instances(state, &live.egress_networks(), &live.port_gated_networks(), colocate_proxy_hosts);
 
-        let outcome = place::place(state, &desired, &live.served_drives());
+        let outcome = place::place(state, &desired, &live.served_drives(), &live.nat_networks());
         for unplaceable in &outcome.unplaceable {
             warn!(instance = %unplaceable.instance, reason = %unplaceable.reason, "cannot place instance");
         }
@@ -200,6 +200,22 @@ impl Scheduler {
 
         for assignment in state.assignments_on(&self.node) {
             let instance = &assignment.instance;
+            // During emergency mode (see `clouduler emergency`), a container
+            // this node was already running for some other stack before it
+            // lost quorum must not keep running: its `desired` was never
+            // touched, so leaving it in `targets` here would restart it
+            // untouched the moment this loop runs, defeating the whole point
+            // of asking an operator to confirm what else is really up first.
+            // Simply excluding it (rather than forcing `desired` to
+            // `Stopped`) is what lets it resume on its own, no restore step
+            // needed, the instant `emergency_stack` clears.
+            if state
+                .emergency_stack
+                .as_deref()
+                .is_some_and(|only| only != instance.stack)
+            {
+                continue;
+            }
             let Some(stack) = state.stacks.get(&instance.stack) else {
                 continue;
             };
@@ -533,6 +549,14 @@ pub fn instances_of(state: &ClusterState, stack: &str) -> Vec<InstanceId> {
 /// / `port_gated_networks`). Shared by the scheduler and by anything else (the
 /// api's "why is this instance unplaced" reporting) that needs the same
 /// expansion without duplicating it.
+///
+/// While `state.emergency_stack` holds a name (see `clouduler emergency`),
+/// every other stack is left out entirely, rather than reported unplaceable:
+/// its instances are not a placement problem, they are simply not wanted
+/// until an operator ends emergency mode. Nothing here mutates any
+/// assignment's own `desired` state, so once `emergency_stack` clears (see
+/// `Request::ClearEmergency`) every stack picks back up exactly where its own
+/// `desired` field already said it should be.
 pub fn desired_instances(
     state: &ClusterState,
     egress_networks: &BTreeSet<String>,
@@ -541,6 +565,9 @@ pub fn desired_instances(
 ) -> Vec<Desired> {
     let mut desired = Vec::new();
     for (name, stack) in &state.stacks {
+        if state.emergency_stack.as_deref().is_some_and(|only| only != name) {
+            continue;
+        }
         match StackFile::parse(&stack.spec) {
             Ok(file) => desired.extend(plan::expand(
                 name,
@@ -569,12 +596,24 @@ fn served_drives(state: &ClusterState) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+/// Nat-kind network names, read from the replicated cluster config the same
+/// way `served_drives` is. Empty (falling back to strict per-node network
+/// eligibility) if no config has been published yet or it fails to parse.
+fn nat_networks(state: &ClusterState) -> BTreeSet<String> {
+    state
+        .cluster_config
+        .as_ref()
+        .and_then(|entry| ClusterConfig::parse(&entry.yaml).ok())
+        .map(|cfg| cfg.nat_networks())
+        .unwrap_or_default()
+}
+
 /// Every request the leader would submit for a state, without submitting them.
 /// Exists so the scheduling decision can be tested without a cluster.
 pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
     let desired = desired_instances(state, &BTreeSet::new(), &BTreeSet::new(), false);
 
-    let outcome = place::place(state, &desired, &served_drives(state));
+    let outcome = place::place(state, &desired, &served_drives(state), &nat_networks(state));
     Ok(outcome
         .decisions
         .into_iter()
@@ -733,6 +772,26 @@ web: { address: cloud, network: tailscale }
         // The good stack still schedules.
         let requests = plan_requests(&state).expect("plan");
         assert_eq!(requests.len(), 2);
+    }
+
+    /// During emergency mode only the named stack is a placement candidate:
+    /// another deployed stack must not schedule anywhere, not even on the
+    /// sole surviving node, until an operator ends emergency mode.
+    #[test]
+    fn emergency_mode_only_plans_the_named_stack() {
+        let mut state = state();
+        state.apply(&Request::DeployStack {
+            name: "other".into(),
+            spec: STACK.into(),
+        });
+        state.emergency_stack = Some("site".into());
+
+        let requests = plan_requests(&state).expect("plan");
+        assert_eq!(requests.len(), 2, "only site's two replicas");
+        assert!(requests.iter().all(|r| match r {
+            Request::Assign { instance, .. } => instance.stack == "site",
+            _ => false,
+        }));
     }
 
     #[test]

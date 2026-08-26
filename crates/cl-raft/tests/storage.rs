@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use cl_raft::state::{Availability, NodeState, Request, Role};
+use cl_raft::ids::{InstanceId, VolumeId};
+use cl_raft::state::{Availability, DesiredState, NodeState, Request, Role, VolumeState};
 use cl_raft::store::{LogStore, StateMachineStore, Store};
 use cl_raft::types::{StorageError, TypeConfig};
 use openraft::storage::RaftStateMachine;
@@ -134,4 +135,133 @@ async fn snapshots_round_trip_the_state_machine() {
     let shared = other.shared_state();
     let guard = shared.read().await;
     assert!(guard.data.nodes.contains_key("n1"));
+}
+
+/// `force_quorum` on its own must not touch any assignment's `desired` state
+/// - that would be indistinguishable from an operator deliberately stopping
+/// a stack, and there would be nothing left recording it should come back.
+/// Only `emergency` (below) treats "not the recovering stack" specially, and
+/// even that leaves `desired` alone in favour of `emergency_stack`.
+#[tokio::test]
+async fn force_quorum_leaves_assignments_desired_state_alone() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("raft.redb");
+
+    let instance = InstanceId::new("site", "web", 0);
+    {
+        let store = Store::open(&path).expect("open");
+        let mut sm = store.state_machine();
+        let responses = sm
+            .apply([
+                entry(1, Request::UpsertNode(node("n1"))),
+                entry(
+                    2,
+                    Request::Assign {
+                        instance: instance.clone(),
+                        node: "n1".to_string(),
+                        drives: Default::default(),
+                    },
+                ),
+            ])
+            .await
+            .expect("apply");
+        assert!(responses[0].is_ok());
+        assert!(responses[1].is_ok());
+    }
+
+    let store = Store::open(&path).expect("reopen");
+    store
+        .force_quorum(1, "10.10.0.2:7373".parse().expect("addr"))
+        .await
+        .expect("force quorum");
+
+    let shared = store.shared_state();
+    let guard = shared.read().await;
+    let assignment = guard.data.assignments.get(&instance).expect("assignment");
+    assert_eq!(assignment.desired, DesiredState::Running);
+    assert_eq!(guard.data.emergency_stack, None);
+}
+
+#[tokio::test]
+async fn emergency_sets_the_flag_marks_other_nodes_unreachable_and_stamps_volumes() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("raft.redb");
+
+    let volume = VolumeId::new("fast", "data");
+    {
+        let store = Store::open(&path).expect("open");
+        let mut sm = store.state_machine();
+        let responses = sm
+            .apply([
+                entry(1, Request::UpsertNode(node("n1"))),
+                entry(2, Request::UpsertNode(node("n2"))),
+                entry(
+                    3,
+                    Request::UpsertVolume {
+                        id: volume.clone(),
+                        primary: "n2".to_string(),
+                    },
+                ),
+            ])
+            .await
+            .expect("apply");
+        for r in &responses {
+            assert!(r.is_ok(), "{r:?}");
+        }
+    }
+
+    let store = Store::open(&path).expect("reopen");
+    let untouched = VolumeId::new("bulk", "other");
+    store
+        .emergency(
+            1,
+            "10.10.0.1:7373".parse().expect("addr"),
+            "n1",
+            "site",
+            &[volume.clone()].into(),
+        )
+        .await
+        .expect("emergency");
+
+    let shared = store.shared_state();
+    let guard = shared.read().await;
+    assert_eq!(guard.data.emergency_stack.as_deref(), Some("site"));
+    assert!(guard.data.unreachable.contains("n2"));
+    assert!(!guard.data.unreachable.contains("n1"));
+
+    let stamped = guard.data.volumes.get(&volume).expect("volume");
+    assert_eq!(stamped.primary, "n1");
+    assert_eq!(stamped.replicas.get("n1"), Some(&stamped.generation));
+    assert!(!guard.data.volumes.contains_key(&untouched));
+}
+
+/// A volume `emergency` is told about that was never registered through raft
+/// (a brand new one this node has local data for, but never wrote
+/// `UpsertVolume` for before losing quorum) still needs to come out of this
+/// as authoritative on this node, not silently skipped.
+#[tokio::test]
+async fn emergency_registers_a_volume_it_has_never_seen_before() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("raft.redb");
+    {
+        let store = Store::open(&path).expect("open");
+        let mut sm = store.state_machine();
+        sm.apply([entry(1, Request::UpsertNode(node("n1")))])
+            .await
+            .expect("apply");
+    }
+
+    let store = Store::open(&path).expect("reopen");
+    let volume = VolumeId::new("fast", "fresh");
+    store
+        .emergency(1, "10.10.0.1:7373".parse().expect("addr"), "n1", "site", &[volume.clone()].into())
+        .await
+        .expect("emergency");
+
+    let shared = store.shared_state();
+    let guard = shared.read().await;
+    let stamped: &VolumeState = guard.data.volumes.get(&volume).expect("volume");
+    assert_eq!(stamped.primary, "n1");
+    assert_eq!(stamped.generation, 1);
+    assert_eq!(stamped.replicas.get("n1"), Some(&1));
 }

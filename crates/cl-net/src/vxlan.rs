@@ -39,8 +39,10 @@ pub const VXLAN_OVERHEAD_IPV4: u16 = 50;
 pub const VXLAN_OVERHEAD_IPV6: u16 = 70;
 
 /// Assumed when the kernel does not report an MTU for the underlay link,
-/// which should not happen but must not be a panic if it does.
-const DEFAULT_UNDERLAY_MTU: u16 = 1500;
+/// which should not happen but must not be a panic if it does. Also the plain
+/// (non-vxlan) MTU used for a single-node overlay's bridge, which has no
+/// underlay link to read one from.
+pub const DEFAULT_UNDERLAY_MTU: u16 = 1500;
 
 /// Deterministic interface name for a stack network's bridge.
 pub fn bridge_name(network: &str) -> String {

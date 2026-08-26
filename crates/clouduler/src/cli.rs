@@ -88,6 +88,64 @@ pub enum Command {
     ///
     ///   sudo clouduler folder-import ~/Downloads/dataset bulk/imports
     FolderImport(Box<FolderImportArgs>),
+    /// Disaster recovery for a cluster that has lost quorum for good (a
+    /// manager's raft state gone with no backup, so a normal membership
+    /// change can never be driven through consensus again since that itself
+    /// needs the quorum that is missing): make this node the cluster's sole
+    /// voter, bring only `stack` back up trusting this node's own local data
+    /// for it, and hold every other stack off until an operator has had a
+    /// chance to confirm what else is genuinely still running out there.
+    ///
+    /// Bypasses raft consensus entirely by rewriting this node's own local
+    /// log and state machine, the way etcd's `--force-new-cluster` or
+    /// Consul's `peers.json` recovery do. Every other node this node already
+    /// knew about stays as a learner - including any lost co-manager, now
+    /// demoted rather than dropped - only the voter set shrinks to this node
+    /// alone; once a demoted manager's daemon is reachable again, this node
+    /// promotes it back to a voter on its own, the same timer that adds any
+    /// other new node.
+    ///
+    /// `stack`'s own instances get placed and started normally, on this data:
+    /// every volume it uses is stamped as authoritative on this node, and
+    /// every served drive it needs picks this node as the active server
+    /// (every other currently known node is marked unreachable, so the
+    /// existing first-reachable-candidate logic in `drives.rs` naturally
+    /// prefers this one). Every other stack's own `desired` state is left
+    /// completely untouched - not stopped, just held off - and it resumes on
+    /// its own, with no restore step, the moment another manager is reachable
+    /// again and emergency mode ends automatically.
+    ///
+    /// This node's daemon MUST be stopped first: it writes straight to the
+    /// data directory's raft.redb, and the running daemon holding that file
+    /// open would make this fail, or race it. Once it is done, start the
+    /// daemon normally.
+    Emergency {
+        /// Stack to bring back up, trusting this node's own local data for it.
+        stack: String,
+        /// Name of this node in the config. Defaults to the system hostname.
+        #[arg(long, env = "CLOUDULER_NODE")]
+        node: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Actively relocate instances to smooth the number of instances per
+    /// node, unlike the regular scheduler pass, which never moves an
+    /// already validly-placed instance.
+    ///
+    /// Never touches an instance pinned to a node, published on a proxy
+    /// hostname, already mid-migration, or that has nowhere else it could
+    /// legally run - see `cl_sched::rebalance::plan`. Each move it decides on
+    /// goes through the same `BeginMigration` path as a manual move from the
+    /// ui, so ordinary placement and drive checks still apply.
+    Rebalance {
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show cluster status.
     Status,
     /// Stream a container's output, or every container in a stack.
@@ -351,35 +409,6 @@ pub enum NodeCommand {
         /// Node to submit through. Defaults to any manager in the config.
         #[arg(long)]
         via: Option<String>,
-    },
-    /// Disaster recovery: force this node to be the cluster's sole voter,
-    /// for a cluster that has lost quorum for good (a manager's raft state
-    /// gone with no backup, so a normal membership change can never be
-    /// driven through consensus again since that itself needs the quorum
-    /// that is missing).
-    ///
-    /// Bypasses raft consensus entirely by rewriting this node's own local
-    /// log and state machine, the way etcd's `--force-new-cluster` or
-    /// Consul's `peers.json` recovery do. Every other node this node already
-    /// knew about stays as a learner - including any lost co-manager, now
-    /// demoted rather than dropped - only the voter set shrinks to this node
-    /// alone. This is meant as a temporary state: once a demoted manager's
-    /// daemon is reachable again, this node promotes it back to a voter on
-    /// its own, on the same timer that adds any other new node. Nothing
-    /// needs to run on that node by hand unless its own local state is gone
-    /// too, in which case it needs `clouduler init --join` before it can be
-    /// reached at all.
-    ///
-    /// This node's daemon MUST be stopped first: it writes straight to the
-    /// data directory's raft.redb, and the running daemon holding that file
-    /// open would make this fail, or race it.
-    ForceQuorum {
-        /// Name of this node in the config. Defaults to the system hostname.
-        #[arg(long, env = "CLOUDULER_NODE")]
-        node: Option<String>,
-        /// Skip the confirmation prompt.
-        #[arg(long)]
-        yes: bool,
     },
 }
 

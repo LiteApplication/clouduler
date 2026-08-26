@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useClusterState } from '../state/store';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { AddNodeForm } from './AddNodeForm';
 import { Icon } from '../components/Icon';
 import { RelationDiagram, type RelationEdge, type RelationNode } from '../components/RelationDiagram';
@@ -14,6 +14,26 @@ export function Nodes() {
   const { original: config } = useConfigDraft();
   const { isAdmin } = useAuth();
   const [showAdd, setShowAdd] = useState(false);
+  const [rebalancing, setRebalancing] = useState(false);
+
+  const rebalance = async () => {
+    setRebalancing(true);
+    try {
+      const result = await api.rebalance();
+      if (result.moves.length === 0) {
+        alert('already balanced, nothing to move');
+      } else {
+        alert(
+          `moving ${result.moves.length} instance${result.moves.length === 1 ? '' : 's'}:\n` +
+            result.moves.map((m) => `${m.instance}: ${m.from} → ${m.to}`).join('\n'),
+        );
+      }
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'failed to rebalance');
+    } finally {
+      setRebalancing(false);
+    }
+  };
 
   const nodes = useMemo(() => Object.values(cluster?.nodes ?? {}), [cluster]);
   const unreachable = cluster?.unreachable ?? [];
@@ -103,10 +123,16 @@ export function Nodes() {
           </div>
         </div>
         {isAdmin && (
-          <button className="primary" onClick={() => setShowAdd((v) => !v)}>
-            <Icon name={showAdd ? 'close' : 'plus'} />
-            {showAdd ? 'Cancel' : 'Add node'}
-          </button>
+          <div className="btn-row">
+            <button onClick={rebalance} disabled={rebalancing} title="Move instances around to smooth load across nodes">
+              <Icon name="refresh" />
+              {rebalancing ? 'Rebalancing…' : 'Rebalance'}
+            </button>
+            <button className="primary" onClick={() => setShowAdd((v) => !v)}>
+              <Icon name={showAdd ? 'close' : 'plus'} />
+              {showAdd ? 'Cancel' : 'Add node'}
+            </button>
+          </div>
         )}
       </div>
 

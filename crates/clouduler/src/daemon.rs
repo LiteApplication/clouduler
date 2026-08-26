@@ -667,6 +667,22 @@ async fn watch_leadership(
             if let Err(e) = seed_roster(&current, &cluster).await {
                 warn!(error = %e, "could not publish the node roster");
             }
+
+            // `status.reachable` (including this node itself) growing past
+            // one voter is the cluster's own signal that another manager
+            // `clouduler emergency` left for dead has come back - end
+            // emergency mode right here rather than wait for an operator, so
+            // every other stack resumes on its own. See
+            // `ClusterState::emergency_stack`.
+            if status.reachable.len() > 1 && cluster.state().await.emergency_stack.is_some() {
+                match cluster.submit(Request::ClearEmergency).await {
+                    Ok(response) if response.error.is_none() => {
+                        info!("another manager is reachable again, ending emergency mode");
+                    }
+                    Ok(response) => warn!(error = ?response.error, "could not clear emergency mode"),
+                    Err(e) => warn!(error = %e, "could not clear emergency mode"),
+                }
+            }
         }
 
         tokio::select! {
@@ -860,7 +876,7 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             }
         }
 
-        let desired = to_state(cfg, name, node, rpc_addr, known.nodes.get(name));
+        let desired = to_state(name, node, rpc_addr, known.nodes.get(name));
         if known.nodes.get(name) != Some(&desired) {
             let response = cluster.submit(Request::UpsertNode(desired)).await?;
             if let Some(error) = response.error {
@@ -909,22 +925,11 @@ fn to_port_protocol(protocol: cl_config::Protocol) -> cl_raft::PortProtocol {
 /// Build the roster entry from config, keeping any availability the cluster has
 /// already set. Draining a node from the ui must not be undone by a restart.
 fn to_state(
-    cfg: &ClusterConfig,
     name: &str,
     node: &Node,
     rpc_addr: std::net::SocketAddr,
     current: Option<&NodeState>,
 ) -> NodeState {
-    // A nat-kind network needs no per-node address: every node implements it
-    // identically, so it belongs in this node's egress/network sets
-    // unconditionally rather than being read off `node.network` like an
-    // egress or wireguard interface is.
-    let nat_networks: Vec<String> = cfg
-        .networks
-        .iter()
-        .filter(|(_, net)| net.kind == cl_config::NetworkKind::Nat)
-        .map(|(name, _)| name.clone())
-        .collect();
     NodeState {
         name: name.to_string(),
         id: node.id,
@@ -947,14 +952,8 @@ fn to_state(
             .iter()
             .filter(|(_, addr)| matches!(addr, cl_config::NodeAddress::Interface(_)))
             .map(|(name, _)| name.clone())
-            .chain(nat_networks.iter().cloned())
             .collect(),
-        networks: node
-            .network
-            .keys()
-            .cloned()
-            .chain(nat_networks.iter().cloned())
-            .collect(),
+        networks: node.network.keys().cloned().collect(),
         // Public networks declare open ports on the router address; wireguard
         // ones on the tunnel interface address (a VPN provider's port
         // forwarding, e.g. AirVPN). Either way, this is the set of ports the
@@ -1079,20 +1078,5 @@ mod tests {
         };
 
         assert_eq!(live_config(&state, &boot_cfg()), boot_cfg());
-    }
-
-    #[test]
-    fn a_nat_network_is_implemented_by_every_node_with_no_config() {
-        let mut cfg = boot_cfg();
-        cfg.networks.insert(
-            "home".to_string(),
-            cl_config::Network { kind: cl_config::NetworkKind::Nat, subnet: None, domain: None },
-        );
-        for (name, node) in cfg.nodes.clone() {
-            let rpc_addr = cfg.rpc_addr(&node).expect("node has an rpc address");
-            let state = to_state(&cfg, &name, &node, rpc_addr, None);
-            assert!(state.egress_networks.contains("home"), "{name} should implement the nat network");
-            assert!(state.networks.contains("home"), "{name} should implement the nat network");
-        }
     }
 }

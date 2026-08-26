@@ -16,6 +16,7 @@ function state(version: number): ClusterState {
     dns_status: {},
     wrapped_keys: {},
     cluster_config: null,
+    emergency_stack: null,
     unreachable: [],
     removed: [],
     overlay: null,

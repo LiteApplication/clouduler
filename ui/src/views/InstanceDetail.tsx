@@ -239,6 +239,7 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
   const [requirements, setRequirements] = useState<StackRequirements | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [servedDrives, setServedDrives] = useState<Set<string>>(new Set());
+  const [natNetworks, setNatNetworks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -249,6 +250,25 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
       })
       .catch(() => {
         /* the table just falls back to strict (replicated-style) eligibility */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getConfiguration()
+      .then((config) => {
+        if (cancelled) return;
+        const names = Object.entries(config.networks)
+          .filter(([, net]) => net.type === 'nat')
+          .map(([name]) => name);
+        setNatNetworks(new Set(names));
+      })
+      .catch(() => {
+        /* the table just falls back to strict (per-node) eligibility */
       });
     return () => {
       cancelled = true;
@@ -293,6 +313,7 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
       requirements={requirements}
       cluster={cluster}
       servedDrives={servedDrives}
+      natNetworks={natNetworks}
       onCreateConfig={() => {}}
       onCreateSecret={() => {}}
     />

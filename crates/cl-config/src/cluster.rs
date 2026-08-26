@@ -747,6 +747,20 @@ impl ClusterConfig {
             .collect()
     }
 
+    /// Names of every network of kind `Nat`. Unlike `Egress` or `Wireguard`,
+    /// a nat network takes no per-node interface at all, so every node
+    /// implements it automatically: placement treats membership in this set
+    /// as an automatic pass the same way `served_drives` bypasses
+    /// `NodeState::implements` for a served drive (see
+    /// `cl_sched::place::rejection`).
+    pub fn nat_networks(&self) -> std::collections::BTreeSet<String> {
+        self.networks
+            .iter()
+            .filter(|(_, net)| net.kind == NetworkKind::Nat)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Names of every network whose reachability from outside depends on a
     /// specific node, whether public (its own router) or wireguard (its own
     /// tunnel's far end forwarding a port back), so a raw `x-clouduler.expose`

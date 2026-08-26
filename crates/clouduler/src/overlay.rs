@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cl_config::{ClusterConfig, StackFile};
+use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::{Docker, NetworkSpec};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
@@ -83,6 +83,30 @@ fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
     cfg.networks.values().filter_map(|n| n.subnet).collect()
 }
 
+/// Whether a stack network can only ever have its containers scheduled on one
+/// node cluster-wide, so its overlay never has to carry traffic between
+/// nodes.
+///
+/// This is only ever true for a public network's fallback overlay (see
+/// `overlay_network_name`): a public network's per-node address is optional
+/// (`Node::network` may simply omit an entry for it), so a node not carrying
+/// one is never a placement candidate for it (`NodeState::implements_network`
+/// via `node.networks`, sourced from that same map in `daemon::to_state`).
+/// When at most one node in the whole cluster declares the network at all,
+/// the scheduler can never place a second replica anywhere else, so there is
+/// nothing for a cross-node VXLAN tunnel to ever carry - building one just
+/// forces every implementing node to also have a working address on the
+/// cluster's `internal` network for no reason a single-node network needs.
+fn is_single_node_network(cfg: &ClusterConfig, network: &str) -> bool {
+    let Some(net) = cfg.networks.get(network) else {
+        return false;
+    };
+    if net.kind != NetworkKind::Public {
+        return false;
+    }
+    cfg.nodes.values().filter(|node| node.network.contains_key(network)).count() <= 1
+}
+
 impl Context_ {
     async fn run(self) {
         // Netlink needs CAP_NET_ADMIN. Without it the overlay cannot be built
@@ -113,30 +137,33 @@ impl Context_ {
 
         // Recomputed from the live config every tick, not just once at boot,
         // so a node that gains an internal-network address, or a peer that
-        // joins, is picked up without a restart.
+        // joins, is picked up without a restart. `None` no longer stops the
+        // whole pass: a single-node overlay (see `is_single_node_network`)
+        // needs no underlay address at all, so it must still be built even
+        // when this node has none.
         let internal_ip = match cfg.node(&self.node).and_then(|node| cfg.internal_ip(node)) {
-            Some(IpAddr::V4(ip)) => ip,
+            Some(IpAddr::V4(ip)) => Some(ip),
             Some(IpAddr::V6(_)) => {
                 // The VXLAN device is created with an IPv4 local address. An
                 // IPv6 internal network is a real setup, just not one this
                 // supports yet, and saying so beats failing later with a
                 // netlink error.
                 warn!("the internal network is ipv6, the overlay needs an ipv4 underlay");
-                return Ok(());
+                None
             }
-            None => {
-                debug!("this node has no address on the internal network yet, skipping this pass");
-                return Ok(());
-            }
+            None => None,
         };
         let peers = peers_of(&cfg, &self.node);
         let cluster_subnets = cluster_subnets_of(&cfg);
 
         // Every stack network the cluster knows about, with the instances on
         // it, and separately the ones with a container on this node. The
-        // leader allocates for all of them, not just its own.
+        // leader allocates for all of them, not just its own. `single_node`
+        // tracks which of these overlays need no cross-node VXLAN tunnel at
+        // all (see `is_single_node_network`).
         let mut all: BTreeMap<String, BTreeSet<InstanceId>> = BTreeMap::new();
         let mut mine = BTreeSet::new();
+        let mut single_node: BTreeSet<String> = BTreeSet::new();
 
         for (name, stack) in &state.stacks {
             let Ok(file) = StackFile::parse(&stack.spec) else {
@@ -147,6 +174,9 @@ impl Context_ {
                 continue;
             };
             let overlay = overlay_name(name, network);
+            if is_single_node_network(&cfg, network) {
+                single_node.insert(overlay.clone());
+            }
             let instances = all.entry(overlay.clone()).or_default();
 
             for assignment in state.assignments.values() {
@@ -173,8 +203,13 @@ impl Context_ {
         }
 
         for overlay in &mine {
+            let needs_vxlan = !single_node.contains(overlay);
+            if needs_vxlan && internal_ip.is_none() {
+                debug!(network = %overlay, "this node has no address on the internal network yet, skipping this pass");
+                continue;
+            }
             if let Err(e) = self
-                .ensure_network(netlink, &allocations, overlay, internal_ip, &peers)
+                .ensure_network(netlink, &allocations, overlay, needs_vxlan, internal_ip, &peers)
                 .await
             {
                 // One broken network must not stop the others being built.
@@ -297,13 +332,18 @@ impl Context_ {
         Ok(())
     }
 
-    /// Bring one network up on this node: bridge, vxlan, fdb, docker network.
+    /// Bring one network up on this node: bridge, (if `needs_vxlan`) vxlan and
+    /// fdb, then the docker network. A single-node network (see
+    /// `is_single_node_network`) skips the vxlan device and FDB entirely, and
+    /// needs no address on the internal network to build its bridge, since a
+    /// container on it will never have to be reached from another node.
     async fn ensure_network(
         &self,
         netlink: Option<&Overlay>,
         allocations: &Allocations,
         overlay: &str,
-        internal_ip: Ipv4Addr,
+        needs_vxlan: bool,
+        internal_ip: Option<Ipv4Addr>,
         peers: &BTreeSet<Ipv4Addr>,
     ) -> Result<()> {
         // Nothing to do until the leader has allocated. On a follower that just
@@ -322,23 +362,33 @@ impl Context_ {
             return Ok(());
         };
 
-        let underlay = netlink
-            .underlay_for(internal_ip)
-            .await?
-            .with_context(|| format!("no interface holds the internal address {internal_ip}"))?;
-        let mtu = overlay_mtu(underlay.mtu, false);
-
-        let bridge_index = netlink
-            .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
-            .await?;
-
         // The VNI is derived from the network name rather than allocated, so
-        // every node computes the same one without another round of consensus.
-        let vni = allocate_vni(overlay, &BTreeSet::new());
-        let vxlan_index = netlink
-            .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
-            .await?;
-        netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
+        // every node computes the same one without another round of
+        // consensus. Meaningless off a vxlan device, so only computed - and
+        // logged - when one is actually being built.
+        let vni = needs_vxlan.then(|| allocate_vni(overlay, &BTreeSet::new()));
+
+        let mtu = if needs_vxlan {
+            let internal_ip = internal_ip.expect("caller only sets needs_vxlan once internal_ip is Some");
+            let underlay = netlink
+                .underlay_for(internal_ip)
+                .await?
+                .with_context(|| format!("no interface holds the internal address {internal_ip}"))?;
+            let mtu = overlay_mtu(underlay.mtu, false);
+
+            let bridge_index = netlink
+                .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
+                .await?;
+            let vxlan_index = netlink
+                .ensure_vxlan(&vxlan, vni.expect("set above"), underlay.index, internal_ip, bridge_index, mtu)
+                .await?;
+            netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
+            mtu
+        } else {
+            let mtu = cl_net::vxlan::DEFAULT_UNDERLAY_MTU;
+            netlink.ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu).await?;
+            mtu
+        };
 
         let Some(docker) = self.docker.read().await.clone() else {
             return Ok(());
@@ -355,7 +405,7 @@ impl Context_ {
             })
             .await?;
         if created {
-            info!(network = %overlay, %subnet, %bridge, vni, mtu, "overlay network up");
+            info!(network = %overlay, %subnet, %bridge, ?vni, mtu, "overlay network up");
         }
         Ok(())
     }
@@ -417,6 +467,35 @@ mod tests {
 
     fn cfg() -> ClusterConfig {
         ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+    }
+
+    /// `wan` is declared by both n1 and n2 in the example config, so it needs
+    /// a real cross-node overlay.
+    #[test]
+    fn a_public_network_two_nodes_implement_is_not_single_node() {
+        assert!(!is_single_node_network(&cfg(), "wan"));
+    }
+
+    /// A public network only one node ever declares can never have a second
+    /// replica placed anywhere else, so it needs no vxlan tunnel at all.
+    #[test]
+    fn a_public_network_only_one_node_implements_is_single_node() {
+        let mut solo = cfg();
+        solo.nodes.get_mut("n2").unwrap().network.remove("wan");
+        assert!(is_single_node_network(&solo, "wan"));
+    }
+
+    /// An internal (subnetted) network is never treated as single-node, even
+    /// with one node: it is exactly the network the vxlan underlay itself
+    /// runs on.
+    #[test]
+    fn an_internal_network_is_never_single_node() {
+        assert!(!is_single_node_network(&cfg(), "tailscale"));
+    }
+
+    #[test]
+    fn an_unknown_network_is_not_single_node() {
+        assert!(!is_single_node_network(&cfg(), "nonexistent"));
     }
 
     /// `peers_of`/`cluster_subnets_of` are recomputed every reconcile tick from

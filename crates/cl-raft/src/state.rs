@@ -455,6 +455,16 @@ pub struct ClusterState {
     /// machine, which every node has to agree on byte for byte.
     #[serde(default)]
     pub overlay: Option<String>,
+    /// Set by `Store::emergency`'s offline recovery write, never by a normal
+    /// `Request`: while this holds a stack name, the scheduler places and
+    /// starts only that stack's instances, leaving every other assignment's
+    /// `desired` untouched rather than forcing it to `Stopped` - so nothing
+    /// has to be restored by hand once this clears. `ClearEmergency` is the
+    /// only way out, submitted by `watch_leadership` the moment this node can
+    /// once again reach another voter (see `QuorumStatus::reachable`), which
+    /// is the cluster's own signal that another manager has come back.
+    #[serde(default)]
+    pub emergency_stack: Option<String>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -616,6 +626,11 @@ pub enum Request {
     },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
+    /// Ends emergency mode: clears `ClusterState::emergency_stack`, letting
+    /// every stack's own `desired` state (never touched by emergency) govern
+    /// placement again. Submitted by `watch_leadership` once this node can
+    /// reach another voter, not by an operator - see `emergency_stack`.
+    ClearEmergency,
 }
 
 /// Result of applying a command. Failures are values, not errors: a rejected
@@ -768,6 +783,11 @@ impl ClusterState {
 
             Request::SetOverlayAllocations { allocations } => {
                 self.overlay = Some(allocations.clone());
+                Ok(())
+            }
+
+            Request::ClearEmergency => {
+                self.emergency_stack = None;
                 Ok(())
             }
 

@@ -22,6 +22,7 @@ const cluster: ClusterState = {
   removed: [],
   wrapped_keys: {},
   cluster_config: null,
+  emergency_stack: null,
   overlay: null,
   version: 1,
 };

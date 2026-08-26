@@ -242,11 +242,17 @@ async fn fetch_summary(
     resp.json().await.with_context(|| format!("parsing {node}'s answer about {instance}"))
 }
 
-/// Instances every deployed stack wants but that have no assignment at all,
-/// because no node currently satisfies what they need. Mirrors `cl-api`'s
-/// `pending_placements`, against this node's own copy of the cluster config
-/// rather than the replicated one, the same trade `stack deploy` already
-/// makes when it validates locally before submitting.
+/// Instances every deployed stack wants but that have no running assignment,
+/// either because no node currently satisfies what they need, or because a
+/// placement decision exists and nothing is stopping it, yet the real
+/// scheduler loop still hasn't turned it into an assignment - the reconcile
+/// loop stalling after a partial batch (see the mediaserver.jellyfin.0 /
+/// docs/clouduler-migration.md incident this was written for) is otherwise
+/// invisible: it recomputes as perfectly placeable every time this command
+/// runs, so only comparing against `unplaceable` would report "healthy"
+/// forever. Mirrors `cl-api`'s `pending_placements`, against this node's own
+/// copy of the cluster config rather than the replicated one, the same trade
+/// `stack deploy` already makes when it validates locally before submitting.
 fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)> {
     let colocate_proxy_hosts = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
     let desired = cl_sched::desired_instances(
@@ -257,23 +263,40 @@ fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)>
     );
     let served_drives = cfg.served_drives();
 
-    cl_sched::place(state, &desired, &served_drives)
-        .unplaceable
-        .into_iter()
-        .map(|u| {
-            (
-                u.instance.stack.clone(),
-                Row {
-                    instance: u.instance.to_string(),
-                    node: None,
-                    state: "pending_placement".to_string(),
-                    health: "none".to_string(),
-                    started_at: None,
-                    reason: Some(u.reason),
-                },
-            )
-        })
-        .collect()
+    let outcome = cl_sched::place(state, &desired, &served_drives, &cfg.nat_networks());
+
+    let unplaceable = outcome.unplaceable.into_iter().map(|u| {
+        (
+            u.instance.stack.clone(),
+            Row {
+                instance: u.instance.to_string(),
+                node: None,
+                state: "pending_placement".to_string(),
+                health: "none".to_string(),
+                started_at: None,
+                reason: Some(u.reason),
+            },
+        )
+    });
+
+    let stuck = outcome.decisions.into_iter().filter_map(|d| match d {
+        cl_sched::Decision::Place { instance, node } if !state.assignments.contains_key(&instance) => Some((
+            instance.stack.clone(),
+            Row {
+                instance: instance.to_string(),
+                node: Some(node.clone()),
+                state: "pending_placement".to_string(),
+                health: "none".to_string(),
+                started_at: None,
+                reason: Some(format!(
+                    "wants to run on {node} but has no assignment yet - the scheduler decided this but hasn't applied it"
+                )),
+            },
+        )),
+        _ => None,
+    });
+
+    unplaceable.chain(stuck).collect()
 }
 
 fn internal_logs_path(instance: &str) -> String {

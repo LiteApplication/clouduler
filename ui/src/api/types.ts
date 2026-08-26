@@ -111,6 +111,13 @@ export interface InstanceState {
   placement_error?: string;
 }
 
+/** Result of `POST /api/rebalance`: every move it decided on and already
+ *  submitted (each went through the same BeginMigration path a manual move
+ *  does, so by the time this response arrives they are underway). */
+export interface RebalanceResponse {
+  moves: { instance: InstanceId; from: string; to: string }[];
+}
+
 export interface StackState {
   name: string;
   spec: string;
@@ -215,6 +222,11 @@ export interface ClusterState {
   /** The replicated cluster.yaml, null until the first write. Read via
    *  `/api/config` instead; this is raft's own copy. */
   cluster_config: ClusterConfigEntry | null;
+  /** Set only by `clouduler emergency`'s offline recovery write: while this
+   *  holds a stack name, the scheduler places and starts only that stack,
+   *  leaving every other assignment untouched. Cleared automatically once
+   *  another manager is reachable again. */
+  emergency_stack: string | null;
   version: number;
 }
 

@@ -51,6 +51,26 @@ collide (`clbr-` + 6 chars of the name + 4 hash chars = 15). The scheme is
 deterministic: every node computes the same interface names for the same
 network name without coordinating.
 
+## Single-node overlays
+
+A public network's per-node address is optional (a node just omits the
+`network.<name>` entry to not implement it), so the scheduler never places a
+service needing it anywhere but a node that declares one
+(`NodeState::implements_network`). When at most one node in the whole
+cluster declares a given public network, that network's fallback overlay
+(see "Replication: who allocates" below for when a stack gets one) can never
+have a second replica land anywhere else, so nothing will ever need to reach
+it over a VXLAN tunnel.
+
+`overlay::is_single_node_network` detects this and `ensure_network` skips
+building the VXLAN device and FDB for it entirely — just the bridge, docker
+network and address, same as any other overlay otherwise. This also means it
+needs no address on the cluster's `internal` network at all: previously a
+node hosting only such a network but no `internal` address (or one not
+actually bound to a local interface) failed with "no interface holds the
+internal address ...", loudly and every reconcile tick, for a tunnel that
+was never going to carry any traffic.
+
 ## VNI derivation
 
 The VXLAN Network Identifier (VNI) is a 24 bit space. It is derived
@@ -362,10 +382,15 @@ services:
 ```
 
 No node address is declared or needed — a `nat` network takes no entry
-under `nodes.<name>.network` at all, and none is rejected as invalid if one
-is given. Every node implements it identically, so unlike `egress` or
+under `nodes.<name>.network` at all, and one is rejected as invalid if
+given. Every node implements it identically, so unlike `egress` or
 `wireguard` it never restricts which node a service attached to it can land
-on.
+on: the scheduler treats membership in `ClusterConfig::nat_networks()` as an
+automatic pass in `cl_sched::place::rejection`, the same way a served
+drive's name in `served_drives` bypasses the "does this node have a local
+copy" check for a drive. The placement table in the ui (`ConstraintTable`)
+mirrors this the same way, so a nat network never shows as missing from a
+node that legitimately has nothing to configure for it.
 
 There is no manual bridge or iptables kill-switch either: clouduler asks
 docker to build and own an ordinary bridge network

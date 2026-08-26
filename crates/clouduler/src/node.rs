@@ -136,15 +136,17 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
 }
 
 /// Disaster recovery for a cluster that has lost quorum for good: force
-/// `name`'s own local raft state to make it the cluster's sole voter.
+/// `name`'s own local raft state to make it the cluster's sole voter, and let
+/// only `stack` come back up, trusting this node's own local data for it.
 ///
 /// Unlike every other command in this module, this never talks to a running
 /// daemon - it edits `name`'s own data directory directly, so its daemon
-/// must be stopped first, and `via` does not apply. See
-/// `cl_raft::node::force_quorum` for what actually changes.
-pub async fn force_quorum(
+/// must be stopped first, and `via` does not apply. See `cl_raft::node::emergency`
+/// for what actually changes.
+pub async fn emergency(
     cfg: &ClusterConfig,
     name: &str,
+    stack: &str,
     data_dir_override: Option<PathBuf>,
     yes: bool,
 ) -> Result<()> {
@@ -158,6 +160,36 @@ pub async fn force_quorum(
         .unwrap_or_else(|| node.data_dir(cfg).to_path_buf())
         .join("raft");
 
+    // Read `stack`'s own spec straight out of this node's own local raft
+    // state, before rewriting anything, to work out which volumes it uses.
+    // Scoped so the store is closed again before `cl_raft::node::emergency`
+    // reopens the same file for real.
+    let spec = {
+        let store = cl_raft::store::Store::open(data_dir.join("raft.redb")).map_err(|e| anyhow!("{e}"))?;
+        let shared = store.shared_state();
+        let guard = shared.read().await;
+        guard
+            .data
+            .stacks
+            .get(stack)
+            .map(|entry| entry.spec.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{stack} is not a stack this node's own local state knows about - check the \
+                     name, or deploy it once quorum is otherwise recovered"
+                )
+            })?
+    };
+    let file = cl_config::StackFile::parse(&spec).map_err(|e| anyhow!("{e}"))?;
+    let mut stack_volumes = std::collections::BTreeSet::new();
+    for service in file.services.values() {
+        for mount in &service.volumes {
+            if let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) {
+                stack_volumes.insert(cl_raft::ids::VolumeId::new(drive, volume));
+            }
+        }
+    }
+
     let mut prompt = Prompt::new(std::io::stdin().lock(), std::io::stdout(), !yes);
     prompt.say(&format!(
         "this rewrites the raft log and state machine at {} directly, bypassing consensus, so \
@@ -169,20 +201,34 @@ pub async fn force_quorum(
          manager that comes back with its old state intact would now conflict with this node. \
          make sure this node's own daemon is stopped before continuing.",
     )?;
-    if !prompt.confirm(&format!("force {name} to be the cluster's sole voter?"), yes)? {
+    prompt.say(&format!(
+        "only {stack} is allowed to start once the daemon comes back up; every other stack's \
+         own desired state is left exactly as it was and picks back up on its own, no restore \
+         step needed, the moment another manager is reachable again and emergency mode ends. \
+         every node but {name} is marked unreachable, so any served drive {stack} needs treats \
+         {name} as the active server, and {name}'s own copy of every volume {stack} uses \
+         ({}) is trusted as current, whether or not anything else agrees.",
+        if stack_volumes.is_empty() {
+            "none".to_string()
+        } else {
+            stack_volumes.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+        }
+    ))?;
+    if !prompt.confirm(&format!("force {name} to be the cluster's sole voter and bring up {stack} on it?"), yes)? {
         bail!("aborted");
     }
 
-    cl_raft::node::force_quorum(&data_dir, node.id, rpc_addr)
+    cl_raft::node::emergency(&data_dir, node.id, rpc_addr, name, stack, &stack_volumes)
         .await
         .map_err(|e| anyhow!("{e}"))?;
 
     println!(
-        "{name} is now the cluster's sole voter. Start its daemon; once it is leading again, \
-         any other manager still known to it is promoted back to a voter on its own as soon as \
-         it is reachable - nothing to run there by hand unless its local state is gone too, in \
-         which case it needs `clouduler init --join`. If a lost manager is never coming back, \
-         `clouduler node remove` it instead."
+        "{name} is now the cluster's sole voter, in emergency mode for {stack}. Start its \
+         daemon; {stack} comes up normally, every other stack stays held off. Once another \
+         manager is reachable again - promoted back to a voter on its own, the same as after \
+         `clouduler node remove`'s opposite case, once its daemon is reachable - emergency mode \
+         ends automatically and every other stack resumes on its own. If a lost manager is never \
+         coming back, `clouduler node remove` it instead."
     );
     Ok(())
 }

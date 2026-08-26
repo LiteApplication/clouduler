@@ -617,6 +617,11 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
   // served to show the same "can schedule here" answer the real scheduler
   // would give.
   const [servedDrives, setServedDrives] = useState<Set<string>>(new Set());
+  // A nat network takes no per-node config at all, so every node implements
+  // it automatically - the same "every node is eligible, not just the one
+  // that declared it" bypass servedDrives gives configs, this time for
+  // `cl-sched::place::rejection`'s `everywhere_networks`.
+  const [natNetworks, setNatNetworks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -627,6 +632,25 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
       })
       .catch(() => {
         /* the table just falls back to strict (replicated-style) eligibility */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getConfiguration()
+      .then((config) => {
+        if (cancelled) return;
+        const names = Object.entries(config.networks)
+          .filter(([, net]) => net.type === 'nat')
+          .map(([name]) => name);
+        setNatNetworks(new Set(names));
+      })
+      .catch(() => {
+        /* the table just falls back to strict (per-node) eligibility */
       });
     return () => {
       cancelled = true;
@@ -693,6 +717,7 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
               requirements={perService[service]}
               cluster={cluster}
               servedDrives={servedDrives}
+              natNetworks={natNetworks}
               onCreateConfig={(n) => setCreatingConfig(n)}
               onCreateSecret={(n) => setCreatingSecret(n)}
             />

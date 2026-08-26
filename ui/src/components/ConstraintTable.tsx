@@ -19,6 +19,7 @@ export function ConstraintTable({
   requirements,
   cluster,
   servedDrives,
+  natNetworks,
   onCreateConfig,
   onCreateSecret,
 }: {
@@ -31,6 +32,14 @@ export function ConstraintTable({
    *  table always shows a served drive's own node as the only candidate,
    *  which isn't the real constraint. */
   servedDrives: Set<string>;
+  /** Names of networks of kind `nat`: unlike an ordinary network, or an
+   *  `egress`/`wireguard` interface, a nat network takes no per-node config
+   *  at all, so every node implements it automatically. Mirrors the
+   *  scheduler's `everywhere_networks` bypass in `cl-sched::place::rejection`
+   *  - without it this table would show every node as unable to run a
+   *  service on a nat network, since none of them ever appear in
+   *  `node.networks`. */
+  natNetworks: Set<string>;
   onCreateConfig: (name: string) => void;
   onCreateSecret: (name: string) => void;
 }) {
@@ -40,7 +49,7 @@ export function ConstraintTable({
     { label: 'not drained', ok: (n) => cluster.nodes[n]?.availability === 'active' },
     ...requirements.networks.map((net) => ({
       label: `network: ${net}`,
-      ok: (n: string) => cluster.nodes[n]?.networks.includes(net) ?? false,
+      ok: (n: string) => natNetworks.has(net) || (cluster.nodes[n]?.networks.includes(net) ?? false),
     })),
     ...requirements.drives.map((drive) => ({
       label: `drive: ${drive}`,

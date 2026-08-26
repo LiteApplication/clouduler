@@ -19,6 +19,7 @@ import type {
   InstanceState,
   OidcClientSecretStatus,
   PendingConfig,
+  RebalanceResponse,
   RedirectRule,
   SecretEntry,
   SecretPutRequest,
@@ -210,6 +211,11 @@ export const api = {
   setDesired: (id: string, desired: 'running' | 'stopped') =>
     patch<void>(`/api/instances/${encodeURIComponent(id)}`, { desired }),
   updateInstance: (id: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/update`),
+  // Actively relocates instances to smooth load across nodes. Each move
+  // returned already went through the same BeginMigration path a manual
+  // move does, so by the time this resolves they are underway, not just
+  // planned.
+  rebalance: () => post<RebalanceResponse>('/api/rebalance'),
 
   // configs & secrets
   listConfigs: () => get<ConfigEntry[]>('/api/configs'),

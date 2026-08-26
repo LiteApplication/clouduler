@@ -76,6 +76,26 @@ pub async fn force_quorum(
     Ok(())
 }
 
+/// Disaster recovery like `force_quorum`, for `clouduler emergency`: makes
+/// `id` the cluster's sole voter, and additionally lets only `stack` start
+/// once this node comes back up, with its `stack_volumes` trusted as
+/// authoritative on this node. See `Store::emergency` for exactly what
+/// changes and why. Same offline precondition as `force_quorum`.
+pub async fn emergency(
+    data_dir: &std::path::Path,
+    id: uuid::Uuid,
+    addr: SocketAddr,
+    this_name: &str,
+    stack: &str,
+    stack_volumes: &std::collections::BTreeSet<crate::ids::VolumeId>,
+) -> Result<()> {
+    let store = Store::open(data_dir.join("raft.redb"))?;
+    store
+        .emergency(node_id(id), addr, this_name, stack, stack_volumes)
+        .await?;
+    Ok(())
+}
+
 impl ClusterNode {
     pub async fn start(options: Options) -> Result<Self> {
         let id = node_id(options.id);

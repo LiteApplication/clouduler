@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/{id}", get(detail).patch(patch_instance))
         .route("/api/instances/{id}/restart", post(restart))
         .route("/api/instances/{id}/move", post(move_instance))
+        .route("/api/rebalance", post(rebalance))
         .route("/api/instances/{id}/update", post(update))
         .route("/api/instances/{id}/logs", get(logs))
         .route("/api/instances/{id}/stats", get(stats))
@@ -215,9 +216,10 @@ async fn pending_placements(state: &AppState, cluster_state: &cl_raft::ClusterSt
         colocate_proxy_hosts,
     );
     let served_drives = config.served_drives();
+    let nat_networks = config.nat_networks();
     drop(config);
 
-    cl_sched::place(cluster_state, &desired, &served_drives)
+    cl_sched::place(cluster_state, &desired, &served_drives, &nat_networks)
         .unplaceable
         .into_iter()
         .map(|u| InstanceSummary {
@@ -371,6 +373,65 @@ fn required_drives(
         .and_then(|stack| cl_config::StackFile::parse(&stack.spec).ok())
         .and_then(|file| file.services.get(&instance.service).map(Service::drives_used))
         .unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct RebalanceMove {
+    instance: String,
+    from: String,
+    to: String,
+}
+
+#[derive(Serialize)]
+struct RebalanceResponse {
+    moves: Vec<RebalanceMove>,
+}
+
+/// Actively relocate instances to smooth load across nodes, on operator
+/// request only - see `cl_sched::rebalance::plan` for what it will and will
+/// not move and why. Each move it decides on is submitted the same way the
+/// ui's manual "move" button already does (`BeginMigration`), one at a time,
+/// so the usual placement and drive checks still apply to every one of them;
+/// a move rejected by a race with something else (a manual move, a redeploy)
+/// just does not happen, it does not fail the rest of the batch.
+async fn rebalance(_admin: RequireAdmin, State(state): State<AppState>) -> Result<Json<RebalanceResponse>, ApiError> {
+    let cluster_state = state.cluster.state().await;
+    let config = state.cluster_config.read().await;
+    let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
+    let desired = cl_sched::desired_instances(
+        &cluster_state,
+        &config.egress_networks(),
+        &config.port_gated_networks(),
+        colocate_proxy_hosts,
+    );
+    let served_drives = config.served_drives();
+    let nat_networks = config.nat_networks();
+    drop(config);
+
+    let planned = cl_sched::rebalance::plan(&cluster_state, &desired, &served_drives, &nat_networks);
+
+    let mut moves = Vec::new();
+    for m in planned {
+        let drives = required_drives(&cluster_state, &m.instance);
+        let response = state
+            .cluster
+            .submit(ClusterRequest::BeginMigration {
+                instance: m.instance.clone(),
+                to: m.to.clone(),
+                drives,
+            })
+            .await
+            .map_err(ApiError::not_leader)?;
+        match response.error {
+            None => moves.push(RebalanceMove {
+                instance: m.instance.to_string(),
+                from: m.from,
+                to: m.to,
+            }),
+            Some(error) => warn!(instance = %m.instance, from = %m.from, to = %m.to, %error, "rebalance move was rejected"),
+        }
+    }
+    Ok(Json(RebalanceResponse { moves }))
 }
 
 #[derive(Deserialize)]

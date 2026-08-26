@@ -113,6 +113,7 @@ fn rejection(
     desired: &Desired,
     constraints: &[Constraint],
     served_drives: &BTreeSet<String>,
+    everywhere_networks: &BTreeSet<String>,
 ) -> Option<String> {
     if !node.schedulable() {
         return Some(format!("{} is {:?}", node.name, node.availability));
@@ -135,12 +136,15 @@ fn rejection(
         }
     }
     if let Some(net) = &desired.egress_network {
-        if !node.implements_egress_network(net) {
+        // A nat network declares no per-node interface at all: every node
+        // implements it the same way, so it never narrows candidates the
+        // way an egress or wireguard interface does.
+        if !everywhere_networks.contains(net) && !node.implements_egress_network(net) {
             return Some(format!("{} does not implement egress network {net}", node.name));
         }
     }
     for net in &desired.networks {
-        if !node.implements_network(net) {
+        if !everywhere_networks.contains(net) && !node.implements_network(net) {
             return Some(format!("{} does not implement network {net}", node.name));
         }
     }
@@ -190,6 +194,7 @@ pub fn candidates<'a>(
     state: &'a ClusterState,
     desired: &Desired,
     served_drives: &BTreeSet<String>,
+    everywhere_networks: &BTreeSet<String>,
 ) -> Result<(Vec<&'a NodeState>, Vec<String>)> {
     let constraints: Vec<Constraint> = desired
         .constraints
@@ -200,7 +205,7 @@ pub fn candidates<'a>(
     let mut eligible = Vec::new();
     let mut rejected = Vec::new();
     for node in state.nodes.values() {
-        match rejection(state, node, desired, &constraints, served_drives) {
+        match rejection(state, node, desired, &constraints, served_drives, everywhere_networks) {
             None => eligible.push(node),
             Some(reason) => rejected.push(reason),
         }
@@ -217,7 +222,12 @@ pub fn candidates<'a>(
 /// An instance with no eligible node is reported in `unplaceable` rather than
 /// aborting the pass: one bad service must not stop every other instance in
 /// the cluster from scheduling.
-pub fn place(state: &ClusterState, desired: &[Desired], served_drives: &BTreeSet<String>) -> PlaceOutcome {
+pub fn place(
+    state: &ClusterState,
+    desired: &[Desired],
+    served_drives: &BTreeSet<String>,
+    everywhere_networks: &BTreeSet<String>,
+) -> PlaceOutcome {
     let mut decisions = Vec::new();
     let mut unplaceable = Vec::new();
     let mut wanted: BTreeSet<InstanceId> = BTreeSet::new();
@@ -232,10 +242,17 @@ pub fn place(state: &ClusterState, desired: &[Desired], served_drives: &BTreeSet
     // hosts it, so an instance sharing that hostname joins it instead of
     // spreading to a different node. Seeded from existing assignments before
     // any new placement decisions are made, so a running cluster stays put.
+    // "Validly" is checked with the same `candidates` an instance is judged
+    // by everywhere else - not just node liveness - so a node that is up but
+    // no longer implements what the instance needs (a network removed from
+    // it, say) can't self-anchor a sole hostname owner in place forever, nor
+    // anchor its co-located siblings to a node none of them can actually use.
     let mut host_node: BTreeMap<&str, &str> = BTreeMap::new();
     for item in desired {
         if let Some(current) = state.assignments.get(&item.id) {
-            if state.nodes.contains_key(&current.node) {
+            let validly_placed = candidates(state, item, served_drives, everywhere_networks)
+                .is_ok_and(|(eligible, _)| eligible.iter().any(|n| n.name == current.node));
+            if validly_placed {
                 for host in &item.proxy_hosts {
                     host_node.entry(host).or_insert(&current.node);
                 }
@@ -244,7 +261,7 @@ pub fn place(state: &ClusterState, desired: &[Desired], served_drives: &BTreeSet
     }
 
     for item in desired {
-        let (eligible, rejected) = match candidates(state, item, served_drives) {
+        let (eligible, rejected) = match candidates(state, item, served_drives, everywhere_networks) {
             Ok(v) => v,
             Err(e) => {
                 wanted.insert(item.id.clone());
@@ -388,6 +405,10 @@ mod tests {
         BTreeSet::new()
     }
 
+    fn no_everywhere() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     #[test]
     fn a_label_constraint_matches_the_nodes_carrying_it() {
         let fast = labelled("n1", &[("fast", "true")]);
@@ -487,7 +508,7 @@ mod tests {
         let mut item = desired("db", 0);
         item.drives = ["bulk".to_string()].into();
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served()).expect("candidates");
+        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
         assert!(rejected.iter().any(|r| r.contains("n2 does not implement drive bulk")));
@@ -503,7 +524,7 @@ mod tests {
         item.drives = ["bulk".to_string()].into();
         let served = ["bulk".to_string()].into();
 
-        let (eligible, _) = candidates(&state, &item, &served).expect("candidates");
+        let (eligible, _) = candidates(&state, &item, &served, &no_everywhere()).expect("candidates");
         let names: BTreeSet<_> = eligible.iter().map(|n| n.name.clone()).collect();
         assert_eq!(names, ["n1".to_string(), "n2".to_string(), "n3".to_string()].into());
     }
@@ -515,10 +536,26 @@ mod tests {
         let mut item = desired("db", 0);
         item.networks = ["wan".to_string()].into();
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served()).expect("candidates");
+        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
         assert!(rejected.iter().any(|r| r.contains("n2 does not implement network wan")));
+    }
+
+    /// A nat network takes no per-node config at all, so it never narrows
+    /// candidates the way an ordinary network (or an egress/wireguard
+    /// interface) does: every node implements it identically.
+    #[test]
+    fn a_nat_network_does_not_narrow_the_candidates() {
+        let state = cluster();
+        let mut item = desired("db", 0);
+        item.networks = ["home".to_string()].into();
+        item.egress_network = Some("home".to_string());
+        let everywhere = ["home".to_string()].into();
+
+        let (eligible, _) = candidates(&state, &item, &no_served(), &everywhere).expect("candidates");
+        let names: BTreeSet<_> = eligible.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(names, ["n1".to_string(), "n2".to_string(), "n3".to_string()].into());
     }
 
     #[test]
@@ -529,7 +566,7 @@ mod tests {
         let mut item = desired("mail", 0);
         item.bound_ports = [("wan".to_string(), cl_raft::state::PortProtocol::Tcp, 25)].into();
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served()).expect("candidates");
+        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
         assert!(rejected.iter().any(|r| r.contains("n2 does not have 25/Tcp open on network wan")));
@@ -541,7 +578,7 @@ mod tests {
         let mut item = desired("web", 0);
         item.constraints = vec!["node.role == worker".into()];
 
-        let (eligible, _) = candidates(&state, &item, &no_served()).expect("candidates");
+        let (eligible, _) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n3");
     }
@@ -552,7 +589,7 @@ mod tests {
         let mut item = desired("web", 0);
         item.constraints = vec!["node.labels.zone == eu".into()];
 
-        let (eligible, _) = candidates(&state, &item, &no_served()).expect("candidates");
+        let (eligible, _) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert!(eligible.is_empty());
     }
 
@@ -568,7 +605,7 @@ mod tests {
             item.drives = ["fast".to_string()].into();
         }
 
-        let decisions = place(&state, &items, &served).decisions;
+        let decisions = place(&state, &items, &served, &no_everywhere()).decisions;
         let nodes: BTreeSet<_> = decisions
             .iter()
             .filter_map(|d| match d {
@@ -589,7 +626,7 @@ mod tests {
         let mut item = desired("web", 0);
         item.pinned_node = Some("n3".into());
 
-        let decisions = place(&state, &[item], &no_served()).decisions;
+        let decisions = place(&state, &[item], &no_served(), &no_everywhere()).decisions;
         assert_eq!(placed(&decisions, "web", 0).as_deref(), Some("n3"));
     }
 
@@ -597,7 +634,7 @@ mod tests {
     fn replicas_spread_across_nodes() {
         let state = cluster();
         let items: Vec<_> = (0..3).map(|i| desired("web", i)).collect();
-        let decisions = place(&state, &items, &no_served()).decisions;
+        let decisions = place(&state, &items, &no_served(), &no_everywhere()).decisions;
 
         let nodes: BTreeSet<_> = decisions
             .iter()
@@ -620,7 +657,7 @@ mod tests {
 
         // n3 is the emptiest node anyway, but the point is that no decision is
         // emitted at all for an instance that is already validly placed.
-        let decisions = place(&state, &[desired("web", 0)], &no_served()).decisions;
+        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         assert!(decisions.is_empty());
     }
 
@@ -637,7 +674,7 @@ mod tests {
             availability: Availability::Drain,
         });
 
-        let decisions = place(&state, &[desired("web", 0)], &no_served()).decisions;
+        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         let target = placed(&decisions, "web", 0).expect("replacement node");
         assert_ne!(target, "n3");
     }
@@ -655,7 +692,7 @@ mod tests {
             reachable: false,
         });
 
-        let decisions = place(&state, &[desired("web", 0)], &no_served()).decisions;
+        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         let target = placed(&decisions, "web", 0).expect("replacement node");
         assert_ne!(target, "n3");
     }
@@ -667,7 +704,7 @@ mod tests {
             node: "n1".into(),
             reachable: false,
         });
-        let (eligible, rejected) = candidates(&state, &desired("web", 0), &no_served()).expect("candidates");
+        let (eligible, rejected) = candidates(&state, &desired("web", 0), &no_served(), &no_everywhere()).expect("candidates");
         assert!(!eligible.iter().any(|n| n.name == "n1"));
         assert!(rejected.iter().any(|r| r.contains("n1 is unreachable")));
 
@@ -675,7 +712,7 @@ mod tests {
             node: "n1".into(),
             reachable: true,
         });
-        let (eligible, _) = candidates(&state, &desired("web", 0), &no_served()).expect("candidates");
+        let (eligible, _) = candidates(&state, &desired("web", 0), &no_served(), &no_everywhere()).expect("candidates");
         assert!(eligible.iter().any(|n| n.name == "n1"));
     }
 
@@ -688,7 +725,7 @@ mod tests {
             drives: BTreeSet::new(),
         });
 
-        let decisions = place(&state, &[], &no_served()).decisions;
+        let decisions = place(&state, &[], &no_served(), &no_everywhere()).decisions;
         assert_eq!(
             decisions,
             vec![Decision::Remove {
@@ -703,7 +740,7 @@ mod tests {
         let mut item = desired("agent", 0);
         item.global = true;
 
-        let decisions = place(&state, &[item], &no_served()).decisions;
+        let decisions = place(&state, &[item], &no_served(), &no_everywhere()).decisions;
         assert_eq!(decisions.len(), 3);
     }
 
@@ -714,7 +751,7 @@ mod tests {
         item.global = true;
         item.drives = ["fast".to_string()].into();
 
-        let decisions = place(&state, &[item], &no_served()).decisions;
+        let decisions = place(&state, &[item], &no_served(), &no_everywhere()).decisions;
         assert_eq!(decisions.len(), 2, "only n1 and n2 implement fast");
     }
 
@@ -724,7 +761,7 @@ mod tests {
         let mut item = desired("db", 0);
         item.drives = ["missing".to_string()].into();
 
-        let outcome = place(&state, &[item], &no_served());
+        let outcome = place(&state, &[item], &no_served(), &no_everywhere());
         assert!(outcome.decisions.is_empty());
         let unplaceable = &outcome.unplaceable[0];
         assert_eq!(unplaceable.instance, InstanceId::new("site", "db", 0));
@@ -741,7 +778,7 @@ mod tests {
         broken.drives = ["missing".to_string()].into();
         let fine = desired("web", 0);
 
-        let outcome = place(&state, &[broken, fine], &no_served());
+        let outcome = place(&state, &[broken, fine], &no_served(), &no_everywhere());
         assert_eq!(outcome.unplaceable.len(), 1);
         assert_eq!(outcome.unplaceable[0].instance, InstanceId::new("site", "db", 0));
         assert!(placed(&outcome.decisions, "web", 0).is_some());
@@ -758,7 +795,7 @@ mod tests {
         let mut admin = desired("admin", 0);
         admin.proxy_hosts = ["app.example.com".to_string()].into();
 
-        let decisions = place(&state, &[main, admin], &no_served()).decisions;
+        let decisions = place(&state, &[main, admin], &no_served(), &no_everywhere()).decisions;
         let main_node = placed(&decisions, "web", 0).expect("web placed");
         let admin_node = placed(&decisions, "admin", 0).expect("admin placed");
         assert_eq!(main_node, admin_node);
@@ -782,8 +819,73 @@ mod tests {
         let mut admin = desired("admin", 0);
         admin.proxy_hosts = ["app.example.com".to_string()].into();
 
-        let decisions = place(&state, &[main, admin], &no_served()).decisions;
+        let decisions = place(&state, &[main, admin], &no_served(), &no_everywhere()).decisions;
         assert_eq!(placed(&decisions, "admin", 0).as_deref(), Some("n3"));
+    }
+
+    /// If the node already hosting a proxied hostname goes down, the whole
+    /// co-located group must relocate together rather than being anchored
+    /// forever to a node that will never answer again.
+    #[test]
+    fn a_colocated_group_relocates_when_its_anchor_node_goes_down() {
+        let mut state = cluster();
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "web", 0),
+            node: "n3".into(),
+            drives: BTreeSet::new(),
+        });
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "admin", 0),
+            node: "n3".into(),
+            drives: BTreeSet::new(),
+        });
+        state.apply(&Request::SetReachable {
+            node: "n3".into(),
+            reachable: false,
+        });
+
+        let mut main = desired("web", 0);
+        main.proxy_hosts = ["app.example.com".to_string()].into();
+        let mut admin = desired("admin", 0);
+        admin.proxy_hosts = ["app.example.com".to_string()].into();
+
+        let outcome = place(&state, &[main, admin], &no_served(), &no_everywhere());
+        assert!(
+            outcome.unplaceable.is_empty(),
+            "should relocate rather than get stuck: {:?}",
+            outcome.unplaceable
+        );
+        let main_node = placed(&outcome.decisions, "web", 0).expect("web placed");
+        let admin_node = placed(&outcome.decisions, "admin", 0).expect("admin placed");
+        assert_eq!(main_node, admin_node);
+        assert_ne!(main_node, "n3");
+    }
+
+    /// The sole publisher of a hostname must not self-anchor to its own
+    /// stale placement when that node is up but no longer implements what
+    /// the instance needs (a network dropped from it, say) - otherwise it is
+    /// permanently stuck pointing at a node it can never actually use.
+    #[test]
+    fn a_node_that_lost_a_needed_network_does_not_self_anchor_the_lone_hostname_owner() {
+        let mut state = cluster();
+        state.nodes.get_mut("n1").unwrap().networks = ["public".to_string()].into();
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "web", 0),
+            node: "n3".into(),
+            drives: BTreeSet::new(),
+        });
+
+        let mut item = desired("web", 0);
+        item.proxy_hosts = ["share.example.com".to_string()].into();
+        item.networks = ["public".to_string()].into();
+
+        let outcome = place(&state, &[item], &no_served(), &no_everywhere());
+        assert!(
+            outcome.unplaceable.is_empty(),
+            "should relocate to a node with the network rather than get stuck: {:?}",
+            outcome.unplaceable
+        );
+        assert_eq!(placed(&outcome.decisions, "web", 0).as_deref(), Some("n1"));
     }
 
     /// A constraint that rules out the node the hostname is already anchored
@@ -799,7 +901,7 @@ mod tests {
         admin.proxy_hosts = ["app.example.com".to_string()].into();
         admin.constraints = vec!["node.hostname == n2".into()];
 
-        let outcome = place(&state, &[main, admin], &no_served());
+        let outcome = place(&state, &[main, admin], &no_served(), &no_everywhere());
         assert!(placed(&outcome.decisions, "web", 0).is_some());
         assert_eq!(outcome.unplaceable.len(), 1);
         assert_eq!(outcome.unplaceable[0].instance, InstanceId::new("site", "admin", 0));

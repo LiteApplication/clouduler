@@ -129,6 +129,101 @@ impl Store {
         id: NodeId,
         addr: std::net::SocketAddr,
     ) -> Result<openraft::Membership<NodeId, crate::types::Node>, StorageError> {
+        let mut sm = self.sm.write().await;
+        let membership = self.rewrite_membership(&mut sm, id, addr).await?;
+        write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
+        Ok(membership)
+    }
+
+    /// `force_quorum`, plus the extra state `clouduler emergency` needs: only
+    /// `stack`'s instances are allowed to start once this node comes back up
+    /// (`ClusterState::emergency_stack`, cleared automatically once another
+    /// voter is reachable again - see `Request::ClearEmergency`), every other
+    /// currently known node is marked unreachable (so a served drive `stack`
+    /// uses picks this node as its active server, the same
+    /// first-reachable-candidate logic `drives.rs` always uses - see
+    /// `docs/clouduler-emergency.md`), and every volume `stack` uses is
+    /// stamped as current on this node, so nothing waits for, or tries to
+    /// pull from, a copy elsewhere that may not even exist any more.
+    ///
+    /// `stack_volumes` is computed by the caller (`clouduler::node::emergency`)
+    /// from the stack's own spec before this runs, so this crate does not have
+    /// to depend on stack-file parsing here.
+    pub async fn emergency(
+        &self,
+        id: NodeId,
+        addr: std::net::SocketAddr,
+        this_name: &str,
+        stack: &str,
+        stack_volumes: &std::collections::BTreeSet<crate::ids::VolumeId>,
+    ) -> Result<openraft::Membership<NodeId, crate::types::Node>, StorageError> {
+        let mut sm = self.sm.write().await;
+        let membership = self.rewrite_membership(&mut sm, id, addr).await?;
+
+        sm.data.emergency_stack = Some(stack.to_string());
+
+        // The other managers' fate is unknown - some worker may still be
+        // running an instance this node's stale copy of the state also
+        // thinks is unassigned, or a redeploy that never reached quorum may
+        // resurrect a container that conflicts with one still alive
+        // elsewhere. Marking them unreachable rather than touching any
+        // assignment's `desired` means nothing needs restoring by hand once
+        // `emergency_stack` clears: every stack's own desired state was never
+        // altered.
+        let others: Vec<String> = sm.data.nodes.keys().filter(|n| n.as_str() != this_name).cloned().collect();
+        sm.data.unreachable.extend(others);
+
+        for volume in stack_volumes {
+            match sm.data.volumes.get_mut(volume) {
+                Some(existing) => {
+                    existing.primary = this_name.to_string();
+                    existing.replicas.insert(this_name.to_string(), existing.generation);
+                }
+                None => {
+                    sm.data.volumes.insert(
+                        volume.clone(),
+                        crate::state::VolumeState {
+                            id: volume.clone(),
+                            generation: 1,
+                            primary: this_name.to_string(),
+                            replicas: std::collections::BTreeMap::from([(this_name.to_string(), 1)]),
+                        },
+                    );
+                }
+            }
+        }
+
+        write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
+        Ok(membership)
+    }
+
+    /// The shared part of `force_quorum`/`emergency`: append one synthetic,
+    /// already-committed membership entry making `id` the cluster's sole
+    /// voter, bypassing consensus entirely by rewriting the local log and
+    /// state machine directly.
+    ///
+    /// For a cluster that has lost quorum for good - a voter's local state
+    /// gone forever, with no backup - normal `change_membership` can never
+    /// run again, since driving it through raft itself needs the quorum
+    /// that is missing. This is the same escape hatch etcd's
+    /// `--force-new-cluster` or Consul's `peers.json` recovery provide.
+    ///
+    /// Every node this store already knew about, including the lost voter,
+    /// stays in the new membership's node map - only the voter set shrinks
+    /// to `id` alone. That is deliberate: a worker resumes replicating
+    /// without needing to be re-added as a learner, and the lost voter is
+    /// demoted to a learner rather than dropped, so it can rejoin cleanly
+    /// once it comes back.
+    ///
+    /// Leaves `sm`'s membership/log fields updated but does not persist: the
+    /// caller writes the state machine once, after making whatever further
+    /// changes it needs.
+    async fn rewrite_membership(
+        &self,
+        sm: &mut StateMachine,
+        id: NodeId,
+        addr: std::net::SocketAddr,
+    ) -> Result<openraft::Membership<NodeId, crate::types::Node>, StorageError> {
         let last_index = {
             let txn = self.db.begin_read().map_err(read_err)?;
             let table = txn.open_table(LOGS).map_err(read_err)?;
@@ -145,8 +240,6 @@ impl Store {
             .map(|vote| vote.leader_id.get_term())
             .unwrap_or(0);
         let term = current_term + 1;
-
-        let mut sm = self.sm.write().await;
 
         let mut nodes: std::collections::BTreeMap<NodeId, crate::types::Node> = sm
             .membership
@@ -180,7 +273,6 @@ impl Store {
 
         sm.last_applied = Some(log_id);
         sm.membership = StoredMembership::new(Some(log_id), membership.clone());
-        write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
 
         Ok(membership)
     }

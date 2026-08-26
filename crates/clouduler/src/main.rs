@@ -15,6 +15,7 @@ mod health;
 mod init;
 mod logs;
 mod proxy;
+mod rebalance;
 mod report;
 mod secret;
 mod stack;
@@ -80,14 +81,15 @@ async fn main() -> Result<()> {
             NodeCommand::SetAvailability { name, availability, via } => {
                 node::set_availability(&cfg, &name, availability, via.as_deref()).await
             }
-            NodeCommand::ForceQuorum { node: node_name, yes } => {
-                let node_name = match node_name {
-                    Some(n) => n,
-                    None => hostname()?,
-                };
-                node::force_quorum(&cfg, &node_name, cli.data_dir, yes).await
-            }
         },
+        Command::Emergency { stack, node: node_name, yes } => {
+            let node_name = match node_name {
+                Some(n) => n,
+                None => hostname()?,
+            };
+            node::emergency(&cfg, &node_name, &stack, cli.data_dir, yes).await
+        }
+        Command::Rebalance { via, yes } => rebalance::run(&cfg, via.as_deref(), yes).await,
         Command::Stack { command } => match command {
             StackCommand::Deploy { file, name, via } => {
                 stack::deploy(&cfg, &file, name, via.as_deref()).await
