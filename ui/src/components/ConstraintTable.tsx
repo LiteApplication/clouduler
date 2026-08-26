@@ -18,11 +18,19 @@ interface Row {
 export function ConstraintTable({
   requirements,
   cluster,
+  servedDrives,
   onCreateConfig,
   onCreateSecret,
 }: {
   requirements: StackRequirements;
   cluster: ClusterState;
+  /** Names of drives whose mode is `served`: one authoritative copy any node
+   *  can reach over the internal network, so every node is eligible for them
+   *  regardless of which one declared it locally. Mirrors the scheduler's
+   *  `served_drives` bypass in `cl-sched::place::rejection` - without it this
+   *  table always shows a served drive's own node as the only candidate,
+   *  which isn't the real constraint. */
+  servedDrives: Set<string>;
   onCreateConfig: (name: string) => void;
   onCreateSecret: (name: string) => void;
 }) {
@@ -36,7 +44,8 @@ export function ConstraintTable({
     })),
     ...requirements.drives.map((drive) => ({
       label: `drive: ${drive}`,
-      ok: (n: string) => Object.prototype.hasOwnProperty.call(cluster.nodes[n]?.drives ?? {}, drive),
+      ok: (n: string) =>
+        servedDrives.has(drive) || Object.prototype.hasOwnProperty.call(cluster.nodes[n]?.drives ?? {}, drive),
     })),
     ...requirements.configs.map((name) => ({
       label: `config: ${name}`,

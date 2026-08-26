@@ -556,6 +556,33 @@ mod tests {
         assert!(eligible.is_empty());
     }
 
+    /// A served drive must not pin every replica to the node that happens to
+    /// serve it - any node can reach it over the internal network, so
+    /// replicas spread across the cluster exactly like a driveless service.
+    #[test]
+    fn served_drive_replicas_spread_across_nodes_not_onto_the_server() {
+        let state = cluster();
+        let served = ["fast".to_string()].into();
+        let mut items: Vec<_> = (0..3).map(|i| desired("db", i)).collect();
+        for item in &mut items {
+            item.drives = ["fast".to_string()].into();
+        }
+
+        let decisions = place(&state, &items, &served).decisions;
+        let nodes: BTreeSet<_> = decisions
+            .iter()
+            .filter_map(|d| match d {
+                Decision::Place { node, .. } => Some(node.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            nodes.len(),
+            3,
+            "three replicas of a served-drive service should still land on three different nodes, not just n1 (the drive's server)"
+        );
+    }
+
     #[test]
     fn a_pin_overrides_the_spread() {
         let state = cluster();

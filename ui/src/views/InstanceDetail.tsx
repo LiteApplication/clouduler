@@ -238,6 +238,22 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
   const cluster = useClusterState();
   const [requirements, setRequirements] = useState<StackRequirements | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [servedDrives, setServedDrives] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listDrives()
+      .then((drives) => {
+        if (!cancelled) setServedDrives(new Set(drives.filter((d) => d.mode === 'served').map((d) => d.name)));
+      })
+      .catch(() => {
+        /* the table just falls back to strict (replicated-style) eligibility */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -273,7 +289,13 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
   }
 
   return (
-    <ConstraintTable requirements={requirements} cluster={cluster} onCreateConfig={() => {}} onCreateSecret={() => {}} />
+    <ConstraintTable
+      requirements={requirements}
+      cluster={cluster}
+      servedDrives={servedDrives}
+      onCreateConfig={() => {}}
+      onCreateSecret={() => {}}
+    />
   );
 }
 

@@ -11,7 +11,10 @@
 //! involved. That means it needs this node's cluster key, same as `stack
 //! deploy` does for sealing secrets.
 
+use std::cmp::{Ordering, Reverse};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
@@ -67,6 +70,199 @@ pub async fn run(cfg: &ClusterConfig, target: &str, args: LogsArgs, via: Option<
 
     while tasks.next().await.is_some() {}
     Ok(())
+}
+
+/// `clouduler stack logs`: every instance's output merged into one stream,
+/// ordered by the timestamp docker attached to each line rather than by
+/// whichever node's connection happens to answer first.
+///
+/// Without `--follow` this is exact: every source closes once its tail is
+/// sent, so the whole set is collected and sorted before anything prints.
+/// With `--follow` the sources never close, so exactness would mean waiting
+/// forever; instead, lines are held in a small buffer and flushed in
+/// timestamp order every [`FOLLOW_BUFFER`], trading a bounded delay for
+/// still-live output that reads in order across nodes.
+const FOLLOW_BUFFER: Duration = Duration::from_millis(400);
+
+pub async fn merged(cfg: &ClusterConfig, target: &str, args: LogsArgs, via: Option<&str>) -> Result<()> {
+    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+    let instances = resolve_target(&state, target)?;
+
+    let key = Arc::new(
+        ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+            format!(
+                "loading the cluster key from {} to authenticate to the node(s) running this",
+                cfg.secrets.key_file.display()
+            )
+        })?,
+    );
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .context("building the http client")?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for assignment in instances {
+        let cfg = cfg.clone();
+        let http = http.clone();
+        let key = key.clone();
+        let tx = tx.clone();
+        let follow = args.follow;
+        let tail = args.tail;
+        tokio::spawn(async move {
+            if let Err(e) = fetch_events(&cfg, &http, &key, &assignment, follow, tail, tx).await {
+                eprintln!("{}: {e}", assignment.instance);
+            }
+        });
+    }
+    // Drop this end so `rx` closes once every spawned sender above is gone,
+    // i.e. once every instance's stream has ended.
+    drop(tx);
+
+    if !args.follow {
+        let mut buf = Vec::new();
+        let mut seq = 0u64;
+        while let Some(event) = rx.recv().await {
+            buf.push(HeapItem(event.timestamp.clone(), seq, event));
+            seq += 1;
+        }
+        buf.sort();
+        for item in buf {
+            print_merged(&item.2);
+        }
+        return Ok(());
+    }
+
+    let mut heap: BinaryHeap<Reverse<HeapItem>> = BinaryHeap::new();
+    let mut seq = 0u64;
+    let mut ticker = tokio::time::interval(FOLLOW_BUFFER);
+    ticker.tick().await; // the first tick fires immediately; nothing to flush yet
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(event) => {
+                        heap.push(Reverse(HeapItem(event.timestamp.clone(), seq, event)));
+                        seq += 1;
+                    }
+                    None => break,
+                }
+            }
+            _ = ticker.tick() => {
+                while let Some(Reverse(item)) = heap.pop() {
+                    print_merged(&item.2);
+                }
+            }
+        }
+    }
+    while let Some(Reverse(item)) = heap.pop() {
+        print_merged(&item.2);
+    }
+    Ok(())
+}
+
+/// One line pulled off an instance's log stream, kept structured (rather than
+/// printed immediately like [`stream_one`] does) so [`merged`] can sort a
+/// batch of them across instances before anything reaches the terminal.
+struct MergedEvent {
+    instance: String,
+    timestamp: Option<String>,
+    kind: String,
+    text: String,
+}
+
+/// Sortable by (timestamp, arrival order): docker's timestamps are fixed-width
+/// RFC3339 in UTC, so lexicographic order on the string is chronological
+/// order. The arrival-order tiebreaker only matters for lines with no
+/// timestamp (the synthetic "error" event), keeping those in the order they
+/// were received instead of comparing `MergedEvent`'s unrelated fields.
+struct HeapItem(Option<String>, u64, MergedEvent);
+
+impl PartialEq for HeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.0, self.1) == (&other.0, other.1)
+    }
+}
+impl Eq for HeapItem {}
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for HeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (&self.0, self.1).cmp(&(&other.0, other.1))
+    }
+}
+
+async fn fetch_events(
+    cfg: &ClusterConfig,
+    http: &reqwest::Client,
+    key: &ClusterKey,
+    assignment: &Assignment,
+    follow: bool,
+    tail: u32,
+    tx: tokio::sync::mpsc::UnboundedSender<MergedEvent>,
+) -> Result<()> {
+    let base = cl_update::peers::base_url(cfg, &assignment.node)
+        .ok_or_else(|| anyhow!("node {} has no address on the internal network", assignment.node))?;
+    let path = format!(
+        "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
+        assignment.instance
+    );
+    let signature = cl_secret::internal_auth::sign(key, &path);
+
+    let resp = http
+        .get(format!("{base}{path}"))
+        .header(AUTH_HEADER, signature)
+        .send()
+        .await
+        .with_context(|| format!("asking {} for {}'s logs", assignment.node, assignment.instance))?;
+    if !resp.status().is_success() {
+        bail!("{} answered {}", assignment.node, resp.status());
+    }
+
+    let instance = assignment.instance.to_string();
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut event = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading the log stream")?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].trim_end_matches('\r').to_string();
+            buf.drain(..=pos);
+
+            if let Some(name) = line.strip_prefix("event: ") {
+                event = name.to_string();
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let (timestamp, text) = match event.as_str() {
+                    "stdout" | "stderr" => match serde_json::from_str::<LogPayload>(data) {
+                        Ok(p) => (p.timestamp, p.text),
+                        Err(_) => (None, data.to_string()),
+                    },
+                    _ => (None, data.to_string()),
+                };
+                // The channel's other end goes away only when `merged` has
+                // already flushed and returned; nothing left to do with a
+                // send that fails at that point.
+                let _ = tx.send(MergedEvent { instance: instance.clone(), timestamp, kind: event.clone(), text });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_merged(event: &MergedEvent) {
+    let ts = event.timestamp.as_deref().unwrap_or("?");
+    let prefix = format!("{ts} {} | ", event.instance);
+    match event.kind.as_str() {
+        "stderr" => eprintln!("{prefix}{}", event.text),
+        "error" => eprintln!("{prefix}error: {}", event.text),
+        _ => println!("{prefix}{}", event.text),
+    }
 }
 
 /// A single instance id, or every currently assigned instance of a stack.
@@ -129,6 +325,8 @@ async fn stream_one(
 
 #[derive(Deserialize)]
 struct LogPayload {
+    #[serde(default)]
+    timestamp: Option<String>,
     text: String,
 }
 

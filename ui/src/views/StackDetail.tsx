@@ -610,6 +610,28 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
   const [error, setError] = useState<string | null>(null);
   const [creatingConfig, setCreatingConfig] = useState<string | null>(null);
   const [creatingSecret, setCreatingSecret] = useState<string | null>(null);
+  // A served drive has one authoritative copy any node can reach over the
+  // internal network, so it does not narrow eligible nodes to whichever one
+  // declared it locally the way a replicated drive does (see
+  // cl-sched::place::rejection). The table needs to know which drives are
+  // served to show the same "can schedule here" answer the real scheduler
+  // would give.
+  const [servedDrives, setServedDrives] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listDrives()
+      .then((drives) => {
+        if (!cancelled) setServedDrives(new Set(drives.filter((d) => d.mode === 'served').map((d) => d.name)));
+      })
+      .catch(() => {
+        /* the table just falls back to strict (replicated-style) eligibility */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -670,6 +692,7 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
             <ConstraintTable
               requirements={perService[service]}
               cluster={cluster}
+              servedDrives={servedDrives}
               onCreateConfig={(n) => setCreatingConfig(n)}
               onCreateSecret={(n) => setCreatingSecret(n)}
             />

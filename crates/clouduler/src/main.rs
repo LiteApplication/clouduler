@@ -96,6 +96,12 @@ async fn main() -> Result<()> {
                 stack::show(&cfg, &name, files, via.as_deref()).await
             }
             StackCommand::Remove { name, via } => stack::remove(&cfg, &name, via.as_deref()).await,
+            StackCommand::Stop { name, via } => stack::stop(&cfg, &name, via.as_deref()).await,
+            StackCommand::Start { name, via } => stack::start(&cfg, &name, via.as_deref()).await,
+            StackCommand::Restart { name, via } => stack::restart(&cfg, &name, via.as_deref()).await,
+            StackCommand::Logs { name, follow, tail, via } => {
+                logs::merged(&cfg, &name, logs::LogsArgs { follow, tail }, via.as_deref()).await
+            }
         },
         Command::Secret { command } => match command {
             SecretCommand::Set { name, value, file, via } => {

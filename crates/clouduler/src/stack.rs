@@ -8,7 +8,8 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, StackBundle};
 use cl_raft::client::Client;
-use cl_raft::state::{base64_encode, Request, MAX_OBJECT_BYTES};
+use cl_raft::state::{base64_encode, DesiredState, Request, MAX_OBJECT_BYTES};
+use cl_raft::Assignment;
 use cl_secret::{ClusterKey, Sealed};
 use tracing::debug;
 
@@ -239,5 +240,90 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
         bail!("cluster rejected the removal: {error}");
     }
     println!("removed {name}");
+    Ok(())
+}
+
+pub async fn stop(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
+    set_all_desired(cfg, name, via, DesiredState::Stopped).await
+}
+
+pub async fn start(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
+    set_all_desired(cfg, name, via, DesiredState::Running).await
+}
+
+async fn set_all_desired(cfg: &ClusterConfig, name: &str, via: Option<&str>, desired: DesiredState) -> Result<()> {
+    let client = client_for(cfg, via)?;
+    let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
+    let instances = crate::logs::resolve_target(&state, name)?;
+
+    for assignment in &instances {
+        debug!(instance = %assignment.instance, ?desired, "submitting SetDesiredState");
+        let response = client
+            .submit(Request::SetDesiredState { instance: assignment.instance.clone(), desired })
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        if let Some(error) = response.error {
+            bail!("could not set {} to {desired:?}: {error}", assignment.instance);
+        }
+    }
+
+    let verb = match desired {
+        DesiredState::Running => "started",
+        DesiredState::Stopped => "stopped",
+    };
+    println!("{verb} {} instance(s) of {name}", instances.len());
+    Ok(())
+}
+
+/// Restarts every currently assigned instance of the stack in place, over the
+/// same node-to-node channel `clouduler logs`/`exec` use: the internal api,
+/// authenticated by an HMAC signature over the shared cluster key rather than
+/// an admin session, since this is one cluster member telling another to
+/// restart its own container.
+pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
+    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+    let instances = crate::logs::resolve_target(&state, name)?;
+
+    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {} to authenticate to the node(s) running this",
+            cfg.secrets.key_file.display()
+        )
+    })?;
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .context("building the http client")?;
+
+    let mut failed = Vec::new();
+    for assignment in &instances {
+        if let Err(e) = restart_one(cfg, &http, &key, assignment).await {
+            eprintln!("{}: {e}", assignment.instance);
+            failed.push(assignment.instance.to_string());
+        }
+    }
+
+    if !failed.is_empty() {
+        bail!("failed to restart: {}", failed.join(", "));
+    }
+    println!("restarted {} instance(s) of {name}", instances.len());
+    Ok(())
+}
+
+async fn restart_one(cfg: &ClusterConfig, http: &reqwest::Client, key: &ClusterKey, assignment: &Assignment) -> Result<()> {
+    let base = cl_update::peers::base_url(cfg, &assignment.node)
+        .ok_or_else(|| anyhow!("node {} has no address on the internal network", assignment.node))?;
+    let path = format!("/api/instances/internal/{}/restart", assignment.instance);
+    let signature = cl_secret::internal_auth::sign(key, &path);
+
+    let resp = http
+        .post(format!("{base}{path}"))
+        .header(cl_update::internal_client::AUTH_HEADER, signature)
+        .send()
+        .await
+        .with_context(|| format!("asking {} to restart {}", assignment.node, assignment.instance))?;
+    if !resp.status().is_success() {
+        bail!("{} answered {}", assignment.node, resp.status());
+    }
     Ok(())
 }

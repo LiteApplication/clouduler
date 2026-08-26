@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::{ClusterConfig, StackFile};
+use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::Docker;
 use cl_net::Allocations;
 use tokio::sync::RwLock;
@@ -452,14 +452,24 @@ pub fn overlay_name(stack: &str, network: &str) -> String {
 }
 
 /// The one declared network a stack should get a VXLAN overlay built for, if
-/// any: the one of subnet-addressed (internal or private) kind. Only that
-/// kind of network gets a per-instance overlay IP; a stack whose networks
-/// are all public, egress or wireguard needs no overlay at all, and must not
-/// be made to wait forever for an address on one of those instead.
+/// any. An internal or private network wins when the stack declares one,
+/// since that is the network whose domain its containers should actually
+/// resolve on. Failing that, a public network still needs its containers
+/// reachable cross-node for the proxy to forward to them, so it falls back to
+/// getting its own per-stack overlay too - isolated to this stack alone, the
+/// same as any other overlay, so this grants no access to whatever internal
+/// or private network other stacks happen to share.
+///
+/// A stack whose networks are all egress or wireguard needs no overlay at
+/// all, and must not be made to wait forever for an address on one of those
+/// instead.
 pub fn overlay_network_name<'a>(file: &'a StackFile, cfg: &ClusterConfig) -> Option<&'a str> {
+    let kind_of = |n: &str| cfg.networks.get(n).map(|net| net.kind);
+
     file.networks
         .keys()
-        .find(|n| cfg.networks.get(n.as_str()).is_some_and(|net| net.kind.is_subnetted()))
+        .find(|n| kind_of(n).is_some_and(NetworkKind::is_subnetted))
+        .or_else(|| file.networks.keys().find(|n| kind_of(n) == Some(NetworkKind::Public)))
         .map(String::as_str)
 }
 
@@ -599,12 +609,34 @@ web: { address: cloud, network: tailscale }
         let internal = StackFile::parse("networks:\n  tailscale: {}\n  wan: {}\nservices: {}\n").unwrap();
         assert_eq!(overlay_network_name(&internal, &cfg), Some("tailscale"));
 
-        // A stack whose networks are all public/egress needs no overlay at
-        // all: this is the case that used to send `targets()` into an
-        // infinite wait for an address on the "public" network, which never
-        // gets one.
-        let no_overlay = StackFile::parse("networks:\n  public: {}\n  wan: {}\nservices: {}\n").unwrap();
+        // A stack whose networks are all egress needs no overlay at all:
+        // this is the case that used to send `targets()` into an infinite
+        // wait for an address on a network that never gets one.
+        let no_overlay = StackFile::parse("networks:\n  wan: {}\nservices: {}\n").unwrap();
         assert_eq!(overlay_network_name(&no_overlay, &cfg), None);
+    }
+
+    /// A stack reachable only from the internet, with no internal/private
+    /// network of its own, still needs its container reachable cross-node for
+    /// the proxy to forward to it - so a public network falls back to
+    /// getting its own overlay rather than leaving the stack with no address
+    /// at all.
+    #[test]
+    fn a_public_only_stack_still_gets_its_own_overlay() {
+        let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+        let public_only = StackFile::parse("networks:\n  public: {}\n  wan: {}\nservices: {}\n").unwrap();
+        assert_eq!(overlay_network_name(&public_only, &cfg), Some("public"));
+    }
+
+    /// A stack declaring both keeps the internal/private one: that is the
+    /// network whose domain the containers should resolve on, and the one
+    /// other stacks on it are reachable through - a public network is only
+    /// ever a fallback, not a preference.
+    #[test]
+    fn an_internal_network_is_preferred_over_a_public_one() {
+        let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+        let both = StackFile::parse("networks:\n  public: {}\n  tailscale: {}\nservices: {}\n").unwrap();
+        assert_eq!(overlay_network_name(&both, &cfg), Some("tailscale"));
     }
 
     fn state() -> ClusterState {

@@ -425,6 +425,46 @@ pub enum StackCommand {
         #[arg(long)]
         via: Option<String>,
     },
+    /// Stop every instance of a stack, wherever it runs. The assignment is
+    /// kept, so `stack start` brings it back without redeploying.
+    Stop {
+        name: String,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Start every instance of a stack that isn't already running.
+    Start {
+        name: String,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Restart every currently running instance of a stack in place, the
+    /// same as `docker restart` on each of its containers. Unlike
+    /// `stack stop`+`stack start`, this never changes desired state, so a
+    /// stack that was stopped stays stopped.
+    Restart {
+        name: String,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
+    /// Stream every instance of a stack's output together, merged and
+    /// ordered by timestamp rather than by whichever node answers first.
+    Logs {
+        name: String,
+        /// Keep streaming new lines as they are written.
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Number of lines to show from the end of each container's log.
+        #[arg(short = 'n', long, default_value_t = 200)]
+        tail: u32,
+        /// Node to ask for the cluster's current state. Defaults to any
+        /// manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
