@@ -322,7 +322,7 @@ export interface TlsFingerprint {
 
 // ---- config ----
 
-export type NetworkKind = 'internal' | 'private' | 'public' | 'egress' | 'wireguard';
+export type NetworkKind = 'internal' | 'private' | 'public' | 'egress' | 'wireguard' | 'nat';
 
 export interface OpenPort {
   port: number;

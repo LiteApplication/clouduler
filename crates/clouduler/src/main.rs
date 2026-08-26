@@ -11,6 +11,7 @@ mod overlay;
 mod egress;
 mod exec;
 mod expose;
+mod health;
 mod init;
 mod logs;
 mod proxy;
@@ -101,6 +102,14 @@ async fn main() -> Result<()> {
             StackCommand::Restart { name, via } => stack::restart(&cfg, &name, via.as_deref()).await,
             StackCommand::Logs { name, follow, tail, via } => {
                 logs::merged(&cfg, &name, logs::LogsArgs { follow, tail }, via.as_deref()).await
+            }
+            StackCommand::Unhealthy { node, uptime, placement, logs, all, via } => {
+                let flags = if all {
+                    health::ShowFlags { node: true, uptime: true, placement: true, logs: Some(logs.unwrap_or(10)) }
+                } else {
+                    health::ShowFlags { node, uptime, placement, logs }
+                };
+                health::run(&cfg, via.as_deref(), flags).await
             }
         },
         Command::Secret { command } => match command {

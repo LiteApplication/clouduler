@@ -199,11 +199,12 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               { value: 'public', label: 'Public' },
               { value: 'egress', label: 'Egress' },
               { value: 'wireguard', label: 'WireGuard' },
+              { value: 'nat', label: 'NAT' },
             ]}
-            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below."
+            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below. NAT routes a service's outbound traffic through the node's own routing table, masqueraded like ordinary NAT, instead of a named interface — no per-node setup needed."
             disabled={disabled}
           />
-          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && (
+          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <CidrField
               id={`net-${name}-subnet`}
               label="Subnet"
@@ -213,7 +214,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               disabled={disabled}
             />
           )}
-          {net.type !== 'wireguard' && net.type !== 'egress' && (
+          {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <TextField
               id={`net-${name}-domain`}
               label="Domain"
@@ -232,6 +233,13 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
             <p className="field-hint">
               Not addressable by subnet: pick a host interface per node below. Clouduler does not
               manage the interface itself — it must already exist and be up.
+            </p>
+          )}
+          {net.type === 'nat' && (
+            <p className="field-hint">
+              Not addressable, and nothing to configure per node: every node implements it the
+              same way, NAT-ing a service's outbound traffic out whatever interface its own
+              routing table picks, instead of a single fixed interface.
             </p>
           )}
         </div>
@@ -535,7 +543,11 @@ export function NodeCard({
   // in node.network) until the operator actually imports something.
   const [pendingWireguard, setPendingWireguard] = useState<string[]>([]);
   const joinableNetworks = networkEntries.filter(
-    ([netName, net]) => net.type !== 'internal' && !(netName in node.network) && !pendingWireguard.includes(netName),
+    ([netName, net]) =>
+      net.type !== 'internal' &&
+      net.type !== 'nat' &&
+      !(netName in node.network) &&
+      !pendingWireguard.includes(netName),
   );
   const [addingNetwork, setAddingNetwork] = useState('');
 
@@ -615,7 +627,10 @@ export function NodeCard({
       </h4>
       {networkEntries.map(([netName, net]) => {
         const addr = node.network[netName];
-        if (net.type === 'internal') {
+        if (net.type === 'nat') {
+          // Not addressable per node: nothing to render here at all.
+          return null;
+        } else if (net.type === 'internal') {
           // always shown, falls through below
         } else if (net.type === 'wireguard') {
           if (!(netName in node.network) && !pendingWireguard.includes(netName)) return null;

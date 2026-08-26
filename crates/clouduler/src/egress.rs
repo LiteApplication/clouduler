@@ -38,7 +38,7 @@ use cl_config::{ClusterConfig, InterfaceAddress, NetworkKind, NodeAddress};
 use cl_docker::{Docker, NetworkSpec};
 use cl_net::egress::{
     apply_egress_iptables, egress_docker_name, egress_gateway, egress_iptables_plan, egress_subnet,
-    ensure_egress_bridge,
+    ensure_egress_bridge, nat_docker_name,
 };
 use cl_net::vxlan::Overlay;
 use cl_net::wireguard::{
@@ -155,6 +155,18 @@ pub fn start(
             let Some(docker) = docker.read().await.clone() else {
                 continue;
             };
+
+            // Nat networks need no per-node interface at all: every node
+            // implements them the same way, so this runs regardless of
+            // whether the node has any egress/wireguard interfaces below.
+            for (network, net) in &cfg.networks {
+                if net.kind != NetworkKind::Nat {
+                    continue;
+                }
+                if let Err(e) = ensure_nat(&docker, network).await {
+                    warn!(network = %network, error = %e, "cannot bring up the nat network");
+                }
+            }
 
             let interfaces = interfaces_of(&cfg, &node_name);
             if interfaces.is_empty() {
@@ -273,6 +285,22 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
         .with_context(|| format!("ensuring the {network} docker network"))?;
     if created {
         info!(network = %network, %subnet, %bridge, iface = %iface, "egress network up");
+    }
+    Ok(())
+}
+
+/// Bring up a nat-kind network's docker network: no bridge, no interface, no
+/// iptables of clouduler's own — docker builds the bridge and NATs it out
+/// whatever the host's routing table picks, exactly like any bridge network
+/// docker would make on its own.
+async fn ensure_nat(docker: &Docker, network: &str) -> Result<()> {
+    let name = nat_docker_name(network);
+    let created = docker
+        .ensure_nat_network(&name, OWNER)
+        .await
+        .with_context(|| format!("ensuring the {network} nat docker network"))?;
+    if created {
+        info!(network = %network, docker_name = %name, "nat network up");
     }
     Ok(())
 }

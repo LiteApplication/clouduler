@@ -22,6 +22,14 @@ export interface UseEventSourceOptions<T> {
    * enough when the payload already has the shape `T`.
    */
   mapItem?: (data: unknown, eventType: string) => T;
+  /**
+   * Identity key for an item, used to drop duplicates. Needed because a
+   * dropped connection makes the browser's `EventSource` silently reconnect
+   * to the same url (same `tail`), and the server has no way to know what
+   * it already sent, so it replays the tail again. Without a key every
+   * reconnect would re-append lines already in the buffer.
+   */
+  dedupeKey?: (item: T) => string;
 }
 
 /**
@@ -29,13 +37,15 @@ export interface UseEventSourceOptions<T> {
  * from the named events it listens for.
  */
 export function useEventSource<T>(url: string | null, options: UseEventSourceOptions<T> = {}) {
-  const { limit = 1000, enabled = true, events = ['message'], mapItem } = options;
+  const { limit = 1000, enabled = true, events = ['message'], mapItem, dedupeKey } = options;
   const [items, setItems] = useState<T[]>([]);
   const [connected, setConnected] = useState(false);
   const limitRef = useRef(limit);
   limitRef.current = limit;
   const mapRef = useRef(mapItem);
   mapRef.current = mapItem;
+  const dedupeKeyRef = useRef(dedupeKey);
+  dedupeKeyRef.current = dedupeKey;
 
   // Stringified so the effect does not re-subscribe every render when the
   // caller passes a fresh array literal.
@@ -46,11 +56,17 @@ export function useEventSource<T>(url: string | null, options: UseEventSourceOpt
     setItems([]);
     setConnected(false);
     const source = new EventSource(url);
+    const seen = new Set<string>();
 
     const onEvent = (evt: MessageEvent) => {
       try {
         const parsed = JSON.parse(evt.data);
         const item = (mapRef.current ? mapRef.current(parsed, evt.type) : parsed) as T;
+        const key = dedupeKeyRef.current?.(item);
+        if (key !== undefined) {
+          if (seen.has(key)) return;
+          seen.add(key);
+        }
         setItems((prev) => {
           const next = [...prev, item];
           return next.length > limitRef.current ? next.slice(next.length - limitRef.current) : next;

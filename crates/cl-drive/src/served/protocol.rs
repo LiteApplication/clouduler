@@ -173,29 +173,29 @@ pub enum Response {
 }
 
 pub async fn send_request(conn: &mut Connection, req: &Request) -> io::Result<()> {
-    send_json(conn, req).await
+    send_encoded(conn, req).await
 }
 
 pub async fn recv_request(conn: &mut Connection) -> io::Result<Option<Request>> {
-    recv_json(conn).await
+    recv_encoded(conn).await
 }
 
 pub async fn send_response(conn: &mut Connection, resp: &Response) -> io::Result<()> {
-    send_json(conn, resp).await
+    send_encoded(conn, resp).await
 }
 
 pub async fn recv_response(conn: &mut Connection) -> io::Result<Option<Response>> {
-    recv_json(conn).await
+    recv_encoded(conn).await
 }
 
-async fn send_json<T: Serialize>(conn: &mut Connection, msg: &T) -> io::Result<()> {
-    let raw = serde_json::to_vec(msg).map_err(io::Error::other)?;
+async fn send_encoded<T: Serialize>(conn: &mut Connection, msg: &T) -> io::Result<()> {
+    let raw = bincode::serialize(msg).map_err(io::Error::other)?;
     conn.send(bytes::Bytes::from(raw)).await
 }
 
-async fn recv_json<T: for<'de> Deserialize<'de>>(conn: &mut Connection) -> io::Result<Option<T>> {
+async fn recv_encoded<T: for<'de> Deserialize<'de>>(conn: &mut Connection) -> io::Result<Option<T>> {
     match conn.next().await {
-        Some(Ok(raw)) => Ok(Some(serde_json::from_slice(&raw).map_err(io::Error::other)?)),
+        Some(Ok(raw)) => Ok(Some(bincode::deserialize(&raw).map_err(io::Error::other)?)),
         Some(Err(e)) => Err(e),
         None => Ok(None),
     }
@@ -206,14 +206,14 @@ mod tests {
     use super::*;
 
     fn req_round_trip(req: Request) {
-        let raw = serde_json::to_vec(&req).unwrap();
-        let decoded: Request = serde_json::from_slice(&raw).unwrap();
+        let raw = bincode::serialize(&req).unwrap();
+        let decoded: Request = bincode::deserialize(&raw).unwrap();
         assert_eq!(decoded, req);
     }
 
     fn resp_round_trip(resp: Response) {
-        let raw = serde_json::to_vec(&resp).unwrap();
-        let decoded: Response = serde_json::from_slice(&raw).unwrap();
+        let raw = bincode::serialize(&resp).unwrap();
+        let decoded: Response = bincode::deserialize(&raw).unwrap();
         assert_eq!(decoded, resp);
     }
 

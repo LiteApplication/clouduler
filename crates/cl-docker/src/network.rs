@@ -98,6 +98,39 @@ impl Docker {
         }
     }
 
+    /// Create a nat-kind cluster network if missing. Idempotent, like
+    /// `ensure_network`, but unlike it this asks docker to build and own the
+    /// bridge itself rather than pointing at one `cl-net` already made:
+    /// there is no VXLAN device to enslave and no fixed egress interface to
+    /// pin traffic to, so ordinary docker bridge NAT — masqueraded out
+    /// whatever the host's own routing table picks for a given destination
+    /// — is exactly the behavior wanted. No explicit subnet either: nothing
+    /// outside this node ever needs to know it, so docker's own IPAM can
+    /// pick one.
+    pub async fn ensure_nat_network(&self, name: &str, owner: &str) -> Result<bool> {
+        if self.network_exists(name).await? {
+            return Ok(false);
+        }
+
+        let labels = HashMap::from([
+            (LABEL_MANAGED.to_string(), MANAGED_VALUE.to_string()),
+            (LABEL_STACK.to_string(), owner.to_string()),
+        ]);
+
+        let request = NetworkCreateRequest {
+            name: name.to_string(),
+            driver: Some("bridge".to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        };
+
+        match self.inner.create_network(request).await {
+            Ok(_) => Ok(true),
+            Err(e) if already_exists(&e) => Ok(false),
+            Err(e) => Err(classify(e)),
+        }
+    }
+
     /// Attach an already-created container to a second network. Docker only
     /// takes one network at create time (`HostConfig.network_mode`); a
     /// service's egress network, if it has one, is always this second

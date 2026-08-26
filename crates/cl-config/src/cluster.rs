@@ -236,6 +236,15 @@ pub enum NetworkKind {
     /// set up out of band. A node's address is still the interface name
     /// clouduler derives for it, not admin-chosen.
     Wireguard,
+    /// Like `Egress`, but outbound traffic leaves through the node's normal
+    /// route instead of a named interface: ordinary NAT, masqueraded out
+    /// whatever the host's own routing table picks. No node address is
+    /// declared or needed — every node implements it the same way, with
+    /// nothing host-specific to configure. Useful for a service that needs
+    /// to reach addresses only the host's routing table knows how to reach
+    /// (a Tailscale/VPN peer, say) rather than the internet at large, which
+    /// an `egress` network's single fixed interface cannot do.
+    Nat,
 }
 
 impl NetworkKind {
@@ -724,14 +733,16 @@ impl ClusterConfig {
         self.nodes.get(name)
     }
 
-    /// Names of every network of kind `Egress` or `Wireguard`, the two kinds a
-    /// service's `networks:` entry can join for outbound NAT (a wireguard
-    /// network attaches exactly like an egress one, its interface just being
-    /// clouduler-managed instead of admin-managed).
+    /// Names of every network of kind `Egress`, `Wireguard` or `Nat`, the
+    /// three kinds a service's `networks:` entry can join for outbound NAT
+    /// (a wireguard network attaches exactly like an egress one, its
+    /// interface just being clouduler-managed instead of admin-managed; a
+    /// nat network needs no interface at all, since every node implements it
+    /// the same way).
     pub fn egress_networks(&self) -> std::collections::BTreeSet<String> {
         self.networks
             .iter()
-            .filter(|(_, net)| matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard))
+            .filter(|(_, net)| matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat))
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -862,6 +873,7 @@ impl fmt::Display for NetworkKind {
             NetworkKind::Public => f.write_str("public"),
             NetworkKind::Egress => f.write_str("egress"),
             NetworkKind::Wireguard => f.write_str("wireguard"),
+            NetworkKind::Nat => f.write_str("nat"),
         }
     }
 }

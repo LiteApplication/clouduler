@@ -41,6 +41,13 @@ pub fn egress_docker_name(network: &str) -> String {
     format!("egress_{network}")
 }
 
+/// The docker network name for a nat-kind cluster network. Same idea as
+/// `egress_docker_name`, its own prefix only so the two read apart in
+/// `docker network ls`.
+pub fn nat_docker_name(network: &str) -> String {
+    format!("nat_{network}")
+}
+
 /// Deterministic interface name for an egress network's bridge.
 pub fn egress_bridge_name(network: &str) -> String {
     short_name("clex-", network, IFNAMSIZ_USABLE)
@@ -235,6 +242,7 @@ mod tests {
     fn a_short_network_name_passes_through() {
         assert_eq!(egress_bridge_name("vpn"), "clex-vpn");
         assert_eq!(egress_docker_name("vpn"), "egress_vpn");
+        assert_eq!(nat_docker_name("vpn"), "nat_vpn");
     }
 
     #[test]

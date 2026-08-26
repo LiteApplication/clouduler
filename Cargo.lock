@@ -798,6 +798,7 @@ dependencies = [
 name = "cl-drive"
 version = "0.5.7"
 dependencies = [
+ "bincode",
  "blake3",
  "bytes",
  "cl-config",
@@ -810,7 +811,6 @@ dependencies = [
  "openraft",
  "rand 0.8.7",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -1009,6 +1009,7 @@ dependencies = [
  "clap",
  "futures",
  "hickory-proto",
+ "humantime",
  "instant-acme",
  "ipnet",
  "nix 0.30.1",

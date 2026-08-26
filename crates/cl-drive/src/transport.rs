@@ -1,10 +1,12 @@
 //! Wire protocol for bulk volume transfer.
 //!
 //! Kept off the raft rpc channel so a multi-megabyte delta never sits behind
-//! a heartbeat, but framed the same way as `cl_raft::rpc` (length delimited
-//! json over plain TCP) for consistency with the rest of the internal
-//! network. A binary encoding would pack file bytes tighter; on a trusted,
-//! unencrypted LAN that isn't worth the extra dependency.
+//! a heartbeat. Framed like `cl_raft::rpc` (length delimited over plain TCP),
+//! but encoded with `bincode` rather than JSON: this channel carries mostly
+//! raw file bytes and deltas, and a byte vector round-trips as its literal
+//! bytes plus a length prefix instead of a comma-separated JSON array of
+//! decimal integers. Nothing else talks this protocol, so there's no
+//! cross-version compatibility to preserve.
 //!
 //! This module owns both directions of the protocol: `send`/`recv` and the
 //! `Message` enum are shared, and `serve` runs the receive side (the sender
@@ -36,14 +38,10 @@ const MAX_FRAME: usize = 256 * 1024 * 1024;
 
 /// Files at or below this size go over the wire as a single `WholeFile`
 /// message. Above it, `send_whole` streams `WholeFileBegin`/`WholeFileChunk`/
-/// `WholeFileEnd` instead: `serde_json` encodes a `Vec<u8>` as a JSON array of
-/// integers, not base64, so a single frame's payload can bloat to several
-/// times the raw byte count. A postgres relation file comfortably exceeds
-/// `MAX_FRAME` once encoded that way, which used to abort the whole sync
-/// partway through and leave the receiver with a half-written volume (e.g. a
-/// PGDATA directory missing everything alphabetically after the oversized
-/// file). Chosen with enough headroom under `MAX_FRAME` that the JSON
-/// encoding of one chunk, plus its message envelope, never gets close.
+/// `WholeFileEnd` instead, so one huge file can't force a single allocation
+/// and frame the size of the whole thing and so progress can be observed
+/// (and backpressure applied) chunk by chunk rather than after one giant
+/// read. Chosen with headroom under `MAX_FRAME` for the message envelope.
 pub const WHOLE_FILE_CHUNK: usize = 32 * 1024 * 1024;
 
 /// rpc_port + 1. Keeps bulk transfer off the raft socket without adding a
@@ -118,14 +116,14 @@ pub fn frame(stream: TcpStream) -> Connection {
 }
 
 pub async fn send(conn: &mut Connection, msg: &Message) -> io::Result<()> {
-    let raw = serde_json::to_vec(msg).map_err(io::Error::other)?;
+    let raw = bincode::serialize(msg).map_err(io::Error::other)?;
     conn.send(bytes::Bytes::from(raw)).await
 }
 
 /// `Ok(None)` means the peer closed the connection cleanly.
 pub async fn recv(conn: &mut Connection) -> io::Result<Option<Message>> {
     match conn.next().await {
-        Some(Ok(raw)) => Ok(Some(serde_json::from_slice(&raw).map_err(io::Error::other)?)),
+        Some(Ok(raw)) => Ok(Some(bincode::deserialize(&raw).map_err(io::Error::other)?)),
         Some(Err(e)) => Err(e),
         None => Ok(None),
     }
@@ -335,13 +333,13 @@ mod tests {
     use super::*;
 
     fn msg_round_trip(msg: Message) {
-        let raw = serde_json::to_vec(&msg).unwrap();
-        let decoded: Message = serde_json::from_slice(&raw).unwrap();
+        let raw = bincode::serialize(&msg).unwrap();
+        let decoded: Message = bincode::deserialize(&raw).unwrap();
         assert_eq!(decoded, msg);
     }
 
     #[test]
-    fn every_message_variant_round_trips_through_json() {
+    fn every_message_variant_round_trips_through_bincode() {
         msg_round_trip(Message::Hello { volume: VolumeId::new("fast", "data"), generation: 3 });
         msg_round_trip(Message::Ready(Manifest::default()));
         msg_round_trip(Message::ManifestRequest { volume: VolumeId::new("fast", "data"), hash_content: true });

@@ -339,3 +339,45 @@ This only applies to `egress`-kind addresses. A `wireguard`-kind address can
 carry a `fallback` block (the schema is shared), but the reconcile loop
 never probes it — a wireguard tunnel doesn't have a "second interface" to
 fail over to the way a plain egress address does.
+
+## NAT networks
+
+A `nat`-kind network is `egress`'s opposite number: instead of forcing a
+service's outbound traffic out one named interface, it lets the node's own
+routing table decide, exactly like an ordinary NAT'd docker bridge network
+would. Useful for reaching addresses only the host's routing table knows how
+to get to — a Tailscale or other VPN mesh peer, say — which a single fixed
+`egress` interface cannot do, since that interface's kill-switch drops
+anything that doesn't leave through it.
+
+```yaml
+networks:
+  home:
+    type: nat
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma
+    networks: [proxy, home]
+```
+
+No node address is declared or needed — a `nat` network takes no entry
+under `nodes.<name>.network` at all, and none is rejected as invalid if one
+is given. Every node implements it identically, so unlike `egress` or
+`wireguard` it never restricts which node a service attached to it can land
+on.
+
+There is no manual bridge or iptables kill-switch either: clouduler asks
+docker to build and own an ordinary bridge network
+(`cl_net::egress::nat_docker_name`, `Docker::ensure_nat_network`), and
+docker's own MASQUERADE rule — which doesn't pin to one interface, unlike
+`egress`'s — does the rest. Brought up the same way `egress` networks are,
+on the same 10 second reconcile loop
+(`crates/clouduler/src/egress.rs::RECONCILE_INTERVAL`), so adding one or
+attaching a service to it needs no daemon restart.
+
+A service attaches to at most one network from `{egress, wireguard, nat}` at
+once, alongside its normal overlay network, the same "one extra network,
+attached after creation with its default route pointed at it" mechanism
+`egress` uses (see above) — `nat` is simply a different kind entry in that
+same set.

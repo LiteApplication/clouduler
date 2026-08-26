@@ -465,6 +465,37 @@ pub enum StackCommand {
         #[arg(long)]
         via: Option<String>,
     },
+    /// At a glance: every stack that currently has a container worth looking
+    /// at - crashed, restart-looping, failing its healthcheck, stuck
+    /// migrating, on an unreachable node, or wanted but unable to land
+    /// anywhere.
+    ///
+    /// Bare output is deliberately terse (instance, state, health); the
+    /// flags below add detail per instance.
+    Unhealthy {
+        /// Show which node each instance runs on.
+        #[arg(long)]
+        node: bool,
+        /// Show how long each instance has been up.
+        #[arg(long)]
+        uptime: bool,
+        /// Show why a pending instance could not be placed on any node, or
+        /// why a migration failed.
+        #[arg(long)]
+        placement: bool,
+        /// Print this many lines from the end of each unhealthy container's
+        /// log, indented underneath it.
+        #[arg(long, value_name = "N")]
+        logs: Option<u32>,
+        /// Show everything: --node, --uptime, --placement and the last 10
+        /// log lines, as if all four were given.
+        #[arg(long)]
+        all: bool,
+        /// Node to ask for the cluster's current state. Defaults to any
+        /// manager in the config.
+        #[arg(long)]
+        via: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

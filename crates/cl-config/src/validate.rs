@@ -83,7 +83,7 @@ impl ClusterConfig {
                 }
                 _ => {}
             }
-            if matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard) && net.domain.is_some() {
+            if matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat) && net.domain.is_some() {
                 return Err(ConfigError::invalid(
                     format!("{at}.domain"),
                     format!("a {} network is not addressable and must not declare a domain", net.kind),
@@ -216,6 +216,12 @@ impl ClusterConfig {
                         return Err(ConfigError::invalid(
                             at,
                             format!("a {} network takes a bare host interface name", net.kind),
+                        ))
+                    }
+                    (NetworkKind::Nat, _) => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            "a nat network takes no node address, every node implements it the same way",
                         ))
                     }
                 }
@@ -658,6 +664,26 @@ cloudflare:
         ])
         .unwrap_err();
         assert!(err.to_string().contains("takes a bare host interface name"));
+    }
+
+    #[test]
+    fn nat_network_takes_no_node_address() {
+        let cfg = parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            "  wan:       { type: public,   domain: example.com }\n  home:      { type: nat }",
+        )])
+        .expect("valid");
+        assert_eq!(cfg.networks["home"].kind, NetworkKind::Nat);
+
+        let err = parse(&[
+            (
+                "  wan:       { type: public,   domain: example.com }",
+                "  wan:       { type: public,   domain: example.com }\n  home:      { type: nat }",
+            ),
+            ("      tailscale: 10.10.0.1", "      tailscale: 10.10.0.1\n      home: eth0"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("takes no node address"));
     }
 
     #[test]

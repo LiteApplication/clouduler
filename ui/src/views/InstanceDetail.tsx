@@ -311,6 +311,10 @@ function InstanceLogs({ id }: { id: string }) {
       const line = data as { text: string; timestamp: string };
       return { timestamp: line.timestamp, message: line.text, stream: eventType as 'stdout' | 'stderr' };
     },
+    // A dropped connection makes the browser reopen the same url (same
+    // `tail`), and docker replays that tail again; without this, every
+    // reconnect would duplicate the lines already shown.
+    dedupeKey: (line) => `${line.timestamp}|${line.stream}|${line.message}`,
   });
 
   const visible = search ? items.filter((l) => l.message.includes(search)) : items;

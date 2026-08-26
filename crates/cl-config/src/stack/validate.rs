@@ -143,8 +143,17 @@ impl StackFile {
     /// the cluster config, but per stack since that's where a service's
     /// `networks:` list lives.
     fn validate_networks_implemented(&self, cluster: &ClusterConfig) -> Result<()> {
+        use crate::cluster::NetworkKind;
+
         for (name, svc) in &self.services {
             for net in &svc.networks {
+                // A nat network declares no per-node address at all: every
+                // node implements it identically, so there is nothing to
+                // check here the way there is for an egress or wireguard
+                // interface.
+                if cluster.networks.get(net).map(|n| n.kind) == Some(NetworkKind::Nat) {
+                    continue;
+                }
                 if !cluster.nodes.values().any(|n| n.network.contains_key(net)) {
                     return Err(ConfigError::invalid(
                         format!("services.{name}.networks"),
@@ -254,7 +263,7 @@ impl StackFile {
                 // Already checked to exist by validate_networks_exist.
                 if !matches!(
                     cluster.networks.get(net).map(|n| n.kind),
-                    Some(NetworkKind::Egress | NetworkKind::Wireguard)
+                    Some(NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat)
                 ) {
                     continue;
                 }
@@ -290,11 +299,16 @@ impl StackFile {
                 ));
             }
             if let Some(net) = self.egress_network(name, cluster) {
-                let implements = cluster
-                    .nodes
-                    .get(&node)
-                    .map(|n| n.network.get(&net).is_some_and(|a| a.as_interface().is_some()))
-                    .unwrap_or(false);
+                // A nat network needs no interface address anywhere: every
+                // node implements it the same way, so a pin to any node is
+                // always fine.
+                let is_nat = cluster.networks.get(&net).map(|n| n.kind) == Some(crate::cluster::NetworkKind::Nat);
+                let implements = is_nat
+                    || cluster
+                        .nodes
+                        .get(&node)
+                        .map(|n| n.network.get(&net).is_some_and(|a| a.as_interface().is_some()))
+                        .unwrap_or(false);
                 if !implements {
                     return Err(ConfigError::invalid(
                         format!("services.{name}.x-clouduler.node"),
@@ -463,6 +477,41 @@ services:
         let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
         let err = stack(raw).validate(&cluster).unwrap_err();
         assert!(err.to_string().contains("no node implements network unreachable"));
+    }
+
+    #[test]
+    fn a_nat_network_needs_no_implementing_node() {
+        let raw = r#"
+networks:
+  home: {}
+services:
+  a:
+    image: x
+    networks: [home]
+    x-clouduler: { node: n1 }
+"#;
+        let yaml = CLUSTER_YAML.replace("  vpn:\n    type: egress\n", "  vpn:\n    type: egress\n  home:\n    type: nat\n");
+        let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
+        // No node has (or needs) an interface address on `home`, yet the
+        // service, even pinned to a specific node, is still accepted.
+        stack(raw).validate(&cluster).expect("a nat network is implemented by every node");
+    }
+
+    #[test]
+    fn a_service_cannot_attach_to_both_an_egress_and_a_nat_network() {
+        let raw = r#"
+networks:
+  vpn: {}
+  home: {}
+services:
+  a:
+    image: x
+    networks: [vpn, home]
+"#;
+        let yaml = CLUSTER_YAML.replace("  vpn:\n    type: egress\n", "  vpn:\n    type: egress\n  home:\n    type: nat\n");
+        let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
+        let err = stack(raw).validate(&cluster).unwrap_err();
+        assert!(err.to_string().contains("only one egress network is allowed per service"));
     }
 
     #[test]

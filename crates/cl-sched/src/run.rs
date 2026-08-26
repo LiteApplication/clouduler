@@ -265,7 +265,10 @@ impl Scheduler {
                 .networks
                 .iter()
                 .find(|n| egress_networks.contains(*n))
-                .map(|n| cl_net::egress::egress_docker_name(n));
+                .map(|n| match live.networks.get(n.as_str()).map(|net| net.kind) {
+                    Some(NetworkKind::Nat) => cl_net::egress::nat_docker_name(n),
+                    _ => cl_net::egress::egress_docker_name(n),
+                });
 
             // An instance on its way somewhere else must not be started here
             // again between the migration stopping it and the handover
@@ -286,6 +289,8 @@ impl Scheduler {
                 assignment.desired = DesiredState::Stopped;
             }
 
+            let revision = revision_with_mounts(stack.revision, service, &dynamic_mounts);
+
             let spec = spec::build(
                 instance,
                 service,
@@ -296,13 +301,13 @@ impl Scheduler {
                 },
                 placement,
                 assignment.image_digest.as_deref(),
-                stack.revision,
+                revision,
             );
 
             targets.push(Target {
                 assignment,
                 spec,
-                revision: stack.revision,
+                revision,
                 stop_grace: service.stop_grace_period.unwrap_or(DEFAULT_STOP_GRACE),
             });
         }
@@ -351,6 +356,41 @@ impl Scheduler {
 
         (roots, dynamic)
     }
+}
+
+/// Folds which of a service's drives are currently FUSE-mounted (rather than
+/// backed by this node's own local copy) into the revision used to detect
+/// drift, so a container gets recreated on top of `stack.revision` changing.
+///
+/// A served drive's active server can change after a container already
+/// exists (the previously-active candidate failed, or came back and this
+/// node handed the role back) without `stack.revision` moving at all — the
+/// stack file didn't change, only which host path answers for the drive did.
+/// `diff` only compares `LABEL_REVISION`, so without this, a container
+/// created while its drive was FUSE-mounted keeps that bind source baked in
+/// forever: `Action::Start` never recreates it, and the mountpoint it points
+/// at is only maintained by `clouduler::drives::watch_volume_mounts` while
+/// this node still needs it as a FUSE mount, which stops being true the
+/// moment this node becomes the active server. The result is a container
+/// stuck failing to start against a bind path nothing owns any more.
+///
+/// The real stack revision lives in the low 32 bits (a stack redeploying
+/// four billion times is not a real concern) and a bit per drive the service
+/// mounts, in sorted order, in the high bits, so an ordinary redeploy and a
+/// drive failover each move a disjoint part of the value and neither can
+/// mask the other.
+fn revision_with_mounts(revision: u64, service: &cl_config::Service, dynamic_mounts: &BTreeSet<String>) -> u64 {
+    let mut drives: Vec<&str> = service.volumes.iter().filter_map(|v| v.drive.as_deref()).collect();
+    drives.sort_unstable();
+    drives.dedup();
+
+    let mut bits: u64 = 0;
+    for (i, drive) in drives.iter().enumerate().take(32) {
+        if dynamic_mounts.contains(*drive) {
+            bits |= 1 << i;
+        }
+    }
+    (bits << 32) | (revision & 0xFFFF_FFFF)
 }
 
 /// The node currently serving a `Served` drive: the first of `served_by` that
@@ -738,6 +778,46 @@ services:
         // A registered volume has a primary that migration moves; re-asserting
         // it every sweep would fight that.
         assert!(volume_requests(&state).is_empty());
+    }
+
+    fn service_with_volumes(volumes: &str) -> cl_config::Service {
+        let stack = StackFile::parse(&format!(
+            "services:\n  web:\n    image: nginx\n    volumes:\n{volumes}\n"
+        ))
+        .expect("valid stack");
+        stack.services["web"].clone()
+    }
+
+    /// A container created while its drive was FUSE-mounted, then never
+    /// recreated, keeps that stale bind path forever if a failover (or fail
+    /// back) that changes nothing about the stack file also changes nothing
+    /// about the revision `diff` compares.
+    #[test]
+    fn a_drive_switching_between_local_and_fuse_mounted_changes_the_revision() {
+        let service = service_with_volumes("      - fast/data:/data\n");
+        let local = revision_with_mounts(1, &service, &BTreeSet::new());
+        let fuse_mounted = revision_with_mounts(1, &service, &BTreeSet::from(["fast".to_string()]));
+        assert_ne!(local, fuse_mounted);
+    }
+
+    /// A drive this service doesn't even mount switching between local and
+    /// FUSE-mounted must not force every other container to be recreated.
+    #[test]
+    fn an_unrelated_drive_switching_does_not_change_the_revision() {
+        let service = service_with_volumes("      - fast/data:/data\n");
+        let a = revision_with_mounts(1, &service, &BTreeSet::new());
+        let b = revision_with_mounts(1, &service, &BTreeSet::from(["slow".to_string()]));
+        assert_eq!(a, b);
+    }
+
+    /// The stack's own revision still has to move the combined value, the
+    /// same as before this was folded in, or an ordinary redeploy would stop
+    /// being noticed.
+    #[test]
+    fn the_stack_revision_still_changes_the_combined_value() {
+        let service = service_with_volumes("      - fast/data:/data\n");
+        let dynamic = BTreeSet::from(["fast".to_string()]);
+        assert_ne!(revision_with_mounts(1, &service, &dynamic), revision_with_mounts(2, &service, &dynamic));
     }
 
     #[test]
