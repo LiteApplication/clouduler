@@ -1,7 +1,8 @@
-//! `clouduler stack unhealthy` — an at-a-glance list of stacks that currently
-//! have a container worth looking at: crashed, restart-looping, failing its
-//! healthcheck, stuck migrating, on an unreachable node, or wanted but unable
-//! to land anywhere.
+//! `clouduler stack unhealthy` — an at-a-glance list of stacks whose actual
+//! state doesn't match what's desired: crashed, restart-looping, failing its
+//! healthcheck, stuck migrating, on an unreachable node, wanted but unable to
+//! land anywhere, or stopped (shown either way, so it's clear the stop was
+//! deliberate rather than a crash that happens to look the same).
 //!
 //! Health and liveness only exist on the node running (or trying to run) a
 //! container, so this reaches every node the same way `clouduler logs` and
@@ -16,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{anyhow, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::state::ClusterState;
-use cl_raft::Assignment;
+use cl_raft::{Assignment, DesiredState};
 use cl_secret::ClusterKey;
 use cl_update::internal_client::AUTH_HEADER;
 use futures::StreamExt;
@@ -36,6 +37,7 @@ pub struct ShowFlags {
 struct Row {
     instance: String,
     node: Option<String>,
+    desired: DesiredState,
     state: String,
     health: String,
     started_at: Option<String>,
@@ -43,10 +45,30 @@ struct Row {
 }
 
 impl Row {
+    /// Worth showing: either the desired state doesn't match what's actually
+    /// running (a stopped stack is always shown too, alongside real
+    /// mismatches like a crash or a stuck placement), or something else is
+    /// wrong (bad health, a failed migration, an unreachable node).
     fn unhealthy(&self) -> bool {
         self.reason.is_some()
             || self.health == "unhealthy"
-            || matches!(self.state.as_str(), "exited" | "restarting" | "unknown" | "pending_placement")
+            || self.desired == DesiredState::Stopped
+            || matches!(self.state.as_str(), "restarting" | "unknown" | "pending_placement")
+            || (self.desired == DesiredState::Running && self.state == "exited")
+    }
+}
+
+/// Explains a row's state relative to its desired state, so `--placement`
+/// can tell a deliberate `stack stop` apart from a crash - both report
+/// state=exited, but only one is a problem.
+fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
+    match (desired, state) {
+        (DesiredState::Stopped, "exited") => Some("stopped (stack stop)".to_string()),
+        (DesiredState::Stopped, other) => {
+            Some(format!("desired state is stopped, but the container is still {other}"))
+        }
+        (DesiredState::Running, "exited") => Some("exited but desired state is running".to_string()),
+        _ => None,
     }
 }
 
@@ -166,6 +188,7 @@ async fn row_for_assignment(
                 Row {
                     instance,
                     node: Some(node),
+                    desired: assignment.desired,
                     state: "migration_failed".to_string(),
                     health: "none".to_string(),
                     started_at: None,
@@ -181,6 +204,7 @@ async fn row_for_assignment(
             Row {
                 instance,
                 node: Some(node),
+                desired: assignment.desired,
                 state: "unknown".to_string(),
                 health: "none".to_string(),
                 started_at: None,
@@ -190,22 +214,27 @@ async fn row_for_assignment(
     }
 
     match fetch_summary(cfg, http, key, &node, &assignment.instance).await {
-        Ok(summary) => (
-            stack,
-            Row {
-                instance,
-                node: Some(node),
-                state: summary.state,
-                health: summary.health,
-                started_at: summary.started_at,
-                reason: None,
-            },
-        ),
+        Ok(summary) => {
+            let reason = describe_state(assignment.desired, &summary.state);
+            (
+                stack,
+                Row {
+                    instance,
+                    node: Some(node),
+                    desired: assignment.desired,
+                    state: summary.state,
+                    health: summary.health,
+                    started_at: summary.started_at,
+                    reason,
+                },
+            )
+        }
         Err(e) => (
             stack,
             Row {
                 instance,
                 node: Some(node),
+                desired: assignment.desired,
                 state: "unknown".to_string(),
                 health: "none".to_string(),
                 started_at: None,
@@ -271,6 +300,7 @@ fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)>
             Row {
                 instance: u.instance.to_string(),
                 node: None,
+                desired: DesiredState::Running,
                 state: "pending_placement".to_string(),
                 health: "none".to_string(),
                 started_at: None,
@@ -285,6 +315,7 @@ fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)>
             Row {
                 instance: instance.to_string(),
                 node: Some(node.clone()),
+                desired: DesiredState::Running,
                 state: "pending_placement".to_string(),
                 health: "none".to_string(),
                 started_at: None,

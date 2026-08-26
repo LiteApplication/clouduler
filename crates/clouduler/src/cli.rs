@@ -494,10 +494,11 @@ pub enum StackCommand {
         #[arg(long)]
         via: Option<String>,
     },
-    /// At a glance: every stack that currently has a container worth looking
-    /// at - crashed, restart-looping, failing its healthcheck, stuck
-    /// migrating, on an unreachable node, or wanted but unable to land
-    /// anywhere.
+    /// At a glance: every stack instance whose actual state doesn't match
+    /// what's desired - crashed, restart-looping, failing its healthcheck,
+    /// stuck migrating, on an unreachable node, wanted but unable to land
+    /// anywhere, or stopped (shown with --placement so a deliberate `stack
+    /// stop` isn't mistaken for a crash).
     ///
     /// Bare output is deliberately terse (instance, state, health); the
     /// flags below add detail per instance.
