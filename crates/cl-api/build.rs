@@ -2,11 +2,13 @@
 //! build when it exists; otherwise points at a placeholder under OUT_DIR so
 //! the crate still compiles with no ui build available.
 //!
-//! If `npm` is on PATH, runs `npm run build` in `ui/` to (re)produce
-//! `ui/dist` before embedding it. This is gated on npm's availability rather
-//! than unconditional: CI's rust job and the aarch64 cross-build recipe run
-//! `cargo build` on hosts with no Node toolchain, and must keep working off
-//! a `ui/dist` built separately (or fall back to the placeholder).
+//! If `ui/node_modules` already exists, runs `npm run build` in `ui/` to
+//! (re)produce `ui/dist` before embedding it. This is gated on
+//! `node_modules` rather than just npm's presence: GitHub-hosted runners
+//! (and the dev machine) always have npm on PATH, but CI's rust/examples
+//! jobs and the aarch64 cross-build recipe never run `npm ci` in `ui/`, and
+//! must keep working off a `ui/dist` built separately (or fall back to the
+//! placeholder) instead of failing on missing devDependencies.
 
 use std::path::Path;
 use std::process::Command;
@@ -21,7 +23,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", ui_dir.join("src").display());
     println!("cargo:rerun-if-changed={}", ui_dir.join("package.json").display());
 
-    if which_npm_on_path() {
+    if ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
         let status = Command::new("npm")
             .args(["--prefix", ui_dir.to_str().expect("utf8 path"), "run", "build"])
             .status()
