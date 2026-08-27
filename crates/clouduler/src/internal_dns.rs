@@ -11,7 +11,7 @@
 //! listening there, and port 53 on the node's own addresses stays free for
 //! whatever the operator runs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,13 +122,35 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
 }
 
 /// The zone as it should be right now: every running container by service
-/// name, plus every node by its own name.
+/// name, every node by its own name, plus every proxy hostname routed on
+/// this same network (e.g. `mail` for stalwart's `mail.home.liteapp.fr`
+/// route) so a container can reach another service the same way an outside
+/// client does, not just by its internal `<service>.<stack>` name. Proxy
+/// hosts routed on a *different* network are left out: their domain isn't
+/// this zone's origin, so they belong to whatever resolves that zone
+/// upstream, not to us.
 fn zone_for(state: &ClusterState, cfg: &ClusterConfig, nodes: &[(String, Ipv4Addr)]) -> Vec<ZoneRecord> {
     let instances = crate::placement::instance_addresses(state, cfg);
-    build_records(
+    let mut records = build_records(
         instances.iter().map(|(id, ip)| (id, *ip)),
         nodes.iter().map(|(name, ip)| (name.as_str(), *ip)),
-    )
+    );
+
+    let node_ips: BTreeMap<&str, Ipv4Addr> = nodes.iter().map(|(name, ip)| (name.as_str(), *ip)).collect();
+    let (internal_name, _) = cfg.internal_network();
+    for ((host, network), node_names) in crate::proxy::desired_dns_hosts(cfg, state) {
+        if network != *internal_name {
+            continue;
+        }
+        let mut addresses: Vec<Ipv4Addr> = node_names.iter().filter_map(|n| node_ips.get(n.as_str()).copied()).collect();
+        addresses.sort();
+        addresses.dedup();
+        if !addresses.is_empty() {
+            records.push(ZoneRecord { name: host, addresses });
+        }
+    }
+    records.sort_by(|a, b| a.name.cmp(&b.name));
+    records
 }
 
 /// Gateway address of every overlay network that has a subnet. Bound
@@ -146,6 +168,47 @@ mod tests {
     use super::*;
     use crate::placement::fixtures::{cluster_config, state_with, SPEC};
     use cl_net::dns::answer;
+
+    /// A proxy `host:` alias routed on the same network as the internal zone
+    /// (SPEC's `blog` route is on `wan`, a different network, so it must stay
+    /// absent) is not what a container asking for it by its public name
+    /// should get: without this, only `<service>.<stack>` names resolve
+    /// inside a container, and a health check hitting another service by the
+    /// hostname it's actually published under (same as an outside client
+    /// would use) gets NXDOMAIN.
+    #[test]
+    fn a_proxy_host_on_the_internal_network_resolves() {
+        let spec = "\
+networks:
+  default: {}
+services:
+  web:
+    image: nginx
+    networks: [default]
+    x-clouduler:
+      proxy:
+        - host: blog
+          network: default
+          port: 80
+";
+        let state = state_with(spec, 1);
+        let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
+        let records = zone_for(&state, &cluster_config(), &nodes);
+
+        assert_eq!(answer(&records, "blog"), Some(&[Ipv4Addr::new(10, 10, 0, 1)][..]));
+    }
+
+    /// SPEC's own route is on `wan`, not the internal `default` network, so
+    /// it must not leak into this zone: `wan` has its own domain, resolved
+    /// by whatever answers for it, not by us.
+    #[test]
+    fn a_proxy_host_on_a_different_network_is_absent() {
+        let state = state_with(SPEC, 1);
+        let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
+        let records = zone_for(&state, &cluster_config(), &nodes);
+
+        assert_eq!(answer(&records, "blog"), None);
+    }
 
     #[test]
     fn a_service_resolves_to_every_replica() {

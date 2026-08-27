@@ -30,6 +30,25 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// `FETCH_TIMEOUT`.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// A peer answering 503 means "not there right now, and may be later" (see
+/// `ApiError::Unavailable`) — the exact shape of a node whose docker client
+/// is mid-reconnect, or that is still fencing right after a raft rejoin.
+/// Both of those clear up within a few seconds in the common case, so it is
+/// worth a few retries before giving up and surfacing it to the caller.
+const RETRY_ATTEMPTS: u32 = 5;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+
+/// Retry `attempt` (0-based) after a short exponential backoff, but only when
+/// the peer's answer was specifically 503 — any other non-success status is a
+/// real failure (auth, not found, ...) that retrying will not fix.
+async fn retry_on_unavailable(attempt: u32, status: reqwest::StatusCode) -> bool {
+    if attempt + 1 >= RETRY_ATTEMPTS || status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return false;
+    }
+    tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt)).await;
+    true
+}
+
 async fn peer_base_url(state: &AppState, node: &str) -> Result<String, ApiError> {
     let cfg = state.cluster_config.read().await;
     cl_update::peers::base_url(&cfg, node)
@@ -48,20 +67,28 @@ async fn signature(state: &AppState, path: &str) -> Result<String, ApiError> {
 pub async fn fetch_json<T: DeserializeOwned>(state: &AppState, node: &str, path: &str) -> Result<T, ApiError> {
     let base = peer_base_url(state, node).await?;
     let signature = signature(state, path).await?;
-    let resp = state
-        .http
-        .get(format!("{base}{path}"))
-        .header(cl_update::internal_client::AUTH_HEADER, signature)
-        .timeout(FETCH_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(ApiError::Unavailable(format!("{node} answered {}", resp.status())));
+    for attempt in 0.. {
+        let resp = state
+            .http
+            .get(format!("{base}{path}"))
+            .header(cl_update::internal_client::AUTH_HEADER, signature.clone())
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            if retry_on_unavailable(attempt, status).await {
+                continue;
+            }
+            return Err(ApiError::Unavailable(format!("{node} answered {status}")));
+        }
+        return resp
+            .json::<T>()
+            .await
+            .map_err(|e| ApiError::Internal(format!("decoding {node}'s response: {e}")));
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| ApiError::Internal(format!("decoding {node}'s response: {e}")))
+    unreachable!("retry_on_unavailable eventually returns false")
 }
 
 /// `POST path` (no body) on `node`'s api, for write commands — restart,
@@ -72,18 +99,25 @@ pub async fn fetch_json<T: DeserializeOwned>(state: &AppState, node: &str, path:
 pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), ApiError> {
     let base = peer_base_url(state, node).await?;
     let signature = signature(state, path).await?;
-    let resp = state
-        .http
-        .post(format!("{base}{path}"))
-        .header(cl_update::internal_client::AUTH_HEADER, signature)
-        .timeout(WRITE_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(ApiError::Unavailable(format!("{node} answered {}", resp.status())));
+    for attempt in 0.. {
+        let resp = state
+            .http
+            .post(format!("{base}{path}"))
+            .header(cl_update::internal_client::AUTH_HEADER, signature.clone())
+            .timeout(WRITE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            if retry_on_unavailable(attempt, status).await {
+                continue;
+            }
+            return Err(ApiError::Unavailable(format!("{node} answered {status}")));
+        }
+        return Ok(());
     }
-    Ok(())
+    unreachable!("retry_on_unavailable eventually returns false")
 }
 
 /// `GET path` on `node`'s api, proxied straight through as the response body.

@@ -8,6 +8,7 @@
 //! listeners.
 
 mod acme;
+mod auth_gate;
 mod certs;
 mod error;
 mod forward_auth;
@@ -16,6 +17,7 @@ mod middleware;
 mod route;
 mod server;
 
+pub use auth_gate::AuthGate;
 pub use acme::{
     issue_certificate, load_or_create_account, needs_renewal, renewal_tick, run_renewal_loop,
     AcmeConfig, IssuedCertificate, ZoneResolver, DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,

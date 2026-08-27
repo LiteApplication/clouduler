@@ -39,6 +39,11 @@ pub enum Middleware {
     Cors(CorsPolicy),
     ForwardAuth(ForwardAuth),
     RedirectRegex(RedirectRegex),
+    /// Requires a session established through clouduler's own OIDC login
+    /// before a request reaches the backend. Needs no settings here: the
+    /// identity provider is the cluster-wide `auth.oidc` config already used
+    /// for the web ui, not something declared per route.
+    Authenticated,
 }
 
 /// Wire form. serde_yaml renders an externally tagged enum as a yaml tag
@@ -59,6 +64,7 @@ impl TryFrom<RawMiddleware> for Middleware {
             RawMiddleware::Bare(name) => match name.as_str() {
                 "redirect_https" => Ok(Middleware::RedirectHttps),
                 "strip_prefix" => Ok(Middleware::StripPrefix),
+                "authenticated" => Ok(Middleware::Authenticated),
                 // Naming one that needs settings without giving any is a
                 // mistake worth reporting rather than defaulting.
                 "basic_auth" | "headers" | "cors" | "forward_auth" | "redirect_regex" => {
@@ -119,7 +125,7 @@ impl From<Middleware> for RawMiddleware {
     fn from(mw: Middleware) -> Self {
         let name = mw.name().to_string();
         match mw {
-            Middleware::RedirectHttps | Middleware::StripPrefix => RawMiddleware::Bare(name),
+            Middleware::RedirectHttps | Middleware::StripPrefix | Middleware::Authenticated => RawMiddleware::Bare(name),
             Middleware::BasicAuth(auth) => RawMiddleware::Configured(BTreeMap::from([(
                 name,
                 serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
@@ -155,6 +161,7 @@ impl Middleware {
             Middleware::Cors(_) => "cors",
             Middleware::ForwardAuth(_) => "forward_auth",
             Middleware::RedirectRegex(_) => "redirect_regex",
+            Middleware::Authenticated => "authenticated",
         }
     }
 }
@@ -648,6 +655,15 @@ proxy:
         )
         .unwrap_err();
         assert!(err.to_string().contains("needs settings"), "{err}");
+    }
+
+    #[test]
+    fn authenticated_is_a_bare_middleware() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares: [authenticated]\n",
+        )
+        .expect("parse");
+        assert_eq!(ext.proxy[0].middlewares, vec![Middleware::Authenticated]);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::LazyConfigAcceptor;
 use tracing::{debug, warn};
 
+use crate::auth_gate::{AuthGate, GateOutcome};
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
 use crate::error::Result;
 use crate::forward_auth;
@@ -34,16 +35,26 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// uses, so both listeners and the backend client agree on one shape.
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
-fn empty_body() -> ProxyBody {
+pub(crate) fn empty_body() -> ProxyBody {
     Empty::<Bytes>::new().map_err(|never| match never {}).boxed()
 }
 
-fn text_body(s: impl Into<Bytes>) -> ProxyBody {
+pub(crate) fn text_body(s: impl Into<Bytes>) -> ProxyBody {
     Full::new(s.into()).map_err(|never| match never {}).boxed()
 }
 
 fn incoming_to_proxy_body(b: Incoming) -> ProxyBody {
     b.map_err(|e| Box::new(e) as BoxError).boxed()
+}
+
+/// The outbound clients and gate a request may need once a route is found,
+/// bundled together so passing them down to a connection handler is one
+/// argument instead of three.
+#[derive(Clone)]
+struct Backends {
+    client: Client<HttpConnector, ProxyBody>,
+    forward_auth_client: reqwest::Client,
+    auth_gate: Option<Arc<AuthGate>>,
 }
 
 /// Runs the plain HTTP and TLS listeners for one routing table and cert store.
@@ -55,6 +66,9 @@ pub struct ProxyServer {
     /// speak TLS, unlike backends, which are always plain HTTP over the
     /// overlay and reachable through the internal `HttpConnector`.
     forward_auth_client: reqwest::Client,
+    /// `None` when nothing needs it yet: only built once a route actually
+    /// carries the `authenticated` middleware.
+    auth_gate: Option<Arc<AuthGate>>,
 }
 
 /// How long a backend gets to accept a TCP connection before it's treated as
@@ -86,6 +100,10 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ProxyServer {
     pub fn new(routes: Arc<RouteTable>, certs: Arc<CertStore>) -> Self {
+        Self::with_auth_gate(routes, certs, None)
+    }
+
+    pub fn with_auth_gate(routes: Arc<RouteTable>, certs: Arc<CertStore>, auth_gate: Option<Arc<AuthGate>>) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_connect_timeout(Some(BACKEND_CONNECT_TIMEOUT));
         let client = Client::builder(TokioExecutor::new())
@@ -97,6 +115,7 @@ impl ProxyServer {
             certs,
             client,
             forward_auth_client: reqwest::Client::new(),
+            auth_gate,
         }
     }
 
@@ -108,13 +127,14 @@ impl ProxyServer {
         loop {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
-            let client = self.client.clone();
-            let forward_auth_client = self.forward_auth_client.clone();
+            let backends = Backends {
+                client: self.client.clone(),
+                forward_auth_client: self.forward_auth_client.clone(),
+                auth_gate: self.auth_gate.clone(),
+            };
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
-                let svc = service_fn(move |req| {
-                    handle_http(req, routes.clone(), client.clone(), forward_auth_client.clone(), peer)
-                });
+                let svc = service_fn(move |req| handle_http(req, routes.clone(), backends.clone(), peer));
                 if let Err(e) = http1::Builder::new().serve_connection(io, svc).with_upgrades().await {
                     debug!(error = %e, "http connection closed");
                 }
@@ -141,12 +161,15 @@ impl ProxyServer {
         loop {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
-            let client = self.client.clone();
-            let forward_auth_client = self.forward_auth_client.clone();
+            let backends = Backends {
+                client: self.client.clone(),
+                forward_auth_client: self.forward_auth_client.clone(),
+                auth_gate: self.auth_gate.clone(),
+            };
             let certs = self.certs.clone();
             let config = config.clone();
             tokio::spawn(async move {
-                if let Err(e) = accept_tls(stream, peer, config, certs, routes, client, forward_auth_client).await {
+                if let Err(e) = accept_tls(stream, peer, config, certs, routes, backends).await {
                     debug!(error = %e, "https connection closed");
                 }
             });
@@ -160,8 +183,7 @@ async fn accept_tls(
     config: Arc<ServerConfig>,
     certs: Arc<CertStore>,
     routes: Arc<RouteTable>,
-    client: Client<HttpConnector, ProxyBody>,
-    forward_auth_client: reqwest::Client,
+    backends: Backends,
 ) -> Result<()> {
     let acceptor = LazyConfigAcceptor::new(Acceptor::default(), stream);
     let start = match acceptor.await {
@@ -181,9 +203,7 @@ async fn accept_tls(
 
     let tls_stream = start.into_stream(config).await?;
     let io = TokioIo::new(tls_stream);
-    let svc = service_fn(move |req| {
-        handle_https(req, routes.clone(), client.clone(), forward_auth_client.clone(), peer)
-    });
+    let svc = service_fn(move |req| handle_https(req, routes.clone(), backends.clone(), peer));
     if let Err(e) = http1::Builder::new().serve_connection(io, svc).with_upgrades().await {
         debug!(error = %e, "https connection error");
     }
@@ -307,8 +327,7 @@ fn respond_redirect_regex(route: &Route, scheme: &str, host: &str, path_and_quer
 async fn handle_http(
     req: Request<Incoming>,
     routes: Arc<RouteTable>,
-    client: Client<HttpConnector, ProxyBody>,
-    forward_auth_client: reqwest::Client,
+    backends: Backends,
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     let host = req
@@ -344,14 +363,13 @@ async fn handle_http(
         return Ok(resp);
     }
 
-    Ok(proxy(req, &route, "http", peer, &client, &forward_auth_client).await)
+    Ok(proxy(req, &route, "http", peer, &backends).await)
 }
 
 async fn handle_https(
     req: Request<Incoming>,
     routes: Arc<RouteTable>,
-    client: Client<HttpConnector, ProxyBody>,
-    forward_auth_client: reqwest::Client,
+    backends: Backends,
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     let host = req
@@ -380,7 +398,7 @@ async fn handle_https(
         return Ok(resp);
     }
 
-    Ok(proxy(req, &route, "https", peer, &client, &forward_auth_client).await)
+    Ok(proxy(req, &route, "https", peer, &backends).await)
 }
 
 /// Applies `strip_prefix` and `basic_auth` in that order, ahead of `headers`.
@@ -423,6 +441,11 @@ fn forward_auth_config(route: &Route) -> Option<&cl_config::ForwardAuth> {
     })
 }
 
+/// Whether the route carries the `authenticated` middleware.
+fn is_authenticated_route(route: &Route) -> bool {
+    route.middlewares.contains(&cl_config::Middleware::Authenticated)
+}
+
 /// Turns a `forward_auth::Outcome::Deny` into the response sent to the
 /// client, relaying the auth endpoint's own status/headers/body verbatim.
 fn deny_response(status: StatusCode, headers: hyper::HeaderMap, body: Bytes) -> Response<ProxyBody> {
@@ -435,18 +458,24 @@ fn deny_response(status: StatusCode, headers: hyper::HeaderMap, body: Bytes) -> 
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
-async fn proxy(
-    mut req: Request<Incoming>,
-    route: &Route,
-    scheme: &str,
-    peer: SocketAddr,
-    client: &Client<HttpConnector, ProxyBody>,
-    forward_auth_client: &reqwest::Client,
-) -> Response<ProxyBody> {
+async fn proxy(mut req: Request<Incoming>, route: &Route, scheme: &str, peer: SocketAddr, backends: &Backends) -> Response<ProxyBody> {
     apply_route_middlewares(route, &mut req);
 
+    if is_authenticated_route(route) {
+        let Some(gate) = &backends.auth_gate else {
+            return status_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this route requires login, but the proxy has no auth gate configured",
+            );
+        };
+        match gate.evaluate(&req, scheme).await {
+            GateOutcome::Allow => {}
+            GateOutcome::Respond(resp) => return resp,
+        }
+    }
+
     if let Some(cfg) = forward_auth_config(route) {
-        match forward_auth::check(forward_auth_client, cfg, req.method(), req.uri(), req.headers()).await {
+        match forward_auth::check(&backends.forward_auth_client, cfg, req.method(), req.uri(), req.headers()).await {
             forward_auth::Outcome::Deny(status, headers, body) => return deny_response(status, headers, body),
             forward_auth::Outcome::Allow(allowed) => {
                 for (name, value) in allowed {
@@ -531,7 +560,7 @@ async fn proxy(
 
     let outbound = Request::from_parts(parts, limited_body(body, options.max_body_size));
 
-    let sent = client.request(outbound);
+    let sent = backends.client.request(outbound);
     let limit = options.response_timeout.unwrap_or(DEFAULT_RESPONSE_TIMEOUT);
     let result = match tokio::time::timeout(limit, sent).await {
         Ok(result) => result,

@@ -8,6 +8,7 @@ license.workspace = true
 cl-config.workspace = true
 cl-dns.workspace = true
 cl-raft.workspace = true
+cl-secret.workspace = true
 
 futures.workspace = true
 http-body-util.workspace = true
@@ -30,6 +31,7 @@ base64 = "0.22"
 bytes = "1"
 http = "1"
 ipnet.workspace = true
+openidconnect = "4"
 serde_json = "1"
 x509-parser = "0.18"
 

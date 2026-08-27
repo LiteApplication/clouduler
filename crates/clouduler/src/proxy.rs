@@ -113,11 +113,12 @@ pub fn start(
     let health = cl_proxy::HealthTable::default();
     let task_health = health.clone();
 
+    let mut config_rx = config_rx;
     let supervisor = tokio::spawn(async move {
         let health = task_health;
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
-        let mut listen = build_listen(&desired, &cluster, &config_rx, &health);
+        let mut listen = build_listen(&desired, &cluster, &config_rx, &key_rx, &health);
         let mut acme = build_acme(&desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx);
         let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
 
@@ -125,8 +126,8 @@ pub fn start(
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
-                changed = config_rx_changed(&config_rx) => {
-                    if !changed {
+                changed = config_rx.changed() => {
+                    if changed.is_err() {
                         continue;
                     }
                 }
@@ -151,7 +152,7 @@ pub fn start(
                 if let Some(group) = listen.take() {
                     group.teardown();
                 }
-                listen = build_listen(&live, &cluster, &config_rx, &health);
+                listen = build_listen(&live, &cluster, &config_rx, &key_rx, &health);
             }
             if live.acme != desired.acme {
                 if let Some(group) = acme.take() {
@@ -172,27 +173,21 @@ pub fn start(
     Proxy { supervisor, shutdown_tx, health }
 }
 
-/// Awaits the next change on `config_rx`. Takes a fresh clone each call since
-/// `changed()` needs `&mut self` and this only ever has a shared reference —
-/// cheap, a `Receiver` is just a pointer and a generation counter.
-async fn config_rx_changed(config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>) -> bool {
-    let mut rx = config_rx.clone();
-    rx.changed().await.is_ok()
-}
-
 /// The two listeners plus the routing table/certificate reconcile loop.
 /// `None` when the proxy is disabled.
 fn build_listen(
     desired: &Desired,
     cluster: &Arc<ClusterNode>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     health: &cl_proxy::HealthTable,
 ) -> Option<Group> {
     let (http_port, https_port) = desired.listen?;
 
     let routes = Arc::new(RouteTable::default());
     let certs = Arc::new(CertStore::new());
-    let server = Arc::new(cl_proxy::ProxyServer::new(routes.clone(), certs.clone()));
+    let auth_gate = Arc::new(cl_proxy::AuthGate::new(config_rx.clone(), key_rx.clone(), cluster.clone()));
+    let server = Arc::new(cl_proxy::ProxyServer::with_auth_gate(routes.clone(), certs.clone(), Some(auth_gate)));
     let mut tasks = Vec::new();
 
     for (port, tls) in [(http_port, false), (https_port, true)] {
@@ -774,7 +769,7 @@ async fn run_dns_reconcile(
 /// every node's address for it lets a client's write land on a follower,
 /// which can only 503 and point elsewhere. `desired_records` gives that
 /// hostname the leader's address alone.
-fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(String, String), BTreeSet<String>> {
+pub(crate) fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(String, String), BTreeSet<String>> {
     let mut hosts: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let all_nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
     let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;

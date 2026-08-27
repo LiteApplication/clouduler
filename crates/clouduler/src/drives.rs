@@ -166,6 +166,7 @@ pub fn start(
 
     let supervisor = {
         let registry = registry.clone();
+        let mut config_rx = config_rx;
         tokio::spawn(async move {
             let mut cfg = boot_cfg;
             let mut topology = topology_of(&cfg, &node_name);
@@ -181,8 +182,8 @@ pub fn start(
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {}
-                    changed = config_rx_changed(&config_rx) => {
-                        if !changed {
+                    changed = config_rx.changed() => {
+                        if changed.is_err() {
                             continue;
                         }
                     }
@@ -215,15 +216,6 @@ pub fn start(
     };
 
     Drives { supervisor, shutdown_tx, registry }
-}
-
-/// Awaits the next change on `config_rx`, cloning first so the borrow does
-/// not outlive the await point (`watch::Receiver::changed` needs `&mut self`,
-/// which a shared reference can't give it, so this takes a fresh clone each
-/// call — cheap, a `Receiver` is just a pointer and a generation counter).
-async fn config_rx_changed(config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>) -> bool {
-    let mut rx = config_rx.clone();
-    rx.changed().await.is_ok()
 }
 
 /// Build every task and mount this node's current drive topology calls for,
