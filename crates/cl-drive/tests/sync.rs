@@ -58,8 +58,13 @@ fn dst_volume(dst: &tempfile::TempDir) -> PathBuf {
     dst.path().join(VOLUME)
 }
 
-/// Compares content, not metadata: sync does not (and should not) preserve
-/// the source's mtime, only its data, mode and symlink target.
+/// Compares content and metadata, mtime included for regular files: the
+/// sender's mtime has to survive the trip, or the next `scan`+`diff` on
+/// either side sees a fresh "now" timestamp that never matches the source's
+/// and re-syncs the file forever (see `a_synced_file_is_not_re_diffed_as_changed`
+/// below). Symlinks are exempt: `FileMeta::differs_from` never compares their
+/// mtime (only `is_symlink`/`link_target`), so `write_whole` doesn't restamp
+/// one either.
 fn tree_equal(a: &Path, b: &Path) -> bool {
     let ma = cl_drive::scan_volume(a, true).expect("scan a");
     let mb = cl_drive::scan_volume(b, true).expect("scan b");
@@ -72,6 +77,7 @@ fn tree_equal(a: &Path, b: &Path) -> bool {
                 && meta.link_target == other.link_target
                 && meta.mode == other.mode
                 && meta.hash == other.hash
+                && (meta.is_symlink || meta.mtime_nanos == other.mtime_nanos)
         })
     })
 }
@@ -95,6 +101,42 @@ async fn syncs_a_directory_tree_byte_for_byte() {
 
     let link_meta = std::fs::symlink_metadata(dst_volume(&dst).join("link")).unwrap();
     assert!(link_meta.file_type().is_symlink());
+}
+
+/// A file that already made it across must not be re-diffed as "changed" on
+/// the very next pass. Before the receiver preserved the sender's mtime, the
+/// write itself stamped a fresh "now" mtime that could never again match the
+/// source's — so a re-scan on both sides always disagreed, and every synced
+/// file was resent on every single pass forever, regardless of whether its
+/// content had actually changed. This is what made a large volume (e.g. a
+/// Nextcloud preview cache with hundreds of thousands of files) never settle:
+/// each pass took longer than the sync interval, so the scheduler restarted
+/// it back-to-back, pinning the daemon's CPU indefinitely.
+#[tokio::test]
+async fn a_synced_file_is_not_re_diffed_as_changed() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    std::fs::write(src.path().join("a.txt"), b"hello world").unwrap();
+
+    let (addr, _registry, _rx) = spawn_receiver(dst.path());
+    let engine = DeltaEngine::default();
+    let first = engine.sync(src.path(), addr, &volume_id(), 1).await.expect("first sync");
+    assert_eq!(first.files_added, 1);
+
+    // Nothing on either side changed between passes; a second sync must ship
+    // nothing at all.
+    let second = engine.sync(src.path(), addr, &volume_id(), 2).await.expect("second sync");
+    assert_eq!(second.files_added, 0);
+    assert_eq!(second.files_changed, 0);
+    assert_eq!(second.files_removed, 0);
+
+    // The actual invariant: scanning both sides independently agrees they
+    // hold the same file, mtime included, so `Manifest::diff` between them
+    // is empty.
+    let src_manifest = cl_drive::scan_volume(src.path(), false).expect("scan src");
+    let dst_manifest = cl_drive::scan_volume(&dst_volume(&dst), false).expect("scan dst");
+    assert_eq!(src_manifest.diff(&dst_manifest), cl_drive::Diff::default());
 }
 
 #[tokio::test]
@@ -201,6 +243,7 @@ async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
         &cl_drive::Message::WholeFile {
             path: "committed.bin".into(),
             mode: 0o644,
+            mtime_nanos: 0,
             is_symlink: false,
             link_target: None,
             data: payload.clone(),

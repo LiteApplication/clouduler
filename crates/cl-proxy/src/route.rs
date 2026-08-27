@@ -221,6 +221,19 @@ impl RouteTable {
         self.snapshot.store(Arc::new(build(routes)));
     }
 
+    /// Every route currently published, exact and wildcard alike. Used by the
+    /// health prober, which has to walk the whole table rather than look up
+    /// one request's route.
+    pub fn all(&self) -> Vec<Arc<Route>> {
+        let snap = self.snapshot.load();
+        snap.exact
+            .values()
+            .chain(snap.wildcard.values())
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
     /// Find the best matching route for a host and path.
     pub fn lookup(&self, host: &str, path: &str) -> Option<Arc<Route>> {
         let snap = self.snapshot.load();

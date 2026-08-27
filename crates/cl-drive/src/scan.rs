@@ -97,6 +97,13 @@ fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
     meta.mtime() * 1_000_000_000 + meta.mtime_nsec()
 }
 
+/// Converts a `FileMeta`-style nanosecond timestamp to a `filetime::FileTime`,
+/// shared by every writer (`transport`, `served::server`) that needs to stamp
+/// a file with a timestamp carried over the wire rather than "now".
+pub fn nanos_to_filetime(nanos: i64) -> filetime::FileTime {
+    filetime::FileTime::from_unix_time(nanos / 1_000_000_000, (nanos % 1_000_000_000) as u32)
+}
+
 /// Walk `root` into a manifest. Symlinks are recorded, not followed. When
 /// `hash_content` is set every regular file is read and blake3 hashed, which
 /// is only worth paying for during verification or rename detection.

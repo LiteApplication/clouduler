@@ -156,6 +156,7 @@ async fn harness() -> Harness {
             .build()
             .expect("building the test http client"),
         tls_fingerprint: "test:fingerprint".to_string(),
+        proxy_health: cl_proxy::HealthTable::default(),
     };
 
     let router = build_router(state.clone());

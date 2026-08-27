@@ -73,6 +73,13 @@ fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
 /// the rest of this daemon's reconcile loops.
 const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long a drive transport or served-drive listener waits before binding
+/// again after its listener stopped. At boot, this node's own overlay
+/// interface can still be coming up when the drive subsystem starts, so a
+/// bind can fail transiently; without a retry that listener is gone for good
+/// until the next topology change or daemon restart.
+const BIND_RETRY: Duration = Duration::from_secs(10);
+
 pub struct Drives {
     supervisor: JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -266,8 +273,11 @@ async fn build(
             let serving = registry.clone();
             info!(%addr, drives = local_copy.len(), "drive transport listening");
             running.tasks.push(tokio::spawn(async move {
-                if let Err(e) = transport::serve(addr, serving).await {
-                    warn!(error = %e, "drive transport stopped");
+                loop {
+                    if let Err(e) = transport::serve(addr, serving.clone()).await {
+                        warn!(error = %e, "drive transport stopped, retrying");
+                    }
+                    tokio::time::sleep(BIND_RETRY).await;
                 }
             }));
 
@@ -299,8 +309,11 @@ fn start_serving(cfg: &ClusterConfig, node: &Node, node_name: &str, running: &mu
         info!(drive = %name, %addr, path = %root.display(), "serving drive");
         let drive_name = name.clone();
         running.tasks.push(tokio::spawn(async move {
-            if let Err(e) = served::serve(addr, root).await {
-                warn!(drive = %drive_name, error = %e, "served drive server stopped");
+            loop {
+                if let Err(e) = served::serve(addr, root.clone()).await {
+                    warn!(drive = %drive_name, error = %e, "served drive server stopped, retrying");
+                }
+                tokio::time::sleep(BIND_RETRY).await;
             }
         }));
     }

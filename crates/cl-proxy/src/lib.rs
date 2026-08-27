@@ -11,6 +11,7 @@ mod acme;
 mod certs;
 mod error;
 mod forward_auth;
+mod health;
 mod middleware;
 mod route;
 mod server;
@@ -22,6 +23,7 @@ pub use acme::{
 };
 pub use certs::{ensure_crypto_provider, parse_certified_key, CertResolver, CertStore};
 pub use error::{ProxyError, Result};
+pub use health::{run as run_health_checks, BackendHealth, HealthTable, CHECK_INTERVAL as HEALTH_CHECK_INTERVAL};
 pub use middleware::{
     apply_headers, basic_auth_challenge, check_basic_auth, cors_origin_allowed,
     cors_response_headers, is_cors_preflight, is_upgrade, redirect_https, strip_hop_by_hop,

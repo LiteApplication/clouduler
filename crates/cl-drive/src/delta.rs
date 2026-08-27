@@ -226,6 +226,7 @@ impl DeltaEngine {
                 &Message::WholeFile {
                     path: path.to_string(),
                     mode: meta.mode,
+                    mtime_nanos: meta.mtime_nanos,
                     is_symlink: true,
                     link_target: meta.link_target.clone(),
                     data: Vec::new(),
@@ -240,7 +241,14 @@ impl DeltaEngine {
             let data = std::fs::read(src.join(path)).map_err(|source| DriveError::Io { path: src.join(path), source })?;
             return transport::send(
                 conn,
-                &Message::WholeFile { path: path.to_string(), mode: meta.mode, is_symlink: false, link_target: None, data },
+                &Message::WholeFile {
+                    path: path.to_string(),
+                    mode: meta.mode,
+                    mtime_nanos: meta.mtime_nanos,
+                    is_symlink: false,
+                    link_target: None,
+                    data,
+                },
             )
             .await
             .map_err(transfer_err);
@@ -250,9 +258,12 @@ impl DeltaEngine {
         // `WholeFileEnd` sequence instead of one giant frame. See
         // `WHOLE_FILE_CHUNK`'s doc comment for why a single frame can't be
         // trusted to hold an entire file past a few tens of megabytes.
-        transport::send(conn, &Message::WholeFileBegin { path: path.to_string(), mode: meta.mode })
-            .await
-            .map_err(transfer_err)?;
+        transport::send(
+            conn,
+            &Message::WholeFileBegin { path: path.to_string(), mode: meta.mode, mtime_nanos: meta.mtime_nanos },
+        )
+        .await
+        .map_err(transfer_err)?;
         let full_path = src.join(path);
         let mut file = std::fs::File::open(&full_path).map_err(|source| DriveError::Io { path: full_path.clone(), source })?;
         let mut buf = vec![0u8; transport::WHOLE_FILE_CHUNK];
@@ -292,9 +303,12 @@ impl DeltaEngine {
             .map_err(|e| DriveError::Transfer { message: format!("diff for {path}: {e}") })?;
 
         stats.bytes_sent += delta.len() as u64;
-        transport::send(conn, &Message::Delta { path: path.to_string(), mode: meta.mode, data: delta })
-            .await
-            .map_err(transfer_err)
+        transport::send(
+            conn,
+            &Message::Delta { path: path.to_string(), mode: meta.mode, mtime_nanos: meta.mtime_nanos, data: delta },
+        )
+        .await
+        .map_err(transfer_err)
     }
 }
 

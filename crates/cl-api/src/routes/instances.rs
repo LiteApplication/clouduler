@@ -69,6 +69,24 @@ struct InstanceSummary {
     /// what its service needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     placement_error: Option<String>,
+    /// The reverse proxy's own most recent active health check of this
+    /// instance's service, when it publishes a route at all. `None` means
+    /// either nothing is published for it or no check has landed yet, not
+    /// that it's healthy — distinct from an empty `error` on a `Some`, which
+    /// does mean healthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy: Option<ProxyHealthSummary>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProxyHealthSummary {
+    host: String,
+    checked_at: String,
+    /// `None` when the last check reached the backend; `Some(reason)` in the
+    /// same shape the proxy's own "bad gateway" response would have shown a
+    /// real client, e.g. `"10.244.1.2:8080 unreachable: client error (SendRequest)"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -137,6 +155,7 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
     };
 
     let running = container.as_ref().map(|c| c.running);
+    let proxy = proxy_health_of(state, assignment);
     let instance_state = if !local {
         STATE_UNKNOWN
     } else {
@@ -168,7 +187,22 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
             phase: format!("{:?}", m.phase).to_lowercase(),
         }),
         placement_error: None,
+        proxy,
     }
+}
+
+/// This node's own reverse proxy's latest check of the service this instance
+/// belongs to, keyed `stack.service` since one route load balances every
+/// replica of a service rather than publishing one per instance. `None` when
+/// the service publishes no route, or no check has run for it yet.
+fn proxy_health_of(state: &AppState, assignment: &cl_raft::Assignment) -> Option<ProxyHealthSummary> {
+    let key = format!("{}.{}", assignment.instance.stack, assignment.instance.service);
+    let health = state.proxy_health.get(&key)?;
+    Some(ProxyHealthSummary {
+        host: health.host,
+        checked_at: humantime::format_rfc3339_seconds(health.checked_at).to_string(),
+        error: health.error,
+    })
 }
 
 /// Translate docker's own lifecycle status into the state string the ui
@@ -234,6 +268,7 @@ async fn pending_placements(state: &AppState, cluster_state: &cl_raft::ClusterSt
             started_at: None,
             migration: None,
             placement_error: Some(u.reason),
+            proxy: None,
         })
         .collect()
 }

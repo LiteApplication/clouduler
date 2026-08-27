@@ -51,6 +51,10 @@ const ISSUANCE_INTERVAL: Duration = Duration::from_secs(300);
 pub struct Proxy {
     supervisor: tokio::task::JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Latest active health check per route, shared with the api so
+    /// `/api/instances` and `clouduler stack unhealthy` can report a backend
+    /// the proxy can't reach without waiting for a real client to hit it.
+    pub health: cl_proxy::HealthTable,
 }
 
 impl Proxy {
@@ -106,11 +110,14 @@ pub fn start(
     let data_dir = data_dir.to_path_buf();
     let boot_cfg = cfg.clone();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let health = cl_proxy::HealthTable::default();
+    let task_health = health.clone();
 
     let supervisor = tokio::spawn(async move {
+        let health = task_health;
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
-        let mut listen = build_listen(&desired, &cluster, &config_rx);
+        let mut listen = build_listen(&desired, &cluster, &config_rx, &health);
         let mut acme = build_acme(&desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx);
         let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
 
@@ -144,7 +151,7 @@ pub fn start(
                 if let Some(group) = listen.take() {
                     group.teardown();
                 }
-                listen = build_listen(&live, &cluster, &config_rx);
+                listen = build_listen(&live, &cluster, &config_rx, &health);
             }
             if live.acme != desired.acme {
                 if let Some(group) = acme.take() {
@@ -162,7 +169,7 @@ pub fn start(
         }
     });
 
-    Proxy { supervisor, shutdown_tx }
+    Proxy { supervisor, shutdown_tx, health }
 }
 
 /// Awaits the next change on `config_rx`. Takes a fresh clone each call since
@@ -179,6 +186,7 @@ fn build_listen(
     desired: &Desired,
     cluster: &Arc<ClusterNode>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    health: &cl_proxy::HealthTable,
 ) -> Option<Group> {
     let (http_port, https_port) = desired.listen?;
 
@@ -204,7 +212,8 @@ fn build_listen(
         info!(%addr, tls, "proxy listening");
     }
 
-    tasks.push(tokio::spawn(reconcile_loop(config_rx.clone(), cluster.clone(), routes, certs)));
+    tasks.push(tokio::spawn(reconcile_loop(config_rx.clone(), cluster.clone(), routes.clone(), certs)));
+    tasks.push(tokio::spawn(cl_proxy::run_health_checks(routes, health.clone(), cl_proxy::HEALTH_CHECK_INTERVAL)));
 
     Some(Group { tasks })
 }

@@ -143,6 +143,22 @@ export function InstanceDetail() {
             {instance.health}
           </Badge>
         </div>
+        {instance.proxy && (
+          <div className="card stat">
+            <span className="stat-head">
+              <Icon name="network" />
+              <span className="stat-label">Proxy</span>
+            </span>
+            <Badge tone={instance.proxy.error ? 'bad' : 'good'}>
+              {instance.proxy.error ? 'unreachable' : 'ok'}
+            </Badge>
+            {instance.proxy.error && (
+              <span className="mono" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                {instance.proxy.error}
+              </span>
+            )}
+          </div>
+        )}
         <div className="card stat">
           <span className="stat-head">
             <Icon name="stacks" />

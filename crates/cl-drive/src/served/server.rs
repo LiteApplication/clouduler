@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
 
+use crate::scan::nanos_to_filetime;
+
 use crate::registry::resolve_in_root;
 use crate::served::protocol::{
     self, Attr, DirEntry, FileKind, Handle, ProtoError, Request, Response, StatfsInfo,
@@ -190,10 +192,6 @@ fn set_attr(root: &Path, rel: &str, mode: Option<u32>, mtime_nanos: Option<i64>,
         }
     }
     attr(root, rel)
-}
-
-fn nanos_to_filetime(nanos: i64) -> filetime::FileTime {
-    filetime::FileTime::from_unix_time(nanos / 1_000_000_000, (nanos % 1_000_000_000) as u32)
 }
 
 fn read_dir(root: &Path, rel: &str) -> Response {

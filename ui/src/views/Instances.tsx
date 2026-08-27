@@ -112,6 +112,7 @@ export function Instances() {
               <th>Node</th>
               <th>State</th>
               <th>Health</th>
+              <th>Proxy</th>
               <th>Image</th>
             </tr>
           </thead>
@@ -138,12 +139,21 @@ export function Instances() {
                     {i.health}
                   </Badge>
                 </td>
+                <td>
+                  {i.proxy ? (
+                    <Badge tone={i.proxy.error ? 'bad' : 'good'} title={i.proxy.error}>
+                      {i.proxy.error ? 'unreachable' : 'ok'}
+                    </Badge>
+                  ) : (
+                    '-'
+                  )}
+                </td>
                 <td className="mono">{i.image ?? '-'}</td>
               </tr>
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={5} className="empty-cell">
+                <td colSpan={6} className="empty-cell">
                   no instances match
                 </td>
               </tr>

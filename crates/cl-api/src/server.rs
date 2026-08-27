@@ -88,6 +88,10 @@ pub struct AppState {
     /// same bytes handed to the TLS listener, so it always matches what a
     /// joining node sees, self signed or issued.
     pub tls_fingerprint: String,
+    /// This node's own reverse proxy's latest active health check per route,
+    /// keyed `stack.service`. Read by `routes::instances` to report a backend
+    /// the proxy can't reach without waiting for a real client to hit it.
+    pub proxy_health: cl_proxy::HealthTable,
 }
 
 impl AppState {
@@ -129,6 +133,7 @@ pub struct ApiServerOptions {
     /// This node's own asymmetric keypair, used only to unwrap a cluster key
     /// delivered automatically through raft. See `routes::key_distribution`.
     pub node_keypair: Option<cl_secret::NodeKeypair>,
+    pub proxy_health: cl_proxy::HealthTable,
 }
 
 pub struct ApiServer {
@@ -191,6 +196,7 @@ impl ApiServer {
             shutdown: options.shutdown,
             http: options.http,
             tls_fingerprint,
+            proxy_health: options.proxy_health,
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the

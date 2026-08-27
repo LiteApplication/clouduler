@@ -79,7 +79,7 @@ pub fn plan(
         let Some(assignment) = state.assignments.get(&item.id) else {
             continue;
         };
-        if assignment.migration.is_some() {
+        if assignment.migration.as_ref().is_some_and(|m| !m.phase.is_terminal()) {
             continue;
         }
         let Ok((eligible, _)) = candidates(state, item, served_drives, everywhere_networks) else {

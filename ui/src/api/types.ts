@@ -109,6 +109,20 @@ export interface InstanceState {
   /** Why no node could run this instance, set only when `state` is
    *  `"pending_placement"`. */
   placement_error?: string;
+  /** The reverse proxy's own most recent active check of this instance's
+   *  service, when it publishes a route. Absent means either nothing is
+   *  published for it or no check has landed yet — not that it's healthy;
+   *  a present `proxy` with no `error` does mean healthy. */
+  proxy?: ProxyHealth;
+}
+
+/** One route's latest active health check: the proxy itself connecting to
+ *  the backend, independent of whether any real client traffic has hit it
+ *  yet. `error` mirrors the "bad gateway: ..." text a real client would see. */
+export interface ProxyHealth {
+  host: string;
+  checked_at: string;
+  error?: string;
 }
 
 /** Result of `POST /api/rebalance`: every move it decided on and already

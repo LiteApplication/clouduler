@@ -127,6 +127,11 @@ pub async fn run(
         .build()
         .context("building the internal node-to-node http client")?;
 
+    // Started before the api so the api can hand out `proxy.health`, the
+    // reverse proxy's own active backend health checks, from the moment it
+    // comes up rather than needing a second wiring pass later.
+    let proxy = crate::proxy::start(&cfg, &cluster, &data_dir, config_rx.clone(), key_rx.clone());
+
     let api = start_api(StartApiArgs {
         cfg: &cfg,
         node,
@@ -141,6 +146,7 @@ pub async fn run(
         shutdown: shutdown_tx,
         http: internal_http.clone(),
         node_keypair,
+        proxy_health: proxy.health.clone(),
     })
     .await;
 
@@ -150,7 +156,6 @@ pub async fn run(
     // overlay rather than waiting for anything to be scheduled.
     let internal_dns = crate::internal_dns::start(&cfg, &cluster);
     let exposed = crate::expose::start(&cfg, &cluster);
-    let proxy = crate::proxy::start(&cfg, &cluster, &data_dir, config_rx.clone(), key_rx.clone());
 
     // Worth waiting for: on a node that has just booted, dockerd is often a
     // second or two behind us, and a node that gave up on docker for the life
@@ -260,6 +265,7 @@ struct StartApiArgs<'a> {
     shutdown: tokio::sync::watch::Sender<()>,
     http: reqwest::Client,
     node_keypair: Option<cl_secret::NodeKeypair>,
+    proxy_health: cl_proxy::HealthTable,
 }
 
 async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>> {
@@ -277,6 +283,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         shutdown,
         http,
         node_keypair,
+        proxy_health,
     } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -321,6 +328,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         shutdown,
         http,
         node_keypair,
+        proxy_health,
     };
 
     let server = match cl_api::ApiServer::new(options).await {

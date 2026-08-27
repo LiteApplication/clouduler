@@ -16,7 +16,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::server::Acceptor;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
@@ -71,11 +71,27 @@ const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// and a request that never completes.
 const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a pooled backend connection may sit idle before this client
+/// proactively drops it instead of reusing it. Without this,
+/// `hyper_util`'s legacy pool only notices a dead connection when it tries
+/// to poll it ready for reuse, which detects a graceful close but not a
+/// hard reset - a container that gets killed (not stopped gracefully) while
+/// a keep-alive connection to it is idle in the pool resets the socket
+/// instead of closing it, and the next real request to reuse that
+/// connection fails outright with a `SendRequest` error (confirmed live on
+/// `stalwart`, a backend that restarts in well under 30s and was otherwise
+/// completely healthy). Keeping the idle budget short bounds how long a
+/// connection can go stale in the pool before it's evicted.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl ProxyServer {
     pub fn new(routes: Arc<RouteTable>, certs: Arc<CertStore>) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_connect_timeout(Some(BACKEND_CONNECT_TIMEOUT));
-        let client = Client::builder(TokioExecutor::new()).build(connector);
+        let client = Client::builder(TokioExecutor::new())
+            .pool_timer(TokioTimer::new())
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+            .build(connector);
         Self {
             routes,
             certs,

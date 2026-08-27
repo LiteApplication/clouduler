@@ -149,6 +149,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
             .build()
             .expect("building the test http client"),
         node_keypair: None,
+        proxy_health: cl_proxy::HealthTable::default(),
     })
     .await
     .expect("build api");
@@ -349,6 +350,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
             .build()
             .expect("building the test http client"),
         node_keypair: Some(n2_keypair),
+        proxy_health: cl_proxy::HealthTable::default(),
     })
     .await
     .expect("build n2's api");

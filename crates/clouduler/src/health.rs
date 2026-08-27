@@ -42,15 +42,22 @@ struct Row {
     health: String,
     started_at: Option<String>,
     reason: Option<String>,
+    /// The reverse proxy's own active check of this instance's service, when
+    /// it publishes a route. A backend that answers docker's health check
+    /// but that the proxy can't actually reach (wrong port, app not bound
+    /// yet, crashed mid-request) shows up here rather than in `health`.
+    proxy_error: Option<String>,
 }
 
 impl Row {
     /// Worth showing: either the desired state doesn't match what's actually
     /// running (a stopped stack is always shown too, alongside real
     /// mismatches like a crash or a stuck placement), or something else is
-    /// wrong (bad health, a failed migration, an unreachable node).
+    /// wrong (bad health, a failed migration, an unreachable node, a route
+    /// the proxy can't reach its backend for).
     fn unhealthy(&self) -> bool {
         self.reason.is_some()
+            || self.proxy_error.is_some()
             || self.health == "unhealthy"
             || self.desired == DesiredState::Stopped
             || matches!(self.state.as_str(), "restarting" | "unknown" | "pending_placement")
@@ -144,6 +151,9 @@ fn print_row(row: &Row, flags: &ShowFlags) {
             line.push_str(&format!("\treason={reason}"));
         }
     }
+    if let Some(error) = &row.proxy_error {
+        line.push_str(&format!("\tproxy={error}"));
+    }
     println!("{line}");
 }
 
@@ -168,6 +178,16 @@ struct InstanceSummary {
     state: String,
     health: String,
     started_at: Option<String>,
+    #[serde(default)]
+    proxy: Option<ProxyHealthSummary>,
+}
+
+/// Mirrors `cl-api`'s `ProxyHealthSummary`: the reverse proxy's own most
+/// recent active check of this instance's service.
+#[derive(Deserialize)]
+struct ProxyHealthSummary {
+    #[serde(default)]
+    error: Option<String>,
 }
 
 async fn row_for_assignment(
@@ -193,6 +213,7 @@ async fn row_for_assignment(
                     health: "none".to_string(),
                     started_at: None,
                     reason: Some(reason.clone()),
+                    proxy_error: None,
                 },
             );
         }
@@ -209,6 +230,7 @@ async fn row_for_assignment(
                 health: "none".to_string(),
                 started_at: None,
                 reason: Some("node is unreachable".to_string()),
+                proxy_error: None,
             },
         );
     }
@@ -216,6 +238,7 @@ async fn row_for_assignment(
     match fetch_summary(cfg, http, key, &node, &assignment.instance).await {
         Ok(summary) => {
             let reason = describe_state(assignment.desired, &summary.state);
+            let proxy_error = summary.proxy.and_then(|p| p.error);
             (
                 stack,
                 Row {
@@ -226,6 +249,7 @@ async fn row_for_assignment(
                     health: summary.health,
                     started_at: summary.started_at,
                     reason,
+                    proxy_error,
                 },
             )
         }
@@ -239,6 +263,7 @@ async fn row_for_assignment(
                 health: "none".to_string(),
                 started_at: None,
                 reason: Some(e.to_string()),
+                proxy_error: None,
             },
         ),
     }
@@ -305,6 +330,7 @@ fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)>
                 health: "none".to_string(),
                 started_at: None,
                 reason: Some(u.reason),
+                proxy_error: None,
             },
         )
     });
@@ -322,6 +348,7 @@ fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)>
                 reason: Some(format!(
                     "wants to run on {node} but has no assignment yet - the scheduler decided this but hasn't applied it"
                 )),
+                proxy_error: None,
             },
         )),
         _ => None,
