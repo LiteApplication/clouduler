@@ -69,6 +69,10 @@ pub struct Fence {
     /// When quorum was lost, or None while it is held.
     lost_at: Option<Instant>,
     fenced: bool,
+    /// Whether `observe` has run at least once. A caller needs this to tell
+    /// "genuinely fenced" apart from "still closed because nobody has asked
+    /// yet" — see `is_observed`.
+    observed: bool,
 }
 
 /// What the fence wants the node to do.
@@ -102,6 +106,7 @@ impl Fence {
         Self {
             lost_at: None,
             fenced: true,
+            observed: false,
         }
     }
 
@@ -111,6 +116,7 @@ impl Fence {
     /// them on a brief blip turns a network hiccup into an outage. Only a
     /// sustained loss fences.
     pub fn observe(&mut self, has_quorum: bool, now: Instant, timeout: Duration) -> FenceAction {
+        self.observed = true;
         if has_quorum {
             self.lost_at = None;
             if self.fenced {
@@ -130,6 +136,16 @@ impl Fence {
 
     pub fn is_fenced(&self) -> bool {
         self.fenced
+    }
+
+    /// Whether `observe` has been called yet. A fresh fence is closed
+    /// (`is_fenced() == true`) before its first observation purely as a
+    /// starting default, not because quorum was actually checked and found
+    /// missing — a caller that needs to distinguish those two cases (e.g. to
+    /// avoid acting on a fence result that was never really decided) should
+    /// check this first.
+    pub fn is_observed(&self) -> bool {
+        self.observed
     }
 }
 
@@ -210,6 +226,21 @@ mod tests {
         // and it opens on the first sighting of a quorum, not a timeout later.
         assert_eq!(fence.observe(true, at(base, 61), timeout), FenceAction::Release);
         assert!(!fence.is_fenced());
+    }
+
+    #[test]
+    fn is_observed_only_after_the_first_call() {
+        let base = Instant::now();
+        let timeout = Duration::from_secs(15);
+
+        let mut fence = Fence::new();
+        assert!(!fence.is_observed());
+
+        // True regardless of what that first call finds: a caller telling
+        // "fenced because unchecked" apart from "fenced because confirmed"
+        // needs this to flip on the call itself, not on a particular result.
+        fence.observe(false, base, timeout);
+        assert!(fence.is_observed());
     }
 
     #[test]

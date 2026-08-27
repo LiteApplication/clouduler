@@ -97,10 +97,18 @@ pub async fn run(
     // before raft has caught up, and until then this node's idea of what runs
     // here is whatever was true when it died.
     let fenced = Arc::new(AtomicBool::new(true));
+    // Separate from `fenced` itself: `fenced` starts `true` purely as a
+    // starting default, not because quorum was checked and found missing.
+    // The scheduler needs to tell those apart — see the gate closure below —
+    // or its first sweep, which can easily land before `run_fence`'s first
+    // tick, reads "fenced" and stops every container this node already owns,
+    // only to start them all back up a sweep later once the fence catches up.
+    let observed = Arc::new(AtomicBool::new(false));
     let fencing = tokio::spawn(run_fence(
         cluster.clone(),
         failover.clone(),
         fenced.clone(),
+        observed.clone(),
     ));
 
     // The api comes up before docker does, and picks the client up whenever it
@@ -179,7 +187,12 @@ pub async fn run(
     )
     .with_zone(cl_net::dns::zone_origin(&cfg));
     let gate = fenced.clone();
-    let scheduler = tokio::spawn(scheduler.run(move || gate.load(Ordering::Relaxed)));
+    let gate_observed = observed.clone();
+    let scheduler = tokio::spawn(scheduler.run(move || {
+        gate_observed
+            .load(Ordering::Relaxed)
+            .then(|| gate.load(Ordering::Relaxed))
+    }));
 
     // Built before the scheduler needs it, but idempotent and on a loop, so
     // ordering against a stack deploy does not matter.
@@ -520,7 +533,12 @@ pub(crate) fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKe
 /// This is the other half of the failure handling: the leader will hand our
 /// containers to another node after `node_timeout`, and we must have let go of
 /// them before that happens, or the same volume ends up with two writers.
-async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig, fenced: Arc<AtomicBool>) {
+async fn run_fence(
+    cluster: Arc<ClusterNode>,
+    failover: FailoverConfig,
+    fenced: Arc<AtomicBool>,
+    observed: Arc<AtomicBool>,
+) {
     let quorum = cluster.quorum();
     let mut fence = Fence::new();
     let mut ticker = tokio::time::interval(failover.probe_interval);
@@ -543,6 +561,10 @@ async fn run_fence(cluster: Arc<ClusterNode>, failover: FailoverConfig, fenced: 
             }
             FenceAction::None => {}
         }
+        // Every call is an observation, whatever it decided — this is what
+        // lets the scheduler tell "genuinely fenced" apart from "hasn't been
+        // asked yet" instead of treating its own first sweep's guess as fact.
+        observed.store(fence.is_observed(), Ordering::Relaxed);
     }
 }
 

@@ -91,7 +91,7 @@ unshare --user --map-root-user --mount -- "$APK" \
   -U --allow-untrusted --arch "$ALPINE_ARCH" \
   --root "$ROOTFS_DIR" --cache-dir "$APK_CACHE" --initdb \
   add alpine-base linux-virt docker docker-cli iptables ip6tables \
-      util-linux iproute2 curl jq coreutils gcompat \
+      util-linux iproute2 curl jq coreutils gcompat nfs-utils \
   || echo "build-image: apk reported non-fatal errors (likely setuid ownership under userns), continuing"
 
 # Alpine's setuid helpers land as mode 711, which their owner cannot read.
@@ -125,6 +125,22 @@ mkdir -p "$ROOTFS_DIR/etc/clouduler" "$ROOTFS_DIR/var/lib/clouduler"
 [[ -f "$ROOTFS_DIR/boot/initramfs-virt" ]] || { echo "build-image: initramfs-virt missing, apk install did not complete" >&2; exit 1; }
 [[ -x "$ROOTFS_DIR/usr/bin/dockerd" ]] \
   || { echo "build-image: dockerd missing, apk install did not complete" >&2; exit 1; }
+
+# The served-drive scenario needs a real in-kernel NFSv4 server and the
+# nfs-utils tools (exportfs, rpc.mountd) that manage its export table.
+# linux-virt has carried CONFIG_NFSD as a module for a long time, but this
+# is exactly the kind of thing that silently drops out of a minimal kernel
+# config, so fail the build loudly here rather than have it show up as a
+# baffling "cannot export" warning deep in a scenario run.
+KVER_CHECK_DIR="$(find "$ROOTFS_DIR/lib/modules" -maxdepth 1 -mindepth 1 -type d | head -1)"
+if [[ -z "$(find "$KVER_CHECK_DIR/kernel/fs/nfsd" -name 'nfsd.ko*' 2>/dev/null)" ]]; then
+  echo "build-image: nfsd.ko missing from $KVER_CHECK_DIR/kernel/fs/nfsd - this kernel cannot serve NFS," >&2
+  echo "  the served-drive scenario will not work. linux-virt is expected to build CONFIG_NFSD as a module;" >&2
+  echo "  if it no longer does, this image needs a different kernel package or a custom build." >&2
+  exit 1
+fi
+[[ -x "$ROOTFS_DIR/usr/sbin/exportfs" ]] \
+  || { echo "build-image: exportfs missing, nfs-utils did not install" >&2; exit 1; }
 
 # Pull the kernel and initramfs out to the cache root for direct -kernel boot.
 KVER_DIR="$(find "$ROOTFS_DIR/lib/modules" -maxdepth 1 -mindepth 1 -type d | head -1)"

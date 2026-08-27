@@ -149,6 +149,21 @@ for module in bridge vxlan; do
   fi
 done
 
+# Served drives export over NFSv4. clouduler itself only ever calls
+# `exportfs`; the kernel server module and `rpc.mountd` (which handles
+# `exportfs`'s export-table upcalls) are this image's job to bring up, the
+# same way dockerd is: an external service the daemon depends on and checks
+# for, not one it spawns.
+modprobe nfsd 2>&1 | sed 's/^/init-clouduler: modprobe nfsd: /'
+if [ -d /sys/module/nfsd ]; then
+  mountpoint -q /proc/fs/nfsd || mount -t nfsd nfsd /proc/fs/nfsd
+  # v4-only: no rpcbind, no rpc.statd/lockd, no separate MOUNT protocol.
+  rpc.mountd --no-nfs-version 3 >/var/log/rpc.mountd.log 2>&1 &
+  echo "init-clouduler: nfsd module loaded, rpc.mountd started"
+else
+  echo "init-clouduler: WARNING module nfsd NOT loaded, served drives will not work"
+fi
+
 mkdir -p /var/run
 # dockerd needs cgroups; mount the essentials it wants under cgroup2.
 mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true

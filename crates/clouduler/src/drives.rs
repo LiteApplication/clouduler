@@ -9,36 +9,41 @@
 //!   them;
 //! - a sync scheduler, walking those volumes and pushing changes out on each
 //!   drive's interval;
-//! - for served drives, the server runs on every `served_by` candidate (only
-//!   the active one is actually pointed at by mounting clients), and a FUSE
+//! - for served drives, the drive's root is exported over NFSv4
+//!   (`cl_drive::ensure_export`) on every `served_by` candidate (only the
+//!   active one is actually pointed at by mounting clients), and an NFS
 //!   mount of whichever candidate is currently active runs on every other
-//!   node implementing the drive. A background watcher repoints those mounts
-//!   when the active candidate changes.
+//!   node implementing the drive. A background watcher remounts those mounts
+//!   when the active candidate changes: unlike the FUSE client this used to
+//!   be, a kernel NFS mount bakes its server address in at mount time, so
+//!   failover means unmount-then-remount rather than a live retarget.
 //!
 //! A node implementing nothing starts none of it and that is a normal setup,
 //! not a degraded one.
 //!
 //! The whole subsystem is supervised: `start` spawns a task that rebuilds it
-//! (tearing down every task and unmounting, then running the same build this
-//! module always has) whenever this node's drive topology — which drives it
-//! implements, and any served drive's `served_by` list — actually changes in
-//! the live config. A drive's `sync_interval` does not trigger a rebuild; it
-//! is read live by `DriveIntervals` on every sync pass instead, since that is
-//! a far more common edit than adding or removing a whole drive and does not
-//! need anything torn down. Adding a drive, or changing who serves one, both
-//! now take effect without a restart; removing a drive never deletes the
-//! directory it backed, only stops mounting/serving/transporting it.
+//! (tearing down every task, unmounting, and un-exporting, then running the
+//! same build this module always has) whenever this node's drive topology —
+//! which drives it implements, and any served drive's `served_by` list —
+//! actually changes in the live config. A drive's `sync_interval` does not
+//! trigger a rebuild; it is read live by `DriveIntervals` on every sync pass
+//! instead, since that is a far more common edit than adding or removing a
+//! whole drive and does not need anything torn down. Adding a drive, or
+//! changing who serves one, both now take effect without a restart; removing
+//! a drive never deletes the directory it backed, only stops
+//! mounting/exporting/transporting it.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, Node};
 use cl_drive::{
-    drive_port, served, served_port, transport, DeltaEngine, DriveRegistry, IntervalSource,
-    MountManager, MountSpec, SyncScheduler,
+    drive_port, transport, DeltaEngine, DriveRegistry, IntervalSource, MountManager, MountSpec,
+    SyncScheduler,
 };
 use cl_raft::ids::VolumeId;
 use cl_raft::node::ClusterNode;
@@ -112,13 +117,19 @@ impl Drives {
 struct Running {
     tasks: Vec<JoinHandle<()>>,
     mounts: Option<Arc<MountManager>>,
+    /// Served-drive roots this build exported, paired with the client
+    /// subnet they were exported to, so `teardown` can un-export them.
+    exports: Vec<(PathBuf, String)>,
 }
 
 impl Running {
-    /// Stop every task and unmount every served drive volume this build
-    /// mounted. A FUSE mount outlives the process that made it, so leaving
-    /// one behind means the next pass (or the next daemon start) finds a
-    /// mountpoint whose server is gone and every read on it hangs.
+    /// Stop every task, unmount every served drive volume this build
+    /// mounted, and remove every NFS export it added. A mount or an export
+    /// both outlive the process that made them: leaving a mount behind means
+    /// the next pass (or the next daemon start) finds a mountpoint whose
+    /// server is gone and every read on it hangs; leaving an export behind
+    /// means a node that stopped being a `served_by` candidate keeps handing
+    /// out a copy nothing is syncing anymore.
     fn teardown(self) {
         for task in self.tasks {
             task.abort();
@@ -126,6 +137,11 @@ impl Running {
         if let Some(mounts) = self.mounts {
             if let Err(e) = mounts.unmount_all() {
                 warn!(error = %e, "could not unmount every served drive volume");
+            }
+        }
+        for (root, subnet) in self.exports {
+            if let Err(e) = cl_drive::remove_export(&root, &subnet) {
+                warn!(path = %root.display(), error = %e, "could not remove an NFS export");
             }
         }
     }
@@ -288,35 +304,61 @@ async fn build(
             }));
         }
 
-        start_serving(cfg, node, node_name, &mut running, internal_ip);
+        running.exports = ensure_serving(cfg, node, node_name);
     }
 
     start_volume_mounts(cfg, node, node_name, &mut running, cluster)?;
     Ok(running)
 }
 
-/// Serve every served drive this node is a `served_by` candidate for (every
-/// candidate runs the server, not just the active one) — the server always
-/// answers for the whole drive root; which volume a mounting client actually
-/// sees is decided client side (`start_volume_mounts`).
-fn start_serving(cfg: &ClusterConfig, node: &Node, node_name: &str, running: &mut Running, internal_ip: IpAddr) {
-    for (index, (name, drive)) in cfg.drives.iter().enumerate() {
+/// Export every served drive this node is a `served_by` candidate for over
+/// NFSv4 (every candidate exports, not just the active one) — the export
+/// always covers the whole drive root; which volume a mounting client
+/// actually sees is decided client side (`start_volume_mounts`), by mounting
+/// a subpath of it.
+///
+/// Returns the roots this call exported, so the caller can un-export them on
+/// the next topology rebuild or on shutdown. A no-op (and an empty list) if
+/// this node serves nothing, or if this host can't serve NFS at all
+/// (`cl_drive::exports_available`) — logged as a warning, not fatal: the
+/// node just never becomes an active server for anything.
+fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(PathBuf, String)> {
+    let mut exported = Vec::new();
+
+    let serves_something = cfg
+        .drives
+        .iter()
+        .any(|(name, drive)| drive.is_served() && node.implements(name) && drive.served_by.iter().any(|s| s == node_name));
+    if !serves_something {
+        return exported;
+    }
+
+    if let Err(e) = cl_drive::exports_available() {
+        warn!(error = %e, "cannot serve NFS drives from this node");
+        return exported;
+    }
+
+    let (_, internal) = cfg.internal_network();
+    let Some(subnet) = internal.subnet else {
+        warn!("cluster's internal network has no subnet, cannot restrict NFS exports to it");
+        return exported;
+    };
+    let subnet = subnet.to_string();
+
+    for (name, drive) in &cfg.drives {
         if !drive.is_served() || !node.implements(name) || !drive.served_by.iter().any(|s| s == node_name) {
             continue;
         }
         let root = node.drives[name].clone();
-        let addr = SocketAddr::new(internal_ip, served_port(node.rpc_port, index));
-        info!(drive = %name, %addr, path = %root.display(), "serving drive");
-        let drive_name = name.clone();
-        running.tasks.push(tokio::spawn(async move {
-            loop {
-                if let Err(e) = served::serve(addr, root.clone()).await {
-                    warn!(drive = %drive_name, error = %e, "served drive server stopped, retrying");
-                }
-                tokio::time::sleep(BIND_RETRY).await;
+        match cl_drive::ensure_export(name, &root, &subnet) {
+            Ok(()) => {
+                info!(drive = %name, path = %root.display(), %subnet, "exporting served drive over NFS");
+                exported.push((root, subnet.clone()));
             }
-        }));
+            Err(e) => warn!(drive = %name, error = %e, "could not export served drive over NFS"),
+        }
     }
+    exported
 }
 
 /// One served drive's resolved `served_by` candidates, for deciding which
@@ -327,7 +369,7 @@ struct ServedDriveInfo {
     candidate_addrs: BTreeMap<String, SocketAddr>,
 }
 
-/// Sets up dynamic, per-volume FUSE mounting for every served drive in the
+/// Sets up dynamic, per-volume NFS mounting for every served drive in the
 /// cluster — not just ones this node declared in `cluster.yaml`, since a
 /// served drive's data is reachable from any node over the internal network.
 /// Resolves every candidate's address once, then hands off to a background
@@ -336,8 +378,9 @@ struct ServedDriveInfo {
 /// rather than mounting a served drive's whole directory up front the way a
 /// statically declared `Node.drives` entry used to.
 ///
-/// A no-op if this process cannot FUSE-mount at all (`mount_permission`), or
-/// if the cluster has no served drives whose candidates resolve.
+/// A no-op if this process cannot call `mount(2)` at all (`mount_permission`
+/// — in practice, not root), or if the cluster has no served drives whose
+/// candidates resolve.
 fn start_volume_mounts(
     cfg: &ClusterConfig,
     node: &Node,
@@ -346,7 +389,7 @@ fn start_volume_mounts(
     cluster: &Arc<ClusterNode>,
 ) -> Result<()> {
     let mut served_drives = BTreeMap::new();
-    for (index, (name, drive)) in cfg.drives.iter().enumerate() {
+    for (name, drive) in &cfg.drives {
         if !drive.is_served() || drive.served_by.is_empty() {
             continue;
         }
@@ -360,7 +403,7 @@ fn start_volume_mounts(
                 warn!(drive = %name, server = %server_name, "the serving node has no internal address");
                 continue;
             };
-            candidate_addrs.insert(server_name.clone(), SocketAddr::new(server_ip, served_port(server.rpc_port, index)));
+            candidate_addrs.insert(server_name.clone(), SocketAddr::new(server_ip, cl_drive::NFS_PORT));
         }
         if candidate_addrs.is_empty() {
             warn!(drive = %name, "none of this drive's serving candidates could be resolved");
@@ -373,15 +416,15 @@ fn start_volume_mounts(
         return Ok(());
     }
 
-    // FUSE needs root or `user_allow_other` in /etc/fuse.conf. Refusing to
-    // start the whole daemon over it would take out a node that is otherwise
+    // A raw `mount(2)` call needs root (`CAP_SYS_ADMIN`). Refusing to start
+    // the whole daemon over it would take out a node that is otherwise
     // healthy and still votes, so this is a warning and served drives are
     // simply unavailable here. The scheduler will still place work needing
     // one, since placement no longer requires this node to implement a
     // served drive; those instances just never become ready (see
     // `cl_sched::run::volumes_ready`) until they land somewhere that can
     // mount it.
-    if let Err(e) = served::mount::mount_permission() {
+    if let Err(e) = cl_drive::mount_permission() {
         warn!(
             error = %e,
             "cannot mount served drive volumes on this node, containers needing one will not run here"
@@ -389,7 +432,7 @@ fn start_volume_mounts(
         return Ok(());
     }
 
-    let manager = Arc::new(MountManager::new(tokio::runtime::Handle::current()));
+    let manager = Arc::new(MountManager::new());
     running.mounts = Some(manager.clone());
 
     let data_dir = node.data_dir(cfg).to_path_buf();
@@ -405,11 +448,12 @@ fn start_volume_mounts(
     Ok(())
 }
 
-/// Converges this node's FUSE mounts against what its own running containers
+/// Converges this node's NFS mounts against what its own running containers
 /// actually need, one served-drive volume at a time: mounts a volume the
 /// moment an instance here needs it and this node isn't the active server,
-/// retargets it if the active server fails over, and unmounts it once
-/// nothing here needs it any more. Driven off `ClusterState.assignments`
+/// fails it over (unmount, then remount against the new address) if the
+/// active server changes, and unmounts it once nothing here needs it any
+/// more. Driven off `ClusterState.assignments`
 /// (the leader's placement decisions), the same replicated state
 /// `Scheduler::reconcile` reads, so this and the container it mounts for
 /// converge from the same source of truth.
@@ -451,7 +495,7 @@ async fn watch_volume_mounts(
                 };
                 if active == node_name.as_str() {
                     // This node holds the real data; the container reads it
-                    // directly, no FUSE involved.
+                    // directly, no NFS mount involved.
                     continue;
                 }
                 let Some(&server) = info.candidate_addrs.get(active) else {
@@ -477,7 +521,9 @@ async fn watch_volume_mounts(
         }
         for (key, spec) in needed {
             if manager.is_mounted(&key) {
-                manager.update_server(&key, spec.server);
+                if let Err(e) = manager.retarget(&key, spec.server) {
+                    warn!(%key, server = %spec.server, error = %e, "could not fail a served drive mount over to its new server");
+                }
             } else {
                 info!(drive = %spec.drive, volume = ?spec.volume, server = %spec.server, "mounting served drive volume");
                 if let Err(e) = manager.mount_one(spec) {

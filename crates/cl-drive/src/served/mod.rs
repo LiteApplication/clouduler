@@ -1,22 +1,16 @@
 //! Served drives: one node holds the data and serves it to the rest of the
-//! cluster over the internal network, the way NFS would, but implemented by
-//! the daemon itself so it doesn't depend on a system NFS server being
-//! installed and configured on every node.
+//! cluster over real NFSv4 — the kernel's own NFS server on the serving
+//! side (`exports`), and a hand-built `mount(2)` client on every other
+//! implementing node (`mount`). No FUSE, no bespoke wire protocol.
 //!
-//! `protocol` is the filesystem RPC shared by both sides. `server` answers
-//! it against the real directory, on the node named as a drive's
-//! `served_by`. `client` is a `fuser` filesystem that turns kernel calls
-//! into protocol requests, mounted on every other node that implements the
-//! drive. `mount` owns the lifecycle of those mounts: mounting at daemon
-//! start, unmounting on shutdown, and detecting when mounting isn't
-//! possible at all.
+//! `exports` manages this node's `exportfs` entries when it is a
+//! `served_by` candidate. `mount` owns the lifecycle of the NFS mounts
+//! every other implementing node makes: mounting on demand per volume,
+//! unmounting when no longer needed, failing a mount over when the active
+//! server changes, and detecting and repairing an unhealthy mount.
 
-pub mod client;
+pub mod exports;
 pub mod mount;
-pub mod protocol;
-pub mod server;
 
-pub use client::{ClientConfig, ClientFs};
-pub use mount::{MountManager, MountPermission, MountSpec};
-pub use protocol::{Attr, DirEntry, FileKind, Handle, ProtoError, Request, Response, StatfsInfo};
-pub use server::{handle_connection, serve, HandleTable};
+pub use exports::{check_available as exports_available, ensure_export, remove_export, NFS_PORT};
+pub use mount::{mount_permission, MountManager, MountSpec};

@@ -96,14 +96,21 @@ impl Scheduler {
     }
 
     /// Run until cancelled. `fenced` reports whether this node has lost quorum
-    /// long enough to give up its containers.
-    pub async fn run(self, fenced: impl Fn() -> bool + Send + 'static) {
+    /// long enough to give up its containers — `None` when that has not been
+    /// determined yet (e.g. the first sweep after this node's own restart,
+    /// which can easily land before the fence's own first tick). A pass that
+    /// lands during `None` does nothing at all: guessing "fenced" would stop
+    /// every container this node already correctly owns, only for the next
+    /// sweep to start them all back up once the fence catches up.
+    pub async fn run(self, fenced: impl Fn() -> Option<bool> + Send + 'static) {
         let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
         loop {
             ticker.tick().await;
 
+            let Some(fenced_now) = fenced() else {
+                continue;
+            };
             let state = self.cluster.state().await;
-            let fenced_now = fenced();
 
             if self.cluster.is_leader() && !fenced_now {
                 if let Err(e) = self.schedule(&state).await {

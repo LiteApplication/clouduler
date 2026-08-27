@@ -50,17 +50,6 @@ pub fn drive_port(rpc_port: u16) -> u16 {
     rpc_port.wrapping_add(1)
 }
 
-/// Port a served drive's server listens on, `rpc_port + 2 + index`.
-///
-/// The served protocol carries no drive name, so one listener serves exactly
-/// one drive and each needs its own port. `index` is the drive's position in
-/// the cluster config's drive map, which is ordered by name and replicated, so
-/// every node works out the same port for the same drive without another
-/// config field to keep in step.
-pub fn served_port(rpc_port: u16, index: usize) -> u16 {
-    rpc_port.wrapping_add(2).wrapping_add(index as u16)
-}
-
 /// Rolling signature block size. Small enough to localize a match, large
 /// enough that the signature itself stays a small fraction of the file.
 pub fn signature_options() -> SignatureOptions {
@@ -406,13 +395,5 @@ mod port_tests {
     #[test]
     fn the_bulk_transfer_port_sits_just_above_the_rpc_port() {
         assert_eq!(drive_port(7373), 7374);
-    }
-
-    #[test]
-    fn each_served_drive_gets_its_own_port_above_that() {
-        assert_eq!(served_port(7373, 0), 7375);
-        assert_eq!(served_port(7373, 1), 7376);
-        // Never collides with the raft or bulk transfer ports.
-        assert!(served_port(7373, 0) > drive_port(7373));
     }
 }

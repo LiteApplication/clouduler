@@ -47,10 +47,13 @@ def main():
     all_drive_names = set(drives_cfg.keys())
     for n in nodes:
         all_drive_names.update((n.get("drives") or {}).keys())
-    drives_block = {
-        name: {"sync_interval": drives_cfg.get(name, {}).get("sync_interval", "30s")}
-        for name in sorted(all_drive_names)
-    }
+    drives_block = {}
+    for name in sorted(all_drive_names):
+        entry = {"sync_interval": drives_cfg.get(name, {}).get("sync_interval", "30s")}
+        served_by = drives_cfg.get(name, {}).get("served_by")
+        if served_by:
+            entry["served_by"] = served_by
+        drives_block[name] = entry
 
     # vpn_segment: an isolated second network segment simulating a VPN
     # tunnel, only present when a scenario declares it. `egress_node` gets a

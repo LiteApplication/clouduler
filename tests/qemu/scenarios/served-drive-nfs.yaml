@@ -1,0 +1,53 @@
+# Served drive over NFSv4: two serving candidates (n4, n5) and a service
+# that runs somewhere else in the cluster, mounting the drive over a real
+# kernel NFS client rather than owning a local copy. Exercises the two
+# resilience paths the FUSE-to-NFS migration cared most about:
+#   - the active server going away outright (node kill): the mount has to
+#     fail over to the standby without losing data;
+#   - the active server staying up but unreachable (link partition, not a
+#     node kill): the `soft` mount has to detect the outage itself and
+#     recover once the link heals, rather than hanging forever.
+name: served-drive-nfs
+description: NFSv4 served drive; failover on node loss and on a network partition, no FUSE involved.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4, drives: { fast: {} } }
+  - { name: n5, role: worker,  ip: 10.10.0.5, drives: { fast: {} } }
+  - { name: n6, role: worker,  ip: 10.10.0.6 }
+
+drives:
+  fast: { sync_interval: 15s, served_by: [n4, n5] }
+
+failover:
+  probe_interval: 2s
+  fence_timeout: 6s
+  node_timeout: 12s
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/stateful.yaml, name: stateful }
+  - wait_running: { stack: stateful, service: store, timeout: 90 }
+
+  # Node-kill failover: the active server (n4) disappears outright.
+  - assert_reachable: n4
+  - kill_node: n4
+  - assert_unreachable: n4
+  - wait_running: { stack: stateful, service: store, timeout: 90 }
+  - start_node: n4
+  - assert_reachable: n4
+  - wait_running: { stack: stateful, service: store, timeout: 90 }
+
+  # Link-partition failover: n5 (now serving, or still standby depending on
+  # which candidate the service's mount picked up) stays up but unreachable
+  # on the cluster network. The `soft` NFS mount has to notice on its own
+  # and the service has to keep converging once the link heals, without a
+  # full node restart to shake it loose.
+  - partition: [n5]
+  - wait_running: { stack: stateful, service: store, timeout: 90 }
+  - heal: [n5]
+  - assert_reachable: n5
+  - wait_running: { stack: stateful, service: store, timeout: 90 }
+  - assert_converged: { timeout: 30 }

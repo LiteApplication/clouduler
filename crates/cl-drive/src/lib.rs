@@ -8,11 +8,10 @@
 //! `Manifest` (`scan`), diffing that against a peer, and shipping only what
 //! changed over a small wire protocol (`transport`) using a rolling-hash
 //! delta engine (`delta`); `sync` schedules that periodically. A served
-//! drive has one copy: the serving node answers a filesystem protocol
-//! (`served::protocol`) against its real directory (`served::server`), and
-//! every other implementing node mounts it over FUSE (`served::client`,
-//! `served::mount`). `migration` drives the raft-recorded handoff when an
-//! instance moves nodes.
+//! drive has one copy: the serving node exports its real directory over
+//! NFSv4 (`served::exports`), and every other implementing node mounts it
+//! with a direct `mount(2)` call (`served::mount`). `migration` drives the
+//! raft-recorded handoff when an instance moves nodes.
 
 pub mod delta;
 pub mod error;
@@ -28,6 +27,6 @@ pub use error::{DriveError, Result};
 pub use migration::{InstanceControl, MigrationJob};
 pub use registry::{resolve_in_root, resolve_relative, DriveRegistry, DriveRole};
 pub use scan::{scan as scan_volume, Diff, FileMeta, Manifest};
-pub use served::{MountManager, MountPermission, MountSpec};
+pub use served::{exports_available, ensure_export, mount_permission, remove_export, MountManager, MountSpec, NFS_PORT};
 pub use sync::{IntervalSource, StaticIntervals, SyncScheduler};
-pub use transport::{drive_port, served_port, Message};
+pub use transport::{drive_port, Message};

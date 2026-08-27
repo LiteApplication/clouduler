@@ -81,6 +81,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
 
     setup_data_directory(&mut prompt, &config, &node_name)?;
     setup_drive_directories(&mut prompt, &config, &node_name)?;
+    check_nfs_availability(&mut prompt, &config, &node_name)?;
     setup_secret_key(&mut prompt, &config, &node_name)?;
     setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
@@ -361,6 +362,30 @@ fn setup_drive_directories<R: BufRead, W: Write>(
                 path.display()
             ))?,
         }
+    }
+    Ok(())
+}
+
+/// Advisory only, like the rest of init: a served drive's data is reachable
+/// from any node over the internal network (see `clouduler::drives`), so any
+/// node in a cluster with at least one served drive might end up serving or
+/// mounting one, whether or not this node declares one itself. Not blocking
+/// init over it would take out a node that is otherwise fine for everything
+/// except served drives, which is a normal thing for a node to be (e.g. a
+/// worker with no local storage at all).
+fn check_nfs_availability<R: BufRead, W: Write>(
+    prompt: &mut Prompt<R, W>,
+    config: &ClusterConfig,
+    node_name: &str,
+) -> Result<()> {
+    if !config.drives.values().any(cl_config::Drive::is_served) {
+        return Ok(());
+    }
+    if let Err(e) = cl_drive::exports_available() {
+        prompt.say(&format!(
+            "warning: this cluster has a served drive, but this node ({node_name}) does not look ready to serve NFS: {e}. \
+             Install and enable the kernel NFS server (nfs-kernel-server/nfs-utils) before it needs to serve or mount one"
+        ))?;
     }
     Ok(())
 }
