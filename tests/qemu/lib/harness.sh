@@ -262,7 +262,7 @@ api_call() {
 # than its real cluster ip, so the CLI (run on the host, not inside a VM) can
 # reach it. Regenerated once per run into $RUN_DIR/control.yaml.
 cli() {
-  "$CLOUDULER_BIN" -c "$RUN_DIR/control.yaml" --data-dir "$RUN_DIR/cli-scratch" "$@"
+  "$CLOUDULER_BIN" --config "$RUN_DIR/control.yaml" --data-dir "$RUN_DIR/cli-scratch" "$@"
 }
 
 managers() {

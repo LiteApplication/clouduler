@@ -13,4 +13,4 @@ pub mod exports;
 pub mod mount;
 
 pub use exports::{check_available as exports_available, ensure_export, remove_export, NFS_PORT};
-pub use mount::{mount_permission, MountManager, MountSpec};
+pub use mount::{client_available, mount_permission, MountManager, MountSpec};

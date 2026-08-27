@@ -151,10 +151,12 @@ impl Scheduler {
             }
         }
 
-        for request in volume_requests(state) {
+        for request in volume_requests(state, &live) {
             let response = self.cluster.submit(request.clone()).await.map_err(Box::new)?;
             if let Some(error) = response.error {
                 warn!(?request, %error, "registering a volume was rejected");
+            } else if let Request::UpsertVolume { id, primary } = &request {
+                info!(%id, %primary, "registered volume");
             }
         }
         Ok(())
@@ -476,7 +478,15 @@ fn volumes_ready(
 /// primary that migration moves around, and re-asserting the assignment's node
 /// every sweep would either fight that or write a raft entry per volume per
 /// ten seconds forever.
-pub fn volume_requests(state: &ClusterState) -> Vec<Request> {
+///
+/// The primary registered is the node that actually holds the data: for a
+/// replicated drive that's wherever the instance landed (the only place with
+/// a local copy), but for a served drive it's the drive's own active server
+/// — an instance using a served drive can land on any node, most of which
+/// hold no local copy at all, and the raft state machine's own
+/// `check_placement` only waives the "must implement this drive" rule for a
+/// served drive's real primary, not for an arbitrary assignment node.
+pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Request> {
     let mut requests = Vec::new();
     // Every replica of a service mounts the same volume, so the same id comes
     // up once per instance.
@@ -500,10 +510,16 @@ pub fn volume_requests(state: &ClusterState) -> Vec<Request> {
             if state.volumes.contains_key(&id) || !seen.insert(id.clone()) {
                 continue;
             }
-            requests.push(Request::UpsertVolume {
-                id,
-                primary: assignment.node.clone(),
-            });
+            let primary = match live.drives.get(drive) {
+                Some(cfg) if cfg.is_served() => active_server(cfg, &state.unreachable).map(str::to_string),
+                _ => Some(assignment.node.clone()),
+            };
+            let Some(primary) = primary else {
+                // Every candidate is unreachable right now; try again next
+                // sweep once one comes back.
+                continue;
+            };
+            requests.push(Request::UpsertVolume { id, primary });
         }
     }
     requests
@@ -831,7 +847,8 @@ services:
     #[test]
     fn a_placed_volume_is_registered_once() {
         let mut state = stateful_state();
-        let requests = volume_requests(&state);
+        let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+        let requests = volume_requests(&state, &cfg);
         assert_eq!(requests.len(), 1);
         assert!(matches!(
             &requests[0],
@@ -843,7 +860,78 @@ services:
         }
         // A registered volume has a primary that migration moves; re-asserting
         // it every sweep would fight that.
-        assert!(volume_requests(&state).is_empty());
+        assert!(volume_requests(&state, &cfg).is_empty());
+    }
+
+    /// A served drive's volume is registered against the drive's own active
+    /// server, not the placed instance's node — the instance can land
+    /// anywhere, most of which hold no local copy, and the raft state
+    /// machine's `check_placement` only waives "must implement this drive"
+    /// for a served drive's real primary.
+    #[test]
+    fn a_served_volumes_primary_is_the_active_server_not_the_assignment() {
+        const SERVED_CLUSTER: &str = r#"
+cluster: { name: home }
+networks:
+  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+drives:
+  fast: { mode: served, served_by: [n2, n3] }
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: { tailscale: 10.10.0.1 }
+    drives: {}
+  n2:
+    id: 4c1f7d5b-4e4f-4b9f-9c9c-3d2f7b3a0f02
+    role: worker
+    network: { tailscale: 10.10.0.2 }
+    drives: { fast: /srv/fast }
+  n3:
+    id: 5d2f8e6c-5f5f-4caf-adad-4e3f8c4b1f03
+    role: worker
+    network: { tailscale: 10.10.0.3 }
+    drives: { fast: /srv/fast }
+web: { address: cloud, network: tailscale }
+"#;
+        let cfg = ClusterConfig::parse(SERVED_CLUSTER).expect("valid cluster config");
+        let mut state = ClusterState::default();
+        // n1 implements nothing; the instance still lands here, since a
+        // served drive never requires that (`cl_sched::place::rejection`).
+        state.apply(&Request::UpsertNode(node("n1", &[])));
+        state.apply(&Request::UpsertNode(node("n2", &["fast"])));
+        state.apply(&Request::UpsertNode(node("n3", &["fast"])));
+        state.apply(&Request::DeployStack {
+            name: "app".into(),
+            spec: STATEFUL.into(),
+        });
+        // `check_placement` reads the *replicated* config, not the `cfg`
+        // this test hands `volume_requests` directly, so the served-drive
+        // carve-out needs it published here too or the assign below is
+        // rejected and `state.assignments` stays empty.
+        assert!(state
+            .apply(&Request::PutClusterConfig {
+                yaml: SERVED_CLUSTER.into(),
+                expect_generation: 0,
+            })
+            .is_ok());
+        assert!(state
+            .apply(&Request::Assign {
+                instance: InstanceId::new("app", "db", 0),
+                node: "n1".into(),
+                drives: ["fast".to_string()].into(),
+            })
+            .is_ok());
+
+        let requests = volume_requests(&state, &cfg);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0],
+            Request::UpsertVolume { id, primary } if id == &VolumeId::new("fast", "data") && primary == "n2"
+        ));
+        for request in &requests {
+            assert!(state.apply(request).is_ok(), "primary must satisfy check_placement too");
+        }
     }
 
     fn service_with_volumes(volumes: &str) -> cl_config::Service {
@@ -888,6 +976,7 @@ services:
 
     #[test]
     fn a_stack_with_no_volumes_registers_nothing() {
-        assert!(volume_requests(&state()).is_empty());
+        let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+        assert!(volume_requests(&state(), &cfg).is_empty());
     }
 }

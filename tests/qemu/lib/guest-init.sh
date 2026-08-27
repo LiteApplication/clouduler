@@ -149,6 +149,20 @@ for module in bridge vxlan; do
   fi
 done
 
+# Served drives are exported and mounted over NFSv4. The client side
+# (`mount(2)` with fstype "nfs4") needs the kernel's own nfsv4 client module
+# loaded on *every* node, not just ones that serve - clouduler calls
+# mount(2) directly rather than through the mount.nfs4 helper, which is
+# normally what triggers the kernel's request_module() autoload; without
+# this explicit modprobe, a client-only node's mount attempt fails outright
+# since the kernel doesn't recognize "nfs4" as a filesystem type at all yet.
+modprobe nfsv4 2>&1 | sed 's/^/init-clouduler: modprobe nfsv4: /'
+if [ -d /sys/module/nfsv4 ]; then
+  echo "init-clouduler: nfsv4 client module loaded"
+else
+  echo "init-clouduler: WARNING module nfsv4 NOT loaded, this node cannot mount a served drive"
+fi
+
 # Served drives export over NFSv4. clouduler itself only ever calls
 # `exportfs`; the kernel server module and `rpc.mountd` (which handles
 # `exportfs`'s export-table upcalls) are this image's job to bring up, the
@@ -159,7 +173,12 @@ if [ -d /sys/module/nfsd ]; then
   mountpoint -q /proc/fs/nfsd || mount -t nfsd nfsd /proc/fs/nfsd
   # v4-only: no rpcbind, no rpc.statd/lockd, no separate MOUNT protocol.
   rpc.mountd --no-nfs-version 3 >/var/log/rpc.mountd.log 2>&1 &
-  echo "init-clouduler: nfsd module loaded, rpc.mountd started"
+  # Loading the module only makes nfsd *available* - nothing listens on
+  # 2049 until the server threads are actually started. rpc.nfsd is what
+  # nfs-kernel-server's own start script runs; without it every mount
+  # attempt against this node gets connection refused.
+  rpc.nfsd --no-nfs-version 3 8 >/var/log/rpc.nfsd.log 2>&1
+  echo "init-clouduler: nfsd module loaded, rpc.nfsd and rpc.mountd started"
 else
   echo "init-clouduler: WARNING module nfsd NOT loaded, served drives will not work"
 fi
@@ -191,6 +210,6 @@ echo "init-clouduler: starting clouduler daemon"
 # inherit stdio (the serial console) so the host captures clouduler's own
 # log output directly via -serial file:..., no guest-side fetch needed.
 exec /usr/local/bin/clouduler \
-  -c /etc/clouduler/cluster.yaml \
+  --config /etc/clouduler/cluster.yaml \
   --data-dir /var/lib/clouduler \
   daemon --node "$NODE"

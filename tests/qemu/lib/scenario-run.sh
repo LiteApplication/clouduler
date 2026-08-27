@@ -46,7 +46,7 @@ log "preparing scenario $(basename "$SCENARIO_FILE")"
 python3 "$QEMU_DIR/lib/scenario_prep.py" "$SCENARIO_FILE" \
   "$RUN_DIR/cluster.yaml" "$RUN_DIR/control.yaml" "$MCAST_ID" > "$RUN_DIR/topology.json"
 
-"$CLOUDULER_BIN" -c "$RUN_DIR/cluster.yaml" check \
+"$CLOUDULER_BIN" --config "$RUN_DIR/cluster.yaml" check \
   || die "generated cluster.yaml failed clouduler check, scenario file may be malformed"
 
 mkdir -p "$RUN_DIR/cli-scratch"

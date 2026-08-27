@@ -27,6 +27,9 @@ pub use error::{DriveError, Result};
 pub use migration::{InstanceControl, MigrationJob};
 pub use registry::{resolve_in_root, resolve_relative, DriveRegistry, DriveRole};
 pub use scan::{scan as scan_volume, Diff, FileMeta, Manifest};
-pub use served::{exports_available, ensure_export, mount_permission, remove_export, MountManager, MountSpec, NFS_PORT};
+pub use served::{
+    client_available, exports_available, ensure_export, mount_permission, remove_export, MountManager, MountSpec,
+    NFS_PORT,
+};
 pub use sync::{IntervalSource, StaticIntervals, SyncScheduler};
 pub use transport::{drive_port, Message};

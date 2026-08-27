@@ -70,20 +70,44 @@ fn run_exportfs(args: &[&str]) -> Result<()> {
 }
 
 /// Whether this host looks ready to serve an NFSv4 export: kernel NFS
-/// server support and `exportfs` are present, and a trivial `exportfs -v`
-/// call (list current exports) succeeds. Checked at daemon startup and by
+/// server support and `exportfs` are present, `exportfs -v` (list current
+/// exports) succeeds, and — the part `exportfs` alone can't tell you —
+/// `nfsd`'s server threads are actually running and listening. Loading the
+/// `nfsd` module only makes serving *possible*; `exportfs` happily accepts
+/// an export with no server threads started at all, so without this last
+/// check a broken node looks fine right up until the first client tries to
+/// mount and gets connection refused. Checked at daemon startup and by
 /// `clouduler init`, non-fatal either way — a node that can't serve simply
 /// never becomes an active server for anything.
 pub fn check_available() -> Result<()> {
     if !Path::new("/proc/fs/nfsd").exists() && !kernel_module_present("nfsd") {
         return Err(DriveError::Config("kernel NFS server support (nfsd) is not available".into()));
     }
-    run_exportfs(&["-v"])
+    run_exportfs(&["-v"])?;
+    if !server_running_from("/proc/fs/nfsd/pool_threads") {
+        return Err(DriveError::Config(
+            "nfsd is loaded but has no server threads running (start it with `rpc.nfsd <n>`, \
+             e.g. via the nfs-kernel-server/nfs-utils service) — served drives will otherwise \
+             export fine and then refuse every mount"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn kernel_module_present(name: &str) -> bool {
     std::fs::read_to_string("/proc/modules")
         .map(|s| s.lines().any(|l| l.split_whitespace().next() == Some(name)))
+        .unwrap_or(false)
+}
+
+/// `/proc/fs/nfsd/pool_threads` holds one thread count per nfsd thread
+/// pool, space separated, `0` (or unreadable — usually because this process
+/// isn't root, or the `nfsd` pseudo-filesystem isn't mounted) meaning no
+/// server threads are running at all.
+fn server_running_from(pool_threads_path: &str) -> bool {
+    std::fs::read_to_string(pool_threads_path)
+        .map(|s| s.split_whitespace().filter_map(|n| n.parse::<u32>().ok()).sum::<u32>() > 0)
         .unwrap_or(false)
 }
 
@@ -96,5 +120,24 @@ mod tests {
         assert_eq!(fsid_of("fast"), fsid_of("fast"));
         assert_ne!(fsid_of("fast"), fsid_of("bulk"));
         assert!(fsid_of("fast") > 0);
+    }
+
+    #[test]
+    fn server_running_is_false_when_every_thread_pool_is_empty() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "0 0\n").unwrap();
+        assert!(!server_running_from(tmp.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn server_running_is_true_once_any_thread_pool_has_threads() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "8\n").unwrap();
+        assert!(server_running_from(tmp.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn server_running_is_false_when_the_file_is_missing() {
+        assert!(!server_running_from("/nonexistent/pool_threads"));
     }
 }

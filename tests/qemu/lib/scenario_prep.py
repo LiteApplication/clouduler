@@ -52,6 +52,7 @@ def main():
         entry = {"sync_interval": drives_cfg.get(name, {}).get("sync_interval", "30s")}
         served_by = drives_cfg.get(name, {}).get("served_by")
         if served_by:
+            entry["mode"] = "served"
             entry["served_by"] = served_by
         drives_block[name] = entry
 

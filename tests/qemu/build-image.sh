@@ -91,7 +91,7 @@ unshare --user --map-root-user --mount -- "$APK" \
   -U --allow-untrusted --arch "$ALPINE_ARCH" \
   --root "$ROOTFS_DIR" --cache-dir "$APK_CACHE" --initdb \
   add alpine-base linux-virt docker docker-cli iptables ip6tables \
-      util-linux iproute2 curl jq coreutils gcompat nfs-utils \
+      util-linux iproute2 curl jq coreutils gcompat nfs-utils ethtool \
   || echo "build-image: apk reported non-fatal errors (likely setuid ownership under userns), continuing"
 
 # Alpine's setuid helpers land as mode 711, which their owner cannot read.

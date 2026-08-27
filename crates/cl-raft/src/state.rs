@@ -1092,7 +1092,16 @@ impl ClusterState {
     }
 
     /// The core scheduling invariant: an instance only lands on a node that is
-    /// taking work and implements every drive its volumes live on.
+    /// taking work and implements every *replicated* drive its volumes live
+    /// on. A served drive has one authoritative copy any node can reach over
+    /// the internal network (mounted per volume, on demand, once the
+    /// instance is actually placed), so it never narrows candidates this way
+    /// — mirrors the same carve-out `cl_sched::place::rejection` applies
+    /// when it picks a candidate in the first place; this is the second,
+    /// independent check every node's own state machine runs on the
+    /// resulting `PlaceInstance`/`MoveInstance` request, and the two have to
+    /// agree or a served-drive placement the scheduler chose would always be
+    /// rejected here.
     fn check_placement(&self, node: &str, drives: &BTreeSet<String>) -> Result<(), String> {
         let target = self
             .nodes
@@ -1104,12 +1113,40 @@ impl ClusterState {
         if self.unreachable.contains(node) {
             return Err(format!("node {node} is unreachable"));
         }
+        let served = self.served_drives();
         for drive in drives {
-            if !target.implements(drive) {
+            if !served.contains(drive) && !target.implements(drive) {
                 return Err(format!("node {node} does not implement drive {drive}"));
             }
         }
         Ok(())
+    }
+
+    /// Drive names whose mode is `served`, read from the replicated cluster
+    /// config's raw yaml with a minimal shape local to this crate rather
+    /// than `cl_config::ClusterConfig` (see `ClusterConfigEntry`'s doc
+    /// comment for why `cl-raft` does not depend on `cl-config` for this).
+    /// Empty if no config has been published yet or it fails to parse, same
+    /// fallback `cl_sched::run::served_drives` uses for the config this is
+    /// mirrored from.
+    fn served_drives(&self) -> BTreeSet<String> {
+        #[derive(Deserialize)]
+        struct Shape {
+            #[serde(default)]
+            drives: BTreeMap<String, DriveShape>,
+        }
+        #[derive(Deserialize, Default)]
+        struct DriveShape {
+            #[serde(default)]
+            mode: String,
+        }
+        let Some(entry) = &self.cluster_config else {
+            return BTreeSet::new();
+        };
+        let Ok(shape) = serde_yaml::from_str::<Shape>(&entry.yaml) else {
+            return BTreeSet::new();
+        };
+        shape.drives.into_iter().filter(|(_, d)| d.mode == "served").map(|(name, _)| name).collect()
     }
 
     /// Stacks referencing a config, so removing one in use is refused rather
@@ -1277,6 +1314,34 @@ mod tests {
             .error
             .unwrap()
             .contains("n2 does not implement drive bulk"));
+    }
+
+    /// A served drive has one authoritative copy any node can reach over the
+    /// internal network, so `check_placement` must not reject a node just
+    /// because it never declared a local directory for it — this is the
+    /// same carve-out `cl_sched::place::rejection` applies when picking a
+    /// candidate; the two have to agree, or the scheduler's own choice would
+    /// always be rejected here (this state machine's independent check).
+    #[test]
+    fn a_served_drive_does_not_require_the_node_to_implement_it() {
+        let served_config = Request::PutClusterConfig {
+            yaml: "drives:\n  bulk:\n    mode: served\n    served_by: [n1]\n".into(),
+            expect_generation: 0,
+        };
+
+        // n3 implements neither "fast" nor "bulk" (see `cluster()`), but
+        // "bulk" is now served, so only "fast" should still block it.
+        let mut state = cluster();
+        state.apply(&served_config);
+        assert!(assign(&mut state, "n3", &["bulk"]).is_ok());
+
+        let mut state = cluster();
+        state.apply(&served_config);
+        let rejected = assign(&mut state, "n3", &["fast"]);
+        assert!(rejected
+            .error
+            .unwrap()
+            .contains("n3 does not implement drive fast"));
     }
 
     #[test]

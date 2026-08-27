@@ -82,6 +82,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     setup_data_directory(&mut prompt, &config, &node_name)?;
     setup_drive_directories(&mut prompt, &config, &node_name)?;
     check_nfs_availability(&mut prompt, &config, &node_name)?;
+    check_ethtool_availability(&mut prompt)?;
     setup_secret_key(&mut prompt, &config, &node_name)?;
     setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
@@ -386,6 +387,29 @@ fn check_nfs_availability<R: BufRead, W: Write>(
             "warning: this cluster has a served drive, but this node ({node_name}) does not look ready to serve NFS: {e}. \
              Install and enable the kernel NFS server (nfs-kernel-server/nfs-utils) before it needs to serve or mount one"
         ))?;
+    }
+    // Any node might end up mounting a served drive it never declared
+    // itself (see `clouduler::drives`), so the client-side check applies
+    // just as broadly as the server-side one above.
+    if let Err(e) = cl_drive::client_available() {
+        prompt.say(&format!(
+            "warning: this cluster has a served drive, but this node ({node_name}) cannot mount one yet: {e}"
+        ))?;
+    }
+    Ok(())
+}
+
+/// Advisory, like `check_nfs_availability`: any node running a stack with
+/// its own network needs `ethtool` the moment a container lands on that
+/// network's overlay bridge (see `cl_net::vxlan::disable_tx_checksum_offload`),
+/// not just ones that happen to declare a drive — so this isn't gated on the
+/// cluster config the way the NFS check is.
+fn check_ethtool_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -> Result<()> {
+    if !cl_net::ethtool_available() {
+        prompt.say(
+            "warning: ethtool is not on PATH. Every container on a stack's own overlay network \
+             will silently drop real request/response traffic until it's installed",
+        )?;
     }
     Ok(())
 }

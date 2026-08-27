@@ -305,6 +305,22 @@ async fn build(
         }
 
         running.exports = ensure_serving(cfg, node, node_name);
+
+        let served_drive_names: Vec<String> = cfg
+            .drives
+            .iter()
+            .filter(|(name, drive)| {
+                drive.is_served() && node.implements(name) && drive.served_by.iter().any(|s| s == node_name)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !served_drive_names.is_empty() {
+            let watch_cluster = cluster.clone();
+            let watch_registry = registry.clone();
+            running.tasks.push(tokio::spawn(async move {
+                ensure_served_volume_directories(watch_cluster, watch_registry, served_drive_names).await;
+            }));
+        }
     }
 
     start_volume_mounts(cfg, node, node_name, &mut running, cluster)?;
@@ -361,12 +377,48 @@ fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(Pat
     exported
 }
 
+/// Create the on-disk directory for every volume this node knows about on a
+/// served drive it's a `served_by` candidate for.
+///
+/// Nothing else does this for a served drive. A replicated drive gets it for
+/// free: its container always runs on the same node that holds the data, so
+/// Docker itself creates a missing bind-mount source directory on container
+/// start. A served drive's container usually runs somewhere else entirely,
+/// mounting `server:/<volume>` over NFS — and that mount can only succeed if
+/// `<volume>` already exists under the export root, which nothing but the
+/// serving node itself is in a position to create. Run on every candidate,
+/// not just the active server, so a directory a failover promotes into
+/// service is already there instead of surfacing as a mount error the
+/// moment it takes over.
+async fn ensure_served_volume_directories(cluster: Arc<ClusterNode>, registry: Arc<DriveRegistry>, drives: Vec<String>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        let state = cluster.state().await;
+        for id in state.volumes.keys() {
+            if !drives.contains(&id.drive) {
+                continue;
+            }
+            let already_there = registry.volume_path(id).is_ok_and(|p| p.is_dir());
+            match registry.ensure_volume(id) {
+                Ok(_) if !already_there => info!(%id, "created served drive volume directory"),
+                Ok(_) => {}
+                Err(e) => warn!(%id, error = %e, "could not create a served drive volume's directory"),
+            }
+        }
+    }
+}
+
 /// One served drive's resolved `served_by` candidates, for deciding which
 /// node is the active server and where to reach it, without re-reading
-/// `cfg` on every convergence pass.
+/// `cfg` on every convergence pass. Each candidate's real local directory
+/// (`root`) travels with its address: an NFSv4 mount source is the server's
+/// *real* filesystem path (see `cl_drive::MountSpec::remote_root`), which a
+/// candidate declares independently and so can differ node to node even for
+/// the same drive.
 struct ServedDriveInfo {
     served_by: Vec<String>,
-    candidate_addrs: BTreeMap<String, SocketAddr>,
+    candidates: BTreeMap<String, (SocketAddr, PathBuf)>,
 }
 
 /// Sets up dynamic, per-volume NFS mounting for every served drive in the
@@ -393,7 +445,7 @@ fn start_volume_mounts(
         if !drive.is_served() || drive.served_by.is_empty() {
             continue;
         }
-        let mut candidate_addrs = BTreeMap::new();
+        let mut candidates = BTreeMap::new();
         for server_name in &drive.served_by {
             let Some(server) = cfg.node(server_name) else {
                 warn!(drive = %name, server = %server_name, "drive is served by a node that is not in the config");
@@ -403,13 +455,17 @@ fn start_volume_mounts(
                 warn!(drive = %name, server = %server_name, "the serving node has no internal address");
                 continue;
             };
-            candidate_addrs.insert(server_name.clone(), SocketAddr::new(server_ip, cl_drive::NFS_PORT));
+            let Some(root) = server.drives.get(name) else {
+                warn!(drive = %name, server = %server_name, "serving candidate does not declare a local path for this drive");
+                continue;
+            };
+            candidates.insert(server_name.clone(), (SocketAddr::new(server_ip, cl_drive::NFS_PORT), root.clone()));
         }
-        if candidate_addrs.is_empty() {
+        if candidates.is_empty() {
             warn!(drive = %name, "none of this drive's serving candidates could be resolved");
             continue;
         }
-        served_drives.insert(name.clone(), ServedDriveInfo { served_by: drive.served_by.clone(), candidate_addrs });
+        served_drives.insert(name.clone(), ServedDriveInfo { served_by: drive.served_by.clone(), candidates });
     }
 
     if served_drives.is_empty() {
@@ -425,6 +481,18 @@ fn start_volume_mounts(
     // `cl_sched::run::volumes_ready`) until they land somewhere that can
     // mount it.
     if let Err(e) = cl_drive::mount_permission() {
+        warn!(
+            error = %e,
+            "cannot mount served drive volumes on this node, containers needing one will not run here"
+        );
+        return Ok(());
+    }
+    // `mount(2)` for fstype "nfs4" needs the kernel's nfsv4 client module
+    // loaded first — bypassing the `mount.nfs4` helper (see `served::mount`)
+    // means bypassing the autoload it would normally trigger too, so a host
+    // that never `modprobe nfsv4`d fails its very first mount outright.
+    // Checked once here rather than left to surface per volume.
+    if let Err(e) = cl_drive::client_available() {
         warn!(
             error = %e,
             "cannot mount served drive volumes on this node, containers needing one will not run here"
@@ -498,7 +566,7 @@ async fn watch_volume_mounts(
                     // directly, no NFS mount involved.
                     continue;
                 }
-                let Some(&server) = info.candidate_addrs.get(active) else {
+                let Some((server, remote_root)) = info.candidates.get(active) else {
                     continue;
                 };
                 let mountpoint = data_dir.join("volume-mounts").join(drive).join(volume);
@@ -506,7 +574,8 @@ async fn watch_volume_mounts(
                     drive: drive.clone(),
                     volume: Some(volume.clone()),
                     mountpoint,
-                    server,
+                    server: *server,
+                    remote_root: remote_root.clone(),
                 };
                 needed.insert(spec.key(), spec);
             }
@@ -521,8 +590,9 @@ async fn watch_volume_mounts(
         }
         for (key, spec) in needed {
             if manager.is_mounted(&key) {
-                if let Err(e) = manager.retarget(&key, spec.server) {
-                    warn!(%key, server = %spec.server, error = %e, "could not fail a served drive mount over to its new server");
+                let server = spec.server;
+                if let Err(e) = manager.retarget(&key, spec) {
+                    warn!(%key, %server, error = %e, "could not fail a served drive mount over to its new server");
                 }
             } else {
                 info!(drive = %spec.drive, volume = ?spec.volume, server = %spec.server, "mounting served drive volume");

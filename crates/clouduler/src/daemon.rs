@@ -54,6 +54,20 @@ pub async fn run(
         "starting"
     );
 
+    // Every overlay bridge needs `ethtool -K <bridge> tx off` the moment a
+    // container lands on it (see `cl_net::vxlan::disable_tx_checksum_offload`)
+    // or that container's real traffic gets silently dropped by a checksum
+    // the host never actually fills in - a failure mode with no error to
+    // grep for. Checked once, loudly, at startup instead of only being
+    // discoverable as "why do my requests to this backend keep timing out".
+    if !cl_net::ethtool_available() {
+        warn!(
+            "ethtool is not on PATH - overlay networks will come up but every container on one \
+             will silently drop real request/response traffic; install ethtool before running \
+             any stack with its own network"
+        );
+    }
+
     bail_if_removed(&cfg, node, &node_name, &data_dir).await?;
 
     // `ClusterKey` is deliberately not `Clone` (see its doc comment), so it is

@@ -43,6 +43,14 @@ pub struct MountSpec {
     pub volume: Option<String>,
     pub mountpoint: PathBuf,
     pub server: SocketAddr,
+    /// The drive's real directory on `server`, as that node declared it
+    /// (`Node.drives`). Needed because an NFSv4 mount source is a path in
+    /// the server's *real* filesystem, not one relative to the export: with
+    /// no `fsid=0` root export declared, the kernel's pseudo-filesystem
+    /// mirrors the server's real absolute path down to each export rather
+    /// than starting a fresh namespace at it, so mounting a volume means
+    /// giving the server's real path to it, not just `/<volume>`.
+    pub remote_root: PathBuf,
 }
 
 impl MountSpec {
@@ -56,12 +64,13 @@ impl MountSpec {
         }
     }
 
-    /// The path portion of the NFS source spec (`server:/path`), relative to
-    /// the drive's exported root.
+    /// The path portion of the NFS source spec (`server:/path`): the
+    /// server's real path to the drive root, or to the volume subdirectory
+    /// within it.
     fn export_path(&self) -> String {
         match &self.volume {
-            Some(volume) => format!("/{volume}"),
-            None => "/".to_string(),
+            Some(volume) => self.remote_root.join(volume).display().to_string(),
+            None => self.remote_root.display().to_string(),
         }
     }
 }
@@ -79,14 +88,49 @@ pub fn mount_permission() -> Result<()> {
     }
 }
 
+/// Whether this host's kernel can mount NFSv4 at all: the client module is
+/// either built in or already loaded.
+///
+/// This daemon calls `mount(2)` directly rather than going through the
+/// `mount.nfs4` helper, which on a normal system is what makes the kernel
+/// autoload the module on first use (`request_module()`). Bypassing that
+/// helper means bypassing the autoload too — on a host where `nfsv4` isn't
+/// already loaded, the very first mount just fails outright instead of
+/// pulling the module in on demand, so this needs to be checked and loaded
+/// (`modprobe nfsv4`) up front rather than discovered as a mount error.
+pub fn client_available() -> Result<()> {
+    client_available_from("/proc/filesystems", "/proc/modules")
+}
+
+fn client_available_from(filesystems_path: &str, modules_path: &str) -> Result<()> {
+    let registered = std::fs::read_to_string(filesystems_path)
+        .map(|s| s.lines().any(|line| line.split_whitespace().last() == Some("nfs4")))
+        .unwrap_or(false);
+    let loaded = std::fs::read_to_string(modules_path)
+        .map(|s| s.lines().any(|line| line.split_whitespace().next() == Some("nfsv4")))
+        .unwrap_or(false);
+    if registered || loaded {
+        return Ok(());
+    }
+    Err(DriveError::Config(
+        "the kernel's NFSv4 client module (nfsv4) is not loaded — run `modprobe nfsv4` before this \
+         node can mount a served drive"
+            .into(),
+    ))
+}
+
 fn cstring(s: &str) -> Result<CString> {
     CString::new(s).map_err(|_| DriveError::Config(format!("path has an embedded NUL: {s:?}")))
 }
 
 fn mount_options(server_ip: std::net::IpAddr, port: u16) -> String {
+    // `noatime` is deliberately not here: it's a VFS-level mount flag
+    // (`MS_NOATIME`), not an NFS filesystem-specific option, and the kernel
+    // rejects it with EINVAL if it shows up in this text blob — it belongs
+    // in `do_mount`'s `flags` argument instead.
     format!(
         "vers=4.2,proto=tcp,port={port},addr={server_ip},soft,timeo={TIMEO_DECISECONDS},\
-         retrans={RETRANS},noatime,nolock"
+         retrans={RETRANS},nolock"
     )
 }
 
@@ -103,14 +147,16 @@ fn do_mount(spec: &MountSpec) -> Result<()> {
     let c_data = cstring(&data)?;
 
     // Safety: every pointer is a valid NUL-terminated `CString` kept alive
-    // for the duration of this call. `flags` carries no `MS_*` bits of its
-    // own; NFSv4 takes everything it needs through the text `data` string.
+    // for the duration of this call. `MS_NOATIME` is the one VFS-level flag
+    // this mount wants; everything NFS-specific goes through the text
+    // `data` string instead (and must — the kernel's NFS option parser
+    // rejects a VFS-level option like `noatime` showing up there).
     let rc = unsafe {
         libc::mount(
             c_source.as_ptr(),
             c_target.as_ptr(),
             c_fstype.as_ptr(),
-            0,
+            libc::MS_NOATIME,
             c_data.as_ptr().cast::<libc::c_void>(),
         )
     };
@@ -206,6 +252,7 @@ impl MountManager {
 
     pub fn mount_one(&self, spec: MountSpec) -> Result<()> {
         mount_permission()?;
+        client_available()?;
         if is_mount_point(&spec.mountpoint) {
             // A stale mount from a previous process (daemon restart or
             // crash without a clean unmount) is squatting on this
@@ -256,21 +303,26 @@ impl MountManager {
 
     /// Fail a mount over to a new active server. Unlike the old FUSE client
     /// (whose server address was a shared `Arc<Mutex<_>>` read on the next
-    /// RPC), a kernel NFS mount bakes its server address in at `mount(2)`
-    /// time — there is no live retarget, so this unmounts and remounts
-    /// against the new address instead. A no-op (`Ok(false)`) if `key` isn't
-    /// mounted, or is already pointed at `addr`.
-    pub fn retarget(&self, key: &str, addr: SocketAddr) -> Result<bool> {
-        let spec = {
+    /// RPC), a kernel NFS mount bakes its server address (and its real
+    /// remote path — see `MountSpec::remote_root`) in at `mount(2)` time —
+    /// there is no live retarget, so this unmounts and remounts against
+    /// `new_spec` instead. `new_spec` carries the failed-over server's own
+    /// address and drive root, which can differ node to node. A no-op
+    /// (`Ok(false)`) if `key` isn't mounted, or is already pointed at the
+    /// same server and root.
+    pub fn retarget(&self, key: &str, new_spec: MountSpec) -> Result<bool> {
+        {
             let mounts = self.mounts.lock().expect("mount table lock");
             match mounts.get(key) {
-                Some(active) if active.spec.server == addr => return Ok(false),
-                Some(active) => active.spec.clone(),
+                Some(active) if active.spec.server == new_spec.server && active.spec.remote_root == new_spec.remote_root => {
+                    return Ok(false);
+                }
+                Some(_) => {}
                 None => return Ok(false),
             }
-        };
+        }
         self.unmount(key)?;
-        self.mount_one(MountSpec { server: addr, ..spec })?;
+        self.mount_one(new_spec)?;
         Ok(true)
     }
 
@@ -319,34 +371,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn client_available_when_nfs4_is_a_registered_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filesystems = tmp.path().join("filesystems");
+        let modules = tmp.path().join("modules");
+        std::fs::write(&filesystems, "nodev\tsysfs\nnodev\tnfs4\n").unwrap();
+        std::fs::write(&modules, "").unwrap();
+        assert!(client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn client_available_when_nfsv4_module_is_loaded_but_not_yet_registered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filesystems = tmp.path().join("filesystems");
+        let modules = tmp.path().join("modules");
+        std::fs::write(&filesystems, "nodev\tsysfs\n").unwrap();
+        std::fs::write(&modules, "nfsv4 000000 0 - Live 0x0000000000000000\n").unwrap();
+        assert!(client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn client_unavailable_when_neither_shows_nfs4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filesystems = tmp.path().join("filesystems");
+        let modules = tmp.path().join("modules");
+        std::fs::write(&filesystems, "nodev\tsysfs\n").unwrap();
+        std::fs::write(&modules, "ext4 000000 0 - Live 0x0000000000000000\n").unwrap();
+        let err = client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("nfsv4"));
+    }
+
+    #[test]
     fn is_mounted_is_false_for_an_unknown_drive() {
         let manager = MountManager::new();
         assert!(!manager.is_mounted("fast"));
         assert!(manager.unmount_all().is_ok());
     }
 
+    fn test_spec() -> MountSpec {
+        MountSpec {
+            drive: "fast".into(),
+            volume: None,
+            mountpoint: PathBuf::new(),
+            server: "127.0.0.1:2049".parse().unwrap(),
+            remote_root: PathBuf::from("/srv/clouduler/fast"),
+        }
+    }
+
     #[test]
     fn retarget_is_a_no_op_for_an_unmounted_drive() {
         let manager = MountManager::new();
-        assert!(!manager.retarget("fast", "127.0.0.1:9000".parse().unwrap()).unwrap());
+        assert!(!manager.retarget("fast", test_spec()).unwrap());
     }
 
     #[test]
     fn mount_spec_key_distinguishes_whole_drive_from_a_volume_of_it() {
-        let base =
-            MountSpec { drive: "fast".into(), volume: None, mountpoint: PathBuf::new(), server: "127.0.0.1:2049".parse().unwrap() };
+        let base = test_spec();
         assert_eq!(base.key(), "fast");
         let vol = MountSpec { volume: Some("data".into()), ..base };
         assert_eq!(vol.key(), "fast/data");
     }
 
     #[test]
-    fn export_path_is_root_for_a_whole_drive_mount_and_the_volume_subpath_otherwise() {
-        let base =
-            MountSpec { drive: "fast".into(), volume: None, mountpoint: PathBuf::new(), server: "127.0.0.1:2049".parse().unwrap() };
-        assert_eq!(base.export_path(), "/");
+    fn export_path_is_the_remote_root_or_a_volume_subpath_of_it() {
+        let base = test_spec();
+        assert_eq!(base.export_path(), "/srv/clouduler/fast");
         let vol = MountSpec { volume: Some("data".into()), ..base };
-        assert_eq!(vol.export_path(), "/data");
+        assert_eq!(vol.export_path(), "/srv/clouduler/fast/data");
     }
 
     #[test]

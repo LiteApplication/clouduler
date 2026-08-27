@@ -19,4 +19,4 @@ pub mod wireguard;
 
 pub use error::{NetError, Result};
 pub use ipam::Allocations;
-pub use vxlan::{Overlay, Underlay};
+pub use vxlan::{ethtool_available, Overlay, Underlay};

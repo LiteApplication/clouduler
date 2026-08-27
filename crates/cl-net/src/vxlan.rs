@@ -258,6 +258,7 @@ impl Overlay {
         self.ensure_mtu(name, index, mtu).await?;
         self.ensure_address(name, index, gateway, prefix_len).await?;
         self.ensure_up(name, index).await?;
+        disable_tx_checksum_offload(name)?;
         Ok(index)
     }
 
@@ -442,6 +443,53 @@ impl Overlay {
             }
         }
         Ok(())
+    }
+}
+
+/// Turn off TX checksum offload (and, as a dependency, TSO) on a
+/// clouduler-managed bridge. Some kernel/NIC-driver combinations miscompute
+/// the checksum for traffic the host itself originates onto a software
+/// bridge it also has an address on: the kernel hands the packet out
+/// believing hardware will fill in the checksum, no hardware ever does, and
+/// the receiving container's stack silently drops the corrupt segment.
+/// Symptom: the TCP handshake completes fine (small control packets, whose
+/// checksum is often trivially valid anyway) but the first real request or
+/// response payload vanishes, so every reverse-proxy call to that backend
+/// times out or resets even though the backend itself is healthy. Confirmed
+/// live: `ethtool -K <bridge> tx off` turned deterministic failures into
+/// deterministic successes with zero other change.
+/// Whether `ethtool` is on `PATH` at all. Checked once at daemon startup and
+/// by `clouduler init` rather than left to surface only when the first
+/// overlay bridge actually needs `disable_tx_checksum_offload` — a missing
+/// binary there doesn't fail loudly on its own, it just leaves that bridge's
+/// containers silently dropping every real request/response payload (see
+/// `disable_tx_checksum_offload`'s doc comment), which is a much harder
+/// symptom to trace back to "install ethtool" than a clear startup warning.
+pub fn ethtool_available() -> bool {
+    std::process::Command::new("ethtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn disable_tx_checksum_offload(name: &str) -> Result<()> {
+    let output = std::process::Command::new("ethtool")
+        .args(["-K", name, "tx", "off"])
+        .output()
+        .map_err(|e| NetError::Io {
+            context: format!("ethtool -K {name} tx off"),
+            source: e,
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(NetError::Io {
+            context: format!(
+                "ethtool -K {name} tx off: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            source: std::io::Error::other("ethtool exited non-zero"),
+        })
     }
 }
 
