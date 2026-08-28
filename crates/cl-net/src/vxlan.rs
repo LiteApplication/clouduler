@@ -86,6 +86,36 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// perturb the input with a counter and rehash until a free one is found.
 /// With 2^24 VNIs and a handful of stack networks this never happens in
 /// practice, but the reconcile loop must still behave when it does.
+/// The MAC every node gives this network's bridge.
+///
+/// The bridge is an *anycast* gateway: every node holds the same address
+/// (`10.244.x.1`) on its own bridge, and a container talks to whichever one is
+/// local to it. But all those bridges sit in one flooded VXLAN L2 domain, so a
+/// container's ARP request for the gateway reaches every node and any of them
+/// may answer first. With a per-node MAC, the container caches whichever MAC
+/// won the race — and if that is a remote node's bridge, every packet it sends
+/// to its "gateway" is tunnelled to a machine that holds no socket and no
+/// conntrack entry for the flow, which promptly resets it. The result is a
+/// container whose connections are refused for as long as the ARP entry lives,
+/// re-rolled each time it is re-resolved: intermittent, per-container, and
+/// invisible to every health check that talks to the container directly.
+///
+/// Giving every node the same MAC makes the race harmless — whoever answers,
+/// the answer names a MAC the container's own local bridge owns, so the frame
+/// is consumed locally and never leaves the node.
+///
+/// Derived from the name so every node computes it without coordinating, the
+/// same way `allocate_vni` does. `0x02` marks it locally administered and
+/// keeps the multicast bit clear.
+///
+/// Setting it explicitly also pins it: a bridge left to itself adopts the
+/// lowest MAC among its ports, so it silently changes as containers come and
+/// go.
+pub fn gateway_mac(name: &str) -> [u8; 6] {
+    let hash = fnv1a(name.as_bytes()).to_be_bytes();
+    [0x02, hash[1], hash[2], hash[3], hash[4], hash[5]]
+}
+
 pub fn allocate_vni(name: &str, taken: &BTreeSet<u32>) -> u32 {
     const VNI_SPACE: u64 = 1 << 24;
     let mut attempt = 0u32;
@@ -256,6 +286,9 @@ impl Overlay {
         };
 
         self.ensure_mtu(name, index, mtu).await?;
+        // Before the address: the gateway is only safely anycast once every
+        // node answers ARP for it with the same MAC. See `gateway_mac`.
+        self.ensure_mac(name, index, gateway_mac(name)).await?;
         self.ensure_address(name, index, gateway, prefix_len).await?;
         self.ensure_up(name, index).await?;
         disable_tx_checksum_offload(name)?;
@@ -306,6 +339,32 @@ impl Overlay {
         self.ensure_controller(&format!("{name} (enslave)"), index, bridge_index).await?;
         self.ensure_up(&format!("{name} (up)"), index).await?;
         Ok(index)
+    }
+
+    /// Pin an already-existing bridge's MAC to the shared anycast value, if
+    /// this node has that bridge at all. A no-op when it does not.
+    ///
+    /// `ensure_bridge` covers every network this node currently runs something
+    /// on. This covers the ones it merely still *has*: when the last instance
+    /// on a network moves to another node the bridge is left behind (it is only
+    /// swept once the stack is gone cluster-wide), and a leftover bridge still
+    /// holds the anycast gateway address on the same flooded segment — so it
+    /// still answers ARP for it, and with the wrong MAC it still hijacks
+    /// containers on other nodes. See `gateway_mac`.
+    pub async fn ensure_existing_bridge_mac(&self, name: &str) -> Result<()> {
+        let Some(index) = self.find_link(name).await? else {
+            return Ok(());
+        };
+        self.ensure_mac(name, index, gateway_mac(name)).await
+    }
+
+    async fn ensure_mac(&self, name: &str, index: u32, mac: [u8; 6]) -> Result<()> {
+        self.handle
+            .link()
+            .set(LinkUnspec::new_with_index(index).address(mac.to_vec()).build())
+            .execute()
+            .await
+            .map_err(|e| NetError::from_netlink(format!("{name} (mac)"), e))
     }
 
     async fn ensure_mtu(&self, name: &str, index: u32, mtu: u16) -> Result<()> {
@@ -577,6 +636,27 @@ mod tests {
     fn names_are_deterministic() {
         assert_eq!(bridge_name("gitlab"), bridge_name("gitlab"));
         assert_eq!(vxlan_name("monitoring"), vxlan_name("monitoring"));
+    }
+
+    /// The whole point: every node has to arrive at the same MAC from the name
+    /// alone. If two nodes disagree, a container can ARP its anycast gateway
+    /// and cache a *remote* node's bridge, which then resets every connection
+    /// it makes.
+    #[test]
+    fn the_gateway_mac_is_the_same_on_every_node() {
+        assert_eq!(gateway_mac("clbr-gitlab"), gateway_mac("clbr-gitlab"));
+        assert_ne!(gateway_mac("clbr-gitlab"), gateway_mac("clbr-monitoring"));
+    }
+
+    /// Locally administered (bit 1 of the first octet) and unicast (bit 0
+    /// clear). A multicast bit here would make the kernel reject the address.
+    #[test]
+    fn the_gateway_mac_is_locally_administered_and_unicast() {
+        for name in ["clbr-gitlab", "clbr-a", "", "clbr-immichf731"] {
+            let mac = gateway_mac(name);
+            assert_eq!(mac[0] & 0x01, 0, "{name}: multicast bit set");
+            assert_eq!(mac[0] & 0x02, 0x02, "{name}: not locally administered");
+        }
     }
 
     #[test]

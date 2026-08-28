@@ -105,6 +105,7 @@ export function Layout({ children }: { children: ReactNode }) {
       },
       { to: '/stacks', label: 'Stacks', short: 'Stacks', icon: 'stacks', tab: true },
       { to: '/instances', label: 'Instances', short: 'Instances', icon: 'instances', tab: true },
+      { to: '/updates', label: 'Updates', short: 'Updates', icon: 'download' },
       { to: '/configs-secrets', label: 'Configs & Secrets', short: 'Secrets', icon: 'secrets' },
       { to: '/drives', label: 'Drives & Volumes', short: 'Drives', icon: 'drives' },
       CONFIGURATION_LINK,

@@ -135,6 +135,32 @@ fn rejection(
             return Some(format!("{} does not implement drive {drive}", node.name));
         }
     }
+    // Implementing a replicated drive says the node has the directory, not
+    // that it has this volume's data. Every node holds its own copy and only
+    // one of them is authoritative, so being allowed to run here is a question
+    // about the copy, not about the drive.
+    //
+    // The bar is holding a copy at the volume's current generation. Anything
+    // less is a node that has never received this volume (its mount is an
+    // empty directory, and an instance started on it comes up as if its data
+    // had never existed) or one whose copy is behind (it missed the syncs
+    // since the last handover). Either way `run::volume_requests` would then
+    // make *that* copy the primary, and the sync scheduler would push it over
+    // the good one everywhere else. The primary itself always clears this bar,
+    // so there is always a candidate as long as it is up.
+    for volume in &desired.volumes {
+        if served_drives.contains(&volume.drive) {
+            continue;
+        }
+        // No record yet means the volume is about to be created wherever this
+        // lands (`run::volume_requests`), so there is nothing to disagree with.
+        let Some(record) = state.volumes.get(volume) else {
+            continue;
+        };
+        if record.replicas.get(&node.name) != Some(&record.generation) {
+            return Some(format!("{} holds no current copy of volume {volume}", node.name));
+        }
+    }
     if let Some(net) = &desired.egress_network {
         // A nat network declares no per-node interface at all: every node
         // implements it the same way, so it never narrows candidates the
@@ -190,6 +216,16 @@ pub struct PlaceOutcome {
 }
 
 /// Nodes that could run this instance, with the reasons the others could not.
+///
+/// Note what this deliberately does *not* do: prefer the node currently
+/// holding a replicated volume's primary. Co-locating the instance with the
+/// authoritative copy is required (otherwise the sync overwrites the running
+/// container's data), but there are two ways to get there and dragging the
+/// instance to the primary is the expensive one - it means stopping a healthy
+/// service and restarting it on a copy that is at best equally fresh. Moving
+/// the *primary* to the instance costs one raft entry and no downtime, so that
+/// is what `run::volume_requests` does. Placement's only job here is to refuse
+/// nodes whose copy is not current, which is what keeps that promotion safe.
 pub fn candidates<'a>(
     state: &'a ClusterState,
     desired: &Desired,
@@ -210,6 +246,7 @@ pub fn candidates<'a>(
             Some(reason) => rejected.push(reason),
         }
     }
+
     Ok((eligible, rejected))
 }
 
@@ -364,6 +401,7 @@ pub fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cl_raft::ids::VolumeId;
     use cl_raft::state::{Availability, Request};
     use std::path::PathBuf;
 
@@ -467,6 +505,7 @@ mod tests {
             id: InstanceId::new("site", service, index),
             image: "nginx".into(),
             drives: BTreeSet::new(),
+            volumes: BTreeSet::new(),
             constraints: Vec::new(),
             pinned_node: None,
             global: false,
@@ -512,6 +551,103 @@ mod tests {
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
         assert!(rejected.iter().any(|r| r.contains("n2 does not implement drive bulk")));
+    }
+
+    /// `fast/data`, primary n1, with n2 holding a synced replica.
+    fn with_replicated_volume(replicated_to: Option<&str>) -> (ClusterState, Desired) {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        if let Some(node) = replicated_to {
+            state.apply(&Request::SetVolumeReplica {
+                id: id.clone(),
+                node: node.into(),
+                generation: 1,
+            });
+        }
+
+        let mut item = desired("db", 0);
+        item.drives = ["fast".to_string()].into();
+        item.volumes = [id].into();
+        (state, item)
+    }
+
+    /// A node whose copy is current can run the instance: the primary follows
+    /// it afterwards (`run::volume_requests`), which is far cheaper than
+    /// stopping a healthy service to move it onto the primary instead.
+    #[test]
+    fn a_node_holding_a_current_copy_is_a_candidate() {
+        let (state, item) = with_replicated_volume(Some("n2"));
+
+        let (eligible, _) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert_eq!(eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["n1", "n2"]);
+    }
+
+    /// And a healthy placement on such a node is left alone rather than
+    /// dragged back onto the primary — moving the primary is the cheap half
+    /// of restoring the invariant, moving the container is not.
+    #[test]
+    fn an_instance_running_off_its_primary_is_not_moved_back() {
+        let (mut state, item) = with_replicated_volume(Some("n2"));
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "db", 0),
+            node: "n2".into(),
+            drives: ["fast".to_string()].into(),
+        });
+
+        let outcome = place(&state, &[item], &no_served(), &no_everywhere());
+        assert_eq!(placed(&outcome.decisions, "db", 0), None, "should stay on n2");
+    }
+
+    /// Running on a node that never received a copy is not failover: the
+    /// volume comes up empty, and that empty copy then becomes the primary and
+    /// is synced over everyone else's.
+    #[test]
+    fn a_node_holding_no_copy_is_never_a_candidate() {
+        let (mut state, item) = with_replicated_volume(None);
+        state.unreachable.insert("n1".into());
+
+        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert!(eligible.is_empty(), "eligible: {:?}", eligible.iter().map(|n| &n.name).collect::<Vec<_>>());
+        assert!(
+            rejected.iter().any(|r| r.contains("n2 holds no current copy of volume fast/data")),
+            "rejected: {rejected:?}"
+        );
+    }
+
+    /// A copy that has fallen behind is no better than no copy: it is missing
+    /// every write since the last handover, and promoting it would sync those
+    /// away everywhere else.
+    #[test]
+    fn a_node_whose_copy_is_behind_is_never_a_candidate() {
+        let (mut state, item) = with_replicated_volume(Some("n2"));
+        // A handover bumps the generation; n2 has not caught up with it yet.
+        state.apply(&Request::TouchVolume {
+            id: VolumeId::new("fast", "data"),
+            primary: "n1".into(),
+        });
+
+        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert_eq!(eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["n1"]);
+        assert!(
+            rejected.iter().any(|r| r.contains("n2 holds no current copy of volume fast/data")),
+            "rejected: {rejected:?}"
+        );
+    }
+
+    /// A served drive's volumes have one copy the whole cluster reaches over
+    /// the network, so its primary says where the data is served from, not
+    /// where the instance has to run.
+    #[test]
+    fn a_served_volumes_primary_does_not_narrow_placement() {
+        let (state, item) = with_replicated_volume(None);
+
+        let served = ["fast".to_string()].into();
+        let (eligible, _) = candidates(&state, &item, &served, &no_everywhere()).expect("candidates");
+        assert!(eligible.iter().any(|n| n.name == "n2"), "n2 should still be eligible");
     }
 
     /// A served drive has one authoritative copy any node can reach over the

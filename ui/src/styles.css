@@ -1641,3 +1641,36 @@ kbd {
     transform: none;
   }
 }
+
+/* Modal dialog, used by the registry accounts panel. Fixed rather than
+   absolute so it stays put while the page behind it scrolls, and capped in
+   height so a long account list scrolls inside the dialog instead of running
+   off the viewport. */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgb(0 0 0 / 0.5);
+}
+
+.dialog {
+  width: min(560px, 100%);
+  max-height: min(80vh, 100%);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  background: var(--surface);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.35);
+}
+
+.dialog .section-head {
+  margin-top: 0;
+}

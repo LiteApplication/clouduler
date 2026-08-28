@@ -1653,6 +1653,10 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("selfUpdateRepo", "/api/self-update/repo"),
         ("selfUpdateRun", "/api/self-update/run"),
         ("drives", "/api/drives"),
+        // Covered even though it is an array, unlike stacks/instances/certs
+        // below: the harness assigns `web.app.0` above, so there is a real
+        // item to prove the row shape against.
+        ("updates", "/api/updates"),
     ] {
         let resp = h
             .router
@@ -1709,4 +1713,89 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
          typechecks against:\n    UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes\n\
          and run the ui tests, which will fail if a TypeScript interface no longer matches."
     );
+}
+
+/// Every assignment gets a row, whether or not its node could say anything
+/// about it. A missing row means an instance silently absent from the Updates
+/// view, which is worse than one reading "unknown".
+#[tokio::test]
+async fn the_updates_view_lists_every_assignment() {
+    let h = harness().await;
+    h.state
+        .cluster
+        .submit(cl_raft::Request::Assign {
+            instance: "blog.web.0".parse().unwrap(),
+            node: "n0".into(),
+            drives: Default::default(),
+        })
+        .await
+        .expect("assign");
+
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/updates")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let row = &rows[0];
+    assert_eq!(row["id"], "blog.web.0");
+    assert_eq!(row["stack"], "blog");
+    assert_eq!(row["node"], "n0");
+    // Nothing is running here, so nothing is known — and an unknown digest
+    // must never be reported as an available update, or "update all" would
+    // churn every container in the cluster forever.
+    assert_eq!(row["update_available"], false);
+    assert_eq!(row["pin_drift"], false);
+}
+
+/// A registry login is an ordinary sealed secret under a reserved name, so
+/// the generic secret listing has to hide it exactly like the Cloudflare
+/// token — otherwise it shows up as a mystery entry an operator can delete
+/// out from under every pull in the cluster.
+#[tokio::test]
+async fn registry_logins_do_not_show_up_among_the_users_secrets() {
+    let h = harness().await;
+    let name = cl_sched::registries::secret_name("docker.io");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::PutSecret {
+            name: name.clone(),
+            sealed: "AAAA".into(),
+            key_fingerprint: "test".into(),
+            owner: None,
+        })
+        .await
+        .expect("store");
+
+    let resp = h
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/secrets")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let names: Vec<&str> = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(!names.contains(&name.as_str()), "{name} leaked into {names:?}");
 }

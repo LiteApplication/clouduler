@@ -17,6 +17,7 @@ import { ConfigDraftProvider } from './views/config/draft';
 import { Certificates } from './views/Certificates';
 import { Redirects } from './views/Redirects';
 import { SelfUpdate } from './views/SelfUpdate';
+import { Updates } from './views/Updates';
 
 export function App() {
   const { identity, loading } = useAuth();
@@ -42,6 +43,7 @@ export function App() {
             <Route path="/stacks/:name" element={<StackDetail />} />
             <Route path="/instances" element={<Instances />} />
             <Route path="/instances/:id" element={<InstanceDetail />} />
+            <Route path="/updates" element={<Updates />} />
             <Route path="/configs-secrets" element={<ConfigsSecrets />} />
             <Route path="/drives" element={<Drives />} />
             <Route path="/configuration/*" element={<Configuration />} />

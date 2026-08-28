@@ -34,6 +34,27 @@ use crate::transport::{self, Message};
 /// nothing to diff against and are always sent whole.
 const WHOLE_FILE_THRESHOLD: u64 = 8 * 1024;
 
+/// Above this size a changed file is streamed whole instead of diffed.
+///
+/// The delta path is O(filesize) in *resident memory* on both ends, and
+/// nothing else in this protocol is. The receiver's `Message::Delta` handler
+/// holds the base file and the reconstructed output at the same time —
+/// `fast_rsync::apply` writes into a `Vec`, it cannot stream — so applying a
+/// delta costs `2 x filesize` plus the delta itself; the sender's
+/// `send_delta` holds another full copy to diff against. With multi-gigabyte
+/// files in a volume (a database relation, an ONNX model, a stray core dump)
+/// that is several gigabytes for one file, and `transport::serve` accepts
+/// every peer concurrently, so it multiplies by the number of nodes pushing.
+/// On an 8GB node that is an OOM kill, which looks from the sender like a
+/// bare "Connection reset by peer".
+///
+/// Past this size the `WholeFileBegin`/`WholeFileChunk`/`WholeFileEnd` path
+/// is used instead: it streams in `WHOLE_FILE_CHUNK` pieces and its peak
+/// memory is that chunk, whatever the file's size. The cost is bandwidth —
+/// a big file that changed is resent in full rather than diffed — which is
+/// the right trade against an unbounded allocation that takes the node down.
+const MAX_DELTA_FILE: u64 = 256 * 1024 * 1024;
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What one sync did, for reporting and tests.
@@ -94,6 +115,24 @@ fn transfer_err(e: std::io::Error) -> DriveError {
     DriveError::Transfer { message: e.to_string() }
 }
 
+/// Run one piece of filesystem or hashing work on the blocking pool.
+///
+/// The protocol chatter here is genuinely async, but the work between the
+/// messages is not: reading a multi-gigabyte database file, blake3 hashing it,
+/// building an rsync signature index, computing a delta. Left inline in these
+/// `async fn`s it holds a tokio worker for the duration, which starves
+/// everything else this process runs — including its raft heartbeats. See
+/// `scan::scan_off_runtime` for what that looks like from the outside.
+pub(crate) async fn off_runtime<T, F>(what: &'static str, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| DriveError::Transfer { message: format!("{what} did not run: {e}") })?
+}
+
 /// A node that is down rather than merely refusing gives no RST, so a plain
 /// `TcpStream::connect` can sit for the OS's own connect timeout — minutes,
 /// not seconds. A sync loop over several targets (the background scheduler,
@@ -127,10 +166,21 @@ impl DeltaEngine {
             None => return Err(DriveError::Transfer { message: "peer closed before ready".into() }),
         };
 
-        let local = scan::scan(src, false)?;
+        let local = scan::scan_off_runtime(src.to_path_buf(), false).await?;
         let diff = local.diff(&remote);
 
         let mut stats = SyncStats { engine: self.name().to_string(), ..Default::default() };
+
+        // Directories first, parents before children, before any file is
+        // written into them. Empty directories exist nowhere else in this
+        // protocol — `create_dir_all` on the way to a file only ever produces
+        // the ones that happen to contain something.
+        for path in &diff.added_dirs {
+            let mode = local.dirs[path];
+            transport::send(&mut conn, &Message::MakeDir { path: path.clone(), mode })
+                .await
+                .map_err(transfer_err)?;
+        }
 
         // Rename detection: hash local "added" candidates directly, and ask
         // the peer for the hash of each "removed" candidate (it still has
@@ -140,14 +190,23 @@ impl DeltaEngine {
         let mut renamed_to = std::collections::HashSet::new();
 
         if !removed.is_empty() {
-            let mut removed_hashes: HashMap<[u8; 32], String> = HashMap::new();
+            // One hash can belong to many paths, so this maps to a *list* and
+            // each match pops one. Content equality is not identity: a
+            // database directory routinely holds hundreds of byte-identical
+            // files (every freshly created postgres `_fsm`/`_vm` fork is
+            // zero length), and they all hash the same. Keyed to a single
+            // path, every one of those additions would claim the same source
+            // and the sender would emit N renames out of one file — the
+            // second arrives at a receiver that no longer has `from`, and the
+            // whole sync dies there. See the empty-file guard below too.
+            let mut removed_hashes: HashMap<[u8; 32], Vec<String>> = HashMap::new();
             for path in &removed {
                 transport::send(&mut conn, &Message::HashRequest(path.clone()))
                     .await
                     .map_err(transfer_err)?;
                 match transport::recv(&mut conn).await.map_err(transfer_err)? {
                     Some(Message::Hash { hash: Some(hash), .. }) => {
-                        removed_hashes.insert(hash, path.clone());
+                        removed_hashes.entry(hash).or_default().push(path.clone());
                     }
                     Some(Message::Hash { hash: None, .. }) => {}
                     Some(other) => {
@@ -162,16 +221,39 @@ impl DeltaEngine {
                 if meta.is_symlink {
                     continue;
                 }
-                let Ok(data) = std::fs::read(src.join(path)) else { continue };
-                let hash = *blake3::hash(&data).as_bytes();
-                if let Some(from) = removed_hashes.get(&hash) {
-                    transport::send(&mut conn, &Message::Rename { from: from.clone(), to: path.clone() })
-                        .await
-                        .map_err(transfer_err)?;
-                    renamed_from.insert(from.clone());
-                    renamed_to.insert(path.clone());
-                    stats.files_renamed += 1;
+                // Empty files are never renames. Every empty file hashes
+                // alike, so a match here is evidence of nothing, and pairing
+                // two arbitrary ones costs more than it saves: `Rename` moves
+                // the receiver's existing file, which carries the *source's*
+                // mode and mtime, so the result differs from what the sender
+                // has and gets re-sent on the next pass anyway. Sending zero
+                // bytes whole is cheaper than that round trip.
+                if meta.size == 0 {
+                    continue;
                 }
+                let full = src.join(path);
+                // An unreadable candidate is simply not a rename, same as before.
+                let hashed =
+                    off_runtime("hashing a rename candidate", move || Ok(scan::hash_file(&full).ok())).await?;
+                let Some(hash) = hashed else { continue };
+                // `pop` so a source is claimed at most once: N identical
+                // removals can pair with N identical additions, and any
+                // addition left over is simply sent whole.
+                let Some(from) = removed_hashes.get_mut(&hash).and_then(Vec::pop) else { continue };
+                transport::send(
+                    &mut conn,
+                    &Message::Rename {
+                        from: from.clone(),
+                        to: path.clone(),
+                        mode: meta.mode,
+                        mtime_nanos: meta.mtime_nanos,
+                    },
+                )
+                .await
+                .map_err(transfer_err)?;
+                renamed_from.insert(from);
+                renamed_to.insert(path.clone());
+                stats.files_renamed += 1;
             }
         }
         removed.retain(|p| !renamed_from.contains(p));
@@ -192,12 +274,21 @@ impl DeltaEngine {
 
         for path in &diff.changed {
             let meta = &local.files[path];
-            if meta.is_symlink || meta.size < self.whole_file_threshold {
+            // Too small to be worth a signature round trip, or too big to
+            // diff without an unbounded allocation on both ends. See
+            // `MAX_DELTA_FILE`.
+            if meta.is_symlink || meta.size < self.whole_file_threshold || meta.size > MAX_DELTA_FILE {
                 self.send_whole(&mut conn, src, path, meta, &mut stats).await?;
             } else {
                 self.send_delta(&mut conn, src, path, meta, &mut stats).await?;
             }
             stats.files_changed += 1;
+        }
+
+        // Last, once every file inside them is gone: `diff.removed_dirs` is
+        // already ordered children-first.
+        for path in &diff.removed_dirs {
+            transport::send(&mut conn, &Message::RemoveDir(path.clone())).await.map_err(transfer_err)?;
         }
 
         transport::send(&mut conn, &Message::Done).await.map_err(transfer_err)?;
@@ -238,7 +329,14 @@ impl DeltaEngine {
 
         stats.bytes_sent += meta.size;
         if meta.size <= transport::WHOLE_FILE_CHUNK as u64 {
-            let data = std::fs::read(src.join(path)).map_err(|source| DriveError::Io { path: src.join(path), source })?;
+            let full = src.join(path);
+            let data = off_runtime("reading a file to send", move || {
+                match std::fs::read(&full) {
+                    Ok(data) => Ok(data),
+                    Err(source) => Err(DriveError::Io { path: full, source }),
+                }
+            })
+            .await?;
             return transport::send(
                 conn,
                 &Message::WholeFile {
@@ -265,10 +363,31 @@ impl DeltaEngine {
         .await
         .map_err(transfer_err)?;
         let full_path = src.join(path);
-        let mut file = std::fs::File::open(&full_path).map_err(|source| DriveError::Io { path: full_path.clone(), source })?;
+        let opened = full_path.clone();
+        let mut file = off_runtime("opening a file to send", move || {
+            match std::fs::File::open(&opened) {
+                Ok(file) => Ok(file),
+                Err(source) => Err(DriveError::Io { path: opened, source }),
+            }
+        })
+        .await?;
+        // The handle and the buffer are handed to the blocking pool and back
+        // once per chunk, so neither the read nor the allocation lands on a
+        // runtime thread, and the buffer is reused instead of reallocated.
         let mut buf = vec![0u8; transport::WHOLE_FILE_CHUNK];
         loop {
-            let n = std::io::Read::read(&mut file, &mut buf).map_err(|source| DriveError::Io { path: full_path.clone(), source })?;
+            let at = full_path.clone();
+            let (returned_file, returned_buf, n) = off_runtime("reading a chunk to send", move || {
+                let mut file = file;
+                let mut buf = buf;
+                match std::io::Read::read(&mut file, &mut buf) {
+                    Ok(n) => Ok((file, buf, n)),
+                    Err(source) => Err(DriveError::Io { path: at, source }),
+                }
+            })
+            .await?;
+            file = returned_file;
+            buf = returned_buf;
             if n == 0 {
                 break;
             }
@@ -293,14 +412,25 @@ impl DeltaEngine {
             }
             None => return Err(DriveError::Transfer { message: "peer closed mid signature".into() }),
         };
-        let signature = Signature::deserialize(sig_data)
-            .map_err(|e| DriveError::Transfer { message: format!("bad signature for {path}: {e}") })?;
-        let indexed = signature.index();
+        // Indexing the signature, reading the local file and running the
+        // rolling-hash diff are all CPU and IO over the whole file.
+        let full = src.join(path);
+        let named = path.to_string();
+        let delta = off_runtime("computing a delta", move || {
+            let signature = Signature::deserialize(sig_data)
+                .map_err(|e| DriveError::Transfer { message: format!("bad signature for {named}: {e}") })?;
+            let indexed = signature.index();
 
-        let local_data = std::fs::read(src.join(path)).map_err(|source| DriveError::Io { path: src.join(path), source })?;
-        let mut delta = Vec::new();
-        rsync_diff(&indexed, &local_data, &mut delta)
-            .map_err(|e| DriveError::Transfer { message: format!("diff for {path}: {e}") })?;
+            let local_data = match std::fs::read(&full) {
+                Ok(data) => data,
+                Err(source) => return Err(DriveError::Io { path: full, source }),
+            };
+            let mut delta = Vec::new();
+            rsync_diff(&indexed, &local_data, &mut delta)
+                .map_err(|e| DriveError::Transfer { message: format!("diff for {named}: {e}") })?;
+            Ok(delta)
+        })
+        .await?;
 
         stats.bytes_sent += delta.len() as u64;
         transport::send(
@@ -377,5 +507,19 @@ mod tests {
     #[test]
     fn default_engine_is_named_delta() {
         assert_eq!(DeltaEngine::default().name(), "delta");
+    }
+
+    /// The delta path costs `2 x filesize` resident on the receiver and
+    /// another copy on the sender, so it has to have an upper bound as well
+    /// as a lower one. Both ends of the window must stay ordered, and the cap
+    /// has to leave the chunked whole-file path (which is bounded by
+    /// `WHOLE_FILE_CHUNK`, not by size) as the thing that handles the rest.
+    #[test]
+    fn the_delta_window_is_bounded_at_both_ends() {
+        const {
+            assert!(WHOLE_FILE_THRESHOLD < MAX_DELTA_FILE);
+            // A capped file must still stream in more than one chunk.
+            assert!(MAX_DELTA_FILE > transport::WHOLE_FILE_CHUNK as u64);
+        }
     }
 }

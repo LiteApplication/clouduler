@@ -290,14 +290,21 @@ impl RaftLogReader<TypeConfig> for LogStore {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry>, StorageError> {
-        let txn = self.db.begin_read().map_err(read_err)?;
-        let table = txn.open_table(LOGS).map_err(read_err)?;
-        let mut out = Vec::new();
-        for row in table.range(range).map_err(read_err)? {
-            let (_, value) = row.map_err(read_err)?;
-            out.push(decode(value.value())?);
-        }
-        Ok(out)
+        // `RB` isn't `'static` (the trait doesn't require it), so it can't be
+        // moved into `spawn_blocking` as-is; owned bounds can.
+        let range = (range.start_bound().cloned(), range.end_bound().cloned());
+        let db = self.db.clone();
+        blocking(move || {
+            let txn = db.begin_read().map_err(read_err)?;
+            let table = txn.open_table(LOGS).map_err(read_err)?;
+            let mut out = Vec::new();
+            for row in table.range(range).map_err(read_err)? {
+                let (_, value) = row.map_err(read_err)?;
+                out.push(decode(value.value())?);
+            }
+            Ok(out)
+        })
+        .await
     }
 }
 
@@ -305,25 +312,24 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     type LogReader = Self;
 
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError> {
-        let purged: Option<LogId> = read_meta(&self.db, KEY_PURGED)?
-            .map(|raw| decode(&raw))
-            .transpose()?;
+        let db = self.db.clone();
+        blocking(move || {
+            let purged: Option<LogId> = read_meta(&db, KEY_PURGED)?.map(|raw| decode(&raw)).transpose()?;
 
-        let txn = self.db.begin_read().map_err(read_err)?;
-        let table = txn.open_table(LOGS).map_err(read_err)?;
-        let last = match table.last().map_err(read_err)? {
-            Some((_, value)) => {
-                let entry: Entry = decode(value.value())?;
-                Some(entry.log_id)
-            }
-            // With no entries left, the last purged id is the last id we know of.
-            None => purged,
-        };
+            let txn = db.begin_read().map_err(read_err)?;
+            let table = txn.open_table(LOGS).map_err(read_err)?;
+            let last = match table.last().map_err(read_err)? {
+                Some((_, value)) => {
+                    let entry: Entry = decode(value.value())?;
+                    Some(entry.log_id)
+                }
+                // With no entries left, the last purged id is the last id we know of.
+                None => purged,
+            };
 
-        Ok(LogState {
-            last_purged_log_id: purged,
-            last_log_id: last,
+            Ok(LogState { last_purged_log_id: purged, last_log_id: last })
         })
+        .await
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
@@ -331,22 +337,28 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote) -> Result<(), StorageError> {
-        write_meta(&self.db, KEY_VOTE, vote)
+        let db = self.db.clone();
+        let vote = *vote;
+        blocking(move || write_meta(&db, KEY_VOTE, &vote)).await
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote>, StorageError> {
-        read_meta(&self.db, KEY_VOTE)?.map(|raw| decode(&raw)).transpose()
+        let db = self.db.clone();
+        blocking(move || read_meta(&db, KEY_VOTE)?.map(|raw| decode(&raw)).transpose()).await
     }
 
     async fn save_committed(&mut self, committed: Option<LogId>) -> Result<(), StorageError> {
-        write_meta(&self.db, KEY_COMMITTED, &committed)
+        let db = self.db.clone();
+        blocking(move || write_meta(&db, KEY_COMMITTED, &committed)).await
     }
 
     async fn read_committed(&mut self) -> Result<Option<LogId>, StorageError> {
-        match read_meta(&self.db, KEY_COMMITTED)? {
+        let db = self.db.clone();
+        blocking(move || match read_meta(&db, KEY_COMMITTED)? {
             Some(raw) => decode(&raw),
             None => Ok(None),
-        }
+        })
+        .await
     }
 
     async fn append<I>(&mut self, entries: I, callback: LogFlushed<TypeConfig>) -> Result<(), StorageError>
@@ -354,43 +366,56 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         I: IntoIterator<Item = Entry> + Send,
         I::IntoIter: Send,
     {
-        let txn = self.db.begin_write().map_err(write_err)?;
-        {
-            let mut table = txn.open_table(LOGS).map_err(write_err)?;
-            for entry in entries {
-                let encoded = encode(&entry)?;
-                table
-                    .insert(entry.log_id.index, encoded.as_slice())
-                    .map_err(write_err)?;
+        let db = self.db.clone();
+        let entries: Vec<Entry> = entries.into_iter().collect();
+        blocking(move || {
+            let txn = db.begin_write().map_err(write_err)?;
+            {
+                let mut table = txn.open_table(LOGS).map_err(write_err)?;
+                for entry in entries {
+                    let encoded = encode(&entry)?;
+                    table
+                        .insert(entry.log_id.index, encoded.as_slice())
+                        .map_err(write_err)?;
+                }
             }
-        }
-        // redb commits durably, so the callback can fire as soon as this returns.
-        txn.commit().map_err(write_err)?;
+            // redb commits durably, so the callback can fire as soon as this returns.
+            txn.commit().map_err(write_err)
+        })
+        .await?;
         callback.log_io_completed(Ok(()));
         Ok(())
     }
 
     async fn truncate(&mut self, log_id: LogId) -> Result<(), StorageError> {
-        let txn = self.db.begin_write().map_err(write_err)?;
-        {
-            let mut table = txn.open_table(LOGS).map_err(write_err)?;
-            table.retain_in(log_id.index.., |_, _| false).map_err(write_err)?;
-        }
-        txn.commit().map_err(write_err)
+        let db = self.db.clone();
+        blocking(move || {
+            let txn = db.begin_write().map_err(write_err)?;
+            {
+                let mut table = txn.open_table(LOGS).map_err(write_err)?;
+                table.retain_in(log_id.index.., |_, _| false).map_err(write_err)?;
+            }
+            txn.commit().map_err(write_err)
+        })
+        .await
     }
 
     async fn purge(&mut self, log_id: LogId) -> Result<(), StorageError> {
-        let txn = self.db.begin_write().map_err(write_err)?;
-        {
-            let mut table = txn.open_table(LOGS).map_err(write_err)?;
-            table
-                .retain_in(..=log_id.index, |_, _| false)
-                .map_err(write_err)?;
-            let mut meta = txn.open_table(META).map_err(write_err)?;
-            let encoded = encode(&log_id)?;
-            meta.insert(KEY_PURGED, encoded.as_slice()).map_err(write_err)?;
-        }
-        txn.commit().map_err(write_err)
+        let db = self.db.clone();
+        blocking(move || {
+            let txn = db.begin_write().map_err(write_err)?;
+            {
+                let mut table = txn.open_table(LOGS).map_err(write_err)?;
+                table
+                    .retain_in(..=log_id.index, |_, _| false)
+                    .map_err(write_err)?;
+                let mut meta = txn.open_table(META).map_err(write_err)?;
+                let encoded = encode(&log_id)?;
+                meta.insert(KEY_PURGED, encoded.as_slice()).map_err(write_err)?;
+            }
+            txn.commit().map_err(write_err)
+        })
+        .await
     }
 }
 
@@ -404,8 +429,10 @@ pub struct StateMachineStore {
 
 impl StateMachineStore {
     /// Persist the in memory state machine. Called while the write lock is held.
-    fn persist(&self, sm: &StateMachine) -> Result<(), StorageError> {
-        write_meta(&self.db, KEY_STATE_MACHINE, sm)
+    async fn persist(&self, sm: &StateMachine) -> Result<(), StorageError> {
+        let db = self.db.clone();
+        let sm = sm.clone();
+        blocking(move || write_meta(&db, KEY_STATE_MACHINE, &sm)).await
     }
 }
 
@@ -445,7 +472,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             responses.push(response);
         }
 
-        self.persist(&sm)?;
+        self.persist(&sm).await?;
         Ok(responses)
     }
 
@@ -467,26 +494,26 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         let mut sm = self.sm.write().await;
         *sm = restored;
-        self.persist(&sm)?;
-        write_meta(
-            &self.db,
-            KEY_SNAPSHOT,
-            &StoredSnapshot {
-                meta: meta.clone(),
-                data,
-            },
-        )
+        self.persist(&sm).await?;
+
+        let db = self.db.clone();
+        let stored = StoredSnapshot { meta: meta.clone(), data };
+        blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, StorageError> {
-        let Some(raw) = read_meta(&self.db, KEY_SNAPSHOT)? else {
-            return Ok(None);
-        };
-        let stored: StoredSnapshot = decode(&raw)?;
-        Ok(Some(Snapshot {
-            meta: stored.meta,
-            snapshot: Box::new(Cursor::new(stored.data)),
-        }))
+        let db = self.db.clone();
+        blocking(move || {
+            let Some(raw) = read_meta(&db, KEY_SNAPSHOT)? else {
+                return Ok(None);
+            };
+            let stored: StoredSnapshot = decode(&raw)?;
+            Ok(Some(Snapshot {
+                meta: stored.meta,
+                snapshot: Box::new(Cursor::new(stored.data)),
+            }))
+        })
+        .await
     }
 }
 
@@ -509,14 +536,9 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             (data, meta)
         };
 
-        write_meta(
-            &self.db,
-            KEY_SNAPSHOT,
-            &StoredSnapshot {
-                meta: meta.clone(),
-                data: data.clone(),
-            },
-        )?;
+        let db = self.db.clone();
+        let stored = StoredSnapshot { meta: meta.clone(), data: data.clone() };
+        blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await?;
 
         Ok(Snapshot {
             meta,
@@ -560,4 +582,24 @@ fn read_err<E: std::error::Error + 'static>(e: E) -> StorageError {
 
 fn write_err<E: std::error::Error + 'static>(e: E) -> StorageError {
     StorageIOError::<NodeId>::write(AnyError::new(&e)).into()
+}
+
+/// Runs a redb operation on the blocking thread pool.
+///
+/// redb's `commit()` does a real `fsync`, which on the aarch64 nodes' SD/USB
+/// storage routinely takes well past the raft heartbeat's soft ttl (see
+/// `cl-raft::network::Channel::call`) whenever something else on the box is
+/// also hitting disk. Called inline on the async task handling that peer's
+/// connection, a slow commit stalls the response to a totally unrelated
+/// heartbeat or vote RPC on the same executor, which is what actually shows
+/// up as a raft "Unreachable" timeout — the peer was never actually
+/// unreachable, this node just hadn't gotten back to answering it yet.
+/// Running it here instead lets the executor keep serving other RPCs while
+/// the disk catches up.
+async fn blocking<T, F>(f: F) -> Result<T, StorageError>
+where
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(write_err)?
 }

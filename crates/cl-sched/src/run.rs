@@ -151,12 +151,26 @@ impl Scheduler {
             }
         }
 
+        // Re-read: `state` is from before the placements above were submitted,
+        // and `volume_requests` decides where a volume's primary belongs from
+        // the assignments. Working off the stale copy makes it chase the node
+        // each instance was on a moment ago, which is one step behind for
+        // exactly one sweep - long enough to hand the primary back and forth
+        // with placement forever, stopping and starting the containers each
+        // time round.
+        let state = &self.cluster.state().await;
         for request in volume_requests(state, &live) {
             let response = self.cluster.submit(request.clone()).await.map_err(Box::new)?;
             if let Some(error) = response.error {
                 warn!(?request, %error, "registering a volume was rejected");
-            } else if let Request::UpsertVolume { id, primary } = &request {
-                info!(%id, %primary, "registered volume");
+            } else {
+                match &request {
+                    Request::UpsertVolume { id, primary } => info!(%id, %primary, "registered volume"),
+                    Request::TouchVolume { id, primary } => {
+                        info!(%id, %primary, "volume primary follows the instance that mounts it")
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -170,7 +184,15 @@ impl Scheduler {
         let Some(docker) = self.docker.read().await.clone() else {
             return Ok(());
         };
-        let reconciler = Reconciler::new(docker.clone(), self.pulling.clone());
+        // Opened fresh each pass: see `Reconciler::registries`. A node with
+        // no cluster key yet gets none, and pulls anonymously — the same
+        // thing it did before logins existed, rather than failing outright.
+        let registries = match self.materializer.key() {
+            Some(key) => crate::registries::Registries::load(state, &key),
+            None => crate::registries::Registries::default(),
+        };
+        let reconciler =
+            Reconciler::new(docker.clone(), self.pulling.clone()).with_registries(registries);
 
         let targets = self.targets(state)?;
         let actual = docker.list_managed().await?;
@@ -474,11 +496,6 @@ fn volumes_ready(
 /// nothing for a migration to hand over: the mount would work on the node that
 /// happens to hold the directory and the data would exist nowhere else.
 ///
-/// Only unknown volumes are submitted. A volume already on record has a
-/// primary that migration moves around, and re-asserting the assignment's node
-/// every sweep would either fight that or write a raft entry per volume per
-/// ten seconds forever.
-///
 /// The primary registered is the node that actually holds the data: for a
 /// replicated drive that's wherever the instance landed (the only place with
 /// a local copy), but for a served drive it's the drive's own active server
@@ -486,6 +503,25 @@ fn volumes_ready(
 /// hold no local copy at all, and the raft state machine's own
 /// `check_placement` only waives the "must implement this drive" rule for a
 /// served drive's real primary, not for an arbitrary assignment node.
+///
+/// # Following the instance
+///
+/// A replicated volume already on record also gets a `TouchVolume` whenever
+/// its primary is no longer the node running the instance that mounts it.
+///
+/// Placement prefers the primary (`place::sole_primary`), so this only fires
+/// after a real failover: the primary went unreachable, the instance moved to
+/// a node holding a replica, and the volume has to follow it. Until it does,
+/// the sync scheduler still treats the node that just went away as the source
+/// and, the moment it comes back, syncs its stale copy over the live one —
+/// deleting files the running container is using, reverting its writes, and
+/// doing it again every interval, forever. That is not a corner case: every
+/// rolling restart of the fleet makes each node briefly unreachable.
+///
+/// Deliberately not done for a served drive (its primary is the active
+/// server, which has nothing to do with where instances run) or for an
+/// instance mid-migration (`cl_drive::migration` hands the primary over
+/// itself, at `Switching`, and must not be raced).
 pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Request> {
     let mut requests = Vec::new();
     // Every replica of a service mounts the same volume, so the same id comes
@@ -507,11 +543,23 @@ pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Reques
                 continue;
             };
             let id = VolumeId::new(drive, volume);
-            if state.volumes.contains_key(&id) || !seen.insert(id.clone()) {
+            if !seen.insert(id.clone()) {
                 continue;
             }
+            let served = live.drives.get(drive).is_some_and(|cfg| cfg.is_served());
+
+            if let Some(record) = state.volumes.get(&id) {
+                if !served && record.primary != assignment.node && assignment.migration.is_none() {
+                    requests.push(Request::TouchVolume {
+                        id,
+                        primary: assignment.node.clone(),
+                    });
+                }
+                continue;
+            }
+
             let primary = match live.drives.get(drive) {
-                Some(cfg) if cfg.is_served() => active_server(cfg, &state.unreachable).map(str::to_string),
+                Some(cfg) if served => active_server(cfg, &state.unreachable).map(str::to_string),
                 _ => Some(assignment.node.clone()),
             };
             let Some(primary) = primary else {
@@ -858,8 +906,52 @@ services:
         for request in requests {
             assert!(state.apply(&request).is_ok());
         }
-        // A registered volume has a primary that migration moves; re-asserting
-        // it every sweep would fight that.
+        // A registered volume whose primary already is the instance's node
+        // needs nothing: no raft entry per volume per sweep, forever.
+        assert!(volume_requests(&state, &cfg).is_empty());
+    }
+
+    /// After a failover the instance is on a node that is not the volume's
+    /// primary, and the primary has to follow it — otherwise the node it left
+    /// stays the sync source and, once it is back, overwrites the live copy
+    /// with its stale one every interval.
+    #[test]
+    fn a_volumes_primary_follows_an_instance_that_failed_over() {
+        let mut state = stateful_state();
+        let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+        for request in volume_requests(&state, &cfg) {
+            assert!(state.apply(&request).is_ok());
+        }
+
+        let id = VolumeId::new("fast", "data");
+        let instance = state.assignments.keys().next().expect("one assignment").clone();
+        let from = state.volumes[&id].primary.clone();
+        let to = if from == "n1" { "n2" } else { "n1" };
+
+        // The failover itself: the primary went away and placement moved the
+        // instance to the other node holding a copy.
+        state.apply(&Request::SetVolumeReplica {
+            id: id.clone(),
+            node: to.into(),
+            generation: state.volumes[&id].generation,
+        });
+        state.apply(&Request::Assign {
+            instance,
+            node: to.into(),
+            drives: ["fast".to_string()].into(),
+        });
+
+        let requests = volume_requests(&state, &cfg);
+        assert!(
+            matches!(&requests[..], [Request::TouchVolume { id: got, primary }] if got == &id && primary == to),
+            "expected the primary to move to {to}, got {requests:?}"
+        );
+
+        for request in requests {
+            assert!(state.apply(&request).is_ok());
+        }
+        assert_eq!(state.volumes[&id].primary, to);
+        // And it settles: nothing to say once the primary has caught up.
         assert!(volume_requests(&state, &cfg).is_empty());
     }
 

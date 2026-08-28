@@ -34,6 +34,7 @@ fn is_reserved(name: &str) -> bool {
 /// secret listing route.
 fn is_reserved_secret(name: &str) -> bool {
     super::self_update::is_reserved_secret(name)
+        || cl_sched::registries::is_registry_secret(name)
         || is_reserved_wireguard_secret(name)
         || is_reserved_cloudflare_secret(name)
         || is_reserved_oidc_secret(name)

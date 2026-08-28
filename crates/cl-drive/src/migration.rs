@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 
 use cl_raft::state::MigrationPhase;
 use cl_raft::{ClusterNode, InstanceId, Request, VolumeId};
+use tracing::warn;
 
 use crate::delta::{BoxFuture, SyncEngine};
 use crate::error::{DriveError, Result};
@@ -24,6 +25,12 @@ use crate::transport;
 pub trait InstanceControl: Send + Sync {
     fn stop_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, Result<()>>;
     fn start_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Take the stopped container away on the node it was moved off.
+    ///
+    /// Must treat an already-absent container as success: the source node's
+    /// own reconcile loop removes containers it is no longer assigned, so it
+    /// races this and either one may win.
+    fn remove_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, Result<()>>;
 }
 
 /// Everything needed to carry one migration through to completion.
@@ -35,9 +42,27 @@ pub struct MigrationJob<'a> {
     pub target_addr: SocketAddr,
     /// Volumes the instance mounts, all moving together.
     pub volumes: Vec<VolumeId>,
-    pub registry: &'a DriveRegistry,
+    /// `None` on a node that backs no drive with a local directory.
+    ///
+    /// Optional because a migration's *source* does not need a drive registry
+    /// unless it actually has volumes to hand over — and an instance with no
+    /// volumes at all (a stateless frontend, say) is perfectly happy to run,
+    /// and therefore to move, on a node that declares no drives. Requiring one
+    /// unconditionally strands exactly those moves: the driver skips the job
+    /// on every poll and the migration sits in `Stopping` forever.
+    pub registry: Option<&'a DriveRegistry>,
     pub engine: &'a dyn SyncEngine,
     pub control: &'a dyn InstanceControl,
+}
+
+impl MigrationJob<'_> {
+    /// The registry, for a step that genuinely needs one. Only reachable with
+    /// a non-empty `volumes`, so a node that backs no drives never gets here.
+    fn require_registry(&self) -> Result<&DriveRegistry> {
+        self.registry.ok_or_else(|| DriveError::Transfer {
+            message: format!("{} has volumes to move but this node backs no drives", self.instance),
+        })
+    }
 }
 
 /// Drive `instance`'s migration through to `Done` or `Failed`, resuming from
@@ -93,6 +118,21 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
                 if let Err(e) = job.control.start_instance(&job.instance, &job.target_node).await {
                     return Err(fail(node, &job.instance, e).await);
                 }
+                // Best effort, and deliberately not a reason to fail: the
+                // move is already committed by here — the target owns the
+                // data and the assignment — so a source that will not let go
+                // of a stopped container leaves clutter, not a broken
+                // migration. Failing the job over it would report a move that
+                // actually succeeded as `Failed` and invite someone to retry
+                // it, which is far worse than one stale container.
+                if let Err(e) = job.control.remove_instance(&job.instance, &job.source_node).await {
+                    warn!(
+                        instance = %job.instance,
+                        node = %job.source_node,
+                        error = %e,
+                        "the move succeeded but the source container could not be removed",
+                    );
+                }
                 advance(node, &job.instance, MigrationPhase::Done).await?;
                 // `Done` clears the migration record (state.rs), so there is
                 // nothing left to read back; the move is over.
@@ -130,7 +170,7 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             .ok_or_else(|| DriveError::VolumeNotFound { volume: volume.clone() })?
             .generation;
 
-        let src_path = job.registry.volume_path(volume)?;
+        let src_path = job.require_registry()?.volume_path(volume)?;
         job.engine.sync(&src_path, job.target_addr, volume, generation).await?;
 
         node.submit(Request::SetVolumeReplica {
@@ -146,8 +186,10 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
 
 async fn verify_all(job: &MigrationJob<'_>) -> Result<()> {
     for volume in &job.volumes {
-        let src_path = job.registry.volume_path(volume)?;
-        let source = scan::scan(&src_path, true)?;
+        let src_path = job.require_registry()?.volume_path(volume)?;
+        // `true` here means hashing every byte of the volume, the single most
+        // expensive thing this crate does — never on a runtime thread.
+        let source = scan::scan_off_runtime(src_path, true).await?;
         let target = transport::request_manifest(job.target_addr, volume, true).await?;
 
         let diff = source.diff(&target);
@@ -205,6 +247,9 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
         fn start_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn remove_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
     }

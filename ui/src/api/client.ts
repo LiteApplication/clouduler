@@ -6,6 +6,7 @@ import type {
   ApiErrorBody,
   ApiKey,
   ApiKeyCreated,
+  BulkResult,
   CertificateState,
   CloudflareTokenStatus,
   ClusterConfig,
@@ -21,6 +22,7 @@ import type {
   PendingConfig,
   RebalanceResponse,
   RedirectRule,
+  RegistryAccount,
   SecretEntry,
   SecretPutRequest,
   SelfUpdateConfig,
@@ -30,6 +32,7 @@ import type {
   StackValidationResult,
   StaticRouteRule,
   TlsFingerprint,
+  UpdateRow,
   ValidationResult,
   VolumeState,
   WireguardIngressRule,
@@ -216,6 +219,22 @@ export const api = {
   // move does, so by the time this resolves they are underway, not just
   // planned.
   rebalance: () => post<RebalanceResponse>('/api/rebalance'),
+
+  // updates: what every container runs versus what its registry now serves.
+  // `pinUpdates`/`applyUpdates` with no argument mean "everything this
+  // applies to", which is what the view's bulk buttons send.
+  listUpdates: () => get<UpdateRow[]>('/api/updates'),
+  pinUpdates: (instances?: string[]) => post<BulkResult[]>('/api/updates/pin', { instances: instances ?? [] }),
+  applyUpdates: (instances?: string[]) => post<BulkResult[]>('/api/updates/apply', { instances: instances ?? [] }),
+
+  // registry accounts. The password is write-only: there is no getter for it,
+  // and `listRegistries` returns only the server and username.
+  listRegistries: () => get<RegistryAccount[]>('/api/registries'),
+  putRegistry: (body: { server: string; username: string; password: string }) =>
+    put<void>('/api/registries', body),
+  verifyRegistry: (body: { server: string; username: string; password: string }) =>
+    post<void>('/api/registries/verify', body),
+  removeRegistry: (server: string) => del<void>(`/api/registries/${encodeURIComponent(server)}`),
 
   // configs & secrets
   listConfigs: () => get<ConfigEntry[]>('/api/configs'),

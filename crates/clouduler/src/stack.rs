@@ -9,7 +9,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, StackBundle};
 use cl_raft::client::Client;
 use cl_raft::state::{base64_encode, DesiredState, Request, MAX_OBJECT_BYTES};
-use cl_raft::Assignment;
 use cl_secret::{ClusterKey, Sealed};
 use tracing::debug;
 
@@ -275,31 +274,37 @@ async fn set_all_desired(cfg: &ClusterConfig, name: &str, via: Option<&str>, des
     Ok(())
 }
 
-/// Restarts every currently assigned instance of the stack in place, over the
-/// same node-to-node channel `clouduler logs`/`exec` use: the internal api,
-/// authenticated by an HMAC signature over the shared cluster key rather than
-/// an admin session, since this is one cluster member telling another to
-/// restart its own container.
+/// Unassigns every currently assigned instance of the stack rather than
+/// restarting it in place, so the scheduler's next placement pass picks each
+/// one up as freshly desired: it lands back on the same node if that node is
+/// still the best fit, or on another one if it no longer is (unreachable,
+/// drained, missing a needed drive or network). An in-place restart would
+/// instead retry forever on whatever node it already happened to be on, even
+/// one that can no longer host it.
 pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+    let client = client_for(cfg, via)?;
+    let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let instances = crate::logs::resolve_target(&state, name)?;
-
-    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-        format!(
-            "loading the cluster key from {} to authenticate to the node(s) running this",
-            cfg.secrets.key_file.display()
-        )
-    })?;
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("building the http client")?;
 
     let mut failed = Vec::new();
     for assignment in &instances {
-        if let Err(e) = restart_one(cfg, &http, &key, assignment).await {
-            eprintln!("{}: {e}", assignment.instance);
-            failed.push(assignment.instance.to_string());
+        debug!(instance = %assignment.instance, "submitting Unassign");
+        let response = client
+            .submit(Request::Unassign {
+                instance: assignment.instance.clone(),
+            })
+            .await
+            .map_err(|e| anyhow!("{e}"));
+        match response {
+            Ok(response) if response.error.is_none() => {}
+            Ok(response) => {
+                eprintln!("{}: {}", assignment.instance, response.error.unwrap());
+                failed.push(assignment.instance.to_string());
+            }
+            Err(e) => {
+                eprintln!("{}: {e}", assignment.instance);
+                failed.push(assignment.instance.to_string());
+            }
         }
     }
 
@@ -307,23 +312,5 @@ pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resu
         bail!("failed to restart: {}", failed.join(", "));
     }
     println!("restarted {} instance(s) of {name}", instances.len());
-    Ok(())
-}
-
-async fn restart_one(cfg: &ClusterConfig, http: &reqwest::Client, key: &ClusterKey, assignment: &Assignment) -> Result<()> {
-    let base = cl_update::peers::base_url(cfg, &assignment.node)
-        .ok_or_else(|| anyhow!("node {} has no address on the internal network", assignment.node))?;
-    let path = format!("/api/instances/internal/{}/restart", assignment.instance);
-    let signature = cl_secret::internal_auth::sign(key, &path);
-
-    let resp = http
-        .post(format!("{base}{path}"))
-        .header(cl_update::internal_client::AUTH_HEADER, signature)
-        .send()
-        .await
-        .with_context(|| format!("asking {} to restart {}", assignment.node, assignment.instance))?;
-    if !resp.status().is_success() {
-        bail!("{} answered {}", assignment.node, resp.status());
-    }
     Ok(())
 }

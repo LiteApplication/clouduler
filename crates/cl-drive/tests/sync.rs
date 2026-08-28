@@ -217,6 +217,98 @@ async fn renaming_a_file_moves_it_instead_of_retransferring() {
     assert_eq!(std::fs::read(dst_volume(&dst).join("new_name.bin")).unwrap(), content);
 }
 
+/// Rename detection matches on content hash, and content equality is not
+/// identity. A postgres data directory holds hundreds of byte-identical
+/// files — every freshly created `_fsm`/`_vm` fork is zero length — so one
+/// hash legitimately maps to many paths on both sides.
+///
+/// Keyed to a single path per hash, every one of those additions claimed the
+/// *same* source: the sender emitted N renames out of one file, the second
+/// reached a receiver that no longer had `from`, `std::fs::rename` returned
+/// `ENOENT`, and `receive` returned an error — which drops the connection
+/// mid-stream. All the sender ever saw was `Broken pipe`. Deterministic, so
+/// the volume then failed on every single pass, forever.
+#[tokio::test]
+async fn many_identical_files_replaced_at_once_still_sync() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    // A batch of empty files and a batch sharing one non-empty body: both
+    // collapse to a single hash.
+    for i in 0..20 {
+        std::fs::write(src.path().join(format!("empty_{i}")), b"").unwrap();
+        std::fs::write(src.path().join(format!("same_{i}")), b"identical body").unwrap();
+    }
+
+    let (addr, _registry, _rx) = spawn_receiver(dst.path());
+    let engine = DeltaEngine::default();
+    engine.sync(src.path(), addr, &volume_id(), 1).await.expect("first sync");
+
+    // Swap the whole lot for a differently named set with the same contents,
+    // exactly as postgres does when it rewrites relations under new
+    // relfilenode numbers.
+    for i in 0..20 {
+        std::fs::remove_file(src.path().join(format!("empty_{i}"))).unwrap();
+        std::fs::remove_file(src.path().join(format!("same_{i}"))).unwrap();
+        std::fs::write(src.path().join(format!("empty_new_{i}")), b"").unwrap();
+        std::fs::write(src.path().join(format!("same_new_{i}")), b"identical body").unwrap();
+    }
+
+    let stats = engine.sync(src.path(), addr, &volume_id(), 2).await.expect("second sync must not die");
+    assert!(tree_equal(src.path(), &dst_volume(&dst)));
+
+    // Each source is claimed at most once, so renames never exceed the
+    // number of files that actually went away.
+    assert!(stats.files_renamed <= 20, "a source was reused: {} renames", stats.files_renamed);
+
+    // And it settles: a third pass has nothing left to do.
+    let third = engine.sync(src.path(), addr, &volume_id(), 3).await.expect("third sync");
+    assert_eq!(third.files_added, 0);
+    assert_eq!(third.files_changed, 0);
+    assert_eq!(third.files_removed, 0);
+}
+
+/// A rename is only ever the sender's guess. If the source is gone by the
+/// time it lands, the receiver must skip that one file rather than abort —
+/// dropping the connection here is what turned a single bad guess into a
+/// volume that never synced again.
+#[tokio::test]
+async fn a_rename_whose_source_is_missing_does_not_abort_the_sync() {
+    use cl_drive::transport::{self, Message};
+
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let (addr, _registry, _rx) = spawn_receiver(dst.path());
+    let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let mut conn = transport::frame(stream);
+
+    transport::send(&mut conn, &Message::Hello { volume: volume_id(), generation: 1 })
+        .await
+        .expect("hello");
+    assert!(matches!(transport::recv(&mut conn).await.expect("ready"), Some(Message::Ready(_))));
+
+    transport::send(&mut conn, &Message::Rename { from: "not_there".into(), to: "wherever".into(), mode: 0o644, mtime_nanos: 1_000_000_000 })
+        .await
+        .expect("rename");
+    // The connection has to still be alive and complete the sync normally.
+    transport::send(&mut conn, &Message::WholeFile {
+        path: "after.txt".into(),
+        mode: 0o644,
+        mtime_nanos: 1_000_000_000,
+        is_symlink: false,
+        link_target: None,
+        data: b"still here".to_vec(),
+    })
+    .await
+    .expect("whole file after a failed rename");
+
+    transport::send(&mut conn, &Message::Done).await.expect("done");
+    assert_eq!(transport::recv(&mut conn).await.expect("ack"), Some(Message::Ack(1)));
+    assert_eq!(std::fs::read(dst_volume(&dst).join("after.txt")).unwrap(), b"still here");
+    let _ = src;
+}
+
 #[tokio::test]
 async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
     let dst = tempfile::tempdir().unwrap();

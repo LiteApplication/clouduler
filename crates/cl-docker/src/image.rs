@@ -46,6 +46,48 @@ impl ImageRef {
     pub fn is_latest(&self) -> bool {
         self.digest.is_none() && matches!(self.tag.as_deref(), None | Some("latest"))
     }
+
+    /// The registry host this reference resolves to, in the form docker's own
+    /// credential store keys on: `docker.io` for anything unqualified.
+    ///
+    /// The first path segment is a registry only if it looks like a host —
+    /// it contains a dot or a colon, or it is exactly `localhost`. Without
+    /// that test `myteam/app` would be read as the registry `myteam`, and
+    /// every unqualified Docker Hub image would go looking for credentials
+    /// under a host that does not exist.
+    pub fn registry(&self) -> String {
+        match self.repository.split_once('/') {
+            Some((head, _)) if head.contains('.') || head.contains(':') || head == "localhost" => {
+                head.to_string()
+            }
+            _ => DOCKER_HUB.to_string(),
+        }
+    }
+}
+
+/// How Docker Hub is spelled in a credential store, as opposed to
+/// `registry-1.docker.io` where its api actually lives.
+pub const DOCKER_HUB: &str = "docker.io";
+
+/// A registry login. Mirrors the subset of bollard's `DockerCredentials` that
+/// clouduler stores, so nothing outside this crate has to depend on bollard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryCredentials {
+    pub username: String,
+    pub password: String,
+    /// Registry host, as `ImageRef::registry` spells it.
+    pub server: String,
+}
+
+impl From<&RegistryCredentials> for bollard::auth::DockerCredentials {
+    fn from(creds: &RegistryCredentials) -> Self {
+        bollard::auth::DockerCredentials {
+            username: Some(creds.username.clone()),
+            password: Some(creds.password.clone()),
+            serveraddress: Some(creds.server.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 fn extract_digest(info: &bollard::models::ImageInspect) -> Option<String> {
@@ -56,12 +98,44 @@ fn extract_digest(info: &bollard::models::ImageInspect) -> Option<String> {
     })
 }
 
+/// The digest `repository` published this image under.
+///
+/// One local image can carry several repo digests — the same bits pulled from
+/// two registries, or retagged — and `extract_digest` takes whichever comes
+/// first. That is fine when the caller only wants *a* digest, and wrong when
+/// it is about to compare against what one particular repository currently
+/// serves: the answer would be a digest from some other repository, which
+/// never matches, and the image reads as perpetually out of date. Falls back
+/// to the first digest when nothing matches, since an image with exactly one
+/// repo digest is the overwhelmingly common case.
+fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str) -> Option<String> {
+    let digests = info.repo_digests.as_ref()?;
+    digests
+        .iter()
+        .find(|d| d.split_once('@').is_some_and(|(repo, _)| repo == repository))
+        .or_else(|| digests.first())
+        .and_then(|d| d.split_once('@'))
+        .map(|(_, digest)| digest.to_string())
+}
+
 impl Docker {
     /// Pull `image`, streaming progress to completion, then return the digest
     /// docker resolved it to locally.
     pub async fn pull(&self, image: &str) -> Result<String> {
+        self.pull_as(image, None).await
+    }
+
+    /// `pull`, authenticating to the registry as `credentials`.
+    ///
+    /// Separate from `pull` rather than replacing it because most pulls are
+    /// anonymous, and passing credentials for a registry the image does not
+    /// come from is worse than passing none: docker forwards them to whatever
+    /// host the reference names.
+    pub async fn pull_as(&self, image: &str, credentials: Option<&RegistryCredentials>) -> Result<String> {
         let options = CreateImageOptionsBuilder::new().from_image(image).build();
-        let mut stream = self.inner.create_image(Some(options), None, None);
+        let mut stream = self
+            .inner
+            .create_image(Some(options), None, credentials.map(Into::into));
         while let Some(item) = stream.next().await {
             item.map_err(classify)?;
         }
@@ -83,17 +157,49 @@ impl Docker {
         }
     }
 
+    /// The digest a local image carries for `repository`, looked up by image
+    /// id rather than by tag.
+    ///
+    /// The Updates view needs the digest of the bits a container is *actually*
+    /// running, which is not the same question as what the tag resolves to
+    /// now: the tag has usually moved on, which is the whole point of asking.
+    /// A container's `image_digest` is a local image id, so this is the only
+    /// way back to a registry content digest for it.
+    pub async fn digest_of_image(&self, image_id: &str, repository: &str) -> Result<Option<String>> {
+        match self.inner.inspect_image(image_id).await {
+            Ok(info) => Ok(digest_for_repository(&info, repository)),
+            Err(e) => match classify(e) {
+                DockerError::NotFound(_) => Ok(None),
+                other => Err(other),
+            },
+        }
+    }
+
+    /// What the registry currently serves for `image`, without pulling it.
+    ///
+    /// `Ok(None)` when the registry answered but published no digest at all.
+    /// A registry that cannot be reached, or that refuses the credentials, is
+    /// an `Err`: "we could not find out" and "there is nothing newer" are
+    /// different answers, and collapsing them would report every image behind
+    /// an expired login as up to date.
+    pub async fn registry_digest(
+        &self,
+        image: &str,
+        credentials: Option<&RegistryCredentials>,
+    ) -> Result<Option<String>> {
+        let remote = self
+            .inner
+            .inspect_registry_image(image, credentials.map(Into::into))
+            .await
+            .map_err(classify)?;
+        Ok(remote.descriptor.digest)
+    }
+
     /// Compare the local image digest against what the registry currently has,
     /// without pulling. Used by the `:latest` update check in the web UI.
     pub async fn has_newer(&self, image: &str) -> Result<bool> {
         let local = self.resolve_digest(image).await?;
-        let remote = self
-            .inner
-            .inspect_registry_image(image, None)
-            .await
-            .map_err(classify)?;
-        let remote_digest = remote.descriptor.digest;
-        match (local, remote_digest) {
+        match (local, self.registry_digest(image, None).await?) {
             (Some(local), Some(remote)) => Ok(local != remote),
             (None, Some(_)) => Ok(true),
             _ => Ok(false),
@@ -166,5 +272,39 @@ mod tests {
     fn extract_digest_none_when_no_repo_digests() {
         let info = bollard::models::ImageInspect::default();
         assert_eq!(extract_digest(&info), None);
+    }
+
+    #[test]
+    fn digest_for_repository_picks_the_matching_repository() {
+        let info = bollard::models::ImageInspect {
+            repo_digests: Some(vec![
+                "mirror.internal/nginx@sha256:mirror".to_string(),
+                "nginx@sha256:hub".to_string(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(digest_for_repository(&info, "nginx"), Some("sha256:hub".to_string()));
+    }
+
+    #[test]
+    fn digest_for_repository_falls_back_to_the_only_digest() {
+        let info = bollard::models::ImageInspect {
+            repo_digests: Some(vec!["nginx@sha256:abc".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(digest_for_repository(&info, "somewhere/else"), Some("sha256:abc".to_string()));
+    }
+
+    #[test]
+    fn unqualified_images_belong_to_docker_hub() {
+        assert_eq!(ImageRef::parse("nginx").registry(), "docker.io");
+        assert_eq!(ImageRef::parse("myteam/app:1.0").registry(), "docker.io");
+    }
+
+    #[test]
+    fn a_host_like_first_segment_is_the_registry() {
+        assert_eq!(ImageRef::parse("git.example.com/team/app:1.0").registry(), "git.example.com");
+        assert_eq!(ImageRef::parse("registry.local:5000/app").registry(), "registry.local:5000");
+        assert_eq!(ImageRef::parse("localhost/app").registry(), "localhost");
     }
 }

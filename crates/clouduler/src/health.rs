@@ -1,8 +1,11 @@
 //! `clouduler stack unhealthy` — an at-a-glance list of stacks whose actual
 //! state doesn't match what's desired: crashed, restart-looping, failing its
-//! healthcheck, stuck migrating, on an unreachable node, wanted but unable to
-//! land anywhere, or stopped (shown either way, so it's clear the stop was
-//! deliberate rather than a crash that happens to look the same).
+//! healthcheck, mid-migration, on an unreachable node, assigned with no
+//! container at all, running something other than the pinned image, wanted
+//! but unable to land anywhere, or stopped (shown either way, so it's clear
+//! the stop was deliberate rather than a crash that happens to look the
+//! same). Ends with `cluster_warnings`, for the faults that belong to no
+//! single instance.
 //!
 //! Health and liveness only exist on the node running (or trying to run) a
 //! container, so this reaches every node the same way `clouduler logs` and
@@ -70,13 +73,43 @@ impl Row {
 /// state=exited, but only one is a problem.
 fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
     match (desired, state) {
-        (DesiredState::Stopped, "exited") => Some("stopped (stack stop)".to_string()),
+        (DesiredState::Stopped, "exited" | "stopped") => Some("stopped (stack stop)".to_string()),
         (DesiredState::Stopped, other) => {
             Some(format!("desired state is stopped, but the container is still {other}"))
         }
         (DesiredState::Running, "exited") => Some("exited but desired state is running".to_string()),
+        // Assigned to a node, wanted running, and no container exists there
+        // at all. Distinct from `exited`, which at least got as far as being
+        // created: this is a node that has not acted on its assignment —
+        // docker unreachable, an image that will not pull, a reconcile loop
+        // that is not running. It reported nothing before, because "stopped"
+        // is not a state `unhealthy` used to consider wrong.
+        (DesiredState::Running, "stopped") => {
+            Some("no container exists on its node, but desired state is running".to_string())
+        }
+        (DesiredState::Running, "restarting") => {
+            Some("restarting - usually a container crashing and being restarted in a loop".to_string())
+        }
         _ => None,
     }
+}
+
+/// A container that is not running the image the cluster pinned for it.
+///
+/// Not an update being available — that is the Updates view's question, and
+/// answering it needs a registry round trip this command deliberately does
+/// not make. This is the purely local disagreement: a pin was recorded and
+/// the container was never rebuilt onto it, so the cluster believes it is
+/// running bits it is not.
+fn describe_pin_drift(summary: &InstanceSummary) -> Option<String> {
+    let pinned = summary.image_digest.as_deref()?;
+    let running = summary.running_digest.as_deref()?;
+    if pinned == running {
+        return None;
+    }
+    Some(format!(
+        "running {running}, but the cluster pinned {pinned} - the container was never rebuilt onto the pin"
+    ))
 }
 
 pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Result<()> {
@@ -132,10 +165,60 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Re
         }
     }
 
+    let warnings = cluster_warnings(&state);
+    if !warnings.is_empty() {
+        any = true;
+        println!("cluster\t{} warning(s)", warnings.len());
+        for warning in &warnings {
+            println!("  {warning}");
+        }
+    }
+
     if !any {
         println!("no unhealthy instances");
     }
     Ok(())
+}
+
+/// Faults that belong to no single instance, and so had nowhere to be
+/// reported before.
+///
+/// All three are conditions an operator finds out about the hard way: a node
+/// that has dropped out shows up only as every one of its instances reading
+/// `unknown`, and a volume whose replica has silently stopped catching up
+/// shows up as nothing at all until the day it is promoted to primary and the
+/// data turns out to be old.
+fn cluster_warnings(state: &ClusterState) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    for node in &state.unreachable {
+        warnings.push(format!("node {node} is unreachable"));
+    }
+
+    for (id, volume) in &state.volumes {
+        if !state.nodes.contains_key(&volume.primary) {
+            warnings.push(format!(
+                "volume {id}: its primary {} is not a member of the cluster",
+                volume.primary
+            ));
+        } else if state.unreachable.contains(&volume.primary) {
+            warnings.push(format!(
+                "volume {id}: its primary {} is unreachable, so nothing can write to it",
+                volume.primary
+            ));
+        }
+
+        for (node, generation) in &volume.replicas {
+            if *generation < volume.generation {
+                warnings.push(format!(
+                    "volume {id}: the replica on {node} is at generation {generation}, {} behind the primary",
+                    volume.generation - generation,
+                ));
+            }
+        }
+    }
+
+    warnings
 }
 
 fn print_row(row: &Row, flags: &ShowFlags) {
@@ -180,6 +263,13 @@ struct InstanceSummary {
     started_at: Option<String>,
     #[serde(default)]
     proxy: Option<ProxyHealthSummary>,
+    /// What the cluster has pinned for this instance.
+    #[serde(default)]
+    image_digest: Option<String>,
+    /// What the container is actually running. Differs from `image_digest`
+    /// when a pin was recorded but the container was never rebuilt onto it.
+    #[serde(default)]
+    running_digest: Option<String>,
 }
 
 /// Mirrors `cl-api`'s `ProxyHealthSummary`: the reverse proxy's own most
@@ -202,20 +292,57 @@ async fn row_for_assignment(
     let node = assignment.node.clone();
 
     if let Some(migration) = &assignment.migration {
-        if let cl_raft::state::MigrationPhase::Failed { reason } = &migration.phase {
-            return (
-                stack,
-                Row {
-                    instance,
-                    node: Some(node),
-                    desired: assignment.desired,
-                    state: "migration_failed".to_string(),
-                    health: "none".to_string(),
-                    started_at: None,
-                    reason: Some(reason.clone()),
-                    proxy_error: None,
-                },
-            );
+        use cl_raft::state::MigrationPhase;
+        match &migration.phase {
+            MigrationPhase::Failed { reason } => {
+                return (
+                    stack,
+                    Row {
+                        instance,
+                        node: Some(node),
+                        desired: assignment.desired,
+                        state: "migration_failed".to_string(),
+                        health: "none".to_string(),
+                        started_at: None,
+                        reason: Some(reason.clone()),
+                        proxy_error: None,
+                    },
+                );
+            }
+            // A move that has not finished. This command's own help has
+            // always advertised "stuck migrating", but only `Failed` was ever
+            // reported: an instance wedged in `Stopping` — the shape of the
+            // magev-planner.frontend.0 incident, where the driver skipped the
+            // job on every poll forever — showed up as a plain `exited`
+            // container, indistinguishable from a crash.
+            //
+            // A move in progress is normally brief, so seeing one here is not
+            // by itself a fault; seeing the same one across successive runs
+            // is. There is no timestamp on a `Migration` to tell those apart
+            // from a single run, and adding one would mean putting a clock
+            // reading into the raft log, so this reports the phase and leaves
+            // that judgement to whoever is watching.
+            phase if !phase.is_terminal() => {
+                return (
+                    stack,
+                    Row {
+                        instance,
+                        node: Some(node),
+                        desired: assignment.desired,
+                        state: "migrating".to_string(),
+                        health: "none".to_string(),
+                        started_at: None,
+                        reason: Some(format!(
+                            "moving from {} to {} ({}) - if this phase does not change, the move is stuck",
+                            migration.from,
+                            migration.to,
+                            format!("{phase:?}").to_lowercase(),
+                        )),
+                        proxy_error: None,
+                    },
+                );
+            }
+            _ => {}
         }
     }
 
@@ -237,7 +364,10 @@ async fn row_for_assignment(
 
     match fetch_summary(cfg, http, key, &node, &assignment.instance).await {
         Ok(summary) => {
-            let reason = describe_state(assignment.desired, &summary.state);
+            // State first: a container that is not running at all is the more
+            // useful thing to say about it than which image it isn't running.
+            let reason =
+                describe_state(assignment.desired, &summary.state).or_else(|| describe_pin_drift(&summary));
             let proxy_error = summary.proxy.and_then(|p| p.error);
             (
                 stack,
@@ -416,4 +546,137 @@ async fn fetch_log_tail(
 #[derive(Deserialize)]
 struct LogPayload {
     text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cl_raft::ids::VolumeId;
+
+
+    fn summary(pinned: Option<&str>, running: Option<&str>) -> InstanceSummary {
+        InstanceSummary {
+            state: "running".into(),
+            health: "healthy".into(),
+            started_at: None,
+            proxy: None,
+            image_digest: pinned.map(str::to_string),
+            running_digest: running.map(str::to_string),
+        }
+    }
+
+    fn row_with(reason: Option<String>, state: &str, desired: DesiredState) -> Row {
+        Row {
+            instance: "app.web.0".into(),
+            node: Some("n1".into()),
+            desired,
+            state: state.into(),
+            health: "none".into(),
+            started_at: None,
+            reason,
+            proxy_error: None,
+        }
+    }
+
+    /// The gap this command had: an instance assigned to a node, wanted
+    /// running, with no container there at all reported nothing.
+    #[test]
+    fn a_wanted_instance_with_no_container_is_unhealthy() {
+        let reason = describe_state(DesiredState::Running, "stopped").expect("a reason");
+        assert!(reason.contains("no container exists"));
+        assert!(row_with(Some(reason), "stopped", DesiredState::Running).unhealthy());
+    }
+
+    #[test]
+    fn a_deliberate_stop_is_still_reported_as_deliberate() {
+        for state in ["exited", "stopped"] {
+            let reason = describe_state(DesiredState::Stopped, state).expect("a reason");
+            assert_eq!(reason, "stopped (stack stop)", "{state}");
+        }
+    }
+
+    #[test]
+    fn a_healthy_running_instance_has_nothing_to_say() {
+        assert_eq!(describe_state(DesiredState::Running, "running"), None);
+        assert!(!row_with(None, "running", DesiredState::Running).unhealthy());
+    }
+
+    #[test]
+    fn a_container_not_on_its_pin_is_reported() {
+        let drift = describe_pin_drift(&summary(Some("sha256:pinned"), Some("sha256:actual")));
+        let reason = drift.expect("drift between the pin and what is running");
+        assert!(reason.contains("sha256:pinned"));
+        assert!(reason.contains("sha256:actual"));
+    }
+
+    /// Half an answer is not evidence of drift. An image built locally has no
+    /// registry digest at all, and reporting every one of those as wrong
+    /// would bury the real faults.
+    #[test]
+    fn an_unknown_digest_on_either_side_is_not_drift() {
+        assert_eq!(describe_pin_drift(&summary(Some("sha256:a"), Some("sha256:a"))), None);
+        assert_eq!(describe_pin_drift(&summary(Some("sha256:a"), None)), None);
+        assert_eq!(describe_pin_drift(&summary(None, Some("sha256:a"))), None);
+    }
+
+    /// Built by hand rather than through `apply`: the volume requests all
+    /// validate that the primary is a roster member implementing the drive,
+    /// and one of these cases is deliberately a primary that is not.
+    fn state_with_volume(primary: &str, generation: u64, replica: Option<(&str, u64)>) -> ClusterState {
+        let mut state = ClusterState::default();
+        let id = VolumeId::new("fast", "data");
+        let mut replicas = std::collections::BTreeMap::from([(primary.to_string(), generation)]);
+        if let Some((node, at)) = replica {
+            replicas.insert(node.to_string(), at);
+        }
+        state.volumes.insert(
+            id.clone(),
+            cl_raft::state::VolumeState {
+                id,
+                generation,
+                primary: primary.to_string(),
+                replicas,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn a_replica_that_has_fallen_behind_is_reported() {
+        let state = state_with_volume("n1", 4, Some(("n2", 1)));
+        let generation = state.volumes[&VolumeId::new("fast", "data")].generation;
+        let warnings = cluster_warnings(&state);
+        assert!(
+            warnings.iter().any(|w| w.contains("replica on n2") && w.contains("behind")),
+            "expected a lag warning for generation {generation}, got {warnings:?}",
+        );
+    }
+
+    #[test]
+    fn a_replica_that_has_caught_up_is_not_reported() {
+        let state = state_with_volume("n1", 1, Some(("n2", 1)));
+        let lag: Vec<_> = cluster_warnings(&state)
+            .into_iter()
+            .filter(|w| w.contains("behind"))
+            .collect();
+        assert!(lag.is_empty(), "{lag:?}");
+    }
+
+    /// A volume whose primary is not in the roster at all is the shape a
+    /// removed node leaves behind, and nothing else in this command would
+    /// mention it: no assignment names that node any more.
+    #[test]
+    fn a_volume_whose_primary_left_the_cluster_is_reported() {
+        let state = state_with_volume("gone", 1, None);
+        let warnings = cluster_warnings(&state);
+        assert!(
+            warnings.iter().any(|w| w.contains("not a member of the cluster")),
+            "{warnings:?}",
+        );
+    }
+
+    #[test]
+    fn a_quiet_cluster_warns_about_nothing() {
+        assert!(cluster_warnings(&ClusterState::default()).is_empty());
+    }
 }

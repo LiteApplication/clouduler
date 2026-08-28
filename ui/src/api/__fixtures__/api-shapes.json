@@ -220,5 +220,19 @@
     "state_version": 0,
     "version": "0.5.14",
     "voters": 1
-  }
+  },
+  "updates": [
+    {
+      "id": "<volatile>",
+      "image": null,
+      "latest_digest": null,
+      "node": "n0",
+      "pin_drift": false,
+      "pinned_digest": null,
+      "running_digest": null,
+      "service": "app",
+      "stack": "web",
+      "update_available": false
+    }
+  ]
 }

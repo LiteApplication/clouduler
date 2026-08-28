@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::error::Result;
+use crate::registries::Registries;
 
 /// Instances whose image this node's reconciler is currently pulling. Shared
 /// with the api so `GET /api/instances` can report "pulling" instead of
@@ -141,11 +142,24 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<
 pub struct Reconciler {
     docker: Docker,
     pulling: PullTracker,
+    /// Registry logins this pass may pull with. Rebuilt per pass rather than
+    /// held for the reconciler's life so a login added, rotated or removed
+    /// through the api takes effect on the next sweep instead of at the next
+    /// daemon restart — and so no password outlives the pass that needed it.
+    registries: Registries,
 }
 
 impl Reconciler {
     pub fn new(docker: Docker, pulling: PullTracker) -> Self {
-        Self { docker, pulling }
+        Self { docker, pulling, registries: Registries::default() }
+    }
+
+    /// Pull private images with these logins. Without them a private image is
+    /// simply unpullable: docker answers an anonymous manifest request for
+    /// one with the same 401 it gives for a repository that does not exist.
+    pub fn with_registries(mut self, registries: Registries) -> Self {
+        self.registries = registries;
+        self
     }
 
     /// Apply the actions. One failure does not abort the rest: a single broken
@@ -227,7 +241,7 @@ impl Reconciler {
         }
         info!(%image, "pulling");
         self.pulling.write().await.insert(id.clone());
-        let result = self.docker.pull(image).await;
+        let result = self.docker.pull_as(image, self.registries.for_image(image)).await;
         self.pulling.write().await.remove(id);
         result?;
         Ok(())

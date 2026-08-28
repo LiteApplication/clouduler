@@ -104,6 +104,11 @@ export interface InstanceState {
   health: 'healthy' | 'unhealthy' | 'starting' | 'none';
   image: string | null;
   image_digest: string | null;
+  /** Registry digest of the bits the container is actually running, as
+   *  opposed to `image_digest`, which is what the cluster has pinned. Absent
+   *  for an instance running elsewhere, one with no container, or one whose
+   *  image was built locally and so has no registry digest. */
+  running_digest?: string | null;
   started_at: string | null;
   migration: { to: string; phase: string } | null;
   /** Why no node could run this instance, set only when `state` is
@@ -633,4 +638,43 @@ export interface SelfUpdateRunState {
   finished_at: number | null;
   failure_reason: string | null;
   restart_started_at: number | null;
+}
+
+/** One row of the Updates view: what a container runs versus what its
+ *  registry currently serves. Mirrors `cl_api::routes::updates::UpdateRow`. */
+export interface UpdateRow {
+  id: InstanceId;
+  stack: string;
+  service: string;
+  node: string;
+  /** The reference the container was created from, e.g. `nginx:1.25`. */
+  image: string | null;
+  /** Registry digest of the bits actually running. */
+  running_digest: string | null;
+  /** What the registry serves for `image` right now. */
+  latest_digest: string | null;
+  /** What the cluster has pinned, if anything. */
+  pinned_digest: string | null;
+  /** The registry serves something other than what is running. */
+  update_available: boolean;
+  /** A pin exists but the container was never rebuilt onto it. Fixed by
+   *  rebuilding, not by pulling — which is why it is not `update_available`. */
+  pin_drift: boolean;
+  /** Why the registry could not be asked. Carried per row so one bad login
+   *  does not blank out the rest of the cluster's answer. */
+  error?: string;
+}
+
+/** Outcome of one instance in a bulk pin/update call. */
+export interface BulkResult {
+  id: InstanceId;
+  ok: boolean;
+  error?: string;
+}
+
+/** A stored registry login. The password is write-only: it never comes back
+ *  over the api, by construction. */
+export interface RegistryAccount {
+  server: string;
+  username: string;
 }

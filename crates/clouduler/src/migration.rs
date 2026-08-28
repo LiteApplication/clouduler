@@ -77,15 +77,29 @@ pub fn start(
                     running.lock().await.remove(&job.instance);
                     continue;
                 };
-                // A dockerd that is not connected right now, or a drive
-                // subsystem mid-rebuild, is not a reason to fail the
-                // migration outright: leave it unclaimed and try again on
-                // the next tick, same as a target with no address.
-                let (Some(docker), Some(registry)) = (docker.read().await.clone(), registry.read().await.clone())
-                else {
+                // A dockerd that is not connected right now is not a reason to
+                // fail the migration outright: leave it unclaimed and try
+                // again on the next tick, same as a target with no address.
+                let Some(docker) = docker.read().await.clone() else {
                     running.lock().await.remove(&job.instance);
                     continue;
                 };
+                // The registry is only needed to hand over volumes. An
+                // instance that mounts none can live, and so move, on a node
+                // that backs no drives at all — and that node's registry is
+                // `None` permanently, not just mid-rebuild. Demanding one
+                // regardless stranded exactly those moves: skipped on every
+                // poll, forever, with the migration stuck in `Stopping`.
+                let live_registry = registry.read().await.clone();
+                if live_registry.is_none() && !job.volumes.is_empty() {
+                    warn!(
+                        instance = %job.instance,
+                        volumes = job.volumes.len(),
+                        "cannot migrate yet: volumes to hand over but no drive registry on this node",
+                    );
+                    running.lock().await.remove(&job.instance);
+                    continue;
+                }
                 let control = DockerControl { node: node_name.clone(), docker };
 
                 info!(
@@ -101,7 +115,7 @@ pub fn start(
                     target_node: job.target_node,
                     target_addr,
                     volumes: job.volumes,
-                    registry: &registry,
+                    registry: live_registry.as_deref(),
                     engine: &engine,
                     control: &control,
                 };
@@ -236,6 +250,35 @@ impl InstanceControl for DockerControl {
                 "handing the container to the target's reconcile loop",
             );
             Ok(())
+        })
+    }
+
+    /// Takes the stopped container away on the source once the move is
+    /// committed. The source's reconcile loop would eventually do this too —
+    /// `reconcile::diff` emits `Remove` for any managed container this node
+    /// is no longer assigned — but only on its next sweep, so without this a
+    /// dead container sits in `Exited` for up to a full sweep interval,
+    /// looking exactly like a crash to anyone reading `docker ps`.
+    fn remove_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> cl_drive::BoxFuture<'a, cl_drive::Result<()>> {
+        Box::pin(async move {
+            if node != self.node {
+                return Err(cl_drive::DriveError::Config(format!(
+                    "asked to remove {instance} on {node}, but this is {}",
+                    self.node
+                )));
+            }
+            match self.docker.remove(&instance.container_name(), true).await {
+                // Already gone: reconcile beat us to it, which is the same
+                // end state and so not a failure.
+                Ok(()) | Err(cl_docker::DockerError::NotFound(_)) => Ok(()),
+                Err(e) => Err(cl_drive::DriveError::Transfer {
+                    message: format!("removing {instance}: {e}"),
+                }),
+            }
         })
     }
 }

@@ -20,6 +20,6 @@ pub use container::{
 pub use error::{DockerError, Result};
 pub use events::ContainerEvent;
 pub use exec::{ExecChunk, ExecSession, ExecSpec, ExecStream};
-pub use image::ImageRef;
+pub use image::{ImageRef, RegistryCredentials, DOCKER_HUB};
 pub use logs::{LogLine, LogOptions, LogStream, Tail};
 pub use network::NetworkSpec;

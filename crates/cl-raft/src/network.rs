@@ -77,6 +77,22 @@ impl Peer {
         Self::new(addr.to_string())
     }
 
+    /// Drop the cached connection, if any, without waiting on whatever
+    /// in-flight exchange might still be holding it.
+    ///
+    /// Must be called whenever a caller gives up on a request via its own
+    /// deadline (see `Channel::call`) rather than a real socket error: `call`
+    /// pairs requests and responses purely by send-then-read order on one
+    /// shared socket, so if a caller stops waiting mid-exchange the request
+    /// it sent is still in flight and its response is still coming — read by
+    /// this same connection later, it would be handed to a completely
+    /// unrelated call as its answer. Forcing a reconnect here throws that
+    /// stale response away with the old socket instead of letting it
+    /// desynchronize every future exchange on this peer.
+    async fn invalidate(&self) {
+        *self.conn.lock().await = None;
+    }
+
     /// Send one request, reconnecting once if the cached socket is stale.
     pub async fn call(&self, request: &RpcRequest) -> Result<RpcResponse, std::io::Error> {
         let mut guard = self.conn.lock().await;
@@ -135,7 +151,14 @@ impl Channel {
         match tokio::time::timeout(deadline, self.peer.call(&request)).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(e)) => Err(RPCError::Unreachable(Unreachable::new(&e))),
-            Err(elapsed) => Err(RPCError::Unreachable(Unreachable::new(&elapsed))),
+            Err(elapsed) => {
+                // The request we just sent is still in flight on that socket
+                // with no one left reading its response; see `invalidate`'s
+                // doc comment for why the cached connection can't be reused
+                // as-is after this.
+                self.peer.invalidate().await;
+                Err(RPCError::Unreachable(Unreachable::new(&elapsed)))
+            }
         }
     }
 

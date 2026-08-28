@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -52,6 +52,20 @@ impl FileMeta {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub files: BTreeMap<String, FileMeta>,
+    /// Directories, path to permission bits.
+    ///
+    /// Tracked in their own right rather than being implied by the files
+    /// inside them, because an *empty* directory is implied by nothing. A
+    /// receiver that only ever calls `create_dir_all` on the way to writing a
+    /// file ends up with a faithful copy of every file and none of the empty
+    /// directories — which is not a faithful copy of the volume. Postgres
+    /// keeps a dozen normally-empty directories (`pg_notify`, `pg_replslot`,
+    /// `pg_twophase`, ...) and refuses to start without them, so a replica
+    /// built purely by sync was unstartable: `could not open directory
+    /// "pg_notify"`. That only ever surfaces on failover, which is the worst
+    /// possible moment to discover it.
+    #[serde(default)]
+    pub dirs: BTreeMap<String, u32>,
 }
 
 /// The difference needed to turn `other` into `self`. Sorted since the
@@ -64,6 +78,12 @@ pub struct Diff {
     pub changed: Vec<String>,
     /// Present in `other` only: needs deleting from `other`.
     pub removed: Vec<String>,
+    /// Directories to create on `other`, parents first (lexicographic order
+    /// puts `a` before `a/b`).
+    pub added_dirs: Vec<String>,
+    /// Directories `other` has and `self` does not, children first so a tree
+    /// can be taken down from the leaves.
+    pub removed_dirs: Vec<String>,
 }
 
 impl Manifest {
@@ -89,8 +109,48 @@ impl Manifest {
                 diff.removed.push(path.clone());
             }
         }
+        for path in self.dirs.keys() {
+            if !other.dirs.contains_key(path) {
+                diff.added_dirs.push(path.clone());
+            }
+        }
+        for path in other.dirs.keys() {
+            if !self.dirs.contains_key(path) {
+                diff.removed_dirs.push(path.clone());
+            }
+        }
+        // Children before parents, so a removed tree comes down from the
+        // leaves and each `remove_dir` sees an empty directory.
+        diff.removed_dirs.reverse();
         diff
     }
+}
+
+/// Read size for [`hash_file`]. Big enough that the syscall overhead is
+/// irrelevant, small enough to be noise against the process's footprint.
+const HASH_CHUNK: usize = 1024 * 1024;
+
+/// blake3 a file's contents without holding the file in memory.
+///
+/// `std::fs::read` followed by `blake3::hash` needs the entire file resident,
+/// and these hashes are taken over arbitrary volume contents — a
+/// multi-gigabyte database relation, an ONNX model, a stray core dump. On a
+/// node with 8GB that is an OOM kill for a single file. Streaming keeps the
+/// cost at one `HASH_CHUNK` buffer regardless of size, for the same result.
+pub fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; HASH_CHUNK];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
@@ -104,11 +164,37 @@ pub fn nanos_to_filetime(nanos: i64) -> filetime::FileTime {
     filetime::FileTime::from_unix_time(nanos / 1_000_000_000, (nanos % 1_000_000_000) as u32)
 }
 
+/// `scan`, moved off the async runtime.
+///
+/// Every caller of `scan` in this crate is inside an `async fn`, and a scan is
+/// not a quick syscall: it stats every file in the volume and, with
+/// `hash_content`, reads and blake3 hashes all of it. On a volume the size of
+/// a database that is seconds of solid syscalls and CPU on one thread.
+///
+/// Run inline, that blocks a tokio worker for the whole pass — and this
+/// process is also a raft node. openraft's heartbeat deadline is a fraction of
+/// `heartbeat_interval` (375ms at the default 500ms), so a sync pass is long
+/// enough to make the node miss heartbeats, be marked unreachable by peers
+/// that can reach it perfectly well, lose quorum and fence itself. The
+/// giveaway is `Unreachable node: deadline has elapsed` on a link that pings
+/// with 0% loss.
+pub async fn scan_off_runtime(root: PathBuf, hash_content: bool) -> Result<Manifest> {
+    let name = root.display().to_string();
+    tokio::task::spawn_blocking(move || scan(&root, hash_content))
+        .await
+        .map_err(|e| DriveError::Transfer {
+            message: format!("scan of {name} did not run: {e}"),
+        })?
+}
+
 /// Walk `root` into a manifest. Symlinks are recorded, not followed. When
 /// `hash_content` is set every regular file is read and blake3 hashed, which
 /// is only worth paying for during verification or rename detection.
+///
+/// Blocking. Inside an `async fn` use `scan_off_runtime`.
 pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
     let mut files = BTreeMap::new();
+    let mut dirs = BTreeMap::new();
 
     if !root.exists() {
         return Ok(Manifest::default());
@@ -125,9 +211,6 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         }
 
         let file_type = entry.file_type();
-        if file_type.is_dir() {
-            continue;
-        }
 
         let rel = path
             .strip_prefix(root)
@@ -139,6 +222,11 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
             path: path.to_path_buf(),
             source,
         })?;
+
+        if file_type.is_dir() {
+            dirs.insert(rel, meta.mode() & 0o7777);
+            continue;
+        }
 
         if file_type.is_symlink() {
             let target = std::fs::read_link(path)
@@ -164,11 +252,10 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         }
 
         let hash = if hash_content {
-            let data = std::fs::read(path).map_err(|source| DriveError::Io {
+            Some(hash_file(path).map_err(|source| DriveError::Io {
                 path: path.to_path_buf(),
                 source,
-            })?;
-            Some(*blake3::hash(&data).as_bytes())
+            })?)
         } else {
             None
         };
@@ -186,7 +273,7 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         );
     }
 
-    Ok(Manifest { files })
+    Ok(Manifest { files, dirs })
 }
 
 #[cfg(test)]

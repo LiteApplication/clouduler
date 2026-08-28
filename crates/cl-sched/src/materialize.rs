@@ -81,6 +81,17 @@ impl Materializer {
         self.key.borrow().is_some()
     }
 
+    /// The cluster key as this node currently holds it.
+    ///
+    /// Exposed because secrets are not only ever written into containers: a
+    /// registry login is a sealed secret the reconcile loop has to open for
+    /// itself, before any container exists to mount it into. Cloned out of
+    /// the watch rather than handing back a borrow, so a caller cannot hold
+    /// the watch's lock across an await.
+    pub fn key(&self) -> Option<Arc<ClusterKey>> {
+        self.key.borrow().clone()
+    }
+
     /// Directory holding one instance's objects. Per instance rather than
     /// shared, so removing a container takes its secrets off disk with it.
     fn instance_dir(&self, instance: &InstanceId) -> PathBuf {

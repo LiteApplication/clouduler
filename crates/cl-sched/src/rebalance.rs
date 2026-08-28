@@ -177,6 +177,7 @@ mod tests {
             id: InstanceId::new("site", service, index),
             image: "img".into(),
             drives: Default::default(),
+            volumes: Default::default(),
             constraints: Vec::new(),
             pinned_node: None,
             global: false,

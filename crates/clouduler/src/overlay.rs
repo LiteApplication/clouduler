@@ -216,6 +216,20 @@ impl Context_ {
                 warn!(network = %overlay, error = %e, "cannot bring up the overlay network");
             }
         }
+
+        // Networks this node still has a bridge for but runs nothing on. They
+        // are not swept (that only happens once the stack is gone from the
+        // whole cluster), and they keep the anycast gateway address on the
+        // shared segment, so they go on answering ARP for it. They must answer
+        // with the same MAC as everyone else or they hijack other nodes'
+        // containers - see `cl_net::vxlan::gateway_mac`.
+        if let Some(netlink) = netlink {
+            for overlay in all.keys().filter(|overlay| !mine.contains(*overlay)) {
+                if let Err(e) = netlink.ensure_existing_bridge_mac(&bridge_name(overlay)).await {
+                    debug!(network = %overlay, error = %e, "could not pin a leftover bridge's mac");
+                }
+            }
+        }
         Ok(())
     }
 

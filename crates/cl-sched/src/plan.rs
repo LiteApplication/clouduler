@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use cl_config::{DeployMode, Protocol, Service, StackFile};
-use cl_raft::ids::InstanceId;
+use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::state::PortProtocol;
 
 fn to_port_protocol(protocol: Protocol) -> PortProtocol {
@@ -22,6 +22,12 @@ pub struct Desired {
     /// Drives whose volumes this instance mounts. A node must implement all of
     /// them to be a candidate.
     pub drives: BTreeSet<String>,
+    /// The individual volumes this instance mounts. Implementing the drive is
+    /// only half the requirement: for a replicated drive every node holds its
+    /// own copy of each volume, and only one of them is the authoritative one
+    /// (`VolumeState::primary`), so placement has to know which volumes are at
+    /// stake and not just which drives. See `place::rejection`.
+    pub volumes: BTreeSet<VolumeId>,
     /// Raw `deploy.placement.constraints` entries.
     pub constraints: Vec<String>,
     /// `x-clouduler.node`, a hard pin to one node.
@@ -99,6 +105,11 @@ pub fn expand(
                 id: InstanceId::new(stack, service_name, index),
                 image: service.image.clone(),
                 drives: service.drives_used(),
+                volumes: service
+                    .volumes
+                    .iter()
+                    .filter_map(|mount| Some(VolumeId::new(mount.drive.as_ref()?, mount.volume.as_ref()?)))
+                    .collect(),
                 constraints: service
                     .deploy
                     .as_ref()

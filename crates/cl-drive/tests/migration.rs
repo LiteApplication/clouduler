@@ -29,6 +29,7 @@ fn free_addr() -> SocketAddr {
 struct RecordingControl {
     events: Mutex<Vec<String>>,
     fail_stop: AtomicUsize,
+    fail_remove: AtomicUsize,
 }
 
 impl RecordingControl {
@@ -51,6 +52,16 @@ impl InstanceControl for RecordingControl {
     fn start_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
             self.events.lock().unwrap().push(format!("start:{instance}@{node}"));
+            Ok(())
+        })
+    }
+
+    fn remove_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(format!("remove:{instance}@{node}"));
+            if self.fail_remove.load(Ordering::SeqCst) > 0 {
+                return Err(cl_drive::DriveError::Transfer { message: "forced remove failure".into() });
+            }
             Ok(())
         })
     }
@@ -205,7 +216,7 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
         target_node: "target".into(),
         target_addr: harness.target_addr,
         volumes: vec![volume()],
-        registry: &registry,
+        registry: Some(&registry),
         engine: &engine,
         control: &control,
     };
@@ -214,7 +225,13 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
 
     assert_eq!(
         control.events(),
-        vec!["stop:gitlab.web.0@source".to_string(), "start:gitlab.web.0@target".to_string()]
+        vec![
+            "stop:gitlab.web.0@source".to_string(),
+            "start:gitlab.web.0@target".to_string(),
+            // The source's dead container goes away as part of the move, not
+            // whenever its reconcile loop next happens to sweep.
+            "remove:gitlab.web.0@source".to_string(),
+        ]
     );
 
     let state = harness.node.state().await;
@@ -241,7 +258,7 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
         target_node: "target".into(),
         target_addr: harness.target_addr,
         volumes: vec![volume()],
-        registry: &registry,
+        registry: Some(&registry),
         engine: &engine,
         control: &control,
     };
@@ -258,4 +275,102 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
         MigrationPhase::Failed { reason } => assert!(reason.contains("forced stop failure")),
         other => panic!("expected Failed, got {other:?}"),
     }
+}
+
+/// A stateless instance — no volumes — must be able to migrate off a node
+/// that backs no drives at all, and therefore has no `DriveRegistry`.
+///
+/// Such a node's registry is `None` permanently, not just while the drive
+/// subsystem rebuilds. The driver used to require one before claiming any
+/// job, so a move like this was skipped on every 5s poll, forever, with no
+/// log line: the migration sat in `Stopping` and the instance stayed put on
+/// a node it could not even run on. Nothing here needs a registry — it is
+/// only ever touched to hand over a volume.
+#[tokio::test]
+async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
+    let harness = Harness::start().await;
+
+    harness
+        .node
+        .submit(Request::Assign {
+            instance: instance(),
+            node: "source".into(),
+            drives: BTreeSet::new(),
+        })
+        .await
+        .unwrap();
+    harness
+        .node
+        .submit(Request::BeginMigration {
+            instance: instance(),
+            to: "target".into(),
+            drives: BTreeSet::new(),
+        })
+        .await
+        .unwrap();
+
+    let control = RecordingControl::default();
+    let engine = DeltaEngine::default();
+    let job = MigrationJob {
+        instance: instance(),
+        source_node: "source".into(),
+        target_node: "target".into(),
+        target_addr: harness.target_addr,
+        volumes: Vec::new(),
+        registry: None,
+        engine: &engine,
+        control: &control,
+    };
+
+    run(&harness.node, &job).await.expect("a volumeless migration needs no registry");
+
+    assert_eq!(
+        control.events(),
+        vec![
+            "stop:gitlab.web.0@source".to_string(),
+            "start:gitlab.web.0@target".to_string(),
+            "remove:gitlab.web.0@source".to_string(),
+        ]
+    );
+    let state = harness.node.state().await;
+    let assignment = &state.assignments[&instance()];
+    assert_eq!(assignment.node, "target");
+    assert!(assignment.migration.is_none(), "a finished migration clears its record");
+}
+
+/// Removing the source container is cleanup after the point of no return, so
+/// it must not be able to turn a move that actually worked into a `Failed`
+/// one. By the time it runs the target owns both the data and the assignment;
+/// reporting failure here would invite a retry of a completed migration.
+#[tokio::test]
+async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
+    let harness = Harness::start().await;
+    let source_volume = harness.source.path().join("data");
+    std::fs::create_dir_all(&source_volume).unwrap();
+    std::fs::write(source_volume.join("a.txt"), b"payload").unwrap();
+
+    begin_migration(&harness.node).await;
+
+    let control = RecordingControl::default();
+    control.fail_remove.store(1, Ordering::SeqCst);
+    let engine = DeltaEngine::default();
+    let registry = harness.source_registry();
+    let job = MigrationJob {
+        instance: instance(),
+        source_node: "source".into(),
+        target_node: "target".into(),
+        target_addr: harness.target_addr,
+        volumes: vec![volume()],
+        registry: Some(&registry),
+        engine: &engine,
+        control: &control,
+    };
+
+    run(&harness.node, &job).await.expect("a failed cleanup still leaves the move successful");
+
+    let state = harness.node.state().await;
+    let assignment = &state.assignments[&instance()];
+    assert_eq!(assignment.node, "target");
+    assert!(assignment.migration.is_none(), "a finished migration clears its record");
+    assert_eq!(state.volumes[&volume()].primary, "target");
 }

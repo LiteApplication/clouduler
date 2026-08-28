@@ -55,6 +55,13 @@ Routes are declared in `src/App.tsx`:
   schedulable, reachable nodes), and update a `:latest` image. Live log
   viewer with follow/tail/search and a live stats panel, both opened
   on-demand SSE subscriptions independent of the main state stream.
+- `/updates` — every container's running image digest against what its
+  registry currently serves, with per-row and bulk update actions, a "pin
+  running" action for instances that carry no pin, and a dialog for registry
+  accounts (added, tested against the registry, and removed; passwords are
+  write-only). Deliberately **not** polled: each load costs one registry
+  round trip per distinct image across the cluster, so it refreshes on
+  demand.
 - `/configs-secrets` — configs and secrets lists, the three secret creation
   paths (paste, file, generate-with-preview), and the cluster key panel
   (fingerprint, whether this node holds it, upload-after-outage).
@@ -69,7 +76,8 @@ Each view reads from the shared cluster state store rather than fetching its
 own copy of `/api/state`; a few views (node/instance detail, drives) also
 poll their own light endpoints (`/api/nodes/:name`, `/api/instances`,
 `/api/drives`) on a short interval for data the state event doesn't carry,
-like live resource usage.
+like live resource usage. `/updates` is the exception that fetches but never
+polls, for the reason given above.
 
 ## Live state
 

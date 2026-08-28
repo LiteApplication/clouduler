@@ -41,7 +41,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/internal/{id}/summary", get(internal_summary))
         .route("/api/instances/internal/{id}/logs", get(internal_logs))
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
-        .route("/api/instances/internal/{id}/restart", post(internal_restart))
         .route("/api/instances/internal/{id}/update", post(internal_update))
         // Node-to-node only, same as above: the cli resolves which node an
         // instance runs on itself (see `clouduler exec`) and connects to
@@ -62,6 +61,14 @@ struct InstanceSummary {
     health: String,
     image: Option<String>,
     image_digest: Option<String>,
+    /// Registry content digest of the bits the container is *actually*
+    /// running, as opposed to `image_digest`, which is what the cluster has
+    /// pinned. The two differ whenever a pin was recorded but the container
+    /// has not been rebuilt onto it yet. `None` when the instance runs
+    /// elsewhere, has no container, or runs a locally built image that was
+    /// never pulled from a registry and so has no digest at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    running_digest: Option<String>,
     started_at: Option<String>,
     migration: Option<MigrationSummary>,
     /// Why this instance has no assignment at all, set only when `state` is
@@ -155,6 +162,19 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
     };
 
     let running = container.as_ref().map(|c| c.running);
+    // Looked up by the local image id the container was created from, not by
+    // its tag: the tag has usually moved on, which is exactly the drift this
+    // is here to expose.
+    let running_digest = match (&container, state.docker.read().await.clone()) {
+        (Some(c), Some(docker)) => {
+            let repository = cl_docker::ImageRef::parse(&c.image).repository;
+            match c.image_digest.as_deref() {
+                Some(image_id) => docker.digest_of_image(image_id, &repository).await.ok().flatten(),
+                None => None,
+            }
+        }
+        _ => None,
+    };
     let proxy = proxy_health_of(state, assignment);
     let instance_state = if !local {
         STATE_UNKNOWN
@@ -181,6 +201,7 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
             .unwrap_or_else(|| "none".to_string()),
         image: container.as_ref().map(|c| c.image.clone()),
         image_digest: assignment.image_digest.clone(),
+        running_digest,
         started_at: container.as_ref().and_then(|c| c.started_at.clone()),
         migration: assignment.migration.as_ref().map(|m| MigrationSummary {
             to: m.to.clone(),
@@ -265,6 +286,7 @@ async fn pending_placements(state: &AppState, cluster_state: &cl_raft::ClusterSt
             health: "none".to_string(),
             image: None,
             image_digest: None,
+            running_digest: None,
             started_at: None,
             migration: None,
             placement_error: Some(u.reason),
@@ -309,10 +331,21 @@ async fn internal_summary(
     Ok(Json(summarize_local(&state, assignment).await))
 }
 
-fn internal_restart_path(instance: &InstanceId) -> String {
-    format!("/api/instances/internal/{instance}/restart")
-}
-
+/// Rerolls the instance's placement rather than restarting it in place: works
+/// out where it would land if freshly scheduled right now (the same node, if
+/// that node is still the best fit, or another one if it no longer is -
+/// unreachable, drained, missing a needed drive or network) and moves it
+/// there before starting it. An in-place restart would instead retry forever
+/// on whatever node it already happened to be on, even one that can no
+/// longer host it.
+///
+/// Reroll happens inline here rather than by unassigning and waiting for the
+/// scheduler's own sweep, for two reasons: the operator sees the effect
+/// immediately instead of up to `SWEEP_INTERVAL` later, and a plain
+/// `Unassign` would drop the assignment's `image_digest` pin (`Assign`
+/// always resets it to `None`) - restarting a `stack update`-pinned instance
+/// would silently let it drift back to whatever tag it deploys from now
+/// resolves to.
 async fn restart(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -323,35 +356,74 @@ async fn restart(
     let assignment = cluster_state
         .assignments
         .get(&instance)
+        .cloned()
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
-    if assignment.node != state.node_name {
-        let node = assignment.node.clone();
-        internal_peer::post_empty(&state, &node, &internal_restart_path(&instance)).await?;
-        return Ok(StatusCode::OK);
-    }
-    restart_local(&state, &instance).await?;
-    Ok(StatusCode::OK)
-}
 
-async fn restart_local(state: &AppState, instance: &InstanceId) -> Result<(), ApiError> {
-    state
-        .docker()
-        .await?
-        .restart(&instance.container_name(), Duration::from_secs(10))
+    let config = state.cluster_config.read().await;
+    let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
+    let desired = cl_sched::desired_instances(
+        &cluster_state,
+        &config.egress_networks(),
+        &config.port_gated_networks(),
+        colocate_proxy_hosts,
+    );
+    let served_drives = config.served_drives();
+    let nat_networks = config.nat_networks();
+    drop(config);
+
+    let item = desired
+        .into_iter()
+        .find(|d| d.id == instance)
+        .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
+
+    // Placement leaves a valid existing assignment alone, so judge candidates
+    // against a copy with this one instance's assignment cleared - the same
+    // fresh pick a never-yet-placed instance would get.
+    let mut probe = cluster_state.clone();
+    probe.assignments.remove(&instance);
+    let outcome = cl_sched::place::place(&probe, std::slice::from_ref(&item), &served_drives, &nat_networks);
+    let target = outcome
+        .decisions
+        .into_iter()
+        .find_map(|d| match d {
+            cl_sched::place::Decision::Place { node, .. } => Some(node),
+            cl_sched::place::Decision::Remove { .. } => None,
+        })
+        .ok_or_else(|| ApiError::Conflict("no node in the cluster can run this instance right now".to_string()))?;
+
+    let response = state
+        .cluster
+        .submit(ClusterRequest::Unassign { instance: instance.clone() })
         .await
-        .map_err(ApiError::internal)
-}
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
 
-/// Node-to-node: restarts this node's own container. The caller already
-/// checked the assignment and the caller's own admin auth before forwarding
-/// here.
-async fn internal_restart(
-    _auth: InternalAuth,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let instance = parse_id(&id)?;
-    restart_local(&state, &instance).await?;
+    let response = state
+        .cluster
+        .submit(ClusterRequest::Assign {
+            instance: instance.clone(),
+            node: target,
+            drives: item.drives,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
+
+    if let Some(digest) = assignment.image_digest {
+        let response = state
+            .cluster
+            .submit(ClusterRequest::SetImageDigest { instance, digest })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::Conflict(msg));
+        }
+    }
+
     Ok(StatusCode::OK)
 }
 
@@ -505,23 +577,48 @@ async fn update(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let instance = parse_id(&id)?;
+    update_instance(&state, instance).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Update one instance wherever it runs: here, or on the node that owns it.
+///
+/// Shared with `routes::updates`, which drives the same thing across a whole
+/// list of instances from the Updates view.
+pub(crate) async fn update_instance(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
     let cluster_state = state.cluster.state().await;
     let assignment = cluster_state
         .assignments
         .get(&instance)
-        .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
+        .ok_or_else(|| ApiError::NotFound(format!("no instance {instance}")))?;
     if assignment.node != state.node_name {
         let node = assignment.node.clone();
-        internal_peer::post_empty(&state, &node, &internal_update_path(&instance)).await?;
-        return Ok(StatusCode::OK);
+        return internal_peer::post_empty(state, &node, &internal_update_path(&instance)).await;
     }
-    update_local(&state, instance).await?;
-    Ok(StatusCode::OK)
+    drop(cluster_state);
+    update_local(state, instance).await
 }
 
 /// Pulls the instance's current image on this node, records the new digest
 /// (a leader-only raft write, hence still needing `submit` even when this is
-/// not the leader), and restarts the container onto it.
+/// not the leader), and takes the old container away so the reconcile loop
+/// builds a new one on the new bits.
+///
+/// Removing rather than restarting is the whole point. `docker restart` stops
+/// and starts *the same container*, which is bound to the image id it was
+/// created from — so the pull would fetch the new image, the digest would be
+/// recorded, the container would bounce, and it would come back up running
+/// exactly the bits it was already running. Nothing else would have caught
+/// it either: the spec revision that drives `Action::Recreate` is built from
+/// the stack revision and mount shape (`revision_with_mounts`), not the
+/// image, so a changed pin alone never triggers a replace. The update looked
+/// like it worked and silently did nothing.
+///
+/// Reconcile sees a wanted instance with no container and issues
+/// `Action::Create` on its next sweep, which builds the spec from the pin
+/// just recorded. Ordering against that write does not matter: if the sweep
+/// lands before the pin has applied locally, it creates from the plain tag,
+/// which the pull above has just repointed at the same new digest.
 async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
     let name = instance.container_name();
     let docker = state.docker().await?;
@@ -531,14 +628,25 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::NotFound(format!("container {name} does not exist on this node")))?;
 
-    let digest = docker.pull(&current.image).await.map_err(ApiError::internal)?;
+    let registries = super::registries::load(state).await;
+    let digest = docker
+        .pull_as(&current.image, registries.for_image(&current.image))
+        .await
+        .map_err(ApiError::internal)?;
     state
         .cluster
         .submit(ClusterRequest::SetImageDigest { instance, digest })
         .await
         .map_err(ApiError::not_leader)?;
-    docker.restart(&name, Duration::from_secs(10)).await.map_err(ApiError::internal)
+
+    docker.stop(&name, STOP_GRACE).await.ok();
+    docker.remove(&name, true).await.map_err(ApiError::internal)
 }
+
+/// How long the container being updated gets to stop cleanly. Matches the
+/// reconcile loop's own default rather than docker's 10 seconds, which is
+/// short for a database.
+const STOP_GRACE: Duration = cl_sched::reconcile::DEFAULT_STOP_GRACE;
 
 /// Node-to-node: updates this node's own container. The caller already
 /// checked the assignment and the caller's own admin auth before forwarding

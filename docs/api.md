@@ -140,7 +140,8 @@ Instance ids are `stack.service.index`. A summary looks like:
   "running": true,            // null when state is unknown
   "health": "healthy",        // healthy|unhealthy|starting|none
   "image": "nginx:1.25",
-  "image_digest": "sha256:...",
+  "image_digest": "sha256:...",   // what the cluster has pinned
+  "running_digest": "sha256:...", // what the container is actually running
   "started_at": "2026-08-18T09:30:19Z",
   "migration": null           // { "to": "n2", "phase": "syncing" } while moving
 }
@@ -153,10 +154,92 @@ different answer from `stopped`.
 `restart`, `update`, `logs` and `stats` only work when the instance runs on
 the node currently answering the request; cl-docker has no rpc path for
 fetching another node's container state. Hitting them for an instance that
-runs elsewhere returns `409` naming the node it actually runs on. `move`
+runs elsewhere returns `409` naming the node it actually runs on.
+
+`image_digest` and `running_digest` answer different questions and routinely
+differ: the first is the pin recorded in raft, the second is the registry
+digest behind the image id the container was actually created from. A pin that
+has been recorded but not yet built onto shows up as a disagreement between
+them, which is what `clouduler stack unhealthy` reports as pin drift.
+
+`move`
 currently begins the migration without re-deriving the drives the instance's
 volumes need from its stack spec, so a target node's drive support is not
 re-checked at move time the way it is at initial placement.
+
+## Updates
+
+```
+GET    /api/updates                     read    per instance: running vs latest
+POST   /api/updates/pin                 { "instances": [] }  pin what is running
+POST   /api/updates/apply               { "instances": [] }  pull and rebuild
+```
+
+An empty (or absent) `instances` list means "everything this applies to":
+every unpinned instance for `pin`, every instance with an update available for
+`apply`. Both answer with one result per instance, so a partial failure is
+legible rather than the whole call reading as failed:
+
+```json
+[{ "id": "blog.web.0", "ok": true }]
+```
+
+A row of the listing:
+
+```json
+{
+  "id": "blog.web.0",
+  "stack": "blog",
+  "service": "web",
+  "node": "n1",
+  "image": "nginx:1.25",
+  "running_digest": "sha256:...",   // the bits actually running
+  "latest_digest": "sha256:...",    // what the registry serves for `image`
+  "pinned_digest": null,            // what the cluster has pinned
+  "update_available": true,         // latest differs from running
+  "pin_drift": false,               // pinned differs from running
+  "error": null                     // why the registry could not be asked
+}
+```
+
+`update_available` is only ever true when both digests are known. An image
+built locally has no registry digest at all, and reporting those as
+perpetually out of date would make "update all" a no-op that never stops
+asking.
+
+The listing costs one registry round trip per *distinct image* across the
+cluster — the fan-out is per node, not per instance — so it is not something
+to poll. `apply` runs its updates sequentially on purpose: each one takes its
+container down and lets the reconcile loop build a new one, so running them
+concurrently would stop every replica of a service at once.
+
+`pin` only ever pins instances that have none. An instance already pinned had
+that decision made deliberately, and repointing it at whatever happens to be
+running now would silently undo a rollback.
+
+## Registry accounts
+
+```
+GET    /api/registries                  read    server and username, never a password
+PUT    /api/registries                  { "server": "", "username": "", "password": "" }
+POST   /api/registries/verify           same body, checks without storing
+DELETE /api/registries/:server
+```
+
+Logins are sealed with the cluster key and stored as reserved cluster secrets,
+so they are replicated to every node and hidden from `/api/secrets`. The
+password is write-only: no route returns it.
+
+`PUT` refuses a login the registry does not accept, using the ordinary
+registry v2 handshake (`GET /v2/`, then the `Bearer` token realm it names).
+Storing an unverified password does not fail here; it fails later, on another
+node, mid-pull, as an image that will not come down.
+
+Every spelling of Docker Hub (`hub.docker.com`, `index.docker.io`,
+`registry-1.docker.io`) is folded to `docker.io`, which is the host docker
+itself keys credentials on. A login is only ever offered to the registry named
+in the image reference — handing one registry's password to another is a
+disclosure, not a convenience.
 
 ## Configs and secrets
 
