@@ -629,10 +629,15 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
         .ok_or_else(|| ApiError::NotFound(format!("container {name} does not exist on this node")))?;
 
     let registries = super::registries::load(state).await;
-    let digest = docker
-        .pull_as(&current.image, registries.for_image(&current.image))
-        .await
-        .map_err(ApiError::internal)?;
+    // Marked for the same reason the reconcile loop marks its own pulls: a
+    // docker inspect cannot tell "fetching the image" from "about to be
+    // created", so without this the instance reads as plain `stopped` for
+    // however long the download takes. `apply` returns before the pull
+    // finishes, so this is the only thing the ui has to watch.
+    state.pulling.write().await.insert(instance.clone());
+    let pulled = docker.pull_as(&current.image, registries.for_image(&current.image)).await;
+    state.pulling.write().await.remove(&instance);
+    let digest = pulled.map_err(ApiError::internal)?;
     state
         .cluster
         .submit(ClusterRequest::SetImageDigest { instance, digest })

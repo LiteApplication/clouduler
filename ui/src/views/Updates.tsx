@@ -46,6 +46,10 @@ export function Updates() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BulkResult[] | null>(null);
+  /** Instances an `apply` accepted and that have not settled yet. */
+  const [pending, setPending] = useState<string[]>([]);
+  /** Live container state per pending instance, for the progress line. */
+  const [progress, setProgress] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -75,6 +79,38 @@ export function Updates() {
     void loadAccounts();
   }, [load, loadAccounts]);
 
+  // While updates are in flight, watch the instances themselves — the only
+  // thing that knows how far along a pull is. `/api/instances` is a local
+  // docker inspect per node, cheap enough for a 3s poll, unlike `/api/updates`.
+  // When every accepted instance is running again, re-check digests once so
+  // the rows go green on their own.
+  useEffect(() => {
+    if (pending.length === 0) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const instances = await api.listInstances();
+        if (cancelled) return;
+        const watched = instances.filter((i) => pending.includes(i.id));
+        setProgress(Object.fromEntries(watched.map((i) => [i.id, i.state])));
+        // `stopped` counts as settled too: an update that failed to come back
+        // must end the watch rather than spin forever.
+        if (watched.length > 0 && watched.every((i) => i.state === 'running' || i.state === 'stopped')) {
+          setPending([]);
+          void load();
+        }
+      } catch {
+        // A failed poll is not worth surfacing; the next tick retries.
+      }
+    };
+    void tick();
+    const id = setInterval(() => void tick(), 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [pending, load]);
+
   const outdated = useMemo(() => (rows ?? []).filter((r) => statusOf(r) === 'update'), [rows]);
   const unpinned = useMemo(() => (rows ?? []).filter((r) => !r.pinned_digest && r.running_digest), [rows]);
 
@@ -86,6 +122,29 @@ export function Updates() {
       const outcome = await action();
       setResults(outcome);
       await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Start updates and follow them through the instance list.
+   *
+   * The server answers as soon as the work is scheduled, because a pull takes
+   * far longer than a request may. So the ids are always sent explicitly —
+   * this view is looking at the answer already, and letting the server
+   * recompute it would make it re-scan every registry first — and progress
+   * comes from `/api/instances`, which is cheap enough to poll.
+   */
+  async function startUpdate(ids: string[]) {
+    setBusy(ids.length === 1 ? ids[0] : 'apply');
+    setError(null);
+    setResults(null);
+    try {
+      const { accepted } = await api.applyUpdates(ids);
+      setPending(accepted);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -135,8 +194,8 @@ export function Updates() {
           </button>
           <button
             className="primary"
-            disabled={busy !== null || outdated.length === 0}
-            onClick={() => void run('apply', () => api.applyUpdates())}
+            disabled={busy !== null || pending.length > 0 || outdated.length === 0}
+            onClick={() => void startUpdate(outdated.map((r) => r.id))}
           >
             {busy === 'apply' ? <span className="spinner" /> : <Icon name="download" />} Update all (
             {outdated.length})
@@ -145,6 +204,13 @@ export function Updates() {
       </div>
 
       {error && <p className="banner banner-bad">{error}</p>}
+
+      {pending.length > 0 && (
+        <p className="banner banner-warn">
+          <span className="spinner" /> Updating {pending.length} instance(s). Each one pulls its image and is
+          rebuilt by the node that runs it, so this keeps going whether or not you stay on this page.
+        </p>
+      )}
 
       {results && (
         <div className="card" style={{ marginBottom: 'var(--space-4)' }}>
@@ -212,14 +278,20 @@ export function Updates() {
                     </Badge>
                   </td>
                   <td>
-                    {status === 'update' && (
-                      <button
-                        className="ghost"
-                        disabled={busy !== null}
-                        onClick={() => void run(row.id, () => api.applyUpdates([row.id]))}
-                      >
-                        Update
-                      </button>
+                    {pending.includes(row.id) ? (
+                      <span className="muted">
+                        <span className="spinner" /> {progress[row.id] ?? 'starting'}
+                      </span>
+                    ) : (
+                      status === 'update' && (
+                        <button
+                          className="ghost"
+                          disabled={busy !== null || pending.length > 0}
+                          onClick={() => void startUpdate([row.id])}
+                        >
+                          Update
+                        </button>
+                      )
                     )}
                   </td>
                 </tr>

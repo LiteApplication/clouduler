@@ -6,6 +6,7 @@ import type {
   ApiErrorBody,
   ApiKey,
   ApiKeyCreated,
+  AcceptedUpdates,
   BulkResult,
   CertificateState,
   CloudflareTokenStatus,
@@ -225,7 +226,10 @@ export const api = {
   // applies to", which is what the view's bulk buttons send.
   listUpdates: () => get<UpdateRow[]>('/api/updates'),
   pinUpdates: (instances?: string[]) => post<BulkResult[]>('/api/updates/pin', { instances: instances ?? [] }),
-  applyUpdates: (instances?: string[]) => post<BulkResult[]>('/api/updates/apply', { instances: instances ?? [] }),
+  // Answers 202 as soon as the work is scheduled: a pull takes far longer
+  // than any http timeout allows, so the response says what was accepted and
+  // progress is watched through the instance list (`pulling` -> `running`).
+  applyUpdates: (instances?: string[]) => post<AcceptedUpdates>('/api/updates/apply', { instances: instances ?? [] }),
 
   // registry accounts. The password is write-only: there is no getter for it,
   // and `listRegistries` returns only the server and username.

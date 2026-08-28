@@ -69,6 +69,15 @@ impl ImageRef {
 /// `registry-1.docker.io` where its api actually lives.
 pub const DOCKER_HUB: &str = "docker.io";
 
+/// Attempts a rate-limited registry lookup gets, including the first.
+const RATE_LIMIT_RETRIES: u32 = 4;
+
+/// First backoff after a 429, doubling each time. Deliberately short: the
+/// `retry-after` these registries return is well under a millisecond, so this
+/// is already generous, and the whole point is to stay inside the reverse
+/// proxy's response timeout rather than to be polite over minutes.
+const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A registry login. Mirrors the subset of bollard's `DockerCredentials` that
 /// clouduler stores, so nothing outside this crate has to depend on bollard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -187,12 +196,29 @@ impl Docker {
         image: &str,
         credentials: Option<&RegistryCredentials>,
     ) -> Result<Option<String>> {
-        let remote = self
-            .inner
-            .inspect_registry_image(image, credentials.map(Into::into))
-            .await
-            .map_err(classify)?;
-        Ok(remote.descriptor.digest)
+        // Retried, because checking a cluster's worth of images means asking
+        // several registries a few dozen times in quick succession, and they
+        // throttle bursts well under their published per-minute allowance. A
+        // 429 is "too fast", not "no": giving up on it reports a perfectly
+        // current image as unknown, and does so unpredictably, so the same
+        // image flips between known and unknown run to run.
+        let mut delay = RATE_LIMIT_BACKOFF;
+        for attempt in 0..RATE_LIMIT_RETRIES {
+            match self
+                .inner
+                .inspect_registry_image(image, credentials.map(Into::into))
+                .await
+                .map_err(classify)
+            {
+                Ok(remote) => return Ok(remote.descriptor.digest),
+                Err(DockerError::RateLimited(_)) if attempt + 1 < RATE_LIMIT_RETRIES => {
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("the loop returns on the last attempt")
     }
 
     /// Compare the local image digest against what the registry currently has,

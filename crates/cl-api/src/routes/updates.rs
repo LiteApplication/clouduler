@@ -22,12 +22,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_raft::ids::InstanceId;
 use cl_raft::Request as ClusterRequest;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::auth::internal::InternalAuth;
 use crate::auth::{Identity, RequireAdmin};
@@ -46,6 +48,15 @@ pub fn router() -> Router<AppState> {
 }
 
 const INTERNAL_SCAN_PATH: &str = "/api/updates/internal/scan";
+
+/// How many registry lookups one node runs at once. See `scan_local`.
+///
+/// Four rather than eight: at eight, ghcr.io and lscr.io started answering
+/// 429 to a routine scan. `registry_digest` retries those, so the cap is
+/// about making the retry rare rather than about correctness — and the
+/// difference between four and eight in wall time is small next to the
+/// difference between four and one.
+const REGISTRY_LOOKUP_CONCURRENCY: usize = 4;
 
 /// What one node can say about one of its containers without consulting raft.
 #[derive(Serialize, Deserialize, Clone)]
@@ -214,17 +225,30 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
     }
 
     // Pass two: one registry lookup per distinct reference, however many
-    // containers share it.
-    let images: BTreeSet<String> = statuses.iter().filter_map(|s| s.image.clone()).collect();
-    let mut latest: BTreeMap<String, Result<Option<String>, String>> = BTreeMap::new();
-    for image in images {
-        let credentials = registries.for_image(&image);
-        let answer = docker
-            .registry_digest(&image, credentials)
-            .await
-            .map_err(|e| e.to_string());
-        latest.insert(image, answer);
-    }
+    // containers share it, and several in flight at once.
+    //
+    // Concurrency matters more than it looks. These are round trips to the
+    // open internet, tens of them, and run one after another they added up to
+    // well over the reverse proxy's 30s response timeout on a cluster this
+    // size — the view 504'd rather than rendering. Bounded rather than
+    // unlimited so a node with a hundred distinct images does not open a
+    // hundred sockets, and because registries rate-limit anonymous pulls.
+    let images: Vec<String> = statuses.iter().filter_map(|s| s.image.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    let latest: BTreeMap<String, Result<Option<String>, String>> = futures::stream::iter(images)
+        .map(|image| {
+            let docker = docker.clone();
+            let credentials = registries.for_image(&image).cloned();
+            async move {
+                let answer = docker
+                    .registry_digest(&image, credentials.as_ref())
+                    .await
+                    .map_err(|e| e.to_string());
+                (image, answer)
+            }
+        })
+        .buffer_unordered(REGISTRY_LOOKUP_CONCURRENCY)
+        .collect()
+        .await;
 
     for status in &mut statuses {
         let Some(image) = &status.image else { continue };
@@ -302,37 +326,68 @@ async fn pin(
     Ok(Json(results))
 }
 
-/// Pull and rebuild, for the named instances or for every one with an update
-/// available.
+/// What `apply` took on. The work itself outlives the request.
+#[derive(Serialize)]
+struct Accepted {
+    accepted: Vec<String>,
+}
+
+/// Start pulling and rebuilding, for the named instances or for every one
+/// with an update available.
 ///
-/// Sequential on purpose. Each update takes its container down and lets the
-/// reconcile loop build a new one, so running the whole cluster's worth at
-/// once would stop every replica of a service simultaneously — the one thing
-/// a rolling update exists to avoid. A handful of images pulled in series is
-/// slower and survivable; a cluster-wide simultaneous restart is neither.
+/// Answers `202` as soon as the work is scheduled rather than when it is
+/// done, because it cannot be done in time. A pull is a download of hundreds
+/// of megabytes over whatever link the node has; the reverse proxy gives a
+/// backend 30 seconds. Holding the request open across that produced a
+/// gateway timeout every time, on an update that was in fact running fine —
+/// the worst possible reading, since the operator sees a failure and clicks
+/// again, stacking a second pull on the first.
+///
+/// The caller watches progress through the instance list, which already
+/// reports `pulling` (see `AppState::pulling`) and then `running` — no new
+/// polling endpoint, and it stays correct if the browser's next request
+/// lands on a different node.
+///
+/// The updates themselves run sequentially inside the spawned task. Each one
+/// takes its container down and lets the reconcile loop build a new one, so
+/// doing the whole cluster at once would stop every replica of a service
+/// simultaneously — the one thing a rolling update exists to avoid.
 async fn apply(
     _admin: RequireAdmin,
     State(state): State<AppState>,
     body: Option<Json<InstanceSelection>>,
-) -> Result<Json<Vec<BulkResult>>, ApiError> {
+) -> Result<(StatusCode, Json<Accepted>), ApiError> {
     let selection = body.map(|Json(b)| b).unwrap_or_default();
-    let wanted: BTreeSet<String> = selection.instances.into_iter().collect();
 
-    let mut results = Vec::new();
-    for row in rows(&state).await {
-        let chosen = if wanted.is_empty() { row.update_available } else { wanted.contains(&row.id) };
-        if !chosen {
-            continue;
+    // Only scan when the caller did not say what it wanted. The ui always
+    // does — it is looking at the answer already — so the common path costs
+    // nothing. Scanning regardless meant a single-row update paid for a
+    // full cluster-wide registry sweep before it even started pulling.
+    let instances: Vec<InstanceId> = if selection.instances.is_empty() {
+        rows(&state)
+            .await
+            .into_iter()
+            .filter(|row| row.update_available)
+            .filter_map(|row| row.id.parse().ok())
+            .collect()
+    } else {
+        selection.instances.iter().filter_map(|id| id.parse().ok()).collect()
+    };
+
+    let accepted: Vec<String> = instances.iter().map(|i| i.to_string()).collect();
+
+    let worker = state.clone();
+    tokio::spawn(async move {
+        for instance in instances {
+            match super::instances::update_instance(&worker, instance.clone()).await {
+                Ok(()) => info!(%instance, "updated"),
+                // Logged rather than returned: nothing is waiting on this any
+                // more. The instance itself shows the failure — it does not
+                // come back up — and `stack unhealthy` reports it.
+                Err(e) => warn!(%instance, error = %e, "update failed"),
+            }
         }
-        let Ok(instance) = row.id.parse::<InstanceId>() else {
-            continue;
-        };
-        let outcome = super::instances::update_instance(&state, instance).await;
-        results.push(match outcome {
-            Ok(()) => BulkResult { id: row.id, ok: true, error: None },
-            Err(e) => BulkResult { id: row.id, ok: false, error: Some(e.to_string()) },
-        });
-    }
+    });
 
-    Ok(Json(results))
+    Ok((StatusCode::ACCEPTED, Json(Accepted { accepted })))
 }

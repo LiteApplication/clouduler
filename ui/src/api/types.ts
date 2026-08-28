@@ -665,7 +665,15 @@ export interface UpdateRow {
   error?: string;
 }
 
-/** Outcome of one instance in a bulk pin/update call. */
+/** What `POST /api/updates/apply` took on. It answers 202 as soon as the work
+ *  is scheduled — a pull runs far longer than any http timeout allows — so
+ *  this reports what was accepted, not what finished. Progress is watched
+ *  through the instance list: each one goes `pulling`, then `running`. */
+export interface AcceptedUpdates {
+  accepted: InstanceId[];
+}
+
+/** Outcome of one instance in a bulk pin call. */
 export interface BulkResult {
   id: InstanceId;
   ok: boolean;

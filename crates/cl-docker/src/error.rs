@@ -24,6 +24,13 @@ pub enum DockerError {
     #[error("docker api error: {0}")]
     Api(#[source] bollard::errors::Error),
 
+    /// The registry answered 429. Distinct from `Api` because it is a
+    /// "try again shortly", not a failure: the answer exists, we asked too
+    /// fast. Registries throttle bursts even well under their published
+    /// per-minute allowance, so this is routine when checking many images.
+    #[error("registry is rate limiting: {0}")]
+    RateLimited(String),
+
     /// An image reference couldn't be parsed or resolved.
     #[error("invalid image reference: {0}")]
     InvalidImageRef(String),
@@ -44,12 +51,15 @@ impl DockerError {
 /// Turn a raw bollard error into ours, pulling 404s out as `NotFound` so callers
 /// can match on them without inspecting bollard's error type directly.
 pub(crate) fn classify(err: bollard::errors::Error) -> DockerError {
-    if let bollard::errors::Error::DockerResponseServerError {
-        status_code: 404,
-        message,
-    } = &err
-    {
-        return DockerError::NotFound(message.clone());
+    if let bollard::errors::Error::DockerResponseServerError { status_code, message } = &err {
+        match status_code {
+            404 => return DockerError::NotFound(message.clone()),
+            // The registry is throttling, not refusing. Worth its own variant
+            // so a caller can back off and retry instead of reporting an
+            // image as unknown — see `Docker::registry_digest`.
+            429 => return DockerError::RateLimited(message.clone()),
+            _ => {}
+        }
     }
     DockerError::Api(err)
 }
