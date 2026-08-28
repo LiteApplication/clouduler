@@ -343,7 +343,34 @@ expose:
     published: 2222      # port published on the network
     protocol: tcp         # tcp or udp, default tcp
     network: tailscale     # which declared network publishes it
+    proxy_protocol: false   # announce the real client, default false
 ```
+
+#### `proxy_protocol`
+
+A published port is forwarded **in userspace**, so the backend sees a
+connection from the node's own address on the container bridge — never the
+client's. For most services that only makes the access log less useful. For
+anything that decides per client address (rate limits, fail2ban, allowlists)
+it is dangerous: every client looks identical, so one abusive client gets the
+*relay* banned and takes every other client down with it.
+
+Setting `proxy_protocol: true` prepends a [PROXY protocol
+v2](https://www.haproxy.org/download/2.8/doc/proxy-protocol.txt) header to
+each backend connection, carrying the real client and the address it
+connected to.
+
+TCP only — the header goes at the head of a stream, and UDP has none, so the
+combination is rejected at validation rather than ignored.
+
+**Enable it on the backend first.** The header is extra bytes ahead of the
+protocol, so a backend that is not expecting one sees a malformed request.
+Servers that support it usually gate on a trusted-proxy list, and typically
+reject a header arriving from an address not on that list — which means
+turning this on before the backend trusts the node takes the service down
+completely. Turn it on in the backend, confirm it still works without a
+header (most implementations accept both from a trusted address), then set
+this.
 
 ### `volume_sync`
 

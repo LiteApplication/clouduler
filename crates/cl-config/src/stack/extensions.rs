@@ -338,6 +338,26 @@ pub struct ExposePort {
     #[serde(default, skip_serializing_if = "is_default_protocol")]
     pub protocol: Protocol,
     pub network: String,
+    /// Announce the real client to the backend with a PROXY protocol header
+    /// before relaying anything else.
+    ///
+    /// A published port is forwarded in userspace (`cl_net::expose`), which
+    /// means the backend sees a connection from *this node's* address on the
+    /// container's bridge, never the client's. For most services that is
+    /// merely a worse access log. For anything that makes decisions per
+    /// client address — rate limits, fail2ban, allowlists — it is actively
+    /// dangerous: every client looks like the same address, so one abusive
+    /// client gets the relay itself banned and takes every other client down
+    /// with it. That is not hypothetical; it is why this option exists.
+    ///
+    /// Off by default, and necessarily opt in: the header is extra bytes at
+    /// the head of the stream, so a backend that is not expecting one sees a
+    /// malformed request. **Enable it on the backend first.**
+    ///
+    /// TCP only. The relay rejects `proxy_protocol` on a UDP port rather
+    /// than silently ignoring it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy_protocol: bool,
 }
 
 fn is_default_protocol(p: &Protocol) -> bool {

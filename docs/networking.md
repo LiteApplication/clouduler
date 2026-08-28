@@ -220,6 +220,15 @@ owning instance:
   the backend, forwarding datagrams in both directions until the session
   goes idle.
 
+Forwarding in userspace means the backend sees the connection coming from
+**this node's address on the container bridge**, not the client's. That is
+inherent to a relay: it terminates one connection and opens another. For a
+service that keys anything on the client address it is worse than a cosmetic
+problem — every client is indistinguishable, so a per-IP rate limit or
+fail2ban ends up acting on the relay, and one abusive client locks out all of
+them. `proxy_protocol: true` on the `expose` entry fixes it for backends that
+speak PROXY protocol v2; see docs/stacks.md for the ordering it requires.
+
 Routing is driven by a table the reconciler updates as placement changes.
 Forwarders don't resolve the backend once and forget it: each connection or
 session watches its route for the rest of its life, so if the instance

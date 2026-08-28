@@ -81,27 +81,51 @@ impl Routes {
 /// Serve a published TCP port, forwarding accepted connections to whatever
 /// `routes` currently says the backend is. Runs until the listener errors;
 /// callers spawn this as a background task per published port.
-pub async fn serve_tcp(bind: SocketAddr, published: u16, routes: Routes) -> Result<()> {
+///
+/// `proxy_protocol` prepends a PROXY v2 header to each backend connection so
+/// the backend learns who actually connected. See [`ExposePort::proxy_protocol`]
+/// for why that matters and why it is opt in.
+///
+/// [`ExposePort::proxy_protocol`]: https://docs.rs/cl-config
+pub async fn serve_tcp(
+    bind: SocketAddr,
+    published: u16,
+    routes: Routes,
+    proxy_protocol: bool,
+) -> Result<()> {
     let listener = TcpListener::bind(bind).await.map_err(|source| NetError::Io {
         context: format!("bind tcp {bind}"),
         source,
     })?;
 
     loop {
-        let (client, _peer) = listener.accept().await.map_err(|source| NetError::Io {
+        let (client, peer) = listener.accept().await.map_err(|source| NetError::Io {
             context: format!("accept tcp {bind}"),
             source,
         })?;
+        // The local address of the accepted socket, not the listener's: the
+        // listener binds 0.0.0.0, and a PROXY header saying the connection
+        // was destined for 0.0.0.0 is useless to the backend.
+        let local = client.local_addr().ok();
         let mut route = routes.subscribe(published);
         tokio::spawn(async move {
-            let _ = forward_tcp(client, &mut route).await;
+            let header = proxy_protocol
+                .then(|| local.map(|local| proxy_v2_header(peer, local)))
+                .flatten();
+            let _ = forward_tcp(client, &mut route, header).await;
         });
     }
 }
 
 /// Splice one accepted TCP connection to its current backend, aborting if
 /// the route changes or there is no backend at all.
-async fn forward_tcp(mut client: TcpStream, route: &mut watch::Receiver<Option<SocketAddr>>) -> Result<()> {
+///
+/// `header`, when present, is written to the backend before any client bytes.
+async fn forward_tcp(
+    mut client: TcpStream,
+    route: &mut watch::Receiver<Option<SocketAddr>>,
+    header: Option<Vec<u8>>,
+) -> Result<()> {
     let Some(backend_addr) = *route.borrow_and_update() else {
         let _ = client.shutdown().await;
         return Err(NetError::Dns("published port has no running instance".into()));
@@ -118,6 +142,19 @@ async fn forward_tcp(mut client: TcpStream, route: &mut watch::Receiver<Option<S
         }
     };
 
+    // Before anything the client sent: the backend parses this header off the
+    // head of the stream, so a single byte of client data ahead of it would
+    // make the whole connection unreadable to it.
+    if let Some(header) = header {
+        if let Err(source) = backend.write_all(&header).await {
+            let _ = client.shutdown().await;
+            return Err(NetError::Io {
+                context: format!("write proxy protocol header to {backend_addr}"),
+                source,
+            });
+        }
+    }
+
     tokio::select! {
         result = tokio::io::copy_bidirectional(&mut client, &mut backend) => {
             result.map(|_| ()).map_err(|source| NetError::Io {
@@ -130,6 +167,61 @@ async fn forward_tcp(mut client: TcpStream, route: &mut watch::Receiver<Option<S
         // client sit on a connection nobody is serving.
         _ = route.changed() => Ok(()),
     }
+}
+
+/// The 12 byte signature every PROXY v2 header starts with. Chosen by the
+/// spec to be something no real protocol would ever begin with, so a backend
+/// can tell a header from ordinary traffic.
+const PROXY_V2_SIGNATURE: [u8; 12] = [
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+];
+
+/// Encode a PROXY protocol v2 header announcing `client` as the real peer of
+/// a connection that arrived for `local`.
+///
+/// v2 (binary) rather than v1 (text) because it is what current servers
+/// implement and it cannot be confused with a real request line. The address
+/// family follows the pair: both are always the same family here, since
+/// `local` is the local end of the very socket `client` connected to.
+///
+/// Deliberately no TLVs. They are optional in the spec, nothing here has
+/// anything to put in one, and every byte of this header is parsed by the
+/// backend before it will talk to us.
+fn proxy_v2_header(client: SocketAddr, local: SocketAddr) -> Vec<u8> {
+    let mut header = Vec::with_capacity(28);
+    header.extend_from_slice(&PROXY_V2_SIGNATURE);
+    // Version 2 (high nibble), command PROXY (low nibble) — as opposed to
+    // LOCAL, which would tell the backend to ignore the addresses and use
+    // the real socket, i.e. exactly the behaviour we are fixing.
+    header.push(0x21);
+
+    match (client, local) {
+        (SocketAddr::V4(client), SocketAddr::V4(local)) => {
+            header.push(0x11); // AF_INET + STREAM
+            header.extend_from_slice(&12u16.to_be_bytes());
+            header.extend_from_slice(&client.ip().octets());
+            header.extend_from_slice(&local.ip().octets());
+            header.extend_from_slice(&client.port().to_be_bytes());
+            header.extend_from_slice(&local.port().to_be_bytes());
+        }
+        (SocketAddr::V6(client), SocketAddr::V6(local)) => {
+            header.push(0x21); // AF_INET6 + STREAM
+            header.extend_from_slice(&36u16.to_be_bytes());
+            header.extend_from_slice(&client.ip().octets());
+            header.extend_from_slice(&local.ip().octets());
+            header.extend_from_slice(&client.port().to_be_bytes());
+            header.extend_from_slice(&local.port().to_be_bytes());
+        }
+        // Mixed families cannot be described by one address block. Rather
+        // than invent an address, fall back to UNSPEC with no body: a
+        // conforming backend accepts the connection and uses the real socket
+        // addresses, which is no worse than not sending a header at all.
+        _ => {
+            header.push(0x00); // AF_UNSPEC
+            header.extend_from_slice(&0u16.to_be_bytes());
+        }
+    }
+    header
 }
 
 /// Serve a published UDP port. Each distinct client address gets its own
@@ -270,7 +362,7 @@ mod tests {
         routes.set(published.port(), Some(backend));
 
         let bind = published;
-        tokio::spawn(serve_tcp(bind, bind.port(), routes.clone()));
+        tokio::spawn(serve_tcp(bind, bind.port(), routes.clone(), false));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(bind).await.unwrap();
@@ -285,7 +377,7 @@ mod tests {
         let published = free_addr().await;
         let routes = Routes::new(); // no backend set for this port
 
-        tokio::spawn(serve_tcp(published, published.port(), routes));
+        tokio::spawn(serve_tcp(published, published.port(), routes, false));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(published).await.unwrap();
@@ -301,7 +393,7 @@ mod tests {
         let routes = Routes::new();
         routes.set(published.port(), Some(backend));
 
-        tokio::spawn(serve_tcp(published, published.port(), routes.clone()));
+        tokio::spawn(serve_tcp(published, published.port(), routes.clone(), false));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(published).await.unwrap();
@@ -318,6 +410,104 @@ mod tests {
         let mut buf = [0u8; 32];
         let n = client.read(&mut buf).await.unwrap();
         assert_eq!(n, 0, "connection should close when the instance moves");
+    }
+
+    /// A backend that reports the first bytes it received, so a test can
+    /// assert on the PROXY header rather than on an echo.
+    async fn recording_backend() -> (SocketAddr, std::sync::Arc<Mutex<Vec<u8>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else { return };
+            let mut buf = [0u8; 256];
+            if let Ok(n) = conn.read(&mut buf).await {
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        (addr, seen)
+    }
+
+    #[test]
+    fn a_v4_header_carries_both_ends_of_the_connection() {
+        let header = proxy_v2_header(
+            "203.0.113.7:54321".parse().unwrap(),
+            "10.244.1.1:25".parse().unwrap(),
+        );
+        assert_eq!(&header[..12], &PROXY_V2_SIGNATURE);
+        assert_eq!(header[12], 0x21, "version 2, command PROXY");
+        assert_eq!(header[13], 0x11, "AF_INET over STREAM");
+        assert_eq!(&header[14..16], &12u16.to_be_bytes(), "v4 body is 12 bytes");
+        assert_eq!(&header[16..20], &[203, 0, 113, 7], "the real client");
+        assert_eq!(&header[20..24], &[10, 244, 1, 1], "the address it connected to");
+        assert_eq!(&header[24..26], &54321u16.to_be_bytes());
+        assert_eq!(&header[26..28], &25u16.to_be_bytes());
+        assert_eq!(header.len(), 28);
+    }
+
+    #[test]
+    fn a_v6_header_is_well_formed() {
+        let header = proxy_v2_header("[2001:db8::1]:443".parse().unwrap(), "[2001:db8::2]:25".parse().unwrap());
+        assert_eq!(header[13], 0x21, "AF_INET6 over STREAM");
+        assert_eq!(&header[14..16], &36u16.to_be_bytes());
+        assert_eq!(header.len(), 52);
+    }
+
+    /// One end v4 and the other v6 cannot be described by a single address
+    /// block, and inventing an address would be worse than saying nothing.
+    #[test]
+    fn a_mixed_family_pair_falls_back_to_unspec() {
+        let header = proxy_v2_header("203.0.113.7:1".parse().unwrap(), "[2001:db8::2]:25".parse().unwrap());
+        assert_eq!(header[13], 0x00, "AF_UNSPEC");
+        assert_eq!(&header[14..16], &0u16.to_be_bytes(), "no body");
+        assert_eq!(header.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn the_backend_is_told_the_real_client_address() {
+        let (backend, seen) = recording_backend().await;
+        let published = free_addr().await;
+        let routes = Routes::new();
+        routes.set(published.port(), Some(backend));
+
+        tokio::spawn(serve_tcp(published, published.port(), routes, true));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut client = TcpStream::connect(published).await.unwrap();
+        let client_port = client.local_addr().unwrap().port();
+        client.write_all(b"HELO").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(&seen[..12], &PROXY_V2_SIGNATURE, "header must come first");
+        assert_eq!(&seen[16..20], &[127, 0, 0, 1]);
+        assert_eq!(
+            u16::from_be_bytes([seen[24], seen[25]]),
+            client_port,
+            "the client's own port, not the relay's",
+        );
+        assert_eq!(&seen[28..32], b"HELO", "client data follows the header");
+    }
+
+    /// The default must stay byte-for-byte what it always was: a backend that
+    /// does not speak PROXY protocol sees a malformed request if a header
+    /// ever appears in front of its traffic.
+    #[tokio::test]
+    async fn no_header_is_sent_unless_it_was_asked_for() {
+        let (backend, seen) = recording_backend().await;
+        let published = free_addr().await;
+        let routes = Routes::new();
+        routes.set(published.port(), Some(backend));
+
+        tokio::spawn(serve_tcp(published, published.port(), routes, false));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut client = TcpStream::connect(published).await.unwrap();
+        client.write_all(b"HELO").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(&seen.lock().unwrap().clone(), b"HELO");
     }
 
     #[tokio::test]

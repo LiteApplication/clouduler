@@ -120,6 +120,16 @@ impl StackFile {
                             ),
                         ));
                     }
+                    // Rejected rather than ignored: silently dropping it
+                    // would leave someone believing their backend is seeing
+                    // real client addresses when it never will.
+                    if expose.proxy_protocol && expose.protocol == Protocol::Udp {
+                        return Err(ConfigError::invalid(
+                            at,
+                            "proxy_protocol only applies to tcp: the header is written once at the \
+                             head of a stream, and udp has no stream to put it at the head of",
+                        ));
+                    }
                 }
             }
         }
@@ -415,6 +425,53 @@ services:
 "#;
         let err = StackFile::parse(raw).unwrap_err();
         assert!(err.to_string().contains("already published by"));
+    }
+
+    /// Silently ignoring it would leave someone believing their backend is
+    /// seeing real client addresses when it never can.
+    #[test]
+    fn proxy_protocol_on_a_udp_port_is_rejected() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - { port: 53, published: 53, protocol: udp, network: public, proxy_protocol: true }
+"#;
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("only applies to tcp"), "{err}");
+    }
+
+    #[test]
+    fn proxy_protocol_on_a_tcp_port_is_accepted() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - { port: 25, published: 25, protocol: tcp, network: public, proxy_protocol: true }
+"#;
+        let file = StackFile::parse(raw).expect("tcp is the supported case");
+        let expose = &file.services["a"].x_clouduler.as_ref().unwrap().expose[0];
+        assert!(expose.proxy_protocol);
+    }
+
+    /// The default has to stay off: a backend that does not speak PROXY
+    /// protocol sees a malformed request the moment one appears.
+    #[test]
+    fn proxy_protocol_defaults_to_off() {
+        let raw = r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      expose:
+        - { port: 25, published: 25, network: public }
+"#;
+        let file = StackFile::parse(raw).expect("parse");
+        assert!(!file.services["a"].x_clouduler.as_ref().unwrap().expose[0].proxy_protocol);
     }
 
     #[test]

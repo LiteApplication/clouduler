@@ -36,7 +36,8 @@ pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> tokio::task::Jo
 
 async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
     let routes = Routes::new();
-    let mut listening: BTreeMap<(u16, Protocol), tokio::task::JoinHandle<()>> = BTreeMap::new();
+    // Keyed by port, protocol *and* proxy-protocol setting: see the loop body.
+    let mut listening: BTreeMap<(u16, Protocol, bool), tokio::task::JoinHandle<()>> = BTreeMap::new();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
 
     loop {
@@ -48,9 +49,14 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
         let live = crate::daemon::live_config(&state, &boot_cfg);
         let desired = desired(&state, &live);
 
-        for ((published, protocol), backend) in &desired {
-            routes.set(*published, *backend);
-            if listening.contains_key(&(*published, *protocol)) {
+        for ((published, protocol), publish) in &desired {
+            routes.set(*published, publish.backend);
+            // Keyed on `proxy_protocol` as well as the port, so turning it on
+            // or off in a stack file takes effect on the next sweep: the old
+            // listener is dropped by the retain below and a new one binds
+            // with the new behaviour. Only the backend address is live-updated
+            // through `routes`; this is baked in when the listener starts.
+            if listening.contains_key(&(*published, *protocol, publish.proxy_protocol)) {
                 continue;
             }
 
@@ -58,15 +64,16 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
             let routes = routes.clone();
             let published = *published;
             let protocol = *protocol;
+            let proxy_protocol = publish.proxy_protocol;
             listening.insert(
-                (published, protocol),
+                (published, protocol, proxy_protocol),
                 // Retried from inside the task: something else may hold the
                 // port for a while, and a forwarder that gave up for good
                 // would leave the port unpublished until the daemon restarts.
                 tokio::spawn(async move {
                     loop {
                         let served = match protocol {
-                            Protocol::Tcp => serve_tcp(bind, published, routes.clone()).await,
+                            Protocol::Tcp => serve_tcp(bind, published, routes.clone(), proxy_protocol).await,
                             Protocol::Udp => serve_udp(bind, published, routes.clone()).await,
                         };
                         if let Err(e) = served {
@@ -76,25 +83,40 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
                     }
                 }),
             );
-            info!(%bind, %protocol, "publishing a port");
+            info!(%bind, %protocol, proxy_protocol, "publishing a port");
         }
 
         // A port nobody publishes any more stops being listened on, or a
         // later stack could never claim it.
         listening.retain(|key, task| {
-            if desired.contains_key(key) {
+            let (published, protocol, proxy_protocol) = *key;
+            // Matched on the flag too: a listener still serving the port but
+            // with the wrong proxy-protocol behaviour has already been
+            // replaced above, and has to go.
+            if desired
+                .get(&(published, protocol))
+                .is_some_and(|publish| publish.proxy_protocol == proxy_protocol)
+            {
                 return true;
             }
             task.abort();
-            info!(published = key.0, protocol = %key.1, "stopped publishing a port");
+            info!(published, protocol = %protocol, "stopped publishing a port");
             false
         });
-        for (published, _) in listening.keys() {
+        for (published, _, _) in listening.keys() {
             if !desired.keys().any(|(p, _)| p == published) {
                 routes.set(*published, None);
             }
         }
     }
+}
+
+/// One published port: where it forwards, and how it announces the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Publish {
+    /// `None` means published but nothing running behind it right now.
+    backend: Option<SocketAddr>,
+    proxy_protocol: bool,
 }
 
 /// Published ports and the backend behind each, from replicated state alone.
@@ -104,16 +126,23 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
 /// spread, and picking the lowest instance keeps every node choosing the same
 /// one. `None` means the port is published but nothing is running behind it,
 /// which the forwarder answers by refusing the connection rather than hanging.
-fn desired(state: &ClusterState, cfg: &ClusterConfig) -> BTreeMap<(u16, Protocol), Option<SocketAddr>> {
-    let mut out: BTreeMap<(u16, Protocol), Option<SocketAddr>> = BTreeMap::new();
+fn desired(state: &ClusterState, cfg: &ClusterConfig) -> BTreeMap<(u16, Protocol), Publish> {
+    let mut out: BTreeMap<(u16, Protocol), Publish> = BTreeMap::new();
 
     for placement in crate::placement::service_placements(state, cfg) {
         for entry in &placement.extensions.expose {
             let key = (entry.published, entry.protocol);
-            let backend = placement
-                .addresses
-                .first()
-                .map(|ip| SocketAddr::from((*ip, entry.port)));
+            let backend = Publish {
+                backend: placement
+                    .addresses
+                    .first()
+                    .map(|ip| SocketAddr::from((*ip, entry.port))),
+                // Ignored for UDP, which has no stream to put a header at the
+                // front of. The stack validator rejects the combination, so
+                // reaching here with both set means an older stack stored
+                // before that check existed.
+                proxy_protocol: entry.proxy_protocol && entry.protocol == Protocol::Tcp,
+            };
 
             match out.get(&key) {
                 // Two services claiming one published port is a config the
@@ -143,7 +172,7 @@ mod tests {
     #[test]
     fn an_exposed_port_forwards_to_the_container_port() {
         let desired = desired(&state_with(SPEC, 1), &cluster_config());
-        let backend = desired[&(2222, Protocol::Tcp)].expect("a backend");
+        let backend = desired[&(2222, Protocol::Tcp)].backend.expect("a backend");
         assert_eq!(backend.port(), 22);
     }
 
@@ -156,7 +185,7 @@ mod tests {
 
         let desired = desired(&state, &cluster_config());
         assert!(desired.contains_key(&(2222, Protocol::Tcp)));
-        assert_eq!(desired[&(2222, Protocol::Tcp)], None);
+        assert_eq!(desired[&(2222, Protocol::Tcp)].backend, None);
     }
 
     /// Every node picks the same replica, or a client reconnecting to a
