@@ -336,7 +336,7 @@ impl Scheduler {
                 assignment.desired = DesiredState::Stopped;
             }
 
-            let revision = revision_with_mounts(stack.revision, service, &dynamic_mounts);
+            let revision = revision_with_mounts(stack.revision, service, &dynamic_mounts, placement.ip);
 
             let spec = spec::build(
                 instance,
@@ -406,8 +406,9 @@ impl Scheduler {
 }
 
 /// Folds which of a service's drives are currently FUSE-mounted (rather than
-/// backed by this node's own local copy) into the revision used to detect
-/// drift, so a container gets recreated on top of `stack.revision` changing.
+/// backed by this node's own local copy), and the instance's own overlay
+/// address, into the revision used to detect drift, so a container gets
+/// recreated on top of `stack.revision` changing.
 ///
 /// A served drive's active server can change after a container already
 /// exists (the previously-active candidate failed, or came back and this
@@ -421,12 +422,27 @@ impl Scheduler {
 /// moment this node becomes the active server. The result is a container
 /// stuck failing to start against a bind path nothing owns any more.
 ///
-/// The real stack revision lives in the low 32 bits (a stack redeploying
-/// four billion times is not a real concern) and a bit per drive the service
-/// mounts, in sorted order, in the high bits, so an ordinary redeploy and a
-/// drive failover each move a disjoint part of the value and neither can
-/// mask the other.
-fn revision_with_mounts(revision: u64, service: &cl_config::Service, dynamic_mounts: &BTreeSet<String>) -> u64 {
+/// The overlay address has the same shape of problem: `cl_net::ipam` frees
+/// an instance's address and hands out a fresh one whenever the instance
+/// briefly drops out of the assignment table (a redeploy's replanning pass,
+/// say), even when the container backing it was never touched — `diff` only
+/// compares `LABEL_REVISION`, so a container built with the old address keeps
+/// running under it forever while every other node's proxy and internal DNS
+/// have already moved on to the new one. Confirmed live: a stack redeploy
+/// left an already-running, perfectly healthy container answering on an
+/// address the reverse proxy no longer knew about, so every request that
+/// landed on it got a permanent `bad gateway`, indistinguishable from the
+/// backend actually being down.
+///
+/// Not reversible bit-packing (an IPv4 address alone needs all 32 bits a
+/// per-drive flag set was previously borrowing) — hashed together instead,
+/// since nothing reads this value apart from testing it for equality.
+fn revision_with_mounts(
+    revision: u64,
+    service: &cl_config::Service,
+    dynamic_mounts: &BTreeSet<String>,
+    ip: Option<std::net::Ipv4Addr>,
+) -> u64 {
     let mut drives: Vec<&str> = service.volumes.iter().filter_map(|v| v.drive.as_deref()).collect();
     drives.sort_unstable();
     drives.dedup();
@@ -437,7 +453,13 @@ fn revision_with_mounts(revision: u64, service: &cl_config::Service, dynamic_mou
             bits |= 1 << i;
         }
     }
-    (bits << 32) | (revision & 0xFFFF_FFFF)
+
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    revision.hash(&mut hasher);
+    bits.hash(&mut hasher);
+    ip.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The node currently serving a `Served` drive: the first of `served_by` that
@@ -1041,8 +1063,8 @@ web: { address: cloud, network: tailscale }
     #[test]
     fn a_drive_switching_between_local_and_fuse_mounted_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
-        let local = revision_with_mounts(1, &service, &BTreeSet::new());
-        let fuse_mounted = revision_with_mounts(1, &service, &BTreeSet::from(["fast".to_string()]));
+        let local = revision_with_mounts(1, &service, &BTreeSet::new(), None);
+        let fuse_mounted = revision_with_mounts(1, &service, &BTreeSet::from(["fast".to_string()]), None);
         assert_ne!(local, fuse_mounted);
     }
 
@@ -1051,8 +1073,8 @@ web: { address: cloud, network: tailscale }
     #[test]
     fn an_unrelated_drive_switching_does_not_change_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
-        let a = revision_with_mounts(1, &service, &BTreeSet::new());
-        let b = revision_with_mounts(1, &service, &BTreeSet::from(["slow".to_string()]));
+        let a = revision_with_mounts(1, &service, &BTreeSet::new(), None);
+        let b = revision_with_mounts(1, &service, &BTreeSet::from(["slow".to_string()]), None);
         assert_eq!(a, b);
     }
 
@@ -1063,7 +1085,29 @@ web: { address: cloud, network: tailscale }
     fn the_stack_revision_still_changes_the_combined_value() {
         let service = service_with_volumes("      - fast/data:/data\n");
         let dynamic = BTreeSet::from(["fast".to_string()]);
-        assert_ne!(revision_with_mounts(1, &service, &dynamic), revision_with_mounts(2, &service, &dynamic));
+        assert_ne!(
+            revision_with_mounts(1, &service, &dynamic, None),
+            revision_with_mounts(2, &service, &dynamic, None)
+        );
+    }
+
+    /// The whole reason this was folded in: an instance handed a new overlay
+    /// address (a redeploy's replanning pass released and reallocated it,
+    /// say, without the container itself ever being touched) has to be
+    /// recreated so it actually binds to the address the rest of the cluster
+    /// now believes it holds — otherwise it keeps answering on the old one
+    /// forever while the reverse proxy and internal DNS point everyone else
+    /// at the new one, a permanent "bad gateway" indistinguishable from the
+    /// backend actually being down.
+    #[test]
+    fn an_instance_getting_a_new_overlay_address_changes_the_revision() {
+        let service = service_with_volumes("      - fast/data:/data\n");
+        let dynamic = BTreeSet::new();
+        let none = revision_with_mounts(1, &service, &dynamic, None);
+        let a = revision_with_mounts(1, &service, &dynamic, Some("10.244.0.23".parse().unwrap()));
+        let b = revision_with_mounts(1, &service, &dynamic, Some("10.244.0.30".parse().unwrap()));
+        assert_ne!(none, a);
+        assert_ne!(a, b);
     }
 
     #[test]
