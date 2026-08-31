@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener as StdListener};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +17,14 @@ const VOLUME: &str = "data";
 
 fn volume_id() -> VolumeId {
     VolumeId::new(DRIVE, VOLUME)
+}
+
+/// The test process's own uid/gid. Chowning to an arbitrary id needs root, so
+/// tests that hand-craft a `Message` carrying ownership use this rather than
+/// a made-up number, the same way a real sender only ever carries the
+/// ownership a file already has.
+fn current_owner() -> (u32, u32) {
+    unsafe { (libc::getuid(), libc::getgid()) }
 }
 
 /// Bind a receiver on an ephemeral loopback port, backed by `root/data`.
@@ -288,13 +297,16 @@ async fn a_rename_whose_source_is_missing_does_not_abort_the_sync() {
         .expect("hello");
     assert!(matches!(transport::recv(&mut conn).await.expect("ready"), Some(Message::Ready(_))));
 
-    transport::send(&mut conn, &Message::Rename { from: "not_there".into(), to: "wherever".into(), mode: 0o644, mtime_nanos: 1_000_000_000 })
+    let (uid, gid) = current_owner();
+    transport::send(&mut conn, &Message::Rename { from: "not_there".into(), to: "wherever".into(), mode: 0o644, uid, gid, mtime_nanos: 1_000_000_000 })
         .await
         .expect("rename");
     // The connection has to still be alive and complete the sync normally.
     transport::send(&mut conn, &Message::WholeFile {
         path: "after.txt".into(),
         mode: 0o644,
+        uid,
+        gid,
         mtime_nanos: 1_000_000_000,
         is_symlink: false,
         link_target: None,
@@ -330,11 +342,14 @@ async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
     }
 
     let payload = vec![b'p'; 32 * 1024];
+    let (uid, gid) = current_owner();
     cl_drive::transport::send(
         &mut conn,
         &cl_drive::Message::WholeFile {
             path: "committed.bin".into(),
             mode: 0o644,
+            uid,
+            gid,
             mtime_nanos: 0,
             is_symlink: false,
             link_target: None,
@@ -388,6 +403,34 @@ async fn a_file_bigger_than_one_chunk_arrives_intact() {
     assert_eq!(stats.files_added, 2);
     assert_eq!(std::fs::read(dst_volume(&dst).join("big.bin")).unwrap(), content);
     assert_eq!(std::fs::read(dst_volume(&dst).join("small.txt")).unwrap(), b"tail file");
+}
+
+#[tokio::test]
+async fn dir_and_root_permissions_replicate_and_a_later_drift_is_fixed() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    std::fs::create_dir(src.path().join("sub")).unwrap();
+    std::fs::set_permissions(src.path().join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+
+    let (addr, _registry, _rx) = spawn_receiver(dst.path());
+    let engine = DeltaEngine::default();
+    engine.sync(src.path(), addr, &volume_id(), 1).await.expect("first sync");
+
+    let dst_root = dst_volume(&dst);
+    assert_eq!(std::fs::metadata(&dst_root).unwrap().permissions().mode() & 0o7777, 0o750);
+    assert_eq!(std::fs::metadata(dst_root.join("sub")).unwrap().permissions().mode() & 0o7777, 0o700);
+
+    // A permission fix applied on the source after the first sync — both the
+    // root and an existing (not newly added) directory — has to propagate on
+    // the next pass via `SetRootMeta`/`SetDirMeta`, not just at creation time.
+    std::fs::set_permissions(src.path().join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    engine.sync(src.path(), addr, &volume_id(), 2).await.expect("second sync");
+
+    assert_eq!(std::fs::metadata(&dst_root).unwrap().permissions().mode() & 0o7777, 0o755);
+    assert_eq!(std::fs::metadata(dst_root.join("sub")).unwrap().permissions().mode() & 0o7777, 0o755);
 }
 
 #[tokio::test]

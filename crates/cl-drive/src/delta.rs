@@ -176,8 +176,30 @@ impl DeltaEngine {
         // protocol — `create_dir_all` on the way to a file only ever produces
         // the ones that happen to contain something.
         for path in &diff.added_dirs {
-            let mode = local.dirs[path];
-            transport::send(&mut conn, &Message::MakeDir { path: path.clone(), mode })
+            let meta = local.dirs[path];
+            transport::send(
+                &mut conn,
+                &Message::MakeDir { path: path.clone(), mode: meta.mode, uid: meta.uid, gid: meta.gid },
+            )
+            .await
+            .map_err(transfer_err)?;
+        }
+
+        // Directories both sides already have, but whose mode/owner drifted —
+        // a permission fix applied on the source after the directory was
+        // first replicated, say.
+        for path in &diff.changed_dirs {
+            let meta = local.dirs[path];
+            transport::send(
+                &mut conn,
+                &Message::SetDirMeta { path: path.clone(), mode: meta.mode, uid: meta.uid, gid: meta.gid },
+            )
+            .await
+            .map_err(transfer_err)?;
+        }
+
+        if let Some(meta) = diff.root {
+            transport::send(&mut conn, &Message::SetRootMeta { mode: meta.mode, uid: meta.uid, gid: meta.gid })
                 .await
                 .map_err(transfer_err)?;
         }
@@ -246,6 +268,8 @@ impl DeltaEngine {
                         from: from.clone(),
                         to: path.clone(),
                         mode: meta.mode,
+                        uid: meta.uid,
+                        gid: meta.gid,
                         mtime_nanos: meta.mtime_nanos,
                     },
                 )
@@ -317,6 +341,8 @@ impl DeltaEngine {
                 &Message::WholeFile {
                     path: path.to_string(),
                     mode: meta.mode,
+                    uid: meta.uid,
+                    gid: meta.gid,
                     mtime_nanos: meta.mtime_nanos,
                     is_symlink: true,
                     link_target: meta.link_target.clone(),
@@ -342,6 +368,8 @@ impl DeltaEngine {
                 &Message::WholeFile {
                     path: path.to_string(),
                     mode: meta.mode,
+                    uid: meta.uid,
+                    gid: meta.gid,
                     mtime_nanos: meta.mtime_nanos,
                     is_symlink: false,
                     link_target: None,
@@ -358,7 +386,13 @@ impl DeltaEngine {
         // trusted to hold an entire file past a few tens of megabytes.
         transport::send(
             conn,
-            &Message::WholeFileBegin { path: path.to_string(), mode: meta.mode, mtime_nanos: meta.mtime_nanos },
+            &Message::WholeFileBegin {
+                path: path.to_string(),
+                mode: meta.mode,
+                uid: meta.uid,
+                gid: meta.gid,
+                mtime_nanos: meta.mtime_nanos,
+            },
         )
         .await
         .map_err(transfer_err)?;
@@ -435,7 +469,14 @@ impl DeltaEngine {
         stats.bytes_sent += delta.len() as u64;
         transport::send(
             conn,
-            &Message::Delta { path: path.to_string(), mode: meta.mode, mtime_nanos: meta.mtime_nanos, data: delta },
+            &Message::Delta {
+                path: path.to_string(),
+                mode: meta.mode,
+                uid: meta.uid,
+                gid: meta.gid,
+                mtime_nanos: meta.mtime_nanos,
+                data: delta,
+            },
         )
         .await
         .map_err(transfer_err)

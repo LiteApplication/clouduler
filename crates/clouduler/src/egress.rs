@@ -258,12 +258,92 @@ async fn apply_ingress(iface: &str, addr: IpAddr, network: &str, store: &Wiregua
 
 async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, iface: &str) -> Result<()> {
     let Some(netlink) = netlink else { return Ok(()) };
-
     let subnet = egress_subnet(network);
     let gateway = egress_gateway(subnet);
     let bridge = ensure_egress_bridge(netlink, network, subnet)
         .await
         .with_context(|| format!("ensuring the {network} egress bridge"))?;
+
+    let iface_owned = iface.to_string();
+    let bridge_owned = bridge.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        std::fs::write(format!("/proc/sys/net/ipv4/conf/{bridge_owned}/rp_filter"), b"2")?;
+        std::fs::write(format!("/proc/sys/net/ipv4/conf/{iface_owned}/rp_filter"), b"2")?;
+        std::fs::write("/proc/sys/net/ipv4/conf/all/rp_filter", b"2")?;
+        Ok(())
+    })
+    .await
+    .context("rp_filter task panicked")?
+    .context("writing rp_filter sysctls")?;
+
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    network.hash(&mut hasher);
+    let table_id = 5000 + (hasher.finish() % 1000) as u32;
+
+    let iface_for_route = iface.to_string();
+    let bridge_for_rule = bridge.clone();
+    let network_owned = network.to_string();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        // `iface`'s own default route, if it has one: this must come from a
+        // route that already names `iface` as its device, never assumed from
+        // the host's overall default route, since on a multi-homed node the
+        // interface this egress network is pinned to may not be the one the
+        // host itself prefers (different metric, or not a default route
+        // candidate at all).
+        let route_out = std::process::Command::new("ip")
+            .args(["route", "show", "default", "dev", &iface_for_route])
+            .output()?;
+        let route_str = String::from_utf8_lossy(&route_out.stdout);
+        let parts: Vec<&str> = route_str.split_whitespace().collect();
+        let via = parts.iter().position(|&x| x == "via").and_then(|i| parts.get(i + 1)).copied();
+
+        let table_str = table_id.to_string();
+        let rule_pattern = format!("iif {bridge_for_rule} lookup {table_str}");
+        let existing_rules =
+            String::from_utf8_lossy(&std::process::Command::new("ip").args(["rule", "show"]).output()?.stdout).to_string();
+
+        // No gateway found for `iface`: it has no working route out (down,
+        // no DHCP lease, cable unplugged, ...). Installing a `dev`-only
+        // default route here would silently blackhole every packet from
+        // this bridge ("No route to host") instead of the kill-switch's
+        // intended DROP, and would look like a healthy path while nothing
+        // actually reaches it. So install no policy route at all and let
+        // the kill-switch's plain `-o iface` FORWARD rule fail to match, as
+        // it should when the network's egress interface is down.
+        let Some(via) = via else {
+            if existing_rules.contains(&rule_pattern) {
+                std::process::Command::new("ip")
+                    .args(["rule", "del", "iif", &bridge_for_rule, "lookup", &table_str, "priority", "5100"])
+                    .status()
+                    .ok();
+            }
+            warn!(
+                network = %network_owned, iface = %iface_for_route,
+                "no default route found on this interface, egress is blocked until it has one",
+            );
+            return Ok(());
+        };
+
+        let status = std::process::Command::new("ip")
+            .args(["route", "replace", "default", "via", via, "dev", &iface_for_route, "table", &table_str])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("ip route replace failed");
+        }
+
+        if !existing_rules.contains(&rule_pattern) {
+            let status = std::process::Command::new("ip")
+                .args(["rule", "add", "iif", &bridge_for_rule, "lookup", &table_str, "priority", "5100"])
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("ip rule add failed");
+            }
+        }
+        Ok(())
+    })
+    .await
+    .context("policy routing task panicked")??;
 
     let plan = egress_iptables_plan(&bridge, subnet, iface);
     let bridge_for_blocking = bridge.clone();
@@ -272,20 +352,27 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
         .context("iptables task panicked")?
         .with_context(|| format!("applying the kill-switch for {bridge_for_blocking}"))?;
 
+    let mtu = std::fs::read_to_string(format!("/sys/class/net/{iface}/mtu"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1500);
+
     let created = docker
         .ensure_network(&NetworkSpec {
             name: egress_docker_name(network),
             bridge: bridge.clone(),
             subnet: subnet.to_string(),
             gateway,
-            mtu: 1500,
+            mtu,
             stack: OWNER.to_string(),
         })
         .await
         .with_context(|| format!("ensuring the {network} docker network"))?;
+    
     if created {
-        info!(network = %network, %subnet, %bridge, iface = %iface, "egress network up");
+        info!(network = %network, %subnet, %bridge, iface = %iface, %mtu, "egress network up");
     }
+    
     Ok(())
 }
 

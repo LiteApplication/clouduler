@@ -25,6 +25,12 @@ pub struct FileMeta {
     pub mtime_nanos: i64,
     /// Permission bits, masked to the low 12 (rwx + setuid/gid/sticky).
     pub mode: u32,
+    /// Owning user, by numeric ID. Names are not portable between nodes —
+    /// two nodes agree on UID space (containers run with fixed UIDs), not on
+    /// `/etc/passwd` entries, so replication carries the number, never a
+    /// name lookup.
+    pub uid: u32,
+    pub gid: u32,
     pub is_symlink: bool,
     /// Set only for symlinks.
     pub link_target: Option<String>,
@@ -35,15 +41,40 @@ pub struct FileMeta {
 impl FileMeta {
     /// Whether two entries for the same path represent different content.
     /// Falls back to cheap metadata unless both sides carry a hash, in which
-    /// case the hash is authoritative.
+    /// case the hash is authoritative for content — ownership is still
+    /// compared separately since it isn't reflected in a content hash.
     fn differs_from(&self, other: &FileMeta) -> bool {
+        let owner_changed = self.uid != other.uid || self.gid != other.gid;
         if self.is_symlink || other.is_symlink {
-            return self.is_symlink != other.is_symlink || self.link_target != other.link_target;
+            return self.is_symlink != other.is_symlink
+                || self.link_target != other.link_target
+                || owner_changed;
         }
         if let (Some(a), Some(b)) = (self.hash, other.hash) {
-            return a != b;
+            return a != b || owner_changed;
         }
-        self.size != other.size || self.mtime_nanos != other.mtime_nanos || self.mode != other.mode
+        self.size != other.size
+            || self.mtime_nanos != other.mtime_nanos
+            || self.mode != other.mode
+            || owner_changed
+    }
+}
+
+/// What's known about one directory: not just its permission bits, but its
+/// owner too, since a replicated volume that only matches the files inside a
+/// directory and not the directory itself is not a faithful copy — Postgres,
+/// for one, insists `PGDATA` and its subdirectories are owned by the user it
+/// runs as, not merely writable by it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirMeta {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl DirMeta {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self { mode: meta.mode() & 0o7777, uid: meta.uid(), gid: meta.gid() }
     }
 }
 
@@ -52,7 +83,7 @@ impl FileMeta {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub files: BTreeMap<String, FileMeta>,
-    /// Directories, path to permission bits.
+    /// Directories, path to metadata.
     ///
     /// Tracked in their own right rather than being implied by the files
     /// inside them, because an *empty* directory is implied by nothing. A
@@ -65,7 +96,12 @@ pub struct Manifest {
     /// "pg_notify"`. That only ever surfaces on failover, which is the worst
     /// possible moment to discover it.
     #[serde(default)]
-    pub dirs: BTreeMap<String, u32>,
+    pub dirs: BTreeMap<String, DirMeta>,
+    /// The volume root's own metadata. Not a `dirs` entry: the walk skips the
+    /// root itself (it's never "added" or "removed", only ever there), so its
+    /// permissions and ownership need their own home to be replicated at all.
+    #[serde(default)]
+    pub root: DirMeta,
 }
 
 /// The difference needed to turn `other` into `self`. Sorted since the
@@ -84,6 +120,10 @@ pub struct Diff {
     /// Directories `other` has and `self` does not, children first so a tree
     /// can be taken down from the leaves.
     pub removed_dirs: Vec<String>,
+    /// Directories present on both sides whose mode, uid or gid differs.
+    pub changed_dirs: Vec<String>,
+    /// The root's own metadata, if it differs between `self` and `other`.
+    pub root: Option<DirMeta>,
 }
 
 impl Manifest {
@@ -109,9 +149,11 @@ impl Manifest {
                 diff.removed.push(path.clone());
             }
         }
-        for path in self.dirs.keys() {
-            if !other.dirs.contains_key(path) {
-                diff.added_dirs.push(path.clone());
+        for (path, meta) in &self.dirs {
+            match other.dirs.get(path) {
+                None => diff.added_dirs.push(path.clone()),
+                Some(other_meta) if other_meta != meta => diff.changed_dirs.push(path.clone()),
+                Some(_) => {}
             }
         }
         for path in other.dirs.keys() {
@@ -122,6 +164,9 @@ impl Manifest {
         // Children before parents, so a removed tree comes down from the
         // leaves and each `remove_dir` sees an empty directory.
         diff.removed_dirs.reverse();
+        if self.root != other.root {
+            diff.root = Some(self.root);
+        }
         diff
     }
 }
@@ -200,6 +245,9 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         return Ok(Manifest::default());
     }
 
+    let root_meta = std::fs::symlink_metadata(root)
+        .map_err(|source| DriveError::Io { path: root.to_path_buf(), source })?;
+
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry.map_err(|e| DriveError::Io {
             path: e.path().unwrap_or(root).to_path_buf(),
@@ -224,7 +272,7 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         })?;
 
         if file_type.is_dir() {
-            dirs.insert(rel, meta.mode() & 0o7777);
+            dirs.insert(rel, DirMeta::from_metadata(&meta));
             continue;
         }
 
@@ -237,6 +285,8 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
                     size: meta.size(),
                     mtime_nanos: mtime_nanos(&meta),
                     mode: meta.mode() & 0o7777,
+                    uid: meta.uid(),
+                    gid: meta.gid(),
                     is_symlink: true,
                     link_target: Some(target.to_string_lossy().to_string()),
                     hash: None,
@@ -266,6 +316,8 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
                 size: meta.size(),
                 mtime_nanos: mtime_nanos(&meta),
                 mode: meta.mode() & 0o7777,
+                uid: meta.uid(),
+                gid: meta.gid(),
                 is_symlink: false,
                 link_target: None,
                 hash,
@@ -273,7 +325,7 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         );
     }
 
-    Ok(Manifest { files, dirs })
+    Ok(Manifest { files, dirs, root: DirMeta::from_metadata(&root_meta) })
 }
 
 #[cfg(test)]
@@ -282,14 +334,7 @@ mod tests {
     use std::fs;
 
     fn meta(size: u64, mtime: i64) -> FileMeta {
-        FileMeta {
-            size,
-            mtime_nanos: mtime,
-            mode: 0o644,
-            is_symlink: false,
-            link_target: None,
-            hash: None,
-        }
+        FileMeta { size, mtime_nanos: mtime, mode: 0o644, ..Default::default() }
     }
 
     #[test]
@@ -386,5 +431,58 @@ mod tests {
 
         let diff = new.diff(&old);
         assert_eq!(diff.changed, vec!["f".to_string()]);
+    }
+
+    #[test]
+    fn diff_owner_change_alone_counts_as_changed() {
+        let mut old = Manifest::default();
+        let mut new = Manifest::default();
+        old.files.insert("f".into(), meta(10, 100));
+        let mut changed_owner = meta(10, 100);
+        changed_owner.uid = 1001;
+        new.files.insert("f".into(), changed_owner);
+
+        let diff = new.diff(&old);
+        assert_eq!(diff.changed, vec!["f".to_string()]);
+    }
+
+    #[test]
+    fn diff_reports_a_dir_whose_owner_or_mode_drifted_as_changed_not_added() {
+        let mut old = Manifest::default();
+        let mut new = Manifest::default();
+        old.dirs.insert("sub".into(), DirMeta { mode: 0o755, uid: 1000, gid: 1000 });
+        new.dirs.insert("sub".into(), DirMeta { mode: 0o750, uid: 1001, gid: 1000 });
+
+        let diff = new.diff(&old);
+        assert_eq!(diff.changed_dirs, vec!["sub".to_string()]);
+        assert!(diff.added_dirs.is_empty());
+        assert!(diff.removed_dirs.is_empty());
+    }
+
+    #[test]
+    fn diff_reports_root_metadata_only_when_it_differs() {
+        let mut old = Manifest::default();
+        let mut new = Manifest::default();
+        old.root = DirMeta { mode: 0o755, uid: 1000, gid: 1000 };
+        new.root = old.root;
+        assert_eq!(new.diff(&old).root, None);
+
+        new.root.uid = 1001;
+        assert_eq!(new.diff(&old).root, Some(new.root));
+    }
+
+    #[test]
+    fn scan_records_uid_gid_of_files_dirs_and_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+
+        let manifest = scan(tmp.path(), false).unwrap();
+        let want_uid = unsafe { libc::getuid() };
+        let want_gid = unsafe { libc::getgid() };
+        assert_eq!(manifest.files["a.txt"].uid, want_uid);
+        assert_eq!(manifest.files["a.txt"].gid, want_gid);
+        assert_eq!(manifest.dirs["sub"].uid, want_uid);
+        assert_eq!(manifest.root.uid, want_uid);
     }
 }

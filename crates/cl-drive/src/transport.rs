@@ -80,6 +80,8 @@ pub enum Message {
     WholeFile {
         path: String,
         mode: u32,
+        uid: u32,
+        gid: u32,
         /// Nanoseconds since the epoch, straight from the sender's
         /// `FileMeta::mtime_nanos`. Applied on write so the receiver's copy
         /// carries the source's mtime rather than the time it was written —
@@ -93,36 +95,45 @@ pub enum Message {
     /// Starts a chunked whole-file transfer for a regular file too large to
     /// send as one `WholeFile` frame. Followed by one or more
     /// `WholeFileChunk`s and a final `WholeFileEnd`.
-    WholeFileBegin { path: String, mode: u32, mtime_nanos: i64 },
+    WholeFileBegin { path: String, mode: u32, uid: u32, gid: u32, mtime_nanos: i64 },
     WholeFileChunk { data: Vec<u8> },
     WholeFileEnd,
-    Delta { path: String, mode: u32, mtime_nanos: i64, data: Vec<u8> },
-    /// Move `from` to `to` on the receiver, then stamp the sender's `mode`
-    /// and `mtime_nanos` on it.
+    Delta { path: String, mode: u32, uid: u32, gid: u32, mtime_nanos: i64, data: Vec<u8> },
+    /// Move `from` to `to` on the receiver, then stamp the sender's `mode`,
+    /// ownership and `mtime_nanos` on it.
     ///
     /// The metadata is not decoration. A rename moves the receiver's existing
-    /// file, which carries whatever mode and mtime the *source* had when it
-    /// was synced — not the ones the sender's `to` has now. Without
-    /// restamping, `Manifest::diff` sees a mismatch on the very next pass and
-    /// re-sends the file whole, which is exactly the work the rename existed
-    /// to avoid. Same reasoning as `WholeFile::mtime_nanos`.
-    Rename { from: String, to: String, mode: u32, mtime_nanos: i64 },
+    /// file, which carries whatever mode, ownership and mtime the *source*
+    /// had when it was synced — not the ones the sender's `to` has now.
+    /// Without restamping, `Manifest::diff` sees a mismatch on the very next
+    /// pass and re-sends the file whole, which is exactly the work the
+    /// rename existed to avoid. Same reasoning as `WholeFile::mtime_nanos`.
+    Rename { from: String, to: String, mode: u32, uid: u32, gid: u32, mtime_nanos: i64 },
     Delete(String),
     /// Sender is done; receiver replies with `Ack`.
     Done,
     Ack(u64),
     Error(String),
-    /// Create a directory (and any missing parents) with these permissions.
-    /// Sent for directories the peer is missing, ahead of any file, so an
-    /// *empty* directory survives replication — nothing else would create one.
+    /// Create a directory (and any missing parents) with these permissions
+    /// and ownership. Sent for directories the peer is missing, ahead of any
+    /// file, so an *empty* directory survives replication — nothing else
+    /// would create one.
     ///
     /// New variants go at the end: `Message` is encoded with bincode, which
     /// writes the variant's index and is not self-describing, so inserting
     /// anywhere else silently renumbers every variant after it.
-    MakeDir { path: String, mode: u32 },
+    MakeDir { path: String, mode: u32, uid: u32, gid: u32 },
     /// Remove a directory the sender no longer has. Best effort and
     /// non-recursive on the receiving side.
     RemoveDir(String),
+    /// Restamp a directory the peer already has whose mode, uid or gid
+    /// diverged — an existing directory whose ownership changed underneath
+    /// it, not a new one.
+    SetDirMeta { path: String, mode: u32, uid: u32, gid: u32 },
+    /// Restamp the volume root itself. The root is never "added" or
+    /// "removed" like an ordinary directory, so its own permissions and
+    /// ownership travel over their own message.
+    SetRootMeta { mode: u32, uid: u32, gid: u32 },
 }
 
 pub type Connection = Framed<TcpStream, LengthDelimitedCodec>;
@@ -216,12 +227,12 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
 
     // State for a `WholeFileBegin`/`WholeFileChunk`*/`WholeFileEnd` sequence
     // in progress: the final target, the temp file it's being written to,
-    // its mode, mtime and the open handle chunks are appended to.
-    let mut chunked: Option<(PathBuf, PathBuf, u32, i64, std::fs::File)> = None;
+    // its mode, ownership, mtime and the open handle chunks are appended to.
+    let mut chunked: Option<(PathBuf, PathBuf, u32, u32, u32, i64, std::fs::File)> = None;
 
     loop {
         match recv(&mut conn).await.map_err(io_err)? {
-            Some(Message::WholeFileBegin { path, mode, mtime_nanos }) => {
+            Some(Message::WholeFileBegin { path, mode, uid, gid, mtime_nanos }) => {
                 let target = resolve_relative(&root, &path)?;
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)
@@ -229,7 +240,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 }
                 let tmp = temp_path(&target);
                 let file = std::fs::File::create(&tmp).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-                chunked = Some((target, tmp, mode, mtime_nanos, file));
+                chunked = Some((target, tmp, mode, uid, gid, mtime_nanos, file));
             }
             Some(Message::WholeFileChunk { data }) => {
                 let state = chunked.take().ok_or_else(|| DriveError::Transfer {
@@ -240,9 +251,9 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 // runtime thread.
                 chunked = Some(
                     off_runtime("writing a chunk", move || {
-                        let (target, tmp, mode, mtime_nanos, mut file) = state;
+                        let (target, tmp, mode, uid, gid, mtime_nanos, mut file) = state;
                         match file.write_all(&data) {
-                            Ok(()) => Ok((target, tmp, mode, mtime_nanos, file)),
+                            Ok(()) => Ok((target, tmp, mode, uid, gid, mtime_nanos, file)),
                             Err(source) => Err(DriveError::Io { path: tmp, source }),
                         }
                     })
@@ -250,12 +261,15 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 );
             }
             Some(Message::WholeFileEnd) => {
-                let (target, tmp, mode, mtime_nanos, file) = chunked.take().ok_or_else(|| DriveError::Transfer {
-                    message: "WholeFileEnd with no WholeFileBegin in progress".into(),
-                })?;
+                let (target, tmp, mode, uid, gid, mtime_nanos, file) =
+                    chunked.take().ok_or_else(|| DriveError::Transfer {
+                        message: "WholeFileEnd with no WholeFileBegin in progress".into(),
+                    })?;
                 off_runtime("finishing a chunked file", move || {
                     drop(file);
                     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+                        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+                    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))
                         .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
                     let mtime = scan::nanos_to_filetime(mtime_nanos);
                     filetime::set_file_times(&tmp, mtime, mtime)
@@ -282,14 +296,14 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let hash = off_runtime("hashing a file", move || Ok(scan::hash_file(&target).ok())).await?;
                 send(&mut conn, &Message::Hash { path, hash }).await.map_err(io_err)?;
             }
-            Some(Message::WholeFile { path, mode, mtime_nanos, is_symlink, link_target, data }) => {
+            Some(Message::WholeFile { path, mode, uid, gid, mtime_nanos, is_symlink, link_target, data }) => {
                 let root = root.clone();
                 off_runtime("writing a whole file", move || {
-                    write_whole(&root, &path, mode, mtime_nanos, is_symlink, link_target.as_deref(), &data)
+                    write_whole(&root, &path, mode, uid, gid, mtime_nanos, is_symlink, link_target.as_deref(), &data)
                 })
                 .await?;
             }
-            Some(Message::Delta { path, mode, mtime_nanos, data }) => {
+            Some(Message::Delta { path, mode, uid, gid, mtime_nanos, data }) => {
                 let target = resolve_relative(&root, &path)?;
                 // Reading the base, applying the delta and writing the result
                 // is whole-file IO on both ends plus the patch itself.
@@ -298,11 +312,11 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                     let mut out = Vec::new();
                     apply(&base, &data, &mut out)
                         .map_err(|e| DriveError::Transfer { message: format!("apply delta for {path}: {e}") })?;
-                    write_temp_then_rename(&target, &out, mode, mtime_nanos)
+                    write_temp_then_rename(&target, &out, mode, uid, gid, mtime_nanos)
                 })
                 .await?;
             }
-            Some(Message::Rename { from, to, mode, mtime_nanos }) => {
+            Some(Message::Rename { from, to, mode, uid, gid, mtime_nanos }) => {
                 let src = resolve_relative(&root, &from)?;
                 let dst = resolve_relative(&root, &to)?;
                 if let Some(parent) = dst.parent() {
@@ -327,18 +341,42 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 } else {
                     std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))
                         .map_err(|source| DriveError::Io { path: dst.clone(), source })?;
+                    std::os::unix::fs::chown(&dst, Some(uid), Some(gid))
+                        .map_err(|source| DriveError::Io { path: dst.clone(), source })?;
                     let mtime = scan::nanos_to_filetime(mtime_nanos);
                     filetime::set_file_times(&dst, mtime, mtime)
                         .map_err(|source| DriveError::Io { path: dst, source })?;
                 }
             }
-            Some(Message::MakeDir { path, mode }) => {
+            Some(Message::MakeDir { path, mode, uid, gid }) => {
                 let target = resolve_relative(&root, &path)?;
                 off_runtime("creating a directory", move || {
                     std::fs::create_dir_all(&target)
                         .map_err(|source| DriveError::Io { path: target.clone(), source })?;
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
+                        .map_err(|source| DriveError::Io { path: target.clone(), source })?;
+                    std::os::unix::fs::chown(&target, Some(uid), Some(gid))
                         .map_err(|source| DriveError::Io { path: target, source })
+                })
+                .await?;
+            }
+            Some(Message::SetDirMeta { path, mode, uid, gid }) => {
+                let target = resolve_relative(&root, &path)?;
+                off_runtime("restamping a directory", move || {
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
+                        .map_err(|source| DriveError::Io { path: target.clone(), source })?;
+                    std::os::unix::fs::chown(&target, Some(uid), Some(gid))
+                        .map_err(|source| DriveError::Io { path: target, source })
+                })
+                .await?;
+            }
+            Some(Message::SetRootMeta { mode, uid, gid }) => {
+                let root = root.clone();
+                off_runtime("restamping the volume root", move || {
+                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode))
+                        .map_err(|source| DriveError::Io { path: root.clone(), source })?;
+                    std::os::unix::fs::chown(&root, Some(uid), Some(gid))
+                        .map_err(|source| DriveError::Io { path: root, source })
                 })
                 .await?;
             }
@@ -411,7 +449,7 @@ fn temp_path(target: &Path) -> PathBuf {
 /// receiver's next scan see a fresh mtime that never matches the sender's,
 /// so `Manifest::diff` would keep reporting the file changed and re-sync it
 /// every pass forever.
-fn write_temp_then_rename(target: &Path, data: &[u8], mode: u32, mtime_nanos: i64) -> Result<()> {
+fn write_temp_then_rename(target: &Path, data: &[u8], mode: u32, uid: u32, gid: u32, mtime_nanos: i64) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DriveError::Io { path: parent.to_path_buf(), source })?;
     }
@@ -419,16 +457,21 @@ fn write_temp_then_rename(target: &Path, data: &[u8], mode: u32, mtime_nanos: i6
     std::fs::write(&tmp, data).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
         .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))
+        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
     let mtime = scan::nanos_to_filetime(mtime_nanos);
     filetime::set_file_times(&tmp, mtime, mtime).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
     std::fs::rename(&tmp, target).map_err(|source| DriveError::Io { path: target.to_path_buf(), source })?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_whole(
     root: &Path,
     rel: &str,
     mode: u32,
+    uid: u32,
+    gid: u32,
     mtime_nanos: i64,
     is_symlink: bool,
     link_target: Option<&str>,
@@ -437,7 +480,7 @@ fn write_whole(
     let target = resolve_relative(root, rel)?;
 
     if !is_symlink {
-        return write_temp_then_rename(&target, data, mode, mtime_nanos);
+        return write_temp_then_rename(&target, data, mode, uid, gid, mtime_nanos);
     }
 
     let link_target = link_target.ok_or_else(|| DriveError::Transfer {
@@ -449,6 +492,11 @@ fn write_whole(
     let tmp = temp_path(&target);
     let _ = std::fs::remove_file(&tmp);
     std::os::unix::fs::symlink(link_target, &tmp).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+    // A symlink's own mode is meaningless on Linux (always 0o777) and
+    // `set_permissions` follows the link rather than the symlink itself, so
+    // only ownership is stamped here — with `lchown`, which does not follow.
+    std::os::unix::fs::lchown(&tmp, Some(uid), Some(gid))
+        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
     std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io { path: target, source })?;
     Ok(())
 }
@@ -476,25 +524,46 @@ mod tests {
         msg_round_trip(Message::WholeFile {
             path: "a.txt".into(),
             mode: 0o644,
+            uid: 1000,
+            gid: 1000,
             mtime_nanos: 123,
             is_symlink: false,
             link_target: None,
             data: b"hello".to_vec(),
         });
-        msg_round_trip(Message::WholeFileBegin { path: "a.txt".into(), mode: 0o644, mtime_nanos: 123 });
+        msg_round_trip(Message::WholeFileBegin {
+            path: "a.txt".into(),
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+            mtime_nanos: 123,
+        });
         msg_round_trip(Message::WholeFileChunk { data: vec![1, 2, 3] });
         msg_round_trip(Message::WholeFileEnd);
-        msg_round_trip(Message::Delta { path: "a.txt".into(), mode: 0o644, mtime_nanos: 123, data: vec![4, 5] });
+        msg_round_trip(Message::Delta {
+            path: "a.txt".into(),
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+            mtime_nanos: 123,
+            data: vec![4, 5],
+        });
         msg_round_trip(Message::Rename {
             from: "a.txt".into(),
             to: "b.txt".into(),
             mode: 0o644,
+            uid: 1000,
+            gid: 1000,
             mtime_nanos: 123,
         });
         msg_round_trip(Message::Delete("a.txt".into()));
         msg_round_trip(Message::Done);
         msg_round_trip(Message::Ack(7));
         msg_round_trip(Message::Error("boom".into()));
+        msg_round_trip(Message::MakeDir { path: "sub".into(), mode: 0o755, uid: 1000, gid: 1000 });
+        msg_round_trip(Message::RemoveDir("sub".into()));
+        msg_round_trip(Message::SetDirMeta { path: "sub".into(), mode: 0o750, uid: 1000, gid: 1000 });
+        msg_round_trip(Message::SetRootMeta { mode: 0o700, uid: 1000, gid: 1000 });
     }
 
     #[test]
