@@ -105,8 +105,21 @@ pub async fn run(routes: Arc<RouteTable>, health: HealthTable, interval: Duratio
             if route.redirect.is_some() || route.backends().is_empty() {
                 continue;
             }
-            let result = probe_route(&client, &route).await;
-            health.record(route.instance.clone(), result);
+            // On its own task so a panic in one route's probe (a reqwest
+            // internal bug, an unexpected header value, anything) can't take
+            // this loop down with it. Losing the loop wedges every route's
+            // health at whatever it last recorded, forever — confirmed live:
+            // one route's `BackendHealth` sat unchanged for over an hour
+            // (many `interval`s) reporting an address the backend hadn't
+            // held since its last restart, and only a process restart
+            // cleared it. `spawn` isolates the panic to this route's probe.
+            let instance = route.instance.clone();
+            let client = client.clone();
+            let health = health.clone();
+            tokio::spawn(async move {
+                let result = probe_route(&client, &route).await;
+                health.record(instance, result);
+            });
         }
     }
 }
@@ -128,10 +141,16 @@ const RETRY_DELAY: Duration = Duration::from_millis(500);
 /// of them are, since a client can land on any of them.
 async fn probe_route(client: &reqwest::Client, route: &Route) -> BackendHealth {
     let mut error = None;
+    // Probe the route's own `path_prefix` rather than always `/`: a backend
+    // mounted under a prefix (headplane's react-router basename is
+    // `/admin/`, matching its route's `path_prefix`) has no route at all for
+    // bare `/` and answers with its own "no route matches" error, which read
+    // as the backend being unhealthy when it was actually fine.
+    let path = route.path_prefix.as_deref().unwrap_or("/");
     for addr in route.backends() {
         // The proxy always speaks plain HTTP to a backend regardless of
         // whether the route terminates TLS for clients (see `server.rs`).
-        let url = format!("http://{addr}/");
+        let url = format!("http://{addr}{path}");
         let mut last_error = None;
         for attempt in 0..=PROBE_RETRIES {
             if attempt > 0 {
