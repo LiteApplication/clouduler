@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, decodeText, encodeText } from '../api/client';
 import type { Assignment, InstanceState, LogLine, StackRequirements, StackState, ValidationError } from '../api/types';
@@ -7,10 +7,36 @@ import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { ConstraintTable } from '../components/ConstraintTable';
 import { Icon } from '../components/Icon';
+import { StackSpecEditor } from '../components/StackSpecEditor';
 import { useEventSource } from '../hooks/useEventSource';
 import { instanceStateTone } from '../lib/format';
+import { emptyKnownNames, type KnownNames } from '../lib/stackSchema';
 import { SecretForm } from './SecretForm';
 import { statusBadge } from './Certificates';
+
+/** Everything this cluster already knows the name of, for the spec editor's
+ *  live-data autocomplete and ctrl+click navigation — all of it already
+ *  present in `ClusterState`, so no extra api calls are needed. */
+function useKnownNames(): KnownNames {
+  const cluster = useClusterState();
+  return useMemo(() => {
+    if (!cluster) return emptyKnownNames;
+    const networks = new Set<string>();
+    const drives = new Set<string>();
+    for (const node of Object.values(cluster.nodes)) {
+      for (const n of node.networks) networks.add(n);
+      for (const d of Object.keys(node.drives)) drives.add(d);
+    }
+    return {
+      networks: Array.from(networks).sort(),
+      drives: Array.from(drives).sort(),
+      nodes: Object.keys(cluster.nodes).sort(),
+      instances: Object.keys(cluster.assignments),
+      secrets: Object.keys(cluster.secrets).sort(),
+      configs: Object.keys(cluster.configs).sort(),
+    };
+  }, [cluster]);
+}
 
 /** `configs` (service-referenced) and `file_configs` (declared with a bundled
  *  `file:`) aren't subsets of one another — a declared-but-unreferenced entry
@@ -32,6 +58,7 @@ export function StackDetail() {
   const navigate = useNavigate();
 
   const stack = !isNew ? cluster?.stacks[name] : undefined;
+  const known = useKnownNames();
   const [editing, setEditing] = useState(isNew);
   const [nameInput, setNameInput] = useState(isNew ? '' : name);
   const [spec, setSpec] = useState(stack?.spec ?? '');
@@ -237,13 +264,7 @@ export function StackDetail() {
             accept=".yml,.yaml"
             onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
           />
-          <textarea
-            id="stack-spec"
-            rows={20}
-            value={spec}
-            onChange={(e) => setSpec(e.target.value)}
-            placeholder="services:\n  web:\n    image: nginx:latest"
-          />
+          <StackSpecEditor value={spec} onChange={setSpec} editable known={known} minHeight="360px" />
         </div>
         {errors.length > 0 && (
           <div className="banner banner-bad" role="alert">
@@ -353,6 +374,7 @@ export function StackDetail() {
       stack={stack}
       instances={instances}
       isAdmin={isAdmin}
+      known={known}
       openEdit={openEdit}
       openConfigFiles={openConfigFiles}
       remove={remove}
@@ -365,6 +387,7 @@ function StackDetailBody({
   stack,
   instances,
   isAdmin,
+  known,
   openEdit,
   openConfigFiles,
   remove,
@@ -373,11 +396,23 @@ function StackDetailBody({
   stack: StackState;
   instances: Assignment[];
   isAdmin: boolean;
+  known: KnownNames;
   openEdit: () => void;
   openConfigFiles: () => void;
   remove: () => void;
 }) {
   const [live, setLive] = useState<Record<string, InstanceState>>({});
+  const [copied, setCopied] = useState(false);
+
+  const copySpec = async () => {
+    try {
+      await navigator.clipboard.writeText(stack.spec);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      alert('failed to copy to clipboard');
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -416,21 +451,26 @@ function StackDetailBody({
             <p className="page-sub">revision {stack.revision}</p>
           </div>
         </div>
-        {isAdmin && (
-          <div className="btn-row">
-            <button onClick={openEdit}>
-              <Icon name="edit" /> Redeploy
-            </button>
-            {(stack.configs.length > 0 || stack.secrets.length > 0) && (
-              <button onClick={openConfigFiles}>
-                <Icon name="file" /> Config files
+        <div className="btn-row">
+          <button onClick={copySpec}>
+            <Icon name={copied ? 'check' : 'file'} /> {copied ? 'Copied' : 'Copy spec'}
+          </button>
+          {isAdmin && (
+            <>
+              <button onClick={openEdit}>
+                <Icon name="edit" /> Redeploy
               </button>
-            )}
-            <button className="danger" onClick={remove}>
-              <Icon name="trash" /> Remove
-            </button>
-          </div>
-        )}
+              {(stack.configs.length > 0 || stack.secrets.length > 0) && (
+                <button onClick={openConfigFiles}>
+                  <Icon name="file" /> Config files
+                </button>
+              )}
+              <button className="danger" onClick={remove}>
+                <Icon name="trash" /> Remove
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="card-grid">
@@ -558,7 +598,7 @@ function StackDetailBody({
             <Icon name="file" /> Spec
           </h2>
         </div>
-        <pre>{stack.spec}</pre>
+        <StackSpecEditor value={stack.spec} editable={false} known={known} minHeight="200px" />
       </div>
     </div>
   );

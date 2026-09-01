@@ -12,6 +12,8 @@ import { Instances } from './views/Instances';
 import { InstanceDetail } from './views/InstanceDetail';
 import { ConfigsSecrets } from './views/ConfigsSecrets';
 import { Drives } from './views/Drives';
+import { DriveDetail } from './views/DriveDetail';
+import { NetworkDetail } from './views/NetworkDetail';
 import { Configuration } from './views/Configuration';
 import { ConfigDraftProvider } from './views/config/draft';
 import { Certificates } from './views/Certificates';
@@ -46,6 +48,8 @@ export function App() {
             <Route path="/updates" element={<Updates />} />
             <Route path="/configs-secrets" element={<ConfigsSecrets />} />
             <Route path="/drives" element={<Drives />} />
+            <Route path="/drives/:name" element={<DriveDetail />} />
+            <Route path="/networks/:name" element={<NetworkDetail />} />
             <Route path="/configuration/*" element={<Configuration />} />
             <Route path="/certificates" element={<Certificates />} />
             <Route path="/redirects" element={<Redirects />} />

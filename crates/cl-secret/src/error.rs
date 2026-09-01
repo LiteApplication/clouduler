@@ -22,8 +22,11 @@ pub enum SecretError {
     BadKey { path: PathBuf, reason: String },
 
     /// Refusing to read a key other users can see is worth an explicit error
-    /// rather than a warning nobody notices.
-    #[error("the cluster key at {path} is readable by other users, run: chmod 600 {path}")]
+    /// rather than a warning nobody notices. Group read is allowed (the
+    /// `clouduler` group needs it to operate the cluster from the cli), so
+    /// this only fires on stray group-write/execute bits or any bit for
+    /// "other".
+    #[error("the cluster key at {path} has excess permissions, run: chmod 640 {path}")]
     KeyPermissions { path: PathBuf },
 
     /// No key on this node, so sealed secrets cannot be opened here.

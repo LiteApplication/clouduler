@@ -70,6 +70,13 @@ pub async fn run(
 
     bail_if_removed(&cfg, node, &node_name, &data_dir).await?;
 
+    // Anyone in the `clouduler` group can operate this cluster from the cli,
+    // the same way root can - see `crate::init::permissions` for why that is
+    // just a matter of file ownership rather than a second auth mechanism.
+    // Run before the key files are loaded below so a freshly chowned key is
+    // what validation and the rest of startup actually see.
+    crate::init::permissions::ensure(&cfg, &data_dir, &config_path);
+
     // `ClusterKey` is deliberately not `Clone` (see its doc comment), so it is
     // wrapped in an `Arc` the moment it is loaded: every subsystem that needs
     // it shares the one allocation instead of each holding its own copy.

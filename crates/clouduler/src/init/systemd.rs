@@ -20,6 +20,14 @@ impl Unit {
     /// votes, holds the replicated state and serves the ui, so the daemon must
     /// come up on a node where docker is broken. It is the node people go to to
     /// find out why.
+    ///
+    /// Still runs as root (`User=` is deliberately left unset): docker and the
+    /// overlay networking it manages (creating VXLAN interfaces, bridges, veth
+    /// pairs via rtnetlink) need real root, not just membership of a group.
+    /// `Group=` only sets root's *primary* group here, which costs nothing —
+    /// root bypasses the unix permission model outright — but keeps the
+    /// process's own group identity consistent with the `clouduler` group the
+    /// daemon chowns its files to on startup, in case anything ever cares.
     pub fn render(&self) -> String {
         format!(
             "[Unit]\n\
@@ -30,6 +38,7 @@ impl Unit {
              \n\
              [Service]\n\
              Type=simple\n\
+             Group=clouduler\n\
              ExecStart={binary} --config {config} daemon --node {node}\n\
              Restart=always\n\
              RestartSec=5\n\
@@ -164,5 +173,14 @@ mod tests {
         let text = unit().render();
         assert!(text.contains("Wants=network-online.target docker.service"));
         assert!(!text.contains("Requires="));
+    }
+
+    /// Root still runs the daemon (docker/network operations need real root),
+    /// but its group matches what startup chowns cluster files to.
+    #[test]
+    fn the_daemon_runs_with_the_clouduler_group_but_stays_root() {
+        let text = unit().render();
+        assert!(text.contains("Group=clouduler"));
+        assert!(!text.contains("User="));
     }
 }

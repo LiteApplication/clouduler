@@ -79,7 +79,7 @@ impl NodeKeypair {
         }
     }
 
-    /// Write the keypair out with owner-only permissions.
+    /// Write the keypair out owner read/write, group read.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -110,7 +110,7 @@ impl NodeKeypair {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o640);
         }
 
         let mut file = options.open(temp).map_err(|source| SecretError::WriteKey {
@@ -157,7 +157,7 @@ impl NodeKeypair {
 }
 
 /// A key other users can read is a key you have to assume is gone. Same check
-/// as `ClusterKey`'s.
+/// as `ClusterKey`'s, including the group-read exception — see its doc comment.
 fn check_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -166,7 +166,8 @@ fn check_permissions(path: &Path) -> Result<()> {
             path: path.to_path_buf(),
             source,
         })?;
-        if meta.permissions().mode() & 0o077 != 0 {
+        const ALLOWED_GROUP_READ: u32 = 0o040;
+        if meta.permissions().mode() & 0o077 & !ALLOWED_GROUP_READ != 0 {
             return Err(SecretError::KeyPermissions {
                 path: path.to_path_buf(),
             });
@@ -200,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_creates_an_owner_only_file() {
+    fn saving_creates_a_group_readable_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("sub").join("node.key");
 
@@ -212,9 +213,23 @@ mod tests {
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
             assert_eq!(
                 mode & 0o777,
-                0o600,
-                "keypair file must not be readable by others"
+                0o640,
+                "keypair file must be owner read/write, group read, and nothing for others"
             );
+        }
+    }
+
+    #[test]
+    fn a_group_readable_keypair_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("node.key");
+        std::fs::write(&path, NodeKeypair::generate().encode()).expect("write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+            NodeKeypair::load(&path).expect("a group-read keypair must load");
         }
     }
 

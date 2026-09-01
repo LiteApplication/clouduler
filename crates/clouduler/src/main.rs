@@ -1,4 +1,6 @@
 mod cli;
+mod completion;
+mod completions;
 mod config;
 mod daemon;
 mod drives;
@@ -21,29 +23,50 @@ mod secret;
 mod stack;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, ConfigCommand, DriveCommand, NodeCommand, SecretCommand, StackCommand};
+use crate::cli::{
+    Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, NodeCommand, SecretCommand, SourceCommand,
+    StackCommand,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Must run before anything else touches stdout: if `COMPLETE` is set in
+    // the environment this answers a shell completion request (or, with no
+    // further args, prints the registration snippet `completions print`
+    // also prints) and exits, instead of falling through to the real CLI.
+    // See `crate::completion` and `crate::completions`.
+    CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     init_tracing(&cli.log, cli.verbose)?;
     install_crypto_provider();
 
     // Setting the node up is the one thing that runs without a config, since
-    // writing that config is most of what it does.
-    if let Command::Init(args) = cli.command {
-        return init::run(*args, cli.config).await;
+    // writing that config is most of what it does. Printing or installing
+    // completions needs no cluster at all.
+    match cli.command {
+        Command::Init(args) => return init::run(*args, cli.config).await,
+        Command::Completions {
+            command: CompletionsCommand::Print { shell },
+        } => return completions::print(shell),
+        Command::Completions {
+            command: CompletionsCommand::Install { shell },
+        } => return completions::install(shell),
+        _ => {}
     }
 
     let cfg = ClusterConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
 
     match cli.command {
-        Command::Init(_) => unreachable!("handled before the config is loaded"),
+        Command::Init(_) | Command::Completions { .. } => {
+            unreachable!("handled before the config is loaded")
+        }
         Command::Daemon { node } => {
             let node = match node {
                 Some(n) => n,
@@ -113,6 +136,10 @@ async fn main() -> Result<()> {
                 };
                 health::run(&cfg, via.as_deref(), flags).await
             }
+            StackCommand::Source { name, action, via } => match action.unwrap_or(SourceCommand::Get) {
+                SourceCommand::Get => stack::source_get(&cfg, &name, via.as_deref()).await,
+                SourceCommand::Set { file } => stack::source_set(&cfg, &name, file.as_deref(), via.as_deref()).await,
+            },
         },
         Command::Secret { command } => match command {
             SecretCommand::Set { name, value, file, via } => {

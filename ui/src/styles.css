@@ -90,6 +90,19 @@ pre {
   line-height: 1.6;
 }
 
+.stack-spec-editor {
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stack-spec-editor .cm-editor {
+  height: 100%;
+}
+
+.stack-spec-editor .cm-scroller {
+  overflow: auto;
+}
+
 ::selection {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }

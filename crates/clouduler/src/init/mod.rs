@@ -15,6 +15,7 @@
 
 pub mod detect;
 pub mod join;
+pub mod permissions;
 pub mod plan;
 pub mod prompt;
 pub mod systemd;

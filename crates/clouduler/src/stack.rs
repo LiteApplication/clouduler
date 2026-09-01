@@ -3,7 +3,7 @@
 //! every manager holds them and any node can run the containers.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, StackBundle};
@@ -45,6 +45,15 @@ pub async fn deploy(
 ) -> Result<()> {
     let bundle = StackBundle::load(file).with_context(|| format!("reading {}", file.display()))?;
     let name = name.unwrap_or_else(|| bundle.name.clone());
+    deploy_bundle(cfg, name, bundle, via).await
+}
+
+/// The part of deploying shared by `stack deploy` (bundle read from a file
+/// named on the command line) and `stack source set` (bundle read from a
+/// file or stdin, name taken from the existing stack). Creates the stack if
+/// it doesn't exist yet, otherwise bumps its revision - see
+/// `Request::DeployStack` in cl-raft.
+async fn deploy_bundle(cfg: &ClusterConfig, name: String, bundle: StackBundle, via: Option<&str>) -> Result<()> {
     debug!(
         name,
         services = bundle.parsed.services.len(),
@@ -52,12 +61,8 @@ pub async fn deploy(
         "loaded bundle"
     );
 
-    // Catch what the cluster would reject anyway, but locally and with a
-    // message that names the file.
-    bundle
-        .parsed
-        .validate(cfg)
-        .with_context(|| format!("validating {}", file.display()))?;
+    // Catch what the cluster would reject anyway, but locally.
+    bundle.parsed.validate(cfg).context("validating stack")?;
 
     for (name, f) in &bundle.files {
         if f.content.len() > MAX_OBJECT_BYTES {
@@ -93,6 +98,56 @@ pub async fn deploy(
         bundle.files.len()
     );
     Ok(())
+}
+
+/// Print a stack's raw source: the yaml exactly as bundled at deploy time,
+/// which is what `stack source set` (and a redeploy from a saved copy of
+/// this output) would take back in. Same content `stack show` prints,
+/// without the `--files` mode.
+pub async fn source_get(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let stack = state
+        .stacks
+        .get(name)
+        .ok_or_else(|| anyhow!("no stack named {name}"))?;
+    print!("{}", stack.spec);
+    Ok(())
+}
+
+/// Replace a stack's source, read from `file` if given or from stdin
+/// otherwise, the same as redeploying it with a new copy of its file. Unlike
+/// `stack deploy`, this is edit-in-place: it refuses a name with no existing
+/// stack rather than silently creating one, since `stack source` is for
+/// editing, not creating.
+pub async fn source_set(cfg: &ClusterConfig, name: &str, file: Option<&Path>, via: Option<&str>) -> Result<()> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    if !state.stacks.contains_key(name) {
+        bail!("no stack named {name}; use `clouduler stack deploy` to create one");
+    }
+
+    let (spec, base) = match file {
+        Some(file) => (
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?,
+            file.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        ),
+        None => {
+            use std::io::Read;
+            let mut spec = String::new();
+            std::io::stdin()
+                .read_to_string(&mut spec)
+                .context("reading stdin")?;
+            (spec, std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        }
+    };
+
+    let bundle = cl_config::StackBundle::from_spec(name, &spec, &base).context("parsing stack source")?;
+    deploy_bundle(cfg, name.to_string(), bundle, via).await
 }
 
 /// Turn the stack's bundled files into cluster config and secret objects, so

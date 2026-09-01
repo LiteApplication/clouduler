@@ -2,6 +2,9 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use clap_complete::engine::ArgValueCompleter;
+
+use crate::completion;
 
 /// Container scheduler, reverse proxy and DNS manager for a small cluster.
 #[derive(Debug, Parser)]
@@ -121,6 +124,7 @@ pub enum Command {
     /// daemon normally.
     Emergency {
         /// Stack to bring back up, trusting this node's own local data for it.
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         stack: String,
         /// Name of this node in the config. Defaults to the system hostname.
         #[arg(long, env = "CLOUDULER_NODE")]
@@ -140,7 +144,7 @@ pub enum Command {
     /// ui, so ordinary placement and drive checks still apply.
     Rebalance {
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
         /// Skip the confirmation prompt.
         #[arg(long)]
@@ -156,6 +160,7 @@ pub enum Command {
     /// prefixed with which instance it came from.
     Logs {
         /// Instance id (`stack.service.index`) or stack name.
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         target: String,
         /// Keep streaming new lines as they are written.
         #[arg(short = 'f', long)]
@@ -166,7 +171,7 @@ pub enum Command {
         /// Node to ask for the cluster's current state. Defaults to any
         /// manager in the config; the container's own node is then found
         /// from that state and asked directly for its logs.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Run a command inside a running container, wherever it runs.
@@ -184,6 +189,7 @@ pub enum Command {
     Exec {
         /// Instance id (`stack.service.index`) or stack name. A stack name
         /// only resolves when it currently has exactly one running instance.
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         target: String,
         /// User to run as inside the container: `user`, `user:group`, `uid`
         /// or `uid:gid`. Defaults to the image's own user.
@@ -191,12 +197,51 @@ pub enum Command {
         user: Option<String>,
         /// Node to ask for the cluster's current state. Defaults to any
         /// manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
         /// Command to run and its arguments. Defaults to `sh`.
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
+    /// Print or install shell completions.
+    ///
+    /// Completions are dynamic: past the fixed set of subcommands and flags,
+    /// arguments that take a stack or node name are completed by asking a
+    /// live manager (or reading the local config) at completion time, not
+    /// from a static list baked in when the script was generated.
+    Completions {
+        #[command(subcommand)]
+        command: CompletionsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CompletionsCommand {
+    /// Print a completion script for the given shell to stdout.
+    ///
+    ///   clouduler completions print bash > /etc/bash_completion.d/clouduler
+    Print {
+        #[arg(value_enum)]
+        shell: ShellArg,
+    },
+    /// Install completions into this user's shell profile, so a new shell
+    /// picks them up automatically. Safe to run more than once: it does not
+    /// add a second line if one is already there.
+    ///
+    /// Detects the shell from $SHELL unless one is given.
+    Install {
+        #[arg(value_enum)]
+        shell: Option<ShellArg>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ShellArg {
+    Bash,
+    Zsh,
+    Fish,
+    Elvish,
+    Powershell,
 }
 
 /// `clouduler folder-import [-mlcr] <folder> <drive>/<volume>[/path inside volume]`
@@ -239,7 +284,7 @@ pub struct FolderImportArgs {
     pub node: Option<String>,
 
     /// Node to submit the volume bookkeeping through. Defaults to any manager.
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
     pub via: Option<String>,
 }
 
@@ -362,7 +407,7 @@ pub enum ConfigCommand {
     /// going through the web ui.
     Reload {
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
 }
@@ -390,24 +435,26 @@ pub enum NodeCommand {
         #[arg(long, value_name = "KEY=VALUE")]
         label: Vec<String>,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Remove a node from the live roster and, if it is declared there, from
     /// the config file too.
     Remove {
+        #[arg(add = ArgValueCompleter::new(completion::node_names))]
         name: String,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Set whether a node may take new work.
     SetAvailability {
+        #[arg(add = ArgValueCompleter::new(completion::node_names))]
         name: String,
         #[arg(value_enum)]
         availability: AvailabilityArg,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
 }
@@ -431,42 +478,46 @@ pub enum StackCommand {
         #[arg(long)]
         name: Option<String>,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// List the stacks stored in the cluster.
     List {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Print a stored stack's spec.
     Show {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         name: String,
         /// Also list the bundled files. Secret contents are never printed.
         #[arg(long)]
         files: bool,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Remove a stack and everything it runs.
     Remove {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         name: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Stop every instance of a stack, wherever it runs. The assignment is
     /// kept, so `stack start` brings it back without redeploying.
     Stop {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         name: String,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Start every instance of a stack that isn't already running.
     Start {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         name: String,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Restart every currently running instance of a stack in place, the
@@ -474,14 +525,16 @@ pub enum StackCommand {
     /// `stack stop`+`stack start`, this never changes desired state, so a
     /// stack that was stopped stays stopped.
     Restart {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         name: String,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// Stream every instance of a stack's output together, merged and
     /// ordered by timestamp rather than by whichever node answers first.
     Logs {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         name: String,
         /// Keep streaming new lines as they are written.
         #[arg(short = 'f', long)]
@@ -491,7 +544,7 @@ pub enum StackCommand {
         tail: u32,
         /// Node to ask for the cluster's current state. Defaults to any
         /// manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// At a glance: every stack instance whose actual state doesn't match
@@ -530,8 +583,33 @@ pub enum StackCommand {
         all: bool,
         /// Node to ask for the cluster's current state. Defaults to any
         /// manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
+    },
+    /// Get or set a stack's raw source (the same yaml a `stack deploy` file
+    /// takes), so it can be piped out, edited and piped back in without
+    /// keeping a local copy of the file.
+    Source {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        name: String,
+        #[command(subcommand)]
+        action: Option<SourceCommand>,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceCommand {
+    /// Print the stack's current source to stdout. The default action.
+    Get,
+    /// Replace the stack's source, the same as redeploying it with a new
+    /// file. Fails if the stack does not exist yet - use `stack deploy` to
+    /// create one.
+    Set {
+        /// Read the new source from this file. Defaults to stdin.
+        file: Option<PathBuf>,
     },
 }
 
@@ -555,12 +633,12 @@ pub enum SecretCommand {
         #[arg(long)]
         file: Option<PathBuf>,
         /// Node to submit through. Defaults to any manager in the config.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
     /// List the secrets stored in the cluster. Values are never shown.
     List {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
 }

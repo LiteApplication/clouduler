@@ -118,14 +118,17 @@ impl ClusterKey {
     fn write_temp(&self, temp: &Path) -> Result<()> {
         use std::io::Write;
 
-        // Owner only from creation, so there is no window where the key is
-        // readable by anyone else.
+        // Owner read/write, group read, from creation: the `clouduler`
+        // system group needs to read this file for the cli to seal/unseal
+        // secrets as any group member, and there is no window where it is
+        // briefly wider than that since the mode is set at open time, not
+        // chmod'd on afterwards.
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o640);
         }
 
         let mut file = options.open(temp).map_err(|source| SecretError::WriteKey {
@@ -178,7 +181,11 @@ impl ClusterKey {
     }
 }
 
-/// A key other users can read is a key you have to assume is gone.
+/// A key other users can read is a key you have to assume is gone — except
+/// group read, which is deliberately allowed: the `clouduler` system group
+/// is how a non-root operator's cli reads this file to seal/unseal secrets,
+/// the same way it reads `cluster.yaml` to find the daemon. Anything else
+/// outside owner (group write/execute, or any "other" bit) is still refused.
 fn check_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -187,7 +194,8 @@ fn check_permissions(path: &Path) -> Result<()> {
             path: path.to_path_buf(),
             source,
         })?;
-        if meta.permissions().mode() & 0o077 != 0 {
+        const ALLOWED_GROUP_READ: u32 = 0o040;
+        if meta.permissions().mode() & 0o077 & !ALLOWED_GROUP_READ != 0 {
             return Err(SecretError::KeyPermissions {
                 path: path.to_path_buf(),
             });
@@ -230,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_creates_an_owner_only_file() {
+    fn saving_creates_a_group_readable_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("sub").join("secrets.key");
 
@@ -241,11 +249,29 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "key file must not be readable by others");
+            assert_eq!(
+                mode & 0o777,
+                0o640,
+                "key file must be owner read/write, group read, and nothing for others"
+            );
         }
 
         let loaded = ClusterKey::load(&path).expect("load");
         assert_eq!(loaded.bytes(), key.bytes());
+    }
+
+    #[test]
+    fn a_group_readable_key_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.key");
+        std::fs::write(&path, ClusterKey::generate().encode()).expect("write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+            ClusterKey::load(&path).expect("a group-read key must load");
+        }
     }
 
     #[test]
@@ -258,6 +284,22 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+            let err = ClusterKey::load(&path).unwrap_err();
+            assert!(matches!(err, SecretError::KeyPermissions { .. }));
+        }
+    }
+
+    #[test]
+    fn a_group_writable_key_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.key");
+        std::fs::write(&path, ClusterKey::generate().encode()).expect("write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Group read plus group write: only the read bit is allowed.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).expect("chmod");
             let err = ClusterKey::load(&path).unwrap_err();
             assert!(matches!(err, SecretError::KeyPermissions { .. }));
         }
