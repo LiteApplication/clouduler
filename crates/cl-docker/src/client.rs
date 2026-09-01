@@ -2,6 +2,12 @@
 
 use crate::error::{DockerError, Result};
 
+/// Where the docker daemon's unix socket lives on the host, matching what
+/// `connect_with_socket_defaults` (and thus `Docker::connect`) actually talks
+/// to. Used to bind-mount the socket into a container that asks for it via
+/// `x-clouduler.docker_socket`.
+pub const DOCKER_SOCKET_PATH: &str = "/var/run/docker.sock";
+
 /// Thin wrapper around a connected bollard client. All other modules in this
 /// crate add methods to this type via `impl Docker` blocks in their own files.
 #[derive(Clone)]

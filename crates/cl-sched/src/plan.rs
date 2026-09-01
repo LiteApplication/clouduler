@@ -53,6 +53,20 @@ pub struct Desired {
     /// can only point at one place once DNS is the one deciding where a
     /// request goes. Empty (no constraint) under the swarm-style default.
     pub proxy_hosts: BTreeSet<String>,
+    /// `x-clouduler.colocate` group this instance's service belongs to, if
+    /// any. Another instance sharing the same key must land on the same
+    /// node, same idiom as `proxy_hosts` above.
+    pub colocate_key: Option<String>,
+}
+
+impl Desired {
+    /// Keys this instance's placement is anchored by: another instance
+    /// sharing one of these must land on the same node. Combines the
+    /// DNS-mode proxy hostnames with any explicit `x-clouduler.colocate`
+    /// group, so placement only has to reason about one kind of anchor.
+    pub fn anchor_keys(&self) -> impl Iterator<Item = &str> {
+        self.proxy_hosts.iter().map(String::as_str).chain(self.colocate_key.as_deref())
+    }
 }
 
 /// Expand a stack into its instances. Replica counts come from
@@ -132,6 +146,7 @@ pub fn expand(
                     })
                     .unwrap_or_default(),
                 proxy_hosts: proxy_hosts.clone(),
+                colocate_key: file.colocate_group(service_name),
             });
         }
     }
@@ -315,5 +330,25 @@ services:
 
         let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), true);
         assert_eq!(desired[0].proxy_hosts, ["app.example.com".to_string()].into());
+    }
+
+    #[test]
+    fn colocated_instances_share_a_key_regardless_of_dns_mode() {
+        let file = parse(
+            r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      colocate: [b]
+  b:
+    image: x
+"#,
+        );
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        let a = desired.iter().find(|d| d.id.service == "a").unwrap();
+        let b = desired.iter().find(|d| d.id.service == "b").unwrap();
+        assert!(a.colocate_key.is_some());
+        assert_eq!(a.colocate_key, b.colocate_key);
     }
 }

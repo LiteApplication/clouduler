@@ -43,6 +43,18 @@ pub struct DriveRegistry {
 
 impl DriveRegistry {
     /// Build from the cluster config and this node's name.
+    ///
+    /// A served drive is placeable on any node, not just the ones that
+    /// declare it (`cl_sched::place::rejection`'s carve-out for `served_drives`,
+    /// and `ClusterState::check_placement`'s matching one) - a node with no
+    /// static entry mounts the drive over the network instead of holding a
+    /// copy. Without a synthetic entry here, that node's registry disagreed
+    /// with the placement checks that had already let an instance land on it:
+    /// `implements`/`root` said `NotImplemented` for a drive placement had
+    /// just approved, which is exactly what turned a legitimate served-drive
+    /// migration into a `does not implement drive` failure. The synthetic
+    /// path mirrors `cl_sched::run::Scheduler::drive_roots`'s own convention
+    /// for the same case (`data_dir/volume-mounts/<name>`) so the two agree.
     pub fn new(config: &ClusterConfig, node: &str) -> Result<Self> {
         let entry = config
             .node(node)
@@ -53,9 +65,16 @@ impl DriveRegistry {
             .filter(|(_, drive)| drive.is_served())
             .map(|(name, drive)| (name.clone(), drive.served_by.clone()))
             .collect();
+        let mut drives = entry.drives.clone();
+        let data_dir = entry.data_dir(config);
+        for (name, drive) in &config.drives {
+            if drive.is_served() && !drives.contains_key(name) {
+                drives.insert(name.clone(), data_dir.join("volume-mounts").join(name));
+            }
+        }
         Ok(Self {
             node: node.to_string(),
-            drives: entry.drives.clone(),
+            drives,
             served_by,
         })
     }

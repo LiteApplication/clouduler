@@ -1,7 +1,7 @@
 //! Data the scheduler needs derived from a parsed stack, so callers don't
 //! recompute it themselves.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use crate::cluster::{ClusterConfig, NetworkKind};
@@ -108,5 +108,137 @@ impl StackFile {
             .and_then(|drive| cluster.drives.get(drive))
             .map(|d| d.sync_interval)
             .unwrap_or(DEFAULT_SYNC_INTERVAL)
+    }
+
+    /// The colocation group key for `service`, if `x-clouduler.colocate`
+    /// puts it in one with at least one other service. Transitively closed
+    /// over every service's `colocate` list, so `a: [b]`, `b: [c]` still
+    /// groups `a`, `b` and `c` together. `None` for a service naming no
+    /// group and named by none.
+    pub fn colocate_group(&self, service: &str) -> Option<String> {
+        self.colocate_groups().remove(service)
+    }
+
+    fn colocate_groups(&self) -> BTreeMap<String, String> {
+        // Union-find over service names: every service starts as its own
+        // root, then each `colocate` entry merges the two roots it names.
+        let mut parent: BTreeMap<String, String> =
+            self.services.keys().map(|n| (n.clone(), n.clone())).collect();
+
+        fn find(parent: &mut BTreeMap<String, String>, x: &str) -> String {
+            let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
+            if p == x {
+                p
+            } else {
+                let root = find(parent, &p);
+                parent.insert(x.to_string(), root.clone());
+                root
+            }
+        }
+
+        for (name, svc) in &self.services {
+            let Some(ext) = &svc.x_clouduler else { continue };
+            for other in &ext.colocate {
+                // An unknown target is caught by validation; here it's just
+                // skipped rather than joined against nothing.
+                if !self.services.contains_key(other) {
+                    continue;
+                }
+                let ra = find(&mut parent, name);
+                let rb = find(&mut parent, other);
+                if ra != rb {
+                    parent.insert(ra, rb);
+                }
+            }
+        }
+
+        let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for name in self.services.keys() {
+            let root = find(&mut parent, name);
+            groups.entry(root).or_default().insert(name.clone());
+        }
+
+        let mut keys = BTreeMap::new();
+        for members in groups.values() {
+            // A singleton needs no anchor: it colocates with nothing.
+            if members.len() < 2 {
+                continue;
+            }
+            let key = format!("colocate:{}", members.iter().cloned().collect::<Vec<_>>().join(","));
+            for member in members {
+                keys.insert(member.clone(), key.clone());
+            }
+        }
+        keys
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::stack::StackFile;
+
+    fn parse(yaml: &str) -> StackFile {
+        StackFile::parse(yaml).expect("valid stack")
+    }
+
+    #[test]
+    fn a_service_naming_no_colocate_group_gets_no_key() {
+        let file = parse("services:\n  a:\n    image: x\n");
+        assert_eq!(file.colocate_group("a"), None);
+    }
+
+    #[test]
+    fn colocated_services_share_one_key() {
+        let file = parse(
+            "services:\n  a:\n    image: x\n    x-clouduler:\n      colocate: [b]\n  b:\n    image: x\n",
+        );
+        let key = file.colocate_group("a").expect("a is grouped");
+        assert_eq!(file.colocate_group("b"), Some(key));
+    }
+
+    /// `a` names `b`, `b` names `c`: all three end up in one group even
+    /// though `a` never named `c` directly.
+    #[test]
+    fn colocation_is_transitive() {
+        let file = parse(
+            r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      colocate: [b]
+  b:
+    image: x
+    x-clouduler:
+      colocate: [c]
+  c:
+    image: x
+"#,
+        );
+        let key = file.colocate_group("a").expect("grouped");
+        assert_eq!(file.colocate_group("b"), Some(key.clone()));
+        assert_eq!(file.colocate_group("c"), Some(key));
+    }
+
+    #[test]
+    fn unrelated_services_get_different_keys() {
+        let file = parse(
+            r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      colocate: [b]
+  b:
+    image: x
+  c:
+    image: x
+    x-clouduler:
+      colocate: [d]
+  d:
+    image: x
+"#,
+        );
+        assert_ne!(file.colocate_group("a"), file.colocate_group("c"));
     }
 }

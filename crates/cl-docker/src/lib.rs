@@ -11,7 +11,7 @@ mod image;
 mod logs;
 mod network;
 
-pub use client::Docker;
+pub use client::{Docker, DOCKER_SOCKET_PATH};
 pub use container::{
     BindMount, ContainerSpec, ContainerState, HealthState, Healthcheck, PortMapping, PortProtocol,
     ResourceLimits, RestartPolicy, RunState, TmpfsMount, LABEL_INSTANCE, LABEL_MANAGED,

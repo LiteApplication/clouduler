@@ -18,6 +18,28 @@ impl StackFile {
         self.validate_service_networks_declared()?;
         self.validate_no_duplicate_ports()?;
         self.validate_stop_signals()?;
+        self.validate_colocate()?;
+        Ok(())
+    }
+
+    fn validate_colocate(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(ext) = &svc.x_clouduler else { continue };
+            for other in &ext.colocate {
+                if other == name {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.x-clouduler.colocate"),
+                        "a service cannot colocate with itself",
+                    ));
+                }
+                if !self.services.contains_key(other) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.x-clouduler.colocate"),
+                        format!("no service named {other} in this stack"),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -652,6 +674,27 @@ services:
             }),
         );
         stack(raw).validate(&cfg).expect("n1's tunnel has the port open");
+    }
+
+    #[test]
+    fn colocate_target_must_exist() {
+        let raw = "services:\n  a:\n    image: x\n    x-clouduler:\n      colocate: [bogus]\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.a.x-clouduler.colocate"));
+        assert!(err.to_string().contains("no service named bogus"));
+    }
+
+    #[test]
+    fn colocate_with_self_is_rejected() {
+        let raw = "services:\n  a:\n    image: x\n    x-clouduler:\n      colocate: [a]\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("cannot colocate with itself"));
+    }
+
+    #[test]
+    fn colocate_with_a_real_service_is_accepted() {
+        let raw = "services:\n  a:\n    image: x\n    x-clouduler:\n      colocate: [b]\n  b:\n    image: x\n";
+        StackFile::parse(raw).expect("valid colocate target");
     }
 
     #[test]

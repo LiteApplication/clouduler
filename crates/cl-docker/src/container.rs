@@ -117,6 +117,9 @@ pub struct ContainerSpec {
     /// Overrides the container's hostname. `None` leaves docker's own default
     /// (the short container id) in effect.
     pub hostname: Option<String>,
+    /// `user`, `user:group`, `uid` or `uid:gid`. `None` leaves the image's
+    /// own default (usually root) in effect.
+    pub user: Option<String>,
     pub env: Vec<(String, String)>,
     pub command: Option<Vec<String>>,
     pub labels: HashMap<String, String>,
@@ -280,6 +283,7 @@ impl ContainerSpec {
         ContainerCreateBody {
             image: Some(self.image.clone()),
             hostname: self.hostname.clone(),
+            user: self.user.clone(),
             cmd: self.command.clone(),
             env: (!self.env.is_empty())
                 .then(|| self.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
@@ -644,6 +648,19 @@ mod tests {
             body.host_config.expect("host config").network_mode.as_deref(),
             Some("blog_default")
         );
+    }
+
+    #[test]
+    fn user_is_passed_to_docker() {
+        let mut spec = base_spec();
+        spec.user = Some("1000:1000".to_string());
+        assert_eq!(spec.to_create_body().user.as_deref(), Some("1000:1000"));
+    }
+
+    #[test]
+    fn no_user_leaves_docker_to_pick_the_image_default() {
+        let body = base_spec().to_create_body();
+        assert_eq!(body.user, None);
     }
 
     #[test]

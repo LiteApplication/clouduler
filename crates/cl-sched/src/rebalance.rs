@@ -73,7 +73,7 @@ pub fn plan(
 
     let mut movable: Vec<Movable> = Vec::new();
     for item in desired {
-        if item.global || item.pinned_node.is_some() || !item.proxy_hosts.is_empty() {
+        if item.global || item.pinned_node.is_some() || item.anchor_keys().next().is_some() {
             continue;
         }
         let Some(assignment) = state.assignments.get(&item.id) else {
@@ -185,6 +185,7 @@ mod tests {
             networks: Default::default(),
             bound_ports: Default::default(),
             proxy_hosts: Default::default(),
+            colocate_key: None,
         }
     }
 
@@ -262,6 +263,23 @@ mod tests {
         let mut items: Vec<_> = (0..3).map(|i| desired("web", i)).collect();
         for item in &mut items {
             item.proxy_hosts = ["app.example.com".to_string()].into();
+        }
+
+        assert!(plan(&state, &items, &no_served(), &no_everywhere()).is_empty());
+    }
+
+    #[test]
+    fn an_instance_in_a_colocate_group_never_moves() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::UpsertNode(node("n1")));
+        state.apply(&Request::UpsertNode(node("n2")));
+        for i in 0..3 {
+            assign(&mut state, "web", i, "n1");
+        }
+
+        let mut items: Vec<_> = (0..3).map(|i| desired("web", i)).collect();
+        for item in &mut items {
+            item.colocate_key = Some("colocate:app,web".to_string());
         }
 
         assert!(plan(&state, &items, &no_served(), &no_everywhere()).is_empty());

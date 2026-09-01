@@ -2,6 +2,7 @@
 //! `docs/stacks.md` for the user facing reference.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -364,6 +365,29 @@ fn is_default_protocol(p: &Protocol) -> bool {
     *p == Protocol::default()
 }
 
+/// Bind-mounts the host's docker socket into the container. Every other
+/// mount in clouduler has to live on a drive so it can be replicated and
+/// migrated (see `VolumeMount`), but the docker socket is neither data nor
+/// something a drive could back — it's the one deliberate escape hatch, for
+/// containers that need to control docker itself (CI runners, docker-in-docker
+/// builds).
+///
+/// Granting this is equivalent to root on the host: anything with write
+/// access to the socket can launch a privileged container and mount the host
+/// filesystem into it, so only give it to services you already trust with
+/// root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DockerSocket {
+    /// Path the socket is mounted at inside the container.
+    pub target: PathBuf,
+    /// Read-write by default: most docker clients need to create and start
+    /// containers, not just inspect what's running, so that's the useful
+    /// default despite being the more dangerous one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+}
+
 /// Per volume override of the drive's default sync interval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -388,6 +412,14 @@ pub struct ServiceExtensions {
     pub auto_update: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_socket: Option<DockerSocket>,
+    /// Other services in this stack that must always land on the same node
+    /// as this one. Transitively closed: naming `b` here and `c` on `b`
+    /// still puts `a`, `b` and `c` in one group even though `a` never named
+    /// `c` directly. See `StackFile::colocate_group`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub colocate: Vec<String>,
 }
 
 /// Stack wide defaults under the top level `x-clouduler` key. Services
@@ -521,6 +553,41 @@ volume_sync:
         let ext: ServiceExtensions = serde_yaml::from_str("auto_update: true\nnode: n1\n").unwrap();
         assert_eq!(ext.auto_update, Some(true));
         assert_eq!(ext.node.as_deref(), Some("n1"));
+    }
+
+    #[test]
+    fn parses_docker_socket() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "docker_socket:\n  target: /var/run/docker.sock\n",
+        )
+        .unwrap();
+        let ds = ext.docker_socket.expect("docker_socket");
+        assert_eq!(ds.target, PathBuf::from("/var/run/docker.sock"));
+        assert!(!ds.read_only, "read-write is the default");
+    }
+
+    #[test]
+    fn docker_socket_read_only_opt_in() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "docker_socket:\n  target: /var/run/docker.sock\n  read_only: true\n",
+        )
+        .unwrap();
+        assert!(ext.docker_socket.unwrap().read_only);
+    }
+
+    #[test]
+    fn docker_socket_rejects_unknown_keys() {
+        let err = serde_yaml::from_str::<ServiceExtensions>(
+            "docker_socket:\n  target: /var/run/docker.sock\n  bogus: 1\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn parses_colocate() {
+        let ext: ServiceExtensions = serde_yaml::from_str("colocate: [db, cache]\n").unwrap();
+        assert_eq!(ext.colocate, vec!["db".to_string(), "cache".to_string()]);
     }
 
     #[test]

@@ -406,6 +406,50 @@ node: n1
 Pins the service to a specific node by name, instead of letting the
 scheduler place it. Must name a node declared in the cluster.
 
+### `docker_socket`
+
+```yaml
+docker_socket:
+  target: /var/run/docker.sock   # path inside the container
+  read_only: false                # default false
+```
+
+Bind-mounts the host's docker socket into the container, so it can control
+docker itself — build images, launch sibling containers, and so on. This is
+the one deliberate bind-mount escape hatch in clouduler: every other mount
+has to live on a drive so it can be replicated and migrated (see
+[Volumes](#volumes)), but the docker socket is neither data nor something a
+drive could back.
+
+`target` is required; `read_only` defaults to `false` since most docker
+clients need to create and start containers, not just inspect what's
+running.
+
+Granting this is equivalent to giving the container root on the host:
+anything with write access to the socket can launch a privileged container
+and mount the host filesystem into it. Only set it on services you already
+trust with root.
+
+### `colocate`
+
+```yaml
+colocate: [worker, cache]
+```
+
+Other services in the same stack that must always land on the same node as
+this one. Transitively closed: if `a` colocates with `b`, and `b` with `c`,
+all three end up on the same node even though `a` never named `c` directly.
+Every name must be a service declared in the same stack, and a service
+cannot name itself.
+
+Uses the same placement mechanism as `x-clouduler.proxy` hostname
+colocation: a node already hosting one member of the group anchors the
+rest, an empty cluster picks the least loaded eligible node for the whole
+group, and a colocated instance never takes part in rebalancing (moving one
+member alone would break the group). Conflicting constraints across a group
+(e.g. two members pinned to different nodes) leave the group unplaceable
+rather than silently splitting it across nodes.
+
 ## Validation
 
 `StackFile::parse` runs syntax-only checks that don't need a cluster:
@@ -416,6 +460,8 @@ scheduler place it. Must name a node declared in the cluster.
   `networks:` section
 - no two services publish the same `protocol`/port, across both `ports:`
   and `x-clouduler.expose`
+- `x-clouduler.colocate` targets name a real service in the same stack, and
+  a service does not name itself
 
 `StackFile::validate(&cluster)` runs the above plus cross-checks against a
 `ClusterConfig`:

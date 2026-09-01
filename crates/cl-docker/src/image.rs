@@ -127,6 +127,22 @@ fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str)
         .map(|(_, digest)| digest.to_string())
 }
 
+/// Docker's `/images/create` endpoint pulls every tag in the repository when
+/// `fromImage` carries neither a tag nor a digest, rather than defaulting to
+/// `latest` the way the `docker` CLI does client-side before ever calling the
+/// API. An untagged reference like `alpine` hit this in production: pulling
+/// every tag walked into a years-old `alpine:2.6`, still served in the
+/// deprecated schema1 manifest format that current containerd rejects, and
+/// the pull never succeeded even though `alpine:latest` alone pulls fine.
+fn pull_reference(image: &str) -> String {
+    let parsed = ImageRef::parse(image);
+    if parsed.tag.is_none() && parsed.digest.is_none() {
+        format!("{image}:latest")
+    } else {
+        image.to_string()
+    }
+}
+
 impl Docker {
     /// Pull `image`, streaming progress to completion, then return the digest
     /// docker resolved it to locally.
@@ -141,7 +157,7 @@ impl Docker {
     /// come from is worse than passing none: docker forwards them to whatever
     /// host the reference names.
     pub async fn pull_as(&self, image: &str, credentials: Option<&RegistryCredentials>) -> Result<String> {
-        let options = CreateImageOptionsBuilder::new().from_image(image).build();
+        let options = CreateImageOptionsBuilder::new().from_image(&pull_reference(image)).build();
         let mut stream = self
             .inner
             .create_image(Some(options), None, credentials.map(Into::into));
@@ -268,6 +284,20 @@ mod tests {
         assert_eq!(r.digest, Some("sha256:deadbeef".to_string()));
         assert_eq!(r.tag, None);
         assert!(!r.is_latest());
+    }
+
+    #[test]
+    fn pull_reference_makes_a_bare_image_explicit() {
+        // Docker's own `/images/create` pulls every tag in the repository
+        // when `fromImage` has none, rather than defaulting to `latest`.
+        assert_eq!(pull_reference("alpine"), "alpine:latest");
+    }
+
+    #[test]
+    fn pull_reference_leaves_a_tagged_or_digested_image_alone() {
+        assert_eq!(pull_reference("nginx:1.25"), "nginx:1.25");
+        assert_eq!(pull_reference("nginx@sha256:deadbeef"), "nginx@sha256:deadbeef");
+        assert_eq!(pull_reference("nginx:latest"), "nginx:latest");
     }
 
     #[test]

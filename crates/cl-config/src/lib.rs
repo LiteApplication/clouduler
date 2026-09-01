@@ -17,7 +17,7 @@ pub use bundle::{BundledFile, StackBundle};
 pub use error::{ConfigError, Result};
 pub use stack::{
     ByteSize, ObjectRef, SECRET_DIR,
-    Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, ForwardAuth, Healthcheck, HealthcheckTest,
+    Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket, ForwardAuth, Healthcheck, HealthcheckTest,
     Middleware, Placement, PortMapping, PortRange, ProxyRoute, PublishMode, RedirectRegex, ResourceSpec, Resources,
     RestartPolicy, ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile,
     StackNetwork, StackRequirements, StackSecret, StackVolume, Protocol, TmpfsOptions, UpdateConfig, VolumeMount,

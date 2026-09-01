@@ -275,23 +275,24 @@ pub fn place(
         .map(|name| (name.clone(), state.assignments_on(name).count()))
         .collect();
 
-    // Anchor every proxied hostname to whichever node already (validly)
-    // hosts it, so an instance sharing that hostname joins it instead of
-    // spreading to a different node. Seeded from existing assignments before
-    // any new placement decisions are made, so a running cluster stays put.
-    // "Validly" is checked with the same `candidates` an instance is judged
-    // by everywhere else - not just node liveness - so a node that is up but
-    // no longer implements what the instance needs (a network removed from
-    // it, say) can't self-anchor a sole hostname owner in place forever, nor
-    // anchor its co-located siblings to a node none of them can actually use.
+    // Anchor every proxied hostname or `x-clouduler.colocate` group to
+    // whichever node already (validly) hosts it, so an instance sharing that
+    // key joins it instead of spreading to a different node. Seeded from
+    // existing assignments before any new placement decisions are made, so a
+    // running cluster stays put. "Validly" is checked with the same
+    // `candidates` an instance is judged by everywhere else - not just node
+    // liveness - so a node that is up but no longer implements what the
+    // instance needs (a network removed from it, say) can't self-anchor a
+    // sole key's owner in place forever, nor anchor its co-located siblings
+    // to a node none of them can actually use.
     let mut host_node: BTreeMap<&str, &str> = BTreeMap::new();
     for item in desired {
         if let Some(current) = state.assignments.get(&item.id) {
             let validly_placed = candidates(state, item, served_drives, everywhere_networks)
                 .is_ok_and(|(eligible, _)| eligible.iter().any(|n| n.name == current.node));
             if validly_placed {
-                for host in &item.proxy_hosts {
-                    host_node.entry(host).or_insert(&current.node);
+                for key in item.anchor_keys() {
+                    host_node.entry(key).or_insert(&current.node);
                 }
             }
         }
@@ -328,13 +329,14 @@ pub fn place(
 
         wanted.insert(item.id.clone());
 
-        // An instance sharing a proxied hostname with an already-anchored
-        // instance can only go where that hostname already lands - a
-        // hostname can't point at two nodes at once. Hostnames anchored to
-        // different nodes (one instance's routes span more than one, or two
-        // of its hostnames disagree) leave nothing eligible: a real conflict
-        // the operator has to resolve, not a node to guess between.
-        let anchors: BTreeSet<&str> = item.proxy_hosts.iter().filter_map(|h| host_node.get(h.as_str())).copied().collect();
+        // An instance sharing an anchor key (a proxied hostname or a
+        // `colocate` group) with an already-anchored instance can only go
+        // where that key already lands - it can't point at two nodes at
+        // once. Keys anchored to different nodes (one instance's routes span
+        // more than one, or two of its keys disagree) leave nothing
+        // eligible: a real conflict the operator has to resolve, not a node
+        // to guess between.
+        let anchors: BTreeSet<&str> = item.anchor_keys().filter_map(|k| host_node.get(k)).copied().collect();
         let eligible: Vec<&NodeState> = if anchors.is_empty() {
             eligible
         } else if anchors.len() == 1 {
@@ -347,8 +349,8 @@ pub fn place(
         // Leave a valid existing placement alone.
         if let Some(current) = state.assignments.get(&item.id) {
             if eligible.iter().any(|n| n.name == current.node) {
-                for host in &item.proxy_hosts {
-                    host_node.entry(host).or_insert(&current.node);
+                for key in item.anchor_keys() {
+                    host_node.entry(key).or_insert(&current.node);
                 }
                 continue;
             }
@@ -363,8 +365,8 @@ pub fn place(
                 instance: item.id.clone(),
                 reason: if !anchors.is_empty() {
                     format!(
-                        "must share a node with hostname(s) {} already placed on {}",
-                        item.proxy_hosts.iter().cloned().collect::<Vec<_>>().join(", "),
+                        "must share a node with {} already placed on {}",
+                        item.anchor_keys().collect::<Vec<_>>().join(", "),
                         anchors.into_iter().collect::<Vec<_>>().join(", ")
                     )
                 } else if rejected.is_empty() {
@@ -377,8 +379,8 @@ pub fn place(
         };
 
         *load.entry(target.name.clone()).or_insert(0) += 1;
-        for host in &item.proxy_hosts {
-            host_node.entry(host).or_insert(&target.name);
+        for key in item.anchor_keys() {
+            host_node.entry(key).or_insert(&target.name);
         }
         decisions.push(Decision::Place {
             instance: item.id.clone(),
@@ -513,6 +515,7 @@ mod tests {
             networks: BTreeSet::new(),
             bound_ports: BTreeSet::new(),
             proxy_hosts: BTreeSet::new(),
+            colocate_key: None,
         }
     }
 
@@ -935,6 +938,22 @@ mod tests {
         let main_node = placed(&decisions, "web", 0).expect("web placed");
         let admin_node = placed(&decisions, "admin", 0).expect("admin placed");
         assert_eq!(main_node, admin_node);
+    }
+
+    /// `x-clouduler.colocate` uses the same anchor mechanism as a shared
+    /// proxied hostname, just keyed by group instead of hostname.
+    #[test]
+    fn instances_in_a_colocate_group_are_placed_together() {
+        let state = cluster();
+        let mut app = desired("app", 0);
+        app.colocate_key = Some("colocate:app,worker".to_string());
+        let mut worker = desired("worker", 0);
+        worker.colocate_key = Some("colocate:app,worker".to_string());
+
+        let decisions = place(&state, &[app, worker], &no_served(), &no_everywhere()).decisions;
+        let app_node = placed(&decisions, "app", 0).expect("app placed");
+        let worker_node = placed(&decisions, "worker", 0).expect("worker placed");
+        assert_eq!(app_node, worker_node);
     }
 
     /// A new instance sharing a hostname with one already running joins that

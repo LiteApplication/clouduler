@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use cl_config::{Command, RestartPolicy as StackRestart, Service};
 use cl_docker::{
     BindMount, ContainerSpec, Healthcheck, PortMapping, PortProtocol, ResourceLimits, RestartPolicy,
-    TmpfsMount,
+    TmpfsMount, DOCKER_SOCKET_PATH,
 };
 use cl_raft::ids::InstanceId;
 
@@ -80,6 +80,13 @@ pub fn build(
         })
         .collect();
     mounts.extend(objects.iter().map(|o| o.mount()));
+    if let Some(docker_socket) = service.x_clouduler.as_ref().and_then(|x| x.docker_socket.as_ref()) {
+        mounts.push(BindMount {
+            host_path: DOCKER_SOCKET_PATH.to_string(),
+            container_path: docker_socket.target.display().to_string(),
+            read_only: docker_socket.read_only,
+        });
+    }
 
     let tmpfs: Vec<TmpfsMount> = service
         .volumes
@@ -111,6 +118,7 @@ pub fn build(
         service: instance.service.clone(),
         instance: instance.to_string(),
         hostname: service.hostname.clone(),
+        user: service.user.clone(),
         env: env.into_iter().collect(),
         command: service.command.as_ref().map(command_words),
         labels,
@@ -386,6 +394,66 @@ mod tests {
     }
 
     #[test]
+    fn docker_socket_is_mounted_read_write_by_default() {
+        let s = service(
+            "services:\n  web:\n    image: nginx\n    x-clouduler:\n      docker_socket:\n        target: /var/run/docker.sock\n",
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization { objects: &[], env: &[], drive_roots: &roots() },
+            Placement::default(),
+            None,
+            1,
+        );
+
+        let mount = spec
+            .mounts
+            .iter()
+            .find(|m| m.container_path == "/var/run/docker.sock")
+            .expect("docker socket mounted");
+        assert_eq!(mount.host_path, DOCKER_SOCKET_PATH);
+        assert!(!mount.read_only);
+    }
+
+    #[test]
+    fn docker_socket_read_only_is_honoured() {
+        let s = service(
+            "services:\n  web:\n    image: nginx\n    x-clouduler:\n      docker_socket:\n        target: /run/docker.sock\n        read_only: true\n",
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization { objects: &[], env: &[], drive_roots: &roots() },
+            Placement::default(),
+            None,
+            1,
+        );
+
+        let mount = spec
+            .mounts
+            .iter()
+            .find(|m| m.container_path == "/run/docker.sock")
+            .expect("docker socket mounted");
+        assert!(mount.read_only);
+    }
+
+    #[test]
+    fn no_docker_socket_mount_without_the_extension() {
+        let s = service("services:\n  web:\n    image: nginx\n");
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization { objects: &[], env: &[], drive_roots: &roots() },
+            Placement::default(),
+            None,
+            1,
+        );
+
+        assert!(spec.mounts.iter().all(|m| m.host_path != DOCKER_SOCKET_PATH));
+    }
+
+    #[test]
     fn objects_become_read_only_mounts() {
         let s = service("services:\n  web:\n    image: nginx\n");
         let objects = vec![Materialized {
@@ -432,6 +500,24 @@ mod tests {
         );
         assert_eq!(spec.hostname.as_deref(), Some("custom-host"));
         assert!(spec.read_only);
+    }
+
+    #[test]
+    fn user_carries_over() {
+        let s = service("services:\n  web:\n    image: nginx\n    user: \"1000:1000\"\n");
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
+            Placement::default(),
+            None,
+            1,
+        );
+        assert_eq!(spec.user.as_deref(), Some("1000:1000"));
     }
 
     #[test]
