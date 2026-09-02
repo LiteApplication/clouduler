@@ -133,6 +133,53 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Disaster recovery for a cluster whose replicated content - cluster
+    /// config, stack specs, cluster configs and secrets - is gone from every
+    /// node, using the git repo `backup:` mirrors it to (see `docs/git-backup.md`).
+    ///
+    /// This restores content only, never raft membership/quorum: on a
+    /// cluster that has also lost quorum for good, run `emergency` or the
+    /// equivalent `node force-quorum` step first to get a reachable cluster,
+    /// then `restore` to refill it. Running `restore` alone leaves this
+    /// node's existing membership and log untouched.
+    ///
+    /// `source` is normally a local path to an already-cloned copy of the
+    /// backup repo (`git clone` it yourself first, using whatever SSH
+    /// credentials you have - clouduler's own deploy key is stored inside
+    /// the very state this command is trying to recover, so it cannot be
+    /// relied on to exist yet). A `git@`/`ssh://` URL is also accepted and
+    /// cloned directly, using the ambient SSH agent.
+    ///
+    /// Secrets in the repo are encrypted for the admin's age identity, never
+    /// the cluster's own key, so restoring them needs that identity: pass it
+    /// with `--age-identity-file` or pipe it on stdin with
+    /// `--age-identity-stdin`. It is read once, used in memory to decrypt
+    /// and immediately re-seal each secret under this node's own cluster
+    /// key, and never written anywhere.
+    ///
+    /// This node's daemon MUST be stopped first, the same as `emergency`.
+    Restore {
+        /// Path to an already-cloned working copy of the backup repo, or a
+        /// `git@`/`ssh://` url to clone directly.
+        source: String,
+        /// File holding the admin's age identity (`AGE-SECRET-KEY-1...`),
+        /// the same format `age-keygen` writes.
+        #[arg(long, conflicts_with = "age_identity_stdin")]
+        age_identity_file: Option<PathBuf>,
+        /// Read the age identity from stdin instead of a file.
+        #[arg(long)]
+        age_identity_stdin: bool,
+        /// Branch to read when `source` is a url to clone. Ignored for an
+        /// already-cloned local path, which is read as checked out.
+        #[arg(long, default_value = "main")]
+        branch: String,
+        /// Name of this node in the config. Defaults to the system hostname.
+        #[arg(long, env = "CLOUDULER_NODE")]
+        node: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Actively relocate instances to smooth the number of instances per
     /// node, unlike the regular scheduler pass, which never moves an
     /// already validly-placed instance.

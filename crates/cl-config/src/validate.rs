@@ -18,6 +18,7 @@ impl ClusterConfig {
         self.validate_failover()?;
         self.validate_cloudflare()?;
         self.validate_proxy()?;
+        self.validate_backup()?;
         Ok(())
     }
 
@@ -461,6 +462,37 @@ impl ClusterConfig {
             return Err(ConfigError::invalid(
                 "web.address",
                 format!("{web} is not covered by any configured cloudflare zone"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_backup(&self) -> Result<()> {
+        let Some(b) = &self.backup else {
+            return Ok(());
+        };
+        if b.repo_url.trim().is_empty() {
+            return Err(ConfigError::invalid("backup.repo_url", "must not be empty"));
+        }
+        if b.repo_url.starts_with("http://") || b.repo_url.starts_with("https://") {
+            return Err(ConfigError::invalid(
+                "backup.repo_url",
+                "only ssh urls are supported (e.g. git@host:org/repo.git), not http(s)",
+            ));
+        }
+        if b.branch.trim().is_empty() {
+            return Err(ConfigError::invalid("backup.branch", "must not be empty"));
+        }
+        if !b.age_recipient.starts_with("age1") {
+            return Err(ConfigError::invalid(
+                "backup.age_recipient",
+                "must be an age X25519 recipient, starting with age1",
+            ));
+        }
+        if b.interval < std::time::Duration::from_secs(5) {
+            return Err(ConfigError::invalid(
+                "backup.interval",
+                "must be at least 5s",
             ));
         }
         Ok(())
@@ -965,5 +997,56 @@ cloudflare:
             cfg.secrets.key_file,
             std::path::PathBuf::from("/etc/clouduler/secrets.key")
         );
+    }
+
+    fn with_backup(patch: &str) -> Result<ClusterConfig> {
+        parse(&[(
+            "cloudflare:\n  zones: [example.com]",
+            &format!("cloudflare:\n  zones: [example.com]\nbackup:\n{patch}"),
+        )])
+    }
+
+    #[test]
+    fn backup_is_absent_by_default() {
+        let cfg = ClusterConfig::parse(BASE).expect("valid");
+        assert!(cfg.backup.is_none());
+    }
+
+    #[test]
+    fn backup_accepts_an_ssh_url_and_age_recipient() {
+        let cfg = with_backup(
+            "  repo_url: git@github.com:org/repo.git\n  age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n",
+        )
+        .expect("valid");
+        let b = cfg.backup.expect("backup set");
+        assert_eq!(b.branch, "main");
+        assert_eq!(b.interval, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn backup_rejects_an_http_url() {
+        let err = with_backup(
+            "  repo_url: https://github.com/org/repo.git\n  age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { at, .. } if at == "backup.repo_url"));
+    }
+
+    #[test]
+    fn backup_rejects_a_non_age_recipient() {
+        let err = with_backup(
+            "  repo_url: git@github.com:org/repo.git\n  age_recipient: not-an-age-key\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { at, .. } if at == "backup.age_recipient"));
+    }
+
+    #[test]
+    fn backup_rejects_a_too_short_interval() {
+        let err = with_backup(
+            "  repo_url: git@github.com:org/repo.git\n  age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n  interval: 1s\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { at, .. } if at == "backup.interval"));
     }
 }

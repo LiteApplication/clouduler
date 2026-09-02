@@ -197,6 +197,40 @@ impl Store {
         Ok(membership)
     }
 
+    /// Replaces this node's `cluster_config`/`stacks`/`configs`/`secrets`
+    /// with content read back out of a git backup (see `cl-backup`), for
+    /// `clouduler restore`.
+    ///
+    /// Unlike `force_quorum`/`emergency`, this never touches
+    /// `sm.membership` or appends to the log - a git backup restores
+    /// *content*, not *quorum*. The two compose: a full disaster recovery
+    /// runs `force_quorum`/`emergency` first to get a reachable cluster,
+    /// then `restore` to refill it. `assignments`/`volumes`/`certificates`/
+    /// `dns_records`/`unreachable`/`emergency_stack` are left untouched for
+    /// the same reason `emergency` leaves them alone: the scheduler
+    /// reconciles assignments against the bumped `StackState.revision` on
+    /// its own, and touching them here risks orphaning containers this node
+    /// doesn't know to stop.
+    ///
+    /// Must only run while the daemon owning this data directory is
+    /// stopped, for the same reason as `force_quorum`/`emergency`.
+    pub async fn restore_state(
+        &self,
+        cluster_config: Option<crate::state::ClusterConfigEntry>,
+        stacks: std::collections::BTreeMap<String, crate::state::StackState>,
+        configs: std::collections::BTreeMap<String, crate::state::ConfigEntry>,
+        secrets: std::collections::BTreeMap<String, crate::state::SecretEntry>,
+    ) -> Result<(), StorageError> {
+        let mut sm = self.sm.write().await;
+        sm.data.cluster_config = cluster_config;
+        sm.data.stacks = stacks;
+        sm.data.configs = configs;
+        sm.data.secrets = secrets;
+        sm.data.version += 1;
+        write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
+        Ok(())
+    }
+
     /// The shared part of `force_quorum`/`emergency`: append one synthetic,
     /// already-committed membership entry making `id` the cluster's sole
     /// voter, bypassing consensus entirely by rewriting the local log and

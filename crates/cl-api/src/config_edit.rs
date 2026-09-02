@@ -153,6 +153,7 @@ mod tests {
             cloudflare: None,
             proxy: Default::default(),
             self_update: None,
+            backup: None,
         }
     }
 

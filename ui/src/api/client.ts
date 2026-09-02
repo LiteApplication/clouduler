@@ -17,6 +17,7 @@ import type {
   ConfigEntry,
   DnsRecordState,
   DriveStatus,
+  GitBackupStatus,
   Identity,
   InstanceState,
   OidcClientSecretStatus,
@@ -334,6 +335,8 @@ export const api = {
   startSelfUpdate: () => post<SelfUpdateRunState>('/api/self-update/run'),
   selfUpdateRun: () => get<SelfUpdateRunState | null>('/api/self-update/run'),
   cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
+
+  gitBackupStatus: () => get<GitBackupStatus>('/api/git-backup/status'),
 };
 
 /**

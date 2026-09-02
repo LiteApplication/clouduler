@@ -22,7 +22,9 @@ use crate::liveness::LivenessTracker;
 use crate::network::{self, forward, Network, Peer};
 use crate::quorum::{from_metrics, QuorumStatus, QuorumWatch};
 use crate::server;
-use crate::state::{ClusterState, Request, Response};
+use crate::state::{
+    ClusterConfigEntry, ClusterState, ConfigEntry, Request, Response, SecretEntry, StackState,
+};
 use crate::store::{StateMachine, Store};
 use crate::types::Raft;
 
@@ -92,6 +94,23 @@ pub async fn emergency(
     let store = Store::open(data_dir.join("raft.redb"))?;
     store
         .emergency(node_id(id), addr, this_name, stack, stack_volumes)
+        .await?;
+    Ok(())
+}
+
+/// Refills `data_dir`'s `cluster_config`/`stacks`/`configs`/`secrets` from a
+/// git backup, for `clouduler restore`. Does not touch raft membership - see
+/// `Store::restore_state`. Same offline precondition as `force_quorum`.
+pub async fn restore(
+    data_dir: &std::path::Path,
+    cluster_config: Option<ClusterConfigEntry>,
+    stacks: BTreeMap<String, StackState>,
+    configs: BTreeMap<String, ConfigEntry>,
+    secrets: BTreeMap<String, SecretEntry>,
+) -> Result<()> {
+    let store = Store::open(data_dir.join("raft.redb"))?;
+    store
+        .restore_state(cluster_config, stacks, configs, secrets)
         .await?;
     Ok(())
 }

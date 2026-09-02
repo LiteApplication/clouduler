@@ -8,7 +8,8 @@ mod stack;
 mod validate;
 
 pub use cluster::{
-    qualify, AuthConfig, CloudflareConfig, ClusterConfig, DnsPublishMode, DriveMode, EgressFallback, FailoverConfig, OidcConfig,
+    qualify, AuthConfig, CloudflareConfig, ClusterConfig, DnsPublishMode, DriveMode, EgressFallback, FailoverConfig,
+    GitBackupConfig, OidcConfig,
     SecretsConfig, ClusterMeta, Drive, InterfaceAddress, Network, NetworkKind, Node,
     NodeAddress, NodeRole, OpenPort, ProxyConfig, PublicAddress, SelfUpdateConfig, WebConfig,
     DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,

@@ -244,6 +244,7 @@ pub async fn run(
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone(), failover.probe_interval));
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
+    let git_backup = tokio::spawn(watch_git_backup(cluster.clone(), config_rx.clone(), key_rx.clone(), data_dir.clone()));
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => { result?; }
@@ -253,6 +254,7 @@ pub async fn run(
     watcher.abort();
     self_report.abort();
     reaper.abort();
+    git_backup.abort();
     config_writer.abort();
     detector.abort();
     fencing.abort();
@@ -604,6 +606,170 @@ async fn run_fence(
 /// possibly-reverted local copy. What still needs a restart is raft's own
 /// listen address, data dir and cluster identity: rebuilding raft membership
 /// or transport under a running cluster is not something to do unattended.
+/// How often the leader checks whether a git export is due. Deliberately not
+/// resized to the live, replicated `backup.interval` (unlike this, that
+/// value can change at any time without a restart) - a short fixed poll that
+/// checks elapsed time against it is simpler than juggling a
+/// `tokio::time::Interval` whose period moves under it.
+const GIT_BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Leader-only: mirrors `cluster_config`/stacks/configs/secrets into the
+/// admin's git repo whenever `cfg.backup` is set and something tracked has
+/// changed, debounced onto `backup.interval`. Generates the cluster's ssh
+/// deploy keypair on the first tick it finds missing.
+async fn watch_git_backup(
+    cluster: Arc<ClusterNode>,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    data_dir: PathBuf,
+) {
+    let dir = data_dir.join("git-backup");
+    let mut ticker = tokio::time::interval(GIT_BACKUP_POLL_INTERVAL);
+    let mut last_snapshot: Option<cl_backup::snapshot::Snapshot> = None;
+    let mut last_attempt: Option<Instant> = None;
+
+    loop {
+        ticker.tick().await;
+
+        if !cluster.is_leader() {
+            continue;
+        }
+        let Some(backup_cfg) = config_rx.borrow().backup.clone() else {
+            continue;
+        };
+        if last_attempt.is_some_and(|at| at.elapsed() < backup_cfg.interval) {
+            continue;
+        }
+
+        let Some(key) = key_rx.borrow().clone() else {
+            // No cluster key on this node yet - secrets can't be decrypted
+            // to re-encrypt for the export. Keep polling; a key delivered
+            // later (or a fresh leader with one) picks this back up.
+            continue;
+        };
+
+        let state = cluster.state().await;
+        let snapshot = cl_backup::snapshot::Snapshot::from_state(&state);
+        if last_snapshot.as_ref() == Some(&snapshot) {
+            continue;
+        }
+        let changes = cl_backup::snapshot::diff(&last_snapshot.clone().unwrap_or_default(), &snapshot);
+        let message = cl_backup::snapshot::commit_message(&changes);
+
+        if !cl_backup::deploy_key::is_present(&state) {
+            if let Err(e) = generate_and_publish_deploy_key(&cluster, &key).await {
+                warn!(error = %e, "git backup: could not generate deploy key");
+                continue;
+            }
+        }
+        // Re-read: either just published the deploy key above, or another
+        // leader term already had, but this node's watched `state` predates
+        // it either way.
+        let state = cluster.state().await;
+
+        last_attempt = Some(Instant::now());
+
+        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message);
+        let last_export = match &result {
+            Ok(commit) => {
+                last_snapshot = Some(snapshot);
+                cl_backup::status::LastExport {
+                    at: unix_now(),
+                    summary: message,
+                    commit: commit.clone(),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "git backup export failed");
+                cl_backup::status::LastExport {
+                    at: unix_now(),
+                    summary: message,
+                    commit: None,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+
+        if let Err(e) = publish_last_export(&cluster, &last_export).await {
+            warn!(error = %e, "git backup: could not publish export status");
+        }
+    }
+}
+
+/// The blocking git2/age work for one export attempt, run off the async
+/// executor's own stack since none of it is `.await`-able anyway.
+fn run_git_export(
+    state: &cl_raft::state::ClusterState,
+    key: &ClusterKey,
+    backup_cfg: &cl_config::GitBackupConfig,
+    dir: &Path,
+    message: &str,
+) -> anyhow::Result<Option<String>> {
+    let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)?;
+    let private_key_pem = cl_backup::deploy_key::load_private(state, key)
+        .context("this node's cluster key cannot open the git deploy key")?;
+
+    let files = cl_backup::tree::build(state, key, &recipient);
+    let repo = cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
+    let oid = repo.sync(&files, message, &private_key_pem)?;
+    Ok(oid.map(|oid| oid.to_string()))
+}
+
+async fn generate_and_publish_deploy_key(cluster: &Arc<ClusterNode>, key: &ClusterKey) -> anyhow::Result<()> {
+    let keypair = cl_backup::deploy_key::DeployKeypair::generate()?;
+    let public_entry = cl_backup::deploy_key::public_config_entry(&keypair);
+    let private_entry = cl_backup::deploy_key::private_secret_entry(&keypair, key)?;
+
+    let response = cluster
+        .submit(Request::PutConfig {
+            name: public_entry.name,
+            content: public_entry.content,
+            owner: None,
+        })
+        .await?;
+    if let Some(error) = response.error {
+        bail!("publishing the deploy public key: {error}");
+    }
+
+    let response = cluster
+        .submit(Request::PutSecret {
+            name: private_entry.name,
+            sealed: private_entry.sealed,
+            key_fingerprint: private_entry.key_fingerprint,
+            owner: None,
+        })
+        .await?;
+    if let Some(error) = response.error {
+        bail!("publishing the deploy private key: {error}");
+    }
+
+    info!("git backup: generated a new ssh deploy key, add its public half as a write-capable deploy key on the repo");
+    Ok(())
+}
+
+async fn publish_last_export(cluster: &Arc<ClusterNode>, export: &cl_backup::status::LastExport) -> anyhow::Result<()> {
+    let content = cl_raft::state::base64_encode(&serde_json::to_vec(export)?);
+    let response = cluster
+        .submit(Request::PutConfig {
+            name: cl_backup::status::LAST_EXPORT_CONFIG.to_string(),
+            content,
+            owner: None,
+        })
+        .await?;
+    if let Some(error) = response.error {
+        bail!("publishing export status: {error}");
+    }
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
 async fn watch_cluster_config(
     cluster: Arc<ClusterNode>,
     config_path: PathBuf,

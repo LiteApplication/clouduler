@@ -122,6 +122,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         cloudflare: None,
         proxy: Default::default(),
         self_update: None,
+        backup: None,
     };
 
     config.validate().context("the answers do not make a valid config")?;

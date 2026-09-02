@@ -70,3 +70,21 @@ and the margin thinner; widening `node_timeout` makes failover slower but safer.
 `probe_interval` bounds how late a failure is noticed, and must be shorter than
 `fence_timeout` so a node cannot be declared dead before it has had the chance
 to fence.
+
+## Disaster recovery
+
+Everything above assumes the cluster still has a working quorum to reschedule
+or fence with. Two further, unrelated commands cover the case where it does
+not:
+
+- `clouduler emergency` recovers *quorum* - for when every manager's raft
+  state is gone for good and a normal membership change can no longer be
+  driven through consensus, since that itself needs the quorum that is
+  missing. It forces one node to become the cluster's sole voter.
+- `clouduler restore` recovers *content* - cluster config, stack specs,
+  configs and secrets - read back from a [git backup](git-backup.md), for
+  when that content itself is gone. It never touches membership or the log.
+
+They compose: a cluster that has lost both runs `emergency` first to become
+reachable again, then `restore` to refill it. See `git-backup.md` for the
+sequence and each command's own `--help` for the details.

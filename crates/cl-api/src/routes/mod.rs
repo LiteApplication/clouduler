@@ -8,6 +8,7 @@ pub mod cloudflare;
 pub mod cluster;
 pub mod config;
 pub mod drives;
+pub mod git_backup;
 pub mod instances;
 pub mod key_distribution;
 pub mod nodes;
@@ -35,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .merge(instances::router())
         .merge(objects::router())
         .merge(drives::router())
+        .merge(git_backup::router())
         .merge(config::router())
         .merge(cloudflare::router())
         .merge(oidc::router())

@@ -9,6 +9,7 @@ import {
   ClusterSection,
   DrivesSection,
   FailoverSection,
+  GitBackupSection,
   NetworksSection,
   ProxySection,
   SecretsSection,
@@ -113,6 +114,15 @@ export const CONFIG_PAGES: ConfigPage[] = [
     group: 'Security',
     keys: ['secrets'],
     Component: SecretsSection,
+  },
+  {
+    slug: 'git-backup',
+    label: 'Git backup',
+    icon: 'sync',
+    blurb: 'Mirror cluster state into a git repository for disaster recovery.',
+    group: 'Security',
+    keys: ['backup'],
+    Component: GitBackupSection,
   },
 ];
 

@@ -265,3 +265,110 @@ async fn emergency_registers_a_volume_it_has_never_seen_before() {
     assert_eq!(stamped.generation, 1);
     assert_eq!(stamped.replicas.get("n1"), Some(&1));
 }
+
+#[tokio::test]
+async fn restore_state_replaces_content_but_never_membership() {
+    use cl_raft::state::{ClusterConfigEntry, ConfigEntry, SecretEntry, StackState};
+
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("raft.redb");
+
+    let instance = InstanceId::new("site", "web", 0);
+    {
+        let store = Store::open(&path).expect("open");
+        let mut sm = store.state_machine();
+        sm.apply([
+            entry(1, Request::UpsertNode(node("n1"))),
+            entry(
+                2,
+                Request::Assign {
+                    instance: instance.clone(),
+                    node: "n1".to_string(),
+                    drives: Default::default(),
+                },
+            ),
+        ])
+        .await
+        .expect("apply");
+    }
+
+    // Give this node's local log/membership a shape restore must leave alone.
+    let store = Store::open(&path).expect("reopen");
+    store
+        .force_quorum(1, "10.10.0.1:7373".parse().expect("addr"))
+        .await
+        .expect("force quorum");
+
+    let membership_before = {
+        let shared = store.shared_state();
+        let guard = shared.read().await;
+        guard.membership.clone()
+    };
+
+    let mut stacks = BTreeMap::new();
+    stacks.insert(
+        "web".to_string(),
+        StackState {
+            name: "web".to_string(),
+            spec: "services: {}\n".to_string(),
+            revision: 1,
+            configs: Default::default(),
+            secrets: Default::default(),
+            used_configs: Default::default(),
+            used_secrets: Default::default(),
+        },
+    );
+    let mut configs = BTreeMap::new();
+    configs.insert(
+        "nginx.conf".to_string(),
+        ConfigEntry {
+            name: "nginx.conf".to_string(),
+            content: "c2VydmVyIHt9".to_string(),
+            revision: 1,
+            owner: None,
+        },
+    );
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "db-password".to_string(),
+        SecretEntry {
+            name: "db-password".to_string(),
+            sealed: "not-a-real-blob".to_string(),
+            revision: 1,
+            key_fingerprint: "deadbeef".to_string(),
+            owner: None,
+        },
+    );
+    let cluster_config = Some(ClusterConfigEntry {
+        yaml: "nodes: []\n".to_string(),
+        generation: 1,
+    });
+
+    store
+        .restore_state(cluster_config.clone(), stacks.clone(), configs.clone(), secrets.clone())
+        .await
+        .expect("restore");
+
+    let shared = store.shared_state();
+    {
+        let guard = shared.read().await;
+        assert_eq!(guard.data.cluster_config, cluster_config);
+        assert_eq!(guard.data.stacks, stacks);
+        assert_eq!(guard.data.configs, configs);
+        assert_eq!(guard.data.secrets, secrets);
+        // Restore is content recovery, not membership recovery.
+        assert_eq!(guard.membership, membership_before);
+        // The pre-existing assignment (unrelated to the four restored
+        // fields) is left untouched.
+        assert!(guard.data.assignments.contains_key(&instance));
+    }
+    drop(shared);
+    drop(store);
+
+    // Persists across a reopen, like every other write to the state machine.
+    let reopened = Store::open(&path).expect("reopen after restore");
+    let shared = reopened.shared_state();
+    let guard = shared.read().await;
+    assert_eq!(guard.data.stacks, stacks);
+    assert_eq!(guard.membership, membership_before);
+}

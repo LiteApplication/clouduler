@@ -278,6 +278,16 @@ POST   /api/secrets/key                 { "key": "<base64>" } upload after an ou
 Uploading writes the key to `secrets.key_file` on this node. It is refused if a
 key is already present, so an upload cannot silently orphan every stored secret.
 
+## Git backup
+
+```
+GET    /api/git-backup/status           read    configured, deploy key, last export
+```
+
+Read-only: the `backup:` fields themselves (repo url, age recipient, branch,
+interval) go through the normal `/api/config` flow, same as any other config
+section. See `docs/git-backup.md`.
+
 ## Drives and volumes
 
 ```

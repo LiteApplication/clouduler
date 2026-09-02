@@ -19,6 +19,7 @@ mod logs;
 mod proxy;
 mod rebalance;
 mod report;
+mod restore;
 mod secret;
 mod stack;
 
@@ -111,6 +112,32 @@ async fn main() -> Result<()> {
                 None => hostname()?,
             };
             node::emergency(&cfg, &node_name, &stack, cli.data_dir, yes).await
+        }
+        Command::Restore {
+            source,
+            age_identity_file,
+            age_identity_stdin,
+            branch,
+            node: node_name,
+            yes,
+        } => {
+            let node_name = match node_name {
+                Some(n) => n,
+                None => hostname()?,
+            };
+            restore::run(
+                &cfg,
+                restore::RestoreArgs {
+                    name: &node_name,
+                    source: &source,
+                    age_identity_file: age_identity_file.as_deref(),
+                    age_identity_stdin,
+                    branch: &branch,
+                    data_dir_override: cli.data_dir,
+                    yes,
+                },
+            )
+            .await
         }
         Command::Rebalance { via, yes } => rebalance::run(&cfg, via.as_deref(), yes).await,
         Command::Stack { command } => match command {

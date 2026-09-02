@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/clouduler",
+    "crates/cl-backup",
     "crates/cl-config",
     "crates/cl-docker",
     "crates/cl-dns",
@@ -22,6 +23,7 @@ license = "MIT"
 repository = "https://github.com/LiteApplication/clouduler"
 
 [workspace.dependencies]
+cl-backup = { path = "crates/cl-backup" }
 cl-config = { path = "crates/cl-config" }
 cl-docker = { path = "crates/cl-docker" }
 cl-dns = { path = "crates/cl-dns" }

@@ -547,6 +547,7 @@ export interface ClusterConfig {
   cloudflare: CloudflareConfig | null;
   proxy: ProxyConfig;
   self_update: SelfUpdateConfig | null;
+  backup: GitBackupConfig | null;
 }
 
 export interface PendingConfig {
@@ -640,6 +641,41 @@ export interface SelfUpdateRunState {
   finished_at: number | null;
   failure_reason: string | null;
   restart_started_at: number | null;
+}
+
+// ---- git backup ----
+
+/** Where and how the cluster mirrors its own state into git. Freely
+ *  editable through `PUT /api/config`, unlike `self_update`. Matches
+ *  `cl_config::GitBackupConfig`. */
+export interface GitBackupConfig {
+  repo_url: string;
+  age_recipient: string;
+  branch: string;
+  /** Humantime string, e.g. `"30s"`. */
+  interval: string;
+}
+
+/** Stored in `ClusterState.configs['_clouduler_git_backup_last_export']`, so
+ *  it arrives live over the same `/api/events` stream as everything else.
+ *  Matches `cl_backup::status::LastExport`. */
+export interface GitBackupLastExport {
+  /** Unix seconds. */
+  at: number;
+  summary: string;
+  /** The git commit that was pushed, absent for a no-op tick. */
+  commit: string | null;
+  /** Set when the export attempt failed; the task keeps retrying regardless. */
+  error: string | null;
+}
+
+/** GET /api/git-backup/status. */
+export interface GitBackupStatus {
+  configured: boolean;
+  /** The generated deploy key's public half, once the leader has made one -
+   *  hand this to the git host as a write-capable deploy key. */
+  deploy_public_key: string | null;
+  last_export: GitBackupLastExport | null;
 }
 
 /** One row of the Updates view: what a container runs versus what its

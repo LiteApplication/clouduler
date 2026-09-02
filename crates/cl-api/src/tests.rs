@@ -131,6 +131,7 @@ async fn harness() -> Harness {
         cloudflare: None,
         proxy: Default::default(),
         self_update: None,
+        backup: None,
     };
 
     let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(());

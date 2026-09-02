@@ -1,0 +1,21 @@
+[package]
+name = "cl-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+age = "0.11"
+base64.workspace = true
+cl-config.workspace = true
+cl-raft.workspace = true
+cl-secret.workspace = true
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+serde.workspace = true
+serde_json.workspace = true
+ssh-key = { version = "0.6", features = ["ed25519", "std", "alloc"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

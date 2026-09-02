@@ -185,7 +185,9 @@ secrets:
 
 On first launch a node generates one and logs its fingerprint with a warning to
 back the file up. **If every copy of that file is lost, every stored secret is
-unrecoverable.** There is no escrow and no recovery path, by design.
+unrecoverable** - unless [git backup](git-backup.md) was set up beforehand,
+which keeps an independently-encrypted copy for exactly this case. Clouduler
+itself holds no escrow of the key.
 
 A node without the key is a valid setup, not an error. It replicates sealed
 secrets like any other state and simply cannot run a container that needs one;
@@ -208,6 +210,12 @@ container needing a secret can start. Either restore the file from a backup, or
 upload it through the web ui, which writes it to `secrets.key_file` on that node.
 Uploading is refused if a key is already present, since replacing it would
 orphan every stored secret.
+
+If the key file itself is gone with no backup, the secrets it sealed are not
+necessarily gone too, provided [git backup](git-backup.md) was configured
+before the outage: secrets there are re-encrypted for an independent age key
+you hold, so `clouduler restore` can bring them back sealed under a fresh
+cluster key, without ever needing the lost one.
 
 ## Deploying from the CLI
 

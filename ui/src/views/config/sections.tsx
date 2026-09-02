@@ -8,6 +8,7 @@ import type {
   CloudflareTokenStatus,
   ClusterConfig,
   EgressFallback,
+  GitBackupStatus,
   InterfaceAddress,
   NetworkConfig,
   NetworkKind,
@@ -1269,6 +1270,130 @@ export function SecretsSection({ draft, setDraft, disabled }: SectionProps) {
         hint="Cluster-wide default for whether a node may create the secret-sealing key if it doesn't have one yet. Each node can override this under its own Nodes page card, e.g. to forbid it on a node joining an existing cluster."
         disabled={disabled}
       />
+    </div>
+  );
+}
+
+const DEFAULT_GIT_BACKUP: NonNullable<ClusterConfig['backup']> = {
+  repo_url: '',
+  age_recipient: '',
+  branch: 'main',
+  interval: '30s',
+};
+
+export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
+  const b = draft.backup;
+  const set = (patch: Partial<NonNullable<ClusterConfig['backup']>>) =>
+    setDraft({ ...draft, backup: b ? { ...b, ...patch } : { ...DEFAULT_GIT_BACKUP, ...patch } });
+
+  return (
+    <div className="card">
+      <CheckboxField
+        id="backup-enabled"
+        label="Mirror cluster state into a git repository"
+        value={b != null}
+        onChange={(enabled) => setDraft({ ...draft, backup: enabled ? DEFAULT_GIT_BACKUP : null })}
+        hint="The leader periodically commits and pushes cluster.yaml, stack specs, configs and secrets to this repo, so it can be rebuilt from git after a total loss. Secrets are re-encrypted for the age key below - the cluster's own key never leaves it."
+        disabled={disabled}
+      />
+      {b && (
+        <>
+          <TextField
+            id="backup-repo-url"
+            label="Repository URL"
+            value={b.repo_url}
+            onChange={(repo_url) => set({ repo_url })}
+            hint="An SSH url, e.g. git@github.com:org/repo.git. Push auth uses a deploy key clouduler generates itself - add its public half as a write-capable deploy key on the repo once it appears below."
+            disabled={disabled}
+          />
+          <TextField
+            id="backup-age-recipient"
+            label="Age recipient"
+            value={b.age_recipient}
+            onChange={(age_recipient) => set({ age_recipient })}
+            hint="The admin's age (X25519) public key, e.g. age1.... Secrets are encrypted for this key before being committed; only whoever holds the matching private key, generated and kept outside clouduler entirely, can read them back."
+            disabled={disabled}
+          />
+          <TextField
+            id="backup-branch"
+            label="Branch"
+            value={b.branch}
+            onChange={(branch) => set({ branch })}
+            disabled={disabled}
+          />
+          <DurationField
+            id="backup-interval"
+            label="Export interval"
+            value={b.interval}
+            onChange={(interval) => set({ interval })}
+            hint="How often the leader checks for changes to export, e.g. 30s. A tick with nothing new to commit is a no-op."
+            disabled={disabled}
+          />
+          <GitBackupDeployKey />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Shows the leader-generated deploy key and last export status, polled once
+ *  on mount - this is read-only reporting, not part of the draft, so it does
+ *  not need to track edits like the fields above. */
+function GitBackupDeployKey() {
+  const [status, setStatus] = useState<GitBackupStatus | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    api.gitBackupStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  const copy = async () => {
+    if (!status?.deploy_public_key) return;
+    await navigator.clipboard.writeText(status.deploy_public_key);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (!status) {
+    return (
+      <p className="loading">
+        <span className="spinner" /> Checking the deploy key...
+      </p>
+    );
+  }
+
+  return (
+    <div className="field">
+      <label>Deploy key</label>
+      {status.deploy_public_key ? (
+        <>
+          <span className="field-hint">
+            Add this as a write-capable deploy key on the repository above; the leader generated it and holds the
+            private half.
+          </span>
+          <pre className="mono">{status.deploy_public_key}</pre>
+          <div className="btn-row" style={{ marginTop: 8 }}>
+            <button type="button" onClick={copy}>
+              <Icon name={copied ? 'check' : 'copy'} /> {copied ? 'Copied' : 'Copy public key'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <span className="field-hint">
+          Not generated yet - the leader creates one on its first export tick after saving a repository url above.
+        </span>
+      )}
+      {status.last_export && (
+        <p className={status.last_export.error ? 'field-error' : 'muted'} style={{ marginTop: 8 }}>
+          {status.last_export.error ? (
+            <>
+              <Icon name="alert-circle" /> Last export failed: {status.last_export.error}
+            </>
+          ) : (
+            <>Last export: {status.last_export.summary}</>
+          )}
+        </p>
+      )}
     </div>
   );
 }

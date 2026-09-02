@@ -28,6 +28,7 @@ fn is_reserved(name: &str) -> bool {
         || name == STATIC_ROUTES_CONFIG
         || name == WIREGUARD_INGRESS_CONFIG
         || super::self_update::is_reserved_config(name)
+        || super::git_backup::is_reserved_config(name)
 }
 
 /// Secret names clouduler itself owns and never shows through the generic
@@ -38,6 +39,7 @@ fn is_reserved_secret(name: &str) -> bool {
         || is_reserved_wireguard_secret(name)
         || is_reserved_cloudflare_secret(name)
         || is_reserved_oidc_secret(name)
+        || super::git_backup::is_reserved_secret(name)
 }
 
 pub fn router() -> Router<AppState> {
@@ -317,5 +319,12 @@ mod tests {
     fn the_self_update_deploy_key_is_excluded_from_the_generic_secret_listing() {
         assert!(is_reserved_secret(cl_update::plan::GITHUB_TOKEN_SECRET));
         assert!(!is_reserved_secret("db_password"));
+    }
+
+    #[test]
+    fn the_git_backup_objects_are_excluded_from_the_generic_listings() {
+        assert!(is_reserved(cl_backup::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG));
+        assert!(is_reserved(cl_backup::status::LAST_EXPORT_CONFIG));
+        assert!(is_reserved_secret(cl_backup::deploy_key::DEPLOY_KEY_PRIVATE_SECRET));
     }
 }

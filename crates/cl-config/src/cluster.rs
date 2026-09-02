@@ -41,6 +41,11 @@ pub struct ClusterConfig {
     /// set, further changes go through this file by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_update: Option<SelfUpdateConfig>,
+    /// Mirrors cluster.yaml, stack specs, configs and secrets into an
+    /// admin-owned git repo on every change. Absent means the feature is
+    /// off. Freely editable through the web ui, unlike `self_update`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<GitBackupConfig>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -701,6 +706,38 @@ pub struct SelfUpdateConfig {
     /// that repo's latest release, or a specific release's url
     /// (`https://github.com/OWNER/REPO/releases/tag/TAG`), which pins it.
     pub release_url: String,
+}
+
+/// Where and how the cluster mirrors its own state into git.
+///
+/// clouduler generates its own ssh keypair to push with; the admin adds its
+/// public half as a deploy key on the repo (shown in the web ui, under
+/// `GET /api/git-backup/status`). Secrets are re-encrypted for `age_recipient`
+/// rather than reusing the cluster's own key, so the matching private key can
+/// live entirely outside the cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GitBackupConfig {
+    /// SSH url, e.g. `git@github.com:org/repo.git`. Only ssh push (deploy
+    /// key) auth is implemented, so http(s) urls are rejected.
+    pub repo_url: String,
+    /// An `age1...` X25519 recipient public key. The matching private key is
+    /// never given to clouduler.
+    pub age_recipient: String,
+    #[serde(default = "default_backup_branch")]
+    pub branch: String,
+    /// Minimum time between commits. State changes are debounced onto this
+    /// interval rather than committed one at a time.
+    #[serde(default = "default_backup_interval", with = "humantime_serde")]
+    pub interval: Duration,
+}
+
+fn default_backup_branch() -> String {
+    "main".to_string()
+}
+
+fn default_backup_interval() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
