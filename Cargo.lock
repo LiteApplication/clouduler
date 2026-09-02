@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "cl-api"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "async-stream",
  "axum",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "cl-backup"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "age",
  "base64 0.23.1",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "cl-config"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "humantime-serde",
  "ipnet",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "cl-dns"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "cl-config",
  "hickory-resolver",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "cl-docker"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "bollard",
  "bytes",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "cl-drive"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "bincode",
  "blake3",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "cl-net"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "async-trait",
  "cl-config",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "cl-proxy"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "cl-raft"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "cl-sched"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "cl-config",
  "cl-docker",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "cl-secret"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "cl-update"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "blake3",
  "cl-config",
@@ -1129,7 +1129,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clouduler"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "age",
  "anyhow",
