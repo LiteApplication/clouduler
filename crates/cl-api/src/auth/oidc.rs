@@ -39,6 +39,7 @@ pub struct OidcSettings {
     pub scopes: Vec<String>,
     pub admin_claim: String,
     pub admin_value: Option<String>,
+    pub username_claim: String,
 }
 
 struct PendingLogin {
@@ -209,8 +210,9 @@ impl OidcAuthenticator {
 
         let subject = claims.subject().as_str().to_string();
         let role = self.role_from_raw_claims(id_token);
+        let username = self.username_from_raw_claims(id_token).unwrap_or_else(|| subject.clone());
 
-        Ok(Identity { subject, role })
+        Ok(Identity { subject, username, role })
     }
 
     /// Re-parse the id token's payload as loose json to read `admin_claim`.
@@ -238,6 +240,17 @@ impl OidcAuthenticator {
         } else {
             Role::Viewer
         }
+    }
+
+    /// Re-parse the id token's payload as loose json to read
+    /// `username_claim`. `None` when that claim is absent or not a string,
+    /// so the caller falls back to the subject.
+    fn username_from_raw_claims(&self, id_token: &openidconnect::core::CoreIdToken) -> Option<String> {
+        let payload = decode_jwt_payload(&id_token.to_string())?;
+        payload
+            .get(&self.settings.username_claim)?
+            .as_str()
+            .map(str::to_string)
     }
 
     async fn gc_expired(&self) {

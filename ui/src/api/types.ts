@@ -290,6 +290,7 @@ export type UserRole = 'admin' | 'viewer';
 
 export interface Identity {
   subject: string;
+  username: string;
   role: UserRole;
 }
 
@@ -447,6 +448,7 @@ export interface OidcConfig {
   scopes: string[];
   admin_claim: string;
   admin_value: string | null;
+  username_claim: string;
 }
 
 export interface AuthConfig {

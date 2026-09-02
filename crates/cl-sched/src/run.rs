@@ -17,7 +17,7 @@ use cl_net::Allocations;
 use tokio::sync::RwLock;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{ClusterState, DesiredState, Request};
+use cl_raft::state::{base64_encode, ClusterState, DesiredState, Request};
 use tracing::{debug, info, warn};
 
 use crate::materialize::Materializer;
@@ -194,7 +194,7 @@ impl Scheduler {
         let reconciler =
             Reconciler::new(docker.clone(), self.pulling.clone()).with_registries(registries);
 
-        let targets = self.targets(state)?;
+        let (targets, config_edits) = self.targets(state)?;
         let actual = docker.list_managed().await?;
         let actions = reconcile::diff(&targets, &actual, fenced);
 
@@ -213,12 +213,37 @@ impl Scheduler {
         if let Err(e) = self.materializer.clean_orphans(&keep) {
             warn!(error = %e, "could not clean orphaned objects");
         }
+
+        // A writable config a container changed since we last mounted it:
+        // feed it back through raft, same path anyone else's edit takes.
+        // `submit` forwards to the leader on its own, so this runs the same
+        // way whether or not this node happens to be it.
+        for edit in config_edits {
+            let request = Request::PutConfig {
+                name: edit.name.clone(),
+                content: base64_encode(&edit.content),
+                owner: edit.owner,
+            };
+            match self.cluster.submit(request).await {
+                Ok(response) => {
+                    if let Some(error) = response.error {
+                        warn!(config = %edit.name, %error, "container's edit to a config was rejected");
+                    } else {
+                        info!(config = %edit.name, "wrote a container's config edit back to the cluster");
+                    }
+                }
+                Err(e) => warn!(config = %edit.name, error = %e, "could not submit a container's config edit"),
+            }
+        }
+
         Ok(())
     }
 
     /// Build what this node should be running, materializing each instance's
-    /// configs and secrets on the way.
-    fn targets(&self, state: &ClusterState) -> crate::Result<Vec<Target>> {
+    /// configs and secrets on the way. Also returns any edit a container
+    /// made to one of its writable config mounts, for the caller to feed
+    /// back into the cluster.
+    fn targets(&self, state: &ClusterState) -> crate::Result<(Vec<Target>, Vec<crate::materialize::ConfigEdit>)> {
         let live = self.live_config(state);
         let (drive_roots, dynamic_mounts) = self.drive_roots(state, &live);
 
@@ -228,6 +253,7 @@ impl Scheduler {
         let egress_networks = live.egress_networks();
 
         let mut targets = Vec::new();
+        let mut config_edits = Vec::new();
 
         for assignment in state.assignments_on(&self.node) {
             let instance = &assignment.instance;
@@ -286,6 +312,7 @@ impl Scheduler {
                     continue;
                 }
             };
+            config_edits.extend(objects.config_edits.clone());
 
             let network = overlay_network_name(&file, &live).map(|n| overlay_name(&instance.stack, n));
 
@@ -359,7 +386,7 @@ impl Scheduler {
             });
         }
 
-        Ok(targets)
+        Ok((targets, config_edits))
     }
 
     /// Where this node resolves each drive's root for mounting purposes, and

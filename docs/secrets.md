@@ -43,11 +43,51 @@ below. The long form sets any of these fields explicitly:
 | `uid` | configs, secrets | unset | Owning user of the file inside the container. |
 | `gid` | configs, secrets | unset | Owning group of the file inside the container. |
 | `env` | secrets only | unset | Environment variable name to expose the secret's value under, instead of mounting a file. See [Exposing a secret as an environment variable](#exposing-a-secret-as-an-environment-variable). |
+| `write` | configs only | `false` | Mount read-write and feed the container's own edits back into the cluster's copy. See [Writable configs](#writable-configs). |
 
-Mounts are always read only. A container has no business editing the cluster's
-copy of a config, and a writable secret file is a leak waiting to happen. Each
-instance gets its own object directory, mode 0700, and it is removed when the
-container goes away, so a secret does not outlive the container that needed it.
+Mounts are read only by default. A writable secret file would be a leak
+waiting to happen, so `write` is rejected outright on a secret — only a
+config can opt in. Each instance gets its own object directory, mode 0700,
+and it is removed when the container goes away, so a secret does not outlive
+the container that needed it.
+
+## Writable configs
+
+```yaml
+services:
+  app:
+    image: myapp
+    configs:
+      - source: app_conf
+        target: /etc/myapp/config.toml
+        write: true
+```
+
+By default a mounted config is read only: it flows one way, from the cluster
+into the container. `write: true` makes it two way. The mount itself becomes
+read-write, and whenever the scheduler's periodic reconcile pass (every ten
+seconds) finds the file's content no longer matches what it last wrote, it
+treats that as the container's own edit and submits it back as the config's
+new value — the same `PutConfig` a `clouduler config` command or the web ui
+would submit, so every other instance mounting that config picks up the
+change on its own next pass.
+
+A few things follow from that:
+
+- The default file mode changes from `0444` to `0644`, since a config nobody
+  can write is not much of a writable config. An explicit `mode:` still wins.
+- Only a config can be `write: true`; setting it on a secret is a validation
+  error. Nothing should be able to overwrite a secret's plaintext by editing
+  its own mounted copy of it.
+- If the cluster's copy changes while nothing has touched the mounted file —
+  another instance's edit landing, or an edit made through the web ui —
+  clouduler rewrites the file to match, same as a read-only config.
+- Two instances writing to the same config at nearly the same time is a plain
+  last-write-wins race, same as two people editing it by hand at once. There
+  is no locking.
+- `env` cannot be combined with `write`, for the same reason it cannot be
+  combined with `target`/`mode`/`uid`/`gid`: an environment variable is not a
+  file, so there is nothing there for a container to edit back.
 
 ## Exposing a secret as an environment variable
 

@@ -195,11 +195,11 @@ export function Layout({ children }: { children: ReactNode }) {
           {identity && (
             <div className="identity-chip">
               <span className="avatar" aria-hidden="true">
-                {identity.subject.slice(0, 2).toUpperCase()}
+                {identity.username.slice(0, 2).toUpperCase()}
               </span>
               <span style={{ minWidth: 0 }}>
-                <span className="identity-name" title={identity.subject}>
-                  {identity.subject}
+                <span className="identity-name" title={identity.username}>
+                  {identity.username}
                 </span>
                 <span className="identity-role">
                   {isAdmin && <Icon name="crown" style={{ width: 11, height: 11, marginRight: 3 }} />}

@@ -86,7 +86,8 @@
   ],
   "identity": {
     "role": "admin",
-    "subject": "<volatile>"
+    "subject": "<volatile>",
+    "username": "test"
   },
   "oidcClientSecretStatus": {
     "configured": false

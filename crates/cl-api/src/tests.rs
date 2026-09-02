@@ -175,6 +175,7 @@ async fn viewer_cookie(state: &AppState) -> String {
         .create(
             Identity {
                 subject: "viewer@example.com".into(),
+                username: "viewer@example.com".into(),
                 role: Role::Viewer,
             },
             Duration::from_secs(60),

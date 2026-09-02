@@ -62,7 +62,7 @@ vi.mock('../state/store', () => ({
 
 let isAdmin = true;
 vi.mock('../auth/AuthContext', () => ({
-  useAuth: () => ({ isAdmin, identity: { subject: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
+  useAuth: () => ({ isAdmin, identity: { subject: 'test', username: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
 }));
 
 const getNode = vi.fn();

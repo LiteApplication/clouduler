@@ -19,6 +19,25 @@ impl StackFile {
         self.validate_no_duplicate_ports()?;
         self.validate_stop_signals()?;
         self.validate_colocate()?;
+        self.validate_writable_secrets()?;
+        Ok(())
+    }
+
+    /// `write: true` feeds a container's edits back into the cluster's copy
+    /// of the object — fine for a config, never for a secret: nothing should
+    /// be able to overwrite a secret's plaintext by editing its own mounted
+    /// copy of it.
+    fn validate_writable_secrets(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            for (idx, secret) in svc.secrets.iter().enumerate() {
+                if secret.write {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.secrets[{idx}]"),
+                        "write is not allowed on a secret, only on a config",
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -695,6 +714,20 @@ services:
     fn colocate_with_a_real_service_is_accepted() {
         let raw = "services:\n  a:\n    image: x\n    x-clouduler:\n      colocate: [b]\n  b:\n    image: x\n";
         StackFile::parse(raw).expect("valid colocate target");
+    }
+
+    #[test]
+    fn a_writable_secret_is_rejected() {
+        let raw = "services:\n  a:\n    image: x\n    secrets:\n      - source: db_password\n        write: true\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.a.secrets[0]"));
+        assert!(err.to_string().contains("not allowed on a secret"));
+    }
+
+    #[test]
+    fn a_writable_config_is_accepted() {
+        let raw = "services:\n  a:\n    image: x\n    configs:\n      - source: nginx_conf\n        write: true\n";
+        StackFile::parse(raw).expect("a writable config is fine");
     }
 
     #[test]

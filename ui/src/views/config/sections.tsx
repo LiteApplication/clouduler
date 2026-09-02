@@ -1309,6 +1309,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
                   scopes: ['openid', 'profile', 'email'],
                   admin_claim: 'groups',
                   admin_value: null,
+                  username_claim: 'preferred_username',
                 }
               : null,
           })
@@ -1339,6 +1340,14 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
               even while OIDC is being configured, so a secret can be staged
               ahead of turning it on. */}
           <OidcClientSecret disabled={disabled} />
+          <TextField
+            id="oidc-usernameclaim"
+            label="Username claim"
+            value={a.oidc.username_claim}
+            onChange={(username_claim) => set({ oidc: { ...a.oidc!, username_claim } })}
+            hint="Name of the claim shown in the web ui as the signed-in user's name, e.g. preferred_username, email, or name. Falls back to the opaque subject id when this claim is absent."
+            disabled={disabled}
+          />
           <TextField
             id="oidc-adminclaim"
             label="Admin claim"

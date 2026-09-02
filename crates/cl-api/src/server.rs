@@ -254,6 +254,7 @@ fn build_oidc(
             scopes: oidc_cfg.scopes.clone(),
             admin_claim: oidc_cfg.admin_claim.clone(),
             admin_value: oidc_cfg.admin_value.clone(),
+            username_claim: oidc_cfg.username_claim.clone(),
         },
         cluster.clone(),
         key.clone(),

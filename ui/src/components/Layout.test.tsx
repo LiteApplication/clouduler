@@ -34,7 +34,7 @@ vi.mock('../state/store', () => ({
 }));
 
 vi.mock('../auth/AuthContext', () => ({
-  useAuth: () => ({ isAdmin: true, identity: { subject: 'test', role: 'admin' }, loading: false }),
+  useAuth: () => ({ isAdmin: true, identity: { subject: 'test', username: 'test', role: 'admin' }, loading: false }),
 }));
 
 // jsdom has no matchMedia, which the real hook probes for the "system" theme.

@@ -904,13 +904,21 @@ impl ClusterState {
                 drives,
             } => {
                 self.check_placement(node, drives)?;
+                // Carry over a pin from the assignment being replaced. An
+                // instance moved to a different node by the scheduler (its
+                // old node went unreachable, was drained, or stopped
+                // implementing something it needs) is still running the same
+                // pinned image - only where it runs changed - so losing the
+                // pin here would let it silently drift back to whatever tag
+                // it deploys from now resolves to the next time it restarts.
+                let image_digest = self.assignments.get(instance).and_then(|a| a.image_digest.clone());
                 self.assignments.insert(
                     instance.clone(),
                     Assignment {
                         instance: instance.clone(),
                         node: node.clone(),
                         desired: DesiredState::Running,
-                        image_digest: None,
+                        image_digest,
                         migration: None,
                     },
                 );
@@ -1301,6 +1309,26 @@ mod tests {
         let accepted = assign(&mut state, "n1", &[]);
         assert!(accepted.is_ok());
         assert_eq!(state.version, before + 1);
+    }
+
+    #[test]
+    fn reassigning_an_instance_to_a_new_node_keeps_its_image_pin() {
+        let mut state = cluster();
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+
+        let instance = InstanceId::new("gitlab", "web", 0);
+        state.apply(&Request::SetImageDigest {
+            instance: instance.clone(),
+            digest: "sha256:pinned".to_string(),
+        });
+        assert_eq!(state.assignments[&instance].image_digest.as_deref(), Some("sha256:pinned"));
+
+        // The scheduler moves the instance to a different node (its old one
+        // went unreachable, say) by submitting `Assign` again, with no
+        // intervening `Unassign`. The pin must survive that move.
+        assert!(assign(&mut state, "n2", &[]).is_ok());
+        assert_eq!(state.assignments[&instance].node, "n2");
+        assert_eq!(state.assignments[&instance].image_digest.as_deref(), Some("sha256:pinned"));
     }
 
     #[test]

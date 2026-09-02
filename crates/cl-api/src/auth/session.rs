@@ -84,6 +84,7 @@ mod tests {
     fn identity() -> Identity {
         Identity {
             subject: "user@example.com".into(),
+            username: "user@example.com".into(),
             role: Role::Viewer,
         }
     }

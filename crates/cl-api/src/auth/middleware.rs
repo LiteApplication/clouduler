@@ -26,6 +26,7 @@ impl FromRequestParts<AppState> for Identity {
                 return keys::verify(&store, id, secret)
                     .map(|record| Identity {
                         subject: record.id.clone(),
+                        username: record.name.clone().unwrap_or_else(|| record.id.clone()),
                         role: Role::Admin,
                     })
                     .ok_or_else(|| ApiError::Unauthenticated("invalid api key".into()));

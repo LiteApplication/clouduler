@@ -152,6 +152,11 @@ pub struct OidcConfig {
     /// gets read only access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_value: Option<String>,
+    /// Claim shown in the web ui as the signed-in user's name. Falls back to
+    /// the `sub` claim (an opaque id, unreadable at a glance) when this claim
+    /// is absent from the id token.
+    #[serde(default = "default_username_claim")]
+    pub username_claim: String,
 }
 
 fn default_scopes() -> Vec<String> {
@@ -160,6 +165,10 @@ fn default_scopes() -> Vec<String> {
 
 fn default_admin_claim() -> String {
     "groups".to_string()
+}
+
+fn default_username_claim() -> String {
+    "preferred_username".to_string()
 }
 
 /// Timings for handling a node that drops out of the cluster.

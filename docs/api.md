@@ -35,7 +35,9 @@ of the secret is stored, so a leaked database does not hand over working keys.
 **OIDC.** The recommended path for people. `GET /auth/oidc/login` starts the
 flow, `GET /auth/oidc/callback` finishes it and sets a session cookie. A user
 holding `auth.oidc.admin_value` in `auth.oidc.admin_claim` gets `admin`;
-everyone else who authenticates gets `viewer`.
+everyone else who authenticates gets `viewer`. The web ui shows the value of
+`auth.oidc.username_claim` (default `preferred_username`) as the signed-in
+user's name, falling back to the opaque `sub` claim when that claim is absent.
 
 Roles: `admin` may change anything, `viewer` may read everything except secret
 values. Endpoints below are admin-only unless marked read.

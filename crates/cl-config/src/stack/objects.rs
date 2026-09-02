@@ -28,6 +28,11 @@ pub struct ObjectRef {
     /// mounting it as a file. Mutually exclusive with `target`/`mode`/`uid`/
     /// `gid`, which only make sense for a file.
     pub env: Option<String>,
+    /// Mount read-write instead of read-only, and feed any change the
+    /// container makes back into the cluster's copy. Valid only for a
+    /// `configs:` reference — never for a secret, so there's no way for a
+    /// container to leak one back out by "editing" it.
+    pub write: bool,
 }
 
 impl ObjectRef {
@@ -39,6 +44,7 @@ impl ObjectRef {
             uid: None,
             gid: None,
             env: None,
+            write: false,
         }
     }
 
@@ -63,8 +69,10 @@ impl ObjectRef {
             .unwrap_or_else(|| PathBuf::from("/").join(&self.source))
     }
 
+    /// A writable config needs its own write bit, since nothing else grants
+    /// one; a read-only reference stays locked down to everyone.
     pub fn mode_or_default(&self) -> u32 {
-        self.mode.unwrap_or(0o444)
+        self.mode.unwrap_or(if self.write { 0o644 } else { 0o444 })
     }
 }
 
@@ -89,6 +97,12 @@ struct LongObjectRef {
     gid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    write: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// Compose writes modes as `0444`, which yaml reads as the decimal 444 unless
@@ -137,10 +151,14 @@ impl TryFrom<RawObjectRef> for ObjectRef {
                     }
                 }
                 if long.env.is_some()
-                    && (long.target.is_some() || long.mode.is_some() || long.uid.is_some() || long.gid.is_some())
+                    && (long.target.is_some()
+                        || long.mode.is_some()
+                        || long.uid.is_some()
+                        || long.gid.is_some()
+                        || long.write)
                 {
                     return Err(
-                        "env cannot be combined with target, mode, uid, or gid: it is not mounted as a file"
+                        "env cannot be combined with target, mode, uid, gid, or write: it is not mounted as a file"
                             .into(),
                     );
                 }
@@ -154,6 +172,7 @@ impl TryFrom<RawObjectRef> for ObjectRef {
                     uid: long.uid,
                     gid: long.gid,
                     env: long.env,
+                    write: long.write,
                 })
             }
         }
@@ -162,7 +181,13 @@ impl TryFrom<RawObjectRef> for ObjectRef {
 
 impl From<ObjectRef> for RawObjectRef {
     fn from(r: ObjectRef) -> Self {
-        if r.target.is_none() && r.mode.is_none() && r.uid.is_none() && r.gid.is_none() && r.env.is_none() {
+        if r.target.is_none()
+            && r.mode.is_none()
+            && r.uid.is_none()
+            && r.gid.is_none()
+            && r.env.is_none()
+            && !r.write
+        {
             return RawObjectRef::Short(r.source);
         }
         RawObjectRef::Long(LongObjectRef {
@@ -172,6 +197,7 @@ impl From<ObjectRef> for RawObjectRef {
             uid: r.uid,
             gid: r.gid,
             env: r.env,
+            write: r.write,
         })
     }
 }
@@ -248,6 +274,30 @@ mod tests {
         for absent in ["mode", "uid", "gid", "env"] {
             assert!(!encoded.contains(absent), "unexpected `{absent}` in:\n{encoded}");
         }
+    }
+
+    #[test]
+    fn a_writable_config_defaults_to_a_mode_with_a_write_bit() {
+        let r = parse("source: c\nwrite: true\n");
+        assert!(r.write);
+        assert_eq!(r.mode_or_default(), 0o644);
+    }
+
+    #[test]
+    fn an_explicit_mode_still_wins_over_the_write_default() {
+        let r = parse("source: c\nwrite: true\nmode: \"0600\"\n");
+        assert_eq!(r.mode_or_default(), 0o600);
+    }
+
+    #[test]
+    fn write_cannot_be_combined_with_env() {
+        let err = serde_yaml::from_str::<ObjectRef>("source: c\nwrite: true\nenv: FOO\n").unwrap_err();
+        assert!(err.to_string().contains("write"));
+    }
+
+    #[test]
+    fn a_short_form_reference_is_not_writable() {
+        assert!(!parse("db_password").write);
     }
 
     #[test]

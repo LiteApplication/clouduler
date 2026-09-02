@@ -2,12 +2,16 @@
 //!
 //! Docker's own configs and secrets are a swarm feature we cannot use, so the
 //! node writes each object to a file under its data directory and bind mounts
-//! that file read only at the target path. From inside the container it looks
-//! exactly like a docker secret at `/run/secrets/<name>`, which is what matters:
-//! images that already read docker secrets work unchanged.
+//! that file at the target path, read only by default. From inside the
+//! container it looks exactly like a docker secret at `/run/secrets/<name>`,
+//! which is what matters: images that already read docker secrets work
+//! unchanged.
 //!
 //! Secrets are decrypted only at this point, as late as possible, and written
-//! with owner-only permissions to a directory that is also owner-only.
+//! with owner-only permissions to a directory that is also owner-only. A
+//! secret is never mounted read-write — see `validate_writable_secrets` in
+//! cl-config — but a config opting into `write: true` is, and this module is
+//! also what notices a container has changed one: see `writable_config`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +38,9 @@ pub struct Materialized {
     pub secret: bool,
     /// Revision written, so a stale file is detectable without reading it.
     pub revision: u64,
+    /// A `write: true` config: mounted read-write instead of read-only.
+    /// Never true for a secret — see `validate_writable_secrets`.
+    pub writable: bool,
 }
 
 impl Materialized {
@@ -41,20 +48,28 @@ impl Materialized {
         BindMount {
             host_path: self.host_path.display().to_string(),
             container_path: self.container_path.display().to_string(),
-            // Always read only. A container has no business editing the
-            // cluster's copy of a config, and a writable secret is a leak
-            // waiting to happen.
-            read_only: true,
+            read_only: !self.writable,
         }
     }
 }
 
+/// A config a container has edited through its writable mount, ready to feed
+/// back into the cluster's copy via `Request::PutConfig`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEdit {
+    pub name: String,
+    pub owner: Option<String>,
+    pub content: Vec<u8>,
+}
+
 /// What an instance's configs and secrets resolve to: files to bind mount,
-/// and secrets exposed as environment variables instead.
+/// secrets exposed as environment variables instead, and any writable
+/// config a container changed since it was last materialized.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prepared {
     pub mounts: Vec<Materialized>,
     pub env: Vec<(String, String)>,
+    pub config_edits: Vec<ConfigEdit>,
 }
 
 /// Writes objects out for one instance.
@@ -112,6 +127,7 @@ impl Materializer {
 
         let mut out = Vec::new();
         let mut env = Vec::new();
+        let mut config_edits = Vec::new();
 
         for reference in configs {
             let entry = state.configs.get(&reference.source).ok_or_else(|| {
@@ -125,6 +141,19 @@ impl Materializer {
                 name: reference.source.clone(),
                 reason: e,
             })?;
+
+            if reference.write {
+                if let Some(edit) =
+                    self.writable_config(&dir, reference, &content, entry.revision, &mut out)?
+                {
+                    config_edits.push(ConfigEdit {
+                        name: reference.source.clone(),
+                        owner: entry.owner.clone(),
+                        content: edit,
+                    });
+                }
+                continue;
+            }
 
             out.push(self.write_object(
                 &dir,
@@ -190,7 +219,73 @@ impl Materializer {
             )?);
         }
 
-        Ok(Prepared { mounts: out, env })
+        Ok(Prepared { mounts: out, env, config_edits })
+    }
+
+    /// Materializes a `write: true` config, watching for a container's edit
+    /// to it on the way.
+    ///
+    /// Each write records the revision it wrote alongside the file itself
+    /// (`<name>.rev`), so a stale-vs-edited disk file can be told apart
+    /// without keeping anything in memory (nothing survives this process
+    /// restarting otherwise). Three cases:
+    ///
+    /// - No `.rev` yet, or it names a revision other than `entry.revision`:
+    ///   this node's copy is not caught up with the cluster (first mount, or
+    ///   someone else's edit landed since); overwrite from `content` and
+    ///   record the new revision, exactly like a read-only config.
+    /// - `.rev` matches `entry.revision` and the file on disk still reads
+    ///   back as `content`: nothing to do.
+    /// - `.rev` matches `entry.revision` but the file reads back as
+    ///   something else: the container changed it. Leave the file alone and
+    ///   report the edit, so the caller can feed it back into the cluster;
+    ///   the next `write: true` config to land here — most likely this same
+    ///   edit, once it round-trips through raft — is what advances `.rev`.
+    fn writable_config(
+        &self,
+        dir: &Path,
+        reference: &ObjectRef,
+        content: &[u8],
+        revision: u64,
+        out: &mut Vec<Materialized>,
+    ) -> Result<Option<Vec<u8>>> {
+        let host_path = dir.join(&reference.source);
+        let rev_path = host_path.with_extension("rev");
+        let container_path = reference.config_target();
+
+        let recorded: Option<u64> = std::fs::read_to_string(&rev_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+
+        if recorded == Some(revision) {
+            if let Ok(disk) = std::fs::read(&host_path) {
+                if disk != content {
+                    out.push(Materialized {
+                        host_path,
+                        container_path,
+                        mode: reference.mode_or_default(),
+                        secret: false,
+                        revision,
+                        writable: true,
+                    });
+                    return Ok(Some(disk));
+                }
+            }
+            out.push(Materialized {
+                host_path,
+                container_path,
+                mode: reference.mode_or_default(),
+                secret: false,
+                revision,
+                writable: true,
+            });
+            return Ok(None);
+        }
+
+        let m = self.write_object(dir, reference, content, container_path, false, revision)?;
+        write_private(&rev_path, revision.to_string().as_bytes(), false)?;
+        out.push(Materialized { writable: true, ..m });
+        Ok(None)
     }
 
     fn write_object(
@@ -221,6 +316,7 @@ impl Materializer {
             mode: reference.mode_or_default(),
             secret,
             revision,
+            writable: false,
         })
     }
 
@@ -349,6 +445,7 @@ mod tests {
                     uid: None,
                     gid: None,
                     env: None,
+                    write: false,
                 }],
                 &[ObjectRef::new("db_password")],
             )
@@ -465,6 +562,7 @@ mod tests {
                     uid: None,
                     gid: None,
                     env: None,
+                    write: false,
                 }],
             )
             .expect("prepare");
@@ -565,6 +663,7 @@ mod tests {
                     uid: None,
                     gid: None,
                     env: Some("DB_PASSWORD".into()),
+                    write: false,
                 }],
             )
             .expect("prepare");
@@ -599,9 +698,138 @@ mod tests {
                     uid: None,
                     gid: None,
                     env: Some("BINARY_SECRET".into()),
+                    write: false,
                 }],
             )
             .unwrap_err();
         assert!(matches!(err, SchedError::BadObject { .. }));
+    }
+
+    fn writable(source: &str) -> ObjectRef {
+        ObjectRef { write: true, ..ObjectRef::new(source) }
+    }
+
+    #[test]
+    fn a_writable_config_is_mounted_read_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        let out = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+
+        assert_eq!(out.mounts.len(), 1);
+        assert!(!out.mounts[0].mount().read_only);
+        assert!(out.config_edits.is_empty(), "nothing edited it yet");
+    }
+
+    #[test]
+    fn an_unmodified_writable_config_produces_no_edit_on_the_next_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        m.prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+        let second = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare again");
+
+        assert!(second.config_edits.is_empty());
+    }
+
+    #[test]
+    fn a_container_s_edit_is_reported_and_left_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        let first = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+
+        // The container writes to its own mount of the file.
+        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }").expect("simulate edit");
+
+        let second = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare again");
+
+        assert_eq!(second.config_edits.len(), 1);
+        assert_eq!(second.config_edits[0].name, "nginx_conf");
+        assert_eq!(second.config_edits[0].content, b"server { listen 8080; }");
+        // Left in place rather than clobbered back to the cluster's stale copy.
+        assert_eq!(
+            std::fs::read(&first.mounts[0].host_path).expect("read"),
+            b"server { listen 8080; }"
+        );
+    }
+
+    #[test]
+    fn once_the_edit_round_trips_through_the_cluster_nothing_is_reported_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let mut state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        let first = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }").expect("simulate edit");
+
+        let edit = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare again")
+            .config_edits
+            .remove(0);
+
+        // What the reconcile loop does with a reported edit: submit it back
+        // through raft, same as any other write.
+        state.apply(&cl_raft::state::Request::PutConfig {
+            name: edit.name,
+            content: base64_encode(&edit.content),
+            owner: edit.owner,
+        });
+
+        let third = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare a third time");
+        assert!(third.config_edits.is_empty());
+        assert_eq!(
+            std::fs::read(&first.mounts[0].host_path).expect("read"),
+            b"server { listen 8080; }"
+        );
+    }
+
+    #[test]
+    fn a_config_change_from_elsewhere_overwrites_an_untouched_mount() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let mut state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        m.prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+
+        // Nobody touched the mount, but the cluster's copy changed (e.g. an
+        // admin edited it, or another instance's edit landed).
+        state.apply(&Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"server { listen 9090; }"),
+            owner: None,
+        });
+
+        let second = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare again");
+        assert!(second.config_edits.is_empty());
+        assert_eq!(
+            std::fs::read(&second.mounts[0].host_path).expect("read"),
+            b"server { listen 9090; }"
+        );
     }
 }

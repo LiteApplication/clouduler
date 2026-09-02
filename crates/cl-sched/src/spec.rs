@@ -462,6 +462,7 @@ mod tests {
             mode: 0o444,
             secret: false,
             revision: 1,
+            writable: false,
         }];
 
         let spec = build(

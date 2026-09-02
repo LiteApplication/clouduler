@@ -37,7 +37,7 @@ vi.mock('./config/draft', () => ({
 
 let isAdmin = false;
 vi.mock('../auth/AuthContext', () => ({
-  useAuth: () => ({ isAdmin, identity: { subject: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
+  useAuth: () => ({ isAdmin, identity: { subject: 'test', username: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
 }));
 
 function renderNodes() {
