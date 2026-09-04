@@ -183,6 +183,11 @@ fn migration_progress_writer(
 }
 
 async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
+    let result = sync_all_inner(node, job).await;
+    finish_sync(job, result)
+}
+
+async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     let volume_count = job.volumes.len() as u64;
     for (idx, volume) in job.volumes.iter().enumerate() {
         let state = node.state().await;
@@ -209,10 +214,19 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
         .await
         .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
     }
+    Ok(())
+}
+
+/// Clear `job.instance`'s live-progress entry unconditionally, whether
+/// `sync_all_inner` finished cleanly or bailed out partway through the
+/// volume loop. Called from exactly one exit point so no `?` inside the
+/// loop can skip it and leave a stale "still syncing" entry behind for a
+/// migration that actually failed.
+fn finish_sync(job: &MigrationJob<'_>, result: Result<()>) -> Result<()> {
     if let Some(tracker) = &job.sync_progress {
         tracker.write().unwrap().remove(&job.instance);
     }
-    Ok(())
+    result
 }
 
 async fn verify_all(job: &MigrationJob<'_>) -> Result<()> {
@@ -321,5 +335,70 @@ mod tests {
         sink.report(4, 4);
 
         assert_eq!(tracker.read().unwrap().get(&instance).unwrap().files_done, 4);
+    }
+
+    struct UnusedEngine;
+    impl SyncEngine for UnusedEngine {
+        fn name(&self) -> &str {
+            "unused"
+        }
+        fn sync<'a>(
+            &'a self,
+            _src: &'a std::path::Path,
+            _peer: std::net::SocketAddr,
+            _volume: &'a VolumeId,
+            _generation: u64,
+            _progress: crate::progress::ProgressSink,
+        ) -> BoxFuture<'a, Result<crate::delta::SyncStats>> {
+            unimplemented!("finish_sync tests never actually call sync")
+        }
+    }
+
+    fn job_with_tracker(tracker: crate::progress::MigrationSyncTracker, instance: InstanceId) -> MigrationJob<'static> {
+        MigrationJob {
+            instance,
+            source_node: "src".into(),
+            target_node: "dst".into(),
+            target_addr: "127.0.0.1:0".parse().unwrap(),
+            volumes: Vec::new(),
+            registry: None,
+            engine: Box::leak(Box::new(UnusedEngine)),
+            control: Box::leak(Box::new(AlwaysOk)),
+            sync_progress: Some(tracker),
+        }
+    }
+
+    // Regression test for the bug this module's cleanup wrapper fixes: a
+    // `sync_all_inner` failure partway through the volume loop must not
+    // leave the instance's progress entry stuck in the tracker forever,
+    // reading as "still syncing" to anyone watching (the web UI) long after
+    // the migration has actually failed.
+    #[test]
+    fn finish_sync_clears_the_tracker_entry_on_success_and_on_failure() {
+        let instance = InstanceId::new("site", "web", 0);
+
+        let tracker: crate::progress::MigrationSyncTracker = Arc::default();
+        tracker.write().unwrap().insert(
+            instance.clone(),
+            crate::progress::MigrationSyncProgress { volume_index: 1, volume_count: 2, files_done: 0, files_total: 0 },
+        );
+        let job = job_with_tracker(tracker.clone(), instance.clone());
+        let result = finish_sync(&job, Ok(()));
+        assert!(result.is_ok());
+        assert!(tracker.read().unwrap().get(&instance).is_none(), "success path must clear the tracker entry");
+
+        // The failure path is what the bug actually broke: before the fix,
+        // an early `?` return from the volume loop skipped the cleanup that
+        // only ran after the loop, leaving this entry behind forever.
+        let tracker: crate::progress::MigrationSyncTracker = Arc::default();
+        tracker.write().unwrap().insert(
+            instance.clone(),
+            crate::progress::MigrationSyncProgress { volume_index: 1, volume_count: 2, files_done: 0, files_total: 0 },
+        );
+        let job = job_with_tracker(tracker.clone(), instance.clone());
+        let err = DriveError::VolumeNotFound { volume: VolumeId::new("drive", "missing") };
+        let result = finish_sync(&job, Err(err));
+        assert!(result.is_err(), "finish_sync must hand back the original error");
+        assert!(tracker.read().unwrap().get(&instance).is_none(), "failure path must also clear the tracker entry");
     }
 }
