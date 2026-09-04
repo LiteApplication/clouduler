@@ -22,6 +22,36 @@ use crate::registries::Registries;
 /// distinguishes "about to be created" from "still fetching the image".
 pub type PullTracker = Arc<RwLock<BTreeSet<InstanceId>>>;
 
+/// Which real docker step a redeploy (`Action::Recreate`, or `Action::Start`'s
+/// stale-network recovery — both go through `replace`) is currently on for
+/// one instance. Shared with the api the same way `PullTracker` is, so
+/// `GET /api/instances` can say "step 2/3" instead of just "exited".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedeployPhase {
+    /// Fetching the new image, before anything about the running container
+    /// changes — matches `replace`'s actual order: the old container stays
+    /// up as long as possible.
+    Pulling,
+    /// Old container stopped and removed, new one not created yet.
+    Stopping,
+    /// New container created, starting.
+    Starting,
+}
+
+impl RedeployPhase {
+    pub fn step_number(self) -> u8 {
+        match self {
+            RedeployPhase::Pulling => 1,
+            RedeployPhase::Stopping => 2,
+            RedeployPhase::Starting => 3,
+        }
+    }
+}
+
+pub const REDEPLOY_TOTAL_STEPS: u8 = 3;
+
+pub type RedeployTracker = Arc<RwLock<BTreeMap<InstanceId, RedeployPhase>>>;
+
 /// What has to happen to one container to bring it in line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -142,6 +172,7 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<
 pub struct Reconciler {
     docker: Docker,
     pulling: PullTracker,
+    redeploy_steps: RedeployTracker,
     /// Registry logins this pass may pull with. Rebuilt per pass rather than
     /// held for the reconciler's life so a login added, rotated or removed
     /// through the api takes effect on the next sweep instead of at the next
@@ -150,8 +181,8 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
-    pub fn new(docker: Docker, pulling: PullTracker) -> Self {
-        Self { docker, pulling, registries: Registries::default() }
+    pub fn new(docker: Docker, pulling: PullTracker, redeploy_steps: RedeployTracker) -> Self {
+        Self { docker, pulling, redeploy_steps, registries: Registries::default() }
     }
 
     /// Pull private images with these logins. Without them a private image is
@@ -312,9 +343,20 @@ impl Reconciler {
     /// currently is rather than whatever it was when this container was
     /// last built.
     async fn replace(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
+        let result = self.replace_inner(id, target, name).await;
+        self.redeploy_steps.write().await.remove(id);
+        result
+    }
+
+    async fn replace_inner(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
+        self.redeploy_steps.write().await.insert(id.clone(), RedeployPhase::Pulling);
         self.ensure_image(id, &target.spec.image).await?;
+
+        self.redeploy_steps.write().await.insert(id.clone(), RedeployPhase::Stopping);
         self.docker.stop(name, stop_timeout(Some(target))).await.ok();
         self.docker.remove(name, true).await.ok();
+
+        self.redeploy_steps.write().await.insert(id.clone(), RedeployPhase::Starting);
         let container_id = self.docker.create(&target.spec).await?;
         if let Some(egress) = &target.spec.egress_network {
             self.docker.connect_network(&container_id, egress, None).await?;

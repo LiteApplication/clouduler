@@ -23,7 +23,8 @@ use tracing::{debug, info, warn};
 use crate::materialize::Materializer;
 use crate::place;
 use crate::plan::{self, Desired};
-use crate::reconcile::{self, Action, PullTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
+
+use crate::reconcile::{self, Action, PullTracker, RedeployTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
 use crate::spec;
 
 /// How often to sweep, on top of reacting to state changes. A periodic pass
@@ -69,6 +70,9 @@ pub struct Scheduler {
     /// (an OOM kill, a crash on start) without needing a raft round trip just
     /// to count it. See `note_restart_and_check_crash_loop`.
     restarts: Arc<RwLock<BTreeMap<InstanceId, VecDeque<Instant>>>>,
+    /// Which redeploy step each instance being recreated is on, shared with
+    /// the api. See `cl_sched::RedeployTracker`.
+    redeploy_steps: RedeployTracker,
 }
 
 impl Scheduler {
@@ -79,6 +83,7 @@ impl Scheduler {
         materializer: Materializer,
         boot_config: ClusterConfig,
         pulling: PullTracker,
+        redeploy_steps: RedeployTracker,
     ) -> Self {
         Self {
             node,
@@ -89,6 +94,7 @@ impl Scheduler {
             boot_config,
             pulling,
             restarts: Arc::new(RwLock::new(BTreeMap::new())),
+            redeploy_steps,
         }
     }
 
@@ -210,7 +216,8 @@ impl Scheduler {
             None => crate::registries::Registries::default(),
         };
         let reconciler =
-            Reconciler::new(docker.clone(), self.pulling.clone()).with_registries(registries);
+            Reconciler::new(docker.clone(), self.pulling.clone(), self.redeploy_steps.clone())
+                .with_registries(registries);
 
         let (targets, config_edits) = self.targets(state)?;
         let actual = docker.list_managed().await?;
