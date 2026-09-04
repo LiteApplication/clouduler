@@ -8,6 +8,7 @@ license.workspace = true
 cl-backup.workspace = true
 cl-config.workspace = true
 cl-docker.workspace = true
+cl-drive.workspace = true
 cl-net.workspace = true
 cl-proxy.workspace = true
 cl-raft.workspace = true

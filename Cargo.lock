@@ -823,6 +823,7 @@ dependencies = [
  "cl-backup",
  "cl-config",
  "cl-docker",
+ "cl-drive",
  "cl-net",
  "cl-proxy",
  "cl-raft",

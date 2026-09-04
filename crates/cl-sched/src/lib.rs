@@ -14,6 +14,9 @@ pub use error::{Result, SchedError};
 pub use materialize::{Materialized, Materializer};
 pub use place::{candidates, place, Constraint, Decision, PlaceOutcome, Unplaceable};
 pub use plan::{expand, Desired};
-pub use reconcile::{diff, Action, PullTracker, Reconciler, RedeployTracker, Target, LABEL_REVISION};
+pub use reconcile::{
+    diff, Action, PullTracker, Reconciler, RedeployPhase, RedeployTracker, Target, LABEL_REVISION,
+    REDEPLOY_TOTAL_STEPS,
+};
 pub use registries::{Registries, StoredLogin};
 pub use run::{desired_instances, Scheduler};

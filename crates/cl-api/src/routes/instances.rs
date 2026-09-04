@@ -75,6 +75,15 @@ struct InstanceSummary {
     running_digest: Option<String>,
     started_at: Option<String>,
     migration: Option<MigrationSummary>,
+    /// What is actively happening to this instance right now — a redeploy
+    /// sub-step or a migration phase — or `None` when it is steady-state.
+    /// `state`/`migration` above are the raw facts; this is the same
+    /// information composed into one string plus a `(step, total)` pair for
+    /// a progress bar. See `compose_progress`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    step: Option<(u8, u8)>,
     /// Why this instance has no assignment at all, set only when `state` is
     /// `"pending_placement"`: no node in the cluster currently satisfies
     /// what its service needs.
@@ -192,6 +201,21 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
         }
     };
 
+    let migration_sync = assignment
+        .migration
+        .as_ref()
+        .and_then(|_| state.migration_sync.read().unwrap().get(&assignment.instance).copied());
+    let redeploy_step = if local {
+        state.redeploy_steps.read().await.get(&assignment.instance).copied()
+    } else {
+        None
+    };
+    let (reason, step) = compose_progress(
+        instance_state,
+        redeploy_step,
+        assignment.migration.as_ref().map(|m| (&m.phase, migration_sync)),
+    );
+
     InstanceSummary {
         id: assignment.instance.to_string(),
         node: assignment.node.clone(),
@@ -213,6 +237,8 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
         }),
         placement_error: None,
         proxy,
+        reason,
+        step,
     }
 }
 
@@ -248,6 +274,79 @@ fn run_state_to_summary(status: cl_docker::RunState, desired: DesiredState) -> &
             }
         }
         RunState::Created | RunState::Paused | RunState::Unknown => STATE_STOPPED,
+    }
+}
+
+/// One instance's redeploy step, or migration phase, turned into the string
+/// the ui shows verbatim and a `(step, total)` pair for anything that wants
+/// to render a progress bar instead. `None` for a steady-state instance.
+fn compose_progress(
+    instance_state: &str,
+    redeploy: Option<cl_sched::RedeployPhase>,
+    migration: Option<(&cl_raft::state::MigrationPhase, Option<cl_drive::MigrationSyncProgress>)>,
+) -> (Option<String>, Option<(u8, u8)>) {
+    if let Some((phase, sync_progress)) = migration {
+        return compose_migration_reason(phase, sync_progress);
+    }
+    let Some(phase) = redeploy else {
+        return (None, None);
+    };
+    let step = phase.step_number();
+    (
+        Some(format!("redeploying ({instance_state}, step {step}/{})", cl_sched::REDEPLOY_TOTAL_STEPS)),
+        Some((step, cl_sched::REDEPLOY_TOTAL_STEPS)),
+    )
+}
+
+fn compose_migration_reason(
+    phase: &cl_raft::state::MigrationPhase,
+    sync_progress: Option<cl_drive::MigrationSyncProgress>,
+) -> (Option<String>, Option<(u8, u8)>) {
+    if *phase == cl_raft::state::MigrationPhase::Syncing {
+        if let Some(p) = sync_progress {
+            return (
+                Some(format!(
+                    "migrating (syncing volume {}/{}, {}/{} files)",
+                    p.volume_index, p.volume_count, p.files_done, p.files_total
+                )),
+                Some((p.volume_index as u8, p.volume_count as u8)),
+            );
+        }
+    }
+    let label = format!("{phase:?}").to_lowercase();
+    (Some(format!("migrating ({label})")), None)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use cl_raft::state::MigrationPhase;
+
+    #[test]
+    fn redeploy_reason_names_the_step_and_the_docker_state() {
+        let (reason, step) = compose_progress(STATE_EXITED, Some(cl_sched::RedeployPhase::Stopping), None);
+        assert_eq!(reason.as_deref(), Some("redeploying (exited, step 2/3)"));
+        assert_eq!(step, Some((2, 3)));
+    }
+
+    #[test]
+    fn migration_reason_without_sync_progress_names_just_the_phase() {
+        let (reason, step) = compose_migration_reason(&MigrationPhase::Verifying, None);
+        assert_eq!(reason.as_deref(), Some("migrating (verifying)"));
+        assert_eq!(step, None);
+    }
+
+    #[test]
+    fn migration_reason_with_sync_progress_names_the_volume_and_file_counts() {
+        let progress = cl_drive::MigrationSyncProgress {
+            volume_index: 1,
+            volume_count: 2,
+            files_done: 5,
+            files_total: 12,
+        };
+        let (reason, step) = compose_migration_reason(&MigrationPhase::Syncing, Some(progress));
+        assert_eq!(reason.as_deref(), Some("migrating (syncing volume 1/2, 5/12 files)"));
+        assert_eq!(step, Some((1, 2)));
     }
 }
 
@@ -293,6 +392,8 @@ async fn pending_placements(state: &AppState, cluster_state: &cl_raft::ClusterSt
             running_digest: None,
             started_at: None,
             migration: None,
+            reason: None,
+            step: None,
             placement_error: Some(u.reason),
             proxy: None,
         })
