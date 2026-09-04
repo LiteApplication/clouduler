@@ -16,6 +16,7 @@
 pub mod delta;
 pub mod error;
 pub mod migration;
+pub mod progress;
 pub mod registry;
 pub mod scan;
 pub mod served;
@@ -25,6 +26,7 @@ pub mod transport;
 pub use delta::{BoxFuture, DeltaEngine, SyncEngine, SyncStats};
 pub use error::{DriveError, Result};
 pub use migration::{InstanceControl, MigrationJob};
+pub use progress::ProgressSink;
 pub use registry::{resolve_in_root, resolve_relative, DriveRegistry, DriveRole};
 pub use scan::{scan as scan_volume, Diff, FileMeta, Manifest};
 pub use served::{
