@@ -140,6 +140,12 @@ pub async fn run(
     // pull) and the api (which reads it to report a "pulling" instance
     // state) — see `cl_sched::PullTracker`.
     let pulling: cl_sched::PullTracker = Arc::default();
+    // Which redeploy step each instance being recreated is on, and how far
+    // along an in-progress migration's volume sync is — both shared with the
+    // api the same way `pulling` is, so it can report live progress instead
+    // of only a coarse docker state.
+    let redeploy_steps: cl_sched::RedeployTracker = Arc::default();
+    let migration_sync: cl_drive::MigrationSyncTracker = Arc::default();
 
     // Fires the same clean shutdown path `ctrl_c()` drives, so the internal
     // self-update restart route can trigger it programmatically after
@@ -170,6 +176,8 @@ pub async fn run(
         data_dir: &data_dir,
         docker: docker.clone(),
         pulling: pulling.clone(),
+        redeploy_steps: redeploy_steps.clone(),
+        migration_sync: migration_sync.clone(),
         key: key.clone(),
         key_tx,
         shutdown: shutdown_tx,
@@ -205,6 +213,7 @@ pub async fn run(
         materializer,
         cfg.clone(),
         pulling.clone(),
+        redeploy_steps.clone(),
     )
     .with_zone(cl_net::dns::zone_origin(&cfg));
     let gate = fenced.clone();
@@ -232,6 +241,7 @@ pub async fn run(
         &cluster,
         docker.clone(),
         drives.registry(),
+        migration_sync.clone(),
     );
 
     let config_writer = tokio::spawn(watch_cluster_config(
@@ -296,6 +306,8 @@ struct StartApiArgs<'a> {
     data_dir: &'a Path,
     docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
     pulling: cl_sched::PullTracker,
+    redeploy_steps: cl_sched::RedeployTracker,
+    migration_sync: cl_drive::MigrationSyncTracker,
     key: Option<Arc<ClusterKey>>,
     key_tx: tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
     shutdown: tokio::sync::watch::Sender<()>,
@@ -314,6 +326,8 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         data_dir,
         docker,
         pulling,
+        redeploy_steps,
+        migration_sync,
         key,
         key_tx,
         shutdown,
@@ -350,6 +364,8 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         cluster: cluster.clone(),
         docker,
         pulling,
+        redeploy_steps,
+        migration_sync,
         node_name: node_name.to_string(),
         config_path: config_path.to_path_buf(),
         cluster_config: cfg.clone(),

@@ -47,6 +47,7 @@ pub fn start(
     cluster: &Arc<ClusterNode>,
     docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
     registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
+    sync_progress: cl_drive::MigrationSyncTracker,
 ) -> JoinHandle<()> {
     let node_name = node_name.to_string();
     let cluster = cluster.clone();
@@ -118,6 +119,7 @@ pub fn start(
                     registry: live_registry.as_deref(),
                     engine: &engine,
                     control: &control,
+                    sync_progress: Some(sync_progress.clone()),
                 };
 
                 match cl_drive::migration::run(&cluster, &migration).await {
