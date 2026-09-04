@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type { InstanceState, InstanceStatsSample, LogLine, StackRequirements } from '../api/types';
 import { useClusterState } from '../state/store';
+import { useInstanceProgress } from '../state/progressStore';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { ConstraintTable } from '../components/ConstraintTable';
@@ -33,6 +34,7 @@ export function InstanceDetail() {
   const [moveTarget, setMoveTarget] = useState('');
   const [tab, setTab] = useState<'logs' | 'stats' | 'placement'>('logs');
   const parsed = parseInstanceId(id);
+  const progress = useInstanceProgress(id);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,9 +102,12 @@ export function InstanceDetail() {
             </p>
           </div>
         </div>
-        <Badge tone={instanceStateTone(instance.state)} title={instance.placement_error}>
-          {instance.state}
-        </Badge>
+        <div style={{ textAlign: 'right' }}>
+          <Badge tone={instanceStateTone(instance.state)} title={instance.placement_error}>
+            {instance.state}
+          </Badge>
+          {progress?.reason && <p className="page-sub">{progress.reason}</p>}
+        </div>
       </div>
 
       {error && (

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, decodeText, encodeText } from '../api/client';
 import type { Assignment, InstanceState, LogLine, StackRequirements, StackState, ValidationError } from '../api/types';
 import { useClusterState } from '../state/store';
+import { useInstanceProgress } from '../state/progressStore';
 import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { ConstraintTable } from '../components/ConstraintTable';
@@ -48,6 +49,26 @@ function allConfigKeys(requirements: StackRequirements): string[] {
 
 function allSecretKeys(requirements: StackRequirements): string[] {
   return Array.from(new Set([...requirements.secrets, ...requirements.file_secrets])).sort();
+}
+
+function InstanceStateCell({
+  instance,
+  state,
+  placementError,
+}: {
+  instance: string;
+  state: InstanceState['state'];
+  placementError?: string;
+}) {
+  const progress = useInstanceProgress(instance);
+  return (
+    <>
+      <Badge tone={instanceStateTone(state)} title={placementError}>
+        {state}
+      </Badge>
+      {progress?.reason && <div className="page-sub">{progress.reason}</div>}
+    </>
+  );
 }
 
 export function StackDetail() {
@@ -532,7 +553,11 @@ function StackDetailBody({
                         <Badge tone={a.desired === 'running' ? 'good' : 'neutral'}>{a.desired}</Badge>
                       </td>
                       <td>
-                        {i ? <Badge tone={instanceStateTone(i.state)} title={i.placement_error}>{i.state}</Badge> : '-'}
+                        {i ? (
+                          <InstanceStateCell instance={a.instance} state={i.state} placementError={i.placement_error} />
+                        ) : (
+                          '-'
+                        )}
                       </td>
                       <td>
                         {i ? (
@@ -570,9 +595,7 @@ function StackDetailBody({
                       <Badge tone="good">running</Badge>
                     </td>
                     <td>
-                      <Badge tone={instanceStateTone(i.state)} title={i.placement_error}>
-                        {i.state}
-                      </Badge>
+                      <InstanceStateCell instance={i.id} state={i.state} placementError={i.placement_error} />
                     </td>
                     <td>-</td>
                     <td>-</td>
