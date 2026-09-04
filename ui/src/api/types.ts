@@ -119,6 +119,25 @@ export interface InstanceState {
    *  published for it or no check has landed yet — not that it's healthy;
    *  a present `proxy` with no `error` does mean healthy. */
   proxy?: ProxyHealth;
+  /** What is actively happening right now — a redeploy sub-step or a
+   *  migration phase, composed server-side into one string — or absent when
+   *  the instance is steady-state. Only ever set on the node that actually
+   *  runs the instance; a summary fetched for one running elsewhere leaves
+   *  this absent even mid-operation. */
+  reason?: string | null;
+  /** `[step, total]` alongside `reason`, for a progress bar; absent when
+   *  `reason` describes something with no fixed step count (e.g. a
+   *  migration phase other than "syncing"). */
+  step?: [number, number] | null;
+}
+
+/** One `progress` event from `GET /api/instances/events`: sent once when an
+ *  instance's live status is first seen, then again only when it changes. */
+export interface InstanceProgressEvent {
+  instance_id: InstanceId;
+  state: InstanceState['state'];
+  reason: string | null;
+  step: [number, number] | null;
 }
 
 /** One route's latest active health check: the proxy itself connecting to
