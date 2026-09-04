@@ -21,6 +21,10 @@ import { Certificates } from './views/Certificates';
 import { Redirects } from './views/Redirects';
 import { SelfUpdate } from './views/SelfUpdate';
 import { Updates } from './views/Updates';
+import { Destinations } from './views/backup/Destinations';
+import { Schedules } from './views/backup/Schedules';
+import { History } from './views/backup/History';
+import { RestoreWizard } from './views/backup/RestoreWizard';
 
 export function App() {
   const { identity, loading } = useAuth();
@@ -55,6 +59,11 @@ export function App() {
               <Route path="/configuration/*" element={<Configuration />} />
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/redirects" element={<Redirects />} />
+              <Route path="/backup" element={<Navigate to="/backup/destinations" replace />} />
+              <Route path="/backup/destinations" element={<Destinations />} />
+              <Route path="/backup/schedules" element={<Schedules />} />
+              <Route path="/backup/history" element={<History />} />
+              <Route path="/backup/restore" element={<RestoreWizard />} />
               <Route path="/self-update" element={<SelfUpdate />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

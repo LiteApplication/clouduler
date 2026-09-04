@@ -28,6 +28,10 @@ impl Service {
             .and_then(|x| x.volume_sync.get(volume))
             .and_then(|o| o.interval)
     }
+
+    fn backup_stop_before(&self) -> Option<bool> {
+        self.x_clouduler.as_ref().and_then(|x| x.backup.as_ref()).and_then(|b| b.stop_before)
+    }
 }
 
 impl StackFile {
@@ -49,6 +53,22 @@ impl StackFile {
             .as_ref()
             .and_then(|x| x.volume_sync.get(volume))
             .and_then(|o| o.interval)
+    }
+
+    fn stack_backup_stop_before(&self) -> Option<bool> {
+        self.x_clouduler.as_ref().and_then(|x| x.backup.as_ref()).and_then(|b| b.stop_before)
+    }
+
+    /// Whether backing up a drive this service uses should stop it first:
+    /// the service's own override, else the stack wide default, else `None`
+    /// (the caller - which has the drive backup target's own setting and the
+    /// hardcoded final default - resolves the rest; see
+    /// `cl_raft::state::DriveBackupTarget::stop_containers`).
+    pub fn effective_backup_stop_before(&self, service: &str) -> Option<bool> {
+        self.services
+            .get(service)
+            .and_then(Service::backup_stop_before)
+            .or_else(|| self.stack_backup_stop_before())
     }
 
     /// Whether `:latest` images are followed automatically for this service:
@@ -179,6 +199,33 @@ mod tests {
 
     fn parse(yaml: &str) -> StackFile {
         StackFile::parse(yaml).expect("valid stack")
+    }
+
+    #[test]
+    fn backup_stop_before_defers_to_the_service_then_the_stack_then_none() {
+        let file = parse(
+            r#"
+x-clouduler:
+  backup:
+    stop_before: true
+services:
+  a:
+    image: x
+    x-clouduler:
+      backup:
+        stop_before: false
+  b:
+    image: x
+  c:
+    image: x
+"#,
+        );
+        assert_eq!(file.effective_backup_stop_before("a"), Some(false));
+        assert_eq!(file.effective_backup_stop_before("b"), Some(true));
+        assert_eq!(file.effective_backup_stop_before("c"), Some(true));
+
+        let bare = parse("services:\n  a:\n    image: x\n");
+        assert_eq!(bare.effective_backup_stop_before("a"), None);
     }
 
     #[test]

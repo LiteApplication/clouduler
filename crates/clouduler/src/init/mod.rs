@@ -84,6 +84,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     setup_drive_directories(&mut prompt, &config, &node_name)?;
     check_nfs_availability(&mut prompt, &config, &node_name)?;
     check_ethtool_availability(&mut prompt)?;
+    check_restic_availability(&mut prompt)?;
     setup_secret_key(&mut prompt, &config, &node_name)?;
     setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
@@ -410,6 +411,20 @@ fn check_ethtool_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -
         prompt.say(
             "warning: ethtool is not on PATH. Every container on a stack's own overlay network \
              will silently drop real request/response traffic until it's installed",
+        )?;
+    }
+    Ok(())
+}
+
+/// Advisory, like `check_ethtool_availability`: whether any backup target
+/// ends up enabled isn't known yet at `init` time (it's set up later, from
+/// the web ui or cli), so this checks unconditionally rather than gating on
+/// existing cluster state the way `daemon::run` does once it can read one.
+fn check_restic_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) -> Result<()> {
+    if !cl_restic::dependency::restic_available() {
+        prompt.say(
+            "warning: restic is not on PATH. Scheduled drive backups will fail until it's installed \
+             on every node that ends up running one",
         )?;
     }
     Ok(())

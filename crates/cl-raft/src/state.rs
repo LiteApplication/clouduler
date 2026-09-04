@@ -406,6 +406,159 @@ pub enum ReconcileStatus {
     },
 }
 
+/// A place restic can keep a drive's backup history. A drive may back up to
+/// several of these at once - see `DriveBackupTarget`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupDestination {
+    pub id: String,
+    pub name: String,
+    pub kind: BackupDestinationKind,
+    /// Name of the cluster secret holding the restic repo password. Always
+    /// set: restic requires one regardless of backend.
+    pub password_secret: String,
+    /// Name of the cluster secret holding backend credentials (an ssh
+    /// private key for `Ssh`, an access/secret key pair for `S3`). `None`
+    /// for `NodeLocal`, which needs none of its own.
+    #[serde(default)]
+    pub credentials_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "kind")]
+pub enum BackupDestinationKind {
+    /// A path on one cluster node's own disk. If that node does not already
+    /// hold the drive being backed up, the runner syncs the data there once
+    /// before running restic locally against it, rather than adding the node
+    /// as a standing replica - a live mirror and a point-in-time history are
+    /// different concerns and conflating them would mean every backup
+    /// destination permanently costs ongoing replication traffic.
+    NodeLocal { node: String, path: String },
+    Ssh {
+        host: String,
+        port: u16,
+        user: String,
+        path: String,
+    },
+    S3 {
+        bucket: String,
+        endpoint: String,
+        #[serde(default)]
+        region: Option<String>,
+        #[serde(default)]
+        prefix: Option<String>,
+    },
+}
+
+/// One drive's backup relationship with one destination: how often, what
+/// time, and how long to keep it. A drive may have several of these, one per
+/// destination it backs up to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DriveBackupTarget {
+    pub id: String,
+    pub drive: String,
+    pub destination_id: String,
+    pub enabled: bool,
+    /// How often to run, in seconds.
+    pub frequency_secs: u64,
+    /// "HH:MM", 24h, node-local time. `None` means "any time of day once
+    /// `frequency_secs` has elapsed", i.e. plain interval scheduling.
+    #[serde(default)]
+    pub time_of_day: Option<String>,
+    #[serde(default)]
+    pub keep_last: Option<u32>,
+    #[serde(default)]
+    pub keep_within_secs: Option<u64>,
+    /// Overrides the resolved x-clouduler stop-before-backup default when
+    /// set. `None` defers to the stack/service override, then a hardcoded
+    /// `true` (see `cl_config::stack::StackFile::effective_backup_stop_before`).
+    #[serde(default)]
+    pub stop_containers: Option<bool>,
+    /// Unix seconds this target last *started* a run, so the scheduler can
+    /// tell whether `frequency_secs` has elapsed. `None` before its first run.
+    #[serde(default)]
+    pub last_run: Option<i64>,
+}
+
+/// One completed, failed, or in-flight backup run, kept as history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupRun {
+    pub id: String,
+    pub target_id: String,
+    pub drive: String,
+    pub destination_id: String,
+    pub started_at: i64,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+    pub outcome: BackupRunOutcome,
+    pub triggered_by: BackupTrigger,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BackupRunOutcome {
+    Running,
+    Succeeded { snapshot_id: String, bytes: u64 },
+    Failed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BackupTrigger {
+    Schedule,
+    Manual { by: String },
+}
+
+/// Newest runs kept per `(drive, destination_id)` pair. Same reasoning as
+/// `MAX_OBJECT_BYTES`: history goes through the raft log and into every
+/// snapshot, so it needs a bound even though nothing here is user-editable.
+pub const MAX_BACKUP_RUNS_PER_TARGET: usize = 50;
+
+/// What a restore request restores: a whole drive, one volume, or every
+/// volume a service uses. Mirrors `backup_restore`'s three granularities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RestoreScope {
+    Drive { drive: String },
+    Volume { volume: VolumeId },
+    Service { stack: String, service: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RestoreStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed { error: String },
+}
+
+/// A restore triggered through the api (the CLI's `backup restore-*`
+/// commands run directly against a node's own local drive registry/docker
+/// and never go through this - see `backup_restore.rs`'s doc comment). This
+/// exists so an api handler on any node can ask for a restore without
+/// itself having drive/docker access: whichever node actually implements the
+/// target drive claims it (`Pending` -> `Running`) and executes, the same
+/// "submit an intent through raft, the node that can act on it does"
+/// pattern `BackupRun` uses for scheduled/manual backups.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoreRequest {
+    pub id: String,
+    pub scope: RestoreScope,
+    /// Destination to restore from. Required for `Drive`/`Volume`; optional
+    /// for `Service`, where it can be resolved automatically if the drive
+    /// backs up to only one destination (see `backup_restore::resolve_service_destination`).
+    #[serde(default)]
+    pub destination_id: Option<String>,
+    /// Snapshot id, or `None`/`"latest"` for the most recent one.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    pub requested_at: i64,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+    pub status: RestoreStatus,
+    pub requested_by: String,
+}
+
+/// Newest requests kept. Restores are rare enough that, unlike backup runs,
+/// one bound across the whole set (not per drive/destination) is simplest.
+pub const MAX_RESTORE_REQUESTS: usize = 50;
+
 /// Everything the cluster agrees on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClusterState {
@@ -465,6 +618,20 @@ pub struct ClusterState {
     /// is the cluster's own signal that another manager has come back.
     #[serde(default)]
     pub emergency_stack: Option<String>,
+    /// Where a drive can back up to. See `BackupDestination`.
+    #[serde(default)]
+    pub restic_destinations: BTreeMap<String, BackupDestination>,
+    /// A drive's schedule/retention against one destination. See
+    /// `DriveBackupTarget`.
+    #[serde(default)]
+    pub restic_targets: BTreeMap<String, DriveBackupTarget>,
+    /// Backup run history, bounded per target - see `MAX_BACKUP_RUNS_PER_TARGET`.
+    #[serde(default)]
+    pub restic_runs: BTreeMap<String, BackupRun>,
+    /// Restore requests submitted through the api, bounded - see
+    /// `MAX_RESTORE_REQUESTS`.
+    #[serde(default)]
+    pub restore_requests: BTreeMap<String, RestoreRequest>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -623,6 +790,41 @@ pub enum Request {
     /// hand out the same address for the same stack network.
     SetOverlayAllocations {
         allocations: String,
+    },
+    PutBackupDestination(BackupDestination),
+    RemoveBackupDestination {
+        id: String,
+    },
+    PutBackupTarget(DriveBackupTarget),
+    RemoveBackupTarget {
+        id: String,
+    },
+    /// Submitted by the leader when it decides a target is due, claiming the
+    /// tick so no other leader term double-fires it.
+    SetBackupTargetLastRun {
+        id: String,
+        at: i64,
+    },
+    /// Insert or update-in-place by id: `Running` -> `Succeeded`/`Failed`.
+    RecordBackupRun(BackupRun),
+    /// Submitted by an api handler; always inserted with `status: Pending`
+    /// regardless of what the caller sent, since only the node that goes on
+    /// to claim and execute it may advance that.
+    PutRestoreRequest(RestoreRequest),
+    /// Advances one restore request's status: a claim (`Pending` ->
+    /// `Running`), or a terminal outcome. The claim step doubles as an
+    /// optimistic lock - if two nodes both think they should run the same
+    /// request, only the first `SetRestoreStatus{Running}` to commit wins;
+    /// the loser's own claim attempt fails because the status is no longer
+    /// `Pending`, and it skips the request (see `backup_restore` module docs).
+    SetRestoreStatus {
+        id: String,
+        status: RestoreStatus,
+        /// Unix seconds, supplied by the caller rather than read from the
+        /// clock here - `apply` must stay pure so every replica computes the
+        /// same state from the same log. Only used (as `finished_at`) when
+        /// `status` is terminal.
+        at: i64,
     },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
@@ -1048,6 +1250,136 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::PutBackupDestination(destination) => {
+                validate_object_name(&destination.id)?;
+                if let BackupDestinationKind::NodeLocal { node, .. } = &destination.kind {
+                    if !self.nodes.contains_key(node) {
+                        return Err(format!("unknown node {node}"));
+                    }
+                }
+                self.restic_destinations.insert(destination.id.clone(), destination.clone());
+                Ok(())
+            }
+
+            Request::RemoveBackupDestination { id } => {
+                if let Some(user) = self.destination_in_use(id) {
+                    return Err(format!("backup destination {id} is still used by {user}"));
+                }
+                self.restic_destinations.remove(id);
+                Ok(())
+            }
+
+            Request::PutBackupTarget(target) => {
+                validate_object_name(&target.id)?;
+                if !self.drive_known(&target.drive) {
+                    return Err(format!("unknown drive {}", target.drive));
+                }
+                if !self.restic_destinations.contains_key(&target.destination_id) {
+                    return Err(format!("unknown backup destination {}", target.destination_id));
+                }
+                if target.enabled
+                    && self.restic_targets.values().any(|t| {
+                        t.id != target.id
+                            && t.enabled
+                            && t.drive == target.drive
+                            && t.destination_id == target.destination_id
+                    })
+                {
+                    return Err(format!(
+                        "drive {} already has an enabled backup target for destination {}",
+                        target.drive, target.destination_id
+                    ));
+                }
+                self.restic_targets.insert(target.id.clone(), target.clone());
+                Ok(())
+            }
+
+            Request::RemoveBackupTarget { id } => {
+                self.restic_targets.remove(id);
+                Ok(())
+            }
+
+            Request::SetBackupTargetLastRun { id, at } => {
+                let target = self
+                    .restic_targets
+                    .get_mut(id)
+                    .ok_or_else(|| format!("unknown backup target {id}"))?;
+                target.last_run = Some(*at);
+                Ok(())
+            }
+
+            Request::RecordBackupRun(run) => {
+                self.restic_runs.insert(run.id.clone(), run.clone());
+                let mut same_target: Vec<&BackupRun> = self
+                    .restic_runs
+                    .values()
+                    .filter(|r| r.drive == run.drive && r.destination_id == run.destination_id)
+                    .collect();
+                if same_target.len() > MAX_BACKUP_RUNS_PER_TARGET {
+                    same_target.sort_by_key(|r| r.started_at);
+                    let drop_count = same_target.len() - MAX_BACKUP_RUNS_PER_TARGET;
+                    let to_drop: Vec<String> = same_target.iter().take(drop_count).map(|r| r.id.clone()).collect();
+                    for id in to_drop {
+                        self.restic_runs.remove(&id);
+                    }
+                }
+                Ok(())
+            }
+
+            Request::PutRestoreRequest(request) => {
+                validate_object_name(&request.id)?;
+                match &request.scope {
+                    RestoreScope::Drive { drive } | RestoreScope::Volume { volume: VolumeId { drive, .. } } => {
+                        if !self.drive_known(drive) {
+                            return Err(format!("unknown drive {drive}"));
+                        }
+                    }
+                    RestoreScope::Service { stack, .. } => {
+                        if !self.stacks.contains_key(stack) {
+                            return Err(format!("unknown stack {stack}"));
+                        }
+                    }
+                }
+                if let Some(destination_id) = &request.destination_id {
+                    if !self.restic_destinations.contains_key(destination_id) {
+                        return Err(format!("unknown backup destination {destination_id}"));
+                    }
+                }
+                let mut request = request.clone();
+                request.status = RestoreStatus::Pending;
+                request.finished_at = None;
+                self.restore_requests.insert(request.id.clone(), request);
+
+                if self.restore_requests.len() > MAX_RESTORE_REQUESTS {
+                    let mut all: Vec<&RestoreRequest> = self.restore_requests.values().collect();
+                    all.sort_by_key(|r| r.requested_at);
+                    let drop_count = all.len() - MAX_RESTORE_REQUESTS;
+                    let to_drop: Vec<String> = all.iter().take(drop_count).map(|r| r.id.clone()).collect();
+                    for id in to_drop {
+                        self.restore_requests.remove(&id);
+                    }
+                }
+                Ok(())
+            }
+
+            Request::SetRestoreStatus { id, status, at } => {
+                let request = self
+                    .restore_requests
+                    .get_mut(id)
+                    .ok_or_else(|| format!("unknown restore request {id}"))?;
+                if matches!(request.status, RestoreStatus::Succeeded | RestoreStatus::Failed { .. }) {
+                    return Err(format!("restore request {id} already finished"));
+                }
+                if matches!(status, RestoreStatus::Running) && !matches!(request.status, RestoreStatus::Pending) {
+                    return Err(format!("restore request {id} is not pending, cannot be claimed"));
+                }
+                if matches!(status, RestoreStatus::Succeeded | RestoreStatus::Failed { .. }) {
+                    request.finished_at = Some(*at);
+                }
+                request.status = status.clone();
+                Ok(())
+            }
+
             Request::StoreCertificate(cert) => {
                 self.cert_status.remove(&cert.fqdn);
                 self.certificates.insert(cert.fqdn.clone(), cert.clone());
@@ -1171,6 +1503,33 @@ impl ClusterState {
             .values()
             .find(|s| s.secrets.iter().any(|c| c == name))
             .map(|s| format!("stack {}", s.name))
+    }
+
+    /// Whether `drive` is declared in the replicated cluster config at all
+    /// (served or replicated) - same minimal-shape parse as `served_drives`,
+    /// for the same reason (`cl-raft` does not depend on `cl-config`).
+    fn drive_known(&self, drive: &str) -> bool {
+        #[derive(Deserialize)]
+        struct Shape {
+            #[serde(default)]
+            drives: BTreeMap<String, serde_yaml::Value>,
+        }
+        let Some(entry) = &self.cluster_config else {
+            return false;
+        };
+        let Ok(shape) = serde_yaml::from_str::<Shape>(&entry.yaml) else {
+            return false;
+        };
+        shape.drives.contains_key(drive)
+    }
+
+    /// Backup targets referencing a destination, so removing one in use is
+    /// refused rather than quietly orphaning its targets.
+    fn destination_in_use(&self, id: &str) -> Option<String> {
+        self.restic_targets
+            .values()
+            .find(|t| t.destination_id == id)
+            .map(|t| format!("backup target {}", t.id))
     }
 
     /// A copy with every secret blanked, for anything that leaves the node.
@@ -2008,5 +2367,217 @@ mod tests {
 
         assert!(state.dns_records.values().any(|r| r.fqdn == "app.example.com"));
         assert!(!state.dns_status.contains_key("app.example.com"));
+    }
+
+    /// A cluster with "fast" declared in the replicated config, so
+    /// `drive_known` sees it - `cluster()` alone only makes nodes implement
+    /// drives, it never publishes a config for `drive_known` to read.
+    fn cluster_with_known_drive() -> ClusterState {
+        let mut state = cluster();
+        state.apply(&Request::PutClusterConfig {
+            yaml: "drives:\n  fast:\n    mode: replicate\n".into(),
+            expect_generation: 0,
+        });
+        state
+    }
+
+    fn node_local_destination(id: &str, node: &str) -> BackupDestination {
+        BackupDestination {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: BackupDestinationKind::NodeLocal {
+                node: node.to_string(),
+                path: "/srv/backups".into(),
+            },
+            password_secret: format!("_clouduler_restic_password_{id}"),
+            credentials_secret: None,
+        }
+    }
+
+    fn backup_target(id: &str, drive: &str, destination_id: &str, enabled: bool) -> DriveBackupTarget {
+        DriveBackupTarget {
+            id: id.to_string(),
+            drive: drive.to_string(),
+            destination_id: destination_id.to_string(),
+            enabled,
+            frequency_secs: 86_400,
+            time_of_day: None,
+            keep_last: Some(7),
+            keep_within_secs: None,
+            stop_containers: None,
+            last_run: None,
+        }
+    }
+
+    #[test]
+    fn a_node_local_destination_must_name_a_known_node() {
+        let mut state = cluster();
+        let rejected = state.apply(&Request::PutBackupDestination(node_local_destination(
+            "d1", "nowhere",
+        )));
+        assert!(rejected.error.unwrap().contains("unknown node nowhere"));
+    }
+
+    #[test]
+    fn a_backup_target_must_name_a_known_drive_and_destination() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
+
+        let unknown_drive = state.apply(&Request::PutBackupTarget(backup_target(
+            "t1", "nowhere", "d1", true,
+        )));
+        assert!(unknown_drive.error.unwrap().contains("unknown drive nowhere"));
+
+        let unknown_destination = state.apply(&Request::PutBackupTarget(backup_target(
+            "t1", "fast", "nowhere", true,
+        )));
+        assert!(unknown_destination
+            .error
+            .unwrap()
+            .contains("unknown backup destination nowhere"));
+
+        assert!(state
+            .apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)))
+            .is_ok());
+        assert!(state.restic_targets.contains_key("t1"));
+    }
+
+    #[test]
+    fn two_enabled_targets_cannot_share_a_drive_and_destination() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
+        state.apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)));
+
+        let rejected = state.apply(&Request::PutBackupTarget(backup_target("t2", "fast", "d1", true)));
+        assert!(rejected
+            .error
+            .unwrap()
+            .contains("already has an enabled backup target"));
+
+        // A disabled duplicate is fine (e.g. a draft being edited).
+        assert!(state
+            .apply(&Request::PutBackupTarget(backup_target("t2", "fast", "d1", false)))
+            .is_ok());
+    }
+
+    #[test]
+    fn removing_a_destination_in_use_by_a_target_is_refused() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
+        state.apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)));
+
+        let rejected = state.apply(&Request::RemoveBackupDestination { id: "d1".into() });
+        assert!(rejected.error.unwrap().contains("still used by backup target t1"));
+
+        state.apply(&Request::RemoveBackupTarget { id: "t1".into() });
+        assert!(state
+            .apply(&Request::RemoveBackupDestination { id: "d1".into() })
+            .is_ok());
+        assert!(!state.restic_destinations.contains_key("d1"));
+    }
+
+    #[test]
+    fn setting_last_run_updates_only_the_named_target() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
+        state.apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)));
+
+        assert!(state
+            .apply(&Request::SetBackupTargetLastRun { id: "t1".into(), at: 100 })
+            .is_ok());
+        assert_eq!(state.restic_targets["t1"].last_run, Some(100));
+
+        let rejected = state.apply(&Request::SetBackupTargetLastRun { id: "nowhere".into(), at: 0 });
+        assert!(rejected.error.unwrap().contains("unknown backup target nowhere"));
+    }
+
+    #[test]
+    fn recording_a_run_prunes_older_runs_past_the_cap_for_that_target() {
+        let mut state = cluster_with_known_drive();
+        for i in 0..(MAX_BACKUP_RUNS_PER_TARGET + 5) {
+            state.apply(&Request::RecordBackupRun(BackupRun {
+                id: format!("run{i}"),
+                target_id: "t1".into(),
+                drive: "fast".into(),
+                destination_id: "d1".into(),
+                started_at: i as i64,
+                finished_at: Some(i as i64 + 1),
+                outcome: BackupRunOutcome::Succeeded {
+                    snapshot_id: "abc".into(),
+                    bytes: 0,
+                },
+                triggered_by: BackupTrigger::Schedule,
+            }));
+        }
+        let for_target: Vec<_> = state
+            .restic_runs
+            .values()
+            .filter(|r| r.drive == "fast" && r.destination_id == "d1")
+            .collect();
+        assert_eq!(for_target.len(), MAX_BACKUP_RUNS_PER_TARGET);
+        // The oldest runs (run0..run4) were the ones dropped.
+        assert!(!state.restic_runs.contains_key("run0"));
+        assert!(state.restic_runs.contains_key(&format!("run{}", MAX_BACKUP_RUNS_PER_TARGET + 4)));
+    }
+
+    fn restore_request(id: &str, drive: &str) -> RestoreRequest {
+        RestoreRequest {
+            id: id.to_string(),
+            scope: RestoreScope::Drive { drive: drive.to_string() },
+            destination_id: None,
+            snapshot: None,
+            requested_at: 0,
+            finished_at: None,
+            status: RestoreStatus::Pending,
+            requested_by: "tester".into(),
+        }
+    }
+
+    #[test]
+    fn a_restore_request_must_name_a_known_drive() {
+        let mut state = cluster();
+        let rejected = state.apply(&Request::PutRestoreRequest(restore_request("r1", "nowhere")));
+        assert!(rejected.error.unwrap().contains("unknown drive nowhere"));
+    }
+
+    #[test]
+    fn a_restore_request_always_lands_pending_regardless_of_the_caller() {
+        let mut state = cluster_with_known_drive();
+        let mut request = restore_request("r1", "fast");
+        request.status = RestoreStatus::Succeeded;
+        request.finished_at = Some(999);
+        assert!(state.apply(&Request::PutRestoreRequest(request)).is_ok());
+        assert_eq!(state.restore_requests["r1"].status, RestoreStatus::Pending);
+        assert_eq!(state.restore_requests["r1"].finished_at, None);
+    }
+
+    #[test]
+    fn only_the_first_claim_of_a_pending_restore_succeeds() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutRestoreRequest(restore_request("r1", "fast")));
+
+        assert!(state
+            .apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 10 })
+            .is_ok());
+        let rejected = state.apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 11 });
+        assert!(rejected.error.unwrap().contains("not pending"));
+    }
+
+    #[test]
+    fn a_terminal_restore_status_cannot_be_advanced_further() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutRestoreRequest(restore_request("r1", "fast")));
+        state.apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 10 });
+        assert!(state
+            .apply(&Request::SetRestoreStatus {
+                id: "r1".into(),
+                status: RestoreStatus::Failed { error: "boom".into() },
+                at: 20,
+            })
+            .is_ok());
+        assert_eq!(state.restore_requests["r1"].finished_at, Some(20));
+
+        let rejected = state.apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 30 });
+        assert!(rejected.error.unwrap().contains("already finished"));
     }
 }

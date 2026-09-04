@@ -108,6 +108,17 @@ export function Layout({ children }: { children: ReactNode }) {
       { to: '/updates', label: 'Updates', short: 'Updates', icon: 'download' },
       { to: '/configs-secrets', label: 'Configs & Secrets', short: 'Secrets', icon: 'secrets' },
       { to: '/drives', label: 'Drives & Volumes', short: 'Drives', icon: 'drives' },
+      {
+        to: '/backup',
+        label: 'Backup',
+        short: 'Backup',
+        icon: 'cloud',
+        submenu: [
+          { to: '/backup/destinations', label: 'Destinations', icon: 'cloud' as IconName },
+          { to: '/backup/schedules', label: 'Schedules', icon: 'clock' as IconName },
+          { to: '/backup/history', label: 'History', icon: 'file' as IconName },
+        ],
+      },
       CONFIGURATION_LINK,
       { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
       { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },

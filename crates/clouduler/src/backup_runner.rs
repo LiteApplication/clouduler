@@ -1,0 +1,566 @@
+//! Drives `restic_targets` through to `restic_runs`: decide what's due
+//! (leader-side), then, on whichever node(s) actually hold the data, stop
+//! affected instances if configured to, get the bytes to the destination,
+//! run restic, and restart.
+//!
+//! Two loops, matching `watch_git_backup` / `crate::migration::start`'s
+//! split between "decide" and "do":
+//!
+//! - [`start_due_checker`] runs only on the leader (a single writer avoids
+//!   every manager racing to start the same run) and turns an `is_due`
+//!   target into a `Running` `BackupRun`, plus fails any `Running` run that
+//!   has sat unclaimed for too long - the crash/partition safety net, since
+//!   nothing here is phase-recorded the way `cl_drive::migration` is: restic's
+//!   own repository lock already makes a retried run safe, and there is no
+//!   point-of-no-return step like migration's `Switching` to protect.
+//! - [`start_runner`] runs on every node and claims the `Running` runs that
+//!   are its job to execute - see `is_local_source` and the `NodeLocal`
+//!   handling below for what "its job" means.
+//!
+//! ## The `NodeLocal`-elsewhere handoff
+//!
+//! restic always runs as a host process against a real local path, so a
+//! `NodeLocal` destination on a node that doesn't already hold the drive
+//! needs the data pushed there first (see `push_drive_once`, using the same
+//! one-off `SyncEngine::sync` call `cl_drive::migration` makes - deliberately
+//! never followed by `SetVolumeReplica`, since this is a point-in-time copy
+//! for restic to read, not a standing replica). `SyncEngine::sync` only ever
+//! pushes from the caller outward, so the source node and the destination
+//! node are necessarily two different nodes' loops cooperating with no
+//! direct channel between them beyond the shared `Running` run: the source
+//! pushes once (best effort, guarded in-memory so a slow push isn't retried
+//! every tick) and the destination, once it is past a fixed grace period
+//! from `started_at`, just runs restic against whatever has landed. This is
+//! a deliberate simplification - a real "sync is done" signal would need a
+//! new cross-node channel this feature doesn't otherwise need - and a push
+//! that is still in flight when the grace period elapses just means that
+//! occurrence's restic run reads a partial tree; the next scheduled run
+//! (or the stale-run watchdog, for a source that never got there at all)
+//! corrects it.
+
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Result};
+use cl_config::StackFile;
+use cl_docker::Docker;
+use cl_drive::{drive_port, DeltaEngine, DriveRegistry, ProgressSink, SyncEngine};
+use cl_raft::ids::InstanceId;
+use cl_raft::node::ClusterNode;
+use cl_raft::state::{
+    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger, ClusterState, DesiredState,
+    DriveBackupTarget, Request,
+};
+use cl_restic::retention::forget_args;
+use cl_secret::ClusterKey;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tracing::warn;
+use uuid::Uuid;
+
+use crate::backup_secrets;
+
+/// How often the leader checks for due targets and stale runs.
+const DUE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// How often every node checks for `Running` runs that are its job.
+const RUN_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// A `Running` run older than `frequency_secs * this`, capped below, is
+/// presumed abandoned (the node that claimed it crashed or partitioned) and
+/// failed so the target is eligible to be picked up again on schedule.
+const STALE_RUN_MULTIPLIER: i64 = 2;
+const STALE_RUN_CAP_SECS: i64 = 24 * 3600;
+/// How long a `NodeLocal`-elsewhere destination waits, once a run starts,
+/// before running restic against whatever the source's one-off push has
+/// landed so far - see the module doc comment.
+const SYNC_GRACE_SECS: i64 = 120;
+/// On top of the affected services' own `stop_grace_period`, how long to
+/// wait for local containers to actually stop before giving up and running
+/// the backup anyway - mirrors `folder_import`'s margin.
+const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
+
+/// Leader-side: turn due targets into `Running` runs, and fail stale ones.
+pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(DUE_POLL_INTERVAL);
+        loop {
+            ticker.tick().await;
+            if !cluster.is_leader() {
+                continue;
+            }
+            let state = cluster.state().await;
+            let now = unix_now();
+
+            for target in state.restic_targets.values() {
+                if !cl_restic::schedule::is_due(target, now) {
+                    continue;
+                }
+                let _ = cluster
+                    .submit(Request::SetBackupTargetLastRun { id: target.id.clone(), at: now })
+                    .await;
+                let run = BackupRun {
+                    id: Uuid::new_v4().to_string(),
+                    target_id: target.id.clone(),
+                    drive: target.drive.clone(),
+                    destination_id: target.destination_id.clone(),
+                    started_at: now,
+                    finished_at: None,
+                    outcome: BackupRunOutcome::Running,
+                    triggered_by: BackupTrigger::Schedule,
+                };
+                let _ = cluster.submit(Request::RecordBackupRun(run)).await;
+            }
+
+            for run in state.restic_runs.values() {
+                if !matches!(run.outcome, BackupRunOutcome::Running) {
+                    continue;
+                }
+                let max_age = state
+                    .restic_targets
+                    .get(&run.target_id)
+                    .map(|t| (t.frequency_secs as i64 * STALE_RUN_MULTIPLIER).min(STALE_RUN_CAP_SECS))
+                    .unwrap_or(STALE_RUN_CAP_SECS);
+                if now - run.started_at >= max_age {
+                    let mut stale = run.clone();
+                    stale.finished_at = Some(now);
+                    stale.outcome = BackupRunOutcome::Failed {
+                        error: "interrupted: no node finished this run in time".to_string(),
+                    };
+                    let _ = cluster.submit(Request::RecordBackupRun(stale)).await;
+                }
+            }
+        }
+    })
+}
+
+/// Per-node: claim and execute the `Running` runs that are this node's job.
+pub fn start_runner(
+    cluster: Arc<ClusterNode>,
+    node_name: String,
+    registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
+    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    data_dir: PathBuf,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(RUN_POLL_INTERVAL);
+        // Runs this node has already claimed (`execute_and_finish` is in
+        // flight for them) or already pushed once as a `NodeLocal`-elsewhere
+        // source - both reset on restart, which is harmless: a retried
+        // execute is safe (restic's repo lock) and a retried push is cheap
+        // (delta-based).
+        let in_flight: Arc<Mutex<BTreeSet<String>>> = Arc::default();
+        let pushed: Arc<Mutex<BTreeSet<String>>> = Arc::default();
+
+        loop {
+            ticker.tick().await;
+            let Some(registry) = registry.read().await.clone() else { continue };
+            let Some(key) = key_rx.borrow().clone() else { continue };
+            let state = cluster.state().await;
+
+            for run in state.restic_runs.values() {
+                if !matches!(run.outcome, BackupRunOutcome::Running) {
+                    continue;
+                }
+                let Some(target) = state.restic_targets.get(&run.target_id) else { continue };
+                let Some(destination) = state.restic_destinations.get(&run.destination_id) else { continue };
+                if !registry.implements(&run.drive) {
+                    continue;
+                }
+                let is_source = is_local_source(&registry, &state, &run.drive);
+
+                match &destination.kind {
+                    BackupDestinationKind::NodeLocal { node, .. } if node == &node_name => {
+                        if !is_source && unix_now() - run.started_at < SYNC_GRACE_SECS {
+                            continue;
+                        }
+                        claim_and_execute(
+                            &cluster, &registry, &docker, &key, &data_dir, &node_name, &state, run, target, destination,
+                            &in_flight,
+                        )
+                        .await;
+                    }
+                    BackupDestinationKind::NodeLocal { node, .. } if is_source && node != &node_name => {
+                        if !pushed.lock().await.insert(run.id.clone()) {
+                            continue;
+                        }
+                        if let Err(e) = push_drive_once(&state, &registry, &run.drive, node).await {
+                            warn!(
+                                run = %run.id, drive = %run.drive, destination = %node, error = %e,
+                                "one-off backup sync failed; the destination will run restic against whatever landed"
+                            );
+                        }
+                    }
+                    BackupDestinationKind::Ssh { .. } | BackupDestinationKind::S3 { .. } if is_source => {
+                        claim_and_execute(
+                            &cluster, &registry, &docker, &key, &data_dir, &node_name, &state, run, target, destination,
+                            &in_flight,
+                        )
+                        .await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claim_and_execute(
+    cluster: &Arc<ClusterNode>,
+    registry: &DriveRegistry,
+    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    key: &ClusterKey,
+    data_dir: &Path,
+    node_name: &str,
+    state: &ClusterState,
+    run: &BackupRun,
+    target: &DriveBackupTarget,
+    destination: &BackupDestination,
+    in_flight: &Arc<Mutex<BTreeSet<String>>>,
+) {
+    if !in_flight.lock().await.insert(run.id.clone()) {
+        return;
+    }
+    let result = execute(cluster, registry, docker, key, data_dir, node_name, state, run, target, destination).await;
+    let outcome = match &result {
+        Ok(outcome) => outcome.clone(),
+        Err(e) => {
+            warn!(run = %run.id, drive = %run.drive, error = %e, "backup run failed");
+            BackupRunOutcome::Failed { error: e.to_string() }
+        }
+    };
+    let mut finished = run.clone();
+    finished.finished_at = Some(unix_now());
+    finished.outcome = outcome;
+    let _ = cluster.submit(Request::RecordBackupRun(finished)).await;
+    in_flight.lock().await.remove(&run.id);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute(
+    cluster: &Arc<ClusterNode>,
+    registry: &DriveRegistry,
+    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    key: &ClusterKey,
+    data_dir: &Path,
+    node_name: &str,
+    state: &ClusterState,
+    run: &BackupRun,
+    target: &DriveBackupTarget,
+    destination: &BackupDestination,
+) -> Result<BackupRunOutcome> {
+    let instances = instances_using_drive(state, &run.drive);
+    let should_stop = resolve_stop_containers(target, state, &instances);
+
+    let mut stopped: Vec<InstanceId> = Vec::new();
+    if should_stop && !instances.is_empty() {
+        set_desired(cluster, &instances, DesiredState::Stopped).await?;
+        let deadline = max_stop_grace(state, &instances) + STOP_POLL_MARGIN;
+        wait_for_stopped(state, node_name, &instances, docker, deadline).await;
+        stopped = instances;
+    }
+
+    let source_path = registry.root(&run.drive)?.to_path_buf();
+    let result = run_restic_backup(cluster, key, data_dir, state, target, destination, &source_path).await;
+
+    if !stopped.is_empty() {
+        set_desired(cluster, &stopped, DesiredState::Running).await?;
+    }
+    result
+}
+
+/// Instances whose stack mounts a volume on `drive` - `folder_import`'s
+/// `instances_using` generalized from one volume to every volume on a drive,
+/// since a backup run covers the whole drive in one restic call.
+pub(crate) fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceId> {
+    let mut found = Vec::new();
+    for assignment in state.assignments.values() {
+        let instance = &assignment.instance;
+        let Some(stack) = state.stacks.get(&instance.stack) else { continue };
+        let Ok(file) = StackFile::parse(&stack.spec) else { continue };
+        let Some(service) = file.services.get(&instance.service) else { continue };
+        if service.volumes.iter().any(|m| m.drive.as_deref() == Some(drive)) {
+            found.push(instance.clone());
+        }
+    }
+    found
+}
+
+/// The target's own override wins outright; otherwise, most-conservative
+/// wins across every affected service's resolved `x-clouduler` override
+/// (`effective_backup_stop_before`): any explicit `true` stops, and only a
+/// unanimous explicit `false` skips stopping. No explicit answer from
+/// anyone defaults to `true` - stopping before touching live data is the
+/// safe default.
+fn resolve_stop_containers(target: &DriveBackupTarget, state: &ClusterState, instances: &[InstanceId]) -> bool {
+    if let Some(explicit) = target.stop_containers {
+        return explicit;
+    }
+    let resolved: Vec<bool> = instances
+        .iter()
+        .filter_map(|instance| {
+            let stack = state.stacks.get(&instance.stack)?;
+            let file = StackFile::parse(&stack.spec).ok()?;
+            file.effective_backup_stop_before(&instance.service)
+        })
+        .collect();
+    resolved.is_empty() || resolved.into_iter().any(|b| b)
+}
+
+fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
+    instances
+        .iter()
+        .filter_map(|i| {
+            let stack = state.stacks.get(&i.stack)?;
+            let file = StackFile::parse(&stack.spec).ok()?;
+            file.services.get(&i.service)?.stop_grace_period
+        })
+        .max()
+        .unwrap_or(cl_sched::reconcile::DEFAULT_STOP_GRACE)
+}
+
+async fn set_desired(cluster: &Arc<ClusterNode>, instances: &[InstanceId], desired: DesiredState) -> Result<()> {
+    for instance in instances {
+        let response = cluster
+            .submit(Request::SetDesiredState { instance: instance.clone(), desired })
+            .await?;
+        if let Some(error) = response.error {
+            bail!("could not update the desired state of {instance}: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Same shape as `folder_import`'s helper of the same name: polls local
+/// docker for instances assigned to `node_name`, and just sleeps out
+/// whatever's left of `deadline` for the rest, since container state is
+/// local to whichever node runs it and there is no cluster-wide "stopped"
+/// signal to poll for those.
+async fn wait_for_stopped(
+    state: &ClusterState,
+    node_name: &str,
+    instances: &[InstanceId],
+    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    deadline: Duration,
+) {
+    let local: Vec<String> = state
+        .assignments
+        .values()
+        .filter(|a| a.node == node_name && instances.contains(&a.instance))
+        .map(|a| a.instance.container_name())
+        .collect();
+    let remote = instances.len() > local.len();
+
+    let Some(docker) = docker.read().await.clone() else {
+        tokio::time::sleep(deadline).await;
+        return;
+    };
+
+    let start = tokio::time::Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        if elapsed >= deadline {
+            return;
+        }
+        let mut all_stopped = true;
+        for name in &local {
+            match docker.inspect(name).await {
+                Ok(Some(state)) if state.running => all_stopped = false,
+                _ => {}
+            }
+        }
+        if all_stopped && !remote {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1).min(deadline - elapsed)).await;
+    }
+}
+
+/// Whether this node currently holds the authoritative copy of `drive`: for
+/// a served drive, whether it's the active server; for a replicated drive,
+/// whether it is primary for every volume on record (a drive whose volumes
+/// disagree on primary has no single source and is skipped - see the module
+/// doc comment on the `NodeLocal`-elsewhere handoff for why a single source
+/// is needed at all).
+fn is_local_source(registry: &DriveRegistry, state: &ClusterState, drive: &str) -> bool {
+    if !registry.implements(drive) {
+        return false;
+    }
+    if registry.is_served(drive) {
+        return registry.active_server(drive, &state.unreachable) == Some(registry.node());
+    }
+    let mut volumes = state.volumes.iter().filter(|(id, _)| id.drive == drive).peekable();
+    if volumes.peek().is_none() {
+        return false;
+    }
+    volumes.all(|(_, v)| v.primary == registry.node())
+}
+
+/// Pushes every volume of `drive` to `target_node`'s own copy of the same
+/// drive, once. Never followed by `SetVolumeReplica`: `target_node` is a
+/// backup destination's staging area, not a standing replica, so the
+/// cluster's replication bookkeeping must never learn about this write - see
+/// `folder_import::push_now` for the pattern this mirrors and
+/// `cl_drive::migration::sync_all_inner` for the call shape.
+async fn push_drive_once(state: &ClusterState, registry: &DriveRegistry, drive: &str, target_node: &str) -> Result<()> {
+    let addr = state
+        .nodes
+        .get(target_node)
+        .map(|ns| ns.rpc_addr)
+        .ok_or_else(|| anyhow!("node {target_node} is not in the cluster"))?;
+    let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
+    let engine = DeltaEngine::default();
+    for (id, vstate) in state.volumes.iter().filter(|(id, _)| id.drive == drive) {
+        let src = registry.volume_path(id)?;
+        engine
+            .sync(&src, peer, id, vstate.generation, ProgressSink::none())
+            .await
+            .map_err(|e| anyhow!("syncing {id} to {target_node}: {e}"))?;
+    }
+    Ok(())
+}
+
+async fn run_restic_backup(
+    cluster: &Arc<ClusterNode>,
+    key: &ClusterKey,
+    data_dir: &Path,
+    state: &ClusterState,
+    target: &DriveBackupTarget,
+    destination: &BackupDestination,
+    source_path: &Path,
+) -> Result<BackupRunOutcome> {
+    backup_secrets::ensure_password_secret(cluster, key, state, &destination.password_secret).await?;
+    // Re-read: `ensure_password_secret` may just have written the entry
+    // `build_repo` needs to open.
+    let state = cluster.state().await;
+    let cred_dir = data_dir.join("restic").join("creds").join(&destination.id);
+    let (repo, _guards) = backup_secrets::build_repo(&state, key, &cred_dir, destination)?;
+
+    let tag = target.drive.clone();
+    let forget = forget_args(target);
+    let source_path = source_path.to_path_buf();
+
+    // restic is a blocking `std::process::Command` - never call it straight
+    // off an async fn's stack, see `clouduler-drive-sync-blocks-runtime`.
+    tokio::task::spawn_blocking(move || -> Result<BackupRunOutcome> {
+        if !repo.is_initialized() {
+            repo.init().map_err(|e| anyhow!("restic init: {e}"))?;
+        }
+        let outcome = repo.backup(&[source_path.as_path()], &[tag.as_str()]).map_err(|e| anyhow!("restic backup: {e}"))?;
+        repo.forget(&forget).map_err(|e| anyhow!("restic forget: {e}"))?;
+        Ok(BackupRunOutcome::Succeeded { snapshot_id: outcome.snapshot_id, bytes: outcome.bytes })
+    })
+    .await
+    .map_err(|e| anyhow!("the restic task panicked: {e}"))?
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cl_raft::ids::InstanceId;
+    use cl_raft::state::{Assignment, DesiredState, StackState};
+
+    fn stack_with_volume(drive: &str, volume: &str, stop_before: Option<bool>) -> StackState {
+        let stop_line = match stop_before {
+            Some(true) => "\n        backup:\n          stop_before: true",
+            Some(false) => "\n        backup:\n          stop_before: false",
+            None => "",
+        };
+        StackState {
+            name: "app".into(),
+            spec: format!(
+                "services:\n  web:\n    image: nginx\n    volumes:\n      - {drive}/{volume}:/data\n    x-clouduler:{stop_line}\n"
+            ),
+            revision: 1,
+            configs: Default::default(),
+            secrets: Default::default(),
+            used_configs: Default::default(),
+            used_secrets: Default::default(),
+        }
+    }
+
+    fn assignment(instance: InstanceId, node: &str) -> Assignment {
+        Assignment { instance, node: node.into(), desired: DesiredState::Running, image_digest: None, migration: None }
+    }
+
+    fn target(stop_containers: Option<bool>) -> DriveBackupTarget {
+        DriveBackupTarget {
+            id: "t1".into(),
+            drive: "fast".into(),
+            destination_id: "d1".into(),
+            enabled: true,
+            frequency_secs: 86_400,
+            time_of_day: None,
+            keep_last: None,
+            keep_within_secs: None,
+            stop_containers,
+            last_run: None,
+        }
+    }
+
+    #[test]
+    fn instances_using_drive_finds_every_service_mounting_it() {
+        let mut state = ClusterState::default();
+        state.stacks.insert("app".into(), stack_with_volume("fast", "data", None));
+        let instance = InstanceId::new("app", "web", 0);
+        state
+            .assignments
+            .insert(instance.clone(), assignment(instance.clone(), "n1"));
+
+        assert_eq!(instances_using_drive(&state, "fast"), vec![instance]);
+        assert!(instances_using_drive(&state, "other").is_empty());
+    }
+
+    #[test]
+    fn target_override_wins_regardless_of_stack_overrides() {
+        let mut state = ClusterState::default();
+        state.stacks.insert("app".into(), stack_with_volume("fast", "data", Some(false)));
+        let instance = InstanceId::new("app", "web", 0);
+        state
+            .assignments
+            .insert(instance.clone(), assignment(instance.clone(), "n1"));
+
+        assert!(resolve_stop_containers(&target(Some(true)), &state, &[instance]));
+    }
+
+    #[test]
+    fn no_explicit_answer_defaults_to_stopping() {
+        let state = ClusterState::default();
+        assert!(resolve_stop_containers(&target(None), &state, &[]));
+    }
+
+    #[test]
+    fn unanimous_false_skips_stopping() {
+        let mut state = ClusterState::default();
+        state.stacks.insert("app".into(), stack_with_volume("fast", "data", Some(false)));
+        let instance = InstanceId::new("app", "web", 0);
+        state
+            .assignments
+            .insert(instance.clone(), assignment(instance.clone(), "n1"));
+
+        assert!(!resolve_stop_containers(&target(None), &state, &[instance]));
+    }
+
+    #[test]
+    fn any_explicit_true_wins_over_a_false() {
+        let mut state = ClusterState::default();
+        state.stacks.insert("a".into(), stack_with_volume("fast", "x", Some(false)));
+        state.stacks.insert("b".into(), stack_with_volume("fast", "y", Some(true)));
+        let i1 = InstanceId::new("a", "web", 0);
+        let i2 = InstanceId::new("b", "web", 0);
+        state.assignments.insert(i1.clone(), assignment(i1.clone(), "n1"));
+        state.assignments.insert(i2.clone(), assignment(i2.clone(), "n1"));
+
+        assert!(resolve_stop_containers(&target(None), &state, &[i1, i2]));
+    }
+}

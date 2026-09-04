@@ -141,6 +141,16 @@ export function DurationField({ id, label, value, onChange, hint, disabled }: Fi
   );
 }
 
+export function TimeOfDayField({ id, label, value, onChange, hint, disabled }: FieldProps<string>) {
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+      <input id={id} type="time" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} />
+      {hint && <span className="field-hint">{hint}</span>}
+    </div>
+  );
+}
+
 export function PortField({ id, label, value, onChange, hint, disabled }: FieldProps<number>) {
   const valid = isValidPort(value);
   return (

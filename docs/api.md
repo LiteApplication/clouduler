@@ -288,6 +288,37 @@ Read-only: the `backup:` fields themselves (repo url, age recipient, branch,
 interval) go through the normal `/api/config` flow, same as any other config
 section. See `docs/git-backup.md`.
 
+## Restic backups
+
+```
+GET    /api/restic/destinations                    read    id, name, kind, has_credentials
+PUT    /api/restic/destinations                     create/update a destination (id in body)
+DELETE /api/restic/destinations/:id                 remove a destination
+GET    /api/restic/targets                          read    every drive's backup schedules
+PUT    /api/restic/targets                           create/update a schedule (id in body)
+DELETE /api/restic/targets/:id                       remove a schedule
+POST   /api/restic/targets/:id/run                    trigger a run now, outside its schedule
+GET    /api/restic/runs[?target=ID]                  read    run history, newest first
+GET    /api/restic/destinations/:id/snapshots         read    restic snapshots at a destination
+POST   /api/restic/restore/drive                      restore a whole drive
+POST   /api/restic/restore/volume                     restore one volume
+POST   /api/restic/restore/service                    restore every volume a service uses
+GET    /api/restic/restore-requests                   read    restore request history, newest first
+```
+
+See `docs/backups.md`. Destination/target `PUT` carries `id` in the request
+body rather than the url, so the same call creates or edits: an unknown id
+creates, a known one updates. `password`/`ssh_private_key`/
+`s3_access_key_id`+`s3_secret_access_key` are only accepted on
+`PUT /api/restic/destinations`, sealed immediately, and omitted (rather than
+echoed back) on read.
+
+Restore is not performed by the handler. It submits a `RestoreRequest`
+through raft and returns its id right away; whichever node actually holds the
+target drive claims and executes it. `/api/events` already streams
+`restic_runs`/`restore_requests` on every state change, so poll those rather
+than this endpoint for live status - there is no separate progress stream.
+
 ## Drives and volumes
 
 ```

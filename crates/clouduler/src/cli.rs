@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use clap_complete::engine::ArgValueCompleter;
+use cl_raft::ids::VolumeId;
 
 use crate::completion;
 
@@ -284,6 +285,15 @@ pub enum Command {
         /// A BPF filter expression, e.g. `port 2283` or `host 10.244.7.11`.
         #[arg(trailing_var_arg = true)]
         filter: Vec<String>,
+    },
+    /// Restic-based drive backups: destinations, per-drive schedules, and
+    /// restore. Distinct from `restore`/`emergency`, which recover the
+    /// cluster's own replicated metadata (config, stacks, secrets) - this is
+    /// about the data *inside* drives, backed up with restic and restored by
+    /// hand. These talk to a running daemon.
+    Backup {
+        #[command(subcommand)]
+        command: Box<BackupCommand>,
     },
     /// Print or install shell completions.
     ///
@@ -729,4 +739,225 @@ pub enum SecretCommand {
 pub enum DriveCommand {
     /// List the drives and the nodes implementing them.
     List,
+}
+
+/// Restic-based drive backups: where to keep them, when to run them, and how
+/// to restore. See `Command::Backup`'s own doc comment for how this differs
+/// from `Command::Restore`.
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// Manage backup destinations - the places restic keeps a drive's history.
+    Destination {
+        #[command(subcommand)]
+        command: BackupDestinationCommand,
+    },
+    /// Manage a drive's schedule/retention against a destination.
+    Target {
+        #[command(subcommand)]
+        command: BackupTargetCommand,
+    },
+    /// Trigger a backup run for a target immediately, outside its schedule.
+    Run {
+        /// Target id (see `backup target list`).
+        id: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Show recent backup runs, newest first.
+    History {
+        /// Only show runs for this target.
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// List the snapshots stored at a destination.
+    Snapshots {
+        /// Destination id (see `backup destination list`).
+        destination: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Restore an entire drive, stopping and restarting every instance that
+    /// uses it.
+    RestoreDrive {
+        /// Drive to restore.
+        drive: String,
+        /// Destination to restore from.
+        #[arg(long)]
+        destination: String,
+        /// Snapshot id, or "latest" (the default) for the most recent one.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Restore a single volume, scoped out of its drive's whole-drive
+    /// snapshot, stopping and restarting only the instances that mount it.
+    RestoreVolume {
+        /// Volume to restore, as `drive/volume`.
+        volume: VolumeId,
+        /// Destination to restore from.
+        #[arg(long)]
+        destination: String,
+        /// Snapshot id, or "latest" (the default) for the most recent one.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Restore every volume a service uses, stopping and restarting the
+    /// service once.
+    RestoreService {
+        /// Stack the service belongs to.
+        stack: String,
+        /// Service within the stack.
+        service: String,
+        /// Destination to restore from, needed only when the drive backs up
+        /// to more than one.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Snapshot id, or "latest" (the default) for the most recent one.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BackupDestinationCommand {
+    /// Add or replace a backup destination.
+    Add(Box<BackupDestinationAddArgs>),
+    /// List backup destinations.
+    List {
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Remove a backup destination. Refused while any target references it.
+    Remove {
+        id: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct BackupDestinationAddArgs {
+    /// Unique id for this destination.
+    pub id: String,
+    /// Human-readable name.
+    #[arg(long)]
+    pub name: String,
+    #[arg(long, value_enum)]
+    pub kind: BackupDestinationKindArg,
+    /// `node-local`: the cluster node holding the backup directory.
+    #[arg(long, required_if_eq("kind", "node-local"))]
+    pub node: Option<String>,
+    /// `node-local`: directory on that node. `ssh`: directory on the
+    /// remote host.
+    #[arg(long, required_if_eq("kind", "node-local"), required_if_eq("kind", "ssh"))]
+    pub path: Option<String>,
+    /// `ssh`: remote host.
+    #[arg(long, required_if_eq("kind", "ssh"))]
+    pub host: Option<String>,
+    /// `ssh`: port. Defaults to 22.
+    #[arg(long, default_value_t = 22)]
+    pub port: u16,
+    /// `ssh`: user to connect as.
+    #[arg(long, required_if_eq("kind", "ssh"))]
+    pub user: Option<String>,
+    /// `s3`: bucket name.
+    #[arg(long, required_if_eq("kind", "s3"))]
+    pub bucket: Option<String>,
+    /// `s3`: endpoint (host, optionally with port).
+    #[arg(long, required_if_eq("kind", "s3"))]
+    pub endpoint: Option<String>,
+    /// `s3`: region, if the endpoint needs one.
+    #[arg(long)]
+    pub region: Option<String>,
+    /// `s3`: key prefix within the bucket.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Repository password. Auto-generated and sealed if omitted -
+    /// restic always needs one regardless of backend.
+    #[arg(long)]
+    pub password: Option<String>,
+    /// `ssh`: path to a private key file to seal as this destination's
+    /// credentials.
+    #[arg(long, conflicts_with = "s3_secret_access_key")]
+    pub ssh_key_file: Option<PathBuf>,
+    /// `s3`: access key id. Requires --s3-secret-access-key.
+    #[arg(long, requires = "s3_secret_access_key")]
+    pub s3_access_key_id: Option<String>,
+    /// `s3`: secret access key. Requires --s3-access-key-id.
+    #[arg(long, requires = "s3_access_key_id")]
+    pub s3_secret_access_key: Option<String>,
+    #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+    pub via: Option<String>,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum BackupDestinationKindArg {
+    NodeLocal,
+    Ssh,
+    S3,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BackupTargetCommand {
+    /// Add or update a drive's schedule/retention against a destination.
+    Set {
+        /// Unique id for this target.
+        id: String,
+        /// Drive to back up.
+        #[arg(long)]
+        drive: String,
+        /// Destination to back up to.
+        #[arg(long)]
+        destination: String,
+        /// How often to run, e.g. "1d", "12h".
+        #[arg(long)]
+        frequency: String,
+        /// Time of day (UTC, "HH:MM") to run at, once due. Any time of day
+        /// if omitted.
+        #[arg(long)]
+        time_of_day: Option<String>,
+        /// Keep at least this many recent snapshots.
+        #[arg(long)]
+        keep_last: Option<u32>,
+        /// Keep every snapshot within this duration, e.g. "30d".
+        #[arg(long)]
+        keep_within: Option<String>,
+        /// Stop containers using the drive before backing up. Defaults to
+        /// the x-clouduler stack/service override, then true.
+        #[arg(long)]
+        stop_containers: Option<bool>,
+        /// Create disabled - the target exists but never runs on its own
+        /// until `--enabled` is passed on a later `set`.
+        #[arg(long)]
+        enabled: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// List backup targets.
+    List {
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Remove a backup target.
+    Remove {
+        id: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
 }

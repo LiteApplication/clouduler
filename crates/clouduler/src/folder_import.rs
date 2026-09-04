@@ -283,7 +283,7 @@ fn parse_target(target: &str) -> Result<(String, String, Option<String>)> {
 }
 
 /// Instances whose stack mounts `id`.
-fn instances_using(state: &ClusterState, id: &VolumeId) -> Vec<InstanceId> {
+pub(crate) fn instances_using(state: &ClusterState, id: &VolumeId) -> Vec<InstanceId> {
     let mut found = Vec::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;

@@ -16,6 +16,7 @@ pub mod objects;
 pub mod oidc;
 pub mod redirects;
 pub mod registries;
+pub mod restic;
 pub mod self_update;
 pub mod stacks;
 pub mod static_routes;
@@ -45,6 +46,7 @@ pub fn router() -> Router<AppState> {
         .merge(static_routes::router())
         .merge(self_update::router())
         .merge(registries::router())
+        .merge(restic::router())
         .merge(updates::router())
         .merge(wireguard::router())
 }

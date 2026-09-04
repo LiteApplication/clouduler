@@ -1,3 +1,7 @@
+mod backup_cli;
+mod backup_restore;
+mod backup_runner;
+mod backup_secrets;
 mod capture;
 mod cli;
 mod completion;
@@ -31,8 +35,8 @@ use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
-    Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, NodeCommand, SecretCommand, SourceCommand,
-    StackCommand,
+    BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, NodeCommand, SecretCommand,
+    SourceCommand, StackCommand,
 };
 
 #[tokio::main]
@@ -203,6 +207,25 @@ async fn main() -> Result<()> {
         Command::Capture { target, network, write, via, filter } => {
             capture::run(&cfg, &target, network, write, filter, via.as_deref()).await
         }
+        Command::Backup { command } => match *command {
+            BackupCommand::Destination { command } => backup_cli::destination(&cfg, command).await,
+            BackupCommand::Target { command } => backup_cli::target(&cfg, command).await,
+            BackupCommand::Run { id, via } => backup_cli::run(&cfg, &id, via.as_deref()).await,
+            BackupCommand::History { target, via } => backup_cli::history(&cfg, target.as_deref(), via.as_deref()).await,
+            BackupCommand::Snapshots { destination, via } => backup_cli::snapshots(&cfg, &destination, via.as_deref()).await,
+            BackupCommand::RestoreDrive { drive, destination, snapshot, yes, via } => {
+                let node_name = hostname()?;
+                backup_cli::restore_drive(&cfg, &node_name, &drive, &destination, snapshot.as_deref(), yes, via.as_deref()).await
+            }
+            BackupCommand::RestoreVolume { volume, destination, snapshot, yes, via } => {
+                let node_name = hostname()?;
+                backup_cli::restore_volume(&cfg, &node_name, &volume, &destination, snapshot.as_deref(), yes, via.as_deref()).await
+            }
+            BackupCommand::RestoreService { stack, service, destination, snapshot, yes, via } => {
+                let node_name = hostname()?;
+                backup_cli::restore_service(&cfg, &node_name, &stack, &service, destination.as_deref(), snapshot.as_deref(), yes, via.as_deref()).await
+            }
+        },
     }
 }
 

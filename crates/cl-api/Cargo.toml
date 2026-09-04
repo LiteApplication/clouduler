@@ -12,6 +12,7 @@ cl-drive.workspace = true
 cl-net.workspace = true
 cl-proxy.workspace = true
 cl-raft.workspace = true
+cl-restic.workspace = true
 cl-sched.workspace = true
 cl-secret.workspace = true
 cl-update.workspace = true

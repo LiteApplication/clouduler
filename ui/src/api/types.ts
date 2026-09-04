@@ -284,7 +284,102 @@ export interface ClusterState {
    *  leaving every other assignment untouched. Cleared automatically once
    *  another manager is reachable again. */
   emergency_stack: string | null;
+  restic_destinations: Record<string, BackupDestination>;
+  restic_targets: Record<string, DriveBackupTarget>;
+  restic_runs: Record<string, BackupRun>;
+  restore_requests: Record<string, RestoreRequest>;
   version: number;
+}
+
+// ---- restic backups ----
+
+export type BackupDestinationKind =
+  | { kind: 'nodelocal'; node: string; path: string }
+  | { kind: 'ssh'; host: string; port: number; user: string; path: string }
+  | { kind: 's3'; bucket: string; endpoint: string; region?: string | null; prefix?: string | null };
+
+/** A place restic can keep a drive's backup history. A drive may back up to
+ *  several of these at once - see DriveBackupTarget. */
+export interface BackupDestination {
+  id: string;
+  name: string;
+  kind: BackupDestinationKind;
+  password_secret: string;
+  credentials_secret?: string | null;
+}
+
+/** What GET /api/restic/destinations returns: never the secret names
+ *  themselves, just whether credentials beyond the password are set. */
+export interface BackupDestinationSummary {
+  id: string;
+  name: string;
+  kind: BackupDestinationKind;
+  has_credentials: boolean;
+}
+
+/** One drive's backup relationship with one destination. A drive may have
+ *  several of these, one per destination it backs up to. */
+export interface DriveBackupTarget {
+  id: string;
+  drive: string;
+  destination_id: string;
+  enabled: boolean;
+  frequency_secs: number;
+  /** "HH:MM", 24h, UTC. Null means any time of day once frequency_secs has
+   *  elapsed. */
+  time_of_day?: string | null;
+  keep_last?: number | null;
+  keep_within_secs?: number | null;
+  /** Overrides the resolved x-clouduler stop-before-backup default when set. */
+  stop_containers?: boolean | null;
+  /** Unix seconds this target last started a run. Null before its first run. */
+  last_run?: number | null;
+}
+
+export type BackupRunOutcome =
+  | 'Running'
+  | { Succeeded: { snapshot_id: string; bytes: number } }
+  | { Failed: { error: string } };
+
+export type BackupTrigger = 'Schedule' | { Manual: { by: string } };
+
+/** One completed, failed, or in-flight backup run, kept as history. */
+export interface BackupRun {
+  id: string;
+  target_id: string;
+  drive: string;
+  destination_id: string;
+  started_at: number;
+  finished_at?: number | null;
+  outcome: BackupRunOutcome;
+  triggered_by: BackupTrigger;
+}
+
+export type RestoreScope =
+  | { Drive: { drive: string } }
+  | { Volume: { volume: VolumeIdStr } }
+  | { Service: { stack: string; service: string } };
+
+export type RestoreStatus = 'Pending' | 'Running' | 'Succeeded' | { Failed: { error: string } };
+
+/** A restore submitted through the api. Whichever node actually implements
+ *  the target drive claims (Pending -> Running) and executes it. */
+export interface RestoreRequest {
+  id: string;
+  scope: RestoreScope;
+  destination_id?: string | null;
+  snapshot?: string | null;
+  requested_at: number;
+  finished_at?: number | null;
+  status: RestoreStatus;
+  requested_by: string;
+}
+
+/** One restic snapshot, as GET /api/restic/destinations/:id/snapshots returns. */
+export interface SnapshotInfo {
+  id: string;
+  time: string;
+  tags: string[];
 }
 
 /** The replicated cluster.yaml and the generation it was written at. */

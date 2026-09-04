@@ -161,6 +161,10 @@
     },
     "overlay": null,
     "removed": [],
+    "restic_destinations": {},
+    "restic_runs": {},
+    "restic_targets": {},
+    "restore_requests": {},
     "secrets": {
       "web.secret": {
         "key_fingerprint": "fp",

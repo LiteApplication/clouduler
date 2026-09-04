@@ -827,6 +827,7 @@ dependencies = [
  "cl-net",
  "cl-proxy",
  "cl-raft",
+ "cl-restic",
  "cl-sched",
  "cl-secret",
  "cl-update",
@@ -1022,6 +1023,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cl-restic"
+version = "0.5.19"
+dependencies = [
+ "cl-raft",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "cl-sched"
 version = "0.5.19"
 dependencies = [
@@ -1134,6 +1146,7 @@ version = "0.5.19"
 dependencies = [
  "age",
  "anyhow",
+ "base64 0.23.1",
  "blake3",
  "cl-api",
  "cl-backup",
@@ -1144,6 +1157,7 @@ dependencies = [
  "cl-net",
  "cl-proxy",
  "cl-raft",
+ "cl-restic",
  "cl-sched",
  "cl-secret",
  "cl-update",

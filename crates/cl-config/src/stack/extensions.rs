@@ -398,6 +398,17 @@ pub struct VolumeSyncOverride {
     pub enabled: Option<bool>,
 }
 
+/// Per service/stack override of whether a restic backup run stops this
+/// service's containers first. `None` defers to the drive backup target's
+/// own setting, then a hardcoded default of stopping - see
+/// `StackFile::effective_backup_stop_before`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BackupOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_before: Option<bool>,
+}
+
 /// Clouduler extensions on a single service.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
@@ -420,6 +431,8 @@ pub struct ServiceExtensions {
     /// `c` directly. See `StackFile::colocate_group`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub colocate: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupOverride>,
 }
 
 /// Stack wide defaults under the top level `x-clouduler` key. Services
@@ -433,6 +446,8 @@ pub struct StackDefaults {
     pub node: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub volume_sync: BTreeMap<String, VolumeSyncOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupOverride>,
 }
 
 #[cfg(test)]
@@ -581,6 +596,18 @@ volume_sync:
             "docker_socket:\n  target: /var/run/docker.sock\n  bogus: 1\n",
         )
         .unwrap_err();
+        assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn parses_backup_stop_before() {
+        let ext: ServiceExtensions = serde_yaml::from_str("backup:\n  stop_before: false\n").unwrap();
+        assert_eq!(ext.backup, Some(BackupOverride { stop_before: Some(false) }));
+    }
+
+    #[test]
+    fn backup_rejects_unknown_keys() {
+        let err = serde_yaml::from_str::<ServiceExtensions>("backup:\n  bogus: 1\n").unwrap_err();
         assert!(err.to_string().contains("bogus"), "{err}");
     }
 

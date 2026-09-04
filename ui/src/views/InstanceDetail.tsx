@@ -209,6 +209,13 @@ export function InstanceDetail() {
                 <Icon name="download" /> Update to latest
               </button>
             )}
+            {parsed && (
+              <Link to={`/backup/restore?scope=service&stack=${encodeURIComponent(parsed.stack)}&service=${encodeURIComponent(parsed.service)}`}>
+                <button>
+                  <Icon name="restart" /> Restore volumes
+                </button>
+              </Link>
+            )}
           </div>
           <div className="flex-row">
             <select value={moveTarget} onChange={(e) => setMoveTarget(e.target.value)} aria-label="Move to node">

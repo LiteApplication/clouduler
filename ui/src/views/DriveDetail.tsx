@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type { DriveStatus } from '../api/types';
 import { useClusterState } from '../state/store';
@@ -185,6 +185,51 @@ export function DriveDetail() {
                 <tr>
                   <td colSpan={isAdmin ? 6 : 5} className="empty-cell">
                     no volumes on this drive
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-head">
+          <h2>
+            <Icon name="cloud" /> Backups
+          </h2>
+          {isAdmin && (
+            <Link to={`/backup/restore?scope=drive&drive=${encodeURIComponent(name)}`}>
+              <button>
+                <Icon name="restart" /> Restore this drive
+              </button>
+            </Link>
+          )}
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>Frequency</th>
+                <th>Last run</th>
+                <th>Enabled</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(cluster ? Object.values(cluster.restic_targets).filter((t) => t.drive === name) : []).map((t) => (
+                <tr key={t.id}>
+                  <td>{cluster?.restic_destinations[t.destination_id]?.name ?? t.destination_id}</td>
+                  <td>every {Math.round(t.frequency_secs / 3600)}h</td>
+                  <td>{t.last_run ? new Date(t.last_run * 1000).toLocaleString() : 'never'}</td>
+                  <td>{t.enabled ? 'yes' : 'no'}</td>
+                </tr>
+              ))}
+              {(!cluster || Object.values(cluster.restic_targets).filter((t) => t.drive === name).length === 0) && (
+                <tr>
+                  <td colSpan={4} className="empty-cell">
+                    no backup schedules for this drive - add one under{' '}
+                    <Link to="/backup/schedules">Backup &gt; Schedules</Link>
                   </td>
                 </tr>
               )}

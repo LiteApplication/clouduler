@@ -7,6 +7,9 @@ import type {
   ApiKey,
   ApiKeyCreated,
   AcceptedUpdates,
+  BackupDestinationKind,
+  BackupDestinationSummary,
+  BackupRun,
   BulkResult,
   CertificateState,
   CloudflareTokenStatus,
@@ -25,11 +28,13 @@ import type {
   RebalanceResponse,
   RedirectRule,
   RegistryAccount,
+  RestoreRequest,
   SecretEntry,
   SecretPutRequest,
   SelfUpdateConfig,
   SelfUpdateGithubTokenStatus,
   SelfUpdateRunState,
+  SnapshotInfo,
   StackDetailResponse,
   StackValidationResult,
   StaticRouteRule,
@@ -337,6 +342,53 @@ export const api = {
   cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
 
   gitBackupStatus: () => get<GitBackupStatus>('/api/git-backup/status'),
+
+  // restic backups: destinations, per-drive schedules, run history, restore.
+  // The `id` for a destination/target is inside the request body, not the
+  // url - the server accepts either a new id (create) or an existing one
+  // (edit) through the same PUT.
+  listBackupDestinations: () => get<BackupDestinationSummary[]>('/api/restic/destinations'),
+  putBackupDestination: (body: {
+    id: string;
+    name: string;
+    kind: BackupDestinationKind;
+    password?: string;
+    ssh_private_key?: string;
+    s3_access_key_id?: string;
+    s3_secret_access_key?: string;
+  }) => put<void>('/api/restic/destinations', body),
+  removeBackupDestination: (id: string) => del<void>(`/api/restic/destinations/${encodeURIComponent(id)}`),
+
+  putBackupTarget: (body: {
+    id: string;
+    drive: string;
+    destination_id: string;
+    enabled: boolean;
+    frequency_secs: number;
+    time_of_day?: string | null;
+    keep_last?: number | null;
+    keep_within_secs?: number | null;
+    stop_containers?: boolean | null;
+  }) => put<void>('/api/restic/targets', body),
+  removeBackupTarget: (id: string) => del<void>(`/api/restic/targets/${encodeURIComponent(id)}`),
+  runBackupTarget: (id: string) => post<string>(`/api/restic/targets/${encodeURIComponent(id)}/run`),
+
+  listBackupRuns: (target?: string) =>
+    get<BackupRun[]>(`/api/restic/runs${target ? `?target=${encodeURIComponent(target)}` : ''}`),
+  listSnapshots: (destinationId: string) =>
+    get<SnapshotInfo[]>(`/api/restic/destinations/${encodeURIComponent(destinationId)}/snapshots`),
+
+  restoreDrive: (body: { drive: string; destination_id: string; snapshot?: string | null }) =>
+    post<string>('/api/restic/restore/drive', body),
+  restoreVolume: (body: { drive: string; volume: string; destination_id: string; snapshot?: string | null }) =>
+    post<string>('/api/restic/restore/volume', body),
+  restoreService: (body: {
+    stack: string;
+    service: string;
+    destination_id?: string | null;
+    snapshot?: string | null;
+  }) => post<string>('/api/restic/restore/service', body),
+  listRestoreRequests: () => get<RestoreRequest[]>('/api/restic/restore-requests'),
 };
 
 /**

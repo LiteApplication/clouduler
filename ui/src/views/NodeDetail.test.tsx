@@ -23,6 +23,10 @@ const cluster: ClusterState = {
   wrapped_keys: {},
   cluster_config: null,
   emergency_stack: null,
+  restic_destinations: {},
+  restic_targets: {},
+  restic_runs: {},
+  restore_requests: {},
   overlay: null,
   version: 1,
 };

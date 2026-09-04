@@ -251,10 +251,27 @@ pub async fn run(
         config_tx,
     ));
 
+    let cfg_for_restore = cfg.clone();
     let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone(), failover.probe_interval));
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
     let git_backup = tokio::spawn(watch_git_backup(cluster.clone(), config_rx.clone(), key_rx.clone(), data_dir.clone()));
+
+    // restic is opt-in - only worth warning about if something actually
+    // depends on it, unlike ethtool (which every overlay network needs).
+    if cluster.state().await.restic_targets.values().any(|t| t.enabled) && !cl_restic::dependency::restic_available() {
+        warn!("restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed");
+    }
+    let backup_due_checker = tokio::spawn(crate::backup_runner::start_due_checker(cluster.clone()));
+    let backup_runner = crate::backup_runner::start_runner(
+        cluster.clone(),
+        node_name.clone(),
+        drives.registry(),
+        docker.clone(),
+        key_rx.clone(),
+        data_dir.clone(),
+    );
+    let restore_watcher = crate::backup_restore::start_restore_watcher(cfg_for_restore, cluster.clone(), node_name.clone());
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => { result?; }
@@ -265,6 +282,9 @@ pub async fn run(
     self_report.abort();
     reaper.abort();
     git_backup.abort();
+    backup_due_checker.abort();
+    backup_runner.abort();
+    restore_watcher.abort();
     config_writer.abort();
     detector.abort();
     fencing.abort();

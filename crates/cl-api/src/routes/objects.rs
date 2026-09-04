@@ -40,6 +40,7 @@ fn is_reserved_secret(name: &str) -> bool {
         || is_reserved_cloudflare_secret(name)
         || is_reserved_oidc_secret(name)
         || super::git_backup::is_reserved_secret(name)
+        || cl_restic::secret_names::is_reserved_restic_secret(name)
 }
 
 pub fn router() -> Router<AppState> {
@@ -326,5 +327,11 @@ mod tests {
         assert!(is_reserved(cl_backup::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG));
         assert!(is_reserved(cl_backup::status::LAST_EXPORT_CONFIG));
         assert!(is_reserved_secret(cl_backup::deploy_key::DEPLOY_KEY_PRIVATE_SECRET));
+    }
+
+    #[test]
+    fn the_restic_destination_secrets_are_excluded_from_the_generic_secret_listing() {
+        assert!(is_reserved_secret(&cl_restic::secret_names::password_secret_name("d1")));
+        assert!(is_reserved_secret(&cl_restic::secret_names::credentials_secret_name("d1")));
     }
 }
