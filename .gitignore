@@ -10,3 +10,4 @@ tests/qemu/work/
 __pycache__/
 .code-graph/
 .cargo/config.toml
+.worktrees/
