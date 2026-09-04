@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
 import { ClusterStoreProvider } from './state/store';
+import { InstanceProgressProvider } from './state/progressStore';
 import { Layout } from './components/Layout';
 import { Login } from './views/Login';
 import { Overview } from './views/Overview';
@@ -35,29 +36,31 @@ export function App() {
 
   return (
     <ClusterStoreProvider>
-      <ConfigDraftProvider>
-        <Layout>
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/nodes" element={<Nodes />} />
-            <Route path="/nodes/:name" element={<NodeDetail />} />
-            <Route path="/stacks" element={<Stacks />} />
-            <Route path="/stacks/:name" element={<StackDetail />} />
-            <Route path="/instances" element={<Instances />} />
-            <Route path="/instances/:id" element={<InstanceDetail />} />
-            <Route path="/updates" element={<Updates />} />
-            <Route path="/configs-secrets" element={<ConfigsSecrets />} />
-            <Route path="/drives" element={<Drives />} />
-            <Route path="/drives/:name" element={<DriveDetail />} />
-            <Route path="/networks/:name" element={<NetworkDetail />} />
-            <Route path="/configuration/*" element={<Configuration />} />
-            <Route path="/certificates" element={<Certificates />} />
-            <Route path="/redirects" element={<Redirects />} />
-            <Route path="/self-update" element={<SelfUpdate />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Layout>
-      </ConfigDraftProvider>
+      <InstanceProgressProvider>
+        <ConfigDraftProvider>
+          <Layout>
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/nodes" element={<Nodes />} />
+              <Route path="/nodes/:name" element={<NodeDetail />} />
+              <Route path="/stacks" element={<Stacks />} />
+              <Route path="/stacks/:name" element={<StackDetail />} />
+              <Route path="/instances" element={<Instances />} />
+              <Route path="/instances/:id" element={<InstanceDetail />} />
+              <Route path="/updates" element={<Updates />} />
+              <Route path="/configs-secrets" element={<ConfigsSecrets />} />
+              <Route path="/drives" element={<Drives />} />
+              <Route path="/drives/:name" element={<DriveDetail />} />
+              <Route path="/networks/:name" element={<NetworkDetail />} />
+              <Route path="/configuration/*" element={<Configuration />} />
+              <Route path="/certificates" element={<Certificates />} />
+              <Route path="/redirects" element={<Redirects />} />
+              <Route path="/self-update" element={<SelfUpdate />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Layout>
+        </ConfigDraftProvider>
+      </InstanceProgressProvider>
     </ClusterStoreProvider>
   );
 }
