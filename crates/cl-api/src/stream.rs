@@ -117,6 +117,59 @@ pub fn cpu_percent(
     }
 }
 
+/// How often `/api/instances/events` recomputes every instance's summary and
+/// checks for a change. Faster than `STATE_POLL_INTERVAL` on purpose:
+/// unlike raft state (replicated, so every node's view moves in lockstep),
+/// redeploy/migration progress is read straight off this node's own
+/// in-memory trackers and a live docker inspect, so there is no replication
+/// lag to wait out — the only cost of polling faster is the docker inspects
+/// themselves, which `summarize_local` already does cheaply enough for the
+/// existing 4-5s ui poll to call on every instance, every tick.
+const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// One instance's live progress, as sent over `/api/instances/events`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InstanceProgressEvent {
+    pub instance_id: String,
+    pub state: String,
+    pub reason: Option<String>,
+    pub step: Option<(u8, u8)>,
+}
+
+/// SSE stream of `progress` events, one per instance whose `(state, reason,
+/// step)` changed since the last time this connection emitted anything for
+/// it. A steady instance is sent once (its current value) and then never
+/// again until something about it actually changes.
+pub fn instance_progress_events(
+    state: crate::server::AppState,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = futures::stream::unfold(
+        (state, std::collections::HashMap::<String, InstanceProgressEvent>::new()),
+        |(state, mut last)| async move {
+            let mut interval = tokio::time::interval(PROGRESS_POLL_INTERVAL);
+            loop {
+                interval.tick().await;
+                let cluster_state = state.cluster.state().await;
+                for (id, event) in crate::routes::instances::progress_snapshot(&state, &cluster_state).await {
+                    if last.get(&id) == Some(&event) {
+                        continue;
+                    }
+                    last.insert(id, event.clone());
+                    let sse_event = Event::default()
+                        .event("progress")
+                        .json_data(&event)
+                        .unwrap_or_else(|_| Event::default().event("progress").data("{}"));
+                    return Some((Ok(sse_event), (state, last)));
+                }
+                // Nothing changed this tick; loop back to `interval.tick()`
+                // rather than returning, so the connection stays open with
+                // no event sent — same shape as `cluster_state_events`.
+            }
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

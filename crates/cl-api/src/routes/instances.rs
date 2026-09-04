@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/{id}/update", post(update))
         .route("/api/instances/{id}/logs", get(logs))
         .route("/api/instances/{id}/stats", get(stats))
+        .route("/api/instances/events", get(instance_events))
         // Node-to-node only, HMAC authenticated: what the public routes above
         // forward to when the instance they were asked about lives on another
         // node. See `internal_peer`.
@@ -348,6 +349,35 @@ mod progress_tests {
         assert_eq!(reason.as_deref(), Some("migrating (syncing volume 1/2, 5/12 files)"));
         assert_eq!(step, Some((1, 2)));
     }
+}
+
+/// Every instance's current `(state, reason, step)`, for `/api/instances/events`
+/// to diff against what it last sent. Reuses `summarize`'s existing
+/// local/remote split — a remote instance still gets a real answer via the
+/// same internal forwarding `list` already relies on.
+pub(crate) async fn progress_snapshot(
+    state: &AppState,
+    cluster_state: &cl_raft::ClusterState,
+) -> Vec<(String, crate::stream::InstanceProgressEvent)> {
+    let summaries = futures::future::join_all(cluster_state.assignments.values().map(|a| summarize(state, a))).await;
+    summaries
+        .into_iter()
+        .map(|s| {
+            (
+                s.id.clone(),
+                crate::stream::InstanceProgressEvent {
+                    instance_id: s.id,
+                    state: s.state,
+                    reason: s.reason,
+                    step: s.step,
+                },
+            )
+        })
+        .collect()
+}
+
+async fn instance_events(_identity: Identity, State(state): State<AppState>) -> impl IntoResponse {
+    stream::instance_progress_events(state)
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<InstanceSummary>> {
