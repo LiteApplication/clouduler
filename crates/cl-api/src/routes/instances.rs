@@ -8,14 +8,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cl_config::Service;
+use cl_config::{Service, StackFile};
 use cl_docker::{Docker, ExecSpec, LogOptions, Tail};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::DesiredState;
 use cl_raft::Request as ClusterRequest;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tracing::warn;
 
 use crate::auth::internal::InternalAuth;
@@ -47,6 +48,9 @@ pub fn router() -> Router<AppState> {
         // that node directly, so there is no public forwarding counterpart
         // to this one yet.
         .route("/api/instances/internal/{id}/exec", get(internal_exec))
+        // Node-to-node only, same as `exec`: `clouduler capture` resolves the
+        // instance's node itself and connects here directly.
+        .route("/api/instances/internal/{id}/capture", get(internal_capture))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -846,5 +850,157 @@ async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, s
             }
         }
     }
+    let _ = socket.send(Message::Close(None)).await;
+}
+
+#[derive(Deserialize)]
+struct CaptureQuery {
+    /// Which of the stack's declared networks to capture. Defaults to the
+    /// same network `clouduler stack deploy` builds a VXLAN overlay for (see
+    /// `cl_sched::run::overlay_network_name`) - the one the proxy actually
+    /// forwards to, which is what someone chasing a proxy bug wants to see
+    /// without having to know the stack's network layout first.
+    network: Option<String>,
+    /// A raw BPF filter expression (`tcpdump`'s own syntax), space-split on
+    /// this end since it arrives as a single query value. Good enough for
+    /// the common case (`port 2283`, `host 10.244.7.11 and port 2283`); a
+    /// filter that itself needs quoting is out of scope here.
+    filter: Option<String>,
+    /// Stream raw pcap bytes (`tcpdump -w -`) instead of decoded text lines,
+    /// so the cli can save them straight to a `.pcap` file for Wireshark.
+    #[serde(default)]
+    pcap: bool,
+}
+
+/// Node-to-node only: runs `tcpdump` on this node's own bridge for one of a
+/// stack's overlay networks and streams its output back over a websocket,
+/// the same shape as `internal_exec`. This is what used to mean SSHing into
+/// a cluster node and reasoning out its bridge interface name by hand (see
+/// `cl_net::vxlan::bridge_name`) before running `tcpdump` there as root -
+/// this endpoint does exactly that, from the daemon's own root privileges,
+/// so `clouduler capture` can do it from a laptop instead.
+async fn internal_capture(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<CaptureQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let instance = parse_id(&id)?;
+    let cluster_state = state.cluster.state().await;
+    let stack = cluster_state
+        .stacks
+        .get(&instance.stack)
+        .ok_or_else(|| ApiError::NotFound(format!("stack {} not found", instance.stack)))?;
+    let file = StackFile::parse(&stack.spec).map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let network = match query.network {
+        Some(n) => n,
+        None => {
+            let cfg = state.cluster_config.read().await;
+            cl_sched::run::overlay_network_name(&file, &cfg)
+                .ok_or_else(|| {
+                    ApiError::BadRequest(format!(
+                        "stack {} has no subnetted or public network to pick a default from; pass --network",
+                        instance.stack
+                    ))
+                })?
+                .to_string()
+        }
+    };
+    if !file.networks.contains_key(&network) {
+        return Err(ApiError::BadRequest(format!("stack {} declares no network {network}", instance.stack)));
+    }
+
+    let overlay = cl_sched::run::overlay_name(&instance.stack, &network);
+    let bridge = cl_net::vxlan::bridge_name(&overlay);
+    Ok(ws.on_upgrade(move |socket| bridge_capture(socket, bridge, query.pcap, query.filter)))
+}
+
+async fn bridge_capture(mut socket: WebSocket, iface: String, pcap: bool, filter: Option<String>) {
+    let mut cmd = Command::new("tcpdump");
+    cmd.arg("-i").arg(&iface).arg("-nn").kill_on_drop(true);
+    if pcap {
+        cmd.arg("-w").arg("-");
+    } else {
+        cmd.arg("-l").arg("-U");
+    }
+    if let Some(filter) = &filter {
+        cmd.args(filter.split_whitespace());
+    }
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = socket.send(Message::Text(format!("tcpdump: {e}").into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let mut stdout = child.stdout.take().expect("piped");
+    let stderr = child.stderr.take().expect("piped");
+
+    // Relayed on its own task rather than in the main select! below: once
+    // stderr hits EOF (immediately, if tcpdump never writes to it) a select!
+    // arm would keep firing on that same `Ok(0)` forever and spin the loop.
+    // A channel that just stops sending once its task ends needs no such
+    // care in the receiver.
+    let (err_tx, mut err_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut stderr = stderr;
+        let mut buf = [0u8; 4096];
+        loop {
+            match stderr.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if err_tx.send(String::from_utf8_lossy(&buf[..n]).into_owned()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut buf = [0u8; 8192];
+    let mut err_open = true;
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+            n = stdout.read(&mut buf) => {
+                match n {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let msg = if pcap { Message::Binary(buf[..n].to_vec().into()) } else { Message::Text(String::from_utf8_lossy(&buf[..n]).into_owned().into()) };
+                        if socket.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Only polled while the sender task is still alive; once it ends
+            // (`None`) the branch is disabled instead of spinning on a
+            // permanently-ready `None` forever.
+            text = err_rx.recv(), if err_open => {
+                match text {
+                    Some(text) => {
+                        if socket.send(Message::Text(format!("tcpdump: {text}").into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => err_open = false,
+                }
+            }
+        }
+    }
+    let _ = child.start_kill();
     let _ = socket.send(Message::Close(None)).await;
 }

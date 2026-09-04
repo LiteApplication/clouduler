@@ -21,6 +21,6 @@ pub use stack::{
     Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket, ForwardAuth, Healthcheck, HealthcheckTest,
     Middleware, Placement, PortMapping, PortRange, ProxyRoute, PublishMode, RedirectRegex, ResourceSpec, Resources,
     RestartPolicy, ServiceExtensions, ExposePort, Service, StackConfig, StackDefaults, StackFile,
-    StackNetwork, StackRequirements, StackSecret, StackVolume, Protocol, TmpfsOptions, UpdateConfig, VolumeMount,
+    StackNetwork, BoundPort, StackRequirements, StackSecret, StackVolume, Protocol, TmpfsOptions, UpdateConfig, VolumeMount,
     VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
 };

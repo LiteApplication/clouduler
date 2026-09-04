@@ -662,13 +662,25 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
   // that declared it" bypass servedDrives gives configs, this time for
   // `cl-sched::place::rejection`'s `everywhere_networks`.
   const [natNetworks, setNatNetworks] = useState<Set<string>>(new Set());
+  // Drive name -> nodes holding its real (non-mountpoint) directory: only
+  // consulted for a `drive/.` whole-drive mount, which needs the stricter
+  // "pinned to the sole real holder" bar `validate_whole_drive_mounts`
+  // enforces rather than the ordinary implements-or-served check.
+  const [driveHolders, setDriveHolders] = useState<Record<string, string[]>>({});
+  // Networks a raw `x-clouduler.expose` port is actually checked against
+  // (`ClusterConfig::port_gated_networks`: public and wireguard only).
+  const [portGatedNetworks, setPortGatedNetworks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     api
       .listDrives()
       .then((drives) => {
-        if (!cancelled) setServedDrives(new Set(drives.filter((d) => d.mode === 'served').map((d) => d.name)));
+        if (cancelled) return;
+        setServedDrives(new Set(drives.filter((d) => d.mode === 'served').map((d) => d.name)));
+        setDriveHolders(
+          Object.fromEntries(drives.map((d) => [d.name, d.mode === 'served' ? d.served_by : d.nodes.map((n) => n.node)])),
+        );
       })
       .catch(() => {
         /* the table just falls back to strict (replicated-style) eligibility */
@@ -684,10 +696,14 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
       .getConfiguration()
       .then((config) => {
         if (cancelled) return;
-        const names = Object.entries(config.networks)
+        const nat = Object.entries(config.networks)
           .filter(([, net]) => net.type === 'nat')
           .map(([name]) => name);
-        setNatNetworks(new Set(names));
+        setNatNetworks(new Set(nat));
+        const gated = Object.entries(config.networks)
+          .filter(([, net]) => net.type === 'public' || net.type === 'wireguard')
+          .map(([name]) => name);
+        setPortGatedNetworks(new Set(gated));
       })
       .catch(() => {
         /* the table just falls back to strict (per-node) eligibility */
@@ -758,6 +774,8 @@ function PlacementSection({ stackName, spec }: { stackName: string; spec: string
               cluster={cluster}
               servedDrives={servedDrives}
               natNetworks={natNetworks}
+              driveHolders={driveHolders}
+              portGatedNetworks={portGatedNetworks}
               onCreateConfig={(n) => setCreatingConfig(n)}
               onCreateSecret={(n) => setCreatingSecret(n)}
             />

@@ -6,10 +6,10 @@
 //! a node never waits on the leader to start a container it has already been
 //! given, and the leader never has to reach into anyone else's docker.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::Docker;
@@ -23,13 +23,24 @@ use tracing::{debug, info, warn};
 use crate::materialize::Materializer;
 use crate::place;
 use crate::plan::{self, Desired};
-use crate::reconcile::{self, PullTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
+use crate::reconcile::{self, Action, PullTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
 use crate::spec;
 
 /// How often to sweep, on top of reacting to state changes. A periodic pass
 /// catches drift docker never told us about, like a container someone stopped
 /// by hand.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How many times a container needs restarting within `CRASH_LOOP_WINDOW`
+/// before this node gives up on running it in place and asks the leader to
+/// move it elsewhere. Three catches a genuine loop (an OOM kill, a crash on
+/// startup) within a minute or so while still giving a single transient
+/// failure - a dockerd blip, a slow pull racing the sweep - room to recover
+/// on its own.
+const CRASH_LOOP_THRESHOLD: usize = 3;
+
+/// The window `CRASH_LOOP_THRESHOLD` is counted over.
+const CRASH_LOOP_WINDOW: Duration = Duration::from_secs(120);
 
 pub struct Scheduler {
     node: String,
@@ -52,6 +63,12 @@ pub struct Scheduler {
     /// Instances this node's reconciler is currently pulling the image for,
     /// shared with the api so it can report a "pulling" instance state.
     pulling: PullTracker,
+    /// Recent `Action::Start` timestamps per instance this node has had to
+    /// restart. Node-local and in-memory only, never persisted or shared:
+    /// enough to notice a container this node keeps failing to keep running
+    /// (an OOM kill, a crash on start) without needing a raft round trip just
+    /// to count it. See `note_restart_and_check_crash_loop`.
+    restarts: Arc<RwLock<BTreeMap<InstanceId, VecDeque<Instant>>>>,
 }
 
 impl Scheduler {
@@ -71,6 +88,7 @@ impl Scheduler {
             zone: None,
             boot_config,
             pulling,
+            restarts: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -203,6 +221,23 @@ impl Scheduler {
         } else {
             info!(actions = actions.len(), fenced, "reconciling");
         }
+
+        // An instance this node keeps having to restart is never fixed by
+        // restarting it again: ask the leader to move it somewhere else.
+        // Checked before `apply` runs the actual restart, but the restart
+        // still happens either way - a rejected or unsubmittable move must
+        // not leave the instance down for no reason.
+        {
+            let keep: BTreeSet<&InstanceId> = targets.iter().map(|t| &t.assignment.instance).collect();
+            self.restarts.write().await.retain(|id, _| keep.contains(id));
+        }
+        for action in &actions {
+            let Action::Start(id) = action else { continue };
+            if self.note_restart_and_check_crash_loop(id).await {
+                self.try_reschedule_away(state, id).await;
+            }
+        }
+
         reconciler.apply(&actions, &targets, &actual).await?;
 
         // Objects for instances that have moved on must not linger on disk.
@@ -237,6 +272,79 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+
+    /// Records this sweep's restart of `id` and reports whether it has now
+    /// happened `CRASH_LOOP_THRESHOLD` times within `CRASH_LOOP_WINDOW`.
+    async fn note_restart_and_check_crash_loop(&self, id: &InstanceId) -> bool {
+        let now = Instant::now();
+        let mut restarts = self.restarts.write().await;
+        let deque = restarts.entry(id.clone()).or_default();
+        record_restart(deque, now)
+    }
+
+    /// Ask the leader to move a crash-looping instance to a different
+    /// eligible node, the same `BeginMigration` request a manual move or
+    /// `clouduler rebalance` submits - so a redeploy or a config edit racing
+    /// this is rejected exactly where a manual move would be.
+    ///
+    /// Skipped (restarting in place is all that is left) for an instance
+    /// that is pinned, global, or anchored to another instance by a shared
+    /// proxy host or `x-clouduler.colocate` group, the same exclusions
+    /// `rebalance::plan` applies: none of those can safely move to just any
+    /// other eligible node on their own. Also skipped if a migration is
+    /// already under way, so a slow move in progress is not raced by a
+    /// second one.
+    async fn try_reschedule_away(&self, state: &ClusterState, id: &InstanceId) {
+        let Some(assignment) = state.assignments.get(id) else { return };
+        if assignment.node != self.node {
+            return;
+        }
+        if assignment.migration.as_ref().is_some_and(|m| !m.phase.is_terminal()) {
+            return;
+        }
+
+        let live = self.live_config(state);
+        let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
+        let desired = desired_instances(state, &live.egress_networks(), &live.port_gated_networks(), colocate_proxy_hosts);
+        let Some(item) = desired.iter().find(|d| &d.id == id) else { return };
+
+        if item.global || item.pinned_node.is_some() || item.anchor_keys().next().is_some() {
+            warn!(instance = %id, "keeps restarting here but cannot be safely moved (pinned, global, or anchored), restarting in place");
+            return;
+        }
+
+        let Ok((eligible, _)) = place::candidates(state, item, &live.served_drives(), &live.nat_networks()) else {
+            return;
+        };
+        let Some(target) = eligible
+            .iter()
+            .filter(|n| n.name != self.node)
+            .min_by_key(|n| state.assignments_on(&n.name).count())
+        else {
+            warn!(instance = %id, "keeps restarting here but no other node can run it, restarting in place");
+            return;
+        };
+
+        warn!(instance = %id, from = %self.node, to = %target.name, "instance keeps restarting here, moving it to another node");
+        match self
+            .cluster
+            .submit(Request::BeginMigration {
+                instance: id.clone(),
+                to: target.name.clone(),
+                drives: item.drives.clone(),
+            })
+            .await
+        {
+            Ok(response) => {
+                if let Some(error) = response.error {
+                    warn!(instance = %id, %error, "could not move a crash-looping instance away");
+                } else {
+                    self.restarts.write().await.remove(id);
+                }
+            }
+            Err(e) => warn!(instance = %id, error = %e, "could not submit a move for a crash-looping instance"),
+        }
     }
 
     /// Build what this node should be running, materializing each instance's
@@ -620,6 +728,20 @@ pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Reques
         }
     }
     requests
+}
+
+/// Pushes `now` and reports whether `CRASH_LOOP_THRESHOLD` restarts now sit
+/// within `CRASH_LOOP_WINDOW` of it, pruning anything older than the window
+/// on the way so a deque tracking a long-lived instance never grows past
+/// what the window can hold. Pulled out of `Scheduler::note_restart_and_check_crash_loop`
+/// as a pure function so the counting logic is testable without a running
+/// cluster.
+fn record_restart(deque: &mut VecDeque<Instant>, now: Instant) -> bool {
+    deque.push_back(now);
+    while deque.front().is_some_and(|t| now.duration_since(*t) > CRASH_LOOP_WINDOW) {
+        deque.pop_front();
+    }
+    deque.len() >= CRASH_LOOP_THRESHOLD
 }
 
 /// Docker network name for a stack's declared network.
@@ -1141,5 +1263,25 @@ web: { address: cloud, network: tailscale }
     fn a_stack_with_no_volumes_registers_nothing() {
         let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
         assert!(volume_requests(&state(), &cfg).is_empty());
+    }
+
+    #[test]
+    fn three_restarts_within_the_window_trip_the_crash_loop() {
+        let mut deque = VecDeque::new();
+        let base = Instant::now();
+        assert!(!record_restart(&mut deque, base));
+        assert!(!record_restart(&mut deque, base + Duration::from_secs(10)));
+        assert!(record_restart(&mut deque, base + Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn restarts_spread_outside_the_window_never_accumulate() {
+        let mut deque = VecDeque::new();
+        let base = Instant::now();
+        assert!(!record_restart(&mut deque, base));
+        assert!(!record_restart(&mut deque, base + CRASH_LOOP_WINDOW + Duration::from_secs(1)));
+        // The first restart aged out, so this is only the second live one.
+        assert!(!record_restart(&mut deque, base + CRASH_LOOP_WINDOW + Duration::from_secs(2)));
+        assert_eq!(deque.len(), 2);
     }
 }

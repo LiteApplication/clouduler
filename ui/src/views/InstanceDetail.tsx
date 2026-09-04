@@ -256,13 +256,19 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
   const [error, setError] = useState<string | null>(null);
   const [servedDrives, setServedDrives] = useState<Set<string>>(new Set());
   const [natNetworks, setNatNetworks] = useState<Set<string>>(new Set());
+  const [driveHolders, setDriveHolders] = useState<Record<string, string[]>>({});
+  const [portGatedNetworks, setPortGatedNetworks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     api
       .listDrives()
       .then((drives) => {
-        if (!cancelled) setServedDrives(new Set(drives.filter((d) => d.mode === 'served').map((d) => d.name)));
+        if (cancelled) return;
+        setServedDrives(new Set(drives.filter((d) => d.mode === 'served').map((d) => d.name)));
+        setDriveHolders(
+          Object.fromEntries(drives.map((d) => [d.name, d.mode === 'served' ? d.served_by : d.nodes.map((n) => n.node)])),
+        );
       })
       .catch(() => {
         /* the table just falls back to strict (replicated-style) eligibility */
@@ -278,10 +284,14 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
       .getConfiguration()
       .then((config) => {
         if (cancelled) return;
-        const names = Object.entries(config.networks)
+        const nat = Object.entries(config.networks)
           .filter(([, net]) => net.type === 'nat')
           .map(([name]) => name);
-        setNatNetworks(new Set(names));
+        setNatNetworks(new Set(nat));
+        const gated = Object.entries(config.networks)
+          .filter(([, net]) => net.type === 'public' || net.type === 'wireguard')
+          .map(([name]) => name);
+        setPortGatedNetworks(new Set(gated));
       })
       .catch(() => {
         /* the table just falls back to strict (per-node) eligibility */
@@ -330,6 +340,8 @@ function InstancePlacement({ stack, service }: { stack: string; service: string 
       cluster={cluster}
       servedDrives={servedDrives}
       natNetworks={natNetworks}
+      driveHolders={driveHolders}
+      portGatedNetworks={portGatedNetworks}
       onCreateConfig={() => {}}
       onCreateSecret={() => {}}
     />

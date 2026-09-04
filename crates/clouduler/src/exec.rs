@@ -130,7 +130,7 @@ where
 /// `danger_accept_invalid_certs(true)` reqwest client `clouduler logs` uses:
 /// every node's certificate is self signed until ACME issues a real one, and
 /// the caller is authenticated by the HMAC header, not TLS trust.
-fn insecure_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+pub(crate) fn insecure_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))

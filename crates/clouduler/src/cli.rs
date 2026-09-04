@@ -250,6 +250,41 @@ pub enum Command {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
+    /// Capture traffic on the overlay network a stack's containers run on.
+    ///
+    /// Runs `tcpdump` on the node that owns the target instance, on the
+    /// bridge for one of the stack's declared networks - the same interface
+    /// you would otherwise have to SSH in, find via `docker network
+    /// inspect` and `ip link`, and run `tcpdump` on by hand, as root, to get
+    /// to. Defaults to the network the reverse proxy actually forwards to.
+    ///
+    /// With no `-w`, prints `tcpdump`'s normal decoded text live, same as
+    /// running it locally. With `-w <file>`, saves raw pcap bytes instead,
+    /// to open later in Wireshark or `tcpdump -r`.
+    ///
+    /// A BPF filter (`tcpdump`'s own expression syntax) goes after `--`:
+    ///
+    ///   clouduler capture immich.server.0 -- port 2283
+    Capture {
+        /// Instance id (`stack.service.index`) or stack name. A stack name
+        /// only resolves when it currently has exactly one running instance.
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        target: String,
+        /// Which of the stack's declared networks to capture on. Defaults to
+        /// the one the reverse proxy forwards to.
+        #[arg(long)]
+        network: Option<String>,
+        /// Save raw pcap bytes to this file instead of printing decoded text.
+        #[arg(short = 'w', long)]
+        write: Option<std::path::PathBuf>,
+        /// Node to ask for the cluster's current state. Defaults to any
+        /// manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+        /// A BPF filter expression, e.g. `port 2283` or `host 10.244.7.11`.
+        #[arg(trailing_var_arg = true)]
+        filter: Vec<String>,
+    },
     /// Print or install shell completions.
     ///
     /// Completions are dynamic: past the fixed set of subcommands and flags,

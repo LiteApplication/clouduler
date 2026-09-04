@@ -2,7 +2,7 @@
 //! itself (so a stack can be linted with no cluster at hand), and cross-checks
 //! against a `ClusterConfig` for the fields that must resolve against it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cluster::ClusterConfig;
 use crate::error::{ConfigError, Result};
@@ -86,6 +86,7 @@ impl StackFile {
         self.validate_networks_exist(cluster)?;
         self.validate_networks_implemented(cluster)?;
         self.validate_drives_exist(cluster)?;
+        self.validate_whole_drive_mounts(cluster)?;
         self.validate_proxy_expose_networks(cluster)?;
         self.validate_service_network_kinds(cluster)?;
         self.validate_node_pins(cluster)?;
@@ -225,6 +226,61 @@ impl StackFile {
                         format!("services.{name}.volumes[{idx}]"),
                         format!("no drive named {drive} declared in the cluster"),
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A volume mount whose subpath is exactly `.` binds a drive's real root
+    /// directory straight into the container (`cl_drive::registry::resolve_relative`
+    /// resolves it to the drive root itself), bypassing the scoped,
+    /// per-volume path every other mount goes through. That is only safe when
+    /// there is exactly one node holding the real directory and this service
+    /// is pinned there: unpinned, or with more than one node able to hold the
+    /// data, the scheduler could place the container against a different
+    /// node's copy (or, for a served drive, an NFS mountpoint of somebody
+    /// else's copy) than the last time it ran, silently diverging from
+    /// whatever else touches that drive.
+    fn validate_whole_drive_mounts(&self, cluster: &ClusterConfig) -> Result<()> {
+        for (name, svc) in &self.services {
+            for (idx, vol) in svc.volumes.iter().enumerate() {
+                let (Some(drive), Some(volume)) = (&vol.drive, &vol.volume) else { continue };
+                if volume != "." {
+                    continue;
+                }
+                let at = format!("services.{name}.volumes[{idx}]");
+                let holders = drive_root_holders(cluster, drive);
+                let Some(sole) = holders.iter().next().filter(|_| holders.len() == 1) else {
+                    return Err(ConfigError::invalid(
+                        at,
+                        format!(
+                            "drive {drive} can be served by more than one node ({}), so mounting {drive}/. \
+                             (its whole root) is not allowed: pin a specific volume under it instead",
+                            holders.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ),
+                    ));
+                };
+                match self.effective_node(name) {
+                    Some(node) if &node == sole => {}
+                    Some(node) => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "{name} is pinned to {node}, but only {sole} holds the real directory for drive {drive}; \
+                                 mounting {drive}/. needs x-clouduler.node: {sole}"
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "mounting {drive}/. (its whole root) requires pinning {name} with x-clouduler.node: {sole}, \
+                                 the only node holding the real directory for drive {drive}"
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -391,6 +447,31 @@ impl StackFile {
             }
         }
         Ok(())
+    }
+}
+
+/// Nodes holding a real, non-mountpoint local directory for `drive_name`: for
+/// a replicated drive, every node that implements it; for a served drive,
+/// only its `served_by` candidates (every other implementing node gets an NFS
+/// mountpoint of whichever candidate is currently active, not real data).
+fn drive_root_holders(cluster: &ClusterConfig, drive_name: &str) -> BTreeSet<String> {
+    let Some(drive) = cluster.drives.get(drive_name) else {
+        return BTreeSet::new();
+    };
+    if drive.is_served() {
+        drive
+            .served_by
+            .iter()
+            .filter(|n| cluster.nodes.get(n.as_str()).is_some_and(|node| node.implements(drive_name)))
+            .cloned()
+            .collect()
+    } else {
+        cluster
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.implements(drive_name))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 }
 
@@ -728,6 +809,46 @@ services:
     fn a_writable_config_is_accepted() {
         let raw = "services:\n  a:\n    image: x\n    configs:\n      - source: nginx_conf\n        write: true\n";
         StackFile::parse(raw).expect("a writable config is fine");
+    }
+
+    #[test]
+    fn whole_drive_mount_on_a_multi_holder_drive_is_rejected() {
+        // "bulk" is implemented by both n1 and n3 in the reference cluster.
+        let raw = "services:\n  a:\n    image: x\n    volumes:\n      - bulk/.:/data\n    x-clouduler: { node: n1 }\n";
+        let err = stack(raw).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("services.a.volumes[0]"));
+        assert!(err.to_string().contains("can be served by more than one node"));
+    }
+
+    fn single_holder_cluster() -> ClusterConfig {
+        // Drop n2's "fast" so n1 is the drive's only holder.
+        let yaml = CLUSTER_YAML.replace(
+            "      wan:\n        domain: n2.example.net # will use CNAME\n    drives:\n      fast: /srv/clouduler/fast\n",
+            "      wan:\n        domain: n2.example.net # will use CNAME\n    drives: {}\n",
+        );
+        ClusterConfig::parse(&yaml).expect("patched cluster is valid")
+    }
+
+    #[test]
+    fn whole_drive_mount_without_a_pin_is_rejected() {
+        let raw = "services:\n  a:\n    image: x\n    volumes:\n      - fast/.:/data\n";
+        let err = stack(raw).validate(&single_holder_cluster()).unwrap_err();
+        assert!(err.to_string().contains("services.a.volumes[0]"));
+        assert!(err.to_string().contains("requires pinning"));
+        assert!(err.to_string().contains("x-clouduler.node: n1"));
+    }
+
+    #[test]
+    fn whole_drive_mount_pinned_to_the_wrong_node_is_rejected() {
+        let raw = "services:\n  a:\n    image: x\n    volumes:\n      - fast/.:/data\n    x-clouduler: { node: n3 }\n";
+        let err = stack(raw).validate(&single_holder_cluster()).unwrap_err();
+        assert!(err.to_string().contains("only n1 holds the real directory"));
+    }
+
+    #[test]
+    fn whole_drive_mount_pinned_to_the_sole_holder_is_accepted() {
+        let raw = "services:\n  a:\n    image: x\n    volumes:\n      - fast/.:/data\n    x-clouduler: { node: n1 }\n";
+        stack(raw).validate(&single_holder_cluster()).expect("pinned to the drive's only holder");
     }
 
     #[test]

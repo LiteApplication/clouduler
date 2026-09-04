@@ -168,6 +168,25 @@ export interface StackRequirements {
    *  `dns_status`/`cert_status` to show this stack's DNS/cert state — those
    *  maps carry no stack field of their own. */
   hosts: string[];
+  /** `x-clouduler.node`, this service's effective hard pin (its own, or the
+   *  stack wide default). Per-service only: `null` on the stack-aggregate
+   *  `requirements`, only meaningful on `per_service`. */
+  pinned_node: string | null;
+  /** Raw `deploy.placement.constraints` entries (Swarm syntax, e.g.
+   *  `node.hostname==n1` or `node.labels.fast==true`). Per-service only,
+   *  same reasoning as `pinned_node`. */
+  placement_constraints: string[];
+  /** `x-clouduler.expose` entries. A node needs the port marked open in its
+   *  `open_ports` to be a candidate, but only when the network is public or
+   *  wireguard kind (a nat/egress/internal network's expose entry, if any,
+   *  needs no such check). Per-service only, same reasoning as `pinned_node`. */
+  bound_ports: { network: string; protocol: PortProtocol; published: number }[];
+  /** Drives mounted whole (`drive/.`) rather than as a named subvolume — a
+   *  subset of `drives`. These need the stricter "pinned to the drive's one
+   *  real holder" eligibility instead of the ordinary implements-or-served
+   *  check every other drive gets. Per-service only, same reasoning as
+   *  `pinned_node`. */
+  whole_drive_mounts: string[];
 }
 
 /** GET /api/stacks/:name. */

@@ -177,10 +177,16 @@ impl DriveRegistry {
 
 /// Join `rel` onto `root`, rejecting anything that could climb out: empty
 /// components, `.`/`..`, and leading slashes (which show up as an empty
-/// first component once split).
+/// first component once split). `rel == "."` is the one exception: it names
+/// the drive's own root directory (a whole-drive mount), not a subpath of
+/// it, so it resolves to `root` itself rather than being rejected as a
+/// no-op path component.
 pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
         return Err(DriveError::PathEscape { path: rel.to_string() });
+    }
+    if rel == "." {
+        return Ok(root.to_path_buf());
     }
     let mut path = root.to_path_buf();
     for part in rel.split('/') {
@@ -372,6 +378,25 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let resolved = resolve_in_root(tmp.path(), "new/file.txt").unwrap();
         assert_eq!(resolved, tmp.path().join("new/file.txt"));
+    }
+
+    #[test]
+    fn resolve_relative_of_bare_dot_is_the_drive_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_relative(tmp.path(), ".").unwrap(), tmp.path());
+    }
+
+    #[test]
+    fn resolve_in_root_of_bare_dot_is_the_drive_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_in_root(tmp.path(), ".").unwrap(), tmp.path());
+    }
+
+    #[test]
+    fn resolve_relative_still_rejects_a_dot_component_inside_a_longer_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_relative(tmp.path(), "a/./b").unwrap_err();
+        assert!(matches!(err, DriveError::PathEscape { .. }));
     }
 
     #[test]

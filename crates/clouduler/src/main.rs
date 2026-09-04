@@ -1,3 +1,4 @@
+mod capture;
 mod cli;
 mod completion;
 mod completions;
@@ -198,6 +199,9 @@ async fn main() -> Result<()> {
         Command::Exec { target, user, via, cmd } => {
             let cmd = if cmd.is_empty() { vec!["sh".to_string()] } else { cmd };
             exec::run(&cfg, &target, cmd, user, via.as_deref()).await
+        }
+        Command::Capture { target, network, write, via, filter } => {
+            capture::run(&cfg, &target, network, write, filter, via.as_deref()).await
         }
     }
 }
