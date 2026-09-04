@@ -69,3 +69,30 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
+
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+use cl_raft::ids::InstanceId;
+
+/// A migrating instance's current position: which of its volumes is being
+/// synced right now, and that volume's own file-count progress. Plain
+/// `std::sync::RwLock`, not `tokio`'s: it is only ever held for the instant
+/// it takes to update or read one entry, from both a synchronous
+/// `ProgressSink` callback (Task 2) and an async reader (`cl-api`), and a
+/// blocking lock is simpler than making the callback async just to `.await`
+/// a tokio lock it holds for microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationSyncProgress {
+    /// 1-based: "syncing volume 2 of 3".
+    pub volume_index: u64,
+    pub volume_count: u64,
+    pub files_done: u64,
+    pub files_total: u64,
+}
+
+/// Shared with `cl-api` so it can report live migration-sync progress
+/// without either crate depending on the other's internals — see
+/// `cl_sched::PullTracker` for the same sharing pattern applied to image
+/// pulls.
+pub type MigrationSyncTracker = Arc<RwLock<HashMap<InstanceId, MigrationSyncProgress>>>;

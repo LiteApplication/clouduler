@@ -219,6 +219,7 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
         registry: Some(&registry),
         engine: &engine,
         control: &control,
+        sync_progress: None,
     };
 
     run(&harness.node, &job).await.expect("migration succeeds");
@@ -261,6 +262,7 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
         registry: Some(&registry),
         engine: &engine,
         control: &control,
+        sync_progress: None,
     };
 
     let err = run(&harness.node, &job).await.expect_err("stop failure should abort the migration");
@@ -320,6 +322,7 @@ async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
         registry: None,
         engine: &engine,
         control: &control,
+        sync_progress: None,
     };
 
     run(&harness.node, &job).await.expect("a volumeless migration needs no registry");
@@ -364,6 +367,7 @@ async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
         registry: Some(&registry),
         engine: &engine,
         control: &control,
+        sync_progress: None,
     };
 
     run(&harness.node, &job).await.expect("a failed cleanup still leaves the move successful");

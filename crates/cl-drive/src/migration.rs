@@ -53,6 +53,9 @@ pub struct MigrationJob<'a> {
     pub registry: Option<&'a DriveRegistry>,
     pub engine: &'a dyn SyncEngine,
     pub control: &'a dyn InstanceControl,
+    /// Where to publish live sync progress for `job.instance`, if anyone is
+    /// watching. `None` in every test and in any caller that doesn't care.
+    pub sync_progress: Option<crate::progress::MigrationSyncTracker>,
 }
 
 impl MigrationJob<'_> {
@@ -161,8 +164,27 @@ async fn recorded_phase(node: &ClusterNode, instance: &InstanceId) -> Result<Mig
         .ok_or_else(|| DriveError::Config(format!("{instance} is not migrating")))
 }
 
+/// Builds the closure `sync_all` hands to `ProgressSink` for one volume of
+/// a migration: which volume this is (`volume_index`/`volume_count`) never
+/// changes once the sync for it starts, so it's captured once here rather
+/// than threaded through every `ProgressSink::report` call.
+fn migration_progress_writer(
+    tracker: crate::progress::MigrationSyncTracker,
+    instance: InstanceId,
+    volume_index: u64,
+    volume_count: u64,
+) -> crate::progress::ProgressSink {
+    crate::progress::ProgressSink::new(move |files_done, files_total| {
+        tracker.write().unwrap().insert(
+            instance.clone(),
+            crate::progress::MigrationSyncProgress { volume_index, volume_count, files_done, files_total },
+        );
+    })
+}
+
 async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
-    for volume in &job.volumes {
+    let volume_count = job.volumes.len() as u64;
+    for (idx, volume) in job.volumes.iter().enumerate() {
         let state = node.state().await;
         let generation = state
             .volumes
@@ -171,7 +193,13 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             .generation;
 
         let src_path = job.require_registry()?.volume_path(volume)?;
-        job.engine.sync(&src_path, job.target_addr, volume, generation, crate::progress::ProgressSink::none()).await?;
+        let progress = match &job.sync_progress {
+            Some(tracker) => {
+                migration_progress_writer(tracker.clone(), job.instance.clone(), idx as u64 + 1, volume_count)
+            }
+            None => crate::progress::ProgressSink::none(),
+        };
+        job.engine.sync(&src_path, job.target_addr, volume, generation, progress).await?;
 
         node.submit(Request::SetVolumeReplica {
             id: volume.clone(),
@@ -180,6 +208,9 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
         })
         .await
         .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
+    }
+    if let Some(tracker) = &job.sync_progress {
+        tracker.write().unwrap().remove(&job.instance);
     }
     Ok(())
 }
@@ -239,6 +270,8 @@ async fn fail(node: &ClusterNode, instance: &InstanceId, err: DriveError) -> Dri
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     struct AlwaysOk;
@@ -261,5 +294,32 @@ mod tests {
     #[test]
     fn instance_control_is_object_safe() {
         let _: Box<dyn InstanceControl> = Box::new(AlwaysOk);
+    }
+
+    #[test]
+    fn migration_progress_writer_records_the_volume_position_and_file_counts() {
+        let tracker: crate::progress::MigrationSyncTracker = Arc::default();
+        let instance = InstanceId::new("site", "web", 0);
+        let sink = migration_progress_writer(tracker.clone(), instance.clone(), 2, 3);
+
+        sink.report(5, 12);
+
+        let recorded = tracker.read().unwrap().get(&instance).copied().unwrap();
+        assert_eq!(recorded.volume_index, 2);
+        assert_eq!(recorded.volume_count, 3);
+        assert_eq!(recorded.files_done, 5);
+        assert_eq!(recorded.files_total, 12);
+    }
+
+    #[test]
+    fn a_later_report_overwrites_the_instance_s_entry() {
+        let tracker: crate::progress::MigrationSyncTracker = Arc::default();
+        let instance = InstanceId::new("site", "web", 0);
+        let sink = migration_progress_writer(tracker.clone(), instance.clone(), 1, 1);
+
+        sink.report(1, 4);
+        sink.report(4, 4);
+
+        assert_eq!(tracker.read().unwrap().get(&instance).unwrap().files_done, 4);
     }
 }
