@@ -260,6 +260,13 @@ pub async fn run(cfg: &ClusterConfig, id: &str, via: Option<&str>) -> Result<()>
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let target = state.restic_targets.get(id).ok_or_else(|| anyhow!("unknown backup target {id}"))?;
+    if state
+        .restic_runs
+        .values()
+        .any(|r| r.target_id == id && matches!(r.outcome, BackupRunOutcome::Running { .. }))
+    {
+        bail!("a backup is already running for target {id}");
+    }
 
     let run_id = Uuid::new_v4().to_string();
     let response = client
@@ -270,7 +277,7 @@ pub async fn run(cfg: &ClusterConfig, id: &str, via: Option<&str>) -> Result<()>
             destination_id: target.destination_id.clone(),
             started_at: unix_now(),
             finished_at: None,
-            outcome: BackupRunOutcome::Running,
+            outcome: BackupRunOutcome::Running { percent: None },
             triggered_by: BackupTrigger::Manual { by: whoami() },
         }))
         .await
@@ -308,7 +315,8 @@ pub async fn history(cfg: &ClusterConfig, target_id: Option<&str>, via: Option<&
     }
     for run in runs {
         let outcome = match &run.outcome {
-            BackupRunOutcome::Running => "running".to_string(),
+            BackupRunOutcome::Running { percent: Some(p) } => format!("running ({:.0}%)", p * 100.0),
+            BackupRunOutcome::Running { percent: None } => "running".to_string(),
             BackupRunOutcome::Succeeded { snapshot_id, bytes } => format!("succeeded snapshot={snapshot_id} bytes={bytes}"),
             BackupRunOutcome::Failed { error } => format!("failed: {error}"),
         };

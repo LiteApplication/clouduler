@@ -2,6 +2,7 @@
 // config it is handed; none of them own state, so switching pages never
 // loses an edit because the draft lives in the Configuration shell above them.
 
+import { generateX25519Identity, identityToRecipient } from 'age-encryption';
 import { useEffect, useState } from 'react';
 import { api, ApiError, encodeText } from '../../api/client';
 import type {
@@ -1281,10 +1282,50 @@ const DEFAULT_GIT_BACKUP: NonNullable<ClusterConfig['backup']> = {
   interval: '30s',
 };
 
+/** Generates a fresh age (X25519) keypair entirely client-side, downloads the
+ *  private half as a file, and hands back the public recipient string to
+ *  autofill the field above. The private key never touches the server -
+ *  clouduler only ever needs the recipient to encrypt secrets for. */
+async function generateAndDownloadAgeKey(): Promise<string> {
+  const identity = await generateX25519Identity();
+  const recipient = await identityToRecipient(identity);
+
+  const contents = `# created: ${new Date().toISOString()}\n# public key: ${recipient}\n${identity}\n`;
+  const blob = new Blob([contents], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'clouduler-age-key.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+
+  return recipient;
+}
+
 export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
   const b = draft.backup;
   const set = (patch: Partial<NonNullable<ClusterConfig['backup']>>) =>
     setDraft({ ...draft, backup: b ? { ...b, ...patch } : { ...DEFAULT_GIT_BACKUP, ...patch } });
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+
+  const generateKey = async () => {
+    setGenerateError(null);
+    setGenerating(true);
+    try {
+      const age_recipient = await generateAndDownloadAgeKey();
+      set({ age_recipient });
+    } catch (err) {
+      setGenerateError(err instanceof Error ? err.message : 'failed to generate age key');
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   return (
     <div className="card">
@@ -1314,6 +1355,21 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
             hint="The admin's age (X25519) public key, e.g. age1.... Secrets are encrypted for this key before being committed; only whoever holds the matching private key, generated and kept outside clouduler entirely, can read them back."
             disabled={disabled}
           />
+          <div className="btn-row" style={{ marginTop: -8, marginBottom: 16 }}>
+            <button type="button" onClick={generateKey} disabled={disabled || generating}>
+              <Icon name="download" /> {generating ? 'Generating...' : 'Generate age key'}
+            </button>
+            <span className="field-hint">
+              Generates a keypair in your browser and downloads the private key - it is never sent to the server.
+              The public recipient above is filled in automatically; store the downloaded file somewhere safe, it is
+              the only copy.
+            </span>
+          </div>
+          {generateError && (
+            <p className="field-error">
+              <Icon name="alert-circle" /> {generateError}
+            </p>
+          )}
           <TextField
             id="backup-branch"
             label="Branch"

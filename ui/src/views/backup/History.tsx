@@ -6,17 +6,18 @@ import { Link } from 'react-router-dom';
 import { useClusterState } from '../../state/store';
 import { Icon } from '../../components/Icon';
 import { Badge, type BadgeTone } from '../../components/Badge';
+import { Meter } from '../../components/Meter';
 import type { BackupRun, RestoreRequest } from '../../api/types';
 
 function runTone(run: BackupRun): BadgeTone {
-  if (run.outcome === 'Running') return 'warn';
-  if (typeof run.outcome === 'object' && 'Succeeded' in run.outcome) return 'good';
+  if ('Running' in run.outcome) return 'warn';
+  if ('Succeeded' in run.outcome) return 'good';
   return 'bad';
 }
 
 function runLabel(run: BackupRun): string {
-  if (run.outcome === 'Running') return 'running';
-  if (typeof run.outcome === 'object' && 'Succeeded' in run.outcome) return 'succeeded';
+  if ('Running' in run.outcome) return 'running';
+  if ('Succeeded' in run.outcome) return 'succeeded';
   return 'failed';
 }
 
@@ -103,16 +104,24 @@ export function History() {
                   <td>{fmt(r.finished_at)}</td>
                   <td>{r.triggered_by === 'Schedule' ? 'schedule' : `manual (${r.triggered_by.Manual.by})`}</td>
                   <td>
-                    <Badge
-                      tone={runTone(r)}
-                      title={typeof r.outcome === 'object' && 'Failed' in r.outcome ? r.outcome.Failed.error : undefined}
-                    >
+                    <Badge tone={runTone(r)} title={'Failed' in r.outcome ? r.outcome.Failed.error : undefined}>
                       {runLabel(r)}
                     </Badge>
-                    {typeof r.outcome === 'object' && 'Succeeded' in r.outcome && (
+                    {'Succeeded' in r.outcome && (
                       <span className="mono" style={{ fontSize: 12, marginLeft: 6 }}>
                         {r.outcome.Succeeded.snapshot_id.slice(0, 8)} · {(r.outcome.Succeeded.bytes / 1e6).toFixed(1)} MB
                       </span>
+                    )}
+                    {'Running' in r.outcome && r.outcome.Running.percent != null && (
+                      <div style={{ maxWidth: 160, marginTop: 6 }}>
+                        <Meter
+                          label="progress"
+                          value={Math.round(r.outcome.Running.percent * 100)}
+                          max={100}
+                          display={`${Math.round(r.outcome.Running.percent * 100)}%`}
+                          tone="warn"
+                        />
+                      </div>
                     )}
                   </td>
                 </tr>

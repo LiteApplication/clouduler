@@ -3,8 +3,9 @@
 //! needs (a snapshot id and byte count, or the parsed error).
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +66,11 @@ impl ResticRepo {
         run(self.command(&["init"]))
     }
 
-    pub fn backup(&self, paths: &[&Path], tags: &[&str]) -> Result<BackupOutcome> {
+    /// Runs `restic backup`, calling `on_progress` with restic's own
+    /// `percent_done` (0.0-1.0) as each `--json` status line streams in, so a
+    /// caller can surface live progress instead of only learning the outcome
+    /// once the whole (possibly very long) run finishes.
+    pub fn backup(&self, paths: &[&Path], tags: &[&str], mut on_progress: impl FnMut(f64)) -> Result<BackupOutcome> {
         let mut args: Vec<String> = vec!["backup".into(), "--json".into()];
         for tag in tags {
             args.push("--tag".into());
@@ -75,11 +80,48 @@ impl ResticRepo {
             args.push(path.display().to_string());
         }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = self.command(&arg_refs).output().map_err(ResticError::Io)?;
-        if !output.status.success() {
-            return Err(ResticError::Failed(String::from_utf8_lossy(&output.stderr).into_owned()));
+
+        let mut child = self
+            .command(&arg_refs)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(ResticError::Io)?;
+
+        // Drained on its own thread rather than after `wait()`: restic can
+        // write enough to stderr (warnings alongside a long-running backup)
+        // to fill the pipe buffer, which would otherwise deadlock this
+        // thread against a restic that's blocked writing to a pipe nobody is
+        // reading.
+        let stderr = child.stderr.take().expect("stderr piped");
+        let stderr_thread = std::thread::spawn(move || {
+            let mut buf = String::new();
+            let mut stderr = stderr;
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        });
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut summary: Option<Result<BackupOutcome>> = None;
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(ResticError::Io)?;
+            match parse_backup_line(&line) {
+                Some(BackupLine::Status { percent_done: Some(percent) }) => on_progress(percent),
+                Some(BackupLine::Status { percent_done: None }) => {}
+                Some(BackupLine::Summary(result)) => summary = Some(result),
+                None => {}
+            }
         }
-        parse_backup_summary(&output.stdout)
+
+        let status = child.wait().map_err(ResticError::Io)?;
+        let stderr_text = stderr_thread.join().unwrap_or_default();
+        if !status.success() {
+            return Err(ResticError::Failed(stderr_text));
+        }
+        match summary {
+            Some(result) => result,
+            None => Err(ResticError::Parse("no summary line in restic backup output".into())),
+        }
     }
 
     /// No-op when `retention_args` is empty - see `retention::forget_args`'s
@@ -141,31 +183,34 @@ struct BackupJsonLine {
     #[serde(default)]
     message_type: String,
     #[serde(default)]
+    percent_done: Option<f64>,
+    #[serde(default)]
     snapshot_id: Option<String>,
     #[serde(default)]
     total_bytes_processed: Option<u64>,
 }
 
-/// `restic backup --json` prints one json object per line; the last one is
-/// the summary (`message_type: "summary"`), carrying the snapshot id and
-/// byte count this crate needs. Progress lines (`message_type: "status"`)
-/// are ignored here - live progress is streamed separately by the runner
-/// (see the crate doc comment / `cl-api`'s progress plumbing), not parsed
-/// from the final captured output.
-fn parse_backup_summary(stdout: &[u8]) -> Result<BackupOutcome> {
-    let text = String::from_utf8_lossy(stdout);
-    for line in text.lines().rev() {
-        let Ok(parsed) = serde_json::from_str::<BackupJsonLine>(line) else {
-            continue;
-        };
-        if parsed.message_type == "summary" {
-            let snapshot_id = parsed
+/// One line of `restic backup --json` output, categorized for `backup`'s
+/// streaming reader: a `"status"` line carries live progress, a `"summary"`
+/// line (always the last one restic prints) carries the final outcome, and
+/// everything else (`"verbose_status"`, `"error"`, ...) is ignored here.
+enum BackupLine {
+    Status { percent_done: Option<f64> },
+    Summary(Result<BackupOutcome>),
+}
+
+fn parse_backup_line(line: &str) -> Option<BackupLine> {
+    let parsed: BackupJsonLine = serde_json::from_str(line).ok()?;
+    match parsed.message_type.as_str() {
+        "status" => Some(BackupLine::Status { percent_done: parsed.percent_done }),
+        "summary" => Some(BackupLine::Summary(
+            parsed
                 .snapshot_id
-                .ok_or_else(|| ResticError::Parse("summary line has no snapshot_id".into()))?;
-            return Ok(BackupOutcome { snapshot_id, bytes: parsed.total_bytes_processed.unwrap_or(0) });
-        }
+                .ok_or_else(|| ResticError::Parse("summary line has no snapshot_id".into()))
+                .map(|snapshot_id| BackupOutcome { snapshot_id, bytes: parsed.total_bytes_processed.unwrap_or(0) }),
+        )),
+        _ => None,
     }
-    Err(ResticError::Parse("no summary line in restic backup output".into()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,28 +226,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_summary_line_is_found_among_progress_lines() {
-        let stdout = concat!(
-            r#"{"message_type":"status","percent_done":0.1}"#,
-            "\n",
-            r#"{"message_type":"status","percent_done":0.9}"#,
-            "\n",
-            r#"{"message_type":"summary","snapshot_id":"abc123","total_bytes_processed":4096}"#,
-            "\n",
-        );
-        let outcome = parse_backup_summary(stdout.as_bytes()).expect("parses");
-        assert_eq!(outcome, BackupOutcome { snapshot_id: "abc123".into(), bytes: 4096 });
+    fn a_status_line_carries_percent_done() {
+        let line = r#"{"message_type":"status","percent_done":0.42}"#;
+        match parse_backup_line(line) {
+            Some(BackupLine::Status { percent_done: Some(p) }) => assert!((p - 0.42).abs() < 1e-9),
+            _ => panic!("expected a status line with percent_done"),
+        }
     }
 
     #[test]
-    fn no_summary_line_is_an_error() {
-        let stdout = concat!(r#"{"message_type":"status","percent_done":0.1}"#, "\n");
-        assert!(parse_backup_summary(stdout.as_bytes()).is_err());
+    fn a_summary_line_parses_the_snapshot_id_and_bytes() {
+        let line = r#"{"message_type":"summary","snapshot_id":"abc123","total_bytes_processed":4096}"#;
+        match parse_backup_line(line) {
+            Some(BackupLine::Summary(Ok(outcome))) => {
+                assert_eq!(outcome, BackupOutcome { snapshot_id: "abc123".into(), bytes: 4096 })
+            }
+            _ => panic!("expected a parsed summary"),
+        }
     }
 
     #[test]
     fn a_summary_line_missing_a_snapshot_id_is_an_error() {
-        let stdout = concat!(r#"{"message_type":"summary","total_bytes_processed":0}"#, "\n");
-        assert!(parse_backup_summary(stdout.as_bytes()).is_err());
+        let line = r#"{"message_type":"summary","total_bytes_processed":0}"#;
+        match parse_backup_line(line) {
+            Some(BackupLine::Summary(Err(_))) => {}
+            _ => panic!("expected a summary parse error"),
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_line_is_ignored() {
+        let line = r#"{"message_type":"verbose_status","action":"unchanged"}"#;
+        assert!(parse_backup_line(line).is_none());
     }
 }

@@ -336,8 +336,10 @@ export interface DriveBackupTarget {
   last_run?: number | null;
 }
 
+/** `percent` is restic's own last-seen `percent_done` (0-1), updated in
+ *  place while the run is in flight; null until the first status line lands. */
 export type BackupRunOutcome =
-  | 'Running'
+  | { Running: { percent: number | null } }
   | { Succeeded: { snapshot_id: string; bytes: number } }
   | { Failed: { error: string } };
 

@@ -495,7 +495,15 @@ pub struct BackupRun {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BackupRunOutcome {
-    Running,
+    /// `percent` is restic's own `percent_done` from its last `--json`
+    /// status line, updated in place by repeated `RecordBackupRun` submits
+    /// against the same run id while it executes - see
+    /// `clouduler::backup_runner::run_restic_backup`. `None` until the first
+    /// status line lands.
+    Running {
+        #[serde(default)]
+        percent: Option<f64>,
+    },
     Succeeded { snapshot_id: String, bytes: u64 },
     Failed { error: String },
 }
@@ -1309,6 +1317,17 @@ impl ClusterState {
             }
 
             Request::RecordBackupRun(run) => {
+                // A progress/finish update against a run's own id is always
+                // allowed (that run *is* the one already running); only a
+                // brand-new run competing for the same target is rejected.
+                if matches!(run.outcome, BackupRunOutcome::Running { .. })
+                    && self
+                        .restic_runs
+                        .values()
+                        .any(|r| r.target_id == run.target_id && r.id != run.id && matches!(r.outcome, BackupRunOutcome::Running { .. }))
+                {
+                    return Err(format!("a backup is already running for target {}", run.target_id));
+                }
                 self.restic_runs.insert(run.id.clone(), run.clone());
                 let mut same_target: Vec<&BackupRun> = self
                     .restic_runs
@@ -2489,6 +2508,48 @@ mod tests {
 
         let rejected = state.apply(&Request::SetBackupTargetLastRun { id: "nowhere".into(), at: 0 });
         assert!(rejected.error.unwrap().contains("unknown backup target nowhere"));
+    }
+
+    #[test]
+    fn a_second_running_run_for_the_same_target_is_rejected() {
+        let mut state = cluster_with_known_drive();
+        let first = BackupRun {
+            id: "run1".into(),
+            target_id: "t1".into(),
+            drive: "fast".into(),
+            destination_id: "d1".into(),
+            started_at: 0,
+            finished_at: None,
+            outcome: BackupRunOutcome::Running { percent: None },
+            triggered_by: BackupTrigger::Schedule,
+        };
+        assert!(state.apply(&Request::RecordBackupRun(first.clone())).is_ok());
+
+        let second = BackupRun { id: "run2".into(), ..first.clone() };
+        let rejected = state.apply(&Request::RecordBackupRun(second));
+        assert!(rejected.error.unwrap().contains("already running"));
+
+        // A progress update against the same run id is not a new run and is
+        // always allowed.
+        let mut progressed = first.clone();
+        progressed.outcome = BackupRunOutcome::Running { percent: Some(0.5) };
+        assert!(state.apply(&Request::RecordBackupRun(progressed)).is_ok());
+
+        // Finishing the first run frees the target up for a new one.
+        let mut finished = first;
+        finished.outcome = BackupRunOutcome::Succeeded { snapshot_id: "abc".into(), bytes: 0 };
+        assert!(state.apply(&Request::RecordBackupRun(finished)).is_ok());
+        let third = BackupRun {
+            id: "run3".into(),
+            target_id: "t1".into(),
+            drive: "fast".into(),
+            destination_id: "d1".into(),
+            started_at: 1,
+            finished_at: None,
+            outcome: BackupRunOutcome::Running { percent: None },
+            triggered_by: BackupTrigger::Schedule,
+        };
+        assert!(state.apply(&Request::RecordBackupRun(third)).is_ok());
     }
 
     #[test]

@@ -5,12 +5,20 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../api/client';
-import type { BackupDestinationSummary, DriveBackupTarget, DriveStatus } from '../../api/types';
+import type { BackupDestinationSummary, BackupRun, DriveBackupTarget, DriveStatus } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { useClusterState } from '../../state/store';
 import { Icon } from '../../components/Icon';
 import { Badge } from '../../components/Badge';
+import { Meter } from '../../components/Meter';
 import { CheckboxField, NumberField, SelectField, TimeOfDayField } from '../../components/FormFields';
+
+/** The target's own currently-`Running` run, if any - drives the "already
+ *  running" disabled state and the live progress bar. A target has at most
+ *  one, enforced server-side (see cl-raft's `RecordBackupRun` handling). */
+function runningRunFor(runs: BackupRun[], targetId: string): BackupRun | null {
+  return runs.find((r) => r.target_id === targetId && 'Running' in r.outcome) ?? null;
+}
 
 interface Draft {
   id: string;
@@ -59,6 +67,7 @@ export function Schedules() {
   useEffect(load, []);
 
   const targets = cluster ? Object.values(cluster.restic_targets) : null;
+  const runs = cluster ? Object.values(cluster.restic_runs) : [];
 
   const startCreate = () => {
     setEditing(null);
@@ -253,41 +262,56 @@ export function Schedules() {
               </tr>
             </thead>
             <tbody>
-              {targets.map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    <Link className="row-link" to={`/drives/${encodeURIComponent(t.drive)}`}>
-                      {t.drive}
-                    </Link>
-                  </td>
-                  <td>{destinationName(t.destination_id)}</td>
-                  <td>every {Math.round(t.frequency_secs / 3600)}h</td>
-                  <td>{t.time_of_day ?? 'any'}</td>
-                  <td>
-                    {t.keep_last ? `last ${t.keep_last}` : ''}
-                    {t.keep_last && t.keep_within_secs ? ', ' : ''}
-                    {t.keep_within_secs ? `${Math.round(t.keep_within_secs / 86400)}d` : ''}
-                    {!t.keep_last && !t.keep_within_secs ? 'forever' : ''}
-                  </td>
-                  <td>{t.last_run ? new Date(t.last_run * 1000).toLocaleString() : 'never'}</td>
-                  <td>
-                    <Badge tone={t.enabled ? 'good' : 'neutral'}>{t.enabled ? 'yes' : 'no'}</Badge>
-                  </td>
-                  {isAdmin && (
+              {targets.map((t) => {
+                const activeRun = runningRunFor(runs, t.id);
+                const percent = activeRun && 'Running' in activeRun.outcome ? activeRun.outcome.Running.percent : null;
+                return (
+                  <tr key={t.id}>
                     <td>
-                      <button disabled={running === t.id} onClick={() => runNow(t.id)}>
-                        <Icon name="play" /> Run now
-                      </button>
-                      <button onClick={() => startEdit(t)}>
-                        <Icon name="edit" /> Edit
-                      </button>
-                      <button className="danger" onClick={() => remove(t.id)}>
-                        <Icon name="trash" /> Remove
-                      </button>
+                      <Link className="row-link" to={`/drives/${encodeURIComponent(t.drive)}`}>
+                        {t.drive}
+                      </Link>
                     </td>
-                  )}
-                </tr>
-              ))}
+                    <td>{destinationName(t.destination_id)}</td>
+                    <td>every {Math.round(t.frequency_secs / 3600)}h</td>
+                    <td>{t.time_of_day ?? 'any'}</td>
+                    <td>
+                      {t.keep_last ? `last ${t.keep_last}` : ''}
+                      {t.keep_last && t.keep_within_secs ? ', ' : ''}
+                      {t.keep_within_secs ? `${Math.round(t.keep_within_secs / 86400)}d` : ''}
+                      {!t.keep_last && !t.keep_within_secs ? 'forever' : ''}
+                    </td>
+                    <td>{t.last_run ? new Date(t.last_run * 1000).toLocaleString() : 'never'}</td>
+                    <td>
+                      <Badge tone={t.enabled ? 'good' : 'neutral'}>{t.enabled ? 'yes' : 'no'}</Badge>
+                    </td>
+                    {isAdmin && (
+                      <td>
+                        <button disabled={running === t.id || activeRun !== null} onClick={() => runNow(t.id)}>
+                          <Icon name="play" /> {activeRun ? 'Running...' : 'Run now'}
+                        </button>
+                        <button onClick={() => startEdit(t)}>
+                          <Icon name="edit" /> Edit
+                        </button>
+                        <button className="danger" onClick={() => remove(t.id)}>
+                          <Icon name="trash" /> Remove
+                        </button>
+                        {activeRun && (
+                          <div style={{ maxWidth: 160, marginTop: 6 }}>
+                            <Meter
+                              label="progress"
+                              value={percent != null ? Math.round(percent * 100) : 0}
+                              max={100}
+                              display={percent != null ? `${Math.round(percent * 100)}%` : 'starting...'}
+                              tone="warn"
+                            />
+                          </div>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
               {targets.length === 0 && (
                 <tr>
                   <td colSpan={8} className="empty-cell">

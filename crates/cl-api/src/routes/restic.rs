@@ -249,6 +249,17 @@ async fn run_target(admin: RequireAdmin, State(state): State<AppState>, Path(id)
         .get(&id)
         .ok_or_else(|| ApiError::NotFound(format!("no backup target {id}")))?;
 
+    // The state machine rejects a second `Running` run for the same target
+    // too (the authoritative check - this one's just a friendlier error
+    // before paying for a raft round trip in the common case).
+    if cluster_state
+        .restic_runs
+        .values()
+        .any(|r| r.target_id == id && matches!(r.outcome, BackupRunOutcome::Running { .. }))
+    {
+        return Err(ApiError::Conflict(format!("a backup is already running for target {id}")));
+    }
+
     let run_id = Uuid::new_v4().to_string();
     let response = state
         .cluster
@@ -259,13 +270,13 @@ async fn run_target(admin: RequireAdmin, State(state): State<AppState>, Path(id)
             destination_id: target.destination_id.clone(),
             started_at: unix_now(),
             finished_at: None,
-            outcome: BackupRunOutcome::Running,
+            outcome: BackupRunOutcome::Running { percent: None },
             triggered_by: BackupTrigger::Manual { by: admin.0.username },
         }))
         .await
         .map_err(ApiError::not_leader)?;
     if let Some(msg) = response.error {
-        return Err(ApiError::BadRequest(msg));
+        return Err(ApiError::Conflict(msg));
     }
     Ok(Json(run_id))
 }

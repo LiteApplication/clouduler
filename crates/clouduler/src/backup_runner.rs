@@ -97,6 +97,18 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                 if !cl_restic::schedule::is_due(target, now) {
                     continue;
                 }
+                // A manual run (or a previous scheduled one that hasn't
+                // finished yet) already owns this target; the state machine
+                // would reject a second `Running` run for it anyway, but
+                // skipping here avoids a pointless submit every poll while
+                // it's in flight.
+                let already_running = state
+                    .restic_runs
+                    .values()
+                    .any(|r| r.target_id == target.id && matches!(r.outcome, BackupRunOutcome::Running { .. }));
+                if already_running {
+                    continue;
+                }
                 let _ = cluster
                     .submit(Request::SetBackupTargetLastRun { id: target.id.clone(), at: now })
                     .await;
@@ -107,14 +119,14 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                     destination_id: target.destination_id.clone(),
                     started_at: now,
                     finished_at: None,
-                    outcome: BackupRunOutcome::Running,
+                    outcome: BackupRunOutcome::Running { percent: None },
                     triggered_by: BackupTrigger::Schedule,
                 };
                 let _ = cluster.submit(Request::RecordBackupRun(run)).await;
             }
 
             for run in state.restic_runs.values() {
-                if !matches!(run.outcome, BackupRunOutcome::Running) {
+                if !matches!(run.outcome, BackupRunOutcome::Running { .. }) {
                     continue;
                 }
                 let max_age = state
@@ -161,7 +173,7 @@ pub fn start_runner(
             let state = cluster.state().await;
 
             for run in state.restic_runs.values() {
-                if !matches!(run.outcome, BackupRunOutcome::Running) {
+                if !matches!(run.outcome, BackupRunOutcome::Running { .. }) {
                     continue;
                 }
                 let Some(target) = state.restic_targets.get(&run.target_id) else { continue };
@@ -264,7 +276,7 @@ async fn execute(
     }
 
     let source_path = registry.root(&run.drive)?.to_path_buf();
-    let result = run_restic_backup(cluster, key, data_dir, state, target, destination, &source_path).await;
+    let result = run_restic_backup(cluster, key, data_dir, state, run, target, destination, &source_path).await;
 
     if !stopped.is_empty() {
         set_desired(cluster, &stopped, DesiredState::Running).await?;
@@ -423,11 +435,20 @@ async fn push_drive_once(state: &ClusterState, registry: &DriveRegistry, drive: 
     Ok(())
 }
 
+/// How often live progress is written back to raft while a backup runs -
+/// throttled here (rather than on every restic status line, which can be
+/// several a second) so a long backup doesn't turn into a flood of raft
+/// proposals; `run_restic_backup`'s `on_progress` closure only forwards a
+/// value once this much time has passed since the last one it sent.
+const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(3);
+
+#[allow(clippy::too_many_arguments)]
 async fn run_restic_backup(
     cluster: &Arc<ClusterNode>,
     key: &ClusterKey,
     data_dir: &Path,
     state: &ClusterState,
+    run: &BackupRun,
     target: &DriveBackupTarget,
     destination: &BackupDestination,
     source_path: &Path,
@@ -443,18 +464,49 @@ async fn run_restic_backup(
     let forget = forget_args(target);
     let source_path = source_path.to_path_buf();
 
+    // Percent updates flow off the blocking thread through this watch
+    // channel; the task below forwards each one to raft (via the same run
+    // id, so it's an in-place update, not a new run - see the state
+    // machine's `RecordBackupRun` handling) and stops once the channel
+    // closes, which happens the instant the blocking closure returns.
+    let (progress_tx, mut progress_rx) = tokio::sync::watch::channel::<Option<f64>>(None);
+    let run_for_progress = run.clone();
+    let cluster_for_progress = Arc::clone(cluster);
+    let reporter = tokio::spawn(async move {
+        while progress_rx.changed().await.is_ok() {
+            let percent = *progress_rx.borrow();
+            let mut updated = run_for_progress.clone();
+            updated.outcome = BackupRunOutcome::Running { percent };
+            let _ = cluster_for_progress.submit(Request::RecordBackupRun(updated)).await;
+        }
+    });
+
     // restic is a blocking `std::process::Command` - never call it straight
     // off an async fn's stack, see `clouduler-drive-sync-blocks-runtime`.
-    tokio::task::spawn_blocking(move || -> Result<BackupRunOutcome> {
+    let result = tokio::task::spawn_blocking(move || -> Result<BackupRunOutcome> {
         if !repo.is_initialized() {
             repo.init().map_err(|e| anyhow!("restic init: {e}"))?;
         }
-        let outcome = repo.backup(&[source_path.as_path()], &[tag.as_str()]).map_err(|e| anyhow!("restic backup: {e}"))?;
+        let mut last_sent = std::time::Instant::now()
+            .checked_sub(PROGRESS_REPORT_INTERVAL)
+            .unwrap_or_else(std::time::Instant::now);
+        let outcome = repo
+            .backup(&[source_path.as_path()], &[tag.as_str()], |percent| {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_sent) >= PROGRESS_REPORT_INTERVAL {
+                    last_sent = now;
+                    let _ = progress_tx.send(Some(percent));
+                }
+            })
+            .map_err(|e| anyhow!("restic backup: {e}"))?;
         repo.forget(&forget).map_err(|e| anyhow!("restic forget: {e}"))?;
         Ok(BackupRunOutcome::Succeeded { snapshot_id: outcome.snapshot_id, bytes: outcome.bytes })
     })
     .await
-    .map_err(|e| anyhow!("the restic task panicked: {e}"))?
+    .map_err(|e| anyhow!("the restic task panicked: {e}"))?;
+
+    let _ = reporter.await;
+    result
 }
 
 fn unix_now() -> i64 {
