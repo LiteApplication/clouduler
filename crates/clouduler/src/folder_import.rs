@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, StackFile};
-use cl_drive::{drive_port, resolve_relative, DeltaEngine, DriveRegistry, DriveRole, SyncEngine};
+use cl_drive::{
+    drive_port, resolve_relative, DeltaEngine, DriveRegistry, DriveRole, ProgressSink, SyncEngine,
+};
 use cl_raft::client::Client;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::state::{ClusterState, DesiredState, Request};
@@ -397,7 +399,10 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
         let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
         debug!(node = name.as_str(), %peer, "syncing volume");
         progress.update(&format!("pushing to {name} ({}/{})", i + 1, targets.len()));
-        match engine.sync(volume_root, peer, id, generation).await {
+        match engine
+            .sync(volume_root, peer, id, generation, ProgressSink::none())
+            .await
+        {
             Ok(_) => {
                 debug!(node = name.as_str(), generation, "recording replica generation");
                 let response = client
