@@ -343,6 +343,75 @@ async fn an_upgrade_is_rejected_when_websockets_are_off() {
     assert_eq!(parse_response(&raw).status, 400);
 }
 
+/// Spawns a raw (non-HTTP-library) backend that records the first line it
+/// receives on each connection and never responds — enough to see exactly
+/// what request-target the proxy put on the wire for an upgrade, without a
+/// higher-level HTTP parser normalizing it back to a path for us.
+async fn spawn_line_capturing_backend() -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    use tokio::io::AsyncReadExt;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                if let Ok(n) = stream.read(&mut buf).await {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = text.lines().next().unwrap_or("").to_string();
+                    let _ = tx.send(first_line);
+                }
+                // Never responds: the point is to see what was sent, not to
+                // complete the handshake.
+            });
+        }
+    });
+    (addr, rx)
+}
+
+/// A reverse proxy must send an origin-form request-target (path + query
+/// only) to the backend, exactly like a normal HTTP client talking to an
+/// origin server — never the absolute-form (`http://host:port/path`) that
+/// `proxy_websocket`'s low-level connection used to write verbatim, which
+/// backends' upgrade handlers (Node's `http` server included) don't match
+/// against their expected route and silently drop.
+#[tokio::test]
+async fn a_websocket_upgrade_is_forwarded_with_an_origin_form_request_target() {
+    let (backend, mut lines) = spawn_line_capturing_backend().await;
+    let addr = serve_route(plain_route(
+        backend,
+        cl_proxy::RouteOptions { websockets: true, ..cl_proxy::RouteOptions::default() },
+    ))
+    .await;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    {
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_all(
+                b"GET /api/socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n\
+                  Host: app.test\r\n\
+                  Connection: Upgrade\r\n\
+                  Upgrade: websocket\r\n\
+                  Sec-WebSocket-Version: 13\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    }
+
+    let first_line = tokio::time::timeout(Duration::from_secs(2), lines.recv())
+        .await
+        .expect("backend never received a connection")
+        .expect("backend connection closed without sending a line");
+
+    assert_eq!(first_line, "GET /api/socket.io/?EIO=4&transport=websocket HTTP/1.1");
+}
+
 /// A slow backend must not hold the connection open forever when the route
 /// sets a deadline.
 #[tokio::test]

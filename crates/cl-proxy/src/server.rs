@@ -650,8 +650,20 @@ async fn proxy_websocket(
     if let Ok(host) = HeaderValue::from_str(&backend.to_string()) {
         parts.headers.insert(HOST, host);
     }
-    let uri = backend_uri(backend, &parts.uri).map_err(|e| crate::error::ProxyError::Tls(e.to_string()))?;
-    parts.uri = uri;
+    // Unlike the regular path (which goes through hyper_util's pooled Client and
+    // gets its absolute-form URI normalized to origin-form automatically), this
+    // sends over a raw hyper::client::conn connection that writes parts.uri to
+    // the wire verbatim. An absolute-form request-target (http://addr/path)
+    // reaches the backend as `GET http://addr/path HTTP/1.1`, which Node's
+    // upgrade handler passes through as req.url unchanged — engine.io/socket.io
+    // then fails to match it against the expected path and silently drops the
+    // connection. Origin-form (path+query only) is what a reverse proxy must
+    // send to an origin server.
+    let path_and_query =
+        parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_string();
+    parts.uri = path_and_query.parse().map_err(|e: http::uri::InvalidUri| {
+        crate::error::ProxyError::Tls(e.to_string())
+    })?;
 
     let backend_req = Request::from_parts(parts, Empty::<Bytes>::new());
 
