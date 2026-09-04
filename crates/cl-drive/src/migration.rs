@@ -171,7 +171,7 @@ async fn sync_all(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
             .generation;
 
         let src_path = job.require_registry()?.volume_path(volume)?;
-        job.engine.sync(&src_path, job.target_addr, volume, generation).await?;
+        job.engine.sync(&src_path, job.target_addr, volume, generation, crate::progress::ProgressSink::none()).await?;
 
         node.submit(Request::SetVolumeReplica {
             id: volume.clone(),

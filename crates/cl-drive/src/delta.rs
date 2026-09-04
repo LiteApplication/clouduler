@@ -80,6 +80,7 @@ pub trait SyncEngine: Send + Sync {
         peer: SocketAddr,
         volume: &'a VolumeId,
         generation: u64,
+        progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>>;
 }
 
@@ -106,8 +107,9 @@ impl SyncEngine for DeltaEngine {
         peer: SocketAddr,
         volume: &'a VolumeId,
         generation: u64,
+        progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>> {
-        Box::pin(async move { self.sync_impl(src, peer, volume, generation).await })
+        Box::pin(async move { self.sync_impl(src, peer, volume, generation, progress).await })
     }
 }
 
@@ -147,6 +149,7 @@ impl DeltaEngine {
         peer: SocketAddr,
         volume: &VolumeId,
         generation: u64,
+        progress: crate::progress::ProgressSink,
     ) -> Result<SyncStats> {
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
             .await
@@ -168,6 +171,9 @@ impl DeltaEngine {
 
         let local = scan::scan_off_runtime(src.to_path_buf(), false).await?;
         let diff = local.diff(&remote);
+        let total_files = (diff.added.len() + diff.changed.len()) as u64;
+        let mut files_done: u64 = 0;
+        progress.report(0, total_files);
 
         let mut stats = SyncStats { engine: self.name().to_string(), ..Default::default() };
 
@@ -294,6 +300,8 @@ impl DeltaEngine {
             let meta = &local.files[path];
             self.send_whole(&mut conn, src, path, meta, &mut stats).await?;
             stats.files_added += 1;
+            files_done += 1;
+            progress.report(files_done, total_files);
         }
 
         for path in &diff.changed {
@@ -307,6 +315,8 @@ impl DeltaEngine {
                 self.send_delta(&mut conn, src, path, meta, &mut stats).await?;
             }
             stats.files_changed += 1;
+            files_done += 1;
+            progress.report(files_done, total_files);
         }
 
         // Last, once every file inside them is gone: `diff.removed_dirs` is
