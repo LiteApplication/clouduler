@@ -242,8 +242,8 @@ fn install_crypto_provider() {
 /// Own-crate debug directives `--verbose` layers on top of `--log`, so
 /// `-v` shows what a command is doing without also turning on debug logging
 /// for every dependency (openraft above all, which is noisy even at info).
-const VERBOSE_DIRECTIVES: &str =
-    "clouduler=debug,cl_drive=debug,cl_raft=debug,cl_sched=debug,cl_net=debug,cl_docker=debug,cl_proxy=debug,cl_dns=debug,cl_config=debug";
+const VERBOSE_DIRECTIVES: &str = "clouduler=debug,cl_drive=debug,cl_raft=debug,cl_sched=debug,cl_net=debug,\
+     cl_docker=debug,cl_proxy=debug,cl_dns=debug,cl_config=debug,hickory_server=debug";
 
 fn init_tracing(filter: &str, verbose: bool) -> Result<()> {
     let filter = if verbose {

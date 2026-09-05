@@ -13,6 +13,14 @@
 //! `build` is a full rebuild every tick, not an incremental patch — this
 //! crate's four tracked fields are small, and a full rebuild means `git.rs`
 //! never has to reason about stale files left over from a rename or delete.
+//!
+//! Secrets are the one exception: `age` encryption is non-deterministic (a
+//! fresh random ephemeral key per call), so re-encrypting an unchanged
+//! secret still produces different ciphertext bytes than last time, which
+//! `git.rs`'s tree-hash comparison would see as a real change. `SecretCache`
+//! remembers each secret's ciphertext alongside the raft revision it was
+//! encrypted from, so a secret only gets re-encrypted (and only then shows
+//! up in a commit) when its revision actually moves.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,8 +28,10 @@ use std::path::Path;
 use base64::Engine;
 use cl_raft::state::ClusterState;
 use cl_secret::{ClusterKey, Sealed};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{BackupError, Result};
+use crate::snapshot::is_bookkeeping_config;
 
 pub struct TreeFile {
     /// Relative path, forward-slash separated.
@@ -29,10 +39,27 @@ pub struct TreeFile {
     pub contents: Vec<u8>,
 }
 
+/// One secret's last-encrypted ciphertext, keyed by the raft revision it was
+/// produced from — reused as-is while that revision hasn't moved, dropped
+/// otherwise. Lives in the daemon's `watch_git_backup` loop, across ticks;
+/// starting empty after a restart just means the next tick's export
+/// re-encrypts everything once, same as today.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretCache(BTreeMap<String, (u64, Vec<u8>)>);
+
+impl SecretCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Builds the full working-tree file set for the current state. A secret
 /// this node's `ClusterKey` cannot open is skipped (logged, not fatal) —
 /// one bad secret must not block every other change from being backed up.
-pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Recipient) -> Vec<TreeFile> {
+/// `cache` is updated in place: a reused or freshly-encrypted secret's entry
+/// moves forward, and secrets no longer in `state.secrets` are dropped so
+/// the cache can't grow unbounded across renames/removals.
+pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Recipient, cache: &mut SecretCache) -> Vec<TreeFile> {
     let mut files = Vec::new();
 
     if let Some(cfg) = &state.cluster_config {
@@ -50,6 +77,9 @@ pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Re
     }
 
     for (name, entry) in &state.configs {
+        if is_bookkeeping_config(name) {
+            continue;
+        }
         match entry.decode() {
             Ok(bytes) => files.push(TreeFile {
                 path: format!("configs/{name}"),
@@ -60,22 +90,35 @@ pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Re
     }
 
     for (name, entry) in &state.secrets {
-        let sealed = Sealed::from_blob(entry.sealed.clone());
-        let plaintext = match sealed.open(key, name) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(secret = %name, error = %e, "git backup: skipping undecryptable secret");
-                continue;
+        let ciphertext = match cache.0.get(name) {
+            Some((revision, ciphertext)) if *revision == entry.revision => ciphertext.clone(),
+            _ => {
+                let sealed = Sealed::from_blob(entry.sealed.clone());
+                let plaintext = match sealed.open(key, name) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(secret = %name, error = %e, "git backup: skipping undecryptable secret");
+                        continue;
+                    }
+                };
+                match crate::age::encrypt(recipient, &plaintext) {
+                    Ok(ciphertext) => {
+                        cache.0.insert(name.clone(), (entry.revision, ciphertext.clone()));
+                        ciphertext
+                    }
+                    Err(e) => {
+                        tracing::warn!(secret = %name, error = %e, "git backup: skipping secret that failed to re-encrypt");
+                        continue;
+                    }
+                }
             }
         };
-        match crate::age::encrypt(recipient, &plaintext) {
-            Ok(ciphertext) => files.push(TreeFile {
-                path: format!("secrets/{name}.age"),
-                contents: ciphertext,
-            }),
-            Err(e) => tracing::warn!(secret = %name, error = %e, "git backup: skipping secret that failed to re-encrypt"),
-        }
+        files.push(TreeFile {
+            path: format!("secrets/{name}.age"),
+            contents: ciphertext,
+        });
     }
+    cache.0.retain(|name, _| state.secrets.contains_key(name));
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
@@ -218,12 +261,46 @@ mod tests {
         let recipient = identity.to_public();
         let state = state_with_everything(&key);
 
-        let files = build(&state, &key, &recipient);
+        let files = build(&state, &key, &recipient, &mut SecretCache::new());
         let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
             vec!["cluster.yaml", "configs/nginx.conf", "secrets/db-password.age", "stacks/web.yaml"]
         );
+    }
+
+    /// The reserved bookkeeping configs must never show up in the exported
+    /// tree - they're this feature's own status/key-publishing plumbing, not
+    /// content the admin's repo should mirror.
+    #[test]
+    fn bookkeeping_configs_are_excluded_from_the_tree() {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let mut state = state_with_everything(&key);
+        state.configs.insert(
+            crate::status::LAST_EXPORT_CONFIG.to_string(),
+            ConfigEntry {
+                name: crate::status::LAST_EXPORT_CONFIG.to_string(),
+                content: encode_config_content(b"{}"),
+                revision: 1,
+                owner: None,
+            },
+        );
+        state.configs.insert(
+            crate::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG.to_string(),
+            ConfigEntry {
+                name: crate::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG.to_string(),
+                content: encode_config_content(b"ssh-ed25519 AAAA"),
+                revision: 1,
+                owner: None,
+            },
+        );
+
+        let files = build(&state, &key, &recipient, &mut SecretCache::new());
+        assert!(!files.iter().any(|f| f.path.contains("_clouduler_git_backup_last_export")));
+        assert!(!files.iter().any(|f| f.path.contains("_clouduler_git_deploy_key_pub")));
+        assert!(files.iter().any(|f| f.path == "configs/nginx.conf"));
     }
 
     #[test]
@@ -234,7 +311,7 @@ mod tests {
         let recipient = identity.to_public();
         let state = state_with_everything(&wrong_key);
 
-        let files = build(&state, &key, &recipient);
+        let files = build(&state, &key, &recipient, &mut SecretCache::new());
         assert!(!files.iter().any(|f| f.path.starts_with("secrets/")));
         assert!(files.iter().any(|f| f.path == "cluster.yaml"));
     }
@@ -245,7 +322,7 @@ mod tests {
         let identity = age::x25519::Identity::generate();
         let recipient = identity.to_public();
         let state = state_with_everything(&key);
-        let files = build(&state, &key, &recipient);
+        let files = build(&state, &key, &recipient, &mut SecretCache::new());
 
         let dir = tempfile::tempdir().expect("tempdir");
         for f in &files {
@@ -262,6 +339,68 @@ mod tests {
         let ciphertext = parsed.secrets.get("db-password").expect("secret present");
         let plaintext = crate::age::decrypt(&identity, ciphertext).expect("decrypt");
         assert_eq!(plaintext, b"hunter2");
+    }
+
+    /// The exact bug this feature hit in production: `age` encryption is
+    /// non-deterministic, so without a cache, a secret whose revision never
+    /// changed would still get fresh ciphertext (and a spurious commit)
+    /// every single export tick.
+    #[test]
+    fn an_unchanged_secret_reuses_its_previous_ciphertext_across_ticks() {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let state = state_with_everything(&key);
+        let mut cache = SecretCache::new();
+
+        let first = build(&state, &key, &recipient, &mut cache);
+        let second = build(&state, &key, &recipient, &mut cache);
+
+        let first_secret = &first.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents;
+        let second_secret = &second.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents;
+        assert_eq!(first_secret, second_secret);
+    }
+
+    /// A real change (a bumped revision) must still produce new ciphertext
+    /// - the cache must not paper over an actual secret rotation.
+    #[test]
+    fn a_secret_with_a_bumped_revision_is_re_encrypted() {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let mut state = state_with_everything(&key);
+        let mut cache = SecretCache::new();
+
+        let first = build(&state, &key, &recipient, &mut cache);
+        let first_secret = first.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents.clone();
+
+        let sealed = Sealed::seal(&key, "db-password", b"new-password").expect("seal");
+        let entry = state.secrets.get_mut("db-password").unwrap();
+        entry.sealed = sealed.blob;
+        entry.revision = 2;
+
+        let second = build(&state, &key, &recipient, &mut cache);
+        let second_secret = &second.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents;
+        assert_ne!(&first_secret, second_secret);
+        let plaintext = crate::age::decrypt(&identity, second_secret).expect("decrypt");
+        assert_eq!(plaintext, b"new-password");
+    }
+
+    /// A removed secret must not linger in the cache forever.
+    #[test]
+    fn a_removed_secret_is_dropped_from_the_cache() {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let mut state = state_with_everything(&key);
+        let mut cache = SecretCache::new();
+
+        build(&state, &key, &recipient, &mut cache);
+        assert!(cache.0.contains_key("db-password"));
+
+        state.secrets.remove("db-password");
+        build(&state, &key, &recipient, &mut cache);
+        assert!(!cache.0.contains_key("db-password"));
     }
 
     #[test]

@@ -493,7 +493,7 @@ pub struct BackupRun {
     pub triggered_by: BackupTrigger,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum BackupRunOutcome {
     /// `percent` is restic's own `percent_done` from its last `--json`
     /// status line, updated in place by repeated `RecordBackupRun` submits
@@ -506,6 +506,46 @@ pub enum BackupRunOutcome {
     },
     Succeeded { snapshot_id: String, bytes: u64 },
     Failed { error: String },
+}
+
+// Hand-written so a raft log/snapshot written before `Running` grew its
+// `percent` field (a bare unit variant, serialized as the JSON string
+// `"Running"`) still replays: the derive-generated `Deserialize` rejects
+// that shape outright, which crashes every node on startup the moment any
+// node's log has ever recorded a pre-upgrade `Running` outcome. Route
+// through `serde_json::Value` (works under any format, not just JSON) so the
+// legacy string can be special-cased before falling back to the current
+// struct-variant shape for everything else.
+impl<'de> Deserialize<'de> for BackupRunOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum Current {
+            Running {
+                #[serde(default)]
+                percent: Option<f64>,
+            },
+            Succeeded {
+                snapshot_id: String,
+                bytes: u64,
+            },
+            Failed {
+                error: String,
+            },
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.as_str() == Some("Running") {
+            return Ok(BackupRunOutcome::Running { percent: None });
+        }
+        match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
+            Current::Running { percent } => Ok(BackupRunOutcome::Running { percent }),
+            Current::Succeeded { snapshot_id, bytes } => Ok(BackupRunOutcome::Succeeded { snapshot_id, bytes }),
+            Current::Failed { error } => Ok(BackupRunOutcome::Failed { error }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -566,6 +606,13 @@ pub struct RestoreRequest {
 /// Newest requests kept. Restores are rare enough that, unlike backup runs,
 /// one bound across the whole set (not per drive/destination) is simplest.
 pub const MAX_RESTORE_REQUESTS: usize = 50;
+
+/// The schema version this build's `ClusterState`/`Request` shapes are at.
+/// Bump by hand whenever a change ships that an older node's persisted data
+/// needs a `crate::migrations` entry to read, or that is otherwise unsafe
+/// for a node behind this version to have installed - see `store.rs`'s use
+/// of this alongside `StateMachine::schema_version`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// Everything the cluster agrees on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -646,7 +693,13 @@ pub struct ClusterState {
 }
 
 /// A command submitted through raft. Every mutation of cluster state is one of these.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Deserialize` is hand-written below rather than derived - see the impl for
+/// why: an unrecognized variant tag (from a node running newer code) must
+/// fall back to `Unknown` instead of failing outright, both for local log/
+/// snapshot reads and for this enum's use as the wire payload for raft
+/// replication itself.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Request {
     /// Replace the cluster config file on every node.
     ///
@@ -841,6 +894,198 @@ pub enum Request {
     /// placement again. Submitted by `watch_leadership` once this node can
     /// reach another voter, not by an operator - see `emergency_stack`.
     ClearEmergency,
+    /// Stand-in for a variant this node's binary doesn't recognize - a
+    /// command a newer node submitted that this (older) node hasn't been
+    /// upgraded to understand yet. `dispatch` treats it as a no-op; the
+    /// command's real effect lands once this node is upgraded and either
+    /// replays a snapshot the (by-then-migrated) leader sends, or is itself
+    /// upgraded before this entry is compacted. Never constructed directly -
+    /// only ever produced by `Deserialize` below.
+    Unknown,
+}
+
+// Mirrors `Request` field-for-field purely so `#[derive(Deserialize)]` can
+// generate the normal per-variant parsing logic under a different entry
+// point (`serde(remote)`), which the impl below calls into. Every variant
+// added to `Request` must be added here too, in the same shape - `dispatch`'s
+// exhaustive match forces you to handle a new variant there, but nothing
+// forces updating this mirror, and if it drifts a variant this build
+// genuinely understands would incorrectly deserialize as `Unknown`. The
+// `every_variant_name_round_trips` test below is the tripwire for that: it
+// must be extended with each new variant.
+mod request_mirror {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(remote = "Request")]
+    pub enum RequestMirror {
+        PutClusterConfig {
+            yaml: String,
+            expect_generation: u64,
+        },
+        UpsertNode(NodeState),
+        SetAvailability {
+            node: String,
+            availability: Availability,
+        },
+        SetReachable {
+            node: String,
+            reachable: bool,
+        },
+        RemoveNode {
+            node: String,
+        },
+        RetireNodeId {
+            id: uuid::Uuid,
+        },
+        DeployStack {
+            name: String,
+            spec: String,
+        },
+        RemoveStack {
+            name: String,
+        },
+        SetStackObjects {
+            name: String,
+            configs: BTreeSet<String>,
+            secrets: BTreeSet<String>,
+            #[serde(default)]
+            used_configs: BTreeSet<String>,
+            #[serde(default)]
+            used_secrets: BTreeSet<String>,
+        },
+        Assign {
+            instance: InstanceId,
+            node: String,
+            drives: BTreeSet<String>,
+        },
+        Unassign {
+            instance: InstanceId,
+        },
+        SetDesiredState {
+            instance: InstanceId,
+            desired: DesiredState,
+        },
+        SetImageDigest {
+            instance: InstanceId,
+            digest: String,
+        },
+        BeginMigration {
+            instance: InstanceId,
+            to: String,
+            drives: BTreeSet<String>,
+        },
+        AdvanceMigration {
+            instance: InstanceId,
+            phase: MigrationPhase,
+        },
+        UpsertVolume {
+            id: VolumeId,
+            primary: String,
+        },
+        SetVolumeReplica {
+            id: VolumeId,
+            node: String,
+            generation: u64,
+        },
+        TouchVolume {
+            id: VolumeId,
+            primary: String,
+        },
+        StoreCertificate(CertificateState),
+        RemoveCertificate {
+            fqdn: String,
+        },
+        SetCertStatus {
+            fqdn: String,
+            status: ReconcileStatus,
+        },
+        UpsertDnsRecord(DnsRecordState),
+        RemoveDnsRecord {
+            key: String,
+        },
+        SetDnsStatus {
+            fqdn: String,
+            status: ReconcileStatus,
+        },
+        PutConfig {
+            name: String,
+            content: String,
+            #[serde(default)]
+            owner: Option<String>,
+        },
+        RemoveConfig {
+            name: String,
+        },
+        PutSecret {
+            name: String,
+            sealed: String,
+            key_fingerprint: String,
+            #[serde(default)]
+            owner: Option<String>,
+        },
+        RemoveSecret {
+            name: String,
+        },
+        PutWrappedKey {
+            node: String,
+            entry: WrappedKeyEntry,
+        },
+        SetOverlayAllocations {
+            allocations: String,
+        },
+        PutBackupDestination(BackupDestination),
+        RemoveBackupDestination {
+            id: String,
+        },
+        PutBackupTarget(DriveBackupTarget),
+        RemoveBackupTarget {
+            id: String,
+        },
+        SetBackupTargetLastRun {
+            id: String,
+            at: i64,
+        },
+        RecordBackupRun(BackupRun),
+        PutRestoreRequest(RestoreRequest),
+        SetRestoreStatus {
+            id: String,
+            status: RestoreStatus,
+            at: i64,
+        },
+        NoOp,
+        ClearEmergency,
+        // `Unknown` is deliberately absent: there is no wire shape a sender
+        // would legitimately produce for it - it is only ever the fallback
+        // result when nothing above matches.
+    }
+}
+
+// Hand-written for the same reason as `BackupRunOutcome`'s impl above - but
+// here the concern is forward, not backward, compatibility: this must
+// tolerate a variant tag it has never heard of (from a node running code
+// newer than this build), not just an old shape of one it knows. Delegates
+// the real parsing to `request_mirror::RequestMirror` (a field-for-field
+// copy of `Request` under `#[serde(remote = "Request")]`, the standard serde
+// idiom for "derive normally, but let me override the public impl") and
+// falls back to `Request::Unknown` - rather than an error - when the tag
+// doesn't match any variant that mirror knows. `dispatch` treats `Unknown`
+// as a no-op: the sending node is newer, this one just hasn't caught up yet.
+// This also covers raft replication itself, not just local log/snapshot
+// reads: openraft's `Entry<TypeConfig>` embeds `Request` directly, so this
+// impl is what protects an old follower from a newer leader's brand-new
+// command variant.
+impl<'de> Deserialize<'de> for Request {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match request_mirror::RequestMirror::deserialize(&value) {
+            Ok(req) => Ok(req),
+            Err(_) => Ok(Request::Unknown),
+        }
+    }
 }
 
 /// Result of applying a command. Failures are values, not errors: a rejected
@@ -889,6 +1134,13 @@ impl ClusterState {
     fn dispatch(&mut self, req: &Request) -> Result<(), String> {
         match req {
             Request::NoOp => Ok(()),
+
+            Request::Unknown => {
+                tracing::warn!(
+                    "received a Request variant this node's binary doesn't recognize (from an upgraded peer) - ignoring until this node is updated"
+                );
+                Ok(())
+            }
 
             Request::PutClusterConfig {
                 yaml,
@@ -1594,6 +1846,177 @@ pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_run_outcome_reads_the_pre_progress_unit_variant() {
+        let legacy: BackupRunOutcome = serde_json::from_str("\"Running\"").unwrap();
+        assert_eq!(legacy, BackupRunOutcome::Running { percent: None });
+    }
+
+    #[test]
+    fn backup_run_outcome_round_trips_the_current_shape() {
+        for outcome in [
+            BackupRunOutcome::Running { percent: Some(0.42) },
+            BackupRunOutcome::Succeeded { snapshot_id: "abc".into(), bytes: 7 },
+            BackupRunOutcome::Failed { error: "boom".into() },
+        ] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let back: BackupRunOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, outcome);
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_request_variant_deserializes_to_unknown_instead_of_erroring() {
+        let from_a_newer_node = serde_json::json!({
+            "SomeFutureVariant": { "field": "value" }
+        });
+        let req: Request = serde_json::from_value(from_a_newer_node).unwrap();
+        assert_eq!(req, Request::Unknown);
+
+        let mut state = ClusterState::default();
+        let response = state.apply(&req);
+        assert!(response.is_ok(), "{:?}", response.error);
+    }
+
+    #[test]
+    fn every_current_request_variant_round_trips_and_is_not_unknown() {
+        // One instance per real `Request` variant (excluding `Unknown`
+        // itself, which has no legitimate wire shape). Guards against
+        // `request_mirror::RequestMirror` drifting out of sync with
+        // `Request`: a variant missing from the mirror would silently
+        // deserialize as `Unknown` here instead of round-tripping.
+        let requests = vec![
+            Request::PutClusterConfig { yaml: "y".into(), expect_generation: 0 },
+            Request::UpsertNode(node("n1", &["fast"])),
+            Request::SetAvailability { node: "n1".into(), availability: Availability::Drain },
+            Request::SetReachable { node: "n1".into(), reachable: false },
+            Request::RemoveNode { node: "n1".into() },
+            Request::RetireNodeId { id: uuid::Uuid::new_v4() },
+            Request::DeployStack { name: "s".into(), spec: "spec".into() },
+            Request::RemoveStack { name: "s".into() },
+            Request::SetStackObjects {
+                name: "s".into(),
+                configs: drives(&["c1"]),
+                secrets: drives(&["sec1"]),
+                used_configs: drives(&["c1"]),
+                used_secrets: drives(&["sec1"]),
+            },
+            Request::Assign { instance: InstanceId::new("s", "web", 0), node: "n1".into(), drives: drives(&["fast"]) },
+            Request::Unassign { instance: InstanceId::new("s", "web", 0) },
+            Request::SetDesiredState { instance: InstanceId::new("s", "web", 0), desired: DesiredState::Stopped },
+            Request::SetImageDigest { instance: InstanceId::new("s", "web", 0), digest: "sha256:abc".into() },
+            Request::BeginMigration { instance: InstanceId::new("s", "web", 0), to: "n2".into(), drives: drives(&["fast"]) },
+            Request::AdvanceMigration { instance: InstanceId::new("s", "web", 0), phase: MigrationPhase::Syncing },
+            Request::UpsertVolume { id: VolumeId::new("fast", "v1"), primary: "n1".into() },
+            Request::SetVolumeReplica { id: VolumeId::new("fast", "v1"), node: "n1".into(), generation: 2 },
+            Request::TouchVolume { id: VolumeId::new("fast", "v1"), primary: "n1".into() },
+            Request::StoreCertificate(CertificateState {
+                fqdn: "example.com".into(),
+                chain_pem: "chain".into(),
+                key_pem: "key".into(),
+                not_after: 0,
+            }),
+            Request::RemoveCertificate { fqdn: "example.com".into() },
+            Request::SetCertStatus { fqdn: "example.com".into(), status: ReconcileStatus::Pending },
+            Request::UpsertDnsRecord(DnsRecordState {
+                fqdn: "example.com".into(),
+                record_type: "A".into(),
+                content: "1.2.3.4".into(),
+                zone: "example.com".into(),
+                provider_id: None,
+            }),
+            Request::RemoveDnsRecord { key: "example.com".into() },
+            Request::SetDnsStatus { fqdn: "example.com".into(), status: ReconcileStatus::Pending },
+            Request::PutConfig { name: "c1".into(), content: "aGk=".into(), owner: None },
+            Request::RemoveConfig { name: "c1".into() },
+            Request::PutSecret {
+                name: "sec1".into(),
+                sealed: "sealed".into(),
+                key_fingerprint: "fp".into(),
+                owner: None,
+            },
+            Request::RemoveSecret { name: "sec1".into() },
+            Request::PutWrappedKey {
+                node: "n1".into(),
+                entry: WrappedKeyEntry {
+                    ephemeral_public: "e".into(),
+                    sealed: "s".into(),
+                    key_fingerprint: "fp".into(),
+                    target_pubkey: "t".into(),
+                },
+            },
+            Request::SetOverlayAllocations { allocations: "{}".into() },
+            Request::PutBackupDestination(BackupDestination {
+                id: "d1".into(),
+                name: "d1".into(),
+                kind: BackupDestinationKind::NodeLocal { node: "n1".into(), path: "/backups".into() },
+                password_secret: "sec1".into(),
+                credentials_secret: None,
+            }),
+            Request::RemoveBackupDestination { id: "d1".into() },
+            Request::PutBackupTarget(DriveBackupTarget {
+                id: "t1".into(),
+                drive: "fast".into(),
+                destination_id: "d1".into(),
+                enabled: true,
+                frequency_secs: 3600,
+                time_of_day: None,
+                keep_last: None,
+                keep_within_secs: None,
+                stop_containers: None,
+                last_run: None,
+            }),
+            Request::RemoveBackupTarget { id: "t1".into() },
+            Request::SetBackupTargetLastRun { id: "t1".into(), at: 0 },
+            Request::RecordBackupRun(BackupRun {
+                id: "r1".into(),
+                target_id: "t1".into(),
+                drive: "fast".into(),
+                destination_id: "d1".into(),
+                started_at: 0,
+                finished_at: None,
+                outcome: BackupRunOutcome::Running { percent: None },
+                triggered_by: BackupTrigger::Manual { by: "op".into() },
+            }),
+            Request::PutRestoreRequest(RestoreRequest {
+                id: "res1".into(),
+                scope: RestoreScope::Volume { volume: VolumeId::new("fast", "v1") },
+                destination_id: None,
+                snapshot: None,
+                requested_at: 0,
+                finished_at: None,
+                status: RestoreStatus::Pending,
+                requested_by: "op".into(),
+            }),
+            Request::SetRestoreStatus { id: "res1".into(), status: RestoreStatus::Pending, at: 0 },
+            Request::NoOp,
+            Request::ClearEmergency,
+        ];
+
+        for req in requests {
+            let json = serde_json::to_string(&req).unwrap();
+            let back: Request = serde_json::from_str(&json).unwrap();
+            assert_ne!(back, Request::Unknown, "variant round-tripped as Unknown: {json}");
+            assert_eq!(back, req);
+        }
+    }
+
+    #[test]
+    fn cluster_state_ignores_an_unknown_top_level_field() {
+        // Guards against ever adding `#[serde(deny_unknown_fields)]` here: a
+        // brand-new field a newer node's `ClusterState` has must stay silently
+        // ignorable by an older node reading the same JSON, with no per-field
+        // work required - see the migration plan's forward-tolerance design.
+        let mut value = serde_json::to_value(ClusterState::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("some_field_from_the_future".into(), serde_json::json!({"anything": true}));
+
+        let parsed: Result<ClusterState, _> = serde_json::from_value(value);
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
 
     #[test]
     fn the_first_cluster_config_is_stored_at_generation_one() {

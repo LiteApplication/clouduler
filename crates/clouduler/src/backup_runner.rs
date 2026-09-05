@@ -178,9 +178,14 @@ pub fn start_runner(
                 }
                 let Some(target) = state.restic_targets.get(&run.target_id) else { continue };
                 let Some(destination) = state.restic_destinations.get(&run.destination_id) else { continue };
-                if !registry.implements(&run.drive) {
-                    continue;
-                }
+                // No blanket `registry.implements(&run.drive)` gate here:
+                // `is_source` below already requires it for every branch
+                // that needs to read the drive, but the `NodeLocal { node
+                // == node_name }` destination branch must run even when
+                // this node does *not* implement the drive - that's exactly
+                // the `NodeLocal`-elsewhere case (see the module doc
+                // comment), and gating on it here used to skip that branch
+                // entirely, leaving those runs stuck `Running` forever.
                 let is_source = is_local_source(&registry, &state, &run.drive);
 
                 match &destination.kind {
@@ -199,10 +204,21 @@ pub fn start_runner(
                             continue;
                         }
                         if let Err(e) = push_drive_once(&state, &registry, &run.drive, node).await {
-                            warn!(
-                                run = %run.id, drive = %run.drive, destination = %node, error = %e,
-                                "one-off backup sync failed; the destination will run restic against whatever landed"
-                            );
+                            warn!(run = %run.id, drive = %run.drive, destination = %node, error = %e, "one-off backup sync failed");
+                            // The destination can't run restic against data
+                            // that never landed, and it can't tell a push
+                            // that's still in flight from one that already
+                            // failed outright - only the source knows that.
+                            // Fail the run itself rather than leaving it
+                            // `Running` until the stale-run watchdog gets to
+                            // it, which can be up to `STALE_RUN_CAP_SECS`
+                            // later.
+                            let mut failed = run.clone();
+                            failed.finished_at = Some(unix_now());
+                            failed.outcome = BackupRunOutcome::Failed {
+                                error: format!("syncing {} to {node}: {e}", run.drive),
+                            };
+                            let _ = cluster.submit(Request::RecordBackupRun(failed)).await;
                         }
                     }
                     BackupDestinationKind::Ssh { .. } | BackupDestinationKind::S3 { .. } if is_source => {
@@ -275,7 +291,18 @@ async fn execute(
         stopped = instances;
     }
 
-    let source_path = registry.root(&run.drive)?.to_path_buf();
+    // A `NodeLocal`-elsewhere destination doesn't implement the drive at
+    // all - see the module doc comment - so it has no `registry.root` to
+    // read; restic runs against the staging copy `push_drive_once`'s peer
+    // landed instead. `ensure_staging_root` (rather than just
+    // `staging_root_for`) matters here: a run whose grace period has
+    // elapsed with no push having landed yet (source unreachable, say)
+    // still needs a real, existing directory for restic to point at.
+    let source_path = if registry.implements(&run.drive) {
+        registry.root(&run.drive)?.to_path_buf()
+    } else {
+        registry.ensure_staging_root(&run.drive)?
+    };
     let result = run_restic_backup(cluster, key, data_dir, state, run, target, destination, &source_path).await;
 
     if !stopped.is_empty() {
@@ -428,7 +455,7 @@ async fn push_drive_once(state: &ClusterState, registry: &DriveRegistry, drive: 
     for (id, vstate) in state.volumes.iter().filter(|(id, _)| id.drive == drive) {
         let src = registry.volume_path(id)?;
         engine
-            .sync(&src, peer, id, vstate.generation, ProgressSink::none())
+            .sync(&src, peer, id, vstate.generation, true, ProgressSink::none())
             .await
             .map_err(|e| anyhow!("syncing {id} to {target_node}: {e}"))?;
     }

@@ -20,6 +20,12 @@ pub enum BackupError {
     #[error("git operation failed: {0}")]
     Git(#[from] git2::Error),
 
+    #[error(
+        "remote ssh host key for {host} does not match the one pinned on first connection - \
+         possible man-in-the-middle, or the remote rotated its key (delete {known_hosts} to re-pin)"
+    )]
+    HostKeyMismatch { host: String, known_hosts: std::path::PathBuf },
+
     #[error("cluster state has no {0} deploy key entry")]
     MissingDeployKey(&'static str),
 

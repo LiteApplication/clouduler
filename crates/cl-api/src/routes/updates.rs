@@ -26,6 +26,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_raft::ids::InstanceId;
+use cl_raft::state::ClusterState;
 use cl_raft::Request as ClusterRequest;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,25 @@ pub fn router() -> Router<AppState> {
 }
 
 const INTERNAL_SCAN_PATH: &str = "/api/updates/internal/scan";
+
+/// The reference the stack file declares for an instance, e.g.
+/// `nginx:1.25` — as opposed to `ContainerState::image`, which is what the
+/// container was actually created from and, once an instance is pinned
+/// (`spec::build`'s `pin`), is a `repo@sha256:...` reference with the tag
+/// discarded entirely.
+///
+/// Asking the registry about that pinned reference instead of this one is a
+/// no-op forever: a digest reference is immutable, so "what does the
+/// registry serve for this exact digest" always answers with the same
+/// digest, no matter how many new tags have been pushed since. The declared
+/// reference is the one that can actually move.
+fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String> {
+    state
+        .stacks
+        .get(&instance.stack)
+        .and_then(|stack| cl_config::StackFile::parse(&stack.spec).ok())
+        .and_then(|file| file.services.get(&instance.service).map(|s| s.image.clone()))
+}
 
 /// How many registry lookups one node runs at once. See `scan_local`.
 ///
@@ -204,17 +224,21 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
         }
         let name = assignment.instance.container_name();
         let container = docker.inspect(&name).await.ok().flatten();
-        let (image, running_digest) = match &container {
+        let running_digest = match &container {
             Some(c) => {
                 let repository = cl_docker::ImageRef::parse(&c.image).repository;
-                let digest = match c.image_digest.as_deref() {
+                match c.image_digest.as_deref() {
                     Some(image_id) => docker.digest_of_image(image_id, &repository).await.ok().flatten(),
                     None => None,
-                };
-                (Some(c.image.clone()), digest)
+                }
             }
-            None => (None, None),
+            None => None,
         };
+        // The declared reference (the stack's tag), not `container.image`:
+        // once pinned that is a digest, which is immutable and so can never
+        // show as behind. See `declared_image`.
+        let image = declared_image(&cluster_state, &assignment.instance)
+            .or_else(|| container.map(|c| c.image));
         statuses.push(ImageStatus {
             id: assignment.instance.to_string(),
             image,

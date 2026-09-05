@@ -5,12 +5,32 @@
 //! churns on scheduling/DNS/certificate activity that has nothing to do with
 //! this feature, so diffing the whole state would produce noisy commits and
 //! misleading messages.
+//!
+//! `configs` also excludes this feature's own reserved bookkeeping entries
+//! (`LAST_EXPORT_CONFIG`, `DEPLOY_KEY_PUBLIC_CONFIG`). Publishing an export's
+//! status bumps `LAST_EXPORT_CONFIG`'s revision in raft state right after
+//! that export runs — including it here would mean the snapshot taken on the
+//! *next* tick never equals `last_snapshot` (which predates that bump),
+//! forcing a fresh export forever, each one re-encrypting every secret with
+//! a new (age is non-deterministic) ciphertext and producing a real commit
+//! every `backup.interval` even when nothing a human changed.
 
 use std::collections::BTreeMap;
 
 use cl_raft::state::ClusterState;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+use crate::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG;
+use crate::status::LAST_EXPORT_CONFIG;
+
+/// Reserved config entries this feature writes for its own bookkeeping, not
+/// user content - excluded both from change detection (this module) and
+/// from the exported tree itself (`tree::build`).
+pub(crate) fn is_bookkeeping_config(name: &str) -> bool {
+    name == LAST_EXPORT_CONFIG || name == DEPLOY_KEY_PUBLIC_CONFIG
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub cluster_config_generation: Option<u64>,
     pub stacks: BTreeMap<String, u64>,
@@ -30,6 +50,7 @@ impl Snapshot {
             configs: state
                 .configs
                 .iter()
+                .filter(|(name, _)| !is_bookkeeping_config(name))
                 .map(|(name, c)| (name.clone(), c.revision))
                 .collect(),
             secrets: state
@@ -129,6 +150,44 @@ fn describe(change: &Change) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cl_raft::state::ConfigEntry;
+
+    fn config_entry(name: &str, revision: u64) -> ConfigEntry {
+        ConfigEntry {
+            name: name.to_string(),
+            content: String::new(),
+            revision,
+            owner: None,
+        }
+    }
+
+    /// The exact loop this feature hit in production: publishing an export's
+    /// status bumps `LAST_EXPORT_CONFIG`'s revision, and that bump must not
+    /// look like a tracked change on the next tick, or the daemon exports
+    /// forever even with nothing else changed.
+    #[test]
+    fn publishing_last_export_status_does_not_look_like_a_change() {
+        let mut state = ClusterState::default();
+        state.configs.insert(LAST_EXPORT_CONFIG.to_string(), config_entry(LAST_EXPORT_CONFIG, 1));
+        let before = Snapshot::from_state(&state);
+
+        state.configs.get_mut(LAST_EXPORT_CONFIG).unwrap().revision = 2;
+        let after = Snapshot::from_state(&state);
+
+        assert_eq!(before, after);
+        assert!(diff(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn publishing_the_deploy_public_key_does_not_look_like_a_change() {
+        let mut state = ClusterState::default();
+        let before = Snapshot::from_state(&state);
+
+        state.configs.insert(DEPLOY_KEY_PUBLIC_CONFIG.to_string(), config_entry(DEPLOY_KEY_PUBLIC_CONFIG, 1));
+        let after = Snapshot::from_state(&state);
+
+        assert_eq!(before, after);
+    }
 
     fn snap(stacks: &[(&str, u64)], configs: &[(&str, u64)], secrets: &[(&str, u64)]) -> Snapshot {
         Snapshot {

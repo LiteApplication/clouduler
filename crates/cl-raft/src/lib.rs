@@ -6,6 +6,7 @@ pub mod contact;
 pub mod error;
 pub mod ids;
 pub mod liveness;
+mod migrations;
 pub mod network;
 pub mod node;
 pub mod quorum;

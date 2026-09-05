@@ -39,6 +39,15 @@ pub struct DriveRegistry {
     /// serving from mounting without every caller having to carry the
     /// cluster config around.
     served_by: BTreeMap<String, Vec<String>>,
+    /// Root for backup-destination staging (see `ensure_staging_volume`):
+    /// where a `NodeLocal` backup destination that does not itself implement
+    /// a drive receives a one-off copy pushed to it, so restic has a real
+    /// local path to read even though this node holds no standing copy of
+    /// the drive. Deliberately outside `drives`/`root`: those model what a
+    /// node actually replicates or serves, which placement and normal drive
+    /// sync both rely on staying accurate - this is a point-in-time cache
+    /// for restic, not a replica.
+    staging_root: PathBuf,
 }
 
 impl DriveRegistry {
@@ -76,6 +85,7 @@ impl DriveRegistry {
             node: node.to_string(),
             drives,
             served_by,
+            staging_root: data_dir.join("backup-staging"),
         })
     }
 
@@ -87,6 +97,7 @@ impl DriveRegistry {
             node: node.into(),
             drives,
             served_by: BTreeMap::new(),
+            staging_root: PathBuf::new(),
         }
     }
 
@@ -95,6 +106,14 @@ impl DriveRegistry {
     /// by hand.
     pub fn with_served_by(mut self, served_by: BTreeMap<String, Vec<String>>) -> Self {
         self.served_by = served_by;
+        self
+    }
+
+    /// Override the backup-staging root. For tests and standalone tools; a
+    /// registry built through `new` already has one under the node's data
+    /// directory.
+    pub fn with_staging_root(mut self, staging_root: impl Into<PathBuf>) -> Self {
+        self.staging_root = staging_root.into();
         self
     }
 
@@ -167,6 +186,41 @@ impl DriveRegistry {
     /// The local path for a volume, creating its directory if missing.
     pub fn ensure_volume(&self, id: &VolumeId) -> Result<PathBuf> {
         let path = self.volume_path(id)?;
+        std::fs::create_dir_all(&path).map_err(|source| DriveError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
+    /// Where a `NodeLocal` backup destination stages `drive` when this node
+    /// does not implement it - see `staging_root` on the struct. Always
+    /// available, unlike `root`: staging a drive this node doesn't hold is
+    /// exactly the case this path exists for.
+    pub fn staging_root_for(&self, drive: &str) -> PathBuf {
+        self.staging_root.join(drive)
+    }
+
+    /// `staging_root_for`, created if missing - the destination side of a
+    /// `NodeLocal`-elsewhere backup needs somewhere for restic to point at
+    /// even before any volume has landed there yet.
+    pub fn ensure_staging_root(&self, drive: &str) -> Result<PathBuf> {
+        let path = self.staging_root_for(drive);
+        std::fs::create_dir_all(&path).map_err(|source| DriveError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
+    /// The staging path for one volume of a drive this node does not
+    /// implement, creating its directory if missing - the receive side of a
+    /// `NodeLocal`-elsewhere backup push (see `transport::receive`'s
+    /// `staging` handling). Mirrors `ensure_volume`, rooted under
+    /// `staging_root` instead of `drives`.
+    pub fn ensure_staging_volume(&self, id: &VolumeId) -> Result<PathBuf> {
+        let root = self.staging_root_for(&id.drive);
+        let path = resolve_relative(&root, &id.volume)?;
         std::fs::create_dir_all(&path).map_err(|source| DriveError::Io {
             path: path.clone(),
             source,
@@ -291,6 +345,27 @@ mod tests {
             let id = VolumeId::new("fast", name);
             assert!(matches!(reg.volume_path(&id), Err(DriveError::PathEscape { .. })), "{name} should be rejected");
         }
+    }
+
+    #[test]
+    fn staging_root_is_available_for_a_drive_this_node_does_not_implement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = DriveRegistry::from_drives("n1", BTreeMap::new()).with_staging_root(tmp.path());
+        assert!(!reg.implements("cold"));
+
+        let id = VolumeId::new("cold", "data");
+        let path = reg.ensure_staging_volume(&id).unwrap();
+        assert!(path.is_dir());
+        assert_eq!(path, tmp.path().join("cold").join("data"));
+    }
+
+    #[test]
+    fn ensure_staging_root_creates_the_drive_directory_with_nothing_pushed_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = DriveRegistry::from_drives("n1", BTreeMap::new()).with_staging_root(tmp.path());
+        let path = reg.ensure_staging_root("cold").unwrap();
+        assert!(path.is_dir());
+        assert_eq!(path, tmp.path().join("cold"));
     }
 
     #[test]

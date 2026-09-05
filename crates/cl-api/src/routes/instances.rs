@@ -757,11 +757,26 @@ pub(crate) async fn update_instance(state: &AppState, instance: InstanceId) -> R
 async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
     let name = instance.container_name();
     let docker = state.docker().await?;
-    let current = docker
+    docker
         .inspect(&name)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::NotFound(format!("container {name} does not exist on this node")))?;
+
+    // The stack's declared reference, e.g. `nginx:1.25` — not the running
+    // container's `image`, which once this instance has been pinned before
+    // is a `repo@sha256:...` reference with the tag discarded. Pulling that
+    // is a no-op forever: a digest reference is immutable, so it always
+    // "pulls" the exact same bits already running, no matter how many new
+    // tags have been pushed since. See `updates::declared_image`.
+    let cluster_state = state.cluster.state().await;
+    let image = cluster_state
+        .stacks
+        .get(&instance.stack)
+        .and_then(|stack| StackFile::parse(&stack.spec).ok())
+        .and_then(|file| file.services.get(&instance.service).map(|s| s.image.clone()))
+        .ok_or_else(|| ApiError::NotFound(format!("no stack service for instance {instance}")))?;
+    drop(cluster_state);
 
     let registries = super::registries::load(state).await;
     // Marked for the same reason the reconcile loop marks its own pulls: a
@@ -770,7 +785,7 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
     // however long the download takes. `apply` returns before the pull
     // finishes, so this is the only thing the ui has to watch.
     state.pulling.write().await.insert(instance.clone());
-    let pulled = docker.pull_as(&current.image, registries.for_image(&current.image)).await;
+    let pulled = docker.pull_as(&image, registries.for_image(&image)).await;
     state.pulling.write().await.remove(&instance);
     let digest = pulled.map_err(ApiError::internal)?;
     state

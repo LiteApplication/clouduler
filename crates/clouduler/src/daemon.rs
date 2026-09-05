@@ -660,9 +660,14 @@ async fn watch_git_backup(
     data_dir: PathBuf,
 ) {
     let dir = data_dir.join("git-backup");
+    // Kept outside `dir` since that directory is the git working tree itself
+    // and gets fully wiped and rewritten every export tick.
+    let cache_path = data_dir.join("git_backup_cache.json");
     let mut ticker = tokio::time::interval(GIT_BACKUP_POLL_INTERVAL);
-    let mut last_snapshot: Option<cl_backup::snapshot::Snapshot> = None;
+    let cache_state = cl_backup::cache_state::CacheState::load(&cache_path);
+    let mut last_snapshot: Option<cl_backup::snapshot::Snapshot> = cache_state.last_snapshot;
     let mut last_attempt: Option<Instant> = None;
+    let mut secret_cache = cache_state.secret_cache;
 
     loop {
         ticker.tick().await;
@@ -705,7 +710,7 @@ async fn watch_git_backup(
 
         last_attempt = Some(Instant::now());
 
-        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message);
+        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message, &mut secret_cache);
         let last_export = match &result {
             Ok(commit) => {
                 last_snapshot = Some(snapshot);
@@ -727,6 +732,18 @@ async fn watch_git_backup(
             }
         };
 
+        // Persist regardless of outcome: `run_git_export` may have already
+        // re-encrypted (and cached) secrets even on a failed attempt (e.g. a
+        // push rejected after the local commit), and that cache entry is
+        // still valid to reuse next tick.
+        let cache_state = cl_backup::cache_state::CacheState {
+            last_snapshot: last_snapshot.clone(),
+            secret_cache: secret_cache.clone(),
+        };
+        if let Err(e) = cache_state.save(&cache_path) {
+            warn!(error = %e, "git backup: could not persist change-detection cache");
+        }
+
         if let Err(e) = publish_last_export(&cluster, &last_export).await {
             warn!(error = %e, "git backup: could not publish export status");
         }
@@ -741,12 +758,13 @@ fn run_git_export(
     backup_cfg: &cl_config::GitBackupConfig,
     dir: &Path,
     message: &str,
+    secret_cache: &mut cl_backup::tree::SecretCache,
 ) -> anyhow::Result<Option<String>> {
     let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)?;
     let private_key_pem = cl_backup::deploy_key::load_private(state, key)
         .context("this node's cluster key cannot open the git deploy key")?;
 
-    let files = cl_backup::tree::build(state, key, &recipient);
+    let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
     let repo = cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
     let oid = repo.sync(&files, message, &private_key_pem)?;
     Ok(oid.map(|oid| oid.to_string()))

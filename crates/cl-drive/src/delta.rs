@@ -74,12 +74,17 @@ pub struct SyncStats {
 pub trait SyncEngine: Send + Sync {
     fn name(&self) -> &str;
 
+    /// `staging` marks a `NodeLocal`-elsewhere backup's one-off push - see
+    /// `Message::Hello`'s doc comment in `transport.rs` for what it changes
+    /// on the receiving end. Every other caller passes `false`.
+    #[allow(clippy::too_many_arguments)]
     fn sync<'a>(
         &'a self,
         src: &'a Path,
         peer: SocketAddr,
         volume: &'a VolumeId,
         generation: u64,
+        staging: bool,
         progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>>;
 }
@@ -107,9 +112,10 @@ impl SyncEngine for DeltaEngine {
         peer: SocketAddr,
         volume: &'a VolumeId,
         generation: u64,
+        staging: bool,
         progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>> {
-        Box::pin(async move { self.sync_impl(src, peer, volume, generation, progress).await })
+        Box::pin(async move { self.sync_impl(src, peer, volume, generation, staging, progress).await })
     }
 }
 
@@ -143,12 +149,14 @@ where
 pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl DeltaEngine {
+    #[allow(clippy::too_many_arguments)]
     async fn sync_impl(
         &self,
         src: &Path,
         peer: SocketAddr,
         volume: &VolumeId,
         generation: u64,
+        staging: bool,
         progress: crate::progress::ProgressSink,
     ) -> Result<SyncStats> {
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
@@ -157,7 +165,7 @@ impl DeltaEngine {
             .map_err(transfer_err)?;
         let mut conn = transport::frame(stream);
 
-        transport::send(&mut conn, &Message::Hello { volume: volume.clone(), generation })
+        transport::send(&mut conn, &Message::Hello { volume: volume.clone(), generation, staging })
             .await
             .map_err(transfer_err)?;
 

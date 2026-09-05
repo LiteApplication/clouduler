@@ -44,6 +44,11 @@ pub struct StateMachine {
     pub last_applied: Option<LogId>,
     pub membership: StoredMembership,
     pub data: ClusterState,
+    /// Which schema this blob was written at - see `state::CURRENT_SCHEMA_VERSION`
+    /// and `crate::migrations`. `#[serde(default)]` so data written before this
+    /// field existed reads as version `0`.
+    #[serde(default)]
+    pub schema_version: u32,
 }
 
 /// A stored snapshot: its metadata plus the serialized state machine.
@@ -74,7 +79,21 @@ impl Store {
 
         let db = Arc::new(db);
         let sm = match read_meta(&db, KEY_STATE_MACHINE)? {
-            Some(raw) => decode(&raw)?,
+            Some(raw) => match load_state_machine(&raw)? {
+                LoadedStateMachine::Current(sm) => *sm,
+                // This node's own local data, with nowhere else to fall back
+                // to - stays a hard, visible failure rather than silently
+                // starting on data this build doesn't understand. Distinct
+                // from `install_snapshot`'s peer-schema-skew handling below,
+                // which has a live cluster to fall back on.
+                LoadedStateMachine::TooNew { found } => {
+                    return Err(StorageIOError::<NodeId>::read(AnyError::error(format!(
+                        "local state machine is schema_version {found}, newer than this build's {} - this looks like a downgrade after a newer version already ran here; upgrade this node rather than downgrading it",
+                        crate::state::CURRENT_SCHEMA_VERSION
+                    )))
+                    .into());
+                }
+            },
             None => StateMachine::default(),
         };
 
@@ -524,7 +543,30 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError> {
         let data = snapshot.into_inner();
-        let restored: StateMachine = decode(&data)?;
+        // A decode failure here comes from a peer, not from this node's own
+        // disk, and this node already has valid state to keep serving - so
+        // unlike `Store::open`, both a too-new schema and a decode failure
+        // are refused-and-logged rather than propagated as a fatal
+        // `StorageError` (which openraft treats as unrecoverable and is
+        // exactly what turned a past shape change into a full crash-loop).
+        let restored = match load_state_machine(&data) {
+            Ok(LoadedStateMachine::Current(sm)) => *sm,
+            Ok(LoadedStateMachine::TooNew { found }) => {
+                tracing::error!(
+                    found,
+                    current = crate::state::CURRENT_SCHEMA_VERSION,
+                    "refusing a snapshot written by a newer schema than this build understands - update this node; continuing to serve its current state until then"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "an incoming snapshot failed to decode even though its schema_version looked compatible - this is likely a genuine bug, not expected version skew; refusing it and continuing to serve current state"
+                );
+                return Ok(());
+            }
+        };
 
         let mut sm = self.sm.write().await;
         *sm = restored;
@@ -589,6 +631,34 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
 
 fn decode<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, StorageError> {
     serde_json::from_slice(raw).map_err(|e| StorageIOError::<NodeId>::read(AnyError::new(&e)).into())
+}
+
+enum LoadedStateMachine {
+    Current(Box<StateMachine>),
+    /// `schema_version` on the blob is greater than
+    /// `state::CURRENT_SCHEMA_VERSION` - this build has no migration that
+    /// could apply, because none has been written for a version that
+    /// doesn't exist yet from its point of view. Callers decide what
+    /// "ignore it, log clearly" means for their situation.
+    TooNew { found: u32 },
+}
+
+/// Peeks a `StateMachine` blob's `schema_version` before committing to a
+/// strict decode, runs any migrations needed to bring it up to
+/// `state::CURRENT_SCHEMA_VERSION`, then decodes normally. See
+/// `crate::migrations` for why this exists instead of permanent
+/// backward-compat shims on the live types.
+fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
+    let value: serde_json::Value = serde_json::from_slice(raw)
+        .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
+    let found = value.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if found > crate::state::CURRENT_SCHEMA_VERSION {
+        return Ok(LoadedStateMachine::TooNew { found });
+    }
+    let migrated = crate::migrations::migrate_to_current(value, found);
+    let sm: StateMachine = serde_json::from_value(migrated)
+        .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
+    Ok(LoadedStateMachine::Current(Box::new(sm)))
 }
 
 fn read_meta(db: &Database, key: &str) -> Result<Option<Vec<u8>>, StorageError> {

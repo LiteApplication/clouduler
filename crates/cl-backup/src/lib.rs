@@ -6,6 +6,7 @@
 //! real repo.
 
 pub mod age;
+pub mod cache_state;
 pub mod deploy_key;
 pub mod error;
 pub mod git;

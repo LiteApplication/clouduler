@@ -23,8 +23,14 @@ pub struct Cli {
     pub data_dir: Option<PathBuf>,
 
     /// Log filter, syntax as in RUST_LOG. openraft is quieted by default because
-    /// it logs every raft message at info.
-    #[arg(long, global = true, env = "CLOUDULER_LOG", default_value = "info,openraft=warn")]
+    /// it logs every raft message at info, and hickory_server because it logs
+    /// every DNS query and response at info regardless of outcome.
+    #[arg(
+        long,
+        global = true,
+        env = "CLOUDULER_LOG",
+        default_value = "info,openraft=warn,hickory_server=warn"
+    )]
     pub log: String,
 
     /// Log each step a command takes while it changes cluster state: requests
