@@ -21,8 +21,10 @@ use crate::static_routes::STATIC_ROUTES_CONFIG;
 use crate::wireguard::{is_reserved_wireguard_secret, WIREGUARD_INGRESS_CONFIG};
 
 /// Config names clouduler itself owns and never shows through the generic
-/// config routes.
-fn is_reserved(name: &str) -> bool {
+/// config routes. `pub(crate)` so `routes::git_backup`'s reverse sync can
+/// skip these too - they have their own dedicated, validated write paths and
+/// must never be overwritten by a plain `PutConfig` of raw git content.
+pub(crate) fn is_reserved(name: &str) -> bool {
     name == API_KEYS_CONFIG
         || name == REDIRECTS_CONFIG
         || name == STATIC_ROUTES_CONFIG

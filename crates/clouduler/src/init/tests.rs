@@ -145,6 +145,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
         // backend listener plays no part in it.
         plain_listen_addr: None,
         self_update_artifact_path: dir.path().join("self-update-artifact"),
+        data_dir: dir.path().to_path_buf(),
         shutdown: tokio::sync::watch::channel(()).0,
         http: reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -348,6 +349,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
         listen_addr: n2_listen_addr,
         plain_listen_addr: None,
         self_update_artifact_path: dir.path().join("self-update-artifact"),
+        data_dir: dir.path().to_path_buf(),
         shutdown: tokio::sync::watch::channel(()).0,
         http: reqwest::Client::builder()
             .danger_accept_invalid_certs(true)

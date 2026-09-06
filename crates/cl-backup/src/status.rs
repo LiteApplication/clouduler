@@ -33,6 +33,35 @@ pub fn load(state: &ClusterState) -> Option<LastExport> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Reserved config name the last webhook-triggered pull's outcome is stored
+/// under, mirroring `LAST_EXPORT_CONFIG`. Never exposed through the generic
+/// `/api/configs` routes.
+pub const LAST_PULL_CONFIG: &str = "_clouduler_git_backup_last_pull";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LastPull {
+    /// Unix seconds.
+    pub at: u64,
+    /// The commit that was fetched and accepted, if this pull applied one.
+    pub commit: Option<String>,
+    /// Set when the fetched commit failed validation: what went wrong, and
+    /// the branch the rejected commit was preserved on before the tracked
+    /// branch was force-pushed back to a working state.
+    pub rejected: Option<RejectedPull>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RejectedPull {
+    pub reason: String,
+    pub preserved_branch: String,
+}
+
+pub fn load_pull(state: &ClusterState) -> Option<LastPull> {
+    let entry = state.configs.get(LAST_PULL_CONFIG)?;
+    let bytes = entry.decode().ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

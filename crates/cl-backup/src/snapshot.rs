@@ -21,13 +21,15 @@ use cl_raft::state::ClusterState;
 use serde::{Deserialize, Serialize};
 
 use crate::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG;
-use crate::status::LAST_EXPORT_CONFIG;
+use crate::status::{LAST_EXPORT_CONFIG, LAST_PULL_CONFIG};
 
 /// Reserved config entries this feature writes for its own bookkeeping, not
 /// user content - excluded both from change detection (this module) and
-/// from the exported tree itself (`tree::build`).
-pub(crate) fn is_bookkeeping_config(name: &str) -> bool {
-    name == LAST_EXPORT_CONFIG || name == DEPLOY_KEY_PUBLIC_CONFIG
+/// from the exported tree itself (`tree::build`), and from the reverse
+/// (git -> cluster) sync in `cl-api::routes::git_backup` since they are never
+/// mirrored into the repo in the first place.
+pub fn is_bookkeeping_config(name: &str) -> bool {
+    name == LAST_EXPORT_CONFIG || name == DEPLOY_KEY_PUBLIC_CONFIG || name == LAST_PULL_CONFIG
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -833,6 +833,7 @@ dependencies = [
  "cl-update",
  "cookie",
  "futures",
+ "git2",
  "http-body-util",
  "humantime",
  "humantime-serde",

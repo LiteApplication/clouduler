@@ -804,6 +804,24 @@ export interface GitBackupLastExport {
   error: string | null;
 }
 
+/** Preserved on `RejectedPull.preserved_branch` when a pulled commit fails
+ *  validation. Matches `cl_backup::status::RejectedPull`. */
+export interface RejectedPull {
+  reason: string;
+  preserved_branch: string;
+}
+
+/** Stored in `ClusterState.configs['_clouduler_git_backup_last_pull']`, live
+ *  over `/api/events` like `GitBackupLastExport`. Matches
+ *  `cl_backup::status::LastPull`. */
+export interface GitBackupLastPull {
+  /** Unix seconds. */
+  at: number;
+  /** The commit that was applied, absent when the pull was rejected or a no-op. */
+  commit: string | null;
+  rejected: RejectedPull | null;
+}
+
 /** GET /api/git-backup/status. */
 export interface GitBackupStatus {
   configured: boolean;
@@ -811,6 +829,13 @@ export interface GitBackupStatus {
    *  hand this to the git host as a write-capable deploy key. */
   deploy_public_key: string | null;
   last_export: GitBackupLastExport | null;
+  last_pull: GitBackupLastPull | null;
+}
+
+/** GET /api/git-backup/webhook-secret. The token itself is write-only, like
+ *  the self-update github token. */
+export interface GitBackupWebhookSecretStatus {
+  configured: boolean;
 }
 
 /** One row of the Updates view: what a container runs versus what its

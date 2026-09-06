@@ -46,6 +46,9 @@ cookie = "0.18"
 humantime = "2"
 humantime-serde.workspace = true
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
+# For `git2::Oid` only, in `routes::git_backup` - the git2 IO itself all lives
+# in `cl-backup`.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "ssh"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

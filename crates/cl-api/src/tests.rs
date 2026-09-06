@@ -153,6 +153,7 @@ async fn harness() -> Harness {
         started_at: Instant::now(),
         rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
         self_update_artifact_path: dir.path().join("self-update-artifact"),
+        data_dir: dir.path().to_path_buf(),
         shutdown,
         http: reqwest::Client::builder()
             .danger_accept_invalid_certs(true)

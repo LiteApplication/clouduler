@@ -21,6 +21,7 @@ import type {
   DnsRecordState,
   DriveStatus,
   GitBackupStatus,
+  GitBackupWebhookSecretStatus,
   Identity,
   InstanceState,
   OidcClientSecretStatus,
@@ -342,6 +343,8 @@ export const api = {
   cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
 
   gitBackupStatus: () => get<GitBackupStatus>('/api/git-backup/status'),
+  gitBackupWebhookSecret: () => get<GitBackupWebhookSecretStatus>('/api/git-backup/webhook-secret'),
+  setGitBackupWebhookSecret: (token: string) => put<void>('/api/git-backup/webhook-secret', { token }),
 
   // restic backups: destinations, per-drive schedules, run history, restore.
   // The `id` for a destination/target is inside the request body, not the

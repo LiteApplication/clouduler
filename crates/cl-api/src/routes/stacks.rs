@@ -106,70 +106,36 @@ async fn deploy(
     Path(name): Path<String>,
     Json(body): Json<DeployRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let parsed = StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let requirements = parsed.requirements();
-
-    // The names this stack owns come from its own spec, not from whatever the
-    // caller happened to include in this request: a redeploy that doesn't
-    // resend an unchanged config's content must not drop the stack's claim on
-    // it, and a config renamed out of the spec must not linger as owned.
-    let cluster_state = state.cluster.state().await;
-    for config_name in &requirements.file_configs {
-        if !body.configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
-            return Err(ApiError::BadRequest(format!(
-                "config {config_name} needs content: it has no existing value to keep"
-            )));
+    let secrets_to_write = {
+        let parsed = StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        let requirements = parsed.requirements();
+        let cluster_state = state.cluster.state().await;
+        for config_name in &requirements.file_configs {
+            if !body.configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
+                return Err(ApiError::BadRequest(format!(
+                    "config {config_name} needs content: it has no existing value to keep"
+                )));
+            }
         }
-    }
-    for secret_name in &requirements.file_secrets {
-        if !body.secrets.contains_key(secret_name) && !cluster_state.secrets.contains_key(secret_name) {
-            return Err(ApiError::BadRequest(format!(
-                "secret {secret_name} needs content: it has no existing value to keep"
-            )));
+        for secret_name in &requirements.file_secrets {
+            if !body.secrets.contains_key(secret_name) && !cluster_state.secrets.contains_key(secret_name) {
+                return Err(ApiError::BadRequest(format!(
+                    "secret {secret_name} needs content: it has no existing value to keep"
+                )));
+            }
         }
-    }
+        body.secrets
+            .into_iter()
+            .filter(|(k, _)| requirements.file_secrets.contains(k))
+            .collect::<BTreeMap<_, _>>()
+    };
 
-    let response = state
-        .cluster
-        .submit(ClusterRequest::DeployStack {
-            name: name.clone(),
-            spec: body.spec,
-        })
-        .await
-        .map_err(ApiError::not_leader)?;
-    if let Some(msg) = response.error {
-        return Err(ApiError::BadRequest(msg));
-    }
-
-    for config_name in &requirements.file_configs {
-        let Some(content) = body.configs.get(config_name) else {
-            continue;
-        };
-        let response = state
-            .cluster
-            .submit(ClusterRequest::PutConfig {
-                name: config_name.clone(),
-                content: content.clone(),
-                owner: Some(name.clone()),
-            })
-            .await
-            .map_err(ApiError::not_leader)?;
-        if let Some(msg) = response.error {
-            return Err(ApiError::BadRequest(msg));
-        }
-    }
-
-    let secrets_to_write: BTreeMap<_, _> = body
-        .secrets
-        .iter()
-        .filter(|(k, _)| requirements.file_secrets.contains(*k))
-        .collect();
     if !secrets_to_write.is_empty() {
         let key_guard = state.key.read().await;
         let key = key_guard
             .as_ref()
             .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-        for (secret_name, content) in secrets_to_write {
+        for (secret_name, content) in &secrets_to_write {
             let plaintext = cl_raft::base64_decode(content).map_err(ApiError::BadRequest)?;
             let sealed = Sealed::seal(key, secret_name, &plaintext).map_err(ApiError::internal)?;
             let response = state
@@ -188,10 +154,77 @@ async fn deploy(
         }
     }
 
+    let configs: BTreeMap<String, Vec<u8>> = body
+        .configs
+        .into_iter()
+        .map(|(name, content)| Ok((name, cl_raft::base64_decode(&content).map_err(ApiError::BadRequest)?)))
+        .collect::<Result<_, ApiError>>()?;
+    deploy_from_files(&state, &name, body.spec, configs).await?;
+    Ok(StatusCode::OK)
+}
+
+/// The reusable core of `deploy`: parses+validates the spec, submits it, then
+/// writes every provided config it owns and records what it owns. Shared with
+/// `routes::git_backup`'s reverse (git -> cluster) sync, which never has
+/// secret content to supply (git-mirrored secrets are age-encrypted for the
+/// admin, not this cluster's key, so they can't be written back this way) and
+/// so only ever calls this, never the secrets branch above.
+pub(crate) async fn deploy_from_files(
+    state: &AppState,
+    name: &str,
+    spec: String,
+    configs: BTreeMap<String, Vec<u8>>,
+) -> Result<(), ApiError> {
+    let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let requirements = parsed.requirements();
+
+    // The names this stack owns come from its own spec, not from whatever the
+    // caller happened to include in this request: a redeploy that doesn't
+    // resend an unchanged config's content must not drop the stack's claim on
+    // it, and a config renamed out of the spec must not linger as owned.
+    let cluster_state = state.cluster.state().await;
+    for config_name in &requirements.file_configs {
+        if !configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
+            return Err(ApiError::BadRequest(format!(
+                "config {config_name} needs content: it has no existing value to keep"
+            )));
+        }
+    }
+
+    let response = state
+        .cluster
+        .submit(ClusterRequest::DeployStack {
+            name: name.to_string(),
+            spec,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::BadRequest(msg));
+    }
+
+    for config_name in &requirements.file_configs {
+        let Some(content) = configs.get(config_name) else {
+            continue;
+        };
+        let response = state
+            .cluster
+            .submit(ClusterRequest::PutConfig {
+                name: config_name.clone(),
+                content: cl_backup::tree::encode_config_content(content),
+                owner: Some(name.to_string()),
+            })
+            .await
+            .map_err(ApiError::not_leader)?;
+        if let Some(msg) = response.error {
+            return Err(ApiError::BadRequest(msg));
+        }
+    }
+
     let response = state
         .cluster
         .submit(ClusterRequest::SetStackObjects {
-            name,
+            name: name.to_string(),
             configs: requirements.file_configs,
             secrets: requirements.file_secrets,
             used_configs: requirements.configs,
@@ -203,7 +236,7 @@ async fn deploy(
         return Err(ApiError::BadRequest(msg));
     }
 
-    Ok(StatusCode::OK)
+    Ok(())
 }
 
 async fn remove(

@@ -10,6 +10,7 @@ import type {
   ClusterConfig,
   EgressFallback,
   GitBackupStatus,
+  GitBackupWebhookSecretStatus,
   InterfaceAddress,
   NetworkConfig,
   NetworkKind,
@@ -20,6 +21,7 @@ import type {
   PortProtocol,
   PublicAddress,
 } from '../../api/types';
+import { Badge } from '../../components/Badge';
 import { Icon } from '../../components/Icon';
 import {
   CheckboxField,
@@ -1392,15 +1394,21 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
   );
 }
 
-/** Shows the leader-generated deploy key and last export status, polled once
- *  on mount - this is read-only reporting, not part of the draft, so it does
+/** Shows the leader-generated deploy key, last export/pull status, and the
+ *  webhook secret setup, polled once on mount - this is read-only reporting
+ *  (plus the write-only webhook token), not part of the draft, so it does
  *  not need to track edits like the fields above. */
 function GitBackupDeployKey() {
   const [status, setStatus] = useState<GitBackupStatus | null>(null);
   const [copied, setCopied] = useState(false);
+  const [webhookSecret, setWebhookSecret] = useState<GitBackupWebhookSecretStatus | null>(null);
+  const [tokenInput, setTokenInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   useEffect(() => {
     api.gitBackupStatus().then(setStatus).catch(() => setStatus(null));
+    api.gitBackupWebhookSecret().then(setWebhookSecret).catch(() => setWebhookSecret(null));
   }, []);
 
   const copy = async () => {
@@ -1408,6 +1416,21 @@ function GitBackupDeployKey() {
     await navigator.clipboard.writeText(status.deploy_public_key);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const saveWebhookSecret = async () => {
+    if (!tokenInput.trim()) return;
+    setTokenError(null);
+    setBusy(true);
+    try {
+      await api.setGitBackupWebhookSecret(tokenInput.trim());
+      setTokenInput('');
+      setWebhookSecret(await api.gitBackupWebhookSecret());
+    } catch (e) {
+      setTokenError(e instanceof ApiError ? e.message : 'failed to save the webhook token');
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (!status) {
@@ -1447,6 +1470,46 @@ function GitBackupDeployKey() {
             </>
           ) : (
             <>Last export: {status.last_export.summary}</>
+          )}
+        </p>
+      )}
+
+      <label style={{ marginTop: 16 }}>Webhook (git &rarr; cluster)</label>
+      <span className="field-hint">
+        Point the repository's webhook at <code>/api/git-backup/webhook</code>, sending this token as either an{' '}
+        <code>X-Gitlab-Token</code> header or an <code>Authorization: Bearer</code> header. A push notification pulls
+        the branch above; a commit that fails to parse or validate is never applied - it is preserved on its own
+        <code> rejected/...</code> branch and the branch above is force-pushed back to its last known-good state.
+      </span>
+      <input
+        id="backup-webhook-token"
+        type="password"
+        placeholder={webhookSecret?.configured ? 'already configured' : 'shared secret for the webhook'}
+        value={tokenInput}
+        onChange={(e) => setTokenInput(e.target.value)}
+        disabled={busy}
+        style={{ marginTop: 8 }}
+      />
+      <div className="btn-row" style={{ marginTop: 8 }}>
+        <button type="button" onClick={saveWebhookSecret} disabled={busy || !tokenInput.trim()}>
+          <Icon name="key" /> Save webhook token
+        </button>
+        {webhookSecret?.configured && <Badge tone="good">configured</Badge>}
+      </div>
+      {tokenError && (
+        <p className="field-error" style={{ marginTop: 8 }}>
+          <Icon name="alert-circle" /> {tokenError}
+        </p>
+      )}
+      {status.last_pull && (
+        <p className={status.last_pull.rejected ? 'field-error' : 'muted'} style={{ marginTop: 8 }}>
+          {status.last_pull.rejected ? (
+            <>
+              <Icon name="alert-circle" /> Last pull rejected: {status.last_pull.rejected.reason} (preserved on{' '}
+              <code>{status.last_pull.rejected.preserved_branch}</code>)
+            </>
+          ) : (
+            <>Last pull applied commit {status.last_pull.commit}</>
           )}
         </p>
       )}

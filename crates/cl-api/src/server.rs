@@ -98,6 +98,11 @@ pub struct AppState {
     /// keyed `stack.service`. Read by `routes::instances` to report a backend
     /// the proxy can't reach without waiting for a real client to hit it.
     pub proxy_health: cl_proxy::HealthTable,
+    /// This node's data directory. Only `routes::git_backup`'s webhook needs
+    /// it, for a second git working copy (separate from the leader export
+    /// loop's own, under `daemon::watch_git_backup`) to fetch and check out a
+    /// candidate commit into before validating it.
+    pub data_dir: PathBuf,
 }
 
 impl AppState {
@@ -142,6 +147,7 @@ pub struct ApiServerOptions {
     /// delivered automatically through raft. See `routes::key_distribution`.
     pub node_keypair: Option<cl_secret::NodeKeypair>,
     pub proxy_health: cl_proxy::HealthTable,
+    pub data_dir: PathBuf,
 }
 
 pub struct ApiServer {
@@ -207,6 +213,7 @@ impl ApiServer {
             http: options.http,
             tls_fingerprint,
             proxy_health: options.proxy_health,
+            data_dir: options.data_dir,
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the
@@ -467,6 +474,16 @@ async fn redirect_non_leader(
     // who the leader is.
     let path = request.uri().path();
     if path.starts_with("/auth/oidc/") {
+        return Ok(next.run(request).await);
+    }
+
+    // A git host's webhook config points at a fixed url that has to keep
+    // working across leader elections, and cannot be expected to follow a
+    // 503 + Location the way the ui's own fetch client does. Both routes
+    // check their own auth (a shared token / an internal HMAC signature, not
+    // `Identity`) and forward the actual work to the leader themselves - see
+    // `routes::git_backup`.
+    if path == "/api/git-backup/webhook" || path == "/api/git-backup/webhook/internal-trigger" {
         return Ok(next.run(request).await);
     }
 

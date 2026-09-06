@@ -397,6 +397,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         listen_addr,
         plain_listen_addr,
         self_update_artifact_path: self_update_artifact_path(data_dir),
+        data_dir: data_dir.to_path_buf(),
         shutdown,
         http,
         node_keypair,
