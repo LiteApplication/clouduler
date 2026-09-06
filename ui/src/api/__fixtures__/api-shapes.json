@@ -129,6 +129,7 @@
         "revision": 1
       }
     },
+    "container_status": {},
     "dns_records": {
       "example.test|A|127.0.0.1": {
         "content": "<volatile>",
@@ -223,7 +224,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.5.21",
+    "version": "0.5.22",
     "voters": 1
   },
   "updates": [
