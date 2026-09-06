@@ -271,10 +271,10 @@ impl GitBackup {
     }
 
     /// Reacts to a fetched commit that failed validation: preserves it under
-    /// its own branch (never lost), then force-pushes the tracked branch back
-    /// to `good`'s tree with an empty commit on top explaining `reason` - or,
-    /// if there is no known-good history at all yet, back to an empty root
-    /// commit.
+    /// its own branch with an explanatory commit on top (so the reason lives
+    /// with the rejected history, not on the tracked branch), then
+    /// force-pushes the tracked branch straight back to `good` - or, if there
+    /// is no known-good history at all yet, back to an empty root commit.
     pub fn reject_and_restore(
         &self,
         bad: git2::Oid,
@@ -284,40 +284,45 @@ impl GitBackup {
     ) -> Result<RejectOutcome> {
         let bad_commit = self.repo.find_commit(bad)?;
         let preserved_branch = format!("rejected/{}-{}", self.branch, &bad.to_string()[..12]);
-        self.repo.branch(&preserved_branch, &bad_commit, true)?;
-
-        let (parents, tree) = match good {
-            Some(good_oid) => {
-                let commit = self.repo.find_commit(good_oid)?;
-                let tree = commit.tree()?;
-                (vec![commit], tree)
-            }
-            None => {
-                let empty_tree_oid = self.repo.treebuilder(None)?.write()?;
-                (vec![], self.repo.find_tree(empty_tree_oid)?)
-            }
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
         let signature = Signature::now("clouduler", "clouduler@localhost")?;
-        // Not `Some(&branch_ref)`: libgit2 requires an update-ref's current
-        // tip to be a parent of the new commit, which a deliberate force
-        // revert past `bad` never is. Force-set the ref by hand instead.
-        let revert_commit = self.repo.commit(
+        // An empty-diff commit on top of `bad`, on the preserved branch only,
+        // so the explanation travels with the rejected history instead of
+        // polluting the tracked branch with a synthetic commit.
+        let explanation_commit = self.repo.commit(
             None,
             &signature,
             &signature,
-            reason,
-            &tree,
-            &parent_refs,
+            &format!("rejected: {reason}"),
+            &bad_commit.tree()?,
+            &[&bad_commit],
         )?;
+        self.repo.reference(
+            &format!("refs/heads/{preserved_branch}"),
+            explanation_commit,
+            true,
+            "preserve rejected commit with explanation",
+        )?;
+
+        // Not `head.set_target`: libgit2 requires an update-ref's current tip
+        // to be a parent of the new commit, which a deliberate force revert
+        // past `bad` never is when there is no known-good commit to fall back
+        // to. Force-set the ref by hand instead.
+        let restore_oid = match good {
+            Some(good_oid) => good_oid,
+            None => {
+                let empty_tree_oid = self.repo.treebuilder(None)?.write()?;
+                let empty_tree = self.repo.find_tree(empty_tree_oid)?;
+                self.repo.commit(None, &signature, &signature, "no accepted history yet", &empty_tree, &[])?
+            }
+        };
         let branch_ref = format!("refs/heads/{}", self.branch);
-        self.repo.reference(&branch_ref, revert_commit, true, "force revert after a rejected pull")?;
+        self.repo.reference(&branch_ref, restore_oid, true, "force revert after a rejected pull")?;
 
         // Keep the working directory in step with the branch that was just
         // force-pushed, or the next export tick's tree-hash comparison in
         // `sync` would see a phantom change against a tree nobody asked for.
-        self.checkout_tree_to_disk(good.unwrap_or(revert_commit))?;
+        self.checkout_tree_to_disk(restore_oid)?;
 
         let force_refspec = format!("+refs/heads/{branch}:refs/heads/{branch}", branch = self.branch);
         let preserve_refspec = format!("refs/heads/{preserved_branch}:refs/heads/{preserved_branch}");
@@ -325,7 +330,7 @@ impl GitBackup {
 
         Ok(RejectOutcome {
             preserved_branch,
-            revert_commit,
+            revert_commit: restore_oid,
         })
     }
 
@@ -350,11 +355,11 @@ impl GitBackup {
 
 /// What `reject_and_restore` did with a rejected commit.
 pub struct RejectOutcome {
-    /// Name of the branch the rejected commit was preserved on, for the
-    /// operator to go inspect and fix.
+    /// Name of the branch the rejected commit was preserved on (with an
+    /// explanatory commit on top), for the operator to go inspect and fix.
     pub preserved_branch: String,
-    /// The empty commit added on top of `good`, whose message explains why
-    /// the original commit was rejected.
+    /// What the tracked branch was force-pushed back to: `good`, or a fresh
+    /// empty root commit when there was no known-good history yet.
     pub revert_commit: git2::Oid,
 }
 
@@ -717,22 +722,26 @@ mod tests {
             .reject_and_restore(bad_oid, Some(good_oid), "stack broken.yaml failed to parse", dummy_key)
             .expect("reject_and_restore");
 
-        // The bad commit is preserved on its own branch, not lost.
+        // The bad commit is preserved on its own branch, not lost, with an
+        // explanatory commit on top carrying the rejection reason.
         let preserved_ref = backup
             .repo
             .find_reference(&format!("refs/heads/{}", outcome.preserved_branch))
             .expect("preserved branch exists");
-        assert_eq!(preserved_ref.target(), Some(bad_oid));
+        let explanation_commit = backup
+            .repo
+            .find_commit(preserved_ref.target().expect("preserved target"))
+            .expect("find explanation commit");
+        assert_eq!(explanation_commit.message(), Some("rejected: stack broken.yaml failed to parse"));
+        assert_eq!(explanation_commit.parent_id(0).expect("parent"), bad_oid);
+        let bad_commit = backup.repo.find_commit(bad_oid).expect("find bad commit");
+        assert_eq!(explanation_commit.tree().expect("tree").id(), bad_commit.tree().expect("tree").id());
 
-        // The tracked branch now points at the new revert commit, whose tree
-        // matches `good` and whose parent is `good`.
+        // The tracked branch is force-pushed straight back to `good`, with no
+        // synthetic commit on top of it.
         let branch_oid = backup.local_branch_oid().expect("local oid").expect("some oid");
         assert_eq!(branch_oid, outcome.revert_commit);
-        let revert_commit = backup.repo.find_commit(outcome.revert_commit).expect("find revert commit");
-        assert_eq!(revert_commit.message(), Some("stack broken.yaml failed to parse"));
-        assert_eq!(revert_commit.parent_id(0).expect("parent"), good_oid);
-        let good_commit = backup.repo.find_commit(good_oid).expect("find good commit");
-        assert_eq!(revert_commit.tree().expect("tree").id(), good_commit.tree().expect("tree").id());
+        assert_eq!(outcome.revert_commit, good_oid);
 
         // The working directory was restored to match `good`, not left as
         // the bad tree or the empty revert tree.
@@ -770,10 +779,22 @@ mod tests {
             .reject_and_restore(bad_oid, None, "cluster.yaml failed to parse", dummy_key)
             .expect("reject_and_restore");
 
-        let revert_commit = backup.repo.find_commit(outcome.revert_commit).expect("find revert commit");
-        assert_eq!(revert_commit.parent_count(), 0);
-        assert_eq!(revert_commit.tree().expect("tree").len(), 0);
+        let root_commit = backup.repo.find_commit(outcome.revert_commit).expect("find root commit");
+        assert_eq!(root_commit.parent_count(), 0);
+        assert_eq!(root_commit.tree().expect("tree").len(), 0);
         assert!(!work_dir.path().join("cluster.yaml").exists());
+
+        // The rejection reason lives on the preserved branch, not on main.
+        let preserved_ref = backup
+            .repo
+            .find_reference(&format!("refs/heads/{}", outcome.preserved_branch))
+            .expect("preserved branch exists");
+        let explanation_commit = backup
+            .repo
+            .find_commit(preserved_ref.target().expect("preserved target"))
+            .expect("find explanation commit");
+        assert_eq!(explanation_commit.message(), Some("rejected: cluster.yaml failed to parse"));
+        assert_eq!(explanation_commit.parent_id(0).expect("parent"), bad_oid);
     }
 
     #[test]
