@@ -10,6 +10,7 @@ mod config;
 mod daemon;
 mod drives;
 mod folder_import;
+mod git_backup_cli;
 mod internal_dns;
 mod migration;
 mod node;
@@ -35,8 +36,8 @@ use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
-    BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, NodeCommand, SecretCommand,
-    SourceCommand, StackCommand,
+    BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, GitBackupCommand, NodeCommand,
+    SecretCommand, SourceCommand, StackCommand,
 };
 
 #[tokio::main]
@@ -225,6 +226,10 @@ async fn main() -> Result<()> {
                 let node_name = hostname()?;
                 backup_cli::restore_service(&cfg, &node_name, &stack, &service, destination.as_deref(), snapshot.as_deref(), yes, via.as_deref()).await
             }
+        },
+        Command::GitBackup { command } => match command {
+            GitBackupCommand::Pull { via } => git_backup_cli::pull(&cfg, via.as_deref()).await,
+            GitBackupCommand::ForcePush { via, yes } => git_backup_cli::force_push(&cfg, via.as_deref(), yes).await,
         },
     }
 }

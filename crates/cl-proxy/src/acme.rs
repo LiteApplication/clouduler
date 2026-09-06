@@ -14,6 +14,7 @@ use instant_acme::{
 use tracing::{error, info, warn};
 
 use crate::error::{ProxyError, Result};
+use crate::http01::Http01Store;
 
 /// Let's Encrypt's staging directory. Use for tests and the qemu harness so
 /// issuance doesn't burn production rate limits. `AcmeConfig::default` points
@@ -179,6 +180,70 @@ async fn complete_authorizations(
     Ok(())
 }
 
+/// Orders a certificate covering a single `name` via HTTP-01, answered by
+/// the plain-http listener out of `store`. Used only for a name the caller
+/// has decided is not covered by any DNS provider zone (an explicit
+/// trailing-dot stack hostname, in practice) - every other name goes through
+/// `issue_certificate`'s DNS-01 instead. As with DNS-01, every token this
+/// places in `store` is removed at the end regardless of outcome, so a
+/// failed order never leaves a stray challenge response behind.
+pub async fn issue_certificate_http01(account: &Account, store: &Http01Store, name: &str) -> Result<IssuedCertificate> {
+    let identifiers = vec![Identifier::Dns(name.to_string())];
+    let mut order = account
+        .new_order(&NewOrder::new(&identifiers))
+        .await
+        .map_err(acme_err)?;
+
+    let mut tokens: Vec<String> = Vec::new();
+    let setup: Result<()> = complete_authorizations_http01(&mut order, store, &mut tokens).await;
+
+    for token in &tokens {
+        store.remove(token);
+    }
+    setup?;
+
+    let status = order.poll_ready(&RetryPolicy::default()).await.map_err(acme_err)?;
+    if status != OrderStatus::Ready {
+        return Err(ProxyError::Acme(format!("order not ready: {status:?}")));
+    }
+
+    let key_pem = order.finalize().await.map_err(acme_err)?;
+    let chain_pem = order.poll_certificate(&RetryPolicy::default()).await.map_err(acme_err)?;
+    let not_after = leaf_not_after(&chain_pem)?;
+
+    Ok(IssuedCertificate {
+        chain_pem,
+        key_pem,
+        not_after,
+    })
+}
+
+async fn complete_authorizations_http01(
+    order: &mut instant_acme::Order,
+    store: &Http01Store,
+    tokens: &mut Vec<String>,
+) -> Result<()> {
+    let mut authorizations = order.authorizations();
+    while let Some(authz) = authorizations.next().await {
+        let mut authz = authz.map_err(acme_err)?;
+        if authz.status == AuthorizationStatus::Valid {
+            continue;
+        }
+
+        let mut challenge = authz
+            .challenge(ChallengeType::Http01)
+            .ok_or_else(|| ProxyError::Acme("ca did not offer an http-01 challenge".to_string()))?;
+
+        let token = challenge.token.clone();
+        let key_authorization = challenge.key_authorization().as_str().to_string();
+        store.set(token.clone(), key_authorization);
+        tokens.push(token);
+
+        challenge.set_ready().await.map_err(acme_err)?;
+    }
+    Ok(())
+}
+
 fn leaf_not_after(chain_pem: &str) -> Result<i64> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(chain_pem.as_bytes())
         .map_err(|e| ProxyError::CertParse(e.to_string()))?;
@@ -218,11 +283,18 @@ fn now_unix() -> i64 {
 /// One pass over the leader's certificate store, renewing anything inside
 /// the renewal window. Runs only when `node` currently leads; a follower
 /// call is a no-op so callers can invoke this on a plain timer everywhere.
+///
+/// A name `zones` can't resolve falls back to HTTP-01 (through `http01_store`)
+/// when `allow_http01` says so - the same opt-in a fresh issuance checks, so
+/// a name issued that way keeps renewing that way rather than erroring once
+/// `zones` still can't cover it.
 pub async fn renewal_tick(
     node: &ClusterNode,
     account: &Account,
     cf: &Cloudflare,
     zones: &dyn ZoneResolver,
+    allow_http01: &(dyn Fn(&str) -> bool + Send + Sync),
+    http01_store: &Http01Store,
     propagation_timeout: Duration,
 ) {
     if !node.is_leader() {
@@ -234,13 +306,17 @@ pub async fn renewal_tick(
         if !needs_renewal(cert.not_after, now, RENEWAL_WINDOW) {
             continue;
         }
-        let Some(zone_id) = zones.zone_id_for(&cert.fqdn) else {
-            warn!(fqdn = %cert.fqdn, "no zone configured for certificate, skipping renewal");
-            continue;
-        };
         info!(fqdn = %cert.fqdn, "renewing certificate");
         let names = vec![cert.fqdn.clone()];
-        match issue_certificate(account, cf, &zone_id, &names, propagation_timeout).await {
+        let issued = match zones.zone_id_for(&cert.fqdn) {
+            Some(zone_id) => issue_certificate(account, cf, &zone_id, &names, propagation_timeout).await,
+            None if allow_http01(&cert.fqdn) => issue_certificate_http01(account, http01_store, &cert.fqdn).await,
+            None => {
+                warn!(fqdn = %cert.fqdn, "no zone configured for certificate, skipping renewal");
+                continue;
+            }
+        };
+        match issued {
             Ok(issued) => {
                 let req = Request::StoreCertificate(CertificateState {
                     fqdn: cert.fqdn.clone(),
@@ -259,18 +335,30 @@ pub async fn renewal_tick(
 
 /// Runs `renewal_tick` on `check_interval` forever. Meant to be spawned as a
 /// background task for the life of the process.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_renewal_loop(
     node: Arc<ClusterNode>,
     account: Account,
     cf: Cloudflare,
     zones: Arc<dyn ZoneResolver>,
+    allow_http01: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    http01_store: Arc<Http01Store>,
     propagation_timeout: Duration,
     check_interval: Duration,
 ) -> ! {
     let mut ticker = tokio::time::interval(check_interval);
     loop {
         ticker.tick().await;
-        renewal_tick(&node, &account, &cf, zones.as_ref(), propagation_timeout).await;
+        renewal_tick(
+            &node,
+            &account,
+            &cf,
+            zones.as_ref(),
+            allow_http01.as_ref(),
+            &http01_store,
+            propagation_timeout,
+        )
+        .await;
     }
 }
 

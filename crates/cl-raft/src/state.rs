@@ -687,9 +687,28 @@ pub struct ClusterState {
     /// `MAX_RESTORE_REQUESTS`.
     #[serde(default)]
     pub restore_requests: BTreeMap<String, RestoreRequest>,
+    /// Live container state as last self-reported by the node that runs each
+    /// instance, keyed by instance. Populated by `cl_sched::run::Scheduler`'s
+    /// reconcile pass (roughly every `SWEEP_INTERVAL`) rather than by whoever
+    /// changes `desired` - so anyone waiting for a container to actually stop,
+    /// including one running on a different node, can poll this instead of
+    /// blindly sleeping out a worst-case deadline. See `Request::ReportContainerStatus`.
+    #[serde(default)]
+    pub container_status: BTreeMap<InstanceId, ContainerStatus>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
+}
+
+/// One instance's last-observed docker state, as reported by the node that
+/// runs it. See `ClusterState::container_status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerStatus {
+    /// The node that reported this, so a fresh report from that node can
+    /// replace exactly its own prior entries (including dropping ones for
+    /// instances it no longer runs) without touching what other nodes report.
+    pub node: String,
+    pub running: bool,
 }
 
 /// A command submitted through raft. Every mutation of cluster state is one of these.
@@ -887,6 +906,15 @@ pub enum Request {
         /// `status` is terminal.
         at: i64,
     },
+    /// Self-reported by `cl_sched::run::Scheduler` each reconcile pass: the
+    /// running/stopped state of every instance currently assigned to `node`,
+    /// wholesale-replacing that node's prior entries in `container_status` -
+    /// so an instance moved or removed since the last report is dropped
+    /// rather than left stale.
+    ReportContainerStatus {
+        node: String,
+        running: BTreeMap<InstanceId, bool>,
+    },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
     /// Ends emergency mode: clears `ClusterState::emergency_stack`, letting
@@ -1052,6 +1080,10 @@ mod request_mirror {
             id: String,
             status: RestoreStatus,
             at: i64,
+        },
+        ReportContainerStatus {
+            node: String,
+            running: BTreeMap<InstanceId, bool>,
         },
         NoOp,
         ClearEmergency,
@@ -1651,6 +1683,17 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::ReportContainerStatus { node, running } => {
+                self.container_status.retain(|_, status| &status.node != node);
+                for (instance, is_running) in running {
+                    self.container_status.insert(
+                        instance.clone(),
+                        ContainerStatus { node: node.clone(), running: *is_running },
+                    );
+                }
+                Ok(())
+            }
+
             Request::StoreCertificate(cert) => {
                 self.cert_status.remove(&cert.fqdn);
                 self.certificates.insert(cert.fqdn.clone(), cert.clone());
@@ -1990,6 +2033,10 @@ mod tests {
                 requested_by: "op".into(),
             }),
             Request::SetRestoreStatus { id: "res1".into(), status: RestoreStatus::Pending, at: 0 },
+            Request::ReportContainerStatus {
+                node: "n1".into(),
+                running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
+            },
             Request::NoOp,
             Request::ClearEmergency,
         ];

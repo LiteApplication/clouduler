@@ -14,7 +14,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use cl_config::Middleware;
-use cl_proxy::{CertStore, ProxyServer, Route, RouteTable};
+use cl_proxy::{CertStore, Http01Store, ProxyServer, Route, RouteTable};
 
 /// Spawns a tiny backend that echoes the request's headers back as
 /// `x-echo-<name>: <value>` response headers, and the method+path as the body.
@@ -138,6 +138,30 @@ async fn unmatched_host_returns_404() {
 
     let resp = reqwest_like_get(http_addr, "nowhere.test", "/").await;
     assert_eq!(resp.status, 404);
+}
+
+/// The ACME HTTP-01 fallback's whole reason to exist: a validator must reach
+/// the challenge response even for a host with no route at all yet (issuance
+/// for a brand new, zone-uncovered name).
+#[tokio::test]
+async fn an_acme_challenge_token_is_served_regardless_of_host_or_routing() {
+    let routes = Arc::new(RouteTable::new(vec![]));
+    let certs = Arc::new(CertStore::new());
+    let http01 = Arc::new(Http01Store::default());
+    http01.set("the-token", "the-token.thumbprint");
+    let server = Arc::new(ProxyServer::full(routes, certs, None, http01.clone()));
+
+    let http_addr = free_addr();
+    let s = server.clone();
+    tokio::spawn(async move { s.serve_http(http_addr).await.unwrap() });
+    wait_for_port(http_addr).await;
+
+    let resp = reqwest_like_get(http_addr, "nowhere.test", "/.well-known/acme-challenge/the-token").await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, "the-token.thumbprint");
+
+    let missing = reqwest_like_get(http_addr, "nowhere.test", "/.well-known/acme-challenge/other-token").await;
+    assert_eq!(missing.status, 404);
 }
 
 #[tokio::test]

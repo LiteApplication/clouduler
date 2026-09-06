@@ -187,7 +187,7 @@ pub fn start(
                     }
                 }
                 let effective = effective_interface(*kind, addr, network).await;
-                if let Err(e) = ensure_one(netlink.as_ref(), &docker, network, &effective).await {
+                if let Err(e) = ensure_one(netlink.as_ref(), &docker, network, &effective, *kind).await {
                     warn!(network = %network, iface = %effective, error = %e, "cannot bring up the egress network");
                 }
             }
@@ -256,7 +256,7 @@ async fn apply_ingress(iface: &str, addr: IpAddr, network: &str, store: &Wiregua
     Ok(())
 }
 
-async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, iface: &str) -> Result<()> {
+async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, iface: &str, kind: NetworkKind) -> Result<()> {
     let Some(netlink) = netlink else { return Ok(()) };
     let subnet = egress_subnet(network);
     let gateway = egress_gateway(subnet);
@@ -285,51 +285,67 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
     let bridge_for_rule = bridge.clone();
     let network_owned = network.to_string();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        // `iface`'s own default route, if it has one: this must come from a
-        // route that already names `iface` as its device, never assumed from
-        // the host's overall default route, since on a multi-homed node the
-        // interface this egress network is pinned to may not be the one the
-        // host itself prefers (different metric, or not a default route
-        // candidate at all).
-        let route_out = std::process::Command::new("ip")
-            .args(["route", "show", "default", "dev", &iface_for_route])
-            .output()?;
-        let route_str = String::from_utf8_lossy(&route_out.stdout);
-        let parts: Vec<&str> = route_str.split_whitespace().collect();
-        let via = parts.iter().position(|&x| x == "via").and_then(|i| parts.get(i + 1)).copied();
-
         let table_str = table_id.to_string();
         let rule_pattern = format!("iif {bridge_for_rule} lookup {table_str}");
         let existing_rules =
             String::from_utf8_lossy(&std::process::Command::new("ip").args(["rule", "show"]).output()?.stdout).to_string();
 
-        // No gateway found for `iface`: it has no working route out (down,
-        // no DHCP lease, cable unplugged, ...). Installing a `dev`-only
-        // default route here would silently blackhole every packet from
-        // this bridge ("No route to host") instead of the kill-switch's
-        // intended DROP, and would look like a healthy path while nothing
-        // actually reaches it. So install no policy route at all and let
-        // the kill-switch's plain `-o iface` FORWARD rule fail to match, as
-        // it should when the network's egress interface is down.
-        let Some(via) = via else {
-            if existing_rules.contains(&rule_pattern) {
-                std::process::Command::new("ip")
-                    .args(["rule", "del", "iif", &bridge_for_rule, "lookup", &table_str, "priority", "5100"])
-                    .status()
-                    .ok();
+        if kind == NetworkKind::Wireguard {
+            // A wireguard tunnel does cryptokey routing: there is no
+            // next-hop gateway address the way a plain ethernet egress
+            // interface has, so the table-scoped default route here is a
+            // bare device route, not a `via` route. The interface is
+            // clouduler's own (`ensure_tunnel` brought it up this same
+            // tick), so unlike the egress case below there is no "is this
+            // operator-managed interface actually up" check to do first.
+            let status = std::process::Command::new("ip")
+                .args(["route", "replace", "default", "dev", &iface_for_route, "table", &table_str])
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("ip route replace failed");
             }
-            warn!(
-                network = %network_owned, iface = %iface_for_route,
-                "no default route found on this interface, egress is blocked until it has one",
-            );
-            return Ok(());
-        };
+        } else {
+            // `iface`'s own default route, if it has one: this must come from a
+            // route that already names `iface` as its device, never assumed from
+            // the host's overall default route, since on a multi-homed node the
+            // interface this egress network is pinned to may not be the one the
+            // host itself prefers (different metric, or not a default route
+            // candidate at all).
+            let route_out = std::process::Command::new("ip")
+                .args(["route", "show", "default", "dev", &iface_for_route])
+                .output()?;
+            let route_str = String::from_utf8_lossy(&route_out.stdout);
+            let parts: Vec<&str> = route_str.split_whitespace().collect();
+            let via = parts.iter().position(|&x| x == "via").and_then(|i| parts.get(i + 1)).copied();
 
-        let status = std::process::Command::new("ip")
-            .args(["route", "replace", "default", "via", via, "dev", &iface_for_route, "table", &table_str])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("ip route replace failed");
+            // No gateway found for `iface`: it has no working route out (down,
+            // no DHCP lease, cable unplugged, ...). Installing a `dev`-only
+            // default route here would silently blackhole every packet from
+            // this bridge ("No route to host") instead of the kill-switch's
+            // intended DROP, and would look like a healthy path while nothing
+            // actually reaches it. So install no policy route at all and let
+            // the kill-switch's plain `-o iface` FORWARD rule fail to match, as
+            // it should when the network's egress interface is down.
+            let Some(via) = via else {
+                if existing_rules.contains(&rule_pattern) {
+                    std::process::Command::new("ip")
+                        .args(["rule", "del", "iif", &bridge_for_rule, "lookup", &table_str, "priority", "5100"])
+                        .status()
+                        .ok();
+                }
+                warn!(
+                    network = %network_owned, iface = %iface_for_route,
+                    "no default route found on this interface, egress is blocked until it has one",
+                );
+                return Ok(());
+            };
+
+            let status = std::process::Command::new("ip")
+                .args(["route", "replace", "default", "via", via, "dev", &iface_for_route, "table", &table_str])
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("ip route replace failed");
+            }
         }
 
         if !existing_rules.contains(&rule_pattern) {

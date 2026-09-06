@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
 use cl_raft::ids::node_id;
 use cl_raft::liveness::{Fence, FenceAction};
@@ -643,16 +643,16 @@ async fn run_fence(
 /// possibly-reverted local copy. What still needs a restart is raft's own
 /// listen address, data dir and cluster identity: rebuilding raft membership
 /// or transport under a running cluster is not something to do unattended.
-/// How often the leader checks whether a git export is due. Deliberately not
-/// resized to the live, replicated `backup.interval` (unlike this, that
-/// value can change at any time without a restart) - a short fixed poll that
-/// checks elapsed time against it is simpler than juggling a
-/// `tokio::time::Interval` whose period moves under it.
-const GIT_BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often the leader checks whether a git export is due. Short, since a
+/// change should be pushed promptly rather than waiting for a slow poll -
+/// the actual git2/age work runs off this loop's task via `spawn_blocking`
+/// (see `run_git_export`), so a fast poll here never risks blocking the
+/// executor.
+const GIT_BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Leader-only: mirrors `cluster_config`/stacks/configs/secrets into the
 /// admin's git repo whenever `cfg.backup` is set and something tracked has
-/// changed, debounced onto `backup.interval`. Generates the cluster's ssh
+/// changed, pushing as soon as a change is seen. Generates the cluster's ssh
 /// deploy keypair on the first tick it finds missing.
 async fn watch_git_backup(
     cluster: Arc<ClusterNode>,
@@ -661,13 +661,24 @@ async fn watch_git_backup(
     data_dir: PathBuf,
 ) {
     let dir = data_dir.join("git-backup");
+    // The webhook-pull path keeps its own separate working copy (concurrent
+    // git2 access to one working tree from both the export tick and an
+    // inbound webhook is not safe), so its "known good" bookmark does not
+    // move on its own just because export pushed something new. Every export
+    // this cluster makes is by definition already-known-good (it is what the
+    // cluster is actually running), so each successful export advances that
+    // bookmark too, right below - otherwise the next pull's "did secrets/
+    // change" check walks all the way back to whatever this cluster's last
+    // *pull* acceptance was (possibly never, if pull has never been used
+    // yet), sees this export's own secrets/ commits in that range, and
+    // rejects-and-reverts an unrelated later commit as collateral damage.
+    let pull_dir = data_dir.join("git-backup-pull");
     // Kept outside `dir` since that directory is the git working tree itself
     // and gets fully wiped and rewritten every export tick.
     let cache_path = data_dir.join("git_backup_cache.json");
     let mut ticker = tokio::time::interval(GIT_BACKUP_POLL_INTERVAL);
     let cache_state = cl_backup::cache_state::CacheState::load(&cache_path);
     let mut last_snapshot: Option<cl_backup::snapshot::Snapshot> = cache_state.last_snapshot;
-    let mut last_attempt: Option<Instant> = None;
     let mut secret_cache = cache_state.secret_cache;
 
     loop {
@@ -679,9 +690,6 @@ async fn watch_git_backup(
         let Some(backup_cfg) = config_rx.borrow().backup.clone() else {
             continue;
         };
-        if last_attempt.is_some_and(|at| at.elapsed() < backup_cfg.interval) {
-            continue;
-        }
 
         let Some(key) = key_rx.borrow().clone() else {
             // No cluster key on this node yet - secrets can't be decrypted
@@ -709,11 +717,15 @@ async fn watch_git_backup(
         // it either way.
         let state = cluster.state().await;
 
-        last_attempt = Some(Instant::now());
-
-        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message, &mut secret_cache);
+        let (result, updated_cache) = run_git_export_blocking(state, key, backup_cfg.clone(), dir.clone(), message.clone(), secret_cache).await;
+        secret_cache = updated_cache;
         let last_export = match &result {
             Ok(commit) => {
+                if let Some(oid) = commit {
+                    if let Err(e) = advance_pull_bookmark(&pull_dir, &backup_cfg, oid) {
+                        warn!(error = %e, "git backup: could not advance the pull bookmark past this export");
+                    }
+                }
                 last_snapshot = Some(snapshot);
                 cl_backup::status::LastExport {
                     at: unix_now(),
@@ -751,8 +763,11 @@ async fn watch_git_backup(
     }
 }
 
-/// The blocking git2/age work for one export attempt, run off the async
-/// executor's own stack since none of it is `.await`-able anyway.
+/// The blocking git2/age work for one export attempt - includes the actual
+/// network push, so it must never run straight off the watcher loop's async
+/// stack (see `clouduler-drive-sync-blocks-runtime`: the same mistake there
+/// starved raft heartbeats). `run_git_export_blocking` is the only caller and
+/// runs this via `spawn_blocking`.
 fn run_git_export(
     state: &cl_raft::state::ClusterState,
     key: &ClusterKey,
@@ -769,6 +784,42 @@ fn run_git_export(
     let repo = cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
     let oid = repo.sync(&files, message, &private_key_pem)?;
     Ok(oid.map(|oid| oid.to_string()))
+}
+
+/// Runs `run_git_export` on a blocking thread and hands the (possibly
+/// updated) `secret_cache` back alongside the result, since `tree::build`
+/// mutates it as it re-encrypts secrets and that has to survive the trip
+/// across `spawn_blocking`'s owned closure.
+async fn run_git_export_blocking(
+    state: cl_raft::state::ClusterState,
+    key: Arc<ClusterKey>,
+    backup_cfg: cl_config::GitBackupConfig,
+    dir: PathBuf,
+    message: String,
+    secret_cache: cl_backup::tree::SecretCache,
+) -> (anyhow::Result<Option<String>>, cl_backup::tree::SecretCache) {
+    let cache_before_attempt = secret_cache.clone();
+    match tokio::task::spawn_blocking(move || {
+        let mut secret_cache = secret_cache;
+        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message, &mut secret_cache);
+        (result, secret_cache)
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => (Err(anyhow!("git export task panicked: {e}")), cache_before_attempt),
+    }
+}
+
+/// Moves the webhook-pull working copy's own local branch ref forward to
+/// `commit` (an oid string just pushed by export), without touching its
+/// working tree or the remote - see the comment above `watch_git_backup`'s
+/// `pull_dir`. Opens its own `GitBackup` rather than sharing export's,
+/// since the two working trees must stay separate.
+fn advance_pull_bookmark(pull_dir: &Path, backup_cfg: &cl_config::GitBackupConfig, commit: &str) -> anyhow::Result<()> {
+    let repo = cl_backup::git::GitBackup::open_or_init(pull_dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
+    repo.advance_local_ref_str(commit)?;
+    Ok(())
 }
 
 async fn generate_and_publish_deploy_key(cluster: &Arc<ClusterNode>, key: &ClusterKey) -> anyhow::Result<()> {

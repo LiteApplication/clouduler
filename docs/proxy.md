@@ -393,3 +393,48 @@ on a follower, so it's safe to call unconditionally from every node's timer;
 selection (which Cloudflare zone a given fqdn's challenge record belongs in)
 is supplied by the caller through the `ZoneResolver` trait, since that
 mapping lives in the cluster config, which this crate does not depend on.
+
+### Certificates for a domain outside Cloudflare
+
+Every hostname above assumes it sits under a zone listed in `cloudflare.zones`,
+so its ACME challenge can be answered with a `_acme-challenge` TXT record.
+That doesn't hold for a domain bought and pointed at the cluster without ever
+being added to Cloudflare — `zones.zone_id_for` finds nothing for it, and by
+default `issue_missing`/`renewal_tick` record
+`ReconcileStatus::Error("no cloudflare zone covers this hostname")` and give
+up rather than guess.
+
+Writing the hostname in a stack's `x-clouduler.proxy` (or a static route)
+with a trailing dot, e.g. `host: gitlab.example.net.`, opts that one name out
+of that error and into ACME's other standard challenge, HTTP-01, instead:
+
+1. `cl_config::qualify` strips the trailing dot from the fqdn actually used
+   for routing/certificates, so the dot itself never reaches DNS. The raw,
+   still-dotted `host` string is what `clouduler::proxy::tls_hosts` checks
+   (`host.ends_with('.')`) to mark the resulting fqdn as HTTP-01-eligible —
+   this happens in the daemon, not `cl-proxy`, since it's the caller that
+   knows the raw stack config `qualify` already discarded the dot from.
+2. `acme::issue_certificate_http01` orders the certificate the same way as
+   `issue_certificate`, except each challenge's key authorization is written
+   into an in-memory `Http01Store` (`token -> key_authorization`) instead of
+   a DNS TXT record, and the challenge type requested is `Http01` not `Dns01`.
+3. The plain-http listener (`server::handle_http`) answers
+   `GET /.well-known/acme-challenge/<token>` straight out of that store,
+   ahead of any routing decision and regardless of `Host` — the CA's
+   validator has no reason to send a `Host` clouduler would recognize, and
+   the hostname being validated may have no route yet on a first issuance.
+   This means the domain's own DNS (however it's managed) must point at the
+   cluster and its plain HTTP port must be reachable from the internet;
+   nothing here publishes that A/AAAA record, since it isn't in a zone
+   clouduler can write to.
+4. The `Http01Store` is created once per proxy supervisor run and shared
+   between the `listen` and `acme` task groups regardless of which one
+   restarts on a config change — a token the issuance task hands out must
+   still be answered by whichever listener instance is live when the
+   validator asks for it.
+
+Renewal recomputes the same `tls_hosts` allow-list from current config on
+every tick rather than remembering how a certificate was originally issued,
+so a certificate keeps renewing through HTTP-01 for as long as its stack
+still declares the host with a trailing dot, and switches back to DNS-01
+automatically if the domain is later added to a Cloudflare zone.

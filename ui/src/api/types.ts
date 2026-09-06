@@ -787,8 +787,6 @@ export interface GitBackupConfig {
   repo_url: string;
   age_recipient: string;
   branch: string;
-  /** Humantime string, e.g. `"30s"`. */
-  interval: string;
 }
 
 /** Stored in `ClusterState.configs['_clouduler_git_backup_last_export']`, so

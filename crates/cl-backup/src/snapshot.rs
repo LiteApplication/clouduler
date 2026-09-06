@@ -10,10 +10,10 @@
 //! (`LAST_EXPORT_CONFIG`, `DEPLOY_KEY_PUBLIC_CONFIG`). Publishing an export's
 //! status bumps `LAST_EXPORT_CONFIG`'s revision in raft state right after
 //! that export runs — including it here would mean the snapshot taken on the
-//! *next* tick never equals `last_snapshot` (which predates that bump),
+//! *next* poll never equals `last_snapshot` (which predates that bump),
 //! forcing a fresh export forever, each one re-encrypting every secret with
 //! a new (age is non-deterministic) ciphertext and producing a real commit
-//! every `backup.interval` even when nothing a human changed.
+//! on every poll even when nothing a human changed.
 
 use std::collections::BTreeMap;
 

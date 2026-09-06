@@ -246,6 +246,7 @@ impl Scheduler {
         }
 
         reconciler.apply(&actions, &targets, &actual).await?;
+        self.report_container_status(state, &actual).await;
 
         // Objects for instances that have moved on must not linger on disk.
         let keep: BTreeMap<String, ()> = targets
@@ -279,6 +280,42 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+
+    /// Self-report this node's running/stopped state for every instance
+    /// assigned to it, so anyone elsewhere waiting for one of them to stop
+    /// (a backup, a restore, a folder import) can poll `container_status`
+    /// instead of blindly sleeping out a worst-case deadline. Skipped when
+    /// nothing changed since the last report, so a quiet node doesn't spam
+    /// raft with an identical write every sweep.
+    async fn report_container_status(&self, state: &ClusterState, actual: &[cl_docker::ContainerState]) {
+        let running: BTreeMap<InstanceId, bool> = actual
+            .iter()
+            .filter_map(|c| Some((c.labels.get(cl_docker::LABEL_INSTANCE)?.parse::<InstanceId>().ok()?, c.running)))
+            .collect();
+
+        let report: BTreeMap<InstanceId, bool> = state
+            .assignments_on(&self.node)
+            .map(|a| (a.instance.clone(), running.get(&a.instance).copied().unwrap_or(false)))
+            .collect();
+
+        let current: BTreeMap<InstanceId, bool> = state
+            .container_status
+            .iter()
+            .filter(|(_, status)| status.node == self.node)
+            .map(|(id, status)| (id.clone(), status.running))
+            .collect();
+
+        if report == current {
+            return;
+        }
+        if let Err(e) = self
+            .cluster
+            .submit(Request::ReportContainerStatus { node: self.node.clone(), running: report })
+            .await
+        {
+            warn!(error = %e, "could not report container status");
+        }
     }
 
     /// Records this sweep's restart of `id` and reports whether it has now

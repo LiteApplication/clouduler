@@ -6,8 +6,8 @@
 //! flow the ui already uses for `FailoverConfig`/`SecretsConfig` - this route
 //! exists only to report what the leader has actually done with them.
 //!
-//! Also `POST /api/git-backup/webhook`: the reverse direction. A git host
-//! notifies this endpoint after a push; the leader fetches the tracked
+//! Also `POST /api/git-backup/webhook/{token}`: the reverse direction. A git
+//! host notifies this endpoint after a push; the leader fetches the tracked
 //! branch, and if the new tip parses and validates cleanly, applies it to the
 //! cluster (cluster config, stacks, and the plain configs they reference -
 //! never secrets, see `validate_parsed` below). A commit that fails
@@ -15,12 +15,28 @@
 //! branch and the tracked branch is force-pushed back to its last known-good
 //! state with an empty commit on top explaining why, so the remote is never
 //! left pointing at something this cluster refuses to run.
+//!
+//! The token lives in the URL path rather than a header: some git hosts (and
+//! most generic "webhook" integrations) offer no way to attach a custom
+//! header, but every one of them lets you paste an arbitrary url, so an
+//! unguessable path segment is the auth mechanism that actually works
+//! everywhere. It is exactly as secret as a header token would have been -
+//! treat the full webhook url as the credential (don't log it, don't paste it
+//! somewhere public) - and is compared the same way, in constant time against
+//! the sealed value set via `PUT /api/git-backup/webhook-secret`.
+//!
+//! `clouduler git-backup pull` and `clouduler git-backup force-push` reach
+//! `POST /api/git-backup/pull` and `POST /api/git-backup/force-push`
+//! instead: internal-auth routes (the same HMAC-over-cluster-key scheme as
+//! every other node-to-node call) rather than the token-in-url one, since the
+//! cli already holds the cluster key on disk and has no reason to also know
+//! the webhook token.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path as UrlPath, State};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_backup::deploy_key::{public_from_state, DEPLOY_KEY_PRIVATE_SECRET, DEPLOY_KEY_PUBLIC_CONFIG};
@@ -58,8 +74,11 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/git-backup/status", get(status))
         .route("/api/git-backup/webhook-secret", get(webhook_secret_status).put(set_webhook_secret))
-        .route("/api/git-backup/webhook", post(webhook))
+        .route("/api/git-backup/webhook/{token}", post(webhook))
         .route("/api/git-backup/webhook/internal-trigger", post(internal_trigger))
+        .route("/api/git-backup/pull", post(pull_now))
+        .route("/api/git-backup/force-push", post(force_push_now))
+        .route("/api/git-backup/force-push/internal-trigger", post(force_push_internal_trigger))
 }
 
 #[derive(Serialize)]
@@ -135,21 +154,6 @@ async fn set_webhook_secret(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `X-Gitlab-Token` is sent verbatim by GitLab's own webhook config, which is
-/// exactly the "static shared secret in a header" shape this feature wants;
-/// `Authorization: Bearer` is accepted too for hosts (or a proxy in front of
-/// one) that only offer that.
-fn presented_token(headers: &HeaderMap) -> Option<String> {
-    if let Some(v) = headers.get("x-gitlab-token").and_then(|v| v.to_str().ok()) {
-        return Some(v.to_string());
-    }
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string)
-}
-
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -189,29 +193,107 @@ async fn leader_node_name(state: &AppState) -> Option<String> {
 /// whichever node currently leads, the same HMAC-authenticated channel
 /// `internal_peer` uses for every other node-to-node call, since the actual
 /// git working copy this needs only exists on the leader.
-async fn webhook(State(state): State<AppState>, headers: HeaderMap) -> Result<StatusCode, ApiError> {
-    let presented = presented_token(&headers).ok_or_else(|| ApiError::Unauthenticated("missing webhook token".into()))?;
-    if !verify_webhook_token(&state, &presented).await {
+async fn webhook(State(state): State<AppState>, UrlPath(token): UrlPath<String>) -> Result<StatusCode, ApiError> {
+    if !verify_webhook_token(&state, &token).await {
         return Err(ApiError::Unauthenticated("bad webhook token".into()));
     }
+    trigger_pull(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
+/// Any node can run a pull once asked - the actual git working copy this
+/// needs only exists on the leader, so a non-leader forwards the trigger over
+/// the same HMAC-authenticated node-to-node channel `internal_peer` uses for
+/// everything else. Shared by the public, token-authenticated webhook and the
+/// internal-auth `pull_now` the cli calls directly.
+async fn trigger_pull(state: &AppState) -> Result<(), ApiError> {
     if !state.cluster.is_leader() {
-        let leader = leader_node_name(&state)
+        let leader = leader_node_name(state)
             .await
             .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
-        internal_peer::post_empty(&state, &leader, "/api/git-backup/webhook/internal-trigger").await?;
-        return Ok(StatusCode::NO_CONTENT);
+        return internal_peer::post_empty(state, &leader, "/api/git-backup/webhook/internal-trigger").await;
     }
+    run_pull(state).await
+}
 
+/// Node-to-node only: what `trigger_pull` forwards to when this node is not
+/// the leader.
+async fn internal_trigger(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     run_pull(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Node-to-node only: what `webhook` forwards to when this node is not the
-/// leader.
-async fn internal_trigger(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
-    run_pull(&state).await?;
+/// `clouduler git-backup pull`: manually run the same pull the webhook would
+/// have triggered, without waiting for (or even configuring) one. Internal
+/// auth rather than the webhook token, since the cli already holds the
+/// cluster key used for every other node-to-node call it makes (`logs`,
+/// `exec`, ...).
+async fn pull_now(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    trigger_pull(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `clouduler git-backup force-push`: force the cluster's own exported state
+/// past whatever is currently on the remote tracked branch. Manual recovery
+/// for when the ordinary export's fast-forward push is stuck failing - the
+/// remote branch was rewritten by hand, or left mid-way through a botched
+/// rejection - and the admin has confirmed the cluster's own state is the one
+/// to keep. Forwards to the leader the same way `trigger_pull` does, since
+/// the export working copy only exists there.
+async fn force_push_now(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    if !state.cluster.is_leader() {
+        let leader = leader_node_name(&state)
+            .await
+            .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+        internal_peer::post_empty(&state, &leader, "/api/git-backup/force-push/internal-trigger").await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    run_force_push(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Node-to-node only: what `force_push_now` forwards to when this node is not
+/// the leader.
+async fn force_push_internal_trigger(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    run_force_push(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The blocking git2 half of a force-push: re-open the export working copy
+/// (the same directory `run_git_export` mirrors the cluster into) and push
+/// its current local branch tip to `origin`, overwriting the remote's
+/// history unconditionally.
+async fn run_force_push(state: &AppState) -> Result<(), ApiError> {
+    let backup_cfg = state
+        .cluster_config
+        .read()
+        .await
+        .backup
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
+
+    let cluster_state = state.cluster.state().await;
+    let key = {
+        let key_guard = state.key.read().await;
+        key_guard
+            .as_ref()
+            .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?
+            .clone()
+    };
+    let private_key_pem = cl_backup::deploy_key::load_private(&cluster_state, &key)
+        .ok_or_else(|| ApiError::Conflict("no git deploy key yet - it is generated after the first export".into()))?;
+
+    let dir = state.data_dir.join("git-backup");
+    tokio::task::spawn_blocking(move || {
+        let repo = cl_backup::git::GitBackup::open_or_init(&dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
+        if repo.local_branch_oid()?.is_none() {
+            return Err(cl_backup::BackupError::NoLocalExportCommit);
+        }
+        repo.force_push(&private_key_pem)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)
 }
 
 /// What the blocking git2 half of a pull decided, handed back to async code
@@ -252,9 +334,12 @@ async fn run_pull(state: &AppState) -> Result<(), ApiError> {
     let existing_secrets: BTreeSet<String> = cluster_state.secrets.keys().cloned().collect();
 
     let dir = state.data_dir.join("git-backup-pull");
-    let decision = tokio::task::spawn_blocking(move || pull_and_decide(&dir, &backup_cfg, &private_key_pem, &existing_secrets))
-        .await
-        .map_err(ApiError::internal)?
+    let export_dir = state.data_dir.join("git-backup");
+    let decision = tokio::task::spawn_blocking(move || {
+        pull_and_decide(&dir, &export_dir, &backup_cfg, &private_key_pem, &existing_secrets)
+    })
+    .await
+    .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?;
 
     match decision {
@@ -340,12 +425,27 @@ fn unix_now() -> u64 {
 /// round trip).
 fn pull_and_decide(
     dir: &Path,
+    export_dir: &Path,
     cfg: &cl_config::GitBackupConfig,
     private_key_pem: &str,
     existing_secrets: &BTreeSet<String>,
 ) -> cl_backup::Result<PullDecision> {
     let backup = cl_backup::git::GitBackup::open_or_init(dir, &cfg.repo_url, &cfg.branch)?;
-    let good = backup.local_branch_oid()?;
+    // This working copy's own bookmark is `None` until its first accepted
+    // pull - which, on a cluster that has been exporting for a while before
+    // anyone ever pushes anything back, means "no known good" here would
+    // otherwise mean "this cluster's actual history, already full of
+    // legitimate secrets/ commits, is unknown" and any pull at all would
+    // look like a first-ever secret rotation. The export-side working copy
+    // (opened read-only here - only its ref is read, never its tree) always
+    // reflects what this cluster last exported, i.e. what it is actually
+    // running, so it is the right fallback baseline whenever this side has
+    // not caught up to it yet (also see where a successful export advances
+    // this same bookmark directly, in `daemon.rs`).
+    let good = match backup.local_branch_oid()? {
+        Some(oid) => Some(oid),
+        None => cl_backup::git::GitBackup::open_or_init(export_dir, &cfg.repo_url, &cfg.branch)?.local_branch_oid()?,
+    };
     let Some(candidate) = backup.fetch_remote_tip(private_key_pem)? else {
         return Ok(PullDecision::NoChange);
     };

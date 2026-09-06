@@ -281,12 +281,20 @@ key is already present, so an upload cannot silently orphan every stored secret.
 ## Git backup
 
 ```
-GET    /api/git-backup/status           read    configured, deploy key, last export
+GET    /api/git-backup/status                      read    configured, deploy key, last export/pull
+GET    /api/git-backup/webhook-secret               read    whether a webhook token is set (write-only value)
+PUT    /api/git-backup/webhook-secret               { "token": "..." } set/replace the webhook token
+POST   /api/git-backup/webhook/:token               git host -> cluster: trigger a pull, token in the url
+POST   /api/git-backup/pull                         internal auth: same pull, for `clouduler git-backup pull`
+POST   /api/git-backup/force-push                   internal auth: force-push the export past a diverged remote
 ```
 
-Read-only: the `backup:` fields themselves (repo url, age recipient, branch,
-interval) go through the normal `/api/config` flow, same as any other config
-section. See `docs/git-backup.md`.
+The `backup:` fields themselves (repo url, age recipient, branch) go
+through the normal `/api/config` flow, same as any other config section.
+`webhook/:token` authenticates by the token in the path rather than a header -
+see `docs/git-backup.md` for why - while `pull` and `force-push` authenticate
+the same HMAC-over-cluster-key way every other node-to-node call does, since
+the cli already holds that key. See `docs/git-backup.md`.
 
 ## Restic backups
 

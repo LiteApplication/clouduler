@@ -199,6 +199,15 @@ impl GitBackup {
         Ok(())
     }
 
+    /// Same as `advance_local_ref`, taking the oid as the hex string form a
+    /// completed export or pull already has on hand (e.g. `run_git_export`'s
+    /// return value), so a caller outside this crate never needs to depend on
+    /// `git2` itself just to move a bookmark forward.
+    pub fn advance_local_ref_str(&self, oid: &str) -> Result<()> {
+        let oid = git2::Oid::from_str(oid)?;
+        self.advance_local_ref(oid)
+    }
+
     /// Whether the `secrets/` subtree differs between `good` and `candidate`,
     /// i.e. whether the pulled commit actually rotates a secret, not just
     /// whether the tree happens to contain any (every commit's tree does,
@@ -318,6 +327,18 @@ impl GitBackup {
             preserved_branch,
             revert_commit,
         })
+    }
+
+    /// Force-pushes whatever the local tracked branch currently points at to
+    /// `origin`, overwriting the remote branch unconditionally - for
+    /// `clouduler git-backup force-push`, the operator's manual recovery once
+    /// the ordinary fast-forward `push` is stuck failing (the remote branch
+    /// was rewritten by hand, or left mid-way through a botched rejection)
+    /// and the admin has confirmed the cluster's own exported state, not
+    /// whatever is on the remote, is the one to keep.
+    pub fn force_push(&self, private_key_pem: &str) -> Result<()> {
+        let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}", branch = self.branch);
+        self.push_refspecs(&[refspec], private_key_pem)
     }
 
     /// Where trust-on-first-use host key pins for this repo's remote are
@@ -753,5 +774,39 @@ mod tests {
         assert_eq!(revert_commit.parent_count(), 0);
         assert_eq!(revert_commit.tree().expect("tree").len(), 0);
         assert!(!work_dir.path().join("cluster.yaml").exists());
+    }
+
+    #[test]
+    fn force_push_overwrites_a_diverged_remote() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let work_dir = tempfile::tempdir().expect("work tempdir");
+        let files = vec![TreeFile {
+            path: "cluster.yaml".to_string(),
+            contents: b"nodes: []\n".to_vec(),
+        }];
+        let (backup, local_oid) = seeded_backup(&bare_dir, &work_dir, &files);
+
+        // Simulate the remote having diverged (e.g. rewritten by hand) after
+        // the local commit was made: point its branch somewhere else that is
+        // not an ancestor of `local_oid`, so an ordinary fast-forward push
+        // would be rejected.
+        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
+        let unrelated_tree = remote_repo.treebuilder(None).expect("treebuilder").write().expect("write");
+        let unrelated_tree = remote_repo.find_tree(unrelated_tree).expect("find tree");
+        let signature = Signature::now("someone-else", "someone-else@localhost").expect("signature");
+        let diverged = remote_repo
+            .commit(None, &signature, &signature, "diverged", &unrelated_tree, &[])
+            .expect("commit");
+        remote_repo
+            .reference("refs/heads/main", diverged, true, "simulate divergence")
+            .expect("update remote ref");
+
+        let dummy_key = "not-a-real-key";
+        backup.force_push(dummy_key).expect("force_push");
+
+        assert_eq!(
+            remote_repo.find_reference("refs/heads/main").expect("remote main").target(),
+            Some(local_oid)
+        );
     }
 }

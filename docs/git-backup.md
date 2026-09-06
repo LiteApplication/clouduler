@@ -36,8 +36,8 @@ cluster is running again.
    cluster entirely. Clouduler never sees the private half.
 2. Create an empty git repository the cluster can push to.
 3. From the web ui's Configuration > Git backup page, turn the feature on and
-   fill in the repo's SSH URL, your age public key (`age1...`), the branch to
-   push, and how often to check for changes.
+   fill in the repo's SSH URL, your age public key (`age1...`), and the branch
+   to push.
 4. Save. The leader generates an SSH deploy keypair the first time it exports
    and shows the public half on the same page - add it to the repo as a
    write-capable deploy key (on GitHub: repo Settings > Deploy keys, with
@@ -49,7 +49,6 @@ backup:
   repo_url: git@github.com:you/clouduler-backup.git
   age_recipient: age1qqf8s8u...
   branch: main
-  interval: 30s
 ```
 
 ## How the deploy key works
@@ -66,17 +65,64 @@ listing, the same way the self-update deploy key does not.
 
 ## Commit behavior
 
-The leader checks for changes every `interval`. A tick with nothing new to
-export is a no-op: no empty commits. When there is something to export, the
-commit message describes what changed - which stack, config, or secret was
-added, updated, or removed, or that the cluster config itself changed - so
-the repo's history reads as a log of cluster changes, not "clouduler backup"
-repeated forever.
+The leader watches for changes and pushes as soon as it sees one, on a short
+poll (a couple of seconds) rather than a fixed interval. A poll with nothing
+new to export is a no-op: no empty commits. When there is something to
+export, the commit message describes what changed - which stack, config, or
+secret was added, updated, or removed, or that the cluster config itself
+changed - so the repo's history reads as a log of cluster changes, not
+"clouduler backup" repeated forever. The git2/age work itself runs off the
+main event loop, so a slow push never delays anything else the leader is
+doing.
 
 The last export attempt (timestamp, summary, commit hash if it succeeded, or
 the error if it did not) is shown on the Git backup config page. A failed
-export is retried on the next tick; it does not block anything else from
+export is retried on the next poll; it does not block anything else from
 running.
+
+## Pulling changes back (git &rarr; cluster)
+
+A push to the tracked branch can flow back into the cluster too, the reverse
+of the export above. On the Git backup config page, set a webhook token, then
+point the repository's webhook at:
+
+```
+POST https://<any-node>/api/git-backup/webhook/<token>
+```
+
+The token lives in the url path rather than a header, since most webhook
+integrations (and some git hosts) offer no way to attach a custom header but
+all of them accept an arbitrary url. Treat the whole url as the secret, the
+same as you would a header token - anyone who has it can trigger a pull.
+
+Any node can receive the request; a non-leader forwards it internally to
+whichever node currently leads, since the deploy key and working copy are
+leader-side. The leader fetches the tracked branch and, if the new tip parses
+and validates cleanly, applies it: `cluster.yaml`, every stack, and the plain
+configs they reference. A commit that fails to parse, fails stack validation,
+or touches anything under `secrets/` is never applied - secret rotation must
+go through the api, git can only ever reference secrets that already exist.
+The rejected commit is preserved on its own `rejected/<branch>-<sha>` branch
+and the tracked branch is force-pushed back to its last known-good state with
+an empty commit on top explaining why, so the remote never points at
+something the cluster refuses to run. The last pull's outcome (applied commit,
+or the rejection reason and preserved branch) shows on the same config page.
+
+Two `clouduler` commands cover the cases the webhook itself doesn't:
+
+```
+clouduler git-backup pull                # run the same pull manually, e.g. to test the setup
+clouduler git-backup force-push [--yes]  # force the cluster's own export past a diverged remote
+```
+
+`pull` is exactly what the webhook triggers, without needing a working webhook
+to test it. `force-push` is manual recovery: if the tracked branch was
+rewritten by hand, or left mid-way through a botched rejection, the ordinary
+export's fast-forward push can get stuck failing on every tick forever -
+`force-push` overwrites the remote branch with whatever the cluster's own
+export working copy currently has, once you've confirmed that's the version to
+keep. Both talk to the cluster over the same internal, key-authenticated
+channel `clouduler logs`/`exec` use, not the webhook token.
 
 ## Restoring
 

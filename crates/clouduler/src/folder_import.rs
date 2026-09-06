@@ -33,13 +33,10 @@ use crate::stack::client_for;
 
 /// Upper bound on how long to give instances to stop cleanly before
 /// touching the volume they mount, on top of each service's own
-/// `stop_grace_period`: the scheduler sweeps every 10s and a service's own
-/// grace period is added on top. There is no cluster-wide "actually
-/// stopped" signal to poll (container state is local to whichever node runs
-/// it), so for instances on *other* nodes this is the best we can do.
-/// For instances on this node, `wait_for_stopped` polls the local docker
-/// daemon directly and returns as soon as they are all confirmed stopped,
-/// instead of always sleeping the full margin.
+/// `stop_grace_period`. `wait_for_stopped` polls local docker for instances
+/// on this node and the cluster's self-reported `container_status` for
+/// everything else, returning as soon as all of them are confirmed stopped
+/// rather than always sleeping the full margin.
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 
 /// How often to poll local docker while waiting for instances to stop.
@@ -105,20 +102,14 @@ fn human_bytes(bytes: u64) -> String {
 /// Wait for `instances` to stop, returning as soon as that is confirmed or
 /// `deadline` elapses, whichever comes first.
 ///
-/// Container state is local to whichever node runs it, so this can only
-/// poll for instances assigned to `node_name`; instances on other nodes have
-/// no cluster-wide "stopped" signal, so we just sleep out whatever's left of
-/// `deadline` for those. If docker isn't reachable, or every affected
-/// instance lives on another node, this degrades to the old fixed sleep.
-async fn wait_for_stopped(state: &ClusterState, node_name: &str, instances: &[InstanceId], deadline: Duration) {
-    let local: Vec<String> = state
-        .assignments
-        .values()
-        .filter(|a| a.node == node_name && instances.contains(&a.instance))
-        .map(|a| a.instance.container_name())
-        .collect();
-    let remote = instances.len() > local.len();
-
+/// Instances assigned to `node_name` are checked against the local docker
+/// daemon directly; instances on other nodes are checked against the
+/// cluster's self-reported `container_status` (see
+/// `cl_sched::run::Scheduler::report_container_status`), so this returns as
+/// soon as the remote node actually confirms its container is down instead
+/// of always sleeping the full margin. An instance with no report yet falls
+/// back to sleeping out the deadline, same as if docker weren't reachable.
+async fn wait_for_stopped(client: &Client, node_name: &str, instances: &[InstanceId], deadline: Duration) {
     let Ok(docker) = cl_docker::Docker::connect() else {
         tokio::time::sleep(deadline).await;
         return;
@@ -130,14 +121,35 @@ async fn wait_for_stopped(state: &ClusterState, node_name: &str, instances: &[In
         if elapsed >= deadline {
             return;
         }
+        let Ok(state) = client.state().await else {
+            tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
+            continue;
+        };
+        let local: Vec<String> = state
+            .assignments
+            .values()
+            .filter(|a| a.node == node_name && instances.contains(&a.instance))
+            .map(|a| a.instance.container_name())
+            .collect();
+
         let mut all_stopped = true;
         for name in &local {
             match docker.inspect(name).await {
-                Ok(Some(state)) if state.running => all_stopped = false,
+                Ok(Some(s)) if s.running => all_stopped = false,
                 _ => {}
             }
         }
-        if all_stopped && !remote {
+        for instance in instances {
+            if local.contains(&instance.container_name()) {
+                continue;
+            }
+            match state.container_status.get(instance) {
+                Some(status) if status.running => all_stopped = false,
+                Some(_) => {}
+                None => all_stopped = false,
+            }
+        }
+        if all_stopped {
             return;
         }
         tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
@@ -199,7 +211,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
                 "stopping instances before replacing the volume"
             );
             set_desired(&client, &using, DesiredState::Stopped).await?;
-            wait_for_stopped(&state, node_name, &using, deadline).await;
+            wait_for_stopped(&client, node_name, &using, deadline).await;
             stopped = using;
         }
         debug!("clearing the volume before replacing it");

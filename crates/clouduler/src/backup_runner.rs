@@ -285,9 +285,17 @@ async fn execute(
 
     let mut stopped: Vec<InstanceId> = Vec::new();
     if should_stop && !instances.is_empty() {
-        set_desired(cluster, &instances, DesiredState::Stopped).await?;
-        let deadline = max_stop_grace(state, &instances) + STOP_POLL_MARGIN;
-        wait_for_stopped(state, node_name, &instances, docker, deadline).await;
+        // Stopped one at a time - each instance's own deadline elapses
+        // before the next is even asked to stop - rather than firing every
+        // `SetDesiredState` at once and waiting on the slowest, so a single
+        // node doesn't have to shut down every affected container in the
+        // same instant.
+        for instance in &instances {
+            let one = std::slice::from_ref(instance);
+            set_desired(cluster, one, DesiredState::Stopped).await?;
+            let deadline = max_stop_grace(state, one) + STOP_POLL_MARGIN;
+            wait_for_stopped(cluster, node_name, one, docker, deadline).await;
+        }
         stopped = instances;
     }
 
@@ -380,45 +388,59 @@ async fn set_desired(cluster: &Arc<ClusterNode>, instances: &[InstanceId], desir
     Ok(())
 }
 
-/// Same shape as `folder_import`'s helper of the same name: polls local
-/// docker for instances assigned to `node_name`, and just sleeps out
-/// whatever's left of `deadline` for the rest, since container state is
-/// local to whichever node runs it and there is no cluster-wide "stopped"
-/// signal to poll for those.
+/// Polls local docker for instances assigned to `node_name`; for anything
+/// assigned elsewhere, polls that node's self-reported `container_status`
+/// (see `cl_sched::run::Scheduler::report_container_status`) instead of
+/// blindly sleeping out `deadline` - so this returns the moment the remote
+/// node actually confirms its container is down, rather than always waiting
+/// the worst case. An instance with no report yet (an older peer, or one
+/// that hasn't swept since this run started) is treated as still running,
+/// falling back to the old blind wait for exactly that instance.
 async fn wait_for_stopped(
-    state: &ClusterState,
+    cluster: &Arc<ClusterNode>,
     node_name: &str,
     instances: &[InstanceId],
     docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
     deadline: Duration,
 ) {
-    let local: Vec<String> = state
-        .assignments
-        .values()
-        .filter(|a| a.node == node_name && instances.contains(&a.instance))
-        .map(|a| a.instance.container_name())
-        .collect();
-    let remote = instances.len() > local.len();
-
-    let Some(docker) = docker.read().await.clone() else {
-        tokio::time::sleep(deadline).await;
-        return;
-    };
-
     let start = tokio::time::Instant::now();
     loop {
         let elapsed = start.elapsed();
         if elapsed >= deadline {
             return;
         }
+        let state = cluster.state().await;
+        let local: Vec<String> = state
+            .assignments
+            .values()
+            .filter(|a| a.node == node_name && instances.contains(&a.instance))
+            .map(|a| a.instance.container_name())
+            .collect();
+
         let mut all_stopped = true;
-        for name in &local {
-            match docker.inspect(name).await {
-                Ok(Some(state)) if state.running => all_stopped = false,
-                _ => {}
+        if let Some(docker) = docker.read().await.clone() {
+            for name in &local {
+                match docker.inspect(name).await {
+                    Ok(Some(s)) if s.running => all_stopped = false,
+                    _ => {}
+                }
+            }
+        } else if !local.is_empty() {
+            all_stopped = false;
+        }
+
+        for instance in instances {
+            if local.contains(&instance.container_name()) {
+                continue;
+            }
+            match state.container_status.get(instance) {
+                Some(status) if status.running => all_stopped = false,
+                Some(_) => {}
+                None => all_stopped = false,
             }
         }
-        if all_stopped && !remote {
+
+        if all_stopped {
             return;
         }
         tokio::time::sleep(Duration::from_secs(1).min(deadline - elapsed)).await;

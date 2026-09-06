@@ -242,11 +242,15 @@ proxy:
 ```
 
 Fields: `host` (a bare label like `gitlab` is qualified with the network's
-domain, e.g. `gitlab.example.com`; a name containing a dot is used as is),
-`network` (must be declared in the stack and have a domain in the cluster:
-an HTTP route needs somewhere to qualify its hostname against), `port`, and
-the optional `path_prefix`, `tls` (defaults to `true`), `middlewares` and
-`sticky`.
+domain, e.g. `gitlab.example.com`; a name containing a dot is used as is;
+a name ending in a dot, e.g. `gitlab.example.net.` — the DNS zone-file
+convention for "this is already absolute" — is also used as is, with the dot
+itself stripped, and additionally marks the hostname as one that may not
+belong to any configured Cloudflare zone: see "Certificates for a domain
+outside Cloudflare" in `docs/proxy.md`), `network` (must be declared in the
+stack and have a domain in the cluster: an HTTP route needs somewhere to
+qualify its hostname against), `port`, and the optional `path_prefix`, `tls`
+(defaults to `true`), `middlewares` and `sticky`.
 
 #### Reverse proxy settings
 

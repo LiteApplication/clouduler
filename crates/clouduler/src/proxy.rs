@@ -22,8 +22,9 @@ use cl_api::static_routes::StaticRouteStore;
 use cl_config::{qualify, ClusterConfig};
 use cl_dns::{Cloudflare, DesiredRecord};
 use cl_proxy::{
-    ensure_crypto_provider, issue_certificate, AcmeConfig, CertStore, RedirectTarget, Route,
-    RouteOptions, RouteTable, ZoneResolver, DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
+    ensure_crypto_provider, issue_certificate, issue_certificate_http01, AcmeConfig, CertStore,
+    Http01Store, RedirectTarget, Route, RouteOptions, RouteTable, ZoneResolver,
+    DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request};
@@ -112,14 +113,18 @@ pub fn start(
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let health = cl_proxy::HealthTable::default();
     let task_health = health.clone();
+    // Shared across `listen` and `acme` regardless of which one restarts: an
+    // HTTP-01 token the issuance task hands out must still be answered by
+    // whichever listener is live when the CA's validator comes knocking.
+    let http01 = Arc::new(Http01Store::default());
 
     let mut config_rx = config_rx;
     let supervisor = tokio::spawn(async move {
         let health = task_health;
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
-        let mut listen = build_listen(&desired, &cluster, &config_rx, &key_rx, &health);
-        let mut acme = build_acme(&desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx);
+        let mut listen = build_listen(&desired, &cluster, &config_rx, &key_rx, &health, &http01);
+        let mut acme = build_acme(&desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01);
         let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
@@ -152,13 +157,13 @@ pub fn start(
                 if let Some(group) = listen.take() {
                     group.teardown();
                 }
-                listen = build_listen(&live, &cluster, &config_rx, &key_rx, &health);
+                listen = build_listen(&live, &cluster, &config_rx, &key_rx, &health, &http01);
             }
             if live.acme != desired.acme {
                 if let Some(group) = acme.take() {
                     group.teardown();
                 }
-                acme = build_acme(&live, &cfg, &data_dir, &cluster, &config_rx, &key_rx);
+                acme = build_acme(&live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01);
             }
             if live.dns != desired.dns {
                 if let Some(group) = dns.take() {
@@ -181,13 +186,14 @@ fn build_listen(
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     health: &cl_proxy::HealthTable,
+    http01: &Arc<Http01Store>,
 ) -> Option<Group> {
     let (http_port, https_port) = desired.listen?;
 
     let routes = Arc::new(RouteTable::default());
     let certs = Arc::new(CertStore::new());
     let auth_gate = Arc::new(cl_proxy::AuthGate::new(config_rx.clone(), key_rx.clone(), cluster.clone()));
-    let server = Arc::new(cl_proxy::ProxyServer::with_auth_gate(routes.clone(), certs.clone(), Some(auth_gate)));
+    let server = Arc::new(cl_proxy::ProxyServer::full(routes.clone(), certs.clone(), Some(auth_gate), http01.clone()));
     let mut tasks = Vec::new();
 
     for (port, tls) in [(http_port, false), (https_port, true)] {
@@ -222,11 +228,18 @@ fn build_acme(
     cluster: &Arc<ClusterNode>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    http01: &Arc<Http01Store>,
 ) -> Option<Group> {
     desired.acme.as_ref()?;
     let acme = acme_setup(cfg, data_dir)?;
     Some(Group {
-        tasks: vec![tokio::spawn(run_acme(acme, cluster.clone(), config_rx.clone(), key_rx.clone()))],
+        tasks: vec![tokio::spawn(run_acme(
+            acme,
+            cluster.clone(),
+            config_rx.clone(),
+            key_rx.clone(),
+            http01.clone(),
+        ))],
     })
 }
 
@@ -432,26 +445,49 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
     routes
 }
 
-/// Every hostname the proxy terminates TLS for, and so needs a certificate.
+/// Every hostname the proxy terminates TLS for, and so needs a certificate,
+/// mapped to whether it may fall back to ACME HTTP-01 when no Cloudflare
+/// zone covers it.
+///
+/// That fallback is opt-in per hostname: a stack (or static route) author
+/// writes the host with a trailing dot, e.g. `app.example.net.`, the DNS
+/// zone-file convention for "this is already an absolute name" - `qualify`
+/// strips the dot from the fqdn actually used, but the raw, undotted `host`
+/// checked here is what signals the author knows this name has no matching
+/// zone and wants HTTP-01 rather than the usual "no cloudflare zone covers
+/// this hostname" error.
 ///
 /// Static routes are folded in directly from the store rather than through
 /// `static_backend_routes`, so listing hostnames that need a certificate
 /// never depends on DNS resolving for their backend.
-fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<String> {
-    let mut hosts: BTreeSet<String> = routes_for(cfg, state)
-        .into_iter()
-        .filter(|r| r.tls)
-        .map(|r| r.host)
-        .collect();
+fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<String, bool> {
+    fn insert(hosts: &mut BTreeMap<String, bool>, cfg: &ClusterConfig, host: &str, network: &str) {
+        let domain = cfg.networks.get(network).and_then(|n| n.domain.as_deref());
+        let fqdn = qualify(host, domain);
+        let allow_http01 = host.ends_with('.');
+        let entry = hosts.entry(fqdn).or_insert(false);
+        *entry = *entry || allow_http01;
+    }
+
+    let mut hosts: BTreeMap<String, bool> = BTreeMap::new();
+    for placement in crate::placement::service_placements(state, cfg) {
+        for entry in &placement.extensions.proxy {
+            if entry.tls {
+                insert(&mut hosts, cfg, &entry.host, &entry.network);
+            }
+        }
+    }
+    for rule in RedirectStore::load(state).rules {
+        insert(&mut hosts, cfg, &rule.host, &rule.network);
+    }
     for entry in StaticRouteStore::load(state).routes {
         if entry.tls {
-            let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
-            hosts.insert(qualify(&entry.host, domain));
+            insert(&mut hosts, cfg, &entry.host, &entry.network);
         }
     }
     // The ui is served by the api on its own port, but its certificate is
     // issued the same way and stored in the same place.
-    hosts.insert(cfg.web_fqdn());
+    hosts.entry(cfg.web_fqdn()).or_insert(false);
     hosts
 }
 
@@ -542,6 +578,7 @@ async fn run_acme(
     cluster: Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    http01: Arc<Http01Store>,
 ) {
     let account = match cl_proxy::load_or_create_account(&acme.config, &acme.credentials).await {
         Ok(account) => account,
@@ -574,8 +611,19 @@ async fn run_acme(
                 continue;
             }
         };
-        issue_missing(&cfg, &cluster, &account, &cloudflare, &zones).await;
-        cl_proxy::renewal_tick(&cluster, &account, &cloudflare, &zones, DEFAULT_PROPAGATION_TIMEOUT).await;
+        issue_missing(&cfg, &cluster, &account, &cloudflare, &zones, &http01).await;
+        let hosts = tls_hosts(&cfg, &cluster.state().await);
+        let allow_http01 = move |fqdn: &str| hosts.get(fqdn).copied().unwrap_or(false);
+        cl_proxy::renewal_tick(
+            &cluster,
+            &account,
+            &cloudflare,
+            &zones,
+            &allow_http01,
+            &http01,
+            DEFAULT_PROPAGATION_TIMEOUT,
+        )
+        .await;
     }
 }
 
@@ -587,13 +635,15 @@ async fn issue_missing(
     account: &instant_acme::Account,
     cloudflare: &Cloudflare,
     zones: &Zones,
+    http01: &Http01Store,
 ) {
     let state = cluster.state().await;
-    for host in tls_hosts(cfg, &state) {
+    for (host, allow_http01) in tls_hosts(cfg, &state) {
         if state.certificates.contains_key(&host) {
             continue;
         }
-        let Some(zone_id) = zones.zone_id_for(&host) else {
+        let zone_id = zones.zone_id_for(&host);
+        if zone_id.is_none() && !allow_http01 {
             warn!(%host, "no cloudflare zone covers this name, not issuing");
             set_cert_status(
                 cluster,
@@ -605,20 +655,25 @@ async fn issue_missing(
             )
             .await;
             continue;
-        };
+        }
         if state.cert_status.get(&host) != Some(&ReconcileStatus::Pending) {
             set_cert_status(cluster, &host, ReconcileStatus::Pending).await;
         }
-        info!(%host, "ordering a certificate");
-        match issue_certificate(
-            account,
-            cloudflare,
-            &zone_id,
-            std::slice::from_ref(&host),
-            DEFAULT_PROPAGATION_TIMEOUT,
-        )
-        .await
-        {
+        info!(%host, http01 = zone_id.is_none(), "ordering a certificate");
+        let issued = match &zone_id {
+            Some(zone_id) => {
+                issue_certificate(
+                    account,
+                    cloudflare,
+                    zone_id,
+                    std::slice::from_ref(&host),
+                    DEFAULT_PROPAGATION_TIMEOUT,
+                )
+                .await
+            }
+            None => issue_certificate_http01(account, http01, &host).await,
+        };
+        match issued {
             Ok(issued) => {
                 let request = Request::StoreCertificate(CertificateState {
                     fqdn: host.clone(),
@@ -1140,15 +1195,43 @@ mod tests {
     fn the_dashboard_hostname_still_gets_a_certificate() {
         let cfg = cfg();
         let hosts = tls_hosts(&cfg, &state_with(SPEC, 1));
-        assert!(hosts.contains(&cfg.web_fqdn()));
+        assert!(hosts.contains_key(&cfg.web_fqdn()));
     }
 
     #[test]
     fn tls_hosts_include_the_web_ui() {
         let cfg = cfg();
         let hosts = tls_hosts(&cfg, &state_with(SPEC, 1));
-        assert!(hosts.contains(&cfg.web_fqdn()));
-        assert!(hosts.contains("blog.example.com"));
+        assert!(hosts.contains_key(&cfg.web_fqdn()));
+        assert!(hosts.contains_key("blog.example.com"));
+    }
+
+    /// The mechanism the whole HTTP-01 fallback rests on: a stack author
+    /// writing a route's host with a trailing dot is the opt-in signal that
+    /// this fqdn may not belong to any configured Cloudflare zone.
+    #[test]
+    fn a_trailing_dot_host_is_marked_for_the_http01_fallback() {
+        const SPEC_WITH_DOT: &str = "\
+networks:
+  default: {}
+services:
+  web:
+    image: nginx
+    networks: [default]
+    x-clouduler:
+      proxy:
+        - host: app.elsewhere.net.
+          network: wan
+          port: 80
+";
+        let hosts = tls_hosts(&cfg(), &state_with(SPEC_WITH_DOT, 1));
+        assert_eq!(hosts.get("app.elsewhere.net"), Some(&true));
+    }
+
+    #[test]
+    fn a_plain_dotted_host_is_not_marked_for_the_http01_fallback() {
+        let hosts = tls_hosts(&cfg(), &state_with(SPEC, 1));
+        assert_eq!(hosts.get("blog.example.com"), Some(&false));
     }
 
     /// A route on a private network only accepts clients on that network's
@@ -1266,7 +1349,7 @@ services:
             vec![static_route("files", "wan", "does-not-resolve.invalid:9999")],
         );
         let hosts = tls_hosts(&cfg, &state);
-        assert!(hosts.contains("files.example.com"));
+        assert!(hosts.contains_key("files.example.com"));
     }
 
     #[test]

@@ -324,7 +324,7 @@ impl Ctx {
         }
         set_desired(&self.client, instances, DesiredState::Stopped).await?;
         let deadline = max_stop_grace(state, instances) + STOP_POLL_MARGIN;
-        wait_for_stopped(state, &self.node_name, instances, deadline).await;
+        wait_for_stopped(&self.client, &self.node_name, instances, deadline).await;
         Ok(instances.to_vec())
     }
 
@@ -409,16 +409,12 @@ fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
         .unwrap_or(DEFAULT_STOP_GRACE)
 }
 
-/// Same shape as `folder_import`'s helper of the same name.
-async fn wait_for_stopped(state: &ClusterState, node_name: &str, instances: &[InstanceId], deadline: Duration) {
-    let local: Vec<String> = state
-        .assignments
-        .values()
-        .filter(|a| a.node == node_name && instances.contains(&a.instance))
-        .map(|a| a.instance.container_name())
-        .collect();
-    let remote = instances.len() > local.len();
-
+/// Same shape as `folder_import`'s helper of the same name: polls local
+/// docker for instances assigned to `node_name`, and the cluster's
+/// self-reported `container_status` (see
+/// `cl_sched::run::Scheduler::report_container_status`) for anything
+/// assigned elsewhere, rather than blindly sleeping out `deadline` for those.
+async fn wait_for_stopped(client: &cl_raft::client::Client, node_name: &str, instances: &[InstanceId], deadline: Duration) {
     let Ok(docker) = cl_docker::Docker::connect() else {
         tokio::time::sleep(deadline).await;
         return;
@@ -430,14 +426,35 @@ async fn wait_for_stopped(state: &ClusterState, node_name: &str, instances: &[In
         if elapsed >= deadline {
             return;
         }
+        let Ok(state) = client.state().await else {
+            tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
+            continue;
+        };
+        let local: Vec<String> = state
+            .assignments
+            .values()
+            .filter(|a| a.node == node_name && instances.contains(&a.instance))
+            .map(|a| a.instance.container_name())
+            .collect();
+
         let mut all_stopped = true;
         for name in &local {
             match docker.inspect(name).await {
-                Ok(Some(state)) if state.running => all_stopped = false,
+                Ok(Some(s)) if s.running => all_stopped = false,
                 _ => {}
             }
         }
-        if all_stopped && !remote {
+        for instance in instances {
+            if local.contains(&instance.container_name()) {
+                continue;
+            }
+            match state.container_status.get(instance) {
+                Some(status) if status.running => all_stopped = false,
+                Some(_) => {}
+                None => all_stopped = false,
+            }
+        }
+        if all_stopped {
             return;
         }
         tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;

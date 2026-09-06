@@ -715,8 +715,7 @@ pub struct SelfUpdateConfig {
 /// `GET /api/git-backup/status`). Secrets are re-encrypted for `age_recipient`
 /// rather than reusing the cluster's own key, so the matching private key can
 /// live entirely outside the cluster.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GitBackupConfig {
     /// SSH url, e.g. `git@github.com:org/repo.git`. Only ssh push (deploy
     /// key) auth is implemented, so http(s) urls are rejected.
@@ -724,20 +723,41 @@ pub struct GitBackupConfig {
     /// An `age1...` X25519 recipient public key. The matching private key is
     /// never given to clouduler.
     pub age_recipient: String,
-    #[serde(default = "default_backup_branch")]
     pub branch: String,
-    /// Minimum time between commits. State changes are debounced onto this
-    /// interval rather than committed one at a time.
-    #[serde(default = "default_backup_interval", with = "humantime_serde")]
-    pub interval: Duration,
 }
 
 fn default_backup_branch() -> String {
     "main".to_string()
 }
 
-fn default_backup_interval() -> Duration {
-    Duration::from_secs(30)
+// Hand-rolled rather than `#[serde(deny_unknown_fields)]` like its siblings:
+// `interval` used to debounce exports onto a fixed period (removed once
+// exports started pushing immediately on every change) and a cluster.yaml
+// written before that change still has it on disk. Accept and discard it so
+// that file keeps loading instead of refusing to parse; a fresh save from the
+// web ui drops it for good.
+impl<'de> Deserialize<'de> for GitBackupConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            repo_url: String,
+            age_recipient: String,
+            #[serde(default = "default_backup_branch")]
+            branch: String,
+            #[serde(default, rename = "interval")]
+            _interval: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(GitBackupConfig {
+            repo_url: raw.repo_url,
+            age_recipient: raw.age_recipient,
+            branch: raw.branch,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -909,7 +929,18 @@ impl Node {
 
 /// Append `domain` to a bare label. Anything already containing a dot is taken
 /// as a full name.
+///
+/// A trailing dot (the DNS zone-file convention for "this is already
+/// absolute") is stripped and the rest of the name used verbatim, regardless
+/// of `domain` - the explicit way to name a domain that isn't a subdomain of
+/// any network here, e.g. one bought elsewhere with no matching Cloudflare
+/// zone. Callers that need to tell such a name apart (to allow an ACME
+/// HTTP-01 fallback, say) check `name.ends_with('.')` on the raw input
+/// themselves; this function only normalizes the name.
 pub fn qualify(name: &str, domain: Option<&str>) -> String {
+    if let Some(stripped) = name.strip_suffix('.') {
+        return stripped.to_string();
+    }
     match domain {
         Some(domain) if !name.contains('.') => format!("{name}.{domain}"),
         _ => name.to_string(),
@@ -935,5 +966,25 @@ impl fmt::Display for NetworkKind {
             NetworkKind::Wireguard => f.write_str("wireguard"),
             NetworkKind::Nat => f.write_str("nat"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trailing_dot_is_stripped_and_used_verbatim() {
+        assert_eq!(qualify("app.example.net.", Some("cluster.lan")), "app.example.net");
+    }
+
+    #[test]
+    fn a_trailing_dot_wins_over_a_bare_label() {
+        assert_eq!(qualify("blog.", Some("cluster.lan")), "blog");
+    }
+
+    #[test]
+    fn without_a_trailing_dot_a_bare_label_still_gets_the_domain() {
+        assert_eq!(qualify("blog", Some("cluster.lan")), "blog.cluster.lan");
     }
 }

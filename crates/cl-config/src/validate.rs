@@ -489,12 +489,6 @@ impl ClusterConfig {
                 "must be an age X25519 recipient, starting with age1",
             ));
         }
-        if b.interval < std::time::Duration::from_secs(5) {
-            return Err(ConfigError::invalid(
-                "backup.interval",
-                "must be at least 5s",
-            ));
-        }
         Ok(())
     }
 }
@@ -1020,7 +1014,6 @@ cloudflare:
         .expect("valid");
         let b = cfg.backup.expect("backup set");
         assert_eq!(b.branch, "main");
-        assert_eq!(b.interval, std::time::Duration::from_secs(30));
     }
 
     #[test]
@@ -1041,12 +1034,15 @@ cloudflare:
         assert!(matches!(err, ConfigError::Invalid { at, .. } if at == "backup.age_recipient"));
     }
 
+    /// `interval` used to debounce exports and no longer exists, but a
+    /// cluster.yaml written before that change still has it on disk - it
+    /// must keep loading rather than refuse to parse.
     #[test]
-    fn backup_rejects_a_too_short_interval() {
-        let err = with_backup(
-            "  repo_url: git@github.com:org/repo.git\n  age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n  interval: 1s\n",
+    fn backup_tolerates_a_leftover_interval_field() {
+        let cfg = with_backup(
+            "  repo_url: git@github.com:org/repo.git\n  age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n  interval: 30s\n",
         )
-        .unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid { at, .. } if at == "backup.interval"));
+        .expect("valid");
+        assert_eq!(cfg.backup.expect("backup set").branch, "main");
     }
 }

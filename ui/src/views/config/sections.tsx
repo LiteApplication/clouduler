@@ -1281,7 +1281,6 @@ const DEFAULT_GIT_BACKUP: NonNullable<ClusterConfig['backup']> = {
   repo_url: '',
   age_recipient: '',
   branch: 'main',
-  interval: '30s',
 };
 
 /** Generates a fresh age (X25519) keypair entirely client-side, downloads the
@@ -1336,7 +1335,7 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
         label="Mirror cluster state into a git repository"
         value={b != null}
         onChange={(enabled) => setDraft({ ...draft, backup: enabled ? DEFAULT_GIT_BACKUP : null })}
-        hint="The leader periodically commits and pushes cluster.yaml, stack specs, configs and secrets to this repo, so it can be rebuilt from git after a total loss. Secrets are re-encrypted for the age key below - the cluster's own key never leaves it."
+        hint="The leader pushes cluster.yaml, stack specs, configs and secrets to this repo as soon as they change, so it can be rebuilt from git after a total loss. Secrets are re-encrypted for the age key below - the cluster's own key never leaves it."
         disabled={disabled}
       />
       {b && (
@@ -1377,14 +1376,6 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
             label="Branch"
             value={b.branch}
             onChange={(branch) => set({ branch })}
-            disabled={disabled}
-          />
-          <DurationField
-            id="backup-interval"
-            label="Export interval"
-            value={b.interval}
-            onChange={(interval) => set({ interval })}
-            hint="How often the leader checks for changes to export, e.g. 30s. A tick with nothing new to commit is a no-op."
             disabled={disabled}
           />
           <GitBackupDeployKey />
@@ -1476,15 +1467,19 @@ function GitBackupDeployKey() {
 
       <label style={{ marginTop: 16 }}>Webhook (git &rarr; cluster)</label>
       <span className="field-hint">
-        Point the repository's webhook at <code>/api/git-backup/webhook</code>, sending this token as either an{' '}
-        <code>X-Gitlab-Token</code> header or an <code>Authorization: Bearer</code> header. A push notification pulls
-        the branch above; a commit that fails to parse or validate is never applied - it is preserved on its own
+        Point the repository's webhook at <code>/api/git-backup/webhook/&lt;token&gt;</code>, with the token below
+        pasted directly into the url - most webhook integrations offer no way to attach a custom header, but every
+        one of them accepts an arbitrary url, so the token lives there instead. Treat the full url as the secret: it
+        grants the same access a header token would have. A push notification pulls the branch above; a commit that
+        fails to parse or validate is never applied - it is preserved on its own
         <code> rejected/...</code> branch and the branch above is force-pushed back to its last known-good state.
+        Use <code>clouduler git-backup pull</code> to trigger the same pull by hand, and{' '}
+        <code>clouduler git-backup force-push</code> to push the cluster's own state past a remote that has diverged.
       </span>
       <input
         id="backup-webhook-token"
         type="password"
-        placeholder={webhookSecret?.configured ? 'already configured' : 'shared secret for the webhook'}
+        placeholder={webhookSecret?.configured ? 'already configured' : 'token to paste into the webhook url'}
         value={tokenInput}
         onChange={(e) => setTokenInput(e.target.value)}
         disabled={busy}

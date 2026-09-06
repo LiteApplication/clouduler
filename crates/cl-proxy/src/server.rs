@@ -27,8 +27,15 @@ use crate::auth_gate::{AuthGate, GateOutcome};
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
 use crate::error::Result;
 use crate::forward_auth;
+use crate::http01::Http01Store;
 use crate::middleware;
 use crate::route::{RedirectTarget, Route, RouteTable, STICKY_COOKIE};
+
+/// Path prefix ACME HTTP-01 validators request; the rest of the path is the
+/// challenge token. Answered ahead of routing and regardless of `Host`,
+/// since the CA's validator has no reason to send one clouduler would
+/// recognize.
+const ACME_CHALLENGE_PREFIX: &str = "/.well-known/acme-challenge/";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// The single body type every response and outbound request in this crate
@@ -55,6 +62,7 @@ struct Backends {
     client: Client<HttpConnector, ProxyBody>,
     forward_auth_client: reqwest::Client,
     auth_gate: Option<Arc<AuthGate>>,
+    http01: Arc<Http01Store>,
 }
 
 /// Runs the plain HTTP and TLS listeners for one routing table and cert store.
@@ -69,6 +77,9 @@ pub struct ProxyServer {
     /// `None` when nothing needs it yet: only built once a route actually
     /// carries the `authenticated` middleware.
     auth_gate: Option<Arc<AuthGate>>,
+    /// ACME HTTP-01 challenge responses, served out of the plain HTTP
+    /// listener regardless of which route (if any) matches the request host.
+    http01: Arc<Http01Store>,
 }
 
 /// How long a backend gets to accept a TCP connection before it's treated as
@@ -104,6 +115,18 @@ impl ProxyServer {
     }
 
     pub fn with_auth_gate(routes: Arc<RouteTable>, certs: Arc<CertStore>, auth_gate: Option<Arc<AuthGate>>) -> Self {
+        Self::full(routes, certs, auth_gate, Arc::new(Http01Store::default()))
+    }
+
+    /// Like [`Self::with_auth_gate`], but with the ACME HTTP-01 challenge
+    /// store shared with the issuance code, rather than a private one this
+    /// server would never see writes to.
+    pub fn full(
+        routes: Arc<RouteTable>,
+        certs: Arc<CertStore>,
+        auth_gate: Option<Arc<AuthGate>>,
+        http01: Arc<Http01Store>,
+    ) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_connect_timeout(Some(BACKEND_CONNECT_TIMEOUT));
         let client = Client::builder(TokioExecutor::new())
@@ -116,6 +139,7 @@ impl ProxyServer {
             client,
             forward_auth_client: reqwest::Client::new(),
             auth_gate,
+            http01,
         }
     }
 
@@ -131,6 +155,7 @@ impl ProxyServer {
                 client: self.client.clone(),
                 forward_auth_client: self.forward_auth_client.clone(),
                 auth_gate: self.auth_gate.clone(),
+                http01: self.http01.clone(),
             };
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
@@ -165,6 +190,7 @@ impl ProxyServer {
                 client: self.client.clone(),
                 forward_auth_client: self.forward_auth_client.clone(),
                 auth_gate: self.auth_gate.clone(),
+                http01: self.http01.clone(),
             };
             let certs = self.certs.clone();
             let config = config.clone();
@@ -338,6 +364,10 @@ async fn handle_http(
         .to_string();
     let path = req.uri().path().to_string();
 
+    if let Some(token) = path.strip_prefix(ACME_CHALLENGE_PREFIX) {
+        return Ok(http01_response(&backends.http01, token));
+    }
+
     let Some(route) = route_for(&routes, &req) else {
         return Ok(not_found(&host, &path));
     };
@@ -364,6 +394,21 @@ async fn handle_http(
     }
 
     Ok(proxy(req, &route, "http", peer, &backends).await)
+}
+
+/// Answers an ACME HTTP-01 validation request straight out of the shared
+/// store, ahead of any routing decision - the CA's validator sends no `Host`
+/// clouduler would recognize, and the hostname being validated may have no
+/// route at all yet (issuance for a brand new name).
+fn http01_response(store: &Http01Store, token: &str) -> Response<ProxyBody> {
+    match store.get(token) {
+        Some(key_authorization) => Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "text/plain")
+            .body(text_body(key_authorization))
+            .unwrap_or_else(|_| Response::new(empty_body())),
+        None => status_response(StatusCode::NOT_FOUND, "no acme challenge for this token"),
+    }
 }
 
 async fn handle_https(

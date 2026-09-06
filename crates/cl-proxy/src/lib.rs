@@ -3,9 +3,11 @@
 //! `route` builds the routing table from `x-clouduler.proxy` entries and
 //! matches incoming requests to a backend. `middleware` implements the named
 //! per-route behaviours. `certs` holds parsed certificates, keyed by fqdn,
-//! with a self-signed fallback. `acme` drives DNS-01 issuance and renewal
-//! through `cl_dns`. `server` wires all of it into hyper 1.x HTTP and HTTPS
-//! listeners.
+//! with a self-signed fallback. `acme` drives issuance and renewal, normally
+//! DNS-01 through `cl_dns`, falling back to HTTP-01 (answered out of
+//! `http01`'s in-memory store by the plain-http listener) for a name the
+//! caller marks as uncovered by any DNS provider zone. `server` wires all of
+//! it into hyper 1.x HTTP and HTTPS listeners.
 
 mod acme;
 mod auth_gate;
@@ -13,18 +15,20 @@ mod certs;
 mod error;
 mod forward_auth;
 mod health;
+mod http01;
 mod middleware;
 mod route;
 mod server;
 
 pub use auth_gate::AuthGate;
 pub use acme::{
-    issue_certificate, load_or_create_account, needs_renewal, renewal_tick, run_renewal_loop,
-    AcmeConfig, IssuedCertificate, ZoneResolver, DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
-    RENEWAL_WINDOW,
+    issue_certificate, issue_certificate_http01, load_or_create_account, needs_renewal,
+    renewal_tick, run_renewal_loop, AcmeConfig, IssuedCertificate, ZoneResolver,
+    DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL, RENEWAL_WINDOW,
 };
 pub use certs::{ensure_crypto_provider, parse_certified_key, CertResolver, CertStore};
 pub use error::{ProxyError, Result};
+pub use http01::Http01Store;
 pub use health::{run as run_health_checks, BackendHealth, HealthTable, CHECK_INTERVAL as HEALTH_CHECK_INTERVAL};
 pub use middleware::{
     apply_headers, basic_auth_challenge, check_basic_auth, cors_origin_allowed,
