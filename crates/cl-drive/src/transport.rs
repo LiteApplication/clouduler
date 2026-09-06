@@ -66,13 +66,17 @@ pub fn signature_options() -> SignatureOptions {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
     /// Sender announces the volume and the generation this sync will reach.
-    /// `staging` marks a `NodeLocal`-elsewhere backup's one-off push (see
-    /// `backup_runner`'s module doc): the receiver stages the volume under
-    /// `DriveRegistry::ensure_staging_volume` instead of requiring it
-    /// already implement the drive. Nothing else in this protocol cares -
+    /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off
+    /// push (see `backup_runner`'s module doc) and carries the backup
+    /// destination's own configured path: the receiver stages the volume
+    /// under `DriveRegistry::ensure_staging_volume`, in a hidden directory
+    /// next to that path, instead of requiring it already implement the
+    /// drive. Colocating with the destination (rather than staging under
+    /// this node's data dir) keeps the staged copy on whatever volume the
+    /// destination itself lives on. Nothing else in this protocol cares -
     /// added here rather than as a new `Message` variant since only the
     /// initial handshake needs to say it.
-    Hello { volume: VolumeId, generation: u64, staging: bool },
+    Hello { volume: VolumeId, generation: u64, staging: Option<String> },
     /// Receiver's current manifest, scanned without hashing.
     Ready(Manifest),
     /// A one-shot manifest request outside a sync, used for migration
@@ -227,10 +231,9 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
         None => return Ok(()),
     };
 
-    let root = if staging {
-        registry.ensure_staging_volume(&volume)?
-    } else {
-        registry.ensure_volume(&volume)?
+    let root = match &staging {
+        Some(destination_path) => registry.ensure_staging_volume(Path::new(destination_path), &volume)?,
+        None => registry.ensure_volume(&volume)?,
     };
     let manifest = scan::scan_off_runtime(root.clone(), false).await?;
     send(&mut conn, &Message::Ready(manifest)).await.map_err(io_err)?;
@@ -523,7 +526,7 @@ mod tests {
 
     #[test]
     fn every_message_variant_round_trips_through_bincode() {
-        msg_round_trip(Message::Hello { volume: VolumeId::new("fast", "data"), generation: 3, staging: false });
+        msg_round_trip(Message::Hello { volume: VolumeId::new("fast", "data"), generation: 3, staging: None });
         msg_round_trip(Message::Ready(Manifest::default()));
         msg_round_trip(Message::ManifestRequest { volume: VolumeId::new("fast", "data"), hash_content: true });
         msg_round_trip(Message::SignatureRequest("a.txt".into()));

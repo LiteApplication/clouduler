@@ -400,7 +400,7 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
         debug!(node = name.as_str(), %peer, "syncing volume");
         progress.update(&format!("pushing to {name} ({}/{})", i + 1, targets.len()));
         match engine
-            .sync(volume_root, peer, id, generation, false, ProgressSink::none())
+            .sync(volume_root, peer, id, generation, None, ProgressSink::none())
             .await
         {
             Ok(_) => {

@@ -196,7 +196,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             let drive_addr = crate::transport::drive_port(target.addr.port());
             let peer = std::net::SocketAddr::new(target.addr.ip(), drive_addr);
 
-            match self.engine.sync(&src, peer, &id, generation, false, crate::progress::ProgressSink::none()).await {
+            match self.engine.sync(&src, peer, &id, generation, None, crate::progress::ProgressSink::none()).await {
                 Ok(stats) => {
                     debug!(%id, node = %target.node, ?stats, "volume synced");
                     if let Err(e) = self

@@ -199,11 +199,11 @@ pub fn start_runner(
                         )
                         .await;
                     }
-                    BackupDestinationKind::NodeLocal { node, .. } if is_source && node != &node_name => {
+                    BackupDestinationKind::NodeLocal { node, path } if is_source && node != &node_name => {
                         if !pushed.lock().await.insert(run.id.clone()) {
                             continue;
                         }
-                        if let Err(e) = push_drive_once(&state, &registry, &run.drive, node).await {
+                        if let Err(e) = push_drive_once(&state, &registry, &run.drive, node, path).await {
                             warn!(run = %run.id, drive = %run.drive, destination = %node, error = %e, "one-off backup sync failed");
                             // The destination can't run restic against data
                             // that never landed, and it can't tell a push
@@ -294,14 +294,21 @@ async fn execute(
     // A `NodeLocal`-elsewhere destination doesn't implement the drive at
     // all - see the module doc comment - so it has no `registry.root` to
     // read; restic runs against the staging copy `push_drive_once`'s peer
-    // landed instead. `ensure_staging_root` (rather than just
+    // landed instead, in a hidden directory next to the destination's own
+    // path rather than under this node's data dir (see
+    // `DriveRegistry::staging_root_for`) - the staged copy can be the
+    // whole drive, and the destination's own volume is the one an operator
+    // actually sized for that. `ensure_staging_root` (rather than just
     // `staging_root_for`) matters here: a run whose grace period has
     // elapsed with no push having landed yet (source unreachable, say)
     // still needs a real, existing directory for restic to point at.
     let source_path = if registry.implements(&run.drive) {
         registry.root(&run.drive)?.to_path_buf()
     } else {
-        registry.ensure_staging_root(&run.drive)?
+        let BackupDestinationKind::NodeLocal { path, .. } = &destination.kind else {
+            bail!("destination {} has no local path to stage {} next to", destination.id, run.drive);
+        };
+        registry.ensure_staging_root(Path::new(path), &run.drive)?
     };
     let result = run_restic_backup(cluster, key, data_dir, state, run, target, destination, &source_path).await;
 
@@ -444,7 +451,13 @@ fn is_local_source(registry: &DriveRegistry, state: &ClusterState, drive: &str) 
 /// cluster's replication bookkeeping must never learn about this write - see
 /// `folder_import::push_now` for the pattern this mirrors and
 /// `cl_drive::migration::sync_all_inner` for the call shape.
-async fn push_drive_once(state: &ClusterState, registry: &DriveRegistry, drive: &str, target_node: &str) -> Result<()> {
+async fn push_drive_once(
+    state: &ClusterState,
+    registry: &DriveRegistry,
+    drive: &str,
+    target_node: &str,
+    destination_path: &str,
+) -> Result<()> {
     let addr = state
         .nodes
         .get(target_node)
@@ -455,7 +468,7 @@ async fn push_drive_once(state: &ClusterState, registry: &DriveRegistry, drive: 
     for (id, vstate) in state.volumes.iter().filter(|(id, _)| id.drive == drive) {
         let src = registry.volume_path(id)?;
         engine
-            .sync(&src, peer, id, vstate.generation, true, ProgressSink::none())
+            .sync(&src, peer, id, vstate.generation, Some(destination_path.to_string()), ProgressSink::none())
             .await
             .map_err(|e| anyhow!("syncing {id} to {target_node}: {e}"))?;
     }

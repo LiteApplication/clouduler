@@ -204,7 +204,7 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
             }
             None => crate::progress::ProgressSink::none(),
         };
-        job.engine.sync(&src_path, job.target_addr, volume, generation, false, progress).await?;
+        job.engine.sync(&src_path, job.target_addr, volume, generation, None, progress).await?;
 
         node.submit(Request::SetVolumeReplica {
             id: volume.clone(),
@@ -348,7 +348,7 @@ mod tests {
             _peer: std::net::SocketAddr,
             _volume: &'a VolumeId,
             _generation: u64,
-            _staging: bool,
+            _staging: Option<String>,
             _progress: crate::progress::ProgressSink,
         ) -> BoxFuture<'a, Result<crate::delta::SyncStats>> {
             unimplemented!("finish_sync tests never actually call sync")

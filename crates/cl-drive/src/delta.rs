@@ -74,9 +74,10 @@ pub struct SyncStats {
 pub trait SyncEngine: Send + Sync {
     fn name(&self) -> &str;
 
-    /// `staging` marks a `NodeLocal`-elsewhere backup's one-off push - see
+    /// `staging`, when set, marks a `NodeLocal`-elsewhere backup's one-off
+    /// push and carries that destination's configured path - see
     /// `Message::Hello`'s doc comment in `transport.rs` for what it changes
-    /// on the receiving end. Every other caller passes `false`.
+    /// on the receiving end. Every other caller passes `None`.
     #[allow(clippy::too_many_arguments)]
     fn sync<'a>(
         &'a self,
@@ -84,7 +85,7 @@ pub trait SyncEngine: Send + Sync {
         peer: SocketAddr,
         volume: &'a VolumeId,
         generation: u64,
-        staging: bool,
+        staging: Option<String>,
         progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>>;
 }
@@ -112,7 +113,7 @@ impl SyncEngine for DeltaEngine {
         peer: SocketAddr,
         volume: &'a VolumeId,
         generation: u64,
-        staging: bool,
+        staging: Option<String>,
         progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>> {
         Box::pin(async move { self.sync_impl(src, peer, volume, generation, staging, progress).await })
@@ -156,7 +157,7 @@ impl DeltaEngine {
         peer: SocketAddr,
         volume: &VolumeId,
         generation: u64,
-        staging: bool,
+        staging: Option<String>,
         progress: crate::progress::ProgressSink,
     ) -> Result<SyncStats> {
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
