@@ -70,7 +70,21 @@ pub async fn run(cfg: &ClusterConfig, target: &str, cmd: Vec<String>, user: Opti
     let raw_terminal = tty.then(RawTerminal::enable).transpose()?;
     let result = bridge(ws_stream).await;
     drop(raw_terminal);
-    result
+
+    // The stdin-forwarding task in `bridge` reads via `tokio::io::stdin()`,
+    // which is backed by a real blocking read on a threadpool thread that
+    // `.abort()` cannot interrupt. Returning normally would leave `main`'s
+    // `#[tokio::main]` runtime waiting for that thread to finish before the
+    // process can exit - which only happens once the user presses another
+    // key. Exit directly instead, once this exec session is over, so the
+    // stuck thread can't hold the process open.
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[derive(Serialize)]
