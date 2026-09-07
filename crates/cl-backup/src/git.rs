@@ -61,6 +61,7 @@ impl GitBackup {
     /// changed, so an unrelated raft-version bump never produces an empty
     /// commit.
     pub fn sync(&self, files: &[TreeFile], message: &str, private_key_pem: &str) -> Result<Option<git2::Oid>> {
+        self.seed_from_remote_if_new(private_key_pem)?;
         self.rewrite_working_tree(files)?;
 
         let mut index = self.repo.index()?;
@@ -96,6 +97,26 @@ impl GitBackup {
         self.push(private_key_pem)?;
 
         Ok(Some(oid))
+    }
+
+    /// A working copy with no commits yet - e.g. a node that just became
+    /// leader and has never run an export before - has no history to build
+    /// a new commit's parent from, even though `origin` almost certainly has
+    /// one (every prior leader's term exported into it). Committing straight
+    /// onto an unborn HEAD would silently start an unrelated root commit,
+    /// which a normal (non-force) push can never fast-forward onto that real
+    /// history: every export attempt after that fails with "not a fast
+    /// forward" forever, and a pull elsewhere sees the whole `secrets/`
+    /// subtree as changed (it is diffing against unrelated trees) and treats
+    /// it as an unauthorized secret rotation.
+    fn seed_from_remote_if_new(&self, private_key_pem: &str) -> Result<()> {
+        if self.repo.head().is_ok() {
+            return Ok(());
+        }
+        if let Some(oid) = self.fetch_remote_tip(private_key_pem)? {
+            self.advance_local_ref(oid)?;
+        }
+        Ok(())
     }
 
     fn rewrite_working_tree(&self, files: &[TreeFile]) -> Result<()> {
@@ -565,6 +586,56 @@ mod tests {
         let dummy_key = "not-a-real-key";
         let oid = backup.sync(files, "seed", dummy_key).expect("sync").expect("a real commit");
         (backup, oid)
+    }
+
+    #[test]
+    fn a_fresh_working_copy_builds_on_the_remotes_existing_history_instead_of_going_orphan() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let first_work_dir = tempfile::tempdir().expect("first work tempdir");
+        let first_files = vec![TreeFile {
+            path: "cluster.yaml".to_string(),
+            contents: b"nodes: []\n".to_vec(),
+        }];
+        let (_first_leader, first_oid) = seeded_backup(&bare_dir, &first_work_dir, &first_files);
+
+        // A new leader with no prior export history, e.g. right after a
+        // failover, opens its own empty working copy against the same repo.
+        let second_work_dir = tempfile::tempdir().expect("second work tempdir");
+        let repo_url = format!("file://{}", bare_dir.path().display());
+        let second_leader = GitBackup::open_or_init(second_work_dir.path(), &repo_url, "main").expect("open");
+        assert_eq!(second_leader.local_branch_oid().expect("local oid"), None);
+
+        let dummy_key = "not-a-real-key";
+        let second_files = vec![
+            TreeFile {
+                path: "cluster.yaml".to_string(),
+                contents: b"nodes: []\n".to_vec(),
+            },
+            TreeFile {
+                path: "stacks/a.yaml".to_string(),
+                contents: b"services: {}\n".to_vec(),
+            },
+        ];
+        let second_oid = second_leader
+            .sync(&second_files, "second leader's first export", dummy_key)
+            .expect("sync")
+            .expect("a real commit");
+
+        // The new commit must be a fast-forward child of the remote's tip,
+        // not an unrelated root commit - otherwise this push (a plain,
+        // non-force push) could never have succeeded.
+        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
+        assert_eq!(
+            remote_repo.find_reference("refs/heads/main").expect("remote main").target(),
+            Some(second_oid)
+        );
+        let parents: Vec<_> = second_leader
+            .repo
+            .find_commit(second_oid)
+            .expect("find commit")
+            .parent_ids()
+            .collect();
+        assert_eq!(parents, vec![first_oid]);
     }
 
     #[test]
