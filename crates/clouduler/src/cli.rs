@@ -214,7 +214,7 @@ pub enum Command {
     /// prefixed with which instance it came from.
     Logs {
         /// Instance id (`stack.service.index`) or stack name.
-        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        #[arg(add = ArgValueCompleter::new(completion::targets))]
         target: String,
         /// Keep streaming new lines as they are written.
         #[arg(short = 'f', long)]
@@ -243,7 +243,7 @@ pub enum Command {
     Exec {
         /// Instance id (`stack.service.index`) or stack name. A stack name
         /// only resolves when it currently has exactly one running instance.
-        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        #[arg(add = ArgValueCompleter::new(completion::targets))]
         target: String,
         /// User to run as inside the container: `user`, `user:group`, `uid`
         /// or `uid:gid`. Defaults to the image's own user.
@@ -275,7 +275,7 @@ pub enum Command {
     Capture {
         /// Instance id (`stack.service.index`) or stack name. A stack name
         /// only resolves when it currently has exactly one running instance.
-        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        #[arg(add = ArgValueCompleter::new(completion::targets))]
         target: String,
         /// Which of the stack's declared networks to capture on. Defaults to
         /// the one the reverse proxy forwards to.
@@ -385,6 +385,7 @@ pub struct FolderImportArgs {
     pub source: PathBuf,
 
     /// Where to import it: `<drive>/<volume>[/path inside volume]`.
+    #[arg(add = ArgValueCompleter::new(completion::folder_import_target))]
     pub target: String,
 
     /// Name of this node in the config. Defaults to the hostname, same as `daemon`.
@@ -775,6 +776,7 @@ pub enum BackupCommand {
     /// Trigger a backup run for a target immediately, outside its schedule.
     Run {
         /// Target id (see `backup target list`).
+        #[arg(add = ArgValueCompleter::new(completion::backup_target_ids))]
         id: String,
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
@@ -782,7 +784,7 @@ pub enum BackupCommand {
     /// Show recent backup runs, newest first.
     History {
         /// Only show runs for this target.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::backup_target_ids))]
         target: Option<String>,
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
@@ -790,6 +792,7 @@ pub enum BackupCommand {
     /// List the snapshots stored at a destination.
     Snapshots {
         /// Destination id (see `backup destination list`).
+        #[arg(add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: String,
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
@@ -798,9 +801,10 @@ pub enum BackupCommand {
     /// uses it.
     RestoreDrive {
         /// Drive to restore.
+        #[arg(add = ArgValueCompleter::new(completion::drive_names))]
         drive: String,
         /// Destination to restore from.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: String,
         /// Snapshot id, or "latest" (the default) for the most recent one.
         #[arg(long)]
@@ -815,9 +819,10 @@ pub enum BackupCommand {
     /// snapshot, stopping and restarting only the instances that mount it.
     RestoreVolume {
         /// Volume to restore, as `drive/volume`.
+        #[arg(add = ArgValueCompleter::new(completion::volume_ids))]
         volume: VolumeId,
         /// Destination to restore from.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: String,
         /// Snapshot id, or "latest" (the default) for the most recent one.
         #[arg(long)]
@@ -832,12 +837,14 @@ pub enum BackupCommand {
     /// service once.
     RestoreService {
         /// Stack the service belongs to.
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
         stack: String,
         /// Service within the stack.
+        #[arg(add = ArgValueCompleter::new(completion::service_names))]
         service: String,
         /// Destination to restore from, needed only when the drive backs up
         /// to more than one.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: Option<String>,
         /// Snapshot id, or "latest" (the default) for the most recent one.
         #[arg(long)]
@@ -891,6 +898,7 @@ pub enum BackupDestinationCommand {
     },
     /// Remove a backup destination. Refused while any target references it.
     Remove {
+        #[arg(add = ArgValueCompleter::new(completion::backup_destination_ids))]
         id: String,
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
@@ -899,7 +907,9 @@ pub enum BackupDestinationCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct BackupDestinationAddArgs {
-    /// Unique id for this destination.
+    /// Unique id for this destination. Completes existing ids too, since
+    /// this command also replaces one.
+    #[arg(add = ArgValueCompleter::new(completion::backup_destination_ids))]
     pub id: String,
     /// Human-readable name.
     #[arg(long)]
@@ -907,7 +917,7 @@ pub struct BackupDestinationAddArgs {
     #[arg(long, value_enum)]
     pub kind: BackupDestinationKindArg,
     /// `node-local`: the cluster node holding the backup directory.
-    #[arg(long, required_if_eq("kind", "node-local"))]
+    #[arg(long, required_if_eq("kind", "node-local"), add = ArgValueCompleter::new(completion::node_names))]
     pub node: Option<String>,
     /// `node-local`: directory on that node. `ssh`: directory on the
     /// remote host.
@@ -963,13 +973,15 @@ pub enum BackupDestinationKindArg {
 pub enum BackupTargetCommand {
     /// Add or update a drive's schedule/retention against a destination.
     Set {
-        /// Unique id for this target.
+        /// Unique id for this target. Completes existing ids too, since
+        /// this command also updates one.
+        #[arg(add = ArgValueCompleter::new(completion::backup_target_ids))]
         id: String,
         /// Drive to back up.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::drive_names))]
         drive: String,
         /// Destination to back up to.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: String,
         /// How often to run, e.g. "1d", "12h".
         #[arg(long)]
@@ -1002,6 +1014,7 @@ pub enum BackupTargetCommand {
     },
     /// Remove a backup target.
     Remove {
+        #[arg(add = ArgValueCompleter::new(completion::backup_target_ids))]
         id: String,
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,

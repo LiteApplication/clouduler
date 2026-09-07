@@ -104,6 +104,24 @@ fn lookup_gid() -> Option<Gid> {
     Group::from_name(GROUP).ok().flatten().map(|group| group.gid)
 }
 
+/// Whether the calling process's user belongs to the `clouduler` group,
+/// checking both the primary gid and the supplementary group list (a plain
+/// `getgid()` misses a group added via `usermod -aG` until the next login,
+/// but `getgroups()` still needs checking too since either could be the one
+/// that matches depending on how the group was granted).
+///
+/// `None` means the group does not exist on this machine at all yet -
+/// distinct from `Some(false)` because the fix is different: the group is
+/// normally created by `ensure` the first time a node's daemon starts, not
+/// something an operator provisions by hand.
+pub fn current_user_is_member() -> Option<bool> {
+    let gid = lookup_gid()?;
+    if nix::unistd::getgid() == gid || nix::unistd::getegid() == gid {
+        return Some(true);
+    }
+    Some(nix::unistd::getgroups().is_ok_and(|groups| groups.contains(&gid)))
+}
+
 /// chown `path` to `root:gid` and set its mode to exactly `mode`, best
 /// effort. Set exactly rather than OR'd in on top of whatever is there
 /// already, so a file someone loosened by hand (e.g. a key left world

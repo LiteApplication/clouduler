@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::cli::ShellArg;
+use crate::init::permissions;
 
 impl ShellArg {
     fn name(self) -> &'static str {
@@ -76,6 +77,40 @@ fn bin_name() -> Result<String> {
         .unwrap_or_else(|| "clouduler".to_string()))
 }
 
+/// The dynamic completers in `completion.rs` read `cluster.yaml` (and, for
+/// stack/instance/volume/backup names, talk to a live manager) to answer
+/// with real data instead of nothing. Both of those need this user to be
+/// able to read the config file, which - once a node's daemon has run at
+/// least once - is root-owned but group-readable by `clouduler` (see
+/// `init::permissions::ensure`). Installing the shell hook for a user who
+/// cannot read it would look identical to a working install right up until
+/// the first tab press, so check now and say so up front instead of leaving
+/// that to be a silently-empty completion list later.
+fn warn_if_not_in_group() {
+    match permissions::current_user_is_member() {
+        Some(true) => {}
+        Some(false) => {
+            println!(
+                "warning: this user is not in the `{group}` group, so live completions \
+                 (stack, node, instance and drive names) will silently come back empty. \
+                 Run `sudo usermod -aG {group} $(whoami)` and log back in to fix that; \
+                 subcommand and flag completion will still work either way.",
+                group = permissions::GROUP,
+            );
+        }
+        None => {
+            println!(
+                "note: the `{group}` group does not exist on this machine yet - it is created \
+                 the first time a node's daemon starts here. Once it has, add this user with \
+                 `sudo usermod -aG {group} $(whoami)` and log back in to get live completions \
+                 (stack, node, instance and drive names); subcommand and flag completion will \
+                 still work either way.",
+                group = permissions::GROUP,
+            );
+        }
+    }
+}
+
 /// Where each shell keeps a rc file this appends to, or None when the
 /// idiomatic move is a dedicated completion file instead (fish).
 fn rc_file(shell: ShellArg) -> Result<PathBuf> {
@@ -99,6 +134,8 @@ fn rc_file(shell: ShellArg) -> Result<PathBuf> {
 /// `~/.config/fish/completions/` automatically, which is the idiomatic place
 /// rather than `config.fish`). Does nothing if the line is already there.
 pub fn install(shell: Option<ShellArg>) -> Result<()> {
+    warn_if_not_in_group();
+
     let shell = match shell {
         Some(shell) => shell,
         None => detect_shell()?,
