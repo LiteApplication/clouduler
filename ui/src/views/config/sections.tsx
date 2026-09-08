@@ -606,6 +606,14 @@ export function NodeCard({
         hint="Overrides the cluster-wide data directory for this node only. Leave blank to use the cluster default."
         disabled={disabled}
       />
+      <TextField
+        id={`node-${name}-docker-datadir`}
+        label="Docker data dir"
+        value={node.docker_data_dir ?? ''}
+        onChange={(docker_data_dir) => onChange({ docker_data_dir: docker_data_dir || null })}
+        hint="Where this node's docker daemon stores images and containers. Leave blank for docker's own default (/var/lib/docker). Changing this only takes effect once docker is restarted, and existing data under the old location is not moved."
+        disabled={disabled}
+      />
       {/* A node that joined an existing cluster is set to "never", because a
           second cluster key would only seal secrets nothing else can open. */}
       <SelectField

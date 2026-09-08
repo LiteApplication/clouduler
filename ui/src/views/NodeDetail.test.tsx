@@ -47,6 +47,7 @@ const clusterConfig: ClusterConfig = {
       drives: { fast: '/srv/fast' },
       rpc_port: 7373,
       data_dir: null,
+      docker_data_dir: null,
       generate_secret_key: null,
     },
   },

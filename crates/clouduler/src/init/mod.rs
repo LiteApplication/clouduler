@@ -14,6 +14,7 @@
 //! point rather than the only way to change any of it.
 
 pub mod detect;
+pub mod docker;
 pub mod join;
 pub mod permissions;
 pub mod plan;
@@ -82,6 +83,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
 
     setup_data_directory(&mut prompt, &config, &node_name)?;
     setup_drive_directories(&mut prompt, &config, &node_name)?;
+    setup_docker_data_dir(&mut prompt, &config, &node_name)?;
     check_nfs_availability(&mut prompt, &config, &node_name)?;
     check_ethtool_availability(&mut prompt)?;
     check_restic_availability(&mut prompt)?;
@@ -150,6 +152,13 @@ fn create_cluster<R: BufRead, W: Write>(
         args.node_data_dir.clone().map(path_string),
         "directory for this node's database and working files",
         Some(DEFAULT_DATA_DIR),
+    )?
+    .map(PathBuf::from);
+    node.docker_data_dir = ask_optional_or(
+        prompt,
+        args.docker_data_dir.clone().map(path_string),
+        "directory for docker's own data (images, containers), blank to leave docker's default",
+        None,
     )?
     .map(PathBuf::from);
 
@@ -232,7 +241,13 @@ async fn join_cluster<R: BufRead, W: Write>(
         None,
     )?
     .map(PathBuf::from);
-
+    node.docker_data_dir = ask_optional_or(
+        prompt,
+        args.docker_data_dir.clone().map(path_string),
+        "directory for docker's own data (images, containers), blank to leave docker's default",
+        None,
+    )?
+    .map(PathBuf::from);
 
     node.drives = drives_from_args(&args.drive)?;
     if node.drives.is_empty() {
@@ -365,6 +380,55 @@ fn setup_drive_directories<R: BufRead, W: Write>(
                 path.display()
             ))?,
         }
+    }
+    Ok(())
+}
+
+/// Point dockerd's `data-root` at the directory configured for this node, if
+/// one was given.
+///
+/// Only the config file is written and the target directory created; docker
+/// itself is not restarted here (it may not even be installed yet, and this
+/// runs unprivileged as often as not). An existing `/var/lib/docker` is not
+/// moved: on a node docker has already run on, that is the operator's call.
+fn setup_docker_data_dir<R: BufRead, W: Write>(
+    prompt: &mut Prompt<R, W>,
+    config: &ClusterConfig,
+    node_name: &str,
+) -> Result<()> {
+    let Some(node) = config.node(node_name) else {
+        return Ok(());
+    };
+    let Some(data_root) = &node.docker_data_dir else {
+        return Ok(());
+    };
+
+    if let Err(e) = std::fs::create_dir_all(data_root) {
+        prompt.say(&format!(
+            "could not create {}: {e}. Create it before starting docker",
+            data_root.display()
+        ))?;
+        return Ok(());
+    }
+
+    let daemon_json = docker::default_path();
+    match docker::set_data_root(&daemon_json, data_root) {
+        Ok(true) => prompt.say(&format!(
+            "set data-root to {} in {}. Restart docker (systemctl restart docker) to pick it up; \
+             anything already under docker's old data-root stays there and is not moved",
+            data_root.display(),
+            daemon_json.display(),
+        ))?,
+        Ok(false) => prompt.say(&format!(
+            "{} already points docker at {}",
+            daemon_json.display(),
+            data_root.display()
+        ))?,
+        Err(e) => prompt.say(&format!(
+            "could not write {}: {e}. Set \"data-root\": \"{}\" there by hand before starting docker",
+            daemon_json.display(),
+            data_root.display()
+        ))?,
     }
     Ok(())
 }

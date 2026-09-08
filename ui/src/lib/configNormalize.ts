@@ -59,6 +59,7 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
       network: mapValues(node.network ?? {}, normalizeAddress),
       drives: node.drives ?? {},
       data_dir: nullable(node.data_dir),
+      docker_data_dir: nullable(node.docker_data_dir),
       generate_secret_key: nullable(node.generate_secret_key),
     })),
     auth: {

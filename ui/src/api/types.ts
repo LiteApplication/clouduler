@@ -550,6 +550,9 @@ export interface NodeConfig {
   drives: Record<string, string>;
   rpc_port: number;
   data_dir: string | null;
+  // Where this node's docker daemon stores images and containers
+  // (dockerd's data-root). Null leaves docker's own default alone.
+  docker_data_dir: string | null;
   // Overrides secrets.generate_if_missing for this node. Null inherits it.
   // A node that joined an existing cluster has this false so it cannot invent a
   // second cluster key, so it has to survive an edit here.

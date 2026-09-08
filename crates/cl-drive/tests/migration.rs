@@ -178,19 +178,31 @@ fn volume() -> cl_raft::VolumeId {
     cl_raft::VolumeId::new("fast", "data")
 }
 
+fn instance2() -> InstanceId {
+    InstanceId::new("gitlab", "cache", 0)
+}
+
+fn volume2() -> cl_raft::VolumeId {
+    cl_raft::VolumeId::new("fast", "cache-data")
+}
+
 async fn begin_migration(node: &ClusterNode) {
+    begin_migration_for(node, instance(), volume()).await;
+}
+
+async fn begin_migration_for(node: &ClusterNode, instance: InstanceId, volume: cl_raft::VolumeId) {
     node.submit(Request::Assign {
-        instance: instance(),
+        instance: instance.clone(),
         node: "source".into(),
         drives: BTreeSet::from(["fast".to_string()]),
     })
     .await
     .unwrap();
-    node.submit(Request::UpsertVolume { id: volume(), primary: "source".into() })
+    node.submit(Request::UpsertVolume { id: volume, primary: "source".into() })
         .await
         .unwrap();
     node.submit(Request::BeginMigration {
-        instance: instance(),
+        instance,
         to: "target".into(),
         drives: BTreeSet::from(["fast".to_string()]),
     })
@@ -220,6 +232,7 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
         engine: &engine,
         control: &control,
         sync_progress: None,
+        transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     run(&harness.node, &job).await.expect("migration succeeds");
@@ -263,6 +276,7 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
         engine: &engine,
         control: &control,
         sync_progress: None,
+        transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     let err = run(&harness.node, &job).await.expect_err("stop failure should abort the migration");
@@ -323,6 +337,7 @@ async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
         engine: &engine,
         control: &control,
         sync_progress: None,
+        transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     run(&harness.node, &job).await.expect("a volumeless migration needs no registry");
@@ -368,6 +383,7 @@ async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
         engine: &engine,
         control: &control,
         sync_progress: None,
+        transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     run(&harness.node, &job).await.expect("a failed cleanup still leaves the move successful");
@@ -377,4 +393,127 @@ async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
     assert_eq!(assignment.node, "target");
     assert!(assignment.migration.is_none(), "a finished migration clears its record");
     assert_eq!(state.volumes[&volume()].primary, "target");
+}
+
+/// Logs every call into one shared, order-preserving timeline, and can be
+/// told to stall inside `start_instance` until told to proceed, or to give
+/// that signal once it is done. The tool the test below needs to prove that
+/// one job's post-transfer tail (verify/switch/start/remove) does not hold
+/// up a second job's stop-and-transfer.
+struct GatedControl {
+    log: Arc<Mutex<Vec<String>>>,
+    label: &'static str,
+    block_start_until: Option<Arc<tokio::sync::Notify>>,
+    signal_on_remove: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl InstanceControl for GatedControl {
+    fn stop_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+        Box::pin(async move {
+            self.log.lock().unwrap().push(format!("stop:{}", self.label));
+            Ok(())
+        })
+    }
+
+    fn start_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+        Box::pin(async move {
+            if let Some(gate) = &self.block_start_until {
+                gate.notified().await;
+            }
+            self.log.lock().unwrap().push(format!("start:{}", self.label));
+            Ok(())
+        })
+    }
+
+    fn remove_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+        Box::pin(async move {
+            self.log.lock().unwrap().push(format!("remove:{}", self.label));
+            if let Some(gate) = &self.signal_on_remove {
+                gate.notify_one();
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The whole point of `transfer_gate`: two migrations sharing one may not
+/// both have their containers down at once, but neither should the first
+/// one's tail (verify/switch/start/remove) hold up the second's stop and
+/// transfer. Job one is stalled inside `start_instance` — well after it has
+/// released the gate at the end of its own `Syncing` — until job two signals
+/// that it has finished completely, including its own `start`/`remove`. If
+/// job two could only proceed once job one's `start` had already run, this
+/// test would deadlock instead of completing.
+#[tokio::test]
+async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishing_up() {
+    let harness = Harness::start().await;
+    std::fs::create_dir_all(harness.source.path().join("data")).unwrap();
+    std::fs::write(harness.source.path().join("data/a.txt"), b"one").unwrap();
+    std::fs::create_dir_all(harness.source.path().join("cache-data")).unwrap();
+    std::fs::write(harness.source.path().join("cache-data/b.txt"), b"two").unwrap();
+
+    begin_migration_for(&harness.node, instance(), volume()).await;
+    begin_migration_for(&harness.node, instance2(), volume2()).await;
+
+    let engine = DeltaEngine::default();
+    let registry = harness.source_registry();
+    let transfer_gate = Arc::new(tokio::sync::Semaphore::new(1));
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let handoff = Arc::new(tokio::sync::Notify::new());
+
+    let control1 = GatedControl {
+        log: log.clone(),
+        label: "one",
+        block_start_until: Some(handoff.clone()),
+        signal_on_remove: None,
+    };
+    let control2 = GatedControl {
+        log: log.clone(),
+        label: "two",
+        block_start_until: None,
+        signal_on_remove: Some(handoff.clone()),
+    };
+
+    let job1 = MigrationJob {
+        instance: instance(),
+        source_node: "source".into(),
+        target_node: "target".into(),
+        target_addr: harness.target_addr,
+        volumes: vec![volume()],
+        registry: Some(&registry),
+        engine: &engine,
+        control: &control1,
+        sync_progress: None,
+        transfer_gate: transfer_gate.clone(),
+    };
+    let job2 = MigrationJob {
+        instance: instance2(),
+        source_node: "source".into(),
+        target_node: "target".into(),
+        target_addr: harness.target_addr,
+        volumes: vec![volume2()],
+        registry: Some(&registry),
+        engine: &engine,
+        control: &control2,
+        sync_progress: None,
+        transfer_gate,
+    };
+
+    let (result1, result2) = tokio::join!(run(&harness.node, &job1), run(&harness.node, &job2));
+    result1.expect("job one completes once job two hands off");
+    result2.expect("job two completes without waiting on job one's tail");
+
+    let events = log.lock().unwrap().clone();
+    let pos = |event: &str| events.iter().position(|e| e == event).unwrap_or_else(|| panic!("{event} missing from {events:?}"));
+
+    // Job two's whole move, including its own start and cleanup, finished
+    // before job one — still parked in `start_instance` — was allowed to log
+    // its own `start`. That is only possible if job two's stop and transfer
+    // never had to wait for job one's tail.
+    assert!(pos("stop:two") < pos("start:one"), "events: {events:?}");
+    assert!(pos("remove:two") < pos("start:one"), "events: {events:?}");
+
+    let state = harness.node.state().await;
+    assert_eq!(state.assignments[&instance()].node, "target");
+    assert_eq!(state.assignments[&instance2()].node, "target");
 }

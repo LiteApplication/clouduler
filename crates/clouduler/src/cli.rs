@@ -480,6 +480,11 @@ pub struct InitArgs {
     #[arg(long)]
     pub node_data_dir: Option<PathBuf>,
 
+    /// Where this node's docker daemon stores images and containers. Left
+    /// unset, dockerd keeps its own default (/var/lib/docker).
+    #[arg(long)]
+    pub docker_data_dir: Option<PathBuf>,
+
     /// Install a systemd unit for the daemon.
     #[arg(long, overrides_with = "no_systemd")]
     pub systemd: bool,

@@ -34,6 +34,9 @@ pub struct NodePlan {
     /// Drives this node implements, mapped to the local directory backing them.
     pub drives: BTreeMap<String, PathBuf>,
     pub data_dir: Option<PathBuf>,
+    /// Where this node's docker daemon should store images and containers.
+    /// `None` leaves dockerd's own default in place.
+    pub docker_data_dir: Option<PathBuf>,
     /// Whether this node may create the cluster key. A joining node must not.
     pub generate_secret_key: Option<bool>,
 }
@@ -48,6 +51,7 @@ impl NodePlan {
             rpc_port: DEFAULT_RPC_PORT,
             drives: BTreeMap::new(),
             data_dir: None,
+            docker_data_dir: None,
             generate_secret_key: None,
         }
     }
@@ -65,6 +69,7 @@ impl NodePlan {
             labels: Default::default(),
             rpc_port: self.rpc_port,
             data_dir: self.data_dir.clone(),
+            docker_data_dir: self.docker_data_dir.clone(),
             generate_secret_key: self.generate_secret_key,
         }
     }

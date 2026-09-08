@@ -13,6 +13,11 @@ export interface KnownNames {
   instances: string[];
   secrets: string[];
   configs: string[];
+  /** "drive/volume" ids, from `ClusterState.volumes`. */
+  volumes: string[];
+  /** Every `image:` value seen across every stack currently in the cluster
+   *  (repo, or repo:tag when one is pinned), for image/tag autocomplete. */
+  images: string[];
 }
 
 export const emptyKnownNames: KnownNames = {
@@ -22,7 +27,22 @@ export const emptyKnownNames: KnownNames = {
   instances: [],
   secrets: [],
   configs: [],
+  volumes: [],
+  images: [],
 };
+
+/** Scans one or more stack spec yaml texts for `image:` lines. Not a real
+ *  yaml parser — just enough to pool "images already used somewhere in this
+ *  cluster" for completion, including images that aren't in this file yet. */
+export function collectImages(specs: string[]): string[] {
+  const names = new Set<string>();
+  const re = /^[ \t]*image:[ \t]*(\S+)[ \t]*$/gm;
+  for (const spec of specs) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(spec))) names.add(m[1].replace(/^["']|["']$/g, ''));
+  }
+  return Array.from(names).sort();
+}
 
 // Parent keys whose immediate map children are user-chosen names (a service
 // name, a drive name under volume_sync, a declared config/secret name)
@@ -30,17 +50,35 @@ export const emptyKnownNames: KnownNames = {
 // instead of being looked up literally.
 const DYNAMIC_PARENTS = new Set(['services', 'volume_sync', 'configs', 'secrets']);
 
-/** Ancestor key path (unnormalized) for the position at the start of `line`. */
-function contextPath(doc: string, offsetInDoc: number): string[] {
-  const before = doc.slice(0, offsetInDoc);
-  const lines = before.split('\n');
-  const curIndent = lines[lines.length - 1].match(/^ */)![0].length;
+/** A line's nesting column: right after its `- ` marker when it's a list
+ *  item, otherwise its plain leading-whitespace length. Used both to record
+ *  where an ancestor key sits and to measure how deep the cursor's own line
+ *  is, so the two are directly comparable. */
+function lineIndent(raw: string): number {
+  const dash = raw.match(/^(\s*)-\s+/);
+  return dash ? dash[0].length : raw.match(/^ */)![0].length;
+}
+
+/** Ancestor key path (unnormalized) for a position `curIndent` columns deep
+ *  on the line starting at `lineFrom`.
+ *
+ *  A list item's first key sits at the dash's own column (e.g. `- host:` is
+ *  2 columns left of `host`), while its sibling keys on later lines sit at
+ *  the column *after* the dash (where `host`'s text starts). Comparing those
+ *  two raw indents directly means a list item's first key never gets popped
+ *  by its own siblings, so it wrongly stays on the stack as their "parent"
+ *  and every key after the first in a `- foo: 1\n  bar: 2` item resolves to
+ *  the wrong schema path. `lineIndent` normalizes both to the same column so
+ *  they pop each other correctly. */
+function contextPath(doc: string, lineFrom: number, curIndent: number): string[] {
+  const lines = doc.slice(0, lineFrom).split('\n');
   const stack: { indent: number; key: string }[] = [];
-  for (let i = 0; i < lines.length - 1; i++) {
-    const raw = lines[i];
+  for (const raw of lines) {
     if (!raw.trim() || raw.trim().startsWith('#')) continue;
-    const indent = raw.match(/^ */)![0].length;
-    const m = raw.trim().match(/^-?\s*([A-Za-z0-9_.-]+):/);
+    const dash = raw.match(/^(\s*)-\s+/);
+    const rest = dash ? raw.slice(dash[0].length) : raw.trimStart();
+    const indent = lineIndent(raw);
+    const m = rest.match(/^([A-Za-z0-9_.-]+):/);
     if (!m) continue;
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
     stack.push({ indent, key: m[1] });
@@ -53,6 +91,43 @@ function normalizePath(path: string[]): string[] {
   return path.map((key, i) => (i > 0 && DYNAMIC_PARENTS.has(path[i - 1]) ? '*' : key));
 }
 
+/** The immediate children of a top-level `key:` map/list in `doc`, in
+ *  document order — e.g. `topLevelChildKeys(doc, 'services')` lists every
+ *  service defined in the file currently being edited, whether or not it's
+ *  been deployed yet. Same-file-aware complement to the cluster-wide
+ *  `KnownNames`. */
+function topLevelChildKeys(doc: string, parentKey: string): string[] {
+  const names: string[] = [];
+  let collecting = false;
+  let childIndent: number | null = null;
+  for (const raw of doc.split('\n')) {
+    if (!raw.trim() || raw.trim().startsWith('#')) continue;
+    const indent = raw.match(/^ */)![0].length;
+    const m = raw.trim().match(/^([A-Za-z0-9_.-]+):/);
+    if (indent === 0) {
+      collecting = m !== null && m[1] === parentKey;
+      childIndent = null;
+      continue;
+    }
+    if (!collecting) continue;
+    if (childIndent === null) childIndent = indent;
+    if (indent === childIndent && m) names.push(m[1]);
+  }
+  return names;
+}
+
+function dedupe(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+/** `image:` values already written elsewhere in the document being edited —
+ *  reusing an image another service in the same stack already pins is the
+ *  most common case (a web + worker pair on the same image), so it's worth
+ *  surfacing even before the stack is saved and shows up in `known.images`. */
+function localImages(doc: string): string[] {
+  return collectImages([doc]);
+}
+
 /** Schema keys valid at a given normalized path (dot-joined, '' = root). */
 const SCHEMA: Record<string, string[]> = {
   '': ['version', 'services', 'networks', 'volumes', 'configs', 'secrets', 'x-clouduler'],
@@ -63,6 +138,8 @@ const SCHEMA: Record<string, string[]> = {
     'deploy', 'x-clouduler',
   ],
   'services.*.healthcheck': ['test', 'interval', 'timeout', 'start_period', 'retries', 'disable'],
+  'services.*.volumes': ['type', 'source', 'target', 'read_only', 'tmpfs'],
+  'services.*.volumes.tmpfs': ['size'],
   'services.*.deploy': ['replicas', 'mode', 'placement', 'resources', 'restart_policy', 'update_config'],
   'services.*.deploy.placement': ['constraints'],
   'services.*.deploy.resources': ['limits', 'reservations'],
@@ -70,13 +147,21 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.deploy.resources.reservations': ['cpus', 'memory'],
   'services.*.deploy.restart_policy': ['condition', 'delay', 'max_attempts', 'window'],
   'services.*.deploy.update_config': ['parallelism', 'delay', 'order', 'failure_action'],
-  'services.*.x-clouduler': ['proxy', 'expose', 'volume_sync', 'auto_update', 'node', 'backup'],
+  'services.*.x-clouduler': [
+    'proxy', 'expose', 'volume_sync', 'auto_update', 'node', 'docker_socket', 'colocate', 'backup',
+  ],
   'services.*.x-clouduler.proxy': [
     'host', 'network', 'port', 'path_prefix', 'tls', 'middlewares', 'sticky', 'max_body_size',
     'websockets', 'preserve_host', 'response_timeout',
   ],
+  'services.*.x-clouduler.proxy.middlewares.basic_auth': ['users', 'realm'],
+  'services.*.x-clouduler.proxy.middlewares.headers': ['request', 'response', 'remove_request', 'remove_response'],
+  'services.*.x-clouduler.proxy.middlewares.cors': ['origins', 'methods', 'headers', 'allow_credentials', 'max_age'],
+  'services.*.x-clouduler.proxy.middlewares.forward_auth': ['address', 'auth_response_headers', 'timeout'],
+  'services.*.x-clouduler.proxy.middlewares.redirect_regex': ['regex', 'replacement', 'permanent'],
   'services.*.x-clouduler.expose': ['port', 'published', 'protocol', 'network', 'proxy_protocol'],
   'services.*.x-clouduler.volume_sync.*': ['interval', 'enabled'],
+  'services.*.x-clouduler.docker_socket': ['target', 'read_only'],
   'services.*.x-clouduler.backup': ['stop_before'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
@@ -87,21 +172,49 @@ const SCHEMA: Record<string, string[]> = {
   'secrets.*': ['file'],
 };
 
-function valueNamesFor(key: string, path: string[], known: KnownNames): string[] | null {
-  if (key === 'network') return known.networks;
+/** Map key names that are always plain booleans, wherever they appear —
+ *  none of them collide with a differently-typed field of the same name. */
+const BOOLEAN_KEYS = new Set([
+  'tls', 'sticky', 'websockets', 'preserve_host', 'proxy_protocol', 'allow_credentials', 'permanent',
+  'stop_before', 'auto_update', 'read_only', 'enabled', 'disable',
+]);
+
+const BARE_MIDDLEWARES = ['redirect_https', 'strip_prefix', 'authenticated'];
+const CONFIGURED_MIDDLEWARES = ['basic_auth', 'headers', 'cors', 'forward_auth', 'redirect_regex'];
+
+const RESTART_VALUES = ['no', 'always', 'on-failure', 'unless-stopped'];
+
+function valueNamesFor(key: string, path: string[], known: KnownNames, doc: string): string[] | null {
+  const container = path[path.length - 1];
+
+  if (key === 'network') return dedupe([...topLevelChildKeys(doc, 'networks'), ...known.networks]);
   if (key === 'node') return known.nodes;
+  if (key === 'image') return dedupe([...localImages(doc), ...known.images]);
+  if (key === 'restart') return RESTART_VALUES;
+  if (key === 'protocol') return ['tcp', 'udp'];
+  if (key === 'mode' && container === 'deploy') return ['replicated', 'global'];
+  if (key === 'condition' && container === 'restart_policy') return ['none', 'on-failure', 'any'];
+  if (key === 'order' && container === 'update_config') return ['start-first', 'stop-first'];
+  if (key === 'failure_action' && container === 'update_config') return ['continue', 'pause', 'rollback'];
+  if (BOOLEAN_KEYS.has(key)) return ['true', 'false'];
+
   if (key === 'source') {
-    const container = path[path.length - 1];
-    if (container === 'volumes') return known.drives.map((d) => `${d}/`);
-    if (container === 'secrets') return known.secrets;
-    if (container === 'configs') return known.configs;
+    if (container === 'volumes') return known.volumes.length ? known.volumes : known.drives.map((d) => `${d}/`);
+    if (container === 'secrets') return dedupe([...known.secrets, ...topLevelChildKeys(doc, 'secrets')]);
+    if (container === 'configs') return dedupe([...known.configs, ...topLevelChildKeys(doc, 'configs')]);
   }
   return null;
 }
 
-function listValueNamesFor(path: string[], known: KnownNames): string[] | null {
+function listValueNamesFor(path: string[], known: KnownNames, doc: string): string[] | null {
   const container = path[path.length - 1];
-  if (container === 'networks' && path[0] === 'services') return known.networks;
+  if (path[0] !== 'services') return null;
+  if (container === 'networks') return dedupe([...topLevelChildKeys(doc, 'networks'), ...known.networks]);
+  if (container === 'volumes') {
+    return known.volumes.length ? known.volumes.map((v) => `${v}:`) : known.drives.map((d) => `${d}/`);
+  }
+  if (container === 'depends_on' || container === 'colocate') return topLevelChildKeys(doc, 'services');
+  if (container === 'middlewares') return [...BARE_MIDDLEWARES, ...CONFIGURED_MIDDLEWARES.map((n) => `${n}:`)];
   return null;
 }
 
@@ -114,13 +227,14 @@ export function stackSpecCompletionSource(getKnown: () => KnownNames) {
     const col = context.pos - line.from;
     const before = line.text.slice(0, col);
     const known = getKnown();
+    const doc = state.doc.toString();
 
     const kvMatch = before.match(/^(\s*)(?:-\s*)?([A-Za-z0-9_.-]+):\s*(\S*)$/);
     const listMatch = !kvMatch && before.match(/^(\s*)-\s*(\S*)$/);
 
     if (kvMatch) {
-      const path = normalizePath(contextPath(state.doc.toString(), line.from));
-      const names = valueNamesFor(kvMatch[2], path, known);
+      const path = normalizePath(contextPath(doc, line.from, lineIndent(before)));
+      const names = valueNamesFor(kvMatch[2], path, known, doc);
       if (!names || names.length === 0) return null;
       const wordLen = kvMatch[3].length;
       return {
@@ -131,8 +245,8 @@ export function stackSpecCompletionSource(getKnown: () => KnownNames) {
     }
 
     if (listMatch) {
-      const path = normalizePath(contextPath(state.doc.toString(), line.from));
-      const names = listValueNamesFor(path, known);
+      const path = normalizePath(contextPath(doc, line.from, lineIndent(before)));
+      const names = listValueNamesFor(path, known, doc);
       if (!names || names.length === 0) return null;
       const wordLen = listMatch[2].length;
       return {
@@ -144,7 +258,20 @@ export function stackSpecCompletionSource(getKnown: () => KnownNames) {
 
     const word = context.matchBefore(/[A-Za-z0-9_-]*/);
     if (!word || (word.from === word.to && !context.explicit)) return null;
-    const path = normalizePath(contextPath(state.doc.toString(), word.from));
+    const path = normalizePath(contextPath(doc, line.from, lineIndent(before.slice(0, word.from - line.from))));
+
+    // Adding a new entry directly under the top-level `networks:` map: the
+    // key itself is the network name, and (unlike `configs`/`secrets`) it
+    // must match a network the cluster actually has, so it's worth
+    // suggesting by name rather than leaving this map's keys unlisted.
+    if (path.length === 1 && path[0] === 'networks' && known.networks.length > 0) {
+      return {
+        from: word.from,
+        options: known.networks.map((n) => ({ label: n, type: 'text', apply: `${n}:` })),
+        validFor: /^\S*$/,
+      };
+    }
+
     const keys = SCHEMA[path.join('.')];
     if (!keys || keys.length === 0) return null;
     return {

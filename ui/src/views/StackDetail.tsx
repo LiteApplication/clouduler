@@ -11,7 +11,7 @@ import { Icon } from '../components/Icon';
 import { StackSpecEditor } from '../components/StackSpecEditor';
 import { useEventSource } from '../hooks/useEventSource';
 import { instanceStateTone } from '../lib/format';
-import { emptyKnownNames, type KnownNames } from '../lib/stackSchema';
+import { collectImages, emptyKnownNames, type KnownNames } from '../lib/stackSchema';
 import { SecretForm } from './SecretForm';
 import { statusBadge } from './Certificates';
 
@@ -35,6 +35,8 @@ function useKnownNames(): KnownNames {
       instances: Object.keys(cluster.assignments),
       secrets: Object.keys(cluster.secrets).sort(),
       configs: Object.keys(cluster.configs).sort(),
+      volumes: Object.keys(cluster.volumes).sort(),
+      images: collectImages(Object.values(cluster.stacks).map((s) => s.spec)),
     };
   }, [cluster]);
 }
@@ -639,6 +641,7 @@ function InlineInstanceLogs({ id }: { id: string }) {
       const line = data as { text: string; timestamp: string };
       return { timestamp: line.timestamp, message: line.text, stream: eventType as 'stdout' | 'stderr' };
     },
+    dedupeKey: (line) => `${line.timestamp}|${line.stream}|${line.message}`,
   });
 
   return (

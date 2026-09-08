@@ -378,6 +378,17 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
 
+    /// Where this node's docker daemon stores images, container layers and
+    /// volumes (dockerd's `data-root`). `None` leaves dockerd's own default
+    /// (`/var/lib/docker`) alone. Purely local to this machine, unlike
+    /// `data_dir`: it has no cluster-wide default because there is no sane
+    /// shared value for a path that has to sit on this node's own disk.
+    /// `clouduler init` writes it into `/etc/docker/daemon.json`; changing it
+    /// here later only takes effect after dockerd is restarted, and moving
+    /// any data already under the old root is left to the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_data_dir: Option<PathBuf>,
+
     /// Overrides `secrets.generate_if_missing` for this node.
     ///
     /// A node joining an existing cluster must not invent its own key: the

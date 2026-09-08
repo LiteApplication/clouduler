@@ -22,7 +22,7 @@ use cl_drive::{drive_port, DeltaEngine, DriveRegistry, InstanceControl, Migratio
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
 use cl_raft::state::ClusterState;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -53,11 +53,17 @@ pub fn start(
     let cluster = cluster.clone();
 
     tokio::spawn(async move {
-        let engine = DeltaEngine::default();
+        let engine = Arc::new(DeltaEngine::default());
         // A migration outlives many polls, so the loop has to know which ones
         // it already handed off or it would start a second run of each on
         // every tick.
         let running: Arc<Mutex<BTreeSet<InstanceId>>> = Arc::default();
+        // Shared across every migration this node drives at once: `run` holds
+        // it only while an instance is actually down and its volume in
+        // flight, so at most one instance is ever stopped for its own move at
+        // a time, while any number of others verify/switch/start/remove in
+        // the background. See `cl_drive::migration`'s module docs.
+        let transfer_gate = Arc::new(Semaphore::new(1));
 
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         loop {
@@ -101,7 +107,6 @@ pub fn start(
                     running.lock().await.remove(&job.instance);
                     continue;
                 }
-                let control = DockerControl { node: node_name.clone(), docker };
 
                 info!(
                     instance = %job.instance,
@@ -110,29 +115,46 @@ pub fn start(
                     "picking up a migration",
                 );
 
-                let migration = MigrationJob {
-                    instance: job.instance.clone(),
-                    source_node: job.source_node,
-                    target_node: job.target_node,
-                    target_addr,
-                    volumes: job.volumes,
-                    registry: live_registry.as_deref(),
-                    engine: &engine,
-                    control: &control,
-                    sync_progress: Some(sync_progress.clone()),
-                };
+                // Handed off to its own task rather than awaited in line: with
+                // the transfer gate serializing only the down-and-in-flight
+                // span of each job, awaiting them one after another here would
+                // still make every migration behind the first wait out that
+                // first one's whole verify/switch/start/remove tail for
+                // nothing.
+                let cluster = cluster.clone();
+                let running = running.clone();
+                let engine = engine.clone();
+                let transfer_gate = transfer_gate.clone();
+                let sync_progress = sync_progress.clone();
+                let node_name = node_name.clone();
+                let instance = job.instance.clone();
+                tokio::spawn(async move {
+                    let control = DockerControl { node: node_name, docker };
+                    let migration = MigrationJob {
+                        instance: job.instance,
+                        source_node: job.source_node,
+                        target_node: job.target_node,
+                        target_addr,
+                        volumes: job.volumes,
+                        registry: live_registry.as_deref(),
+                        engine: &*engine,
+                        control: &control,
+                        sync_progress: Some(sync_progress),
+                        transfer_gate,
+                    };
 
-                match cl_drive::migration::run(&cluster, &migration).await {
-                    Ok(()) => info!(instance = %migration.instance, "migration finished"),
-                    // The phase is recorded as `Failed` by the time this
-                    // returns, so the move is over rather than retried: the
-                    // source still owns the data and someone has to say why
-                    // before it is worth trying again.
-                    Err(e) => {
-                        warn!(instance = %migration.instance, error = %e, "migration failed")
+                    match cl_drive::migration::run(&cluster, &migration).await {
+                        Ok(()) => info!(instance = %migration.instance, "migration finished"),
+                        // The phase is recorded as `Failed` by the time this
+                        // returns, so the move is over rather than retried: the
+                        // source still owns the data and someone has to say why
+                        // before it is worth trying again.
+                        Err(e) => {
+                            warn!(instance = %migration.instance, error = %e, "migration failed")
+                        }
                     }
-                }
-                running.lock().await.remove(&migration.instance);
+                    running.lock().await.remove(&instance);
+                });
             }
         }
     })

@@ -114,6 +114,7 @@ async fn harness() -> Harness {
                 labels: BTreeMap::new(),
                 rpc_port: cl_config::DEFAULT_RPC_PORT,
                 data_dir: None,
+                docker_data_dir: None,
                 generate_secret_key: None,
             },
         )]),
@@ -1024,6 +1025,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
                 labels: BTreeMap::new(),
                 rpc_port: cl_config::DEFAULT_RPC_PORT,
                 data_dir: None,
+                docker_data_dir: None,
                 generate_secret_key: None,
             },
         );

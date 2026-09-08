@@ -6,11 +6,23 @@
 //! never touches docker: starting and stopping the container is delegated to
 //! `InstanceControl`, which the daemon implements over `cl-docker`. That
 //! keeps migration logic testable with a fake and no docker socket.
+//!
+//! A caller driving several migrations off the same node at once is expected
+//! to share one `MigrationJob::transfer_gate` between them: `run` holds it
+//! for exactly as long as the instance is down and its volumes are in
+//! flight (`Stopping`/`Syncing`), and releases it the moment the data has
+//! landed. `Verifying` onward — hashing the copy, switching the volume's
+//! primary, starting the target, tidying up the source — all run with the
+//! gate released, so the next queued migration can already be stopping its
+//! own container and moving its own volume by then. Only one instance is
+//! ever down for its own move at a time; nothing waits on another's tail.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use cl_raft::state::MigrationPhase;
 use cl_raft::{ClusterNode, InstanceId, Request, VolumeId};
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 use crate::delta::{BoxFuture, SyncEngine};
@@ -56,6 +68,14 @@ pub struct MigrationJob<'a> {
     /// Where to publish live sync progress for `job.instance`, if anyone is
     /// watching. `None` in every test and in any caller that doesn't care.
     pub sync_progress: Option<crate::progress::MigrationSyncTracker>,
+    /// Held for the span this instance is stopped and its volumes are moving
+    /// (`Stopping`/`Syncing`), released as soon as the data has landed. A
+    /// caller running several `MigrationJob`s from the same node concurrently
+    /// shares one of these so at most one instance is ever down at a time,
+    /// while the rest of each move (verify/switch/start/remove) proceeds
+    /// unblocked in the background. A caller that only ever runs one job at a
+    /// time can hand each its own fresh `Semaphore::new(1)`.
+    pub transfer_gate: Arc<Semaphore>,
 }
 
 impl MigrationJob<'_> {
@@ -83,6 +103,18 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     // phase it just recorded; the read is for resuming, not for stepping.
     let mut phase = recorded_phase(node, &job.instance).await?;
 
+    // The instance is down and the gate held for exactly `Stopping` and a
+    // resumed `Syncing` (already stopped, data still moving after a crash) —
+    // every later phase, including a resumed `Verifying` onward, runs with it
+    // released. Acquired once up front rather than inside each arm, so a
+    // `Syncing` resume holds it too without `Stopping` running again to grab it.
+    let mut transfer_permit = match phase {
+        MigrationPhase::Stopping | MigrationPhase::Syncing => {
+            Some(job.transfer_gate.clone().acquire_owned().await.expect("transfer gate is never closed"))
+        }
+        _ => None,
+    };
+
     loop {
         match phase {
             MigrationPhase::Stopping => {
@@ -96,6 +128,11 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
                 if let Err(e) = sync_all(node, job).await {
                     return Err(fail(node, &job.instance, e).await);
                 }
+                // The data has landed: free the slot immediately so whichever
+                // migration is queued behind this one can stop its own
+                // container and start moving its volume right away, instead
+                // of waiting on this instance's verify/switch/start/remove.
+                drop(transfer_permit.take());
                 phase = advance(node, &job.instance, MigrationPhase::Verifying).await?;
             }
 
@@ -366,6 +403,7 @@ mod tests {
             engine: Box::leak(Box::new(UnusedEngine)),
             control: Box::leak(Box::new(AlwaysOk)),
             sync_progress: Some(tracker),
+            transfer_gate: Arc::new(Semaphore::new(1)),
         }
     }
 

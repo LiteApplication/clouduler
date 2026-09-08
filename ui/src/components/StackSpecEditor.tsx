@@ -3,10 +3,25 @@ import { useNavigate } from 'react-router-dom';
 import { autocompletion, closeBrackets, completionKeymap } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { yaml } from '@codemirror/lang-yaml';
-import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
+import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { Compartment, EditorState, Facet } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, keymap, MatchDecorator, ViewPlugin, type ViewUpdate } from '@codemirror/view';
+import { tags as t } from '@lezer/highlight';
 import { buildObjectIndex, objectRouteFor, emptyKnownNames, stackSpecCompletionSource, type KnownNames } from '../lib/stackSchema';
+
+// @codemirror/language's defaultHighlightStyle hard-codes light-mode colors,
+// so yaml keys/strings/comments went unreadable on the dark theme. This maps
+// tags to the same CSS variables the rest of the theme uses, so it follows
+// light/dark (and the color-mix'd variants) automatically.
+const stackHighlightStyle = HighlightStyle.define([
+  { tag: t.propertyName, color: 'var(--primary)' },
+  { tag: [t.keyword, t.bool, t.atom, t.null], color: 'var(--accent)' },
+  { tag: [t.string, t.special(t.string)], color: 'var(--good)' },
+  { tag: t.number, color: 'var(--secondary)' },
+  { tag: t.comment, color: 'var(--text-faint)', fontStyle: 'italic' },
+  { tag: [t.meta, t.punctuation], color: 'var(--text-dim)' },
+  { tag: t.invalid, color: 'var(--bad)' },
+]);
 
 const theme = EditorView.theme({
   '&': {
@@ -155,7 +170,7 @@ export function StackSpecEditor({ value, onChange, editable, known, minHeight }:
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...completionKeymap]),
         yaml(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        syntaxHighlighting(stackHighlightStyle, { fallback: true }),
         closeBrackets(),
         autocompletion({ override: [stackSpecCompletionSource(() => knownRef.current)] }),
         knownCompartment.current.of(knownNamesFacet.of(known)),
