@@ -175,8 +175,8 @@ async fn main() -> Result<()> {
             },
         },
         Command::Secret { command } => match command {
-            SecretCommand::Set { name, value, file, via } => {
-                secret::set(&cfg, &name, value, file.as_deref(), via.as_deref()).await
+            SecretCommand::Set { name, value, file, no_trim, via } => {
+                secret::set(&cfg, &name, value, file.as_deref(), no_trim, via.as_deref()).await
             }
             SecretCommand::List { via } => secret::list(&cfg, via.as_deref()).await,
         },

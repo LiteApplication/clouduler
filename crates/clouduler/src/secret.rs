@@ -23,18 +23,26 @@ pub async fn set(
     name: &str,
     value: Option<String>,
     file: Option<&Path>,
+    no_trim: bool,
     via: Option<&str>,
 ) -> Result<()> {
     let plaintext = match (value, file) {
         (Some(v), _) => v.into_bytes(),
         (None, Some(path)) => {
-            std::fs::read(path).with_context(|| format!("reading {}", path.display()))?
+            let mut buf = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            if !no_trim && buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
+            buf
         }
         (None, None) => {
             let mut buf = Vec::new();
             std::io::stdin()
                 .read_to_end(&mut buf)
                 .context("reading value from stdin")?;
+            if !no_trim && buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
             buf
         }
     };

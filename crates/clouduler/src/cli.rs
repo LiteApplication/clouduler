@@ -741,6 +741,11 @@ pub enum SecretCommand {
         /// Read the secret's value from a file instead of stdin.
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Keep a single trailing newline read from --file or stdin instead of
+        /// trimming it. Editors and `echo` routinely append one, which is
+        /// rarely meant to be part of the secret; pass this when it is.
+        #[arg(long)]
+        no_trim: bool,
         /// Node to submit through. Defaults to any manager in the config.
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
