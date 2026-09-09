@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::cli::ShellArg;
-use crate::init::permissions;
+use cl_init::permissions;
 
 impl ShellArg {
     fn name(self) -> &'static str {

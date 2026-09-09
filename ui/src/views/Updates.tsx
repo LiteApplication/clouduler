@@ -4,6 +4,7 @@ import { ApiError, api } from '../api/client';
 import type { BulkResult, RegistryAccount, UpdateRow } from '../api/types';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
+import { useInstanceProgress } from '../state/progressStore';
 import { RegistryAccounts } from './RegistryAccounts';
 
 /** Digests are 71 characters of noise; the first few are enough to compare
@@ -39,6 +40,48 @@ const STATUS_TONE: Record<Status, 'good' | 'warn' | 'bad' | 'neutral'> = {
   unknown: 'neutral',
 };
 
+/** An update in flight goes through three real docker steps, in this order:
+ *  the old container stays up throughout the pull, only coming down once the
+ *  new bits are already on disk. `reason` (from `/api/instances/events`)
+ *  spells out which one a redeploying instance is on, e.g.
+ *  `"redeploying (pulling, step 1/3)"` — pull the phase word out of it so the
+ *  row can show something a lot clearer than that raw string. */
+function updatePhase(reason: string | null): { label: string; icon: 'download' | 'stop' | 'restart' } | null {
+  if (!reason) return null;
+  if (reason.includes('pulling')) return { label: 'downloading image', icon: 'download' };
+  if (reason.includes('stopping')) return { label: 'stopping old container', icon: 'stop' };
+  if (reason.includes('starting')) return { label: 'starting new container', icon: 'restart' };
+  return { label: reason, icon: 'restart' };
+}
+
+/** One row's live update feedback: the phase an in-flight update is on, kept
+ *  apart so only this cell re-renders on every `progress` event rather than
+ *  the whole table. */
+function UpdateProgressCell({ id, fallback }: { id: string; fallback: string }) {
+  const progress = useInstanceProgress(id);
+  const phase = updatePhase(progress?.reason ?? null);
+  if (!phase) {
+    return (
+      <span className="muted">
+        <span className="spinner" /> {fallback}
+      </span>
+    );
+  }
+  return (
+    <span className="update-progress">
+      <span className="spinner" />
+      <Icon name={phase.icon} />
+      {phase.label}
+      {progress?.step && (
+        <span className="mono faint">
+          {' '}
+          ({progress.step[0]}/{progress.step[1]})
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function Updates() {
   const [rows, setRows] = useState<UpdateRow[] | null>(null);
   const [accounts, setAccounts] = useState<RegistryAccount[]>([]);
@@ -46,10 +89,10 @@ export function Updates() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BulkResult[] | null>(null);
-  /** Instances an `apply` accepted and that have not settled yet. */
+  /** Instances an `apply` accepted and that have not settled yet. The phase
+   *  shown per row comes from the SSE-driven progress store (`UpdateProgressCell`);
+   *  this only tracks which instances to keep watching and when to stop. */
   const [pending, setPending] = useState<string[]>([]);
-  /** Live container state per pending instance, for the progress line. */
-  const [progress, setProgress] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -79,9 +122,11 @@ export function Updates() {
     void loadAccounts();
   }, [load, loadAccounts]);
 
-  // While updates are in flight, watch the instances themselves — the only
-  // thing that knows how far along a pull is. `/api/instances` is a local
-  // docker inspect per node, cheap enough for a 3s poll, unlike `/api/updates`.
+  // While updates are in flight, watch the instances themselves for when
+  // they settle — the per-row phase (downloading/stopping/starting) comes
+  // from the SSE progress store instead (`UpdateProgressCell`), but nothing
+  // there says "done"; that still has to come from a live docker inspect.
+  // `/api/instances` is cheap enough for a 3s poll, unlike `/api/updates`.
   // When every accepted instance is running again, re-check digests once so
   // the rows go green on their own.
   useEffect(() => {
@@ -92,7 +137,6 @@ export function Updates() {
         const instances = await api.listInstances();
         if (cancelled) return;
         const watched = instances.filter((i) => pending.includes(i.id));
-        setProgress(Object.fromEntries(watched.map((i) => [i.id, i.state])));
         // `stopped` counts as settled too: an update that failed to come back
         // must end the watch rather than spin forever.
         if (watched.length > 0 && watched.every((i) => i.state === 'running' || i.state === 'stopped')) {
@@ -135,8 +179,9 @@ export function Updates() {
    * The server answers as soon as the work is scheduled, because a pull takes
    * far longer than a request may. So the ids are always sent explicitly —
    * this view is looking at the answer already, and letting the server
-   * recompute it would make it re-scan every registry first — and progress
-   * comes from `/api/instances`, which is cheap enough to poll.
+   * recompute it would make it re-scan every registry first — and per-row
+   * phase comes from `/api/instances/events` (`UpdateProgressCell`), with
+   * `/api/instances` polled only to notice when the batch has settled.
    */
   async function startUpdate(ids: string[]) {
     setBusy(ids.length === 1 ? ids[0] : 'apply');
@@ -207,8 +252,9 @@ export function Updates() {
 
       {pending.length > 0 && (
         <p className="banner banner-warn">
-          <span className="spinner" /> Updating {pending.length} instance(s). Each one pulls its image and is
-          rebuilt by the node that runs it, so this keeps going whether or not you stay on this page.
+          <span className="spinner" /> Updating {pending.length} instance(s): each downloads its new image first,
+          while the old container keeps serving traffic, then restarts onto it once the download lands. Watch
+          progress per instance below — this keeps going whether or not you stay on this page.
         </p>
       )}
 
@@ -242,13 +288,13 @@ export function Updates() {
           <thead>
             <tr>
               <th>Instance</th>
-              <th>Node</th>
-              <th>Image</th>
               <th>Running</th>
               <th>Latest</th>
               <th>Pinned</th>
               <th>Status</th>
               <th />
+              <th>Node</th>
+              <th>Image</th>
             </tr>
           </thead>
           <tbody>
@@ -261,8 +307,6 @@ export function Updates() {
                       {row.id}
                     </Link>
                   </td>
-                  <td>{row.node}</td>
-                  <td className="mono">{row.image ?? '-'}</td>
                   <td className="mono" title={row.running_digest ?? undefined}>
                     {shortDigest(row.running_digest)}
                   </td>
@@ -279,9 +323,7 @@ export function Updates() {
                   </td>
                   <td>
                     {pending.includes(row.id) ? (
-                      <span className="muted">
-                        <span className="spinner" /> {progress[row.id] ?? 'starting'}
-                      </span>
+                      <UpdateProgressCell id={row.id} fallback="starting" />
                     ) : (
                       status === 'update' && (
                         <button
@@ -289,11 +331,13 @@ export function Updates() {
                           disabled={busy !== null || pending.length > 0}
                           onClick={() => void startUpdate([row.id])}
                         >
-                          Update
+                          <Icon name="download" /> Update
                         </button>
                       )
                     )}
                   </td>
+                  <td>{row.node}</td>
+                  <td className="mono">{row.image ?? '-'}</td>
                 </tr>
               );
             })}

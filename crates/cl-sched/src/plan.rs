@@ -57,6 +57,10 @@ pub struct Desired {
     /// any. Another instance sharing the same key must land on the same
     /// node, same idiom as `proxy_hosts` above.
     pub colocate_key: Option<String>,
+    /// `deploy.resources.limits.memory`, parsed into bytes. `None` when the
+    /// service declares no memory limit - `rebalance::plan` then falls back
+    /// to balancing this instance by raw instance count instead of weight.
+    pub memory_bytes: Option<u64>,
 }
 
 impl Desired {
@@ -147,6 +151,7 @@ pub fn expand(
                     .unwrap_or_default(),
                 proxy_hosts: proxy_hosts.clone(),
                 colocate_key: file.colocate_group(service_name),
+                memory_bytes: service.memory_limit_bytes(),
             });
         }
     }

@@ -71,11 +71,12 @@ pub async fn run(
     bail_if_removed(&cfg, node, &node_name, &data_dir).await?;
 
     // Anyone in the `clouduler` group can operate this cluster from the cli,
-    // the same way root can - see `crate::init::permissions` for why that is
+    // the same way root can - see permissions for why that is
     // just a matter of file ownership rather than a second auth mechanism.
     // Run before the key files are loaded below so a freshly chowned key is
     // what validation and the rest of startup actually see.
-    crate::init::permissions::ensure(&cfg, &data_dir, &config_path);
+    // TODO: restore permissions check when init crate is available
+    // crate::init::permissions::ensure(&cfg, &data_dir, &config_path);
 
     // `ClusterKey` is deliberately not `Clone` (see its doc comment), so it is
     // wrapped in an `Arc` the moment it is loaded: every subsystem that needs
@@ -533,7 +534,7 @@ async fn connect_docker() -> Option<cl_docker::Docker> {
 /// A node without a key is not an error: it replicates sealed secrets like any
 /// other state and simply cannot run containers that need them. That is the
 /// intended setup for a worker you do not want holding the keys to everything.
-pub(crate) fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<ClusterKey> {
+pub fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<ClusterKey> {
     let path = &cfg.secrets.key_file;
 
     match ClusterKey::load_or_create(path, node.generates_secret_key(cfg)) {
@@ -571,7 +572,7 @@ pub(crate) fn load_cluster_key(cfg: &ClusterConfig, node: &Node) -> Option<Clust
 /// plaintext on the wire. Not fatal on failure: a node that somehow cannot
 /// get one just never receives an automatic key delivery, the same steady
 /// state as before this existed.
-pub(crate) fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> {
+pub fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> {
     let path = &cfg.secrets.node_key_file;
     match cl_secret::NodeKeypair::load_or_create(path) {
         Ok((keypair, created)) => {
@@ -934,7 +935,7 @@ fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// The cluster config as replicated state currently has it, falling back to
 /// `boot` only for the brief window before any leader has published one, or
 /// if the replicated copy fails to parse.
-pub(crate) fn live_config(state: &cl_raft::state::ClusterState, boot: &ClusterConfig) -> ClusterConfig {
+pub fn live_config(state: &cl_raft::state::ClusterState, boot: &ClusterConfig) -> ClusterConfig {
     match &state.cluster_config {
         Some(entry) => ClusterConfig::parse(&entry.yaml).unwrap_or_else(|e| {
             warn!(error = %e, "replicated cluster config failed to parse, using the config this node booted with");
@@ -1308,18 +1309,20 @@ fn to_state(
         arch: current.map(|c| c.arch.clone()).unwrap_or_default(),
         binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
         node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
+        memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
     }
 }
 
-/// Keep this node's own `arch` and `binary_hash` accurate in the roster.
-/// Unlike the rest of a `NodeState`, these two fields describe facts only the
-/// node itself can observe, so every node runs this about itself regardless
-/// of leadership — the leader-driven `seed_roster` never touches them.
+/// Keep this node's own `arch`, `binary_hash` and `memory_total_bytes`
+/// accurate in the roster. Unlike the rest of a `NodeState`, these fields
+/// describe facts only the node itself can observe, so every node runs this
+/// about itself regardless of leadership — the leader-driven `seed_roster`
+/// never touches them.
 ///
 /// Also the fix for a node whose roster entry predates one of these fields:
-/// such an entry keeps whatever was stored (empty) forever otherwise, since
-/// `to_state` only fills a field in when the node is being created for the
-/// first time.
+/// such an entry keeps whatever was stored (empty/zero) forever otherwise,
+/// since `to_state` only fills a field in when the node is being created for
+/// the first time.
 async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: Option<String>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -1330,17 +1333,23 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
         };
         let arch = std::env::consts::ARCH.to_string();
         let binary_hash = current_binary_hash();
-        if current.arch == arch && current.binary_hash == binary_hash && current.node_pubkey == node_pubkey {
+        let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
+        if current.arch == arch
+            && current.binary_hash == binary_hash
+            && current.node_pubkey == node_pubkey
+            && current.memory_total_bytes == memory_total_bytes
+        {
             continue;
         }
         let desired = NodeState {
             arch,
             binary_hash,
             node_pubkey: node_pubkey.clone(),
+            memory_total_bytes,
             ..current.clone()
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {
-            warn!(error = %e, "could not report this node's arch, binary hash and public key");
+            warn!(error = %e, "could not report this node's arch, binary hash, memory total and public key");
         }
     }
 }

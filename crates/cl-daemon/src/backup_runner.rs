@@ -329,7 +329,7 @@ async fn execute(
 /// Instances whose stack mounts a volume on `drive` - `folder_import`'s
 /// `instances_using` generalized from one volume to every volume on a drive,
 /// since a backup run covers the whole drive in one restic call.
-pub(crate) fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceId> {
+pub fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceId> {
     let mut found = Vec::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;

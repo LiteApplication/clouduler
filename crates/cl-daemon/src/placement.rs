@@ -115,7 +115,7 @@ fn wants_running(state: &ClusterState, instance: &InstanceId) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) mod fixtures {
+pub mod fixtures {
     use super::*;
     use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
     use cl_raft::state::{Assignment, StackState};

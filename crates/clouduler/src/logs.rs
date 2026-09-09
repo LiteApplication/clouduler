@@ -24,7 +24,7 @@ use cl_update::internal_client::AUTH_HEADER;
 use futures::StreamExt;
 use serde::Deserialize;
 
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 pub struct LogsArgs {
     pub follow: bool,
@@ -268,7 +268,7 @@ fn print_merged(event: &MergedEvent) {
 /// A single instance id, or every currently assigned instance of a stack.
 /// Shared with `clouduler exec`, which additionally requires the result to
 /// name exactly one instance.
-pub(crate) fn resolve_target(state: &ClusterState, target: &str) -> Result<Vec<Assignment>> {
+pub fn resolve_target(state: &ClusterState, target: &str) -> Result<Vec<Assignment>> {
     if let Ok(id) = target.parse::<InstanceId>() {
         if let Some(assignment) = state.assignments.get(&id) {
             return Ok(vec![assignment.clone()]);

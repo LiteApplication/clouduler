@@ -241,25 +241,12 @@ fn resources(service: &Service) -> ResourceLimits {
         .and_then(|r| r.limits.as_ref());
 
     ResourceLimits {
-        memory_bytes: limits.and_then(|l| l.memory.as_ref()).and_then(|m| parse_bytes(m)),
+        memory_bytes: limits.and_then(|l| l.memory_bytes()).map(|b| b as i64),
         nano_cpus: limits
             .and_then(|l| l.cpus.as_ref())
             .and_then(|c| c.parse::<f64>().ok())
             .map(|c| (c * 1e9) as i64),
     }
-}
-
-/// Compose sizes: `512M`, `2g`, `1024`. Bytes when there is no suffix.
-fn parse_bytes(raw: &str) -> Option<i64> {
-    let raw = raw.trim();
-    let (digits, multiplier) = match raw.chars().last()? {
-        'b' | 'B' => (&raw[..raw.len() - 1], 1i64),
-        'k' | 'K' => (&raw[..raw.len() - 1], 1024),
-        'm' | 'M' => (&raw[..raw.len() - 1], 1024 * 1024),
-        'g' | 'G' => (&raw[..raw.len() - 1], 1024 * 1024 * 1024),
-        _ => (raw, 1),
-    };
-    digits.trim().parse::<i64>().ok().map(|n| n * multiplier)
 }
 
 fn healthcheck(service: &Service) -> Option<Healthcheck> {
@@ -643,14 +630,6 @@ mod tests {
 
         assert_eq!(spec.resources.memory_bytes, Some(512 * 1024 * 1024));
         assert_eq!(spec.resources.nano_cpus, Some(1_500_000_000));
-    }
-
-    #[test]
-    fn byte_sizes_parse_with_and_without_suffixes() {
-        assert_eq!(parse_bytes("1024"), Some(1024));
-        assert_eq!(parse_bytes("2g"), Some(2 * 1024 * 1024 * 1024));
-        assert_eq!(parse_bytes("512M"), Some(512 * 1024 * 1024));
-        assert_eq!(parse_bytes("nonsense"), None);
     }
 
     #[test]

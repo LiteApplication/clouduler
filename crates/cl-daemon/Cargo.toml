@@ -1,0 +1,39 @@
+[package]
+name = "cl-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cl-api.workspace = true
+cl-backup.workspace = true
+cl-config.workspace = true
+cl-dns.workspace = true
+cl-docker.workspace = true
+cl-drive.workspace = true
+cl-init.workspace = true
+cl-net.workspace = true
+cl-proxy.workspace = true
+cl-raft.workspace = true
+cl-restic.workspace = true
+cl-sched.workspace = true
+cl-secret.workspace = true
+cl-update.workspace = true
+
+anyhow.workspace = true
+age = "0.11"
+blake3.workspace = true
+hickory-proto.workspace = true
+instant-acme.workspace = true
+ipnet.workspace = true
+openraft.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+rtnetlink.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

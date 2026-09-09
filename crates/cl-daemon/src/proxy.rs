@@ -824,7 +824,7 @@ async fn run_dns_reconcile(
 /// every node's address for it lets a client's write land on a follower,
 /// which can only 503 and point elsewhere. `desired_records` gives that
 /// hostname the leader's address alone.
-pub(crate) fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(String, String), BTreeSet<String>> {
+pub fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(String, String), BTreeSet<String>> {
     let mut hosts: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let all_nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
     let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;

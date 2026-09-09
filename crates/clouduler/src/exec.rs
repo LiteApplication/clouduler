@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
 use crate::logs::resolve_target;
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 pub async fn run(cfg: &ClusterConfig, target: &str, cmd: Vec<String>, user: Option<String>, via: Option<&str>) -> Result<()> {
     let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
@@ -144,7 +144,7 @@ where
 /// `danger_accept_invalid_certs(true)` reqwest client `clouduler logs` uses:
 /// every node's certificate is self signed until ACME issues a real one, and
 /// the caller is authenticated by the HMAC header, not TLS trust.
-pub(crate) fn insecure_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+pub fn insecure_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))

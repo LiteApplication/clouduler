@@ -14,6 +14,13 @@ impl Service {
         self.volumes.iter().filter_map(|v| v.drive.clone()).collect()
     }
 
+    /// `deploy.resources.limits.memory`, parsed into bytes. `None` when the
+    /// service declares no memory limit at all - the rebalancer falls back to
+    /// balancing such an instance by raw instance count instead.
+    pub fn memory_limit_bytes(&self) -> Option<u64> {
+        self.deploy.as_ref()?.resources.as_ref()?.limits.as_ref()?.memory_bytes()
+    }
+
     fn auto_update(&self) -> Option<bool> {
         self.x_clouduler.as_ref().and_then(|x| x.auto_update)
     }

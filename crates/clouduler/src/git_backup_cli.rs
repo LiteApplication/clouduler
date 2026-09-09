@@ -14,7 +14,7 @@ use cl_config::ClusterConfig;
 use cl_secret::ClusterKey;
 use cl_update::internal_client::AUTH_HEADER;
 
-use crate::init::prompt::Prompt;
+use cl_init::prompt::Prompt;
 
 fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
     match via {

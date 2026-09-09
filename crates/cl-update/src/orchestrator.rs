@@ -300,6 +300,7 @@ mod tests {
             arch: arch.to_string(),
             binary_hash: String::new(),
             node_pubkey: None,
+            memory_total_bytes: 0,
         }
     }
 

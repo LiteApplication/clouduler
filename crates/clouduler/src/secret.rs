@@ -10,7 +10,7 @@ use cl_raft::state::Request;
 use cl_secret::{ClusterKey, Sealed};
 use tracing::debug;
 
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 /// Seal `value` (or `file`, or stdin if neither is given) and store it as a
 /// cluster-wide secret, not owned by any stack.

@@ -1,0 +1,43 @@
+[package]
+name = "cl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cl-api.workspace = true
+cl-backup.workspace = true
+cl-config.workspace = true
+cl-daemon.workspace = true
+cl-docker.workspace = true
+cl-drive.workspace = true
+cl-init.workspace = true
+cl-raft.workspace = true
+cl-restic.workspace = true
+cl-sched.workspace = true
+cl-secret.workspace = true
+cl-update.workspace = true
+
+anyhow.workspace = true
+age = "0.11"
+base64.workspace = true
+blake3.workspace = true
+clap.workspace = true
+clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
+futures.workspace = true
+humantime = "2"
+instant-acme.workspace = true
+ipnet.workspace = true
+nix = { workspace = true, features = ["term", "user", "fs"] }
+rcgen.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+serde_yaml.workspace = true
+tempfile = "3"
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "cl-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cl-config.workspace = true
+cl-drive.workspace = true
+cl-net.workspace = true
+cl-restic.workspace = true
+cl-secret.workspace = true
+cl-update.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+ipnet.workspace = true
+nix = { workspace = true, features = ["user", "fs"] }
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2 = "0.11"
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+cl-api.workspace = true
+cl-docker.workspace = true
+cl-proxy.workspace = true
+cl-raft.workspace = true
+openraft.workspace = true
+rcgen.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -14,8 +14,8 @@ use cl_raft::ids::InstanceId;
 use cl_raft::state::{ClusterState, Request};
 use tracing::warn;
 
-use crate::init::prompt::Prompt;
-use crate::stack::client_for;
+use cl_init::prompt::Prompt;
+use cl_raft::client::client_for;
 
 pub async fn run(cfg: &ClusterConfig, via: Option<&str>, yes: bool) -> Result<()> {
     let client = client_for(cfg, via)?;

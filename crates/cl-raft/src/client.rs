@@ -4,9 +4,38 @@
 //! submitted to whichever node is asked and forwarded from there to the leader,
 //! so the caller does not have to know who leads.
 
+use anyhow::{anyhow, Result as AnyResult};
+use cl_config::ClusterConfig;
+use tracing::debug;
+
 use crate::network::Peer;
 use crate::rpc::{Query, QueryResult, RpcRequest, RpcResponse, StatusReport};
 use crate::state::{ClusterState, Request, Response};
+
+/// Pick a node to talk to. Any node will do for a write, since it forwards to
+/// the leader, so prefer the one asked for and otherwise take the first manager.
+pub fn client_for(cfg: &ClusterConfig, via: Option<&str>) -> AnyResult<Client> {
+    let (name, node) = match via {
+        Some(name) => (
+            name,
+            cfg.node(name)
+                .ok_or_else(|| anyhow!("no node named {name} in the config"))?,
+        ),
+        None => {
+            let (name, node) = cfg
+                .managers()
+                .next()
+                .ok_or_else(|| anyhow!("config has no manager to talk to"))?;
+            (name.as_str(), node)
+        }
+    };
+
+    let addr = cfg
+        .rpc_addr(node)
+        .ok_or_else(|| anyhow!("node {name} has no address on the internal network"))?;
+    debug!(node = name, %addr, "submitting through");
+    Ok(Client::connect(addr.to_string()))
+}
 
 pub struct Client {
     peer: Peer,

@@ -9,45 +9,16 @@ name = "clouduler"
 path = "src/main.rs"
 
 [dependencies]
-age = "0.11"
-cl-api.workspace = true
-cl-backup.workspace = true
-cl-dns.workspace = true
-cl-proxy.workspace = true
+cl-cli.workspace = true
+cl-daemon.workspace = true
+cl-init.workspace = true
 cl-config.workspace = true
 cl-raft.workspace = true
-cl-docker.workspace = true
-cl-drive.workspace = true
-cl-net.workspace = true
-cl-restic.workspace = true
-cl-sched.workspace = true
 cl-secret.workspace = true
-cl-update.workspace = true
 
 anyhow.workspace = true
-base64.workspace = true
-blake3.workspace = true
 clap.workspace = true
-futures.workspace = true
-hickory-proto.workspace = true
-humantime = "2"
-instant-acme.workspace = true
-ipnet.workspace = true
-nix = { workspace = true, features = ["term", "user", "fs"] }
-rtnetlink.workspace = true
-openraft.workspace = true
-rcgen.workspace = true
-reqwest.workspace = true
-rustls.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_urlencoded.workspace = true
-serde_yaml.workspace = true
-sha2 = "0.11"
-tempfile = "3"
-tokio.workspace = true
-tokio-tungstenite.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-uuid.workspace = true
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
+rustls.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

@@ -40,8 +40,8 @@ use tracing::{debug, warn};
 
 use crate::backup_runner::instances_using_drive;
 use crate::backup_secrets;
-use crate::folder_import::instances_using;
-use crate::stack::client_for;
+use cl_raft::state::instances_using_volume;
+use cl_raft::client::client_for;
 
 /// How often every node checks for `Pending` restore requests it can serve.
 const RESTORE_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -182,7 +182,7 @@ pub async fn restore_volume(
 ) -> Result<()> {
     let ctx = Ctx::new(cfg, node_name, via)?;
     let state = ctx.client.state().await.map_err(|e| anyhow!("{e}"))?;
-    let instances = instances_using(&state, volume);
+    let instances = instances_using_volume(&state, volume);
 
     println!("stopping {} instance(s) that use {volume}", instances.len());
     let stopped = ctx.stop(&state, &instances).await?;

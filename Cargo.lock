@@ -877,6 +877,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "cl-cli"
+version = "0.5.23"
+dependencies = [
+ "age",
+ "anyhow",
+ "base64 0.23.1",
+ "blake3",
+ "cl-api",
+ "cl-backup",
+ "cl-config",
+ "cl-daemon",
+ "cl-docker",
+ "cl-drive",
+ "cl-init",
+ "cl-raft",
+ "cl-restic",
+ "cl-sched",
+ "cl-secret",
+ "cl-update",
+ "clap",
+ "clap_complete",
+ "futures",
+ "humantime",
+ "instant-acme",
+ "ipnet",
+ "nix",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cl-config"
 version = "0.5.23"
 dependencies = [
@@ -887,6 +928,41 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "cl-daemon"
+version = "0.5.23"
+dependencies = [
+ "age",
+ "anyhow",
+ "blake3",
+ "cl-api",
+ "cl-backup",
+ "cl-config",
+ "cl-dns",
+ "cl-docker",
+ "cl-drive",
+ "cl-init",
+ "cl-net",
+ "cl-proxy",
+ "cl-raft",
+ "cl-restic",
+ "cl-sched",
+ "cl-secret",
+ "cl-update",
+ "hickory-proto",
+ "instant-acme",
+ "ipnet",
+ "openraft",
+ "rcgen",
+ "reqwest",
+ "rtnetlink",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -943,6 +1019,38 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "cl-init"
+version = "0.5.23"
+dependencies = [
+ "anyhow",
+ "cl-api",
+ "cl-config",
+ "cl-docker",
+ "cl-drive",
+ "cl-net",
+ "cl-proxy",
+ "cl-raft",
+ "cl-restic",
+ "cl-secret",
+ "cl-update",
+ "clap",
+ "ipnet",
+ "nix",
+ "openraft",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1145,47 +1253,18 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "clouduler"
 version = "0.5.23"
 dependencies = [
- "age",
  "anyhow",
- "base64 0.23.1",
- "blake3",
- "cl-api",
- "cl-backup",
+ "cl-cli",
  "cl-config",
- "cl-dns",
- "cl-docker",
- "cl-drive",
- "cl-net",
- "cl-proxy",
+ "cl-daemon",
+ "cl-init",
  "cl-raft",
- "cl-restic",
- "cl-sched",
  "cl-secret",
- "cl-update",
  "clap",
  "clap_complete",
- "futures",
- "hickory-proto",
- "humantime",
- "instant-acme",
- "ipnet",
- "nix",
- "openraft",
- "rcgen",
- "reqwest",
- "rtnetlink",
  "rustls",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "serde_yaml",
- "sha2 0.11.0",
- "tempfile",
  "tokio",
- "tokio-tungstenite",
- "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

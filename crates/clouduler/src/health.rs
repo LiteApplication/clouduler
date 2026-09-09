@@ -26,7 +26,7 @@ use cl_update::internal_client::AUTH_HEADER;
 use futures::StreamExt;
 use serde::Deserialize;
 
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 pub struct ShowFlags {
     pub node: bool,

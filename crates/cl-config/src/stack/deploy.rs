@@ -31,6 +31,26 @@ pub struct ResourceSpec {
     pub memory: Option<String>,
 }
 
+impl ResourceSpec {
+    /// `memory` parsed into bytes, `None` if unset or unparseable.
+    pub fn memory_bytes(&self) -> Option<u64> {
+        parse_memory_bytes(self.memory.as_deref()?)
+    }
+}
+
+/// Compose memory sizes: `512M`, `2g`, `1024`. Bytes when there is no suffix.
+pub fn parse_memory_bytes(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (digits, multiplier) = match raw.chars().last()? {
+        'b' | 'B' => (&raw[..raw.len() - 1], 1u64),
+        'k' | 'K' => (&raw[..raw.len() - 1], 1024),
+        'm' | 'M' => (&raw[..raw.len() - 1], 1024 * 1024),
+        'g' | 'G' => (&raw[..raw.len() - 1], 1024 * 1024 * 1024),
+        _ => (raw, 1),
+    };
+    digits.trim().parse::<u64>().ok().map(|n| n * multiplier)
+}
+
 /// `deploy.resources`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -126,5 +146,13 @@ update_config:
     fn unknown_key_rejected() {
         let err = serde_yaml::from_str::<Deploy>("replicas: 1\nbogus: 1\n").unwrap_err();
         assert!(err.to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn byte_sizes_parse_with_and_without_suffixes() {
+        assert_eq!(parse_memory_bytes("1024"), Some(1024));
+        assert_eq!(parse_memory_bytes("2g"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_bytes("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_memory_bytes("nonsense"), None);
     }
 }

@@ -13,7 +13,7 @@ use cl_config::ClusterConfig;
 use cl_raft::state::{ClusterConfigEntry, ConfigEntry, SecretEntry, StackState};
 use cl_secret::{ClusterKey, Sealed};
 
-use crate::init::prompt::Prompt;
+use cl_init::prompt::Prompt;
 
 pub struct RestoreArgs<'a> {
     pub name: &'a str,

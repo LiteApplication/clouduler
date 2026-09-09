@@ -46,6 +46,7 @@ fn node(name: &str) -> NodeState {
         arch: Default::default(),
         binary_hash: Default::default(),
         node_pubkey: Default::default(),
+        memory_total_bytes: Default::default(),
     }
 }
 

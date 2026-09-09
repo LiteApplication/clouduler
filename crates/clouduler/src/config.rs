@@ -6,7 +6,7 @@ use cl_config::ClusterConfig;
 use cl_raft::state::Request;
 use tracing::debug;
 
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 /// Push the on-disk config into raft. `cfg` is already read and validated by
 /// the time this runs (`ClusterConfig::load` in `main`, before any command

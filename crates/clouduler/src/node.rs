@@ -13,9 +13,9 @@ use cl_raft::state::{Availability, NodeState, Request, Role};
 use tracing::debug;
 
 use crate::cli::AvailabilityArg;
-use crate::init::plan::parse_drive_arg;
-use crate::init::prompt::Prompt;
-use crate::stack::client_for;
+use cl_init::plan::parse_drive_arg;
+use cl_init::prompt::Prompt;
+use cl_raft::client::client_for;
 
 pub async fn add(
     cfg: &ClusterConfig,
@@ -60,6 +60,7 @@ pub async fn add(
             arch: String::new(),
             binary_hash: String::new(),
             node_pubkey: None,
+            memory_total_bytes: 0,
         }))
         .await
         .map_err(|e| anyhow!("{e}"))?;

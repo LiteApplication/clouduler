@@ -33,6 +33,9 @@ export interface NodeState {
    *  least once. Lets a key-holding node deliver the cluster key to it
    *  without the plaintext ever crossing the network. */
   node_pubkey: string | null;
+  /** Total system memory in bytes, self-reported alongside arch/binary_hash.
+   *  0 until the node has reported in at least once. */
+  memory_total_bytes: number;
 }
 
 export interface ResourceUsage {

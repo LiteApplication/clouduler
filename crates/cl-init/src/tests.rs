@@ -56,7 +56,7 @@ struct Server {
 /// this node already holds on disk, `None` matching a fresh, keyless node.
 async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Server {
     // main does this at startup; tests never run main.
-    crate::install_crypto_provider();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let n1_id = config.node("n1").expect("founding node in config").id;
     let dir = TempDir::new().expect("tempdir");
@@ -101,6 +101,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
             arch: Default::default(),
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
         }))
         .await
         .expect("seed roster");
@@ -324,6 +325,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
             arch: Default::default(),
             binary_hash: Default::default(),
             node_pubkey: Some(n2_keypair.public_key_encoded()),
+            memory_total_bytes: Default::default(),
         }))
         .await
         .expect("seed n2's roster entry with a published pubkey");

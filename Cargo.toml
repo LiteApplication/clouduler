@@ -3,9 +3,12 @@ resolver = "2"
 members = [
     "crates/clouduler",
     "crates/cl-backup",
+    "crates/cl-cli",
     "crates/cl-config",
+    "crates/cl-daemon",
     "crates/cl-docker",
     "crates/cl-dns",
+    "crates/cl-init",
     "crates/cl-raft",
     "crates/cl-net",
     "crates/cl-drive",
@@ -24,18 +27,21 @@ license = "MIT"
 repository = "https://github.com/LiteApplication/clouduler"
 
 [workspace.dependencies]
+cl-api = { path = "crates/cl-api" }
 cl-backup = { path = "crates/cl-backup" }
+cl-cli = { path = "crates/cl-cli" }
 cl-config = { path = "crates/cl-config" }
-cl-docker = { path = "crates/cl-docker" }
+cl-daemon = { path = "crates/cl-daemon" }
 cl-dns = { path = "crates/cl-dns" }
-cl-raft = { path = "crates/cl-raft" }
-cl-net = { path = "crates/cl-net" }
+cl-docker = { path = "crates/cl-docker" }
 cl-drive = { path = "crates/cl-drive" }
+cl-init = { path = "crates/cl-init" }
+cl-net = { path = "crates/cl-net" }
 cl-proxy = { path = "crates/cl-proxy" }
+cl-raft = { path = "crates/cl-raft" }
 cl-restic = { path = "crates/cl-restic" }
 cl-sched = { path = "crates/cl-sched" }
 cl-secret = { path = "crates/cl-secret" }
-cl-api = { path = "crates/cl-api" }
 cl-update = { path = "crates/cl-update" }
 
 anyhow = "1"

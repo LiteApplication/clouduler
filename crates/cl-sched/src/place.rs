@@ -425,6 +425,7 @@ mod tests {
             arch: Default::default(),
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
         }
     }
 
@@ -516,6 +517,7 @@ mod tests {
             bound_ports: BTreeSet::new(),
             proxy_hosts: BTreeSet::new(),
             colocate_key: None,
+            memory_bytes: None,
         }
     }
 

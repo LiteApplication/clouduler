@@ -13,11 +13,11 @@ use cl_restic::secret_names::{credentials_secret_name, password_secret_name};
 use cl_secret::{ClusterKey, Sealed};
 use uuid::Uuid;
 
-use crate::backup_restore;
-use crate::backup_runner::instances_using_drive;
+use cl_daemon::backup_restore;
+use cl_daemon::backup_runner::instances_using_drive;
 use crate::cli::{BackupDestinationAddArgs, BackupDestinationCommand, BackupDestinationKindArg, BackupTargetCommand};
-use crate::init::prompt::Prompt;
-use crate::stack::client_for;
+use cl_init::prompt::Prompt;
+use cl_raft::client::client_for;
 
 pub async fn destination(cfg: &ClusterConfig, command: BackupDestinationCommand) -> Result<()> {
     match command {
@@ -339,7 +339,7 @@ pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&s
         )
     })?;
     let password_secret = &destination.password_secret;
-    let password = crate::backup_secrets::open_secret(&state, &key, password_secret)
+    let password = cl_daemon::backup_secrets::open_secret(&state, &key, password_secret)
         .ok_or_else(|| anyhow!("cannot open the repo password for destination {destination_id}"))?;
 
     let cred_dir = std::env::temp_dir().join("clouduler-restic-snapshots").join(destination_id);
@@ -350,7 +350,7 @@ pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&s
         std::fs::write(&password_path, &password)?;
         std::fs::set_permissions(&password_path, std::fs::Permissions::from_mode(0o600))?;
     }
-    let _guard = crate::backup_secrets::TempFileGuard(password_path.clone());
+    let _guard = cl_daemon::backup_secrets::TempFileGuard(password_path.clone());
 
     let resolved = remote_repo(destination);
     let repo = ResticRepo::new(resolved, cl_restic::destination::ssh_command_args(destination), &password_path, &[]);

@@ -152,6 +152,7 @@
         "egress_networks": [],
         "id": "<volatile>",
         "labels": {},
+        "memory_total_bytes": 0,
         "name": "n0",
         "networks": [],
         "node_pubkey": "target",

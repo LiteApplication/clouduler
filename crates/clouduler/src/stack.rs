@@ -14,28 +14,7 @@ use tracing::debug;
 
 /// Pick a node to talk to. Any node will do for a write, since it forwards to
 /// the leader, so prefer the one asked for and otherwise take the first manager.
-pub fn client_for(cfg: &ClusterConfig, via: Option<&str>) -> Result<Client> {
-    let (name, node) = match via {
-        Some(name) => (
-            name,
-            cfg.node(name)
-                .ok_or_else(|| anyhow!("no node named {name} in the config"))?,
-        ),
-        None => {
-            let (name, node) = cfg
-                .managers()
-                .next()
-                .ok_or_else(|| anyhow!("config has no manager to talk to"))?;
-            (name.as_str(), node)
-        }
-    };
-
-    let addr = cfg
-        .rpc_addr(node)
-        .ok_or_else(|| anyhow!("node {name} has no address on the internal network"))?;
-    debug!(node = name, %addr, "submitting through");
-    Ok(Client::connect(addr.to_string()))
-}
+pub use cl_raft::client::client_for;
 
 pub async fn deploy(
     cfg: &ClusterConfig,

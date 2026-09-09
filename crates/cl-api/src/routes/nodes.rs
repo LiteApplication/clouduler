@@ -174,6 +174,15 @@ fn local_resource_usage() -> ResourceUsage {
     }
 }
 
+/// This machine's total system memory in bytes. Exposed for `cl-daemon`'s
+/// `report_self`, which self-reports it into `NodeState::memory_total_bytes`
+/// the same way it reports `arch` and `binary_hash`.
+pub fn total_memory_bytes() -> u64 {
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.total_memory()
+}
+
 /// Host interfaces an operator would plausibly point an `egress` (or
 /// `wireguard`) network's node address at, i.e. not one clouduler or docker
 /// manages itself. Best-effort autofill for the config UI, not a validated
@@ -264,6 +273,7 @@ async fn add(
             arch: String::new(),
             binary_hash: String::new(),
             node_pubkey: None,
+            memory_total_bytes: 0,
         }),
     )
     .await?;

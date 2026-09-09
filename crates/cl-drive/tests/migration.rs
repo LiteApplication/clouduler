@@ -138,6 +138,7 @@ impl Harness {
             arch: Default::default(),
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
         }))
         .await
         .unwrap();
@@ -155,6 +156,7 @@ impl Harness {
             arch: Default::default(),
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
         }))
         .await
         .unwrap();

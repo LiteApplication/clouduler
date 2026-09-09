@@ -29,7 +29,7 @@ use cl_raft::state::{ClusterState, DesiredState, Request};
 use tracing::debug;
 
 use crate::cli::FolderImportArgs;
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 /// Upper bound on how long to give instances to stop cleanly before
 /// touching the volume they mount, on top of each service's own
@@ -295,7 +295,7 @@ fn parse_target(target: &str) -> Result<(String, String, Option<String>)> {
 }
 
 /// Instances whose stack mounts `id`.
-pub(crate) fn instances_using(state: &ClusterState, id: &VolumeId) -> Vec<InstanceId> {
+pub fn instances_using(state: &ClusterState, id: &VolumeId) -> Vec<InstanceId> {
     let mut found = Vec::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;

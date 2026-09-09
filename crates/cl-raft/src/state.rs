@@ -80,6 +80,12 @@ pub struct NodeState {
     /// plaintext key itself — see `wrapped_keys` on `ClusterState`.
     #[serde(default)]
     pub node_pubkey: Option<String>,
+    /// Total system memory in bytes, self-reported alongside `arch` and
+    /// `binary_hash` (see `report_self` in `cl-daemon`). 0 until the node has
+    /// reported in at least once. Lets the scheduler weigh a node's memory
+    /// pressure instead of treating every node as equally sized.
+    #[serde(default)]
+    pub memory_total_bytes: u64,
 }
 
 impl NodeState {
@@ -1886,6 +1892,31 @@ pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
     format!("{fqdn}|{record_type}|{content}")
 }
 
+// ---------------------------------------------------------------------------
+// Utility queries on the applied state
+// ---------------------------------------------------------------------------
+
+/// Instances whose stack mounts the given volume.
+pub fn instances_using_volume(state: &ClusterState, id: &crate::ids::VolumeId) -> Vec<crate::ids::InstanceId> {
+    use cl_config::StackFile;
+
+    let mut found = Vec::new();
+    for assignment in state.assignments.values() {
+        let instance = &assignment.instance;
+        let Some(stack) = state.stacks.get(&instance.stack) else { continue };
+        let Ok(file) = StackFile::parse(&stack.spec) else { continue };
+        let Some(service) = file.services.get(&instance.service) else { continue };
+        let uses = service
+            .volumes
+            .iter()
+            .any(|m| m.drive.as_deref() == Some(id.drive.as_str()) && m.volume.as_deref() == Some(id.volume.as_str()));
+        if uses {
+            found.push(instance.clone());
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2123,6 +2154,7 @@ mod tests {
             arch: Default::default(),
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
         }
     }
 

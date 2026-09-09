@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
 use crate::logs::resolve_target;
-use crate::stack::client_for;
+use cl_raft::client::client_for;
 
 pub async fn run(
     cfg: &ClusterConfig,
