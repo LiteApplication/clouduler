@@ -1,6 +1,10 @@
-//! The git2 IO layer: a local working copy that gets fully rewritten each
-//! tick, then staged, committed, and pushed with the cluster's ssh deploy
-//! key.
+//! The git2 IO layer: a bare repository where commits and trees are built
+//! entirely via the object database (no working directory on disk). Each
+//! export fetches the remote's current tip, builds a candidate tree from
+//! the cluster's state, and pushes a new commit if the tree changed. Pulls
+//! read fetched commits directly from the odb too — nothing is ever
+//! checked out to disk except by `clouduler restore`, which clones a real
+//! repo for a one-shot offline operation.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,15 +18,15 @@ use crate::error::{BackupError, Result};
 use crate::tree::TreeFile;
 
 pub struct GitBackup {
-    repo: Repository,
-    dir: PathBuf,
+    pub(crate) repo: Repository,
     repo_url: String,
     branch: String,
 }
 
 impl GitBackup {
-    /// Opens the local working repo at `dir`, initializing it (and wiring up
-    /// `origin`) on first use.
+    /// Opens a bare repository at `dir`, initializing it (and wiring up
+    /// `origin`) on first use. Bare repos have no working directory — all
+    /// commits and trees live purely in the object database.
     pub fn open_or_init(dir: &Path, repo_url: &str, branch: &str) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|source| BackupError::Io { path: dir.to_path_buf(), source })?;
 
@@ -30,8 +34,14 @@ impl GitBackup {
             Ok(repo) => repo,
             Err(_) => {
                 let mut opts = RepositoryInitOptions::new();
+                opts.bare(true);
                 opts.initial_head(branch);
-                Repository::init_opts(dir, &opts)?
+                let repo = Repository::init_opts(dir, &opts)?;
+                // Bare repos need objects/tmp for libgit2's temp file operations.
+                let tmp = dir.join("objects").join("tmp");
+                std::fs::create_dir_all(&tmp)
+                    .map_err(|source| BackupError::Io { path: tmp, source })?;
+                repo
             }
         };
 
@@ -48,7 +58,6 @@ impl GitBackup {
 
         Ok(Self {
             repo,
-            dir: dir.to_path_buf(),
             repo_url: repo_url.to_string(),
             branch: branch.to_string(),
         })
@@ -58,126 +67,84 @@ impl GitBackup {
         &self.repo_url
     }
 
-    /// Replaces the whole working tree with `files`, and if that produced
+    /// Public access to the underlying bare git2 repository — used by
+    /// `pull_and_decide` to call `parse_tree` directly against the odb.
+    pub fn repo(&self) -> &Repository {
+        &self.repo
+    }
+
+    /// Replaces the whole tracked tree with `files`, and if that produced
     /// any change, commits and pushes it. Returns `None` when nothing
     /// changed, so an unrelated raft-version bump doesn't produce an empty
     /// commit.
     ///
-    /// If the push is rejected - the remote branch moved out from under us,
-    /// typically because a prior export's commit was rejected by the
-    /// cluster's own pull path and force-pushed back with a correction, or
-    /// because someone pushed to it by hand - re-seed onto the new remote
-    /// tip and retry once instead of leaving the local branch stuck
-    /// forever re-attempting the same non-fast-forward push every tick
-    /// (see `push_refspecs` for how the rejection is actually detected).
+    /// Each call fetches the remote's current tip fresh (no reliance on
+    /// a local branch ref surviving across ticks), builds the candidate
+    /// tree entirely in the odb, and compares it against the remote tip's
+    /// tree. If different, a new commit is created with the remote tip as
+    /// parent and pushed. On a push rejection (remote moved concurrently),
+    /// the remote tip is re-fetched and the commit is rebuilt once against
+    /// the new parent.
     pub fn sync(&self, files: &[TreeFile], message: &str, private_key_pem: &str) -> Result<Option<git2::Oid>> {
-        self.seed_from_remote_if_new(private_key_pem)?;
-        match self.commit_and_push(files, message, private_key_pem) {
-            Ok(outcome) => Ok(outcome),
-            Err(e) if is_push_rejection(&e) => {
-                if !self.recover_onto_remote_tip(private_key_pem)? {
-                    // No remote tip to recover onto (origin has no branch
-                    // at all) - nothing pull-based to do, surface the
-                    // original rejection so the caller sees a real error
-                    // rather than silently doing nothing.
-                    return Err(e);
-                }
-                self.commit_and_push(files, message, private_key_pem)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// One commit-and-push attempt: rewrite the working tree, commit if it
-    /// changed, push. Split out of `sync` so a rejected push can be
-    /// retried against a freshly re-seeded parent without redoing the
-    /// tree rewrite from scratch.
-    fn commit_and_push(&self, files: &[TreeFile], message: &str, private_key_pem: &str) -> Result<Option<git2::Oid>> {
-        self.rewrite_working_tree(files)?;
-
-        let mut index = self.repo.index()?;
-        index.clear()?;
-        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
-        index.write()?;
-
-        let tree_oid = index.write_tree()?;
+        // Build the candidate tree once in the odb.
+        let tree_oid = build_git_tree(&self.repo, files)?;
         let tree = self.repo.find_tree(tree_oid)?;
 
-        if let Ok(head_tree) = self.repo.head().and_then(|h| h.peel_to_tree()) {
-            if head_tree.id() == tree.id() {
+        // Fetch the remote's current tip.
+        let remote_tip = self.fetch_remote_tip(private_key_pem)?;
+
+        // If the remote tip's tree matches our candidate, nothing changed.
+        if let Some(tip_oid) = remote_tip {
+            let tip_commit = self.repo.find_commit(tip_oid)?;
+            if tip_commit.tree()?.id() == tree_oid {
                 return Ok(None);
             }
         }
 
         let signature = Signature::now("clouduler", "clouduler@localhost")?;
-        let parents = match self.repo.head().and_then(|h| h.peel_to_commit()) {
-            Ok(commit) => vec![commit],
-            Err(_) => vec![],
+
+        // One commit-and-push attempt against a given parent.
+        let attempt = |parent: Option<git2::Oid>| -> Result<git2::Oid> {
+            let parents = match parent {
+                Some(oid) => vec![self.repo.find_commit(oid)?],
+                None => vec![],
+            };
+            let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+            let commit_oid = self.repo.commit(
+                None, // detached — not attached to any local ref yet
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &parent_refs,
+            )?;
+            // Temporarily attach a local branch ref so `push` has
+            // something to push — this ref is a push handle, not a
+            // "known good" baseline.
+            self.repo.reference(
+                &format!("refs/heads/{}", self.branch),
+                commit_oid,
+                true,
+                "export",
+            )?;
+            self.push(private_key_pem)?;
+            Ok(commit_oid)
         };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
-        let oid = self.repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &parent_refs,
-        )?;
-
-        self.push(private_key_pem)?;
-
-        Ok(Some(oid))
-    }
-
-    /// Recovers from a rejected push by fetching the remote's current tip
-    /// and moving the local branch ref onto it, discarding the local
-    /// commit that couldn't land (its content isn't lost - `sync` rebuilds
-    /// the working tree from `files` again on retry, it's just no longer
-    /// the parent of a new commit). Returns whether a remote tip existed
-    /// to recover onto.
-    fn recover_onto_remote_tip(&self, private_key_pem: &str) -> Result<bool> {
-        let Some(oid) = self.fetch_remote_tip(private_key_pem)? else {
-            return Ok(false);
-        };
-        self.advance_local_ref(oid)?;
-        self.checkout_tree_to_disk(oid)?;
-        Ok(true)
-    }
-
-    /// A working copy with no commits yet - e.g. a node that just became
-    /// leader and has never run an export before - has no history to build
-    /// a new commit's parent from, even though `origin` almost certainly has
-    /// one (every prior leader's term exported into it). Committing straight
-    /// onto an unborn HEAD would silently start an unrelated root commit,
-    /// which a normal (non-force) push can never fast-forward onto that real
-    /// history: every export attempt after that fails with "not a fast
-    /// forward" forever, and a pull elsewhere sees the whole `secrets/`
-    /// subtree as changed (it is diffing against unrelated trees) and treats
-    /// it as an unauthorized secret rotation.
-    fn seed_from_remote_if_new(&self, private_key_pem: &str) -> Result<()> {
-        if self.repo.head().is_ok() {
-            return Ok(());
-        }
-        if let Some(oid) = self.fetch_remote_tip(private_key_pem)? {
-            self.advance_local_ref(oid)?;
-        }
-        Ok(())
-    }
-
-    fn rewrite_working_tree(&self, files: &[TreeFile]) -> Result<()> {
-        for entry in walk_tracked(&self.dir)? {
-            let _ = std::fs::remove_file(&entry);
-        }
-
-        for file in files {
-            let path = self.dir.join(&file.path);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|source| BackupError::Io { path: parent.to_path_buf(), source })?;
+        match attempt(remote_tip) {
+            Ok(oid) => Ok(Some(oid)),
+            Err(e) if is_push_rejection(&e) => {
+                // Remote moved concurrently — re-fetch and retry once.
+                let new_tip = self.fetch_remote_tip(private_key_pem)?;
+                match new_tip {
+                    Some(new_tip_oid) => attempt(Some(new_tip_oid)).map(Some),
+                    // No remote tip at all (branch doesn't exist yet) —
+                    // surface the original rejection.
+                    None => Err(e),
+                }
             }
-            std::fs::write(&path, &file.contents).map_err(|source| BackupError::Io { path: path.clone(), source })?;
+            Err(e) => Err(e),
         }
-        Ok(())
     }
 
     fn push(&self, private_key_pem: &str) -> Result<()> {
@@ -186,23 +153,9 @@ impl GitBackup {
     }
 
     /// Pushes `refspecs` to `origin`. A rejected ref update (e.g. a
-    /// non-force push against a remote branch that has moved, most
-    /// commonly because someone else pushed to it directly, or the
-    /// remote was manually rewound) is *not* surfaced by libgit2 as an
-    /// `Err` from `Remote::push` itself - the transport round-trip can
-    /// succeed while the individual ref update is refused, and that is
-    /// only ever reported through the `push_update_reference` callback.
-    /// Without wiring that callback up, a rejected push looked
-    /// indistinguishable from a real success: the export tick kept
-    /// committing on top of a branch it could never actually land,
-    /// silently piling up local-only commits forever (this is the
-    /// "reccuring issue" reported in clouduler-config: the remote's
-    /// git-backup pull path force-pushed a correction back onto `main`,
-    /// which the next unmodified export attempt would tick right past).
-    /// Bubble the rejection up as `BackupError::PushRejected` so
-    /// `push`/`push_refspecs` callers can react (see `sync`, which
-    /// fetches and rebases onto the new remote tip instead of leaving
-    /// the branch stuck).
+    /// non-force push against a remote branch that has moved) is surfaced
+    /// through the `push_update_reference` callback as
+    /// `BackupError::PushRejected`.
     fn push_refspecs(&self, refspecs: &[String], private_key_pem: &str) -> Result<()> {
         let mut remote = self.repo.find_remote("origin")?;
         let known_hosts_path = self.known_hosts_path();
@@ -222,10 +175,6 @@ impl GitBackup {
             check_host_key(&known_hosts_path, cert, host)
                 .map_err(|e| git2::Error::from_str(&e.to_string()))
         });
-        // `status` is `Some(reason)` exactly when the remote refused this
-        // particular ref update (non-fast-forward, hook rejection, etc.);
-        // `None` means it landed. Only the first rejection is kept - one
-        // is enough to know the whole push needs a retry.
         callbacks.push_update_reference(move |refname, status| {
             if let Some(reason) = status {
                 rejection_cb
@@ -247,10 +196,9 @@ impl GitBackup {
         Ok(())
     }
 
-    /// Fetches `origin`'s tracked branch and returns its tip, or `None` if the
-    /// branch does not exist on the remote yet. Does not touch the local
-    /// working tree or the local branch ref - see `checkout_tree_to_disk` and
-    /// `advance_local_ref` for that.
+    /// Fetches `origin`'s tracked branch and returns its tip commit oid,
+    /// or `None` if the branch does not exist on the remote yet. Does not
+    /// touch any local refs beyond the remote-tracking ref.
     pub fn fetch_remote_tip(&self, private_key_pem: &str) -> Result<Option<git2::Oid>> {
         let mut remote = self.repo.find_remote("origin")?;
         let known_hosts_path = self.known_hosts_path();
@@ -281,107 +229,59 @@ impl GitBackup {
         }
     }
 
-    /// The local tracked branch's current tip, i.e. the commit last accepted
-    /// (either pushed by an export or accepted by a webhook-triggered pull).
-    /// `None` before the very first one.
-    pub fn local_branch_oid(&self) -> Result<Option<git2::Oid>> {
-        match self.repo.find_reference(&format!("refs/heads/{}", self.branch)) {
-            Ok(reference) => Ok(reference.target()),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Moves the local branch ref to `oid` with no new commit - used once a
-    /// fetched commit has passed validation and been applied to the cluster,
-    /// so the next fetch's "known good" baseline is up to date. The remote
-    /// already has `oid` (it is where it was fetched from), so this needs no
-    /// push.
+    /// Moves the local tracked branch ref to `oid` — used only as a push
+    /// handle, not as a "known good" baseline.
     pub fn advance_local_ref(&self, oid: git2::Oid) -> Result<()> {
         self.repo
-            .reference(&format!("refs/heads/{}", self.branch), oid, true, "accept reviewed remote commit")?;
+            .reference(&format!("refs/heads/{}", self.branch), oid, true, "advance after export/pull")?;
         Ok(())
     }
 
-    /// Same as `advance_local_ref`, taking the oid as the hex string form a
-    /// completed export or pull already has on hand (e.g. `run_git_export`'s
-    /// return value), so a caller outside this crate never needs to depend on
-    /// `git2` itself just to move a bookmark forward.
+    /// Same as `advance_local_ref`, taking the oid as the hex string form.
     pub fn advance_local_ref_str(&self, oid: &str) -> Result<()> {
         let oid = git2::Oid::from_str(oid)?;
         self.advance_local_ref(oid)
     }
 
-    /// Whether the `secrets/` subtree differs between `good` and `candidate`,
-    /// i.e. whether the pulled commit actually rotates a secret, not just
-    /// whether the tree happens to contain any (every commit's tree does,
-    /// since `sync` rewrites the whole tree every time it commits at all).
-    /// `good` being `None` (no known-good history yet) counts as a change
-    /// whenever `candidate` has any secrets at all.
-    pub fn secrets_subtree_changed(&self, good: Option<git2::Oid>, candidate: git2::Oid) -> Result<bool> {
-        let candidate_secrets = self.subtree_oid(candidate, "secrets")?;
-        let good_secrets = match good {
-            Some(oid) => self.subtree_oid(oid, "secrets")?,
+    /// Whether the `secrets/` subtree differs between `good_tree` and
+    /// `candidate_commit`. `good_tree` is a tree oid representing what the
+    /// cluster is currently running (computed fresh each call, not from a
+    /// historical bookmark). `candidate_commit` is a fetched remote commit.
+    /// `good_tree` being `None` counts as a change whenever `candidate`
+    /// has any secrets at all.
+    pub fn secrets_subtree_changed(
+        &self,
+        good_tree: Option<git2::Oid>,
+        candidate_commit: git2::Oid,
+    ) -> Result<bool> {
+        let candidate_secrets = self.subtree_oid_from_commit(candidate_commit, "secrets")?;
+        let good_secrets = match good_tree {
+            Some(tree_oid) => self.subtree_oid_from_tree(tree_oid, "secrets")?,
             None => None,
         };
         Ok(candidate_secrets != good_secrets)
     }
 
-    fn subtree_oid(&self, commit_oid: git2::Oid, path: &str) -> Result<Option<git2::Oid>> {
+    fn subtree_oid_from_commit(&self, commit_oid: git2::Oid, path: &str) -> Result<Option<git2::Oid>> {
         let commit = self.repo.find_commit(commit_oid)?;
         let tree = commit.tree()?;
         Ok(tree.get_path(Path::new(path)).ok().map(|entry| entry.id()))
     }
 
-    /// Full rewrite of the working directory to match `oid`'s tree, the pull
-    /// counterpart to `rewrite_working_tree`, so `cl_backup::tree::parse_dir`
-    /// can read it back off disk exactly like a plain checkout.
-    pub fn checkout_tree_to_disk(&self, oid: git2::Oid) -> Result<()> {
-        for entry in walk_tracked(&self.dir)? {
-            let _ = std::fs::remove_file(&entry);
-        }
-
-        let commit = self.repo.find_commit(oid)?;
-        let tree = commit.tree()?;
-        let mut io_error = None;
-        tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-            if entry.kind() != Some(git2::ObjectType::Blob) {
-                return git2::TreeWalkResult::Ok;
-            }
-            let Some(name) = entry.name() else {
-                return git2::TreeWalkResult::Ok;
-            };
-            let result = entry
-                .to_object(&self.repo)
-                .ok()
-                .and_then(|obj| obj.into_blob().ok())
-                .ok_or(())
-                .and_then(|blob| write_blob(&self.dir, root, name, blob.content()).map_err(|_| ()));
-            match result {
-                Ok(()) => git2::TreeWalkResult::Ok,
-                Err(()) => {
-                    io_error = Some(BackupError::Malformed {
-                        what: "backup tree".to_string(),
-                        reason: format!("could not write {root}{name} to disk"),
-                    });
-                    git2::TreeWalkResult::Abort
-                }
-            }
-        })?;
-        if let Some(e) = io_error {
-            return Err(e);
-        }
-        Ok(())
+    fn subtree_oid_from_tree(&self, tree_oid: git2::Oid, path: &str) -> Result<Option<git2::Oid>> {
+        let tree = self.repo.find_tree(tree_oid)?;
+        Ok(tree.get_path(Path::new(path)).ok().map(|entry| entry.id()))
     }
 
     /// Reacts to a fetched commit that failed validation: preserves it under
-    /// its own branch with an explanatory commit on top (so the reason lives
-    /// with the rejected history, not on the tracked branch), then
-    /// force-pushes the tracked branch straight back to `good` - or, if there
-    /// is no known-good history at all yet, back to an empty root commit.
+    /// its own branch with an explanatory commit on top, then force-pushes
+    /// the tracked branch to a tree representing what the cluster is
+    /// actually running (`good_tree`), or a fresh empty tree when there is
+    /// no known-good state.
     pub fn reject_and_restore(
         &self,
         bad: git2::Oid,
-        good: Option<git2::Oid>,
+        good_tree: Option<git2::Oid>,
         reason: &str,
         private_key_pem: &str,
     ) -> Result<RejectOutcome> {
@@ -407,25 +307,24 @@ impl GitBackup {
             "preserve rejected commit with explanation",
         )?;
 
-        // Not `head.set_target`: libgit2 requires an update-ref's current tip
-        // to be a parent of the new commit, which a deliberate force revert
-        // past `bad` never is when there is no known-good commit to fall back
-        // to. Force-set the ref by hand instead.
-        let restore_oid = match good {
-            Some(good_oid) => good_oid,
+        // Build the restore tree from the "good" state, or an empty tree.
+        let restore_tree = match good_tree {
+            Some(tree_oid) => self.repo.find_tree(tree_oid)?,
             None => {
                 let empty_tree_oid = self.repo.treebuilder(None)?.write()?;
-                let empty_tree = self.repo.find_tree(empty_tree_oid)?;
-                self.repo.commit(None, &signature, &signature, "no accepted history yet", &empty_tree, &[])?
+                self.repo.find_tree(empty_tree_oid)?
             }
         };
+        let restore_commit = self.repo.commit(
+            None,
+            &signature,
+            &signature,
+            "revert after rejected pull",
+            &restore_tree,
+            &[&bad_commit],
+        )?;
         let branch_ref = format!("refs/heads/{}", self.branch);
-        self.repo.reference(&branch_ref, restore_oid, true, "force revert after a rejected pull")?;
-
-        // Keep the working directory in step with the branch that was just
-        // force-pushed, or the next export tick's tree-hash comparison in
-        // `sync` would see a phantom change against a tree nobody asked for.
-        self.checkout_tree_to_disk(restore_oid)?;
+        self.repo.reference(&branch_ref, restore_commit, true, "force revert after a rejected pull")?;
 
         let force_refspec = format!("+refs/heads/{branch}:refs/heads/{branch}", branch = self.branch);
         let preserve_refspec = format!("refs/heads/{preserved_branch}:refs/heads/{preserved_branch}");
@@ -433,27 +332,176 @@ impl GitBackup {
 
         Ok(RejectOutcome {
             preserved_branch,
-            revert_commit: restore_oid,
+            revert_commit: restore_commit,
         })
     }
 
-    /// Force-pushes whatever the local tracked branch currently points at to
-    /// `origin`, overwriting the remote branch unconditionally - for
-    /// `clouduler git-backup force-push`, the operator's manual recovery once
-    /// the ordinary fast-forward `push` is stuck failing (the remote branch
-    /// was rewritten by hand, or left mid-way through a botched rejection)
-    /// and the admin has confirmed the cluster's own exported state, not
-    /// whatever is on the remote, is the one to keep.
-    pub fn force_push(&self, private_key_pem: &str) -> Result<()> {
-        let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}", branch = self.branch);
-        self.push_refspecs(&[refspec], private_key_pem)
-    }
-
     /// Where trust-on-first-use host key pins for this repo's remote are
-    /// kept - inside `.git` so a working-tree rewrite never touches it.
+    /// kept - inside the bare repo's own `.git`-style directory.
     fn known_hosts_path(&self) -> PathBuf {
         self.repo.path().join("clouduler_known_hosts")
     }
+}
+
+/// Builds a nested git tree object from a list of `TreeFile`s, entirely via
+/// the repository's object database (no working directory, no index). Returns
+/// the root tree's oid. Paths use forward slashes; each segment becomes a
+/// nested tree, with blobs at the leaves.
+pub fn build_git_tree(repo: &Repository, files: &[TreeFile]) -> Result<git2::Oid> {
+    // top-level path -> (tree_builder, or blob_oid if it's a file)
+    // We'll build a nested structure: for "stacks/web.yaml", we need
+    // root -> stacks/ -> web.yaml
+    let mut subtrees: HashMap<String, git2::TreeBuilder> = HashMap::new();
+    let mut root_entries: Vec<(String, git2::Oid, u32)> = Vec::new();
+
+    for file in files {
+        let parts: Vec<&str> = file.path.split('/').collect();
+        let blob_oid = repo.blob(&file.contents)?;
+
+        if parts.len() == 1 {
+            // Top-level file.
+            root_entries.push((parts[0].to_string(), blob_oid, 0o100644));
+        } else {
+            // Nested path: ensure each parent tree exists.
+            let dir_name = parts[0];
+            let file_name = parts[parts.len() - 1];
+            let subtrees = subtrees
+                .entry(dir_name.to_string())
+                .or_insert_with(|| repo.treebuilder(None).expect("treebuilder"));
+            // For deeply nested paths (e.g. a/b/c.yaml), we'd need more
+            // levels, but our layout is flat one level deep (stacks/*.yaml,
+            // configs/*, secrets/*.age) — so one level of nesting is enough.
+            subtrees.insert(file_name, blob_oid, 0o100644)?;
+        }
+    }
+
+    // Finalize subtree builders and collect their oids.
+    let mut root = repo.treebuilder(None)?;
+    for (name, builder) in subtrees {
+        let tree_oid = builder.write()?;
+        root.insert(&name, tree_oid, 0o040000)?;
+    }
+    for (name, blob_oid, mode) in root_entries {
+        root.insert(&name, blob_oid, mode as i32)?;
+    }
+
+    let tree_oid = root.write()?;
+    Ok(tree_oid)
+}
+
+/// Walks a git tree object (by oid) and extracts the four tracked kinds
+/// into a `ParsedTree`, reading blob contents directly from the object
+/// database — no working directory involved. Any files outside the four
+/// tracked top-level paths (`cluster.yaml`, `stacks/`, `configs/`,
+/// `secrets/`) are silently ignored (see the "raft should ignore
+/// modifications to things that are not part of the raft" design rule).
+pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree::ParsedTree> {
+    use crate::tree::ParsedTree;
+    use std::collections::BTreeMap;
+
+    let tree = repo.find_tree(tree_oid)?;
+
+    let cluster_yaml = tree
+        .get_name("cluster.yaml")
+        .map(|entry| {
+            entry
+                .to_object(repo)?
+                .into_blob()
+                .map(|b| String::from_utf8_lossy(b.content()).into_owned())
+                .map_err(|_| BackupError::Malformed {
+                    what: "cluster.yaml".to_string(),
+                    reason: "not a blob".to_string(),
+                })
+        })
+        .transpose()?;
+
+    let mut stacks = BTreeMap::new();
+    if let Some(stacks_tree) = tree.get_name("stacks") {
+        let stacks_tree = stacks_tree
+            .to_object(repo)?
+            .into_tree()
+            .map_err(|_| BackupError::Malformed {
+                what: "stacks".to_string(),
+                reason: "not a tree".to_string(),
+            })?;
+        for entry in stacks_tree.iter() {
+            let Some(name) = entry.name() else {
+                continue;
+            };
+            let Some(yaml_name) = name.strip_suffix(".yaml") else {
+                continue;
+            };
+            let content = entry
+                .to_object(repo)?
+                .into_blob()
+                .map(|b| String::from_utf8_lossy(b.content()).into_owned())
+                .map_err(|_| BackupError::Malformed {
+                    what: name.to_string(),
+                    reason: "not a blob".to_string(),
+                })?;
+            stacks.insert(yaml_name.to_string(), content);
+        }
+    }
+
+    let mut configs = BTreeMap::new();
+    if let Some(configs_tree) = tree.get_name("configs") {
+        let configs_tree = configs_tree
+            .to_object(repo)?
+            .into_tree()
+            .map_err(|_| BackupError::Malformed {
+                what: "configs".to_string(),
+                reason: "not a tree".to_string(),
+            })?;
+        for entry in configs_tree.iter() {
+            let Some(name) = entry.name() else {
+                continue;
+            };
+            let content = entry
+                .to_object(repo)?
+                .into_blob()
+                .map(|b| b.content().to_vec())
+                .map_err(|_| BackupError::Malformed {
+                    what: name.to_string(),
+                    reason: "not a blob".to_string(),
+                })?;
+            configs.insert(name.to_string(), content);
+        }
+    }
+
+    let mut secrets = BTreeMap::new();
+    if let Some(secrets_tree) = tree.get_name("secrets") {
+        let secrets_tree = secrets_tree
+            .to_object(repo)?
+            .into_tree()
+            .map_err(|_| BackupError::Malformed {
+                what: "secrets".to_string(),
+                reason: "not a tree".to_string(),
+            })?;
+        for entry in secrets_tree.iter() {
+            let Some(name) = entry.name() else {
+                continue;
+            };
+            let Some(age_name) = name.strip_suffix(".age") else {
+                continue;
+            };
+            let content = entry
+                .to_object(repo)?
+                .into_blob()
+                .map(|b| b.content().to_vec())
+                .map_err(|_| BackupError::Malformed {
+                    what: name.to_string(),
+                    reason: "not a blob".to_string(),
+                })?;
+            secrets.insert(age_name.to_string(), content);
+        }
+    }
+
+    Ok(ParsedTree {
+        cluster_yaml,
+        stacks,
+        configs,
+        secrets,
+    })
 }
 
 /// What `reject_and_restore` did with a rejected commit.
@@ -461,40 +509,21 @@ pub struct RejectOutcome {
     /// Name of the branch the rejected commit was preserved on (with an
     /// explanatory commit on top), for the operator to go inspect and fix.
     pub preserved_branch: String,
-    /// What the tracked branch was force-pushed back to: `good`, or a fresh
-    /// empty root commit when there was no known-good history yet.
+    /// What the tracked branch was force-pushed back to: the "good" tree
+    /// committed, or a fresh empty root commit when there was no
+    /// known-good state yet.
     pub revert_commit: git2::Oid,
 }
 
-/// Whether `err` represents a rejected (non-fast-forward) push, whether
-/// libgit2 caught it client-side before ever contacting the remote (the
-/// common case: it walks the remote-tracking ref locally and refuses to
-/// even attempt a non-force push, surfaced as `Err(ErrorCode::NotFastForward)`
-/// straight out of `Remote::push`), or the remote itself refused the ref
-/// update after a round trip (surfaced through the `push_update_reference`
-/// callback in `push_refspecs`, wrapped as `BackupError::PushRejected`).
-/// Both need the same recovery: fetch the new remote tip and retry.
+/// Whether `err` represents a rejected (non-fast-forward) push.
 fn is_push_rejection(err: &BackupError) -> bool {
     matches!(err, BackupError::PushRejected(_))
         || matches!(err, BackupError::Git(e) if e.code() == git2::ErrorCode::NotFastForward)
 }
 
-fn write_blob(dir: &Path, root: &str, name: &str, content: &[u8]) -> Result<()> {
-    let path = dir.join(format!("{root}{name}"));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| BackupError::Io { path: parent.to_path_buf(), source })?;
-    }
-    std::fs::write(&path, content).map_err(|source| BackupError::Io { path, source })
-}
-
-/// Trust-on-first-use ssh host key check: the vendored libssh2 build has no
-/// system `~/.ssh/known_hosts` to fall back on (that's what produces
-/// libgit2's own "unknown remote ssh hostkey" error with no callback
-/// registered), so this pins whatever key a host presents the first time and
-/// rejects a later mismatch instead of trusting silently forever.
+/// Trust-on-first-use ssh host key check.
 fn check_host_key(known_hosts_path: &Path, cert: &Cert<'_>, host: &str) -> Result<CertificateCheckStatus> {
     let Some(hostkey) = cert.as_hostkey() else {
-        // Not an ssh transport (e.g. https/file) - nothing to pin.
         return Ok(CertificateCheckStatus::CertificateOk);
     };
     let fingerprint = hostkey
@@ -577,34 +606,6 @@ pub fn clone_with_agent(url: &str, branch: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// All non-`.git` files currently on disk under `dir`, so a full rebuild can
-/// clear stale entries (e.g. a removed stack/config/secret) before writing
-/// the fresh set.
-fn walk_tracked(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = match std::fs::read_dir(&current) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(BackupError::Io { path: current.clone(), source }),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| BackupError::Io { path: current.clone(), source })?;
-            let path = entry.path();
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                continue;
-            }
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                out.push(path);
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,7 +625,7 @@ mod tests {
     }
 
     /// Pushes to a local bare repo over `file://`, exercising the whole
-    /// working-tree-rewrite/commit/push path. Does not cover the ssh
+    /// virtual-tree/commit/push path. Does not cover the ssh
     /// credential callback itself — that needs a real ssh remote, flagged
     /// for a manual smoke test.
     #[test]
@@ -632,22 +633,28 @@ mod tests {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
         Repository::init_bare(bare_dir.path()).expect("init bare");
 
-        let work_dir = tempfile::tempdir().expect("work tempdir");
+        let local_dir = tempfile::tempdir().expect("local tempdir");
         let repo_url = format!("file://{}", bare_dir.path().display());
-        let backup = GitBackup::open_or_init(work_dir.path(), &repo_url, "main").expect("open");
+        let backup = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
 
         let files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
             contents: b"nodes: []\n".to_vec(),
         }];
 
-        // file:// pushes need no credentials, so the callback is never
-        // invoked; this key is never actually used.
         let dummy_key = "not-a-real-key";
         let oid = backup.sync(&files, "add cluster.yaml", dummy_key).expect("sync");
         assert!(oid.is_some());
-        let head = backup.repo.head().expect("head").peel_to_commit().expect("commit");
-        assert_eq!(head.message(), Some("add cluster.yaml"));
+        // The commit is reachable from the remote's branch ref.
+        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
+        let remote_tip = remote_repo
+            .find_reference("refs/heads/main")
+            .expect("remote main")
+            .target()
+            .expect("has target");
+        assert_eq!(remote_tip, oid.unwrap());
+        let commit = remote_repo.find_commit(remote_tip).expect("find commit");
+        assert_eq!(commit.message(), Some("add cluster.yaml"));
     }
 
     #[test]
@@ -655,9 +662,9 @@ mod tests {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
         Repository::init_bare(bare_dir.path()).expect("init bare");
 
-        let work_dir = tempfile::tempdir().expect("work tempdir");
+        let local_dir = tempfile::tempdir().expect("local tempdir");
         let repo_url = format!("file://{}", bare_dir.path().display());
-        let backup = GitBackup::open_or_init(work_dir.path(), &repo_url, "main").expect("open");
+        let backup = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
 
         let files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
@@ -671,34 +678,33 @@ mod tests {
         assert_eq!(second, None);
     }
 
-    /// Sets up an `origin`-having local repo (`bare` is the remote, `work` is
-    /// the local working copy) with one commit already pushed, for tests that
-    /// need to fetch/reject/checkout against a populated history.
-    fn seeded_backup(bare: &tempfile::TempDir, work: &tempfile::TempDir, files: &[TreeFile]) -> (GitBackup, git2::Oid) {
+    /// Sets up a bare repo with one commit already pushed, for tests that
+    /// need to fetch/reject against a populated history.
+    fn seeded_backup(bare: &tempfile::TempDir, files: &[TreeFile]) -> (GitBackup, git2::Oid, tempfile::TempDir) {
         Repository::init_bare(bare.path()).expect("init bare");
+        // Bare repos need objects/tmp for libgit2 temp files.
+        std::fs::create_dir_all(bare.path().join("objects/tmp")).expect("create objects/tmp");
+        let local_dir = tempfile::tempdir().expect("local tempdir");
         let repo_url = format!("file://{}", bare.path().display());
-        let backup = GitBackup::open_or_init(work.path(), &repo_url, "main").expect("open");
+        let backup = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
         let dummy_key = "not-a-real-key";
         let oid = backup.sync(files, "seed", dummy_key).expect("sync").expect("a real commit");
-        (backup, oid)
+        (backup, oid, local_dir)
     }
 
     #[test]
-    fn a_fresh_working_copy_builds_on_the_remotes_existing_history_instead_of_going_orphan() {
+    fn a_fresh_repo_builds_on_the_remotes_existing_history() {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let first_work_dir = tempfile::tempdir().expect("first work tempdir");
         let first_files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
             contents: b"nodes: []\n".to_vec(),
         }];
-        let (_first_leader, first_oid) = seeded_backup(&bare_dir, &first_work_dir, &first_files);
+        let (_first_leader, first_oid, _local) = seeded_backup(&bare_dir, &first_files);
 
-        // A new leader with no prior export history, e.g. right after a
-        // failover, opens its own empty working copy against the same repo.
-        let second_work_dir = tempfile::tempdir().expect("second work tempdir");
+        // A new leader with no prior export history.
+        let local_dir = tempfile::tempdir().expect("local tempdir");
         let repo_url = format!("file://{}", bare_dir.path().display());
-        let second_leader = GitBackup::open_or_init(second_work_dir.path(), &repo_url, "main").expect("open");
-        assert_eq!(second_leader.local_branch_oid().expect("local oid"), None);
+        let second_leader = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
 
         let dummy_key = "not-a-real-key";
         let second_files = vec![
@@ -716,42 +722,32 @@ mod tests {
             .expect("sync")
             .expect("a real commit");
 
-        // The new commit must be a fast-forward child of the remote's tip,
-        // not an unrelated root commit - otherwise this push (a plain,
-        // non-force push) could never have succeeded.
+        // The new commit must be a fast-forward child of the remote's tip.
         let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
         assert_eq!(
             remote_repo.find_reference("refs/heads/main").expect("remote main").target(),
             Some(second_oid)
         );
-        let parents: Vec<_> = second_leader
-            .repo
-            .find_commit(second_oid)
-            .expect("find commit")
-            .parent_ids()
-            .collect();
-        assert_eq!(parents, vec![first_oid]);
+        let remote_commit = remote_repo.find_commit(second_oid).expect("find commit");
+        assert_eq!(remote_commit.parent_id(0).expect("parent"), first_oid);
     }
 
     #[test]
-    fn fetch_remote_tip_sees_what_was_pushed_from_another_working_copy() {
+    fn fetch_remote_tip_sees_what_was_pushed() {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
         let files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
             contents: b"nodes: []\n".to_vec(),
         }];
-        let (_pusher, pushed_oid) = seeded_backup(&bare_dir, &work_dir, &files);
+        let (_pusher, pushed_oid, _local) = seeded_backup(&bare_dir, &files);
 
-        let puller_dir = tempfile::tempdir().expect("puller tempdir");
+        let local_dir = tempfile::tempdir().expect("local tempdir");
         let repo_url = format!("file://{}", bare_dir.path().display());
-        let puller = GitBackup::open_or_init(puller_dir.path(), &repo_url, "main").expect("open puller");
+        let puller = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open puller");
 
         let dummy_key = "not-a-real-key";
         let tip = puller.fetch_remote_tip(dummy_key).expect("fetch").expect("a tip");
         assert_eq!(tip, pushed_oid);
-        // Fetching alone must not touch the local branch or working tree.
-        assert_eq!(puller.local_branch_oid().expect("local oid"), None);
     }
 
     #[test]
@@ -760,41 +756,16 @@ mod tests {
         Repository::init_bare(bare_dir.path()).expect("init bare");
         let repo_url = format!("file://{}", bare_dir.path().display());
 
-        let puller_dir = tempfile::tempdir().expect("puller tempdir");
-        let puller = GitBackup::open_or_init(puller_dir.path(), &repo_url, "main").expect("open puller");
+        let local_dir = tempfile::tempdir().expect("local tempdir");
+        let puller = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open puller");
 
         let dummy_key = "not-a-real-key";
         assert_eq!(puller.fetch_remote_tip(dummy_key).expect("fetch"), None);
     }
 
     #[test]
-    fn checkout_tree_to_disk_materializes_a_past_commits_files_and_clears_stale_ones() {
-        let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
-        let first_files = vec![TreeFile {
-            path: "cluster.yaml".to_string(),
-            contents: b"nodes: []\n".to_vec(),
-        }];
-        let (backup, first_oid) = seeded_backup(&bare_dir, &work_dir, &first_files);
-
-        let dummy_key = "not-a-real-key";
-        let second_files = vec![TreeFile {
-            path: "stacks/a.yaml".to_string(),
-            contents: b"services: {}\n".to_vec(),
-        }];
-        backup.sync(&second_files, "second", dummy_key).expect("sync").expect("a real commit");
-        assert!(!work_dir.path().join("cluster.yaml").exists());
-        assert!(work_dir.path().join("stacks/a.yaml").exists());
-
-        backup.checkout_tree_to_disk(first_oid).expect("checkout");
-        assert!(work_dir.path().join("cluster.yaml").exists());
-        assert!(!work_dir.path().join("stacks/a.yaml").exists());
-    }
-
-    #[test]
     fn secrets_subtree_changed_ignores_non_secret_churn() {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
         let first_files = vec![
             TreeFile {
                 path: "cluster.yaml".to_string(),
@@ -805,7 +776,7 @@ mod tests {
                 contents: b"ciphertext-v1".to_vec(),
             },
         ];
-        let (backup, first_oid) = seeded_backup(&bare_dir, &work_dir, &first_files);
+        let (backup, first_oid, _local) = seeded_backup(&bare_dir, &first_files);
 
         let dummy_key = "not-a-real-key";
         let second_files = vec![
@@ -820,8 +791,10 @@ mod tests {
         ];
         let second_oid = backup.sync(&second_files, "second", dummy_key).expect("sync").expect("a real commit");
 
+        // Extract tree oids from commits for comparison.
+        let first_tree = backup.repo.find_commit(first_oid).expect("find commit").tree().expect("tree").id();
         assert!(!backup
-            .secrets_subtree_changed(Some(first_oid), second_oid)
+            .secrets_subtree_changed(Some(first_tree), second_oid)
             .expect("diff"));
 
         let third_files = vec![
@@ -836,20 +809,20 @@ mod tests {
         ];
         let third_oid = backup.sync(&third_files, "third", dummy_key).expect("sync").expect("a real commit");
 
+        let second_tree = backup.repo.find_commit(second_oid).expect("find commit").tree().expect("tree").id();
         assert!(backup
-            .secrets_subtree_changed(Some(second_oid), third_oid)
+            .secrets_subtree_changed(Some(second_tree), third_oid)
             .expect("diff"));
     }
 
     #[test]
     fn secrets_subtree_changed_treats_no_known_good_as_changed_only_if_secrets_exist() {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
         let files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
             contents: b"nodes: []\n".to_vec(),
         }];
-        let (backup, no_secrets_oid) = seeded_backup(&bare_dir, &work_dir, &files);
+        let (backup, no_secrets_oid, _local) = seeded_backup(&bare_dir, &files);
         assert!(!backup.secrets_subtree_changed(None, no_secrets_oid).expect("diff"));
 
         let dummy_key = "not-a-real-key";
@@ -870,12 +843,11 @@ mod tests {
     #[test]
     fn reject_and_restore_preserves_the_bad_commit_and_force_pushes_a_revert() {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
         let good_files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
             contents: b"nodes: []\n".to_vec(),
         }];
-        let (backup, good_oid) = seeded_backup(&bare_dir, &work_dir, &good_files);
+        let (backup, good_oid, _local) = seeded_backup(&bare_dir, &good_files);
 
         let dummy_key = "not-a-real-key";
         let bad_files = vec![TreeFile {
@@ -884,12 +856,13 @@ mod tests {
         }];
         let bad_oid = backup.sync(&bad_files, "bad", dummy_key).expect("sync").expect("a real commit");
 
+        // Good state is what the cluster is running: a tree from the good commit.
+        let good_tree = backup.repo.find_commit(good_oid).expect("find commit").tree().expect("tree").id();
         let outcome = backup
-            .reject_and_restore(bad_oid, Some(good_oid), "stack broken.yaml failed to parse", dummy_key)
+            .reject_and_restore(bad_oid, Some(good_tree), "stack broken.yaml failed to parse", dummy_key)
             .expect("reject_and_restore");
 
-        // The bad commit is preserved on its own branch, not lost, with an
-        // explanatory commit on top carrying the rejection reason.
+        // The bad commit is preserved on its own branch, with an explanation on top.
         let preserved_ref = backup
             .repo
             .find_reference(&format!("refs/heads/{}", outcome.preserved_branch))
@@ -903,19 +876,16 @@ mod tests {
         let bad_commit = backup.repo.find_commit(bad_oid).expect("find bad commit");
         assert_eq!(explanation_commit.tree().expect("tree").id(), bad_commit.tree().expect("tree").id());
 
-        // The tracked branch is force-pushed straight back to `good`, with no
-        // synthetic commit on top of it.
-        let branch_oid = backup.local_branch_oid().expect("local oid").expect("some oid");
+        // The tracked branch is force-pushed to the revert commit.
+        let branch_ref = format!("refs/heads/{}", backup.branch);
+        let branch_oid = backup.repo.find_reference(&branch_ref).expect("branch exists").target().expect("has target");
         assert_eq!(branch_oid, outcome.revert_commit);
-        assert_eq!(outcome.revert_commit, good_oid);
 
-        // The working directory was restored to match `good`, not left as
-        // the bad tree or the empty revert tree.
-        assert!(work_dir.path().join("cluster.yaml").exists());
-        assert!(!work_dir.path().join("stacks/broken.yaml").exists());
+        // The revert commit's tree matches the good state.
+        let revert_tree = backup.repo.find_commit(outcome.revert_commit).expect("find revert").tree().expect("tree").id();
+        assert_eq!(revert_tree, good_tree);
 
-        // Both the force-pushed branch and the preserved branch actually
-        // landed on the remote.
+        // Both refs actually landed on the remote.
         let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
         assert_eq!(
             remote_repo.find_reference("refs/heads/main").expect("remote main").target(),
@@ -931,8 +901,8 @@ mod tests {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
         Repository::init_bare(bare_dir.path()).expect("init bare");
         let repo_url = format!("file://{}", bare_dir.path().display());
-        let work_dir = tempfile::tempdir().expect("work tempdir");
-        let backup = GitBackup::open_or_init(work_dir.path(), &repo_url, "main").expect("open");
+        let local_dir = tempfile::tempdir().expect("local tempdir");
+        let backup = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
 
         let dummy_key = "not-a-real-key";
         let bad_files = vec![TreeFile {
@@ -946,9 +916,8 @@ mod tests {
             .expect("reject_and_restore");
 
         let root_commit = backup.repo.find_commit(outcome.revert_commit).expect("find root commit");
-        assert_eq!(root_commit.parent_count(), 0);
+        assert_eq!(root_commit.parent_id(0).expect("parent"), bad_oid);
         assert_eq!(root_commit.tree().expect("tree").len(), 0);
-        assert!(!work_dir.path().join("cluster.yaml").exists());
 
         // The rejection reason lives on the preserved branch, not on main.
         let preserved_ref = backup
@@ -963,60 +932,19 @@ mod tests {
         assert_eq!(explanation_commit.parent_id(0).expect("parent"), bad_oid);
     }
 
-    #[test]
-    fn force_push_overwrites_a_diverged_remote() {
-        let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
-        let files = vec![TreeFile {
-            path: "cluster.yaml".to_string(),
-            contents: b"nodes: []\n".to_vec(),
-        }];
-        let (backup, local_oid) = seeded_backup(&bare_dir, &work_dir, &files);
-
-        // Simulate the remote having diverged (e.g. rewritten by hand) after
-        // the local commit was made: point its branch somewhere else that is
-        // not an ancestor of `local_oid`, so an ordinary fast-forward push
-        // would be rejected.
-        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
-        let unrelated_tree = remote_repo.treebuilder(None).expect("treebuilder").write().expect("write");
-        let unrelated_tree = remote_repo.find_tree(unrelated_tree).expect("find tree");
-        let signature = Signature::now("someone-else", "someone-else@localhost").expect("signature");
-        let diverged = remote_repo
-            .commit(None, &signature, &signature, "diverged", &unrelated_tree, &[])
-            .expect("commit");
-        remote_repo
-            .reference("refs/heads/main", diverged, true, "simulate divergence")
-            .expect("update remote ref");
-
-        let dummy_key = "not-a-real-key";
-        backup.force_push(dummy_key).expect("force_push");
-
-        assert_eq!(
-            remote_repo.find_reference("refs/heads/main").expect("remote main").target(),
-            Some(local_oid)
-        );
-    }
-
-    /// Regression test for the "recurring issue" reported against
-    /// clouduler-config: a rejected (non-fast-forward) push must not be
+    /// Regression test: a rejected (non-fast-forward) push must not be
     /// silently treated as success, and the next `sync` must recover by
-    /// pulling the new remote tip instead of retrying the same doomed
-    /// push forever.
+    /// pulling the new remote tip.
     #[test]
     fn a_rejected_push_is_recovered_by_pulling_instead_of_retried_forever() {
         let bare_dir = tempfile::tempdir().expect("bare tempdir");
-        let work_dir = tempfile::tempdir().expect("work tempdir");
         let files = vec![TreeFile {
             path: "cluster.yaml".to_string(),
             contents: b"nodes: []\n".to_vec(),
         }];
-        let (backup, _local_oid) = seeded_backup(&bare_dir, &work_dir, &files);
+        let (backup, _local_oid, _local) = seeded_backup(&bare_dir, &files);
 
-        // Simulate the remote moving out from under us after the local
-        // commit was made (e.g. clouduler's own pull path rejected some
-        // unrelated commit and force-pushed a correction back onto the
-        // tracked branch) - the diverged commit is not an ancestor of the
-        // local branch, so a plain (non-force) push is rejected.
+        // Simulate the remote moving out from under us.
         let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
         let diverged_tree = {
             let mut builder = remote_repo.treebuilder(None).expect("treebuilder");
@@ -1039,12 +967,6 @@ mod tests {
             contents: b"nodes: [new]\n".to_vec(),
         }];
 
-        // Before the fix this would either error out with a non-fast-forward
-        // failure that then repeats forever, or (worse) `Remote::push`
-        // returning `Ok` while the ref update was actually refused, leaving
-        // the remote pointed at `diverged` forever. Now it must recover by
-        // fetching `diverged`, rebasing the new commit onto it, and landing
-        // on the remote.
         let oid = backup
             .sync(&new_files, "export after divergence", dummy_key)
             .expect("sync should recover from the rejected push")
@@ -1063,5 +985,81 @@ mod tests {
             diverged,
             "the recovered commit should be built on top of the diverged remote tip, not orphaned"
         );
+    }
+
+    #[test]
+    fn build_git_tree_produces_correct_nested_structure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+
+        let files = vec![
+            TreeFile {
+                path: "cluster.yaml".to_string(),
+                contents: b"nodes: []\n".to_vec(),
+            },
+            TreeFile {
+                path: "stacks/web.yaml".to_string(),
+                contents: b"services: {}\n".to_vec(),
+            },
+            TreeFile {
+                path: "configs/nginx.conf".to_string(),
+                contents: b"server {}".to_vec(),
+            },
+            TreeFile {
+                path: "secrets/db.age".to_string(),
+                contents: b"ciphertext".to_vec(),
+            },
+        ];
+
+        let tree_oid = build_git_tree(&repo, &files).expect("build tree");
+        let parsed = parse_tree(&repo, tree_oid).expect("parse tree");
+
+        assert_eq!(parsed.cluster_yaml.as_deref(), Some("nodes: []\n"));
+        assert_eq!(parsed.stacks.get("web").map(String::as_str), Some("services: {}\n"));
+        assert_eq!(parsed.configs.get("nginx.conf").map(Vec::as_slice), Some(b"server {}".as_slice()));
+        assert_eq!(parsed.secrets.get("db").map(Vec::as_slice), Some(b"ciphertext".as_slice()));
+    }
+
+    #[test]
+    fn parse_tree_ignores_untracked_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+
+        let files = vec![
+            TreeFile {
+                path: "cluster.yaml".to_string(),
+                contents: b"nodes: []\n".to_vec(),
+            },
+            TreeFile {
+                path: "README.md".to_string(),
+                contents: b"# backup repo".to_vec(),
+            },
+            TreeFile {
+                path: ".gitignore".to_string(),
+                contents: b"target/\n".to_vec(),
+            },
+        ];
+
+        let tree_oid = build_git_tree(&repo, &files).expect("build tree");
+        let parsed = parse_tree(&repo, tree_oid).expect("parse tree");
+
+        assert_eq!(parsed.cluster_yaml.as_deref(), Some("nodes: []\n"));
+        assert!(parsed.stacks.is_empty());
+        assert!(parsed.configs.is_empty());
+        assert!(parsed.secrets.is_empty());
+    }
+
+    #[test]
+    fn build_and_parse_round_trip_with_empty_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+
+        let tree_oid = build_git_tree(&repo, &[]).expect("build tree");
+        let parsed = parse_tree(&repo, tree_oid).expect("parse tree");
+
+        assert!(parsed.cluster_yaml.is_none());
+        assert!(parsed.stacks.is_empty());
+        assert!(parsed.configs.is_empty());
+        assert!(parsed.secrets.is_empty());
     }
 }

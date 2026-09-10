@@ -662,20 +662,11 @@ async fn watch_git_backup(
     data_dir: PathBuf,
 ) {
     let dir = data_dir.join("git-backup");
-    // The webhook-pull path keeps its own separate working copy (concurrent
-    // git2 access to one working tree from both the export tick and an
-    // inbound webhook is not safe), so its "known good" bookmark does not
-    // move on its own just because export pushed something new. Every export
-    // this cluster makes is by definition already-known-good (it is what the
-    // cluster is actually running), so each successful export advances that
-    // bookmark too, right below - otherwise the next pull's "did secrets/
-    // change" check walks all the way back to whatever this cluster's last
-    // *pull* acceptance was (possibly never, if pull has never been used
-    // yet), sees this export's own secrets/ commits in that range, and
-    // rejects-and-reverts an unrelated later commit as collateral damage.
-    let pull_dir = data_dir.join("git-backup-pull");
-    // Kept outside `dir` since that directory is the git working tree itself
-    // and gets fully wiped and rewritten every export tick.
+    // The pull path no longer needs a separate working copy: it computes
+    // its "known good" baseline fresh each call from the cluster's live
+    // raft state, so there is no persisted local state to desync across
+    // leadership changes. The export path uses this single bare repo for
+    // pushing.
     let cache_path = data_dir.join("git_backup_cache.json");
     let mut ticker = tokio::time::interval(GIT_BACKUP_POLL_INTERVAL);
     let cache_state = cl_backup::cache_state::CacheState::load(&cache_path);
@@ -722,11 +713,6 @@ async fn watch_git_backup(
         secret_cache = updated_cache;
         let last_export = match &result {
             Ok(commit) => {
-                if let Some(oid) = commit {
-                    if let Err(e) = advance_pull_bookmark(&pull_dir, &backup_cfg, oid) {
-                        warn!(error = %e, "git backup: could not advance the pull bookmark past this export");
-                    }
-                }
                 last_snapshot = Some(snapshot);
                 cl_backup::status::LastExport {
                     at: unix_now(),
@@ -810,17 +796,6 @@ async fn run_git_export_blocking(
         Ok(outcome) => outcome,
         Err(e) => (Err(anyhow!("git export task panicked: {e}")), cache_before_attempt),
     }
-}
-
-/// Moves the webhook-pull working copy's own local branch ref forward to
-/// `commit` (an oid string just pushed by export), without touching its
-/// working tree or the remote - see the comment above `watch_git_backup`'s
-/// `pull_dir`. Opens its own `GitBackup` rather than sharing export's,
-/// since the two working trees must stay separate.
-fn advance_pull_bookmark(pull_dir: &Path, backup_cfg: &cl_config::GitBackupConfig, commit: &str) -> anyhow::Result<()> {
-    let repo = cl_backup::git::GitBackup::open_or_init(pull_dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
-    repo.advance_local_ref_str(commit)?;
-    Ok(())
 }
 
 async fn generate_and_publish_deploy_key(cluster: &Arc<ClusterNode>, key: &ClusterKey) -> anyhow::Result<()> {

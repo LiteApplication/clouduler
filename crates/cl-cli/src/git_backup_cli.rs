@@ -1,7 +1,6 @@
 //! `clouduler git-backup` commands: manual controls for the git <-> cluster
 //! mirror (see `docs/git-backup.md`) that fall outside the schedule-driven
-//! export loop and the webhook-driven pull - triggering a pull immediately,
-//! and force-pushing the export past a diverged remote.
+//! export loop and the webhook-driven pull - triggering a pull immediately.
 //!
 //! Goes over the same node-to-node https channel `clouduler logs`/`exec` use:
 //! the normal api, authenticated by an HMAC signature over the shared cluster
@@ -9,12 +8,10 @@
 //! on disk for other commands and there is no reason to also ask for the
 //! separate webhook token.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use cl_config::ClusterConfig;
 use cl_secret::ClusterKey;
 use cl_update::internal_client::AUTH_HEADER;
-
-use cl_init::prompt::Prompt;
 
 fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
     match via {
@@ -55,7 +52,7 @@ async fn trigger(cfg: &ClusterConfig, via: Option<&str>, path: &str) -> Result<(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("{node} answered {status}: {body}");
+        anyhow::bail!("{node} answered {status}: {body}");
     }
     Ok(())
 }
@@ -63,19 +60,5 @@ async fn trigger(cfg: &ClusterConfig, via: Option<&str>, path: &str) -> Result<(
 pub async fn pull(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
     trigger(cfg, via, "/api/git-backup/pull").await?;
     println!("triggered a git backup pull");
-    Ok(())
-}
-
-pub async fn force_push(cfg: &ClusterConfig, via: Option<&str>, yes: bool) -> Result<()> {
-    let mut prompt = Prompt::new(std::io::stdin().lock(), std::io::stdout(), !yes);
-    if !prompt.confirm(
-        "force-push the cluster's own exported state, overwriting the remote branch's history?",
-        yes,
-    )? {
-        bail!("aborted");
-    }
-
-    trigger(cfg, via, "/api/git-backup/force-push").await?;
-    println!("force-pushed the cluster's git backup export");
     Ok(())
 }

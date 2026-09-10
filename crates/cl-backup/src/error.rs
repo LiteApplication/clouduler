@@ -29,9 +29,6 @@ pub enum BackupError {
     #[error("cluster state has no {0} deploy key entry")]
     MissingDeployKey(&'static str),
 
-    #[error("no local export commit yet to force-push - wait for the first export tick to run")]
-    NoLocalExportCommit,
-
     #[error("push rejected by remote: {0}")]
     PushRejected(String),
 

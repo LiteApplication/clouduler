@@ -9,7 +9,7 @@ below for how it relates to `clouduler emergency`.
 
 ## What gets exported
 
-Every export is a full rebuild of the working tree, not an incremental patch:
+Every export is a full rebuild of the tree, not an incremental patch:
 
 ```
 cluster.yaml
@@ -29,6 +29,31 @@ not exported: node roster history, running-instance placement, DNS/certificate
 state, and anything else outside the four kinds listed above - all of that is
 either already in `cluster.yaml` or is reconstructed by the scheduler once the
 cluster is running again.
+
+Any other files or directories present in the tracked branch (e.g. a README,
+CI config, or .gitignore an admin added by hand) are never exported - every
+commit built by the export process contains exactly and only the four tracked
+kinds listed above. Admin-added files are not clobbered on disk (there is no
+working directory) but they are not carried forward into new exports either;
+the tree is always rebuilt from scratch against the remote's current tip.
+
+## How git storage works internally
+
+Both export and pull operate against a **bare git repository** on the leader
+node - a directory containing only the bare git object database (no working
+tree, no `HEAD` checkout). Commits and trees are constructed entirely via
+git2's object-database APIs (`Repository::blob`, `TreeBuilder::insert`,
+`Repository::commit`) without ever writing files to a working directory. This
+means there is no checked-out working copy to conflict, no file-system
+locking to worry about, and no stale state between ticks.
+
+Exports build the full tree from raft state, compare it to the remote's
+current tip (fetched fresh each tick), and only commit+push when something
+changed. Pulls fetch the remote tip fresh, build the cluster's *current live
+state* into a virtual tree (the same tree a fresh export would produce), and
+compare the two. This comparison is always against what the cluster is
+**running right now**, not against a historical bookmark, so leadership
+rotation between an export and a pull cannot cause a spurious rejection.
 
 ## Setup
 
@@ -75,12 +100,22 @@ changed - so the repo's history reads as a log of cluster changes, not
 main event loop, so a slow push never delays anything else the leader is
 doing.
 
+Each export fetches the remote's current tip first, builds the candidate
+tree from raft state, and compares its tree OID to the remote tip's tree
+OID. If they are identical the export is a no-op (no commit created, no
+push attempted). If different, a new commit is created whose parent is the
+freshly-fetched remote tip (or no parent if the branch does not yet exist on
+the remote), and pushed non-force. If the push is rejected because the remote
+moved concurrently, the export retries once: it re-fetches the tip, rebuilds
+the commit against the new parent, and pushes again. Since no local branch
+state is persisted, there is no divergence to reconcile.
+
 The last export attempt (timestamp, summary, commit hash if it succeeded, or
 the error if it did not) is shown on the Git backup config page. A failed
 export is retried on the next poll; it does not block anything else from
 running.
 
-## Pulling changes back (git &rarr; cluster)
+## Pulling changes back (git → cluster)
 
 A push to the tracked branch can flow back into the cluster too, the reverse
 of the export above. On the Git backup config page, set a webhook token, then
@@ -96,32 +131,41 @@ all of them accept an arbitrary url. Treat the whole url as the secret, the
 same as you would a header token - anyone who has it can trigger a pull.
 
 Any node can receive the request; a non-leader forwards it internally to
-whichever node currently leads, since the deploy key and working copy are
-leader-side. The leader fetches the tracked branch and, if the new tip parses
-and validates cleanly, applies it: `cluster.yaml`, every stack, and the plain
-configs they reference. A commit that fails to parse, fails stack validation,
-or touches anything under `secrets/` is never applied - secret rotation must
-go through the api, git can only ever reference secrets that already exist.
-The rejected commit is preserved on its own `rejected/<branch>-<sha>` branch
-and the tracked branch is force-pushed back to its last known-good state with
-an empty commit on top explaining why, so the remote never points at
-something the cluster refuses to run. The last pull's outcome (applied commit,
-or the rejection reason and preserved branch) shows on the same config page.
+whichever node currently leads, since only the leader has the deploy key.
+The leader fetches the tracked branch and:
 
-Two `clouduler` commands cover the cases the webhook itself doesn't:
+1. Builds the **current live cluster state** into a virtual tree (the same
+   tree a fresh export would produce right now).
+2. Compares the `secrets/` subtree OID between that live baseline and the
+   incoming candidate commit. If the candidate touches any secrets that
+   differ from what the cluster already has, the pull is rejected - secret
+   rotation must go through the API, not via git. The rejected commit is
+   preserved on `rejected/<branch>-<sha>` and the tracked branch is reverted
+   to the live state with an explanatory commit on top.
+3. If secrets are compatible, reads the candidate's `cluster.yaml`, stack
+   specs, and plain configs directly from the fetched tree objects (no
+   working-directory checkout) and validates them.
+4. On success, applies the pulled tree: reconciles cluster state by
+   diffing the parsed tree against the current cluster state and applying
+   the delta (adding, updating, or removing configs, stacks, and secrets).
+
+The baseline comparison is always against what the cluster is *running right
+now* - not against a historical bookmark or a previously-persisted "known
+good" ref. This means leadership rotation between an export and a pull can
+never cause a spurious rejection: the comparison is always apples-to-apples
+against the live state, regardless of which node happens to be leader.
+
+The last pull's outcome (applied commit, or the rejection reason and
+preserved branch) shows on the same config page.
+
+## Commands
 
 ```
-clouduler git-backup pull                # run the same pull manually, e.g. to test the setup
-clouduler git-backup force-push [--yes]  # force the cluster's own export past a diverged remote
+clouduler git-backup pull    # run the same pull manually, e.g. to test the setup
 ```
 
 `pull` is exactly what the webhook triggers, without needing a working webhook
-to test it. `force-push` is manual recovery: if the tracked branch was
-rewritten by hand, or left mid-way through a botched rejection, the ordinary
-export's fast-forward push can get stuck failing on every tick forever -
-`force-push` overwrites the remote branch with whatever the cluster's own
-export working copy currently has, once you've confirmed that's the version to
-keep. Both talk to the cluster over the same internal, key-authenticated
+to test it. It talks to the cluster over the same internal, key-authenticated
 channel `clouduler logs`/`exec` use, not the webhook token.
 
 ## Restoring
@@ -143,6 +187,12 @@ The age identity is read once, used in memory to decrypt and immediately
 reseal each secret under this node's own cluster key, and never written
 anywhere. A secret that cannot be decrypted with the identity given is
 skipped and reported, not fatal - the rest of the restore still proceeds.
+
+Restore reads the backup content from a real cloned repository on disk (using
+the standard `parse_dir` path that reads checked-out files). This is a
+one-shot offline admin operation where the clone is a local filesystem path,
+so there is no need for the virtual tree approach used by the hot-path export
+and pull code.
 
 Every restored object gets a fresh revision number; the numbers a commit
 history carries are meaningless to a freshly rebuilt state machine. The
@@ -172,8 +222,6 @@ They compose rather than overlap: `emergency` says nothing about the cluster's
 ## Limitations
 
 - SSH only. An `http(s)://` repo URL is rejected at config validation time.
-- One-way export. Nothing is ever read back from the repo except by
-  `clouduler restore`, and only when you run it deliberately.
 - Config/secret ownership by a specific stack is not preserved across a
   restore (see [What gets exported](#what-gets-exported)).
 - The SSH-credential push path itself is not covered by the automated test

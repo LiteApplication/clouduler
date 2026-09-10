@@ -288,9 +288,6 @@ async fn main() -> Result<()> {
         },
         Command::GitBackup { command } => match command {
             GitBackupCommand::Pull { via } => cl_cli::git_backup_cli::pull(&cfg, via.as_deref()).await,
-            GitBackupCommand::ForcePush { via, yes } => {
-                cl_cli::git_backup_cli::force_push(&cfg, via.as_deref(), yes).await
-            }
         },
     }
 }

@@ -125,8 +125,11 @@ pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Re
 }
 
 /// The reverse of `build`, read back off disk (an already-checked-out git
-/// working tree). Secrets are returned still age-encrypted — decrypting them
-/// needs the admin's identity, which only the `restore` CLI command holds.
+/// working tree). Used only by `clouduler restore`, which clones a real
+/// repo — the hot-path pull reads directly from the odb via
+/// `git::parse_tree` instead. Secrets are returned still age-encrypted —
+/// decrypting them needs the admin's identity, which only the `restore`
+/// CLI command holds.
 pub struct ParsedTree {
     pub cluster_yaml: Option<String>,
     /// Stack name -> raw spec yaml.

@@ -302,10 +302,9 @@ pub enum Command {
     },
     /// Manual controls for the git backup feature's git -> cluster direction
     /// (see `docs/git-backup.md`): trigger the webhook's pull outside of a
-    /// real webhook, and force-push the cluster's own export past a diverged
-    /// remote. Distinct from `restore`, which rebuilds a cluster's replicated
-    /// state from a repo when the cluster itself has lost it - these instead
-    /// operate on an already-healthy cluster's live mirror.
+    /// real webhook. Distinct from `restore`, which rebuilds a cluster's
+    /// replicated state from a repo when the cluster itself has lost it -
+    /// these instead operate on an already-healthy cluster's live mirror.
     GitBackup {
         #[command(subcommand)]
         command: GitBackupCommand,
@@ -763,22 +762,6 @@ pub enum GitBackupCommand {
         /// forwards the trigger to whichever node currently leads.
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
-    },
-    /// Force-push the cluster's own exported state past whatever is
-    /// currently on the remote tracked branch, overwriting its history.
-    ///
-    /// For when the ordinary export's fast-forward push is stuck failing -
-    /// the remote branch was rewritten by hand, or left mid-way through a
-    /// botched rejection - and you have confirmed the cluster's own state,
-    /// not the remote's, is the one to keep.
-    ForcePush {
-        /// Node to ask. Defaults to any manager in the config; a non-leader
-        /// forwards the trigger to whichever node currently leads.
-        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
-        via: Option<String>,
-        /// Skip the confirmation prompt.
-        #[arg(long)]
-        yes: bool,
     },
 }
 

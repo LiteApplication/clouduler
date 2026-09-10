@@ -1480,9 +1480,8 @@ function GitBackupDeployKey() {
         one of them accepts an arbitrary url, so the token lives there instead. Treat the full url as the secret: it
         grants the same access a header token would have. A push notification pulls the branch above; a commit that
         fails to parse or validate is never applied - it is preserved on its own
-        <code> rejected/...</code> branch and the branch above is force-pushed back to its last known-good state.
-        Use <code>clouduler git-backup pull</code> to trigger the same pull by hand, and{' '}
-        <code>clouduler git-backup force-push</code> to push the cluster's own state past a remote that has diverged.
+        <code> rejected/...</code> branch and the branch above is force-pushed back to a tree reflecting what the
+        cluster is currently running. Use <code>clouduler git-backup pull</code> to trigger the same pull by hand.
       </span>
       <input
         id="backup-webhook-token"
