@@ -32,6 +32,9 @@ pub enum BackupError {
     #[error("no local export commit yet to force-push - wait for the first export tick to run")]
     NoLocalExportCommit,
 
+    #[error("push rejected by remote: {0}")]
+    PushRejected(String),
+
     #[error("cannot decode {what}: {reason}")]
     Malformed { what: String, reason: String },
 

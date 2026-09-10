@@ -2,8 +2,10 @@
 //! tick, then staged, committed, and pushed with the cluster's ssh deploy
 //! key.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use git2::cert::Cert;
 use git2::{CertificateCheckStatus, Cred, PushOptions, RemoteCallbacks, Repository, RepositoryInitOptions, Signature};
@@ -58,10 +60,39 @@ impl GitBackup {
 
     /// Replaces the whole working tree with `files`, and if that produced
     /// any change, commits and pushes it. Returns `None` when nothing
-    /// changed, so an unrelated raft-version bump never produces an empty
+    /// changed, so an unrelated raft-version bump doesn't produce an empty
     /// commit.
+    ///
+    /// If the push is rejected - the remote branch moved out from under us,
+    /// typically because a prior export's commit was rejected by the
+    /// cluster's own pull path and force-pushed back with a correction, or
+    /// because someone pushed to it by hand - re-seed onto the new remote
+    /// tip and retry once instead of leaving the local branch stuck
+    /// forever re-attempting the same non-fast-forward push every tick
+    /// (see `push_refspecs` for how the rejection is actually detected).
     pub fn sync(&self, files: &[TreeFile], message: &str, private_key_pem: &str) -> Result<Option<git2::Oid>> {
         self.seed_from_remote_if_new(private_key_pem)?;
+        match self.commit_and_push(files, message, private_key_pem) {
+            Ok(outcome) => Ok(outcome),
+            Err(e) if is_push_rejection(&e) => {
+                if !self.recover_onto_remote_tip(private_key_pem)? {
+                    // No remote tip to recover onto (origin has no branch
+                    // at all) - nothing pull-based to do, surface the
+                    // original rejection so the caller sees a real error
+                    // rather than silently doing nothing.
+                    return Err(e);
+                }
+                self.commit_and_push(files, message, private_key_pem)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One commit-and-push attempt: rewrite the working tree, commit if it
+    /// changed, push. Split out of `sync` so a rejected push can be
+    /// retried against a freshly re-seeded parent without redoing the
+    /// tree rewrite from scratch.
+    fn commit_and_push(&self, files: &[TreeFile], message: &str, private_key_pem: &str) -> Result<Option<git2::Oid>> {
         self.rewrite_working_tree(files)?;
 
         let mut index = self.repo.index()?;
@@ -97,6 +128,21 @@ impl GitBackup {
         self.push(private_key_pem)?;
 
         Ok(Some(oid))
+    }
+
+    /// Recovers from a rejected push by fetching the remote's current tip
+    /// and moving the local branch ref onto it, discarding the local
+    /// commit that couldn't land (its content isn't lost - `sync` rebuilds
+    /// the working tree from `files` again on retry, it's just no longer
+    /// the parent of a new commit). Returns whether a remote tip existed
+    /// to recover onto.
+    fn recover_onto_remote_tip(&self, private_key_pem: &str) -> Result<bool> {
+        let Some(oid) = self.fetch_remote_tip(private_key_pem)? else {
+            return Ok(false);
+        };
+        self.advance_local_ref(oid)?;
+        self.checkout_tree_to_disk(oid)?;
+        Ok(true)
     }
 
     /// A working copy with no commits yet - e.g. a node that just became
@@ -139,9 +185,29 @@ impl GitBackup {
         self.push_refspecs(&[refspec], private_key_pem)
     }
 
+    /// Pushes `refspecs` to `origin`. A rejected ref update (e.g. a
+    /// non-force push against a remote branch that has moved, most
+    /// commonly because someone else pushed to it directly, or the
+    /// remote was manually rewound) is *not* surfaced by libgit2 as an
+    /// `Err` from `Remote::push` itself - the transport round-trip can
+    /// succeed while the individual ref update is refused, and that is
+    /// only ever reported through the `push_update_reference` callback.
+    /// Without wiring that callback up, a rejected push looked
+    /// indistinguishable from a real success: the export tick kept
+    /// committing on top of a branch it could never actually land,
+    /// silently piling up local-only commits forever (this is the
+    /// "reccuring issue" reported in clouduler-config: the remote's
+    /// git-backup pull path force-pushed a correction back onto `main`,
+    /// which the next unmodified export attempt would tick right past).
+    /// Bubble the rejection up as `BackupError::PushRejected` so
+    /// `push`/`push_refspecs` callers can react (see `sync`, which
+    /// fetches and rebases onto the new remote tip instead of leaving
+    /// the branch stuck).
     fn push_refspecs(&self, refspecs: &[String], private_key_pem: &str) -> Result<()> {
         let mut remote = self.repo.find_remote("origin")?;
         let known_hosts_path = self.known_hosts_path();
+        let rejection: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let rejection_cb = Rc::clone(&rejection);
 
         let mut callbacks = RemoteCallbacks::new();
         callbacks.credentials(|_url, username_from_url, _allowed| {
@@ -156,12 +222,28 @@ impl GitBackup {
             check_host_key(&known_hosts_path, cert, host)
                 .map_err(|e| git2::Error::from_str(&e.to_string()))
         });
+        // `status` is `Some(reason)` exactly when the remote refused this
+        // particular ref update (non-fast-forward, hook rejection, etc.);
+        // `None` means it landed. Only the first rejection is kept - one
+        // is enough to know the whole push needs a retry.
+        callbacks.push_update_reference(move |refname, status| {
+            if let Some(reason) = status {
+                rejection_cb
+                    .borrow_mut()
+                    .get_or_insert_with(|| format!("{refname}: {reason}"));
+            }
+            Ok(())
+        });
 
         let mut push_options = PushOptions::new();
         push_options.remote_callbacks(callbacks);
 
         let refs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
         remote.push(&refs, Some(&mut push_options))?;
+
+        if let Some(reason) = rejection.borrow_mut().take() {
+            return Err(BackupError::PushRejected(reason));
+        }
         Ok(())
     }
 
@@ -382,6 +464,19 @@ pub struct RejectOutcome {
     /// What the tracked branch was force-pushed back to: `good`, or a fresh
     /// empty root commit when there was no known-good history yet.
     pub revert_commit: git2::Oid,
+}
+
+/// Whether `err` represents a rejected (non-fast-forward) push, whether
+/// libgit2 caught it client-side before ever contacting the remote (the
+/// common case: it walks the remote-tracking ref locally and refuses to
+/// even attempt a non-force push, surfaced as `Err(ErrorCode::NotFastForward)`
+/// straight out of `Remote::push`), or the remote itself refused the ref
+/// update after a round trip (surfaced through the `push_update_reference`
+/// callback in `push_refspecs`, wrapped as `BackupError::PushRejected`).
+/// Both need the same recovery: fetch the new remote tip and retry.
+fn is_push_rejection(err: &BackupError) -> bool {
+    matches!(err, BackupError::PushRejected(_))
+        || matches!(err, BackupError::Git(e) if e.code() == git2::ErrorCode::NotFastForward)
 }
 
 fn write_blob(dir: &Path, root: &str, name: &str, content: &[u8]) -> Result<()> {
@@ -899,6 +994,74 @@ mod tests {
         assert_eq!(
             remote_repo.find_reference("refs/heads/main").expect("remote main").target(),
             Some(local_oid)
+        );
+    }
+
+    /// Regression test for the "recurring issue" reported against
+    /// clouduler-config: a rejected (non-fast-forward) push must not be
+    /// silently treated as success, and the next `sync` must recover by
+    /// pulling the new remote tip instead of retrying the same doomed
+    /// push forever.
+    #[test]
+    fn a_rejected_push_is_recovered_by_pulling_instead_of_retried_forever() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let work_dir = tempfile::tempdir().expect("work tempdir");
+        let files = vec![TreeFile {
+            path: "cluster.yaml".to_string(),
+            contents: b"nodes: []\n".to_vec(),
+        }];
+        let (backup, _local_oid) = seeded_backup(&bare_dir, &work_dir, &files);
+
+        // Simulate the remote moving out from under us after the local
+        // commit was made (e.g. clouduler's own pull path rejected some
+        // unrelated commit and force-pushed a correction back onto the
+        // tracked branch) - the diverged commit is not an ancestor of the
+        // local branch, so a plain (non-force) push is rejected.
+        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
+        let diverged_tree = {
+            let mut builder = remote_repo.treebuilder(None).expect("treebuilder");
+            let blob = remote_repo.blob(b"nodes: [diverged]\n").expect("blob");
+            builder.insert("cluster.yaml", blob, 0o100644).expect("insert");
+            let oid = builder.write().expect("write");
+            remote_repo.find_tree(oid).expect("find tree")
+        };
+        let signature = Signature::now("someone-else", "someone-else@localhost").expect("signature");
+        let diverged = remote_repo
+            .commit(None, &signature, &signature, "diverged", &diverged_tree, &[])
+            .expect("commit");
+        remote_repo
+            .reference("refs/heads/main", diverged, true, "simulate divergence")
+            .expect("update remote ref");
+
+        let dummy_key = "not-a-real-key";
+        let new_files = vec![TreeFile {
+            path: "cluster.yaml".to_string(),
+            contents: b"nodes: [new]\n".to_vec(),
+        }];
+
+        // Before the fix this would either error out with a non-fast-forward
+        // failure that then repeats forever, or (worse) `Remote::push`
+        // returning `Ok` while the ref update was actually refused, leaving
+        // the remote pointed at `diverged` forever. Now it must recover by
+        // fetching `diverged`, rebasing the new commit onto it, and landing
+        // on the remote.
+        let oid = backup
+            .sync(&new_files, "export after divergence", dummy_key)
+            .expect("sync should recover from the rejected push")
+            .expect("a real commit");
+
+        let remote_tip = remote_repo
+            .find_reference("refs/heads/main")
+            .expect("remote main")
+            .target()
+            .expect("remote main has a target");
+        assert_eq!(remote_tip, oid, "remote should now point at the recovered export commit");
+
+        let remote_commit = remote_repo.find_commit(remote_tip).expect("find remote commit");
+        assert_eq!(
+            remote_commit.parent_id(0).expect("recovered commit has a parent"),
+            diverged,
+            "the recovered commit should be built on top of the diverged remote tip, not orphaned"
         );
     }
 }

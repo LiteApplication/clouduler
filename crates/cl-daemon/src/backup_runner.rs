@@ -76,6 +76,9 @@ const STALE_RUN_CAP_SECS: i64 = 24 * 3600;
 /// before running restic against whatever the source's one-off push has
 /// landed so far - see the module doc comment.
 const SYNC_GRACE_SECS: i64 = 120;
+/// How long a local, non-primary copy of a drive is given to catch up with
+/// its primary before a backup runs against it anyway.
+const DRIVE_SYNC_GRACE_SECS: i64 = 120;
 /// On top of the affected services' own `stop_grace_period`, how long to
 /// wait for local containers to actually stop before giving up and running
 /// the backup anyway - mirrors `folder_import`'s margin.
@@ -311,6 +314,15 @@ async fn execute(
     // elapsed with no push having landed yet (source unreachable, say)
     // still needs a real, existing directory for restic to point at.
     let source_path = if registry.implements(&run.drive) {
+        // A local copy of a replicated drive can lag its primary (a fresh
+        // replica, or one that fell behind) - back it up straight off disk
+        // without checking and restic would capture stale data with no
+        // warning. Give it a bounded chance to catch up first; a copy still
+        // behind once the deadline passes is backed up as-is, same trade-off
+        // `SYNC_GRACE_SECS` accepts for the `NodeLocal`-elsewhere case - the
+        // next scheduled run corrects it.
+        wait_for_drive_synced(cluster, registry, &run.drive, node_name, Duration::from_secs(DRIVE_SYNC_GRACE_SECS as u64))
+            .await;
         registry.root(&run.drive)?.to_path_buf()
     } else {
         let BackupDestinationKind::NodeLocal { path, .. } = &destination.kind else {
@@ -444,6 +456,42 @@ async fn wait_for_stopped(
             return;
         }
         tokio::time::sleep(Duration::from_secs(1).min(deadline - elapsed)).await;
+    }
+}
+
+/// Whether every volume on `drive` is caught up to its primary's generation
+/// on `node`. Served drives have no replica lag to check - only the active
+/// server ever holds a copy, so it's trivially synced.
+fn drive_synced(registry: &DriveRegistry, state: &ClusterState, drive: &str, node: &str) -> bool {
+    if registry.is_served(drive) {
+        return true;
+    }
+    state
+        .volumes
+        .iter()
+        .filter(|(id, _)| id.drive == drive)
+        .all(|(_, v)| v.in_sync().contains(node))
+}
+
+/// Poll until `drive` is fully synced on `node`, or `deadline` elapses. A
+/// primary's own replica entry is bumped the instant it writes (see
+/// `TouchVolume`), so this returns immediately for the common case and only
+/// actually waits for a replica that is genuinely behind.
+async fn wait_for_drive_synced(
+    cluster: &Arc<ClusterNode>,
+    registry: &DriveRegistry,
+    drive: &str,
+    node: &str,
+    deadline: Duration,
+) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        let state = cluster.state().await;
+        if drive_synced(registry, &state, drive, node) || elapsed >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(5).min(deadline - elapsed)).await;
     }
 }
 
