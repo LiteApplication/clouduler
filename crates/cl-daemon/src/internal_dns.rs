@@ -92,7 +92,7 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
         let live = crate::daemon::live_config(&state, &boot_cfg);
         let nodes = nodes_of(&live);
 
-        let records = zone_for(&state, &live, &nodes);
+        let records = zone_for(&state, &live, &nodes, cluster.quorum().leader());
         if let Err(e) = dns.reload(&records).await {
             warn!(error = %e, "could not rebuild the internal zone");
             continue;
@@ -132,10 +132,23 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
 /// hosts routed on a *different* network are left out: their domain isn't
 /// this zone's origin, so they belong to whatever resolves that zone
 /// upstream, not to us.
+///
+/// The dashboard's own hostname (`web.address`/`web.network`) is included
+/// too, resolved to the current leader alone - same rule `desired_records`
+/// in `cl_daemon::proxy` already applies for the *external* DNS reconcile,
+/// and for the same reason: writes only land on the leader
+/// (`redirect_non_leader` in `cl_api::server`), so every other node's
+/// address is a dead end for anything but a read. Without this, a
+/// container has no way to resolve the dashboard's hostname at all: it
+/// isn't a stack route, so `desired_dns_hosts` never sees it, and the
+/// internal zone is authoritative for its own domain - a query for a name
+/// under it that isn't in the zone comes back NXDOMAIN rather than falling
+/// through to the upstream forwarder.
 fn zone_for(
     state: &ClusterState,
     cfg: &ClusterConfig,
     nodes: &[(String, Ipv4Addr)],
+    leader_id: Option<cl_raft::NodeId>,
 ) -> Vec<ZoneRecord> {
     let instances = crate::placement::instance_addresses(state, cfg);
     let mut records = build_records(
@@ -165,6 +178,21 @@ fn zone_for(
             });
         }
     }
+
+    if cfg.web.network == *internal_name {
+        if let Some(leader_ip) = leader_id.and_then(|id| {
+            cfg.nodes
+                .iter()
+                .find(|(_, node)| cl_raft::node_id(node.id) == id)
+                .and_then(|(name, _)| node_ips.get(name.as_str()).copied())
+        }) {
+            records.push(ZoneRecord {
+                name: cfg.web.address.clone(),
+                addresses: vec![leader_ip],
+            });
+        }
+    }
+
     records.sort_by(|a, b| a.name.cmp(&b.name));
     records
 }
@@ -209,7 +237,7 @@ services:
 ";
         let state = state_with(spec, 1);
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
-        let records = zone_for(&state, &cluster_config(), &nodes);
+        let records = zone_for(&state, &cluster_config(), &nodes, None);
 
         assert_eq!(
             answer(&records, "blog"),
@@ -224,7 +252,7 @@ services:
     fn a_proxy_host_on_a_different_network_is_absent() {
         let state = state_with(SPEC, 1);
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
-        let records = zone_for(&state, &cluster_config(), &nodes);
+        let records = zone_for(&state, &cluster_config(), &nodes, None);
 
         assert_eq!(answer(&records, "blog"), None);
     }
@@ -232,7 +260,7 @@ services:
     #[test]
     fn a_service_resolves_to_every_replica() {
         let state = state_with(SPEC, 2);
-        let records = zone_for(&state, &cluster_config(), &[]);
+        let records = zone_for(&state, &cluster_config(), &[], None);
 
         let addrs = answer(&records, "web.blog").expect("web.blog resolves");
         assert_eq!(addrs.len(), 2);
@@ -244,7 +272,7 @@ services:
     #[test]
     fn nodes_resolve_by_name() {
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
-        let records = zone_for(&state_with(SPEC, 1), &cluster_config(), &nodes);
+        let records = zone_for(&state_with(SPEC, 1), &cluster_config(), &nodes, None);
         assert_eq!(
             answer(&records, "n1"),
             Some(&[Ipv4Addr::new(10, 10, 0, 1)][..])
@@ -280,5 +308,37 @@ services:
     #[test]
     fn a_cluster_with_no_overlay_serves_nothing() {
         assert!(gateways(&ClusterState::default()).is_empty());
+    }
+
+    /// The dashboard hostname (`web.address`) isn't a stack route, so
+    /// nothing else in `zone_for` would ever produce a record for it - a
+    /// container asking for it before this existed got NXDOMAIN even though
+    /// the cluster answers for the exact same domain externally.
+    #[test]
+    fn the_dashboard_hostname_resolves_to_the_leader() {
+        let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
+        let leader = cl_raft::node_id(
+            uuid::Uuid::parse_str("3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01").unwrap(),
+        );
+        let records = zone_for(
+            &state_with(SPEC, 1),
+            &cluster_config(),
+            &nodes,
+            Some(leader),
+        );
+        assert_eq!(
+            answer(&records, "cloud"),
+            Some(&[Ipv4Addr::new(10, 10, 0, 1)][..])
+        );
+    }
+
+    /// No known leader (an election in flight) means no guess: the hostname
+    /// is simply absent rather than pointing at a node that might not even
+    /// be caught up, matching the external DNS reconcile's own rule.
+    #[test]
+    fn the_dashboard_hostname_is_absent_with_no_leader() {
+        let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
+        let records = zone_for(&state_with(SPEC, 1), &cluster_config(), &nodes, None);
+        assert_eq!(answer(&records, "cloud"), None);
     }
 }
