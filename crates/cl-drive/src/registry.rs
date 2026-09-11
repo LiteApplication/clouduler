@@ -107,8 +107,15 @@ impl DriveRegistry {
     /// The node currently serving a drive: the first candidate not in
     /// `unreachable`. `None` if every candidate is unreachable, or this
     /// isn't a served drive.
-    pub fn active_server<'a>(&'a self, drive: &str, unreachable: &BTreeSet<String>) -> Option<&'a str> {
-        self.served_candidates(drive).iter().map(String::as_str).find(|n| !unreachable.contains(*n))
+    pub fn active_server<'a>(
+        &'a self,
+        drive: &str,
+        unreachable: &BTreeSet<String>,
+    ) -> Option<&'a str> {
+        self.served_candidates(drive)
+            .iter()
+            .map(String::as_str)
+            .find(|n| !unreachable.contains(*n))
     }
 
     /// Whether this node serves, mounts, backs up, or replicates a drive.
@@ -144,7 +151,9 @@ impl DriveRegistry {
     }
 
     pub fn drives(&self) -> impl Iterator<Item = (&str, &Path)> {
-        self.drives.iter().map(|(name, path)| (name.as_str(), path.as_path()))
+        self.drives
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path()))
     }
 
     /// Local directory backing `drive` on this node.
@@ -226,7 +235,9 @@ impl DriveRegistry {
 /// no-op path component.
 pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
-        return Err(DriveError::PathEscape { path: rel.to_string() });
+        return Err(DriveError::PathEscape {
+            path: rel.to_string(),
+        });
     }
     if rel == "." {
         return Ok(root.to_path_buf());
@@ -234,7 +245,9 @@ pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
     let mut path = root.to_path_buf();
     for part in rel.split('/') {
         if part.is_empty() || part == "." || part == ".." || part.contains('\0') {
-            return Err(DriveError::PathEscape { path: rel.to_string() });
+            return Err(DriveError::PathEscape {
+                path: rel.to_string(),
+            });
         }
         path.push(part);
     }
@@ -253,7 +266,10 @@ pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
 pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
     let candidate = resolve_relative(root, rel)?;
 
-    let canonical_root = root.canonicalize().map_err(|source| DriveError::Io { path: root.to_path_buf(), source })?;
+    let canonical_root = root.canonicalize().map_err(|source| DriveError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
 
     let mut existing = candidate.as_path();
     while !existing.exists() {
@@ -262,11 +278,15 @@ pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
             None => break,
         }
     }
-    let canonical_existing =
-        existing.canonicalize().map_err(|source| DriveError::Io { path: existing.to_path_buf(), source })?;
+    let canonical_existing = existing.canonicalize().map_err(|source| DriveError::Io {
+        path: existing.to_path_buf(),
+        source,
+    })?;
 
     if !canonical_existing.starts_with(&canonical_root) {
-        return Err(DriveError::PathEscape { path: rel.to_string() });
+        return Err(DriveError::PathEscape {
+            path: rel.to_string(),
+        });
     }
     Ok(candidate)
 }
@@ -302,14 +322,20 @@ mod tests {
     fn volume_path_stays_under_the_drive_root() {
         let reg = registry();
         let id = VolumeId::new("fast", "gitlab-data");
-        assert_eq!(reg.volume_path(&id).unwrap(), PathBuf::from("/srv/fast/gitlab-data"));
+        assert_eq!(
+            reg.volume_path(&id).unwrap(),
+            PathBuf::from("/srv/fast/gitlab-data")
+        );
     }
 
     #[test]
     fn nested_volume_names_are_allowed() {
         let reg = registry();
         let id = VolumeId::new("fast", "a/b");
-        assert_eq!(reg.volume_path(&id).unwrap(), PathBuf::from("/srv/fast/a/b"));
+        assert_eq!(
+            reg.volume_path(&id).unwrap(),
+            PathBuf::from("/srv/fast/a/b")
+        );
     }
 
     #[test]
@@ -322,7 +348,10 @@ mod tests {
                 // Not a traversal: ".." only matters as a whole path component.
                 assert!(result.is_ok(), "{name} should be a legal literal name");
             } else {
-                assert!(matches!(result, Err(DriveError::PathEscape { .. })), "{name} should be rejected");
+                assert!(
+                    matches!(result, Err(DriveError::PathEscape { .. })),
+                    "{name} should be rejected"
+                );
             }
         }
     }
@@ -332,7 +361,10 @@ mod tests {
         let reg = registry();
         for name in ["/etc/passwd", "a//b", ""] {
             let id = VolumeId::new("fast", name);
-            assert!(matches!(reg.volume_path(&id), Err(DriveError::PathEscape { .. })), "{name} should be rejected");
+            assert!(
+                matches!(reg.volume_path(&id), Err(DriveError::PathEscape { .. })),
+                "{name} should be rejected"
+            );
         }
     }
 
@@ -346,7 +378,13 @@ mod tests {
         let id = VolumeId::new("cold", "data");
         let path = reg.ensure_staging_volume(&destination_path, &id).unwrap();
         assert!(path.is_dir());
-        assert_eq!(path, tmp.path().join(".backups-staging").join("cold").join("data"));
+        assert_eq!(
+            path,
+            tmp.path()
+                .join(".backups-staging")
+                .join("cold")
+                .join("data")
+        );
     }
 
     #[test]
@@ -392,7 +430,10 @@ mod tests {
             "n1",
             BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
         )
-        .with_served_by(BTreeMap::from([("fast".to_string(), vec!["n1".to_string()])]));
+        .with_served_by(BTreeMap::from([(
+            "fast".to_string(),
+            vec!["n1".to_string()],
+        )]));
         assert_eq!(serving.role("fast", &BTreeSet::new()), DriveRole::Serve);
         assert!(serving.is_served("fast"));
 
@@ -400,14 +441,18 @@ mod tests {
             "n2",
             BTreeMap::from([("fast".to_string(), PathBuf::from("/mnt/fast"))]),
         )
-        .with_served_by(BTreeMap::from([("fast".to_string(), vec!["n1".to_string()])]));
+        .with_served_by(BTreeMap::from([(
+            "fast".to_string(),
+            vec!["n1".to_string()],
+        )]));
         assert_eq!(mounting.role("fast", &BTreeSet::new()), DriveRole::Mount);
         assert!(mounting.is_served("fast"));
     }
 
     #[test]
     fn standby_takes_over_when_the_active_server_is_unreachable() {
-        let served_by = BTreeMap::from([("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])]);
+        let served_by =
+            BTreeMap::from([("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])]);
 
         let primary = DriveRegistry::from_drives(
             "n1",
@@ -432,8 +477,9 @@ mod tests {
 
     #[test]
     fn active_server_is_none_when_every_candidate_is_unreachable() {
-        let reg = DriveRegistry::from_drives("n1", BTreeMap::new())
-            .with_served_by(BTreeMap::from([("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])]));
+        let reg = DriveRegistry::from_drives("n1", BTreeMap::new()).with_served_by(BTreeMap::from(
+            [("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])],
+        ));
         let all_down = BTreeSet::from(["n1".to_string(), "n2".to_string()]);
         assert_eq!(reg.active_server("fast", &all_down), None);
         assert_eq!(reg.role("fast", &all_down), DriveRole::Standby);

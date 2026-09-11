@@ -328,7 +328,9 @@ pub enum MigrationPhase {
     /// Container is starting on the target.
     Starting,
     Done,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 impl MigrationPhase {
@@ -510,8 +512,13 @@ pub enum BackupRunOutcome {
         #[serde(default)]
         percent: Option<f64>,
     },
-    Succeeded { snapshot_id: String, bytes: u64 },
-    Failed { error: String },
+    Succeeded {
+        snapshot_id: String,
+        bytes: u64,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 // Hand-written so a raft log/snapshot written before `Running` grew its
@@ -548,7 +555,9 @@ impl<'de> Deserialize<'de> for BackupRunOutcome {
         }
         match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
             Current::Running { percent } => Ok(BackupRunOutcome::Running { percent }),
-            Current::Succeeded { snapshot_id, bytes } => Ok(BackupRunOutcome::Succeeded { snapshot_id, bytes }),
+            Current::Succeeded { snapshot_id, bytes } => {
+                Ok(BackupRunOutcome::Succeeded { snapshot_id, bytes })
+            }
             Current::Failed { error } => Ok(BackupRunOutcome::Failed { error }),
         }
     }
@@ -1275,7 +1284,9 @@ impl ClusterState {
                     .get(node)
                     .ok_or_else(|| format!("unknown node {node}"))?;
                 if current.node_pubkey.as_deref() != Some(entry.target_pubkey.as_str()) {
-                    return Err(format!("node {node} has not published the public key this was wrapped for"));
+                    return Err(format!(
+                        "node {node} has not published the public key this was wrapped for"
+                    ));
                 }
                 self.wrapped_keys.insert(node.clone(), entry.clone());
                 Ok(())
@@ -1411,7 +1422,10 @@ impl ClusterState {
                 // pinned image - only where it runs changed - so losing the
                 // pin here would let it silently drift back to whatever tag
                 // it deploys from now resolves to the next time it restarts.
-                let image_digest = self.assignments.get(instance).and_then(|a| a.image_digest.clone());
+                let image_digest = self
+                    .assignments
+                    .get(instance)
+                    .and_then(|a| a.image_digest.clone());
                 self.assignments.insert(
                     instance.clone(),
                     Assignment {
@@ -1502,14 +1516,19 @@ impl ClusterState {
 
             Request::UpsertVolume { id, primary } => {
                 if !self.node_implements(primary, &id.drive) {
-                    return Err(format!("node {primary} does not implement drive {}", id.drive));
+                    return Err(format!(
+                        "node {primary} does not implement drive {}",
+                        id.drive
+                    ));
                 }
-                self.volumes.entry(id.clone()).or_insert_with(|| VolumeState {
-                    id: id.clone(),
-                    generation: 1,
-                    primary: primary.clone(),
-                    replicas: BTreeMap::from([(primary.clone(), 1)]),
-                });
+                self.volumes
+                    .entry(id.clone())
+                    .or_insert_with(|| VolumeState {
+                        id: id.clone(),
+                        generation: 1,
+                        primary: primary.clone(),
+                        replicas: BTreeMap::from([(primary.clone(), 1)]),
+                    });
                 Ok(())
             }
 
@@ -1536,7 +1555,10 @@ impl ClusterState {
 
             Request::TouchVolume { id, primary } => {
                 if !self.node_implements(primary, &id.drive) {
-                    return Err(format!("node {primary} does not implement drive {}", id.drive));
+                    return Err(format!(
+                        "node {primary} does not implement drive {}",
+                        id.drive
+                    ));
                 }
                 let volume = self
                     .volumes
@@ -1555,7 +1577,8 @@ impl ClusterState {
                         return Err(format!("unknown node {node}"));
                     }
                 }
-                self.restic_destinations.insert(destination.id.clone(), destination.clone());
+                self.restic_destinations
+                    .insert(destination.id.clone(), destination.clone());
                 Ok(())
             }
 
@@ -1572,8 +1595,14 @@ impl ClusterState {
                 if !self.drive_known(&target.drive) {
                     return Err(format!("unknown drive {}", target.drive));
                 }
-                if !self.restic_destinations.contains_key(&target.destination_id) {
-                    return Err(format!("unknown backup destination {}", target.destination_id));
+                if !self
+                    .restic_destinations
+                    .contains_key(&target.destination_id)
+                {
+                    return Err(format!(
+                        "unknown backup destination {}",
+                        target.destination_id
+                    ));
                 }
                 if target.enabled
                     && self.restic_targets.values().any(|t| {
@@ -1588,7 +1617,8 @@ impl ClusterState {
                         target.drive, target.destination_id
                     ));
                 }
-                self.restic_targets.insert(target.id.clone(), target.clone());
+                self.restic_targets
+                    .insert(target.id.clone(), target.clone());
                 Ok(())
             }
 
@@ -1611,12 +1641,16 @@ impl ClusterState {
                 // allowed (that run *is* the one already running); only a
                 // brand-new run competing for the same target is rejected.
                 if matches!(run.outcome, BackupRunOutcome::Running { .. })
-                    && self
-                        .restic_runs
-                        .values()
-                        .any(|r| r.target_id == run.target_id && r.id != run.id && matches!(r.outcome, BackupRunOutcome::Running { .. }))
+                    && self.restic_runs.values().any(|r| {
+                        r.target_id == run.target_id
+                            && r.id != run.id
+                            && matches!(r.outcome, BackupRunOutcome::Running { .. })
+                    })
                 {
-                    return Err(format!("a backup is already running for target {}", run.target_id));
+                    return Err(format!(
+                        "a backup is already running for target {}",
+                        run.target_id
+                    ));
                 }
                 self.restic_runs.insert(run.id.clone(), run.clone());
                 let mut same_target: Vec<&BackupRun> = self
@@ -1627,7 +1661,11 @@ impl ClusterState {
                 if same_target.len() > MAX_BACKUP_RUNS_PER_TARGET {
                     same_target.sort_by_key(|r| r.started_at);
                     let drop_count = same_target.len() - MAX_BACKUP_RUNS_PER_TARGET;
-                    let to_drop: Vec<String> = same_target.iter().take(drop_count).map(|r| r.id.clone()).collect();
+                    let to_drop: Vec<String> = same_target
+                        .iter()
+                        .take(drop_count)
+                        .map(|r| r.id.clone())
+                        .collect();
                     for id in to_drop {
                         self.restic_runs.remove(&id);
                     }
@@ -1638,7 +1676,10 @@ impl ClusterState {
             Request::PutRestoreRequest(request) => {
                 validate_object_name(&request.id)?;
                 match &request.scope {
-                    RestoreScope::Drive { drive } | RestoreScope::Volume { volume: VolumeId { drive, .. } } => {
+                    RestoreScope::Drive { drive }
+                    | RestoreScope::Volume {
+                        volume: VolumeId { drive, .. },
+                    } => {
                         if !self.drive_known(drive) {
                             return Err(format!("unknown drive {drive}"));
                         }
@@ -1663,7 +1704,8 @@ impl ClusterState {
                     let mut all: Vec<&RestoreRequest> = self.restore_requests.values().collect();
                     all.sort_by_key(|r| r.requested_at);
                     let drop_count = all.len() - MAX_RESTORE_REQUESTS;
-                    let to_drop: Vec<String> = all.iter().take(drop_count).map(|r| r.id.clone()).collect();
+                    let to_drop: Vec<String> =
+                        all.iter().take(drop_count).map(|r| r.id.clone()).collect();
                     for id in to_drop {
                         self.restore_requests.remove(&id);
                     }
@@ -1676,13 +1718,23 @@ impl ClusterState {
                     .restore_requests
                     .get_mut(id)
                     .ok_or_else(|| format!("unknown restore request {id}"))?;
-                if matches!(request.status, RestoreStatus::Succeeded | RestoreStatus::Failed { .. }) {
+                if matches!(
+                    request.status,
+                    RestoreStatus::Succeeded | RestoreStatus::Failed { .. }
+                ) {
                     return Err(format!("restore request {id} already finished"));
                 }
-                if matches!(status, RestoreStatus::Running) && !matches!(request.status, RestoreStatus::Pending) {
-                    return Err(format!("restore request {id} is not pending, cannot be claimed"));
+                if matches!(status, RestoreStatus::Running)
+                    && !matches!(request.status, RestoreStatus::Pending)
+                {
+                    return Err(format!(
+                        "restore request {id} is not pending, cannot be claimed"
+                    ));
                 }
-                if matches!(status, RestoreStatus::Succeeded | RestoreStatus::Failed { .. }) {
+                if matches!(
+                    status,
+                    RestoreStatus::Succeeded | RestoreStatus::Failed { .. }
+                ) {
                     request.finished_at = Some(*at);
                 }
                 request.status = status.clone();
@@ -1690,11 +1742,15 @@ impl ClusterState {
             }
 
             Request::ReportContainerStatus { node, running } => {
-                self.container_status.retain(|_, status| &status.node != node);
+                self.container_status
+                    .retain(|_, status| &status.node != node);
                 for (instance, is_running) in running {
                     self.container_status.insert(
                         instance.clone(),
-                        ContainerStatus { node: node.clone(), running: *is_running },
+                        ContainerStatus {
+                            node: node.clone(),
+                            running: *is_running,
+                        },
                     );
                 }
                 Ok(())
@@ -1806,7 +1862,12 @@ impl ClusterState {
         let Ok(shape) = serde_yaml::from_str::<Shape>(&entry.yaml) else {
             return BTreeSet::new();
         };
-        shape.drives.into_iter().filter(|(_, d)| d.mode == "served").map(|(name, _)| name).collect()
+        shape
+            .drives
+            .into_iter()
+            .filter(|(_, d)| d.mode == "served")
+            .map(|(name, _)| name)
+            .collect()
     }
 
     /// Stacks referencing a config, so removing one in use is refused rather
@@ -1897,19 +1958,28 @@ pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Instances whose stack mounts the given volume.
-pub fn instances_using_volume(state: &ClusterState, id: &crate::ids::VolumeId) -> Vec<crate::ids::InstanceId> {
+pub fn instances_using_volume(
+    state: &ClusterState,
+    id: &crate::ids::VolumeId,
+) -> Vec<crate::ids::InstanceId> {
     use cl_config::StackFile;
 
     let mut found = Vec::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;
-        let Some(stack) = state.stacks.get(&instance.stack) else { continue };
-        let Ok(file) = StackFile::parse(&stack.spec) else { continue };
-        let Some(service) = file.services.get(&instance.service) else { continue };
-        let uses = service
-            .volumes
-            .iter()
-            .any(|m| m.drive.as_deref() == Some(id.drive.as_str()) && m.volume.as_deref() == Some(id.volume.as_str()));
+        let Some(stack) = state.stacks.get(&instance.stack) else {
+            continue;
+        };
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        let Some(service) = file.services.get(&instance.service) else {
+            continue;
+        };
+        let uses = service.volumes.iter().any(|m| {
+            m.drive.as_deref() == Some(id.drive.as_str())
+                && m.volume.as_deref() == Some(id.volume.as_str())
+        });
         if uses {
             found.push(instance.clone());
         }
@@ -1930,9 +2000,16 @@ mod tests {
     #[test]
     fn backup_run_outcome_round_trips_the_current_shape() {
         for outcome in [
-            BackupRunOutcome::Running { percent: Some(0.42) },
-            BackupRunOutcome::Succeeded { snapshot_id: "abc".into(), bytes: 7 },
-            BackupRunOutcome::Failed { error: "boom".into() },
+            BackupRunOutcome::Running {
+                percent: Some(0.42),
+            },
+            BackupRunOutcome::Succeeded {
+                snapshot_id: "abc".into(),
+                bytes: 7,
+            },
+            BackupRunOutcome::Failed {
+                error: "boom".into(),
+            },
         ] {
             let json = serde_json::to_string(&outcome).unwrap();
             let back: BackupRunOutcome = serde_json::from_str(&json).unwrap();
@@ -1961,13 +2038,27 @@ mod tests {
         // `Request`: a variant missing from the mirror would silently
         // deserialize as `Unknown` here instead of round-tripping.
         let requests = vec![
-            Request::PutClusterConfig { yaml: "y".into(), expect_generation: 0 },
+            Request::PutClusterConfig {
+                yaml: "y".into(),
+                expect_generation: 0,
+            },
             Request::UpsertNode(node("n1", &["fast"])),
-            Request::SetAvailability { node: "n1".into(), availability: Availability::Drain },
-            Request::SetReachable { node: "n1".into(), reachable: false },
+            Request::SetAvailability {
+                node: "n1".into(),
+                availability: Availability::Drain,
+            },
+            Request::SetReachable {
+                node: "n1".into(),
+                reachable: false,
+            },
             Request::RemoveNode { node: "n1".into() },
-            Request::RetireNodeId { id: uuid::Uuid::new_v4() },
-            Request::DeployStack { name: "s".into(), spec: "spec".into() },
+            Request::RetireNodeId {
+                id: uuid::Uuid::new_v4(),
+            },
+            Request::DeployStack {
+                name: "s".into(),
+                spec: "spec".into(),
+            },
             Request::RemoveStack { name: "s".into() },
             Request::SetStackObjects {
                 name: "s".into(),
@@ -1976,23 +2067,57 @@ mod tests {
                 used_configs: drives(&["c1"]),
                 used_secrets: drives(&["sec1"]),
             },
-            Request::Assign { instance: InstanceId::new("s", "web", 0), node: "n1".into(), drives: drives(&["fast"]) },
-            Request::Unassign { instance: InstanceId::new("s", "web", 0) },
-            Request::SetDesiredState { instance: InstanceId::new("s", "web", 0), desired: DesiredState::Stopped },
-            Request::SetImageDigest { instance: InstanceId::new("s", "web", 0), digest: "sha256:abc".into() },
-            Request::BeginMigration { instance: InstanceId::new("s", "web", 0), to: "n2".into(), drives: drives(&["fast"]) },
-            Request::AdvanceMigration { instance: InstanceId::new("s", "web", 0), phase: MigrationPhase::Syncing },
-            Request::UpsertVolume { id: VolumeId::new("fast", "v1"), primary: "n1".into() },
-            Request::SetVolumeReplica { id: VolumeId::new("fast", "v1"), node: "n1".into(), generation: 2 },
-            Request::TouchVolume { id: VolumeId::new("fast", "v1"), primary: "n1".into() },
+            Request::Assign {
+                instance: InstanceId::new("s", "web", 0),
+                node: "n1".into(),
+                drives: drives(&["fast"]),
+            },
+            Request::Unassign {
+                instance: InstanceId::new("s", "web", 0),
+            },
+            Request::SetDesiredState {
+                instance: InstanceId::new("s", "web", 0),
+                desired: DesiredState::Stopped,
+            },
+            Request::SetImageDigest {
+                instance: InstanceId::new("s", "web", 0),
+                digest: "sha256:abc".into(),
+            },
+            Request::BeginMigration {
+                instance: InstanceId::new("s", "web", 0),
+                to: "n2".into(),
+                drives: drives(&["fast"]),
+            },
+            Request::AdvanceMigration {
+                instance: InstanceId::new("s", "web", 0),
+                phase: MigrationPhase::Syncing,
+            },
+            Request::UpsertVolume {
+                id: VolumeId::new("fast", "v1"),
+                primary: "n1".into(),
+            },
+            Request::SetVolumeReplica {
+                id: VolumeId::new("fast", "v1"),
+                node: "n1".into(),
+                generation: 2,
+            },
+            Request::TouchVolume {
+                id: VolumeId::new("fast", "v1"),
+                primary: "n1".into(),
+            },
             Request::StoreCertificate(CertificateState {
                 fqdn: "example.com".into(),
                 chain_pem: "chain".into(),
                 key_pem: "key".into(),
                 not_after: 0,
             }),
-            Request::RemoveCertificate { fqdn: "example.com".into() },
-            Request::SetCertStatus { fqdn: "example.com".into(), status: ReconcileStatus::Pending },
+            Request::RemoveCertificate {
+                fqdn: "example.com".into(),
+            },
+            Request::SetCertStatus {
+                fqdn: "example.com".into(),
+                status: ReconcileStatus::Pending,
+            },
             Request::UpsertDnsRecord(DnsRecordState {
                 fqdn: "example.com".into(),
                 record_type: "A".into(),
@@ -2000,9 +2125,18 @@ mod tests {
                 zone: "example.com".into(),
                 provider_id: None,
             }),
-            Request::RemoveDnsRecord { key: "example.com".into() },
-            Request::SetDnsStatus { fqdn: "example.com".into(), status: ReconcileStatus::Pending },
-            Request::PutConfig { name: "c1".into(), content: "aGk=".into(), owner: None },
+            Request::RemoveDnsRecord {
+                key: "example.com".into(),
+            },
+            Request::SetDnsStatus {
+                fqdn: "example.com".into(),
+                status: ReconcileStatus::Pending,
+            },
+            Request::PutConfig {
+                name: "c1".into(),
+                content: "aGk=".into(),
+                owner: None,
+            },
             Request::RemoveConfig { name: "c1".into() },
             Request::PutSecret {
                 name: "sec1".into(),
@@ -2010,7 +2144,9 @@ mod tests {
                 key_fingerprint: "fp".into(),
                 owner: None,
             },
-            Request::RemoveSecret { name: "sec1".into() },
+            Request::RemoveSecret {
+                name: "sec1".into(),
+            },
             Request::PutWrappedKey {
                 node: "n1".into(),
                 entry: WrappedKeyEntry {
@@ -2020,11 +2156,16 @@ mod tests {
                     target_pubkey: "t".into(),
                 },
             },
-            Request::SetOverlayAllocations { allocations: "{}".into() },
+            Request::SetOverlayAllocations {
+                allocations: "{}".into(),
+            },
             Request::PutBackupDestination(BackupDestination {
                 id: "d1".into(),
                 name: "d1".into(),
-                kind: BackupDestinationKind::NodeLocal { node: "n1".into(), path: "/backups".into() },
+                kind: BackupDestinationKind::NodeLocal {
+                    node: "n1".into(),
+                    path: "/backups".into(),
+                },
                 password_secret: "sec1".into(),
                 credentials_secret: None,
             }),
@@ -2042,7 +2183,10 @@ mod tests {
                 last_run: None,
             }),
             Request::RemoveBackupTarget { id: "t1".into() },
-            Request::SetBackupTargetLastRun { id: "t1".into(), at: 0 },
+            Request::SetBackupTargetLastRun {
+                id: "t1".into(),
+                at: 0,
+            },
             Request::RecordBackupRun(BackupRun {
                 id: "r1".into(),
                 target_id: "t1".into(),
@@ -2055,7 +2199,9 @@ mod tests {
             }),
             Request::PutRestoreRequest(RestoreRequest {
                 id: "res1".into(),
-                scope: RestoreScope::Volume { volume: VolumeId::new("fast", "v1") },
+                scope: RestoreScope::Volume {
+                    volume: VolumeId::new("fast", "v1"),
+                },
                 destination_id: None,
                 snapshot: None,
                 requested_at: 0,
@@ -2063,7 +2209,11 @@ mod tests {
                 status: RestoreStatus::Pending,
                 requested_by: "op".into(),
             }),
-            Request::SetRestoreStatus { id: "res1".into(), status: RestoreStatus::Pending, at: 0 },
+            Request::SetRestoreStatus {
+                id: "res1".into(),
+                status: RestoreStatus::Pending,
+                at: 0,
+            },
             Request::ReportContainerStatus {
                 node: "n1".into(),
                 running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
@@ -2075,7 +2225,11 @@ mod tests {
         for req in requests {
             let json = serde_json::to_string(&req).unwrap();
             let back: Request = serde_json::from_str(&json).unwrap();
-            assert_ne!(back, Request::Unknown, "variant round-tripped as Unknown: {json}");
+            assert_ne!(
+                back,
+                Request::Unknown,
+                "variant round-tripped as Unknown: {json}"
+            );
             assert_eq!(back, req);
         }
     }
@@ -2087,10 +2241,10 @@ mod tests {
         // ignorable by an older node reading the same JSON, with no per-field
         // work required - see the migration plan's forward-tolerance design.
         let mut value = serde_json::to_value(ClusterState::default()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("some_field_from_the_future".into(), serde_json::json!({"anything": true}));
+        value.as_object_mut().unwrap().insert(
+            "some_field_from_the_future".into(),
+            serde_json::json!({"anything": true}),
+        );
 
         let parsed: Result<ClusterState, _> = serde_json::from_value(value);
         assert!(parsed.is_ok(), "{:?}", parsed.err());
@@ -2201,14 +2355,20 @@ mod tests {
             instance: instance.clone(),
             digest: "sha256:pinned".to_string(),
         });
-        assert_eq!(state.assignments[&instance].image_digest.as_deref(), Some("sha256:pinned"));
+        assert_eq!(
+            state.assignments[&instance].image_digest.as_deref(),
+            Some("sha256:pinned")
+        );
 
         // The scheduler moves the instance to a different node (its old one
         // went unreachable, say) by submitting `Assign` again, with no
         // intervening `Unassign`. The pin must survive that move.
         assert!(assign(&mut state, "n2", &[]).is_ok());
         assert_eq!(state.assignments[&instance].node, "n2");
-        assert_eq!(state.assignments[&instance].image_digest.as_deref(), Some("sha256:pinned"));
+        assert_eq!(
+            state.assignments[&instance].image_digest.as_deref(),
+            Some("sha256:pinned")
+        );
     }
 
     #[test]
@@ -2396,7 +2556,9 @@ mod tests {
         state.apply(&Request::Unassign {
             instance: InstanceId::new("gitlab", "web", 0),
         });
-        assert!(state.apply(&Request::RemoveNode { node: "n1".into() }).is_ok());
+        assert!(state
+            .apply(&Request::RemoveNode { node: "n1".into() })
+            .is_ok());
         assert!(!state.nodes.contains_key("n1"));
     }
 
@@ -2498,7 +2660,11 @@ mod tests {
         });
         assert!(repeat.error.is_none());
         assert_eq!(
-            state.assignments[&instance].migration.as_ref().unwrap().phase,
+            state.assignments[&instance]
+                .migration
+                .as_ref()
+                .unwrap()
+                .phase,
             MigrationPhase::Syncing
         );
 
@@ -2538,7 +2704,11 @@ mod tests {
         }
         assert_eq!(state.assignments[&instance].node, "n2");
         assert_eq!(
-            state.assignments[&instance].migration.as_ref().unwrap().from,
+            state.assignments[&instance]
+                .migration
+                .as_ref()
+                .unwrap()
+                .from,
             "n1"
         );
     }
@@ -2553,7 +2723,10 @@ mod tests {
             to: "n2".into(),
             drives: drives(&["bulk"]),
         });
-        assert!(rejected.error.unwrap().contains("does not implement drive bulk"));
+        assert!(rejected
+            .error
+            .unwrap()
+            .contains("does not implement drive bulk"));
     }
 
     #[test]
@@ -2652,7 +2825,10 @@ mod tests {
             id: VolumeId::new("bulk", "data"),
             primary: "n2".into(),
         });
-        assert!(rejected.error.unwrap().contains("does not implement drive bulk"));
+        assert!(rejected
+            .error
+            .unwrap()
+            .contains("does not implement drive bulk"));
     }
 
     #[test]
@@ -2729,11 +2905,11 @@ mod tests {
             key_fingerprint: "abc123".into(),
             owner: None,
         });
-        assert!(state
-            .redacted()
-            .secrets["_clouduler_self_update_deploy_key"]
-            .sealed
-            .is_empty());
+        assert!(
+            state.redacted().secrets["_clouduler_self_update_deploy_key"]
+                .sealed
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2853,7 +3029,10 @@ mod tests {
             fqdn: "app.example.com".into(),
             status: ReconcileStatus::Pending,
         });
-        assert_eq!(state.cert_status.get("app.example.com"), Some(&ReconcileStatus::Pending));
+        assert_eq!(
+            state.cert_status.get("app.example.com"),
+            Some(&ReconcileStatus::Pending)
+        );
 
         state.apply(&Request::StoreCertificate(CertificateState {
             fqdn: "app.example.com".into(),
@@ -2886,7 +3065,10 @@ mod tests {
             provider_id: Some("rec1".into()),
         }));
 
-        assert!(state.dns_records.values().any(|r| r.fqdn == "app.example.com"));
+        assert!(state
+            .dns_records
+            .values()
+            .any(|r| r.fqdn == "app.example.com"));
         assert!(!state.dns_status.contains_key("app.example.com"));
     }
 
@@ -2915,7 +3097,12 @@ mod tests {
         }
     }
 
-    fn backup_target(id: &str, drive: &str, destination_id: &str, enabled: bool) -> DriveBackupTarget {
+    fn backup_target(
+        id: &str,
+        drive: &str,
+        destination_id: &str,
+        enabled: bool,
+    ) -> DriveBackupTarget {
         DriveBackupTarget {
             id: id.to_string(),
             drive: drive.to_string(),
@@ -2942,12 +3129,17 @@ mod tests {
     #[test]
     fn a_backup_target_must_name_a_known_drive_and_destination() {
         let mut state = cluster_with_known_drive();
-        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
+        state.apply(&Request::PutBackupDestination(node_local_destination(
+            "d1", "n1",
+        )));
 
         let unknown_drive = state.apply(&Request::PutBackupTarget(backup_target(
             "t1", "nowhere", "d1", true,
         )));
-        assert!(unknown_drive.error.unwrap().contains("unknown drive nowhere"));
+        assert!(unknown_drive
+            .error
+            .unwrap()
+            .contains("unknown drive nowhere"));
 
         let unknown_destination = state.apply(&Request::PutBackupTarget(backup_target(
             "t1", "fast", "nowhere", true,
@@ -2958,7 +3150,9 @@ mod tests {
             .contains("unknown backup destination nowhere"));
 
         assert!(state
-            .apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)))
+            .apply(&Request::PutBackupTarget(backup_target(
+                "t1", "fast", "d1", true
+            )))
             .is_ok());
         assert!(state.restic_targets.contains_key("t1"));
     }
@@ -2966,10 +3160,16 @@ mod tests {
     #[test]
     fn two_enabled_targets_cannot_share_a_drive_and_destination() {
         let mut state = cluster_with_known_drive();
-        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
-        state.apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)));
+        state.apply(&Request::PutBackupDestination(node_local_destination(
+            "d1", "n1",
+        )));
+        state.apply(&Request::PutBackupTarget(backup_target(
+            "t1", "fast", "d1", true,
+        )));
 
-        let rejected = state.apply(&Request::PutBackupTarget(backup_target("t2", "fast", "d1", true)));
+        let rejected = state.apply(&Request::PutBackupTarget(backup_target(
+            "t2", "fast", "d1", true,
+        )));
         assert!(rejected
             .error
             .unwrap()
@@ -2977,18 +3177,27 @@ mod tests {
 
         // A disabled duplicate is fine (e.g. a draft being edited).
         assert!(state
-            .apply(&Request::PutBackupTarget(backup_target("t2", "fast", "d1", false)))
+            .apply(&Request::PutBackupTarget(backup_target(
+                "t2", "fast", "d1", false
+            )))
             .is_ok());
     }
 
     #[test]
     fn removing_a_destination_in_use_by_a_target_is_refused() {
         let mut state = cluster_with_known_drive();
-        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
-        state.apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)));
+        state.apply(&Request::PutBackupDestination(node_local_destination(
+            "d1", "n1",
+        )));
+        state.apply(&Request::PutBackupTarget(backup_target(
+            "t1", "fast", "d1", true,
+        )));
 
         let rejected = state.apply(&Request::RemoveBackupDestination { id: "d1".into() });
-        assert!(rejected.error.unwrap().contains("still used by backup target t1"));
+        assert!(rejected
+            .error
+            .unwrap()
+            .contains("still used by backup target t1"));
 
         state.apply(&Request::RemoveBackupTarget { id: "t1".into() });
         assert!(state
@@ -3000,16 +3209,29 @@ mod tests {
     #[test]
     fn setting_last_run_updates_only_the_named_target() {
         let mut state = cluster_with_known_drive();
-        state.apply(&Request::PutBackupDestination(node_local_destination("d1", "n1")));
-        state.apply(&Request::PutBackupTarget(backup_target("t1", "fast", "d1", true)));
+        state.apply(&Request::PutBackupDestination(node_local_destination(
+            "d1", "n1",
+        )));
+        state.apply(&Request::PutBackupTarget(backup_target(
+            "t1", "fast", "d1", true,
+        )));
 
         assert!(state
-            .apply(&Request::SetBackupTargetLastRun { id: "t1".into(), at: 100 })
+            .apply(&Request::SetBackupTargetLastRun {
+                id: "t1".into(),
+                at: 100
+            })
             .is_ok());
         assert_eq!(state.restic_targets["t1"].last_run, Some(100));
 
-        let rejected = state.apply(&Request::SetBackupTargetLastRun { id: "nowhere".into(), at: 0 });
-        assert!(rejected.error.unwrap().contains("unknown backup target nowhere"));
+        let rejected = state.apply(&Request::SetBackupTargetLastRun {
+            id: "nowhere".into(),
+            at: 0,
+        });
+        assert!(rejected
+            .error
+            .unwrap()
+            .contains("unknown backup target nowhere"));
     }
 
     #[test]
@@ -3025,9 +3247,14 @@ mod tests {
             outcome: BackupRunOutcome::Running { percent: None },
             triggered_by: BackupTrigger::Schedule,
         };
-        assert!(state.apply(&Request::RecordBackupRun(first.clone())).is_ok());
+        assert!(state
+            .apply(&Request::RecordBackupRun(first.clone()))
+            .is_ok());
 
-        let second = BackupRun { id: "run2".into(), ..first.clone() };
+        let second = BackupRun {
+            id: "run2".into(),
+            ..first.clone()
+        };
         let rejected = state.apply(&Request::RecordBackupRun(second));
         assert!(rejected.error.unwrap().contains("already running"));
 
@@ -3039,7 +3266,10 @@ mod tests {
 
         // Finishing the first run frees the target up for a new one.
         let mut finished = first;
-        finished.outcome = BackupRunOutcome::Succeeded { snapshot_id: "abc".into(), bytes: 0 };
+        finished.outcome = BackupRunOutcome::Succeeded {
+            snapshot_id: "abc".into(),
+            bytes: 0,
+        };
         assert!(state.apply(&Request::RecordBackupRun(finished)).is_ok());
         let third = BackupRun {
             id: "run3".into(),
@@ -3080,13 +3310,17 @@ mod tests {
         assert_eq!(for_target.len(), MAX_BACKUP_RUNS_PER_TARGET);
         // The oldest runs (run0..run4) were the ones dropped.
         assert!(!state.restic_runs.contains_key("run0"));
-        assert!(state.restic_runs.contains_key(&format!("run{}", MAX_BACKUP_RUNS_PER_TARGET + 4)));
+        assert!(state
+            .restic_runs
+            .contains_key(&format!("run{}", MAX_BACKUP_RUNS_PER_TARGET + 4)));
     }
 
     fn restore_request(id: &str, drive: &str) -> RestoreRequest {
         RestoreRequest {
             id: id.to_string(),
-            scope: RestoreScope::Drive { drive: drive.to_string() },
+            scope: RestoreScope::Drive {
+                drive: drive.to_string(),
+            },
             destination_id: None,
             snapshot: None,
             requested_at: 0,
@@ -3099,7 +3333,9 @@ mod tests {
     #[test]
     fn a_restore_request_must_name_a_known_drive() {
         let mut state = cluster();
-        let rejected = state.apply(&Request::PutRestoreRequest(restore_request("r1", "nowhere")));
+        let rejected = state.apply(&Request::PutRestoreRequest(restore_request(
+            "r1", "nowhere",
+        )));
         assert!(rejected.error.unwrap().contains("unknown drive nowhere"));
     }
 
@@ -3120,9 +3356,17 @@ mod tests {
         state.apply(&Request::PutRestoreRequest(restore_request("r1", "fast")));
 
         assert!(state
-            .apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 10 })
+            .apply(&Request::SetRestoreStatus {
+                id: "r1".into(),
+                status: RestoreStatus::Running,
+                at: 10
+            })
             .is_ok());
-        let rejected = state.apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 11 });
+        let rejected = state.apply(&Request::SetRestoreStatus {
+            id: "r1".into(),
+            status: RestoreStatus::Running,
+            at: 11,
+        });
         assert!(rejected.error.unwrap().contains("not pending"));
     }
 
@@ -3130,17 +3374,27 @@ mod tests {
     fn a_terminal_restore_status_cannot_be_advanced_further() {
         let mut state = cluster_with_known_drive();
         state.apply(&Request::PutRestoreRequest(restore_request("r1", "fast")));
-        state.apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 10 });
+        state.apply(&Request::SetRestoreStatus {
+            id: "r1".into(),
+            status: RestoreStatus::Running,
+            at: 10,
+        });
         assert!(state
             .apply(&Request::SetRestoreStatus {
                 id: "r1".into(),
-                status: RestoreStatus::Failed { error: "boom".into() },
+                status: RestoreStatus::Failed {
+                    error: "boom".into()
+                },
                 at: 20,
             })
             .is_ok());
         assert_eq!(state.restore_requests["r1"].finished_at, Some(20));
 
-        let rejected = state.apply(&Request::SetRestoreStatus { id: "r1".into(), status: RestoreStatus::Running, at: 30 });
+        let rejected = state.apply(&Request::SetRestoreStatus {
+            id: "r1".into(),
+            status: RestoreStatus::Running,
+            at: 30,
+        });
         assert!(rejected.error.unwrap().contains("already finished"));
     }
 }

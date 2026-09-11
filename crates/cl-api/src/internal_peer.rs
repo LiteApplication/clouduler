@@ -64,7 +64,11 @@ async fn signature(state: &AppState, path: &str) -> Result<String, ApiError> {
 }
 
 /// `GET path` (query string included, if any) on `node`'s api, decoded as `T`.
-pub async fn fetch_json<T: DeserializeOwned>(state: &AppState, node: &str, path: &str) -> Result<T, ApiError> {
+pub async fn fetch_json<T: DeserializeOwned>(
+    state: &AppState,
+    node: &str,
+    path: &str,
+) -> Result<T, ApiError> {
     let base = peer_base_url(state, node).await?;
     let signature = signature(state, path).await?;
     for attempt in 0.. {
@@ -135,7 +139,10 @@ pub async fn proxy_stream(state: &AppState, node: &str, path: &str) -> Result<Re
         .await
         .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
     if !resp.status().is_success() {
-        return Err(ApiError::Unavailable(format!("{node} answered {}", resp.status())));
+        return Err(ApiError::Unavailable(format!(
+            "{node} answered {}",
+            resp.status()
+        )));
     }
     let stream = resp.bytes_stream().map_err(std::io::Error::other);
     Response::builder()

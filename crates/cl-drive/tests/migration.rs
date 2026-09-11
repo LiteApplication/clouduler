@@ -39,28 +39,53 @@ impl RecordingControl {
 }
 
 impl InstanceControl for RecordingControl {
-    fn stop_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+    fn stop_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
-            self.events.lock().unwrap().push(format!("stop:{instance}@{node}"));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("stop:{instance}@{node}"));
             if self.fail_stop.load(Ordering::SeqCst) > 0 {
-                return Err(cl_drive::DriveError::Transfer { message: "forced stop failure".into() });
+                return Err(cl_drive::DriveError::Transfer {
+                    message: "forced stop failure".into(),
+                });
             }
             Ok(())
         })
     }
 
-    fn start_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+    fn start_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
-            self.events.lock().unwrap().push(format!("start:{instance}@{node}"));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start:{instance}@{node}"));
             Ok(())
         })
     }
 
-    fn remove_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+    fn remove_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
-            self.events.lock().unwrap().push(format!("remove:{instance}@{node}"));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("remove:{instance}@{node}"));
             if self.fail_remove.load(Ordering::SeqCst) > 0 {
-                return Err(cl_drive::DriveError::Transfer { message: "forced remove failure".into() });
+                return Err(cl_drive::DriveError::Transfer {
+                    message: "forced remove failure".into(),
+                });
             }
             Ok(())
         })
@@ -92,9 +117,12 @@ impl Harness {
         })
         .await
         .unwrap();
-        node.initialize(BTreeMap::from([(node_id(n1_id), BasicNode::new(addr.to_string()))]))
-            .await
-            .unwrap();
+        node.initialize(BTreeMap::from([(
+            node_id(n1_id),
+            BasicNode::new(addr.to_string()),
+        )]))
+        .await
+        .unwrap();
 
         // Wait for the solo node to elect itself leader.
         for _ in 0..100 {
@@ -116,7 +144,9 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind(target_addr).await.unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let registry = target_registry.clone();
                 tokio::spawn(async move {
                     let _ = cl_drive::transport::receive(stream, &registry).await;
@@ -161,7 +191,13 @@ impl Harness {
         .await
         .unwrap();
 
-        Self { _dir: dir, node, source, target, target_addr }
+        Self {
+            _dir: dir,
+            node,
+            source,
+            target,
+            target_addr,
+        }
     }
 
     fn source_registry(&self) -> DriveRegistry {
@@ -200,9 +236,12 @@ async fn begin_migration_for(node: &ClusterNode, instance: InstanceId, volume: c
     })
     .await
     .unwrap();
-    node.submit(Request::UpsertVolume { id: volume, primary: "source".into() })
-        .await
-        .unwrap();
+    node.submit(Request::UpsertVolume {
+        id: volume,
+        primary: "source".into(),
+    })
+    .await
+    .unwrap();
     node.submit(Request::BeginMigration {
         instance,
         to: "target".into(),
@@ -253,10 +292,16 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
     let state = harness.node.state().await;
     let assignment = &state.assignments[&instance()];
     assert_eq!(assignment.node, "target");
-    assert!(assignment.migration.is_none(), "a finished migration clears its record");
+    assert!(
+        assignment.migration.is_none(),
+        "a finished migration clears its record"
+    );
     assert_eq!(state.volumes[&volume()].primary, "target");
 
-    assert_eq!(std::fs::read(harness.target.path().join("data/a.txt")).unwrap(), b"payload");
+    assert_eq!(
+        std::fs::read(harness.target.path().join("data/a.txt")).unwrap(),
+        b"payload"
+    );
 }
 
 #[tokio::test]
@@ -281,7 +326,9 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
-    let err = run(&harness.node, &job).await.expect_err("stop failure should abort the migration");
+    let err = run(&harness.node, &job)
+        .await
+        .expect_err("stop failure should abort the migration");
     assert!(err.to_string().contains("forced stop failure"));
 
     let state = harness.node.state().await;
@@ -342,7 +389,9 @@ async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
-    run(&harness.node, &job).await.expect("a volumeless migration needs no registry");
+    run(&harness.node, &job)
+        .await
+        .expect("a volumeless migration needs no registry");
 
     assert_eq!(
         control.events(),
@@ -355,7 +404,10 @@ async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
     let state = harness.node.state().await;
     let assignment = &state.assignments[&instance()];
     assert_eq!(assignment.node, "target");
-    assert!(assignment.migration.is_none(), "a finished migration clears its record");
+    assert!(
+        assignment.migration.is_none(),
+        "a finished migration clears its record"
+    );
 }
 
 /// Removing the source container is cleanup after the point of no return, so
@@ -388,12 +440,17 @@ async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
         transfer_gate: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
-    run(&harness.node, &job).await.expect("a failed cleanup still leaves the move successful");
+    run(&harness.node, &job)
+        .await
+        .expect("a failed cleanup still leaves the move successful");
 
     let state = harness.node.state().await;
     let assignment = &state.assignments[&instance()];
     assert_eq!(assignment.node, "target");
-    assert!(assignment.migration.is_none(), "a finished migration clears its record");
+    assert!(
+        assignment.migration.is_none(),
+        "a finished migration clears its record"
+    );
     assert_eq!(state.volumes[&volume()].primary, "target");
 }
 
@@ -410,26 +467,47 @@ struct GatedControl {
 }
 
 impl InstanceControl for GatedControl {
-    fn stop_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+    fn stop_instance<'a>(
+        &'a self,
+        _i: &'a InstanceId,
+        _n: &'a str,
+    ) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
-            self.log.lock().unwrap().push(format!("stop:{}", self.label));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("stop:{}", self.label));
             Ok(())
         })
     }
 
-    fn start_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+    fn start_instance<'a>(
+        &'a self,
+        _i: &'a InstanceId,
+        _n: &'a str,
+    ) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
             if let Some(gate) = &self.block_start_until {
                 gate.notified().await;
             }
-            self.log.lock().unwrap().push(format!("start:{}", self.label));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("start:{}", self.label));
             Ok(())
         })
     }
 
-    fn remove_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, DriveResult<()>> {
+    fn remove_instance<'a>(
+        &'a self,
+        _i: &'a InstanceId,
+        _n: &'a str,
+    ) -> BoxFuture<'a, DriveResult<()>> {
         Box::pin(async move {
-            self.log.lock().unwrap().push(format!("remove:{}", self.label));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("remove:{}", self.label));
             if let Some(gate) = &self.signal_on_remove {
                 gate.notify_one();
             }
@@ -506,7 +584,12 @@ async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishi
     result2.expect("job two completes without waiting on job one's tail");
 
     let events = log.lock().unwrap().clone();
-    let pos = |event: &str| events.iter().position(|e| e == event).unwrap_or_else(|| panic!("{event} missing from {events:?}"));
+    let pos = |event: &str| {
+        events
+            .iter()
+            .position(|e| e == event)
+            .unwrap_or_else(|| panic!("{event} missing from {events:?}"))
+    };
 
     // Job two's whole move, including its own start and cleanup, finished
     // before job one — still parked in `start_instance` — was allowed to log

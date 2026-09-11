@@ -79,7 +79,11 @@ pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
     ))?;
     prompt.say(&format!(
         "about to restore: cluster config {}, {} stack(s), {} config(s), {} secret(s){}.",
-        if cluster_config.is_some() { "present" } else { "absent" },
+        if cluster_config.is_some() {
+            "present"
+        } else {
+            "absent"
+        },
         stacks.len(),
         configs.len(),
         secrets.len(),
@@ -93,7 +97,10 @@ pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
             )
         }
     ))?;
-    if !prompt.confirm(&format!("replace {name}'s local content with this backup?"), yes)? {
+    if !prompt.confirm(
+        &format!("replace {name}'s local content with this backup?"),
+        yes,
+    )? {
         bail!("aborted");
     }
 
@@ -129,7 +136,10 @@ fn build_restored_state(
     identity: &age::x25519::Identity,
     key: &ClusterKey,
 ) -> Result<RestoredState> {
-    let cluster_config = parsed.cluster_yaml.map(|yaml| ClusterConfigEntry { yaml, generation: 1 });
+    let cluster_config = parsed.cluster_yaml.map(|yaml| ClusterConfigEntry {
+        yaml,
+        generation: 1,
+    });
 
     let mut stacks = BTreeMap::new();
     for (stack_name, spec) in &parsed.stacks {
@@ -203,7 +213,9 @@ fn read_identity(file: Option<&Path>, stdin: bool) -> Result<String> {
                 .context("reading the age identity from stdin")?;
             Ok(buf)
         }
-        (None, false) => bail!("pass the admin's age identity with --age-identity-file or --age-identity-stdin"),
+        (None, false) => {
+            bail!("pass the admin's age identity with --age-identity-file or --age-identity-stdin")
+        }
     }
 }
 
@@ -234,7 +246,8 @@ fn local_checkout(source: &str, branch: &str) -> Result<LocalCheckout> {
         return Ok(LocalCheckout::Existing(path.to_path_buf()));
     }
 
-    let dir = tempfile::tempdir().context("creating a temp directory to clone the backup repo into")?;
+    let dir =
+        tempfile::tempdir().context("creating a temp directory to clone the backup repo into")?;
     cl_backup::git::clone_with_agent(source, branch, dir.path())
         .with_context(|| format!("cloning {source} (branch {branch})"))?;
 
@@ -269,11 +282,20 @@ mod tests {
         let parsed = cl_backup::tree::parse_dir(dir.path())?;
         let restored = build_restored_state(parsed, &identity, &key)?;
 
-        assert_eq!(restored.cluster_config.map(|c| c.yaml), Some("nodes: []\n".to_string()));
-        assert_eq!(restored.stacks.get("web").map(|s| s.spec.as_str()), Some("services: {}\n"));
+        assert_eq!(
+            restored.cluster_config.map(|c| c.yaml),
+            Some("nodes: []\n".to_string())
+        );
+        assert_eq!(
+            restored.stacks.get("web").map(|s| s.spec.as_str()),
+            Some("services: {}\n")
+        );
         assert_eq!(restored.stacks.get("web").map(|s| s.revision), Some(1));
         assert_eq!(
-            restored.configs.get("nginx.conf").map(|c| c.decode().expect("decode")),
+            restored
+                .configs
+                .get("nginx.conf")
+                .map(|c| c.decode().expect("decode")),
             Some(b"server {}".to_vec())
         );
         assert!(restored.skipped.is_empty());
@@ -281,7 +303,12 @@ mod tests {
         let secret = restored.secrets.get("db-password").expect("secret present");
         assert_eq!(secret.key_fingerprint, key.fingerprint());
         let sealed = Sealed::from_blob(secret.sealed.clone());
-        assert_eq!(sealed.open(&key, "db-password").expect("open with this node's own key"), b"hunter2");
+        assert_eq!(
+            sealed
+                .open(&key, "db-password")
+                .expect("open with this node's own key"),
+            b"hunter2"
+        );
 
         Ok(())
     }

@@ -235,12 +235,20 @@ fn create_cluster<R: BufRead, W: Write>(
 ) -> Result<ClusterConfig> {
     prompt.heading("new cluster")?;
 
-    let cluster_name = ask_or(prompt, args.cluster_name.clone(), "cluster name", Some("home"))?;
+    let cluster_name = ask_or(
+        prompt,
+        args.cluster_name.clone(),
+        "cluster name",
+        Some("home"),
+    )?;
 
     let subnet: IpNet = match args.subnet {
         Some(subnet) => subnet,
         None => prompt
-            .ask("internal network subnet, the one every node talks over", Some("10.10.0.0/24"))?
+            .ask(
+                "internal network subnet, the one every node talks over",
+                Some("10.10.0.0/24"),
+            )?
             .parse()
             .context("that is not a subnet in cidr form, e.g. 10.10.0.0/24")?,
     };
@@ -256,14 +264,23 @@ fn create_cluster<R: BufRead, W: Write>(
         prompt,
         args.web_address.clone(),
         "hostname the web ui answers on",
-        Some(if internal_domain.is_some() { "cloud" } else { "cloud.example.com" }),
+        Some(if internal_domain.is_some() {
+            "cloud"
+        } else {
+            "cloud.example.com"
+        }),
     )?;
     let web_port = ask_parsed(prompt, args.web_port, "port the web ui listens on", 8443)?;
 
     prompt.heading("this node")?;
     let ip = ask_ip(prompt, args.ip, subnet)?;
     let mut node = NodePlan::new(node_name, NodeRole::Manager, ip);
-    node.rpc_port = ask_parsed(prompt, args.rpc_port, "node to node rpc port", DEFAULT_RPC_PORT)?;
+    node.rpc_port = ask_parsed(
+        prompt,
+        args.rpc_port,
+        "node to node rpc port",
+        DEFAULT_RPC_PORT,
+    )?;
     node.data_dir = ask_optional_or(
         prompt,
         args.node_data_dir.clone().map(path_string),
@@ -350,7 +367,12 @@ async fn join_cluster<R: BufRead, W: Write>(
 
     let ip = ask_ip(prompt, args.ip, subnet)?;
     let mut node = NodePlan::new(node_name, role, ip);
-    node.rpc_port = ask_parsed(prompt, args.rpc_port, "node to node rpc port", DEFAULT_RPC_PORT)?;
+    node.rpc_port = ask_parsed(
+        prompt,
+        args.rpc_port,
+        "node to node rpc port",
+        DEFAULT_RPC_PORT,
+    )?;
     node.data_dir = ask_optional_or(
         prompt,
         args.node_data_dir.clone().map(path_string),
@@ -463,7 +485,10 @@ fn setup_data_directory<R: BufRead, W: Write>(
     };
     let path = node.data_dir(config);
     if path.is_dir() {
-        prompt.say(&format!("data directory {} is already there", path.display()))?;
+        prompt.say(&format!(
+            "data directory {} is already there",
+            path.display()
+        ))?;
         return Ok(());
     }
     match std::fs::create_dir_all(path) {
@@ -623,7 +648,9 @@ fn setup_secret_key<R: BufRead, W: Write>(
     node_name: &str,
 ) -> Result<()> {
     let path = &config.secrets.key_file;
-    let node = config.node(node_name).context("node missing from its own config")?;
+    let node = config
+        .node(node_name)
+        .context("node missing from its own config")?;
 
     if path.exists() {
         match ClusterKey::load(path) {
@@ -651,19 +678,24 @@ fn setup_secret_key<R: BufRead, W: Write>(
         "this cluster's secrets are sealed with a key held on another node. Copy that file here to\n\
          let this node run containers that use secrets, or skip and it simply will not run those.",
     )?;
-    let Some(source) = prompt.ask_optional("path to a copy of the cluster key, blank to skip", None)?
+    let Some(source) =
+        prompt.ask_optional("path to a copy of the cluster key, blank to skip", None)?
     else {
         prompt.say("skipped, this node will not be able to open secrets")?;
         return Ok(());
     };
 
-    let key = ClusterKey::load(&source).with_context(|| format!("reading the key from {source}"))?;
+    let key =
+        ClusterKey::load(&source).with_context(|| format!("reading the key from {source}"))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     key.save(path)
         .with_context(|| format!("writing the key to {}", path.display()))?;
-    prompt.say(&format!("installed the cluster key ({})", key.fingerprint()))?;
+    prompt.say(&format!(
+        "installed the cluster key ({})",
+        key.fingerprint()
+    ))?;
     Ok(())
 }
 
@@ -713,7 +745,11 @@ fn setup_systemd<R: BufRead, W: Write>(
     // service is never pointed at a path holding nothing.
     systemd::install_binary(&current, &binary)?;
     if binary != current {
-        prompt.say(&format!("copied {} to {}", current.display(), binary.display()))?;
+        prompt.say(&format!(
+            "copied {} to {}",
+            current.display(),
+            binary.display()
+        ))?;
     }
 
     let unit = systemd::Unit {
@@ -726,11 +762,17 @@ fn setup_systemd<R: BufRead, W: Write>(
     prompt.say(&format!("wrote {}", path.display()))?;
 
     if args.no_start {
-        prompt.say(&format!("start it with: systemctl enable --now {}", systemd::UNIT_NAME))?;
+        prompt.say(&format!(
+            "start it with: systemctl enable --now {}",
+            systemd::UNIT_NAME
+        ))?;
         return Ok(());
     }
     if !args.start && !prompt.confirm("enable and start it now?", true)? {
-        prompt.say(&format!("start it with: systemctl enable --now {}", systemd::UNIT_NAME))?;
+        prompt.say(&format!(
+            "start it with: systemctl enable --now {}",
+            systemd::UNIT_NAME
+        ))?;
         return Ok(());
     }
 
@@ -745,7 +787,9 @@ fn summarize<R: BufRead, W: Write>(
     node_name: &str,
 ) -> Result<()> {
     prompt.heading("done")?;
-    let node = config.node(node_name).context("node missing from its own config")?;
+    let node = config
+        .node(node_name)
+        .context("node missing from its own config")?;
     prompt.say(&format!(
         "{node_name} is a {} in cluster {} at {}",
         node.role,

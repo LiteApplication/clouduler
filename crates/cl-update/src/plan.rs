@@ -52,11 +52,17 @@ impl NodePhase {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, NodePhase::Done | NodePhase::FetchFailed { .. } | NodePhase::RestartFailed { .. })
+        matches!(
+            self,
+            NodePhase::Done | NodePhase::FetchFailed { .. } | NodePhase::RestartFailed { .. }
+        )
     }
 
     pub fn is_failed(&self) -> bool {
-        matches!(self, NodePhase::FetchFailed { .. } | NodePhase::RestartFailed { .. })
+        matches!(
+            self,
+            NodePhase::FetchFailed { .. } | NodePhase::RestartFailed { .. }
+        )
     }
 }
 
@@ -159,12 +165,16 @@ mod tests {
     fn fetching_and_terminal_phases_have_no_declared_next() {
         assert!(NodePhase::Fetching.next().is_none());
         assert!(NodePhase::Done.next().is_none());
-        assert!(NodePhase::FetchFailed { reason: "x".into() }.next().is_none());
+        assert!(NodePhase::FetchFailed { reason: "x".into() }
+            .next()
+            .is_none());
     }
 
     #[test]
     fn failed_phases_are_terminal_and_reported_as_failed() {
-        let failed = NodePhase::FetchFailed { reason: "no such asset".into() };
+        let failed = NodePhase::FetchFailed {
+            reason: "no such asset".into(),
+        };
         assert!(failed.is_terminal());
         assert!(failed.is_failed());
         assert!(!NodePhase::Fetching.is_failed());
@@ -192,7 +202,12 @@ mod tests {
     #[test]
     fn a_node_failure_marks_the_run_as_failed() {
         let mut run = UpdateRunState::new("run-1".into(), ["a".to_string()], 0);
-        run.per_node.insert("a".into(), NodePhase::RestartFailed { reason: "never came back".into() });
+        run.per_node.insert(
+            "a".into(),
+            NodePhase::RestartFailed {
+                reason: "never came back".into(),
+            },
+        );
         assert!(run.has_failed());
     }
 }

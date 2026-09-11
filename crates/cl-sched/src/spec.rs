@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use cl_config::{Command, RestartPolicy as StackRestart, Service};
 use cl_docker::{
-    BindMount, ContainerSpec, Healthcheck, PortMapping, PortProtocol, ResourceLimits, RestartPolicy,
-    TmpfsMount, DOCKER_SOCKET_PATH,
+    BindMount, ContainerSpec, Healthcheck, PortMapping, PortProtocol, ResourceLimits,
+    RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
 };
 use cl_raft::ids::InstanceId;
 
@@ -80,7 +80,11 @@ pub fn build(
         })
         .collect();
     mounts.extend(objects.iter().map(|o| o.mount()));
-    if let Some(docker_socket) = service.x_clouduler.as_ref().and_then(|x| x.docker_socket.as_ref()) {
+    if let Some(docker_socket) = service
+        .x_clouduler
+        .as_ref()
+        .and_then(|x| x.docker_socket.as_ref())
+    {
         mounts.push(BindMount {
             host_path: DOCKER_SOCKET_PATH.to_string(),
             container_path: docker_socket.target.display().to_string(),
@@ -128,7 +132,11 @@ pub fn build(
         ports: service.ports.iter().flat_map(port_mappings).collect(),
         network: placement.network,
         ip: placement.ip,
-        dns: placement.resolver.into_iter().map(std::net::IpAddr::V4).collect(),
+        dns: placement
+            .resolver
+            .into_iter()
+            .map(std::net::IpAddr::V4)
+            .collect(),
         // The container's own stack goes first, so a bare service name (e.g.
         // `headscale` from a config file written before it knew it'd run
         // under clouduler) resolves to the sibling in the same stack without
@@ -344,10 +352,16 @@ mod tests {
 
         assert_eq!(spec.network.as_deref(), Some("site_default"));
         assert_eq!(spec.ip, Some(std::net::Ipv4Addr::new(10, 244, 0, 7)));
-        assert_eq!(spec.dns, vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 244, 0, 1))]);
+        assert_eq!(
+            spec.dns,
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 244, 0, 1))]
+        );
         assert_eq!(
             spec.dns_search,
-            vec!["site.int.example.com".to_string(), "int.example.com".to_string()]
+            vec![
+                "site.int.example.com".to_string(),
+                "int.example.com".to_string()
+            ]
         );
         assert_eq!(spec.dns_options, vec!["ndots:2".to_string()]);
     }
@@ -388,7 +402,11 @@ mod tests {
         let spec = build(
             &instance(),
             &s,
-            Materialization { objects: &[], env: &[], drive_roots: &roots() },
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
             Placement::default(),
             None,
             1,
@@ -411,7 +429,11 @@ mod tests {
         let spec = build(
             &instance(),
             &s,
-            Materialization { objects: &[], env: &[], drive_roots: &roots() },
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
             Placement::default(),
             None,
             1,
@@ -431,13 +453,20 @@ mod tests {
         let spec = build(
             &instance(),
             &s,
-            Materialization { objects: &[], env: &[], drive_roots: &roots() },
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
             Placement::default(),
             None,
             1,
         );
 
-        assert!(spec.mounts.iter().all(|m| m.host_path != DOCKER_SOCKET_PATH));
+        assert!(spec
+            .mounts
+            .iter()
+            .all(|m| m.host_path != DOCKER_SOCKET_PATH));
     }
 
     #[test]
@@ -599,14 +628,22 @@ mod tests {
             1,
         );
 
-        assert!(spec.env.contains(&("DB_PASSWORD".to_string(), "hunter2".to_string())));
+        assert!(spec
+            .env
+            .contains(&("DB_PASSWORD".to_string(), "hunter2".to_string())));
         assert!(spec.mounts.is_empty(), "an env secret is not also mounted");
     }
 
     #[test]
     fn a_shell_command_is_split_respecting_quotes() {
-        assert_eq!(shell_words("sh -c 'echo hello world'"), vec!["sh", "-c", "echo hello world"]);
-        assert_eq!(shell_words("nginx -g \"daemon off;\""), vec!["nginx", "-g", "daemon off;"]);
+        assert_eq!(
+            shell_words("sh -c 'echo hello world'"),
+            vec!["sh", "-c", "echo hello world"]
+        );
+        assert_eq!(
+            shell_words("nginx -g \"daemon off;\""),
+            vec!["nginx", "-g", "daemon off;"]
+        );
         assert!(shell_words("   ").is_empty());
     }
 
@@ -673,25 +710,22 @@ mod tests {
 
     #[test]
     fn a_disabled_healthcheck_produces_none() {
-        let s = service(
-            "services:\n  web:\n    image: nginx\n    healthcheck:\n      disable: true\n",
-        );
-        assert!(
-            build(
-                &instance(),
-                &s,
-                Materialization {
-                    objects: &[],
-                    env: &[],
-                    drive_roots: &roots(),
-                },
-                Placement::default(),
-                None,
-                1,
-            )
-            .healthcheck
-            .is_none()
-        );
+        let s =
+            service("services:\n  web:\n    image: nginx\n    healthcheck:\n      disable: true\n");
+        assert!(build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
+            Placement::default(),
+            None,
+            1,
+        )
+        .healthcheck
+        .is_none());
     }
 
     #[test]
@@ -711,8 +745,8 @@ mod tests {
             None,
             1,
         )
-            .healthcheck
-            .expect("healthcheck");
+        .healthcheck
+        .expect("healthcheck");
         assert_eq!(check.test[0], "CMD-SHELL");
         assert_eq!(check.retries, Some(3));
     }

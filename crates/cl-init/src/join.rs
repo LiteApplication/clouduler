@@ -220,7 +220,9 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
         StatusCode::UNAUTHORIZED => {
             bail!("the cluster rejected the api key. Pass a valid one with --token or --token-file")
         }
-        StatusCode::FORBIDDEN => bail!("that api key is not an admin key, so it cannot edit the config"),
+        StatusCode::FORBIDDEN => {
+            bail!("that api key is not an admin key, so it cannot edit the config")
+        }
         StatusCode::SERVICE_UNAVAILABLE => bail!(
             "the cluster has no leader right now, so it cannot accept the join. {}",
             match leader {
@@ -247,7 +249,9 @@ fn base_url(address: &str) -> String {
 /// A colon means a port, except inside a bare ipv6 literal, which has several.
 fn has_explicit_port(address: &str) -> bool {
     match address.rfind(':') {
-        Some(at) => address[at + 1..].chars().all(|c| c.is_ascii_digit()) && !address[at + 1..].is_empty(),
+        Some(at) => {
+            address[at + 1..].chars().all(|c| c.is_ascii_digit()) && !address[at + 1..].is_empty()
+        }
         None => false,
     }
 }
@@ -259,7 +263,10 @@ mod tests {
     #[test]
     fn a_bare_host_gets_https_and_the_default_port() {
         assert_eq!(base_url("10.10.0.1"), "https://10.10.0.1:8443");
-        assert_eq!(base_url("n1.int.example.com"), "https://n1.int.example.com:8443");
+        assert_eq!(
+            base_url("n1.int.example.com"),
+            "https://n1.int.example.com:8443"
+        );
     }
 
     #[test]
@@ -334,6 +341,9 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        assert_eq!(seen.lock().unwrap().as_deref(), Some(fingerprint(b"whatever").as_str()));
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(fingerprint(b"whatever").as_str())
+        );
     }
 }

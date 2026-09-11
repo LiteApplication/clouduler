@@ -95,9 +95,11 @@ impl TryFrom<RawMiddleware> for Middleware {
                         .map(Middleware::Cors)
                         .map_err(|e| format!("cors: {e}")),
                     "forward_auth" => {
-                        let auth: ForwardAuth =
-                            serde_yaml::from_value(value).map_err(|e| format!("forward_auth: {e}"))?;
-                        if !auth.address.starts_with("http://") && !auth.address.starts_with("https://") {
+                        let auth: ForwardAuth = serde_yaml::from_value(value)
+                            .map_err(|e| format!("forward_auth: {e}"))?;
+                        if !auth.address.starts_with("http://")
+                            && !auth.address.starts_with("https://")
+                        {
                             return Err(format!(
                                 "forward_auth: address \"{}\" must start with http:// or https://",
                                 auth.address
@@ -109,7 +111,10 @@ impl TryFrom<RawMiddleware> for Middleware {
                         let redirect: RedirectRegex = serde_yaml::from_value(value)
                             .map_err(|e| format!("redirect_regex: {e}"))?;
                         if let Err(e) = regex::Regex::new(&redirect.regex) {
-                            return Err(format!("redirect_regex: invalid regex \"{}\": {e}", redirect.regex));
+                            return Err(format!(
+                                "redirect_regex: invalid regex \"{}\": {e}",
+                                redirect.regex
+                            ));
                         }
                         Ok(Middleware::RedirectRegex(redirect))
                     }
@@ -126,7 +131,9 @@ impl From<Middleware> for RawMiddleware {
     fn from(mw: Middleware) -> Self {
         let name = mw.name().to_string();
         match mw {
-            Middleware::RedirectHttps | Middleware::StripPrefix | Middleware::Authenticated => RawMiddleware::Bare(name),
+            Middleware::RedirectHttps | Middleware::StripPrefix | Middleware::Authenticated => {
+                RawMiddleware::Bare(name)
+            }
             Middleware::BasicAuth(auth) => RawMiddleware::Configured(BTreeMap::from([(
                 name,
                 serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
@@ -176,7 +183,10 @@ pub struct CorsPolicy {
     /// pair a wildcard origin with credentials, so the combination could
     /// only ever surface as a confusing runtime failure.
     pub origins: Vec<String>,
-    #[serde(default = "default_cors_methods", skip_serializing_if = "is_default_cors_methods")]
+    #[serde(
+        default = "default_cors_methods",
+        skip_serializing_if = "is_default_cors_methods"
+    )]
     pub methods: Vec<String>,
     /// Headers a request may set. Empty means whatever the browser asked for
     /// in `Access-Control-Request-Headers` is echoed back, which is the
@@ -186,7 +196,11 @@ pub struct CorsPolicy {
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_credentials: bool,
     /// How long a browser may cache a preflight result.
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_age: Option<Duration>,
 }
 
@@ -261,7 +275,11 @@ pub struct ForwardAuth {
     pub auth_response_headers: Vec<String>,
     /// How long to wait for the auth endpoint. Unset waits forever, which
     /// ties up the client's connection if it wedges.
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout: Option<Duration>,
 }
 
@@ -322,7 +340,11 @@ pub struct ProxyRoute {
     /// How long to wait for the backend's response headers, connection time
     /// included. Unset waits forever, which ties up a connection when a
     /// container wedges.
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub response_timeout: Option<Duration>,
 }
 
@@ -392,7 +414,11 @@ pub struct DockerSocket {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeSyncOverride {
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub interval: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -472,7 +498,10 @@ proxy:
         assert_eq!(route.network, "wan");
         assert_eq!(route.port, 80);
         assert!(route.tls);
-        assert_eq!(route.middlewares, vec![Middleware::RedirectHttps, Middleware::StripPrefix]);
+        assert_eq!(
+            route.middlewares,
+            vec![Middleware::RedirectHttps, Middleware::StripPrefix]
+        );
         assert_eq!(route.sticky, Some(true));
     }
 
@@ -503,10 +532,9 @@ proxy:
     /// and websockets working without anyone asking for them.
     #[test]
     fn the_proxy_settings_default_to_the_previous_behaviour() {
-        let ext: ServiceExtensions = serde_yaml::from_str(
-            "proxy:\n  - host: site\n    network: wan\n    port: 80\n",
-        )
-        .expect("parse");
+        let ext: ServiceExtensions =
+            serde_yaml::from_str("proxy:\n  - host: site\n    network: wan\n    port: 80\n")
+                .expect("parse");
         let route = &ext.proxy[0];
         assert_eq!(route.max_body_size, None);
         assert!(route.websockets, "websockets must stay on by default");
@@ -572,10 +600,8 @@ volume_sync:
 
     #[test]
     fn parses_docker_socket() {
-        let ext: ServiceExtensions = serde_yaml::from_str(
-            "docker_socket:\n  target: /var/run/docker.sock\n",
-        )
-        .unwrap();
+        let ext: ServiceExtensions =
+            serde_yaml::from_str("docker_socket:\n  target: /var/run/docker.sock\n").unwrap();
         let ds = ext.docker_socket.expect("docker_socket");
         assert_eq!(ds.target, PathBuf::from("/var/run/docker.sock"));
         assert!(!ds.read_only, "read-write is the default");
@@ -601,8 +627,14 @@ volume_sync:
 
     #[test]
     fn parses_backup_stop_before() {
-        let ext: ServiceExtensions = serde_yaml::from_str("backup:\n  stop_before: false\n").unwrap();
-        assert_eq!(ext.backup, Some(BackupOverride { stop_before: Some(false) }));
+        let ext: ServiceExtensions =
+            serde_yaml::from_str("backup:\n  stop_before: false\n").unwrap();
+        assert_eq!(
+            ext.backup,
+            Some(BackupOverride {
+                stop_before: Some(false)
+            })
+        );
     }
 
     #[test]

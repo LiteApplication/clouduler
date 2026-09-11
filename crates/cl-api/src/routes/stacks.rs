@@ -107,18 +107,23 @@ async fn deploy(
     Json(body): Json<DeployRequest>,
 ) -> Result<StatusCode, ApiError> {
     let secrets_to_write = {
-        let parsed = StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        let parsed =
+            StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let requirements = parsed.requirements();
         let cluster_state = state.cluster.state().await;
         for config_name in &requirements.file_configs {
-            if !body.configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
+            if !body.configs.contains_key(config_name)
+                && !cluster_state.configs.contains_key(config_name)
+            {
                 return Err(ApiError::BadRequest(format!(
                     "config {config_name} needs content: it has no existing value to keep"
                 )));
             }
         }
         for secret_name in &requirements.file_secrets {
-            if !body.secrets.contains_key(secret_name) && !cluster_state.secrets.contains_key(secret_name) {
+            if !body.secrets.contains_key(secret_name)
+                && !cluster_state.secrets.contains_key(secret_name)
+            {
                 return Err(ApiError::BadRequest(format!(
                     "secret {secret_name} needs content: it has no existing value to keep"
                 )));
@@ -157,7 +162,12 @@ async fn deploy(
     let configs: BTreeMap<String, Vec<u8>> = body
         .configs
         .into_iter()
-        .map(|(name, content)| Ok((name, cl_raft::base64_decode(&content).map_err(ApiError::BadRequest)?)))
+        .map(|(name, content)| {
+            Ok((
+                name,
+                cl_raft::base64_decode(&content).map_err(ApiError::BadRequest)?,
+            ))
+        })
         .collect::<Result<_, ApiError>>()?;
     deploy_from_files(&state, &name, body.spec, configs).await?;
     Ok(StatusCode::OK)

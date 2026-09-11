@@ -32,7 +32,12 @@ pub async fn deploy(
 /// file or stdin, name taken from the existing stack). Creates the stack if
 /// it doesn't exist yet, otherwise bumps its revision - see
 /// `Request::DeployStack` in cl-raft.
-async fn deploy_bundle(cfg: &ClusterConfig, name: String, bundle: StackBundle, via: Option<&str>) -> Result<()> {
+async fn deploy_bundle(
+    cfg: &ClusterConfig,
+    name: String,
+    bundle: StackBundle,
+    via: Option<&str>,
+) -> Result<()> {
     debug!(
         name,
         services = bundle.parsed.services.len(),
@@ -66,7 +71,10 @@ async fn deploy_bundle(cfg: &ClusterConfig, name: String, bundle: StackBundle, v
         bail!("cluster rejected the stack: {error}");
     }
 
-    debug!(files = bundle.files.len(), "publishing bundled config and secret objects");
+    debug!(
+        files = bundle.files.len(),
+        "publishing bundled config and secret objects"
+    );
     publish_objects(cfg, &client, &name, &bundle).await?;
 
     let stacks = client.state().await.map_err(|e| anyhow!("{e}"))?;
@@ -101,7 +109,12 @@ pub async fn source_get(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> R
 /// `stack deploy`, this is edit-in-place: it refuses a name with no existing
 /// stack rather than silently creating one, since `stack source` is for
 /// editing, not creating.
-pub async fn source_set(cfg: &ClusterConfig, name: &str, file: Option<&Path>, via: Option<&str>) -> Result<()> {
+pub async fn source_set(
+    cfg: &ClusterConfig,
+    name: &str,
+    file: Option<&Path>,
+    via: Option<&str>,
+) -> Result<()> {
     let state = client_for(cfg, via)?
         .state()
         .await
@@ -121,11 +134,15 @@ pub async fn source_set(cfg: &ClusterConfig, name: &str, file: Option<&Path>, vi
             std::io::stdin()
                 .read_to_string(&mut spec)
                 .context("reading stdin")?;
-            (spec, std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            (
+                spec,
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            )
         }
     };
 
-    let bundle = cl_config::StackBundle::from_spec(name, &spec, &base).context("parsing stack source")?;
+    let bundle =
+        cl_config::StackBundle::from_spec(name, &spec, &base).context("parsing stack source")?;
     deploy_bundle(cfg, name.to_string(), bundle, via).await
 }
 
@@ -160,7 +177,12 @@ async fn publish_objects(
     };
 
     for (name, file) in &bundle.files {
-        debug!(name, secret = file.secret, bytes = file.content.len(), "publishing object");
+        debug!(
+            name,
+            secret = file.secret,
+            bytes = file.content.len(),
+            "publishing object"
+        );
         let request = if file.secret {
             let key = key.as_ref().expect("checked above");
             let sealed = Sealed::seal(key, name, &file.content)
@@ -191,7 +213,11 @@ async fn publish_objects(
 
     // Recorded last, so a failure halfway leaves objects the stack does not yet
     // claim rather than claims with nothing behind them.
-    debug!(configs = configs.len(), secrets = secrets.len(), "submitting SetStackObjects");
+    debug!(
+        configs = configs.len(),
+        secrets = secrets.len(),
+        "submitting SetStackObjects"
+    );
     let response = client
         .submit(Request::SetStackObjects {
             name: stack.to_string(),
@@ -284,7 +310,12 @@ pub async fn start(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result
     set_all_desired(cfg, name, via, DesiredState::Running).await
 }
 
-async fn set_all_desired(cfg: &ClusterConfig, name: &str, via: Option<&str>, desired: DesiredState) -> Result<()> {
+async fn set_all_desired(
+    cfg: &ClusterConfig,
+    name: &str,
+    via: Option<&str>,
+    desired: DesiredState,
+) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let instances = crate::logs::resolve_target(&state, name)?;
@@ -292,11 +323,17 @@ async fn set_all_desired(cfg: &ClusterConfig, name: &str, via: Option<&str>, des
     for assignment in &instances {
         debug!(instance = %assignment.instance, ?desired, "submitting SetDesiredState");
         let response = client
-            .submit(Request::SetDesiredState { instance: assignment.instance.clone(), desired })
+            .submit(Request::SetDesiredState {
+                instance: assignment.instance.clone(),
+                desired,
+            })
             .await
             .map_err(|e| anyhow!("{e}"))?;
         if let Some(error) = response.error {
-            bail!("could not set {} to {desired:?}: {error}", assignment.instance);
+            bail!(
+                "could not set {} to {desired:?}: {error}",
+                assignment.instance
+            );
         }
     }
 

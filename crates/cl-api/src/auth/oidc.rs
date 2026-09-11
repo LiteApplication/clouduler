@@ -14,13 +14,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
-use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
-};
 use cl_raft::ClusterNode;
 use cl_secret::{ClusterKey, Sealed};
+use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
+use openidconnect::{
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+};
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use tracing::warn;
 
@@ -173,12 +173,10 @@ impl OidcAuthenticator {
 
     /// Finish a login from the callback's `code` and `state`.
     pub async fn finish_login(&self, code: String, state: String) -> Result<Identity, ApiError> {
-        let pending = self
-            .pending
-            .lock()
-            .await
-            .remove(&state)
-            .ok_or_else(|| ApiError::Unauthenticated("unknown or expired login state".into()))?;
+        let pending =
+            self.pending.lock().await.remove(&state).ok_or_else(|| {
+                ApiError::Unauthenticated("unknown or expired login state".into())
+            })?;
         if pending.started_at.elapsed() > LOGIN_TIMEOUT {
             return Err(ApiError::Unauthenticated("login took too long".into()));
         }
@@ -200,9 +198,9 @@ impl OidcAuthenticator {
             .await
             .map_err(|e| ApiError::Unauthenticated(format!("token exchange failed: {e}")))?;
 
-        let id_token = token_response
-            .id_token()
-            .ok_or_else(|| ApiError::Unauthenticated("provider did not return an id token".into()))?;
+        let id_token = token_response.id_token().ok_or_else(|| {
+            ApiError::Unauthenticated("provider did not return an id token".into())
+        })?;
         let verifier = client.id_token_verifier();
         let claims = id_token
             .claims(&verifier, &pending.nonce)
@@ -210,9 +208,15 @@ impl OidcAuthenticator {
 
         let subject = claims.subject().as_str().to_string();
         let role = self.role_from_raw_claims(id_token);
-        let username = self.username_from_raw_claims(id_token).unwrap_or_else(|| subject.clone());
+        let username = self
+            .username_from_raw_claims(id_token)
+            .unwrap_or_else(|| subject.clone());
 
-        Ok(Identity { subject, username, role })
+        Ok(Identity {
+            subject,
+            username,
+            role,
+        })
     }
 
     /// Re-parse the id token's payload as loose json to read `admin_claim`.
@@ -245,7 +249,10 @@ impl OidcAuthenticator {
     /// Re-parse the id token's payload as loose json to read
     /// `username_claim`. `None` when that claim is absent or not a string,
     /// so the caller falls back to the subject.
-    fn username_from_raw_claims(&self, id_token: &openidconnect::core::CoreIdToken) -> Option<String> {
+    fn username_from_raw_claims(
+        &self,
+        id_token: &openidconnect::core::CoreIdToken,
+    ) -> Option<String> {
         let payload = decode_jwt_payload(&id_token.to_string())?;
         payload
             .get(&self.settings.username_claim)?

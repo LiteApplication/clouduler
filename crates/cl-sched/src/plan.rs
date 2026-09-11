@@ -69,7 +69,10 @@ impl Desired {
     /// DNS-mode proxy hostnames with any explicit `x-clouduler.colocate`
     /// group, so placement only has to reason about one kind of anchor.
     pub fn anchor_keys(&self) -> impl Iterator<Item = &str> {
-        self.proxy_hosts.iter().map(String::as_str).chain(self.colocate_key.as_deref())
+        self.proxy_hosts
+            .iter()
+            .map(String::as_str)
+            .chain(self.colocate_key.as_deref())
     }
 }
 
@@ -126,7 +129,9 @@ pub fn expand(
                 volumes: service
                     .volumes
                     .iter()
-                    .filter_map(|mount| Some(VolumeId::new(mount.drive.as_ref()?, mount.volume.as_ref()?)))
+                    .filter_map(|mount| {
+                        Some(VolumeId::new(mount.drive.as_ref()?, mount.volume.as_ref()?))
+                    })
                     .collect(),
                 constraints: service
                     .deploy
@@ -136,7 +141,11 @@ pub fn expand(
                     .unwrap_or_default(),
                 pinned_node: file.effective_node(service_name),
                 global,
-                egress_network: service.networks.iter().find(|n| egress_networks.contains(*n)).cloned(),
+                egress_network: service
+                    .networks
+                    .iter()
+                    .find(|n| egress_networks.contains(*n))
+                    .cloned(),
                 networks: service.networks.iter().cloned().collect(),
                 bound_ports: service
                     .x_clouduler
@@ -334,7 +343,10 @@ services:
         assert!(desired[0].proxy_hosts.is_empty());
 
         let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), true);
-        assert_eq!(desired[0].proxy_hosts, ["app.example.com".to_string()].into());
+        assert_eq!(
+            desired[0].proxy_hosts,
+            ["app.example.com".to_string()].into()
+        );
     }
 
     #[test]

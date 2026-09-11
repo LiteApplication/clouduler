@@ -182,7 +182,12 @@ pub struct Reconciler {
 
 impl Reconciler {
     pub fn new(docker: Docker, pulling: PullTracker, redeploy_steps: RedeployTracker) -> Self {
-        Self { docker, pulling, redeploy_steps, registries: Registries::default() }
+        Self {
+            docker,
+            pulling,
+            redeploy_steps,
+            registries: Registries::default(),
+        }
     }
 
     /// Pull private images with these logins. Without them a private image is
@@ -195,7 +200,12 @@ impl Reconciler {
 
     /// Apply the actions. One failure does not abort the rest: a single broken
     /// container must not stop the node reconciling everything else.
-    pub async fn apply(&self, actions: &[Action], targets: &[Target], actual: &[ContainerState]) -> Result<()> {
+    pub async fn apply(
+        &self,
+        actions: &[Action],
+        targets: &[Target],
+        actual: &[ContainerState],
+    ) -> Result<()> {
         let specs: BTreeMap<&InstanceId, &Target> = targets
             .iter()
             .map(|t| (&t.assignment.instance, t))
@@ -272,7 +282,10 @@ impl Reconciler {
         }
         info!(%image, "pulling");
         self.pulling.write().await.insert(id.clone());
-        let result = self.docker.pull_as(image, self.registries.for_image(image)).await;
+        let result = self
+            .docker
+            .pull_as(image, self.registries.for_image(image))
+            .await;
         self.pulling.write().await.remove(id);
         result?;
         Ok(())
@@ -291,7 +304,9 @@ impl Reconciler {
                 info!(instance = %id, "creating");
                 let container_id = self.docker.create(&target.spec).await?;
                 if let Some(egress) = &target.spec.egress_network {
-                    self.docker.connect_network(&container_id, egress, None).await?;
+                    self.docker
+                        .connect_network(&container_id, egress, None)
+                        .await?;
                 }
                 self.docker.start(&name).await?;
                 if let Some(egress) = &target.spec.egress_network {
@@ -349,17 +364,31 @@ impl Reconciler {
     }
 
     async fn replace_inner(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
-        self.redeploy_steps.write().await.insert(id.clone(), RedeployPhase::Pulling);
+        self.redeploy_steps
+            .write()
+            .await
+            .insert(id.clone(), RedeployPhase::Pulling);
         self.ensure_image(id, &target.spec.image).await?;
 
-        self.redeploy_steps.write().await.insert(id.clone(), RedeployPhase::Stopping);
-        self.docker.stop(name, stop_timeout(Some(target))).await.ok();
+        self.redeploy_steps
+            .write()
+            .await
+            .insert(id.clone(), RedeployPhase::Stopping);
+        self.docker
+            .stop(name, stop_timeout(Some(target)))
+            .await
+            .ok();
         self.docker.remove(name, true).await.ok();
 
-        self.redeploy_steps.write().await.insert(id.clone(), RedeployPhase::Starting);
+        self.redeploy_steps
+            .write()
+            .await
+            .insert(id.clone(), RedeployPhase::Starting);
         let container_id = self.docker.create(&target.spec).await?;
         if let Some(egress) = &target.spec.egress_network {
-            self.docker.connect_network(&container_id, egress, None).await?;
+            self.docker
+                .connect_network(&container_id, egress, None)
+                .await?;
         }
         self.docker.start(name).await?;
         if let Some(egress) = &target.spec.egress_network {
@@ -447,7 +476,11 @@ mod tests {
             image: "nginx".into(),
             image_digest: None,
             running,
-            status: if running { RunState::Running } else { RunState::Created },
+            status: if running {
+                RunState::Running
+            } else {
+                RunState::Created
+            },
             health: None,
             exit_code: None,
             labels,
@@ -460,7 +493,10 @@ mod tests {
     fn a_missing_container_is_created() {
         let targets = vec![target("web", 0, DesiredState::Running, 1)];
         let actions = diff(&targets, &[], false);
-        assert_eq!(actions, vec![Action::Create(InstanceId::new("site", "web", 0))]);
+        assert_eq!(
+            actions,
+            vec![Action::Create(InstanceId::new("site", "web", 0))]
+        );
     }
 
     #[test]
@@ -548,7 +584,10 @@ mod tests {
 
         let actions = diff(&targets, &actual, true);
         // Only the running one needs stopping, and nothing gets created.
-        assert_eq!(actions, vec![Action::Stop(InstanceId::new("site", "web", 0))]);
+        assert_eq!(
+            actions,
+            vec![Action::Stop(InstanceId::new("site", "web", 0))]
+        );
     }
 
     #[test]

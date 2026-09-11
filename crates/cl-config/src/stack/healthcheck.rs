@@ -20,11 +20,23 @@ pub enum HealthcheckTest {
 pub struct Healthcheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<HealthcheckTest>,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub interval: Option<Duration>,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout: Option<Duration>,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub start_period: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
@@ -68,7 +80,10 @@ start_period: 40s
     #[test]
     fn shell_string_form() {
         let hc: Healthcheck = serde_yaml::from_str("test: curl -f http://localhost/\n").unwrap();
-        assert_eq!(hc.test, Some(HealthcheckTest::Shell("curl -f http://localhost/".into())));
+        assert_eq!(
+            hc.test,
+            Some(HealthcheckTest::Shell("curl -f http://localhost/".into()))
+        );
     }
 
     #[test]

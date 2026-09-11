@@ -37,7 +37,10 @@ const DNS_PORT: u16 = 53;
 /// will never hold this address is not retrying in a tight loop.
 const BIND_RETRY: Duration = Duration::from_secs(30);
 
-pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> Option<tokio::task::JoinHandle<()>> {
+pub fn start(
+    cfg: &ClusterConfig,
+    cluster: &Arc<ClusterNode>,
+) -> Option<tokio::task::JoinHandle<()>> {
     let origin = zone_origin(cfg);
     let name = match Name::parse(&origin, Some(&Name::root())) {
         Ok(name) => name,
@@ -129,24 +132,37 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
 /// hosts routed on a *different* network are left out: their domain isn't
 /// this zone's origin, so they belong to whatever resolves that zone
 /// upstream, not to us.
-fn zone_for(state: &ClusterState, cfg: &ClusterConfig, nodes: &[(String, Ipv4Addr)]) -> Vec<ZoneRecord> {
+fn zone_for(
+    state: &ClusterState,
+    cfg: &ClusterConfig,
+    nodes: &[(String, Ipv4Addr)],
+) -> Vec<ZoneRecord> {
     let instances = crate::placement::instance_addresses(state, cfg);
     let mut records = build_records(
         instances.iter().map(|(id, ip)| (id, *ip)),
         nodes.iter().map(|(name, ip)| (name.as_str(), *ip)),
     );
 
-    let node_ips: BTreeMap<&str, Ipv4Addr> = nodes.iter().map(|(name, ip)| (name.as_str(), *ip)).collect();
+    let node_ips: BTreeMap<&str, Ipv4Addr> = nodes
+        .iter()
+        .map(|(name, ip)| (name.as_str(), *ip))
+        .collect();
     let (internal_name, _) = cfg.internal_network();
     for ((host, network), node_names) in crate::proxy::desired_dns_hosts(cfg, state) {
         if network != *internal_name {
             continue;
         }
-        let mut addresses: Vec<Ipv4Addr> = node_names.iter().filter_map(|n| node_ips.get(n.as_str()).copied()).collect();
+        let mut addresses: Vec<Ipv4Addr> = node_names
+            .iter()
+            .filter_map(|n| node_ips.get(n.as_str()).copied())
+            .collect();
         addresses.sort();
         addresses.dedup();
         if !addresses.is_empty() {
-            records.push(ZoneRecord { name: host, addresses });
+            records.push(ZoneRecord {
+                name: host,
+                addresses,
+            });
         }
     }
     records.sort_by(|a, b| a.name.cmp(&b.name));
@@ -195,7 +211,10 @@ services:
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
         let records = zone_for(&state, &cluster_config(), &nodes);
 
-        assert_eq!(answer(&records, "blog"), Some(&[Ipv4Addr::new(10, 10, 0, 1)][..]));
+        assert_eq!(
+            answer(&records, "blog"),
+            Some(&[Ipv4Addr::new(10, 10, 0, 1)][..])
+        );
     }
 
     /// SPEC's own route is on `wan`, not the internal `default` network, so
@@ -226,7 +245,10 @@ services:
     fn nodes_resolve_by_name() {
         let nodes = vec![("n1".to_string(), Ipv4Addr::new(10, 10, 0, 1))];
         let records = zone_for(&state_with(SPEC, 1), &cluster_config(), &nodes);
-        assert_eq!(answer(&records, "n1"), Some(&[Ipv4Addr::new(10, 10, 0, 1)][..]));
+        assert_eq!(
+            answer(&records, "n1"),
+            Some(&[Ipv4Addr::new(10, 10, 0, 1)][..])
+        );
     }
 
     /// `nodes_of` is recomputed every reload pass from whatever config is
@@ -234,12 +256,15 @@ services:
     /// picked up without a restart.
     #[test]
     fn nodes_of_reflects_a_newly_added_node() {
-        let cfg = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses");
+        let cfg = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml"))
+            .expect("example parses");
         let mut without_n3 = cfg.clone();
         without_n3.nodes.remove("n3");
 
         assert!(!nodes_of(&without_n3).iter().any(|(name, _)| name == "n3"));
-        assert!(nodes_of(&cfg).iter().any(|(name, ip)| name == "n3" && *ip == Ipv4Addr::new(10, 10, 0, 3)));
+        assert!(nodes_of(&cfg)
+            .iter()
+            .any(|(name, ip)| name == "n3" && *ip == Ipv4Addr::new(10, 10, 0, 3)));
     }
 
     #[test]

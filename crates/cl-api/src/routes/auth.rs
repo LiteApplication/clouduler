@@ -65,7 +65,10 @@ async fn login_with_key(
 
     let session_ttl = state.cluster_config.read().await.auth.session_ttl;
     let session_id = state.sessions.create(identity.clone(), session_ttl).await;
-    Ok((jar.add(session_cookie(session_id, session_ttl)), Json(identity)))
+    Ok((
+        jar.add(session_cookie(session_id, session_ttl)),
+        Json(identity),
+    ))
 }
 
 /// The one place the session cookie's flags are decided, so the api key and

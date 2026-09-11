@@ -66,7 +66,11 @@ impl Worker {
         }
     }
 
-    async fn do_fetch(&self, run: &mut UpdateRunState, state: &cl_raft::ClusterState) -> Result<(), String> {
+    async fn do_fetch(
+        &self,
+        run: &mut UpdateRunState,
+        state: &cl_raft::ClusterState,
+    ) -> Result<(), String> {
         let arch = state
             .nodes
             .get(&self.node_name)
@@ -77,7 +81,9 @@ impl Worker {
             _ => {
                 run.per_node.insert(
                     self.node_name.clone(),
-                    NodePhase::FetchFailed { reason: format!("no asset published for arch {arch}") },
+                    NodePhase::FetchFailed {
+                        reason: format!("no asset published for arch {arch}"),
+                    },
                 );
                 return self.save(run.clone()).await;
             }
@@ -90,11 +96,13 @@ impl Worker {
                 std::fs::write(&self.artifact_path, &binary)
                     .map_err(|e| format!("staging downloaded binary: {e}"))?;
                 run.arch_hashes.entry(arch).or_insert(hash);
-                run.per_node.insert(self.node_name.clone(), NodePhase::Ready);
+                run.per_node
+                    .insert(self.node_name.clone(), NodePhase::Ready);
                 info!(node = %self.node_name, run = %run.id, "self-update download finished");
             }
             Err(e) => {
-                run.per_node.insert(self.node_name.clone(), NodePhase::FetchFailed { reason: e });
+                run.per_node
+                    .insert(self.node_name.clone(), NodePhase::FetchFailed { reason: e });
             }
         }
         self.save(run.clone()).await

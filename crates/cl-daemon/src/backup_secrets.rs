@@ -28,12 +28,18 @@ fn generate_password() -> String {
 /// a password that never gets used, since `PutSecret` doesn't reject an
 /// overwrite - see the doc comment on `open_password` about why the *reader*
 /// treats "we sealed one nobody else picked" as harmless.
-pub async fn ensure_password_secret(node: &ClusterNode, key: &ClusterKey, state: &ClusterState, name: &str) -> Result<()> {
+pub async fn ensure_password_secret(
+    node: &ClusterNode,
+    key: &ClusterKey,
+    state: &ClusterState,
+    name: &str,
+) -> Result<()> {
     if state.secrets.contains_key(name) {
         return Ok(());
     }
     let password = generate_password();
-    let sealed = Sealed::seal(key, name, password.as_bytes()).map_err(|e| anyhow!("sealing {name}: {e}"))?;
+    let sealed =
+        Sealed::seal(key, name, password.as_bytes()).map_err(|e| anyhow!("sealing {name}: {e}"))?;
     let response = node
         .submit(Request::PutSecret {
             name: name.to_string(),
@@ -90,8 +96,12 @@ pub fn build_repo(
     destination: &BackupDestination,
 ) -> Result<(ResticRepo, Vec<TempFileGuard>)> {
     std::fs::create_dir_all(cred_dir)?;
-    let password = open_secret(state, key, &destination.password_secret)
-        .ok_or_else(|| anyhow!("cannot open the restic repo password for destination {}", destination.id))?;
+    let password = open_secret(state, key, &destination.password_secret).ok_or_else(|| {
+        anyhow!(
+            "cannot open the restic repo password for destination {}",
+            destination.id
+        )
+    })?;
     let password_path = cred_dir.join("password");
     write_secret_file(&password_path, &password)?;
     let mut guards = vec![TempFileGuard(password_path.clone())];
@@ -99,33 +109,52 @@ pub fn build_repo(
     let mut extra_args = ssh_command_args(destination);
     let mut credentials: Vec<(String, String)> = Vec::new();
     match &destination.kind {
-        BackupDestinationKind::Ssh { host, port, user, .. } => {
+        BackupDestinationKind::Ssh {
+            host, port, user, ..
+        } => {
             if let Some(secret_name) = &destination.credentials_secret {
-                let pem = open_secret(state, key, secret_name)
-                    .ok_or_else(|| anyhow!("cannot open the ssh key for destination {}", destination.id))?;
+                let pem = open_secret(state, key, secret_name).ok_or_else(|| {
+                    anyhow!("cannot open the ssh key for destination {}", destination.id)
+                })?;
                 let key_path = cred_dir.join("ssh_key");
                 write_secret_file(&key_path, &pem)?;
                 extra_args = vec![
                     "-o".to_string(),
-                    format!("sftp.command=ssh {user}@{host} -p {port} -i {} -s sftp", key_path.display()),
+                    format!(
+                        "sftp.command=ssh {user}@{host} -p {port} -i {} -s sftp",
+                        key_path.display()
+                    ),
                 ];
                 guards.push(TempFileGuard(key_path));
             }
         }
         BackupDestinationKind::S3 { .. } => {
             if let Some(secret_name) = &destination.credentials_secret {
-                let creds = open_secret(state, key, secret_name)
-                    .ok_or_else(|| anyhow!("cannot open the s3 credentials for destination {}", destination.id))?;
+                let creds = open_secret(state, key, secret_name).ok_or_else(|| {
+                    anyhow!(
+                        "cannot open the s3 credentials for destination {}",
+                        destination.id
+                    )
+                })?;
                 let mut lines = creds.lines();
-                credentials.push(("AWS_ACCESS_KEY_ID".to_string(), lines.next().unwrap_or_default().to_string()));
-                credentials.push(("AWS_SECRET_ACCESS_KEY".to_string(), lines.next().unwrap_or_default().to_string()));
+                credentials.push((
+                    "AWS_ACCESS_KEY_ID".to_string(),
+                    lines.next().unwrap_or_default().to_string(),
+                ));
+                credentials.push((
+                    "AWS_SECRET_ACCESS_KEY".to_string(),
+                    lines.next().unwrap_or_default().to_string(),
+                ));
             }
         }
         BackupDestinationKind::NodeLocal { .. } => {}
     }
 
     let resolved = remote_repo(destination);
-    Ok((ResticRepo::new(resolved, extra_args, &password_path, &credentials), guards))
+    Ok((
+        ResticRepo::new(resolved, extra_args, &password_path, &credentials),
+        guards,
+    ))
 }
 
 #[cfg(test)]
@@ -159,7 +188,14 @@ mod tests {
             open_secret(&state, &key, "_clouduler_restic_password_d1").as_deref(),
             Some("hunter2")
         );
-        assert_eq!(open_secret(&state, &ClusterKey::generate(), "_clouduler_restic_password_d1"), None);
+        assert_eq!(
+            open_secret(
+                &state,
+                &ClusterKey::generate(),
+                "_clouduler_restic_password_d1"
+            ),
+            None
+        );
         assert_eq!(open_secret(&state, &key, "missing"), None);
     }
 }

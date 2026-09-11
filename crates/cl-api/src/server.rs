@@ -179,7 +179,11 @@ fn leaf_fingerprint(chain_pem: &[u8]) -> Result<String, ApiError> {
         .decode(body.split_whitespace().collect::<String>())
         .map_err(|e| ApiError::Internal(format!("tls certificate is not valid base64: {e}")))?;
     let digest = Sha256::digest(&der);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(":"))
+    Ok(digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":"))
 }
 
 impl ApiServer {
@@ -227,7 +231,11 @@ impl ApiServer {
         // same reason: no leader yet on a fresh cluster, or simply nothing to
         // do until another node publishes or wraps a key.
         routes::key_distribution::spawn_wrap_for_new_nodes(state.clone());
-        routes::key_distribution::spawn_unwrap_own_key(state.clone(), state.node_name.clone(), node_keypair);
+        routes::key_distribution::spawn_unwrap_own_key(
+            state.clone(),
+            state.node_name.clone(),
+            node_keypair,
+        );
 
         // Keeps `state.cluster_config` (and, when it changes, `state.oidc`)
         // in step with the replicated config on every node, not just the one
@@ -315,7 +323,9 @@ fn spawn_sync_cluster_config(state: AppState) {
             if oidc_changed {
                 match build_oidc(&parsed, &state.cluster, &state.key) {
                     Ok(rebuilt) => *state.oidc.write().await = rebuilt,
-                    Err(e) => warn!(error = %e, "could not rebuild the oidc authenticator from the updated config"),
+                    Err(e) => {
+                        warn!(error = %e, "could not rebuild the oidc authenticator from the updated config")
+                    }
                 }
             }
         }
@@ -351,7 +361,10 @@ async fn reload_certificate_on_change(
             continue;
         }
         match config
-            .reload_from_pem(stored.chain_pem.clone().into_bytes(), stored.key_pem.clone().into_bytes())
+            .reload_from_pem(
+                stored.chain_pem.clone().into_bytes(),
+                stored.key_pem.clone().into_bytes(),
+            )
             .await
         {
             Ok(()) => {
@@ -372,9 +385,10 @@ impl ApiServer {
     /// its backends, and is bound to loopback so nothing off this machine can
     /// reach the dashboard without TLS.
     pub async fn serve(self) -> Result<(), ApiError> {
-        let config = axum_server::tls_rustls::RustlsConfig::from_pem(self.tls_cert_pem, self.tls_key_pem)
-            .await
-            .map_err(|e| ApiError::Internal(format!("loading tls config: {e}")))?;
+        let config =
+            axum_server::tls_rustls::RustlsConfig::from_pem(self.tls_cert_pem, self.tls_key_pem)
+                .await
+                .map_err(|e| ApiError::Internal(format!("loading tls config: {e}")))?;
 
         // The self signed cert loaded above is what a brand new cluster
         // starts with; once ACME issues a real one for this hostname
@@ -410,8 +424,10 @@ impl ApiServer {
 /// bootstrap key submission.
 #[doc(hidden)]
 pub fn build_router(state: AppState) -> Router {
-    let api = routes::router()
-        .route_layer(middleware::from_fn_with_state(state.clone(), redirect_non_leader));
+    let api = routes::router().route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        redirect_non_leader,
+    ));
 
     Router::new()
         .merge(api)
@@ -437,7 +453,11 @@ async fn serve_ui(State(state): State<AppState>, request: Request) -> Response {
             let target = format!("{}{}", leader.trim_end_matches('/'), request.uri().path());
             Redirect::temporary(&target).into_response()
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE, "no cluster leader elected yet").into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no cluster leader elected yet",
+        )
+            .into_response(),
     }
 }
 

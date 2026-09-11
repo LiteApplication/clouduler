@@ -144,13 +144,18 @@ pub fn instance_progress_events(
     state: crate::server::AppState,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = futures::stream::unfold(
-        (state, std::collections::HashMap::<String, InstanceProgressEvent>::new()),
+        (
+            state,
+            std::collections::HashMap::<String, InstanceProgressEvent>::new(),
+        ),
         |(state, mut last)| async move {
             let mut interval = tokio::time::interval(PROGRESS_POLL_INTERVAL);
             loop {
                 interval.tick().await;
                 let cluster_state = state.cluster.state().await;
-                for (id, event) in crate::routes::instances::progress_snapshot(&state, &cluster_state).await {
+                for (id, event) in
+                    crate::routes::instances::progress_snapshot(&state, &cluster_state).await
+                {
                     if last.get(&id) == Some(&event) {
                         continue;
                     }

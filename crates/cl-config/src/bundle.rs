@@ -152,7 +152,8 @@ secrets:
         std::fs::create_dir(&sub).expect("mkdir");
         write(&sub, "nginx.conf", "ok");
 
-        let spec = "services:\n  web:\n    image: nginx\nconfigs:\n  c:\n    file: ./conf/nginx.conf\n";
+        let spec =
+            "services:\n  web:\n    image: nginx\nconfigs:\n  c:\n    file: ./conf/nginx.conf\n";
         let path = write(dir.path(), "site.yaml", spec);
 
         let bundle = StackBundle::load(&path).expect("bundle");
@@ -171,7 +172,11 @@ secrets:
     #[test]
     fn a_stack_with_no_files_bundles_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(dir.path(), "site.yaml", "services:\n  web:\n    image: nginx\n");
+        let path = write(
+            dir.path(),
+            "site.yaml",
+            "services:\n  web:\n    image: nginx\n",
+        );
 
         let bundle = StackBundle::load(&path).expect("bundle");
         assert!(bundle.files.is_empty());
@@ -181,7 +186,11 @@ secrets:
     #[test]
     fn the_stack_name_comes_from_the_filename() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(dir.path(), "gitlab.yml", "services:\n  web:\n    image: nginx\n");
+        let path = write(
+            dir.path(),
+            "gitlab.yml",
+            "services:\n  web:\n    image: nginx\n",
+        );
         assert_eq!(StackBundle::load(&path).expect("bundle").name, "gitlab");
     }
 

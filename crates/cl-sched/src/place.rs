@@ -158,7 +158,10 @@ fn rejection(
             continue;
         };
         if record.replicas.get(&node.name) != Some(&record.generation) {
-            return Some(format!("{} holds no current copy of volume {volume}", node.name));
+            return Some(format!(
+                "{} holds no current copy of volume {volume}",
+                node.name
+            ));
         }
     }
     if let Some(net) = &desired.egress_network {
@@ -166,7 +169,10 @@ fn rejection(
         // implements it the same way, so it never narrows candidates the
         // way an egress or wireguard interface does.
         if !everywhere_networks.contains(net) && !node.implements_egress_network(net) {
-            return Some(format!("{} does not implement egress network {net}", node.name));
+            return Some(format!(
+                "{} does not implement egress network {net}",
+                node.name
+            ));
         }
     }
     for net in &desired.networks {
@@ -241,7 +247,14 @@ pub fn candidates<'a>(
     let mut eligible = Vec::new();
     let mut rejected = Vec::new();
     for node in state.nodes.values() {
-        match rejection(state, node, desired, &constraints, served_drives, everywhere_networks) {
+        match rejection(
+            state,
+            node,
+            desired,
+            &constraints,
+            served_drives,
+            everywhere_networks,
+        ) {
             None => eligible.push(node),
             Some(reason) => rejected.push(reason),
         }
@@ -275,37 +288,73 @@ pub fn place(
         .map(|name| (name.clone(), state.assignments_on(name).count()))
         .collect();
 
+    // Each item's own candidate nodes, computed once up front and reused by
+    // every pass below instead of re-running `candidates` per item per pass.
+    let per_item: Vec<std::result::Result<(Vec<&NodeState>, Vec<String>), String>> = desired
+        .iter()
+        .map(|item| {
+            candidates(state, item, served_drives, everywhere_networks).map_err(|e| e.to_string())
+        })
+        .collect();
+
+    // A co-located group (a shared proxied hostname, or an `x-clouduler.colocate`
+    // group) can only ever land on a node every member of the group can
+    // actually run on - not just whichever member happens to be scheduled
+    // first. Without this, the first instance in a group to be placed
+    // anchors the whole group to a node chosen using only *its own*
+    // requirements, and a sibling with a stricter one (a volume needing a
+    // drive that node lacks, say) is left permanently unplaceable even
+    // though a node satisfying every member exists elsewhere. Intersecting
+    // every member's own eligible-node set here makes each member's
+    // constraints binding on the whole group, the same way a single
+    // instance's own constraints already are on itself.
+    let mut group_eligible: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (item, result) in desired.iter().zip(&per_item) {
+        let Ok((eligible, _)) = result else { continue };
+        let names: BTreeSet<&str> = eligible.iter().map(|n| n.name.as_str()).collect();
+        for key in item.anchor_keys() {
+            group_eligible
+                .entry(key)
+                .and_modify(|set| set.retain(|n| names.contains(n)))
+                .or_insert_with(|| names.clone());
+        }
+    }
+
     // Anchor every proxied hostname or `x-clouduler.colocate` group to
     // whichever node already (validly) hosts it, so an instance sharing that
     // key joins it instead of spreading to a different node. Seeded from
     // existing assignments before any new placement decisions are made, so a
-    // running cluster stays put. "Validly" is checked with the same
-    // `candidates` an instance is judged by everywhere else - not just node
-    // liveness - so a node that is up but no longer implements what the
-    // instance needs (a network removed from it, say) can't self-anchor a
-    // sole key's owner in place forever, nor anchor its co-located siblings
-    // to a node none of them can actually use.
+    // running cluster stays put. "Validly" now means valid for every member
+    // of the group, not just the instance currently sitting there - a node
+    // that stops implementing what a co-located sibling needs (a drive
+    // removed, say) can't keep anchoring the whole group to it, the same way
+    // a node that stops working for the instance itself already could not.
     let mut host_node: BTreeMap<&str, &str> = BTreeMap::new();
-    for item in desired {
-        if let Some(current) = state.assignments.get(&item.id) {
-            let validly_placed = candidates(state, item, served_drives, everywhere_networks)
-                .is_ok_and(|(eligible, _)| eligible.iter().any(|n| n.name == current.node));
-            if validly_placed {
-                for key in item.anchor_keys() {
-                    host_node.entry(key).or_insert(&current.node);
-                }
+    for (item, result) in desired.iter().zip(&per_item) {
+        let Some(current) = state.assignments.get(&item.id) else {
+            continue;
+        };
+        let Ok((eligible, _)) = result else { continue };
+        let validly_placed = eligible.iter().any(|n| n.name == current.node)
+            && item.anchor_keys().all(|key| match group_eligible.get(key) {
+                Some(set) => set.contains(current.node.as_str()),
+                None => true,
+            });
+        if validly_placed {
+            for key in item.anchor_keys() {
+                host_node.entry(key).or_insert(&current.node);
             }
         }
     }
 
-    for item in desired {
-        let (eligible, rejected) = match candidates(state, item, served_drives, everywhere_networks) {
+    for (item, result) in desired.iter().zip(per_item) {
+        let (eligible, rejected) = match result {
             Ok(v) => v,
             Err(e) => {
                 wanted.insert(item.id.clone());
                 unplaceable.push(Unplaceable {
                     instance: item.id.clone(),
-                    reason: e.to_string(),
+                    reason: e,
                 });
                 continue;
             }
@@ -335,15 +384,50 @@ pub fn place(
         // once. Keys anchored to different nodes (one instance's routes span
         // more than one, or two of its keys disagree) leave nothing
         // eligible: a real conflict the operator has to resolve, not a node
-        // to guess between.
-        let anchors: BTreeSet<&str> = item.anchor_keys().filter_map(|k| host_node.get(k)).copied().collect();
-        let eligible: Vec<&NodeState> = if anchors.is_empty() {
-            eligible
-        } else if anchors.len() == 1 {
-            let anchor = *anchors.iter().next().unwrap();
-            eligible.into_iter().filter(|n| n.name == anchor).collect()
+        // to guess between. Before any key has an anchor yet (the group is
+        // being placed for the first time this pass), narrow down to
+        // `group_eligible` instead of this instance's own eligible set, so
+        // whichever member happens to be processed first still only ever
+        // proposes a node every co-located sibling can also use.
+        let anchors: BTreeSet<&str> = item
+            .anchor_keys()
+            .filter_map(|k| host_node.get(k))
+            .copied()
+            .collect();
+        let eligible: Vec<&NodeState> = if !anchors.is_empty() {
+            if anchors.len() == 1 {
+                let anchor = *anchors.iter().next().unwrap();
+                eligible.into_iter().filter(|n| n.name == anchor).collect()
+            } else {
+                Vec::new()
+            }
         } else {
-            Vec::new()
+            let mut names: Option<BTreeSet<&str>> = None;
+            for key in item.anchor_keys() {
+                if let Some(group) = group_eligible.get(key) {
+                    if !group.is_empty() {
+                        names = Some(match names {
+                            None => group.clone(),
+                            Some(existing) => {
+                                let inter: BTreeSet<&str> =
+                                    existing.intersection(group).copied().collect();
+                                if inter.is_empty() {
+                                    existing
+                                } else {
+                                    inter
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            match names {
+                Some(names) if !names.is_empty() => eligible
+                    .into_iter()
+                    .filter(|n| names.contains(n.name.as_str()))
+                    .collect(),
+                _ => eligible,
+            }
         };
 
         // Leave a valid existing placement alone.
@@ -356,17 +440,21 @@ pub fn place(
             }
         }
 
-        let target = eligible
-            .iter()
-            .min_by_key(|node| (load.get(&node.name).copied().unwrap_or(0), node.name.clone()));
+        let target = eligible.iter().min_by_key(|node| {
+            (
+                load.get(&node.name).copied().unwrap_or(0),
+                node.name.clone(),
+            )
+        });
 
         let Some(target) = target else {
+            let keys: Vec<&str> = item.anchor_keys().collect();
             unplaceable.push(Unplaceable {
                 instance: item.id.clone(),
                 reason: if !anchors.is_empty() {
                     format!(
                         "must share a node with {} already placed on {}",
-                        item.anchor_keys().collect::<Vec<_>>().join(", "),
+                        keys.join(", "),
                         anchors.into_iter().collect::<Vec<_>>().join(", ")
                     )
                 } else if rejected.is_empty() {
@@ -397,7 +485,10 @@ pub fn place(
         }
     }
 
-    PlaceOutcome { decisions, unplaceable }
+    PlaceOutcome {
+        decisions,
+        unplaceable,
+    }
 }
 
 #[cfg(test)]
@@ -497,7 +588,11 @@ mod tests {
 
     fn cluster() -> ClusterState {
         let mut state = ClusterState::default();
-        state.apply(&Request::UpsertNode(node("n1", Role::Manager, &["fast", "bulk"])));
+        state.apply(&Request::UpsertNode(node(
+            "n1",
+            Role::Manager,
+            &["fast", "bulk"],
+        )));
         state.apply(&Request::UpsertNode(node("n2", Role::Manager, &["fast"])));
         state.apply(&Request::UpsertNode(node("n3", Role::Worker, &[])));
         state
@@ -552,10 +647,13 @@ mod tests {
         let mut item = desired("db", 0);
         item.drives = ["bulk".to_string()].into();
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, rejected) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
-        assert!(rejected.iter().any(|r| r.contains("n2 does not implement drive bulk")));
+        assert!(rejected
+            .iter()
+            .any(|r| r.contains("n2 does not implement drive bulk")));
     }
 
     /// `fast/data`, primary n1, with n2 holding a synced replica.
@@ -587,8 +685,12 @@ mod tests {
     fn a_node_holding_a_current_copy_is_a_candidate() {
         let (state, item) = with_replicated_volume(Some("n2"));
 
-        let (eligible, _) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
-        assert_eq!(eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["n1", "n2"]);
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert_eq!(
+            eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            ["n1", "n2"]
+        );
     }
 
     /// And a healthy placement on such a node is left alone rather than
@@ -604,7 +706,11 @@ mod tests {
         });
 
         let outcome = place(&state, &[item], &no_served(), &no_everywhere());
-        assert_eq!(placed(&outcome.decisions, "db", 0), None, "should stay on n2");
+        assert_eq!(
+            placed(&outcome.decisions, "db", 0),
+            None,
+            "should stay on n2"
+        );
     }
 
     /// Running on a node that never received a copy is not failover: the
@@ -615,10 +721,17 @@ mod tests {
         let (mut state, item) = with_replicated_volume(None);
         state.unreachable.insert("n1".into());
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
-        assert!(eligible.is_empty(), "eligible: {:?}", eligible.iter().map(|n| &n.name).collect::<Vec<_>>());
+        let (eligible, rejected) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert!(
-            rejected.iter().any(|r| r.contains("n2 holds no current copy of volume fast/data")),
+            eligible.is_empty(),
+            "eligible: {:?}",
+            eligible.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|r| r.contains("n2 holds no current copy of volume fast/data")),
             "rejected: {rejected:?}"
         );
     }
@@ -635,10 +748,16 @@ mod tests {
             primary: "n1".into(),
         });
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
-        assert_eq!(eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["n1"]);
+        let (eligible, rejected) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert_eq!(
+            eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            ["n1"]
+        );
         assert!(
-            rejected.iter().any(|r| r.contains("n2 holds no current copy of volume fast/data")),
+            rejected
+                .iter()
+                .any(|r| r.contains("n2 holds no current copy of volume fast/data")),
             "rejected: {rejected:?}"
         );
     }
@@ -651,8 +770,12 @@ mod tests {
         let (state, item) = with_replicated_volume(None);
 
         let served = ["fast".to_string()].into();
-        let (eligible, _) = candidates(&state, &item, &served, &no_everywhere()).expect("candidates");
-        assert!(eligible.iter().any(|n| n.name == "n2"), "n2 should still be eligible");
+        let (eligible, _) =
+            candidates(&state, &item, &served, &no_everywhere()).expect("candidates");
+        assert!(
+            eligible.iter().any(|n| n.name == "n2"),
+            "n2 should still be eligible"
+        );
     }
 
     /// A served drive has one authoritative copy any node can reach over the
@@ -665,9 +788,13 @@ mod tests {
         item.drives = ["bulk".to_string()].into();
         let served = ["bulk".to_string()].into();
 
-        let (eligible, _) = candidates(&state, &item, &served, &no_everywhere()).expect("candidates");
+        let (eligible, _) =
+            candidates(&state, &item, &served, &no_everywhere()).expect("candidates");
         let names: BTreeSet<_> = eligible.iter().map(|n| n.name.clone()).collect();
-        assert_eq!(names, ["n1".to_string(), "n2".to_string(), "n3".to_string()].into());
+        assert_eq!(
+            names,
+            ["n1".to_string(), "n2".to_string(), "n3".to_string()].into()
+        );
     }
 
     #[test]
@@ -677,10 +804,13 @@ mod tests {
         let mut item = desired("db", 0);
         item.networks = ["wan".to_string()].into();
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, rejected) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
-        assert!(rejected.iter().any(|r| r.contains("n2 does not implement network wan")));
+        assert!(rejected
+            .iter()
+            .any(|r| r.contains("n2 does not implement network wan")));
     }
 
     /// A nat network takes no per-node config at all, so it never narrows
@@ -694,23 +824,33 @@ mod tests {
         item.egress_network = Some("home".to_string());
         let everywhere = ["home".to_string()].into();
 
-        let (eligible, _) = candidates(&state, &item, &no_served(), &everywhere).expect("candidates");
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &everywhere).expect("candidates");
         let names: BTreeSet<_> = eligible.iter().map(|n| n.name.clone()).collect();
-        assert_eq!(names, ["n1".to_string(), "n2".to_string(), "n3".to_string()].into());
+        assert_eq!(
+            names,
+            ["n1".to_string(), "n2".to_string(), "n3".to_string()].into()
+        );
     }
 
     #[test]
     fn bound_ports_narrow_the_candidates() {
         let mut state = cluster();
-        state.nodes.get_mut("n1").unwrap().open_ports =
-            [("wan".to_string(), [(cl_raft::state::PortProtocol::Tcp, 25)].into())].into();
+        state.nodes.get_mut("n1").unwrap().open_ports = [(
+            "wan".to_string(),
+            [(cl_raft::state::PortProtocol::Tcp, 25)].into(),
+        )]
+        .into();
         let mut item = desired("mail", 0);
         item.bound_ports = [("wan".to_string(), cl_raft::state::PortProtocol::Tcp, 25)].into();
 
-        let (eligible, rejected) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, rejected) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n1");
-        assert!(rejected.iter().any(|r| r.contains("n2 does not have 25/Tcp open on network wan")));
+        assert!(rejected
+            .iter()
+            .any(|r| r.contains("n2 does not have 25/Tcp open on network wan")));
     }
 
     #[test]
@@ -719,7 +859,8 @@ mod tests {
         let mut item = desired("web", 0);
         item.constraints = vec!["node.role == worker".into()];
 
-        let (eligible, _) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].name, "n3");
     }
@@ -730,7 +871,8 @@ mod tests {
         let mut item = desired("web", 0);
         item.constraints = vec!["node.labels.zone == eu".into()];
 
-        let (eligible, _) = candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
         assert!(eligible.is_empty());
     }
 
@@ -798,7 +940,8 @@ mod tests {
 
         // n3 is the emptiest node anyway, but the point is that no decision is
         // emitted at all for an instance that is already validly placed.
-        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        let decisions =
+            place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         assert!(decisions.is_empty());
     }
 
@@ -815,7 +958,8 @@ mod tests {
             availability: Availability::Drain,
         });
 
-        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        let decisions =
+            place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         let target = placed(&decisions, "web", 0).expect("replacement node");
         assert_ne!(target, "n3");
     }
@@ -833,7 +977,8 @@ mod tests {
             reachable: false,
         });
 
-        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        let decisions =
+            place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         let target = placed(&decisions, "web", 0).expect("replacement node");
         assert_ne!(target, "n3");
     }
@@ -845,7 +990,9 @@ mod tests {
             node: "n1".into(),
             reachable: false,
         });
-        let (eligible, rejected) = candidates(&state, &desired("web", 0), &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, rejected) =
+            candidates(&state, &desired("web", 0), &no_served(), &no_everywhere())
+                .expect("candidates");
         assert!(!eligible.iter().any(|n| n.name == "n1"));
         assert!(rejected.iter().any(|r| r.contains("n1 is unreachable")));
 
@@ -853,7 +1000,8 @@ mod tests {
             node: "n1".into(),
             reachable: true,
         });
-        let (eligible, _) = candidates(&state, &desired("web", 0), &no_served(), &no_everywhere()).expect("candidates");
+        let (eligible, _) = candidates(&state, &desired("web", 0), &no_served(), &no_everywhere())
+            .expect("candidates");
         assert!(eligible.iter().any(|n| n.name == "n1"));
     }
 
@@ -906,7 +1054,13 @@ mod tests {
         assert!(outcome.decisions.is_empty());
         let unplaceable = &outcome.unplaceable[0];
         assert_eq!(unplaceable.instance, InstanceId::new("site", "db", 0));
-        assert!(unplaceable.reason.contains("does not implement drive missing"), "{}", unplaceable.reason);
+        assert!(
+            unplaceable
+                .reason
+                .contains("does not implement drive missing"),
+            "{}",
+            unplaceable.reason
+        );
     }
 
     /// One instance with nowhere to go must not stop everything else in the
@@ -921,7 +1075,10 @@ mod tests {
 
         let outcome = place(&state, &[broken, fine], &no_served(), &no_everywhere());
         assert_eq!(outcome.unplaceable.len(), 1);
-        assert_eq!(outcome.unplaceable[0].instance, InstanceId::new("site", "db", 0));
+        assert_eq!(
+            outcome.unplaceable[0].instance,
+            InstanceId::new("site", "db", 0)
+        );
         assert!(placed(&outcome.decisions, "web", 0).is_some());
     }
 
@@ -940,6 +1097,47 @@ mod tests {
         let main_node = placed(&decisions, "web", 0).expect("web placed");
         let admin_node = placed(&decisions, "admin", 0).expect("admin placed");
         assert_eq!(main_node, admin_node);
+    }
+
+    /// When initial placement occurs for a colocation group, sibling constraints
+    /// (such as drives/volumes) must constrain every member of the group, so that
+    /// an unconstrained member scheduled first does not pick a node that cannot
+    /// run the sibling.
+    #[test]
+    fn colocated_instances_respect_sibling_constraints_when_initially_placing() {
+        let mut state = cluster();
+        // n1 has drive "fast", n2 and n3 do not.
+        // n1 has 2 existing assignments, n2 and n3 have 0 (so lowest load would normally pick n2/n3).
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("other", "a", 0),
+            node: "n1".into(),
+            drives: BTreeSet::new(),
+        });
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("other", "b", 0),
+            node: "n1".into(),
+            drives: BTreeSet::new(),
+        });
+
+        // Dashboard has no drive requirements and comes first in `desired`.
+        let mut dashboard = desired("dashboard", 0);
+        dashboard.proxy_hosts = ["mem0.example.com".to_string()].into();
+
+        // API requires drive "fast" which only n1 implements.
+        let mut api = desired("api", 0);
+        api.proxy_hosts = ["mem0.example.com".to_string()].into();
+        api.drives = ["fast".to_string()].into();
+
+        let outcome = place(&state, &[dashboard, api], &no_served(), &no_everywhere());
+        assert!(
+            outcome.unplaceable.is_empty(),
+            "unplaceable: {:?}",
+            outcome.unplaceable
+        );
+        let dash_node = placed(&outcome.decisions, "dashboard", 0).expect("dashboard placed");
+        let api_node = placed(&outcome.decisions, "api", 0).expect("api placed");
+        assert_eq!(dash_node, "n1");
+        assert_eq!(api_node, "n1");
     }
 
     /// `x-clouduler.colocate` uses the same anchor mechanism as a shared
@@ -1061,6 +1259,9 @@ mod tests {
         let outcome = place(&state, &[main, admin], &no_served(), &no_everywhere());
         assert!(placed(&outcome.decisions, "web", 0).is_some());
         assert_eq!(outcome.unplaceable.len(), 1);
-        assert_eq!(outcome.unplaceable[0].instance, InstanceId::new("site", "admin", 0));
+        assert_eq!(
+            outcome.unplaceable[0].instance,
+            InstanceId::new("site", "admin", 0)
+        );
     }
 }

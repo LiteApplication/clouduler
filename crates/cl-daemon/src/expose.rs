@@ -37,7 +37,8 @@ pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> tokio::task::Jo
 async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
     let routes = Routes::new();
     // Keyed by port, protocol *and* proxy-protocol setting: see the loop body.
-    let mut listening: BTreeMap<(u16, Protocol, bool), tokio::task::JoinHandle<()>> = BTreeMap::new();
+    let mut listening: BTreeMap<(u16, Protocol, bool), tokio::task::JoinHandle<()>> =
+        BTreeMap::new();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
 
     loop {
@@ -73,7 +74,9 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
                 tokio::spawn(async move {
                     loop {
                         let served = match protocol {
-                            Protocol::Tcp => serve_tcp(bind, published, routes.clone(), proxy_protocol).await,
+                            Protocol::Tcp => {
+                                serve_tcp(bind, published, routes.clone(), proxy_protocol).await
+                            }
                             Protocol::Udp => serve_udp(bind, published, routes.clone()).await,
                         };
                         if let Err(e) = served {

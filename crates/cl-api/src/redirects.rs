@@ -43,7 +43,9 @@ pub fn new_id() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut buf = [0u8; 12];
     rand::fill(&mut buf);
-    buf.iter().map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char).collect()
+    buf.iter()
+        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

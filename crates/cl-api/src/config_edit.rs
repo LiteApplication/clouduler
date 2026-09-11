@@ -143,8 +143,8 @@ mod tests {
                 address: "cloud".into(),
                 network: "internal".into(),
                 port: 8443,
-            through_proxy: true,
-            backend_port: 8444,
+                through_proxy: true,
+                backend_port: 8444,
             },
             data_dir: "/var/lib/clouduler".into(),
             failover: Default::default(),
@@ -213,8 +213,17 @@ mod tests {
     #[test]
     fn remaining_time_never_goes_negative() {
         let edit = PendingEdit::arm(config(), Duration::from_secs(10), Duration::from_secs(60));
-        assert_eq!(edit.remaining(Duration::from_secs(10)), Duration::from_secs(60));
-        assert_eq!(edit.remaining(Duration::from_secs(70)), Duration::from_secs(0));
-        assert_eq!(edit.remaining(Duration::from_secs(200)), Duration::from_secs(0));
+        assert_eq!(
+            edit.remaining(Duration::from_secs(10)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            edit.remaining(Duration::from_secs(70)),
+            Duration::from_secs(0)
+        );
+        assert_eq!(
+            edit.remaining(Duration::from_secs(200)),
+            Duration::from_secs(0)
+        );
     }
 }

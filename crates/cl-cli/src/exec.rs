@@ -27,12 +27,28 @@ use tokio_tungstenite::Connector;
 use crate::logs::resolve_target;
 use cl_raft::client::client_for;
 
-pub async fn run(cfg: &ClusterConfig, target: &str, cmd: Vec<String>, user: Option<String>, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+pub async fn run(
+    cfg: &ClusterConfig,
+    target: &str,
+    cmd: Vec<String>,
+    user: Option<String>,
+    via: Option<&str>,
+) -> Result<()> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     let mut assignments = resolve_target(&state, target)?;
     if assignments.len() > 1 {
-        let ids = assignments.iter().map(|a| a.instance.to_string()).collect::<Vec<_>>().join(", ");
-        bail!("{target} has {} running instances; name one directly: {ids}", assignments.len());
+        let ids = assignments
+            .iter()
+            .map(|a| a.instance.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "{target} has {} running instances; name one directly: {ids}",
+            assignments.len()
+        );
     }
     let assignment = assignments.remove(0);
 
@@ -43,8 +59,12 @@ pub async fn run(cfg: &ClusterConfig, target: &str, cmd: Vec<String>, user: Opti
         )
     })?;
 
-    let base = cl_update::peers::base_url(cfg, &assignment.node)
-        .ok_or_else(|| anyhow!("node {} has no address on the internal network", assignment.node))?;
+    let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
+        anyhow!(
+            "node {} has no address on the internal network",
+            assignment.node
+        )
+    })?;
     let ws_base = base.replacen("https://", "wss://", 1);
 
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -63,9 +83,19 @@ pub async fn run(cfg: &ClusterConfig, target: &str, cmd: Vec<String>, user: Opti
     let request = ClientRequestBuilder::new(uri).with_header(AUTH_HEADER, signature);
 
     let tls_config = insecure_tls_config();
-    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(Connector::Rustls(tls_config)))
-        .await
-        .with_context(|| format!("connecting to {} for {}'s exec session", assignment.node, assignment.instance))?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(Connector::Rustls(tls_config)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "connecting to {} for {}'s exec session",
+            assignment.node, assignment.instance
+        )
+    })?;
 
     let raw_terminal = tty.then(RawTerminal::enable).transpose()?;
     let result = bridge(ws_stream).await;
@@ -107,7 +137,11 @@ where
             match stdin.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if write.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                    if write
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -186,7 +220,9 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -213,6 +249,10 @@ impl RawTerminal {
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         let stdin = std::io::stdin();
-        let _ = nix::sys::termios::tcsetattr(&stdin, nix::sys::termios::SetArg::TCSANOW, &self.original);
+        let _ = nix::sys::termios::tcsetattr(
+            &stdin,
+            nix::sys::termios::SetArg::TCSANOW,
+            &self.original,
+        );
     }
 }

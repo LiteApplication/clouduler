@@ -13,6 +13,7 @@ pub mod health;
 pub mod logs;
 pub mod node;
 pub mod rebalance;
+pub mod registry;
 pub mod report;
 pub mod restore;
 pub mod secret;

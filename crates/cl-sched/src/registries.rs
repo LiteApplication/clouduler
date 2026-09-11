@@ -43,7 +43,13 @@ pub fn is_registry_secret(name: &str) -> bool {
 pub fn secret_name(server: &str) -> String {
     let safe: String = server
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{SECRET_PREFIX}{safe}")
 }
@@ -70,6 +76,139 @@ impl StoredLogin {
         let sealed = Sealed::seal(key, &name, &json)?;
         Ok((name, sealed))
     }
+}
+
+/// Reduce whatever the operator typed to the host docker itself keys
+/// credentials on.
+///
+/// Docker Hub has four spellings in common use and only one of them is what a
+/// credential store holds, so they are all folded to `docker.io` — otherwise
+/// a login saved as `hub.docker.com` would simply never be found when pulling
+/// `nginx`, with nothing to indicate why.
+pub fn normalize_server(server: &str) -> String {
+    let trimmed = server
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    match trimmed.as_str() {
+        "docker.io" | "index.docker.io" | "registry-1.docker.io" | "hub.docker.com" => {
+            cl_docker::DOCKER_HUB.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Where a registry's v2 api lives. Docker Hub is the one registry whose
+/// credential-store name is not the host its api answers on.
+fn api_base(server: &str) -> String {
+    if server == cl_docker::DOCKER_HUB {
+        "https://registry-1.docker.io".to_string()
+    } else {
+        format!("https://{server}")
+    }
+}
+
+/// Ask the registry whether it accepts this login.
+///
+/// Follows the ordinary registry v2 handshake: `GET /v2/` either succeeds
+/// outright, or answers 401 naming the scheme to use. For `Bearer` — Docker
+/// Hub, Forgejo, Gitea, GHCR, GitLab — that means fetching a token from the
+/// realm it names, with the login as basic auth; a wrong password is a 401
+/// there. For `Basic`, the same request is simply retried with the header.
+///
+/// Shared by the api's `/api/registries` routes and the `clouduler registry`
+/// cli, so a login typed at either one is checked the same way. Returns a
+/// plain message on failure rather than an api-specific error type, since
+/// the cli has no `ApiError` to build.
+pub async fn verify(
+    http: &reqwest::Client,
+    server: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    let base = api_base(server);
+    let probe = http
+        .get(format!("{base}/v2/"))
+        .send()
+        .await
+        .map_err(|e| format!("cannot reach {server}: {e}"))?;
+
+    if probe.status().is_success() {
+        // An open registry answers this anonymously, so there is nothing here
+        // to check the password against. Storing it is still the right move:
+        // the host is real and reachable, and a registry that is public for
+        // reads commonly still wants a login for private repositories.
+        return Ok(());
+    }
+    if probe.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Err(format!(
+            "{server} answered {} to a registry api request, which does not look like a container registry",
+            probe.status()
+        ));
+    }
+
+    let challenge = probe
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    let response = if let Some(realm) = bearer_realm(&challenge) {
+        let mut url = reqwest::Url::parse(&realm)
+            .map_err(|e| format!("{server} named an unusable token url: {e}"))?;
+        if let Some(service) = challenge_param(&challenge, "service") {
+            url.query_pairs_mut().append_pair("service", &service);
+        }
+        http.get(url)
+            .basic_auth(username, Some(password))
+            .send()
+            .await
+            .map_err(|e| format!("cannot reach {server}'s token endpoint: {e}"))?
+    } else {
+        http.get(format!("{base}/v2/"))
+            .basic_auth(username, Some(password))
+            .send()
+            .await
+            .map_err(|e| format!("cannot reach {server}: {e}"))?
+    };
+
+    match response.status() {
+        s if s.is_success() => Ok(()),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            Err(format!("{server} rejected these credentials"))
+        }
+        other => Err(format!(
+            "{server} answered {other} while checking these credentials"
+        )),
+    }
+}
+
+/// The `realm` of a `Bearer` challenge, or `None` for any other scheme.
+fn bearer_realm(challenge: &str) -> Option<String> {
+    if !challenge
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("bearer")
+    {
+        return None;
+    }
+    challenge_param(challenge, "realm")
+}
+
+/// Pull one quoted parameter out of a `WWW-Authenticate` challenge.
+///
+/// Deliberately simple rather than a full RFC 7235 parser: every registry in
+/// practice emits `Bearer realm="...",service="..."` with quoted values, and
+/// a challenge this cannot read falls back to basic auth rather than failing.
+fn challenge_param(challenge: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = challenge.find(&needle)? + needle.len();
+    let rest = &challenge[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// Every registry login the cluster holds, keyed by server.
@@ -121,6 +260,14 @@ impl Registries {
     /// password disclosed to a third party, not a failed pull.
     pub fn for_image(&self, image: &str) -> Option<&RegistryCredentials> {
         self.0.get(&cl_docker::ImageRef::parse(image).registry())
+    }
+
+    /// The login stored for `server`, if any, keyed the same way `login`
+    /// stores it. Used by the cli's `registry test` and `registry rm`, which
+    /// take whatever spelling the operator typed rather than an image
+    /// reference.
+    pub fn get(&self, server: &str) -> Option<&RegistryCredentials> {
+        self.0.get(&normalize_server(server))
     }
 
     /// Servers with a login stored, for the ui's account list.
@@ -176,7 +323,9 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with(&key, &login("docker.io"));
         let registries = Registries::load(&state, &key);
-        let creds = registries.for_image("nginx:1.25").expect("a docker hub login");
+        let creds = registries
+            .for_image("nginx:1.25")
+            .expect("a docker hub login");
         assert_eq!(creds.username, "alice");
         assert_eq!(creds.password, "hunter2");
         assert_eq!(creds.server, "docker.io");
@@ -191,7 +340,9 @@ mod tests {
         let registries = Registries::load(&state, &key);
         assert!(registries.for_image("git.example.com/team/app:1").is_some());
         assert!(registries.for_image("nginx:1.25").is_none());
-        assert!(registries.for_image("other.example.com/team/app:1").is_none());
+        assert!(registries
+            .for_image("other.example.com/team/app:1")
+            .is_none());
     }
 
     /// The name is sanitised for a port, but what docker is told must still
@@ -199,10 +350,15 @@ mod tests {
     #[test]
     fn a_port_survives_the_name_sanitising() {
         let key = ClusterKey::generate();
-        assert_eq!(secret_name("registry.local:5000"), "_clouduler_registry_registry.local_5000");
+        assert_eq!(
+            secret_name("registry.local:5000"),
+            "_clouduler_registry_registry.local_5000"
+        );
         let state = state_with(&key, &login("registry.local:5000"));
         let registries = Registries::load(&state, &key);
-        let creds = registries.for_image("registry.local:5000/app:1").expect("a login");
+        let creds = registries
+            .for_image("registry.local:5000/app:1")
+            .expect("a login");
         assert_eq!(creds.server, "registry.local:5000");
     }
 
@@ -219,5 +375,56 @@ mod tests {
         let registries = Registries::load(&state, &key);
         assert!(registries.for_image("nginx").is_some());
         assert_eq!(registries.servers().count(), 1);
+    }
+
+    #[test]
+    fn every_spelling_of_docker_hub_folds_to_one() {
+        for spelling in [
+            "docker.io",
+            "index.docker.io",
+            "registry-1.docker.io",
+            "hub.docker.com",
+            "https://hub.docker.com/",
+            "  HUB.DOCKER.COM  ",
+        ] {
+            assert_eq!(normalize_server(spelling), "docker.io", "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_private_registry_keeps_its_host_and_port() {
+        assert_eq!(
+            normalize_server("https://git.example.com/"),
+            "git.example.com"
+        );
+        assert_eq!(
+            normalize_server("registry.local:5000"),
+            "registry.local:5000"
+        );
+    }
+
+    #[test]
+    fn docker_hub_credentials_are_checked_against_the_registry_not_the_website() {
+        assert_eq!(api_base("docker.io"), "https://registry-1.docker.io");
+        assert_eq!(api_base("git.example.com"), "https://git.example.com");
+    }
+
+    #[test]
+    fn a_bearer_challenge_yields_its_realm_and_service() {
+        let challenge =
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io""#;
+        assert_eq!(
+            bearer_realm(challenge),
+            Some("https://auth.docker.io/token".to_string())
+        );
+        assert_eq!(
+            challenge_param(challenge, "service"),
+            Some("registry.docker.io".to_string())
+        );
+    }
+
+    #[test]
+    fn a_basic_challenge_is_not_mistaken_for_a_bearer_one() {
+        assert_eq!(bearer_realm(r#"Basic realm="registry""#), None);
     }
 }

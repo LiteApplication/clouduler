@@ -59,7 +59,10 @@ pub const OWNER: &str = "_cluster";
 /// (kind, address). For a wireguard network the interface name inside the
 /// address is still the one stored in `node.network`, but it names a tunnel
 /// clouduler manages rather than one the admin set up.
-pub fn interfaces_of(cfg: &ClusterConfig, node_name: &str) -> BTreeMap<String, (NetworkKind, InterfaceAddress)> {
+pub fn interfaces_of(
+    cfg: &ClusterConfig,
+    node_name: &str,
+) -> BTreeMap<String, (NetworkKind, InterfaceAddress)> {
     let Some(node) = cfg.nodes.get(node_name) else {
         return BTreeMap::new();
     };
@@ -88,9 +91,11 @@ async fn effective_interface(kind: NetworkKind, addr: &InterfaceAddress, network
     let primary = addr.interface.clone();
     let target = fallback.health_check_ip;
     let primary_iface = primary.clone();
-    let reachable = tokio::task::spawn_blocking(move || cl_net::egress::probe_reachable(&primary_iface, target))
-        .await
-        .unwrap_or(false);
+    let reachable = tokio::task::spawn_blocking(move || {
+        cl_net::egress::probe_reachable(&primary_iface, target)
+    })
+    .await
+    .unwrap_or(false);
     if reachable {
         primary
     } else {
@@ -176,18 +181,25 @@ pub fn start(
             // no key still brings wireguard tunnels up once one is delivered
             // to it, without a restart.
             let key = key_rx.borrow().clone();
-            let internal_addr = cfg.nodes.get(&node_name).and_then(|node| node.ip_on(cfg.internal_network().0));
+            let internal_addr = cfg
+                .nodes
+                .get(&node_name)
+                .and_then(|node| node.ip_on(cfg.internal_network().0));
 
             for (network, (kind, addr)) in &interfaces {
                 let iface = &addr.interface;
                 if *kind == NetworkKind::Wireguard {
-                    if let Err(e) = ensure_tunnel(&cluster, key.as_deref(), &node_name, network, iface).await {
+                    if let Err(e) =
+                        ensure_tunnel(&cluster, key.as_deref(), &node_name, network, iface).await
+                    {
                         warn!(network = %network, iface = %iface, error = %e, "cannot bring up the wireguard tunnel");
                         continue;
                     }
                 }
                 let effective = effective_interface(*kind, addr, network).await;
-                if let Err(e) = ensure_one(netlink.as_ref(), &docker, network, &effective, *kind).await {
+                if let Err(e) =
+                    ensure_one(netlink.as_ref(), &docker, network, &effective, *kind).await
+                {
                     warn!(network = %network, iface = %effective, error = %e, "cannot bring up the egress network");
                 }
             }
@@ -226,11 +238,14 @@ async fn ensure_tunnel(
         .secrets
         .get(&secret_name)
         .with_context(|| format!("no wireguard config imported yet for {network}"))?;
-    let key = key.with_context(|| format!("this node holds no cluster key, cannot open the {network} config"))?;
+    let key = key.with_context(|| {
+        format!("this node holds no cluster key, cannot open the {network} config")
+    })?;
     let plaintext = Sealed::from_blob(entry.sealed.clone())
         .open(key, &secret_name)
         .with_context(|| format!("cannot open the {network} wireguard config"))?;
-    let text = String::from_utf8(plaintext).with_context(|| format!("{network} wireguard config is not utf8"))?;
+    let text = String::from_utf8(plaintext)
+        .with_context(|| format!("{network} wireguard config is not utf8"))?;
     let wg_cfg: WireguardConfig =
         parse_wg_quick(&text).with_context(|| format!("invalid wireguard config for {network}"))?;
 
@@ -242,12 +257,21 @@ async fn ensure_tunnel(
     Ok(())
 }
 
-async fn apply_ingress(iface: &str, addr: IpAddr, network: &str, store: &WireguardIngressStore) -> Result<()> {
+async fn apply_ingress(
+    iface: &str,
+    addr: IpAddr,
+    network: &str,
+    store: &WireguardIngressStore,
+) -> Result<()> {
     let rules: Vec<IngressRule> = store
         .rules
         .iter()
         .filter(|r| r.network == network)
-        .map(|r| IngressRule { port: r.port, protocol: r.protocol, target_port: r.target_port })
+        .map(|r| IngressRule {
+            port: r.port,
+            protocol: r.protocol,
+            target_port: r.target_port,
+        })
         .collect();
     let plan = wireguard_ingress_iptables_plan(iface, addr, &rules);
     tokio::task::spawn_blocking(move || apply_wireguard_ingress_iptables(&plan))
@@ -256,8 +280,16 @@ async fn apply_ingress(iface: &str, addr: IpAddr, network: &str, store: &Wiregua
     Ok(())
 }
 
-async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, iface: &str, kind: NetworkKind) -> Result<()> {
-    let Some(netlink) = netlink else { return Ok(()) };
+async fn ensure_one(
+    netlink: Option<&Overlay>,
+    docker: &Docker,
+    network: &str,
+    iface: &str,
+    kind: NetworkKind,
+) -> Result<()> {
+    let Some(netlink) = netlink else {
+        return Ok(());
+    };
     let subnet = egress_subnet(network);
     let gateway = egress_gateway(subnet);
     let bridge = ensure_egress_bridge(netlink, network, subnet)
@@ -267,8 +299,14 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
     let iface_owned = iface.to_string();
     let bridge_owned = bridge.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        std::fs::write(format!("/proc/sys/net/ipv4/conf/{bridge_owned}/rp_filter"), b"2")?;
-        std::fs::write(format!("/proc/sys/net/ipv4/conf/{iface_owned}/rp_filter"), b"2")?;
+        std::fs::write(
+            format!("/proc/sys/net/ipv4/conf/{bridge_owned}/rp_filter"),
+            b"2",
+        )?;
+        std::fs::write(
+            format!("/proc/sys/net/ipv4/conf/{iface_owned}/rp_filter"),
+            b"2",
+        )?;
         std::fs::write("/proc/sys/net/ipv4/conf/all/rp_filter", b"2")?;
         Ok(())
     })
@@ -287,8 +325,13 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
     tokio::task::spawn_blocking(move || -> Result<()> {
         let table_str = table_id.to_string();
         let rule_pattern = format!("iif {bridge_for_rule} lookup {table_str}");
-        let existing_rules =
-            String::from_utf8_lossy(&std::process::Command::new("ip").args(["rule", "show"]).output()?.stdout).to_string();
+        let existing_rules = String::from_utf8_lossy(
+            &std::process::Command::new("ip")
+                .args(["rule", "show"])
+                .output()?
+                .stdout,
+        )
+        .to_string();
 
         if kind == NetworkKind::Wireguard {
             // A wireguard tunnel does cryptokey routing: there is no
@@ -299,7 +342,15 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
             // tick), so unlike the egress case below there is no "is this
             // operator-managed interface actually up" check to do first.
             let status = std::process::Command::new("ip")
-                .args(["route", "replace", "default", "dev", &iface_for_route, "table", &table_str])
+                .args([
+                    "route",
+                    "replace",
+                    "default",
+                    "dev",
+                    &iface_for_route,
+                    "table",
+                    &table_str,
+                ])
                 .status()?;
             if !status.success() {
                 anyhow::bail!("ip route replace failed");
@@ -316,7 +367,11 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
                 .output()?;
             let route_str = String::from_utf8_lossy(&route_out.stdout);
             let parts: Vec<&str> = route_str.split_whitespace().collect();
-            let via = parts.iter().position(|&x| x == "via").and_then(|i| parts.get(i + 1)).copied();
+            let via = parts
+                .iter()
+                .position(|&x| x == "via")
+                .and_then(|i| parts.get(i + 1))
+                .copied();
 
             // No gateway found for `iface`: it has no working route out (down,
             // no DHCP lease, cable unplugged, ...). Installing a `dev`-only
@@ -329,7 +384,16 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
             let Some(via) = via else {
                 if existing_rules.contains(&rule_pattern) {
                     std::process::Command::new("ip")
-                        .args(["rule", "del", "iif", &bridge_for_rule, "lookup", &table_str, "priority", "5100"])
+                        .args([
+                            "rule",
+                            "del",
+                            "iif",
+                            &bridge_for_rule,
+                            "lookup",
+                            &table_str,
+                            "priority",
+                            "5100",
+                        ])
                         .status()
                         .ok();
                 }
@@ -341,7 +405,17 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
             };
 
             let status = std::process::Command::new("ip")
-                .args(["route", "replace", "default", "via", via, "dev", &iface_for_route, "table", &table_str])
+                .args([
+                    "route",
+                    "replace",
+                    "default",
+                    "via",
+                    via,
+                    "dev",
+                    &iface_for_route,
+                    "table",
+                    &table_str,
+                ])
                 .status()?;
             if !status.success() {
                 anyhow::bail!("ip route replace failed");
@@ -350,7 +424,16 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
 
         if !existing_rules.contains(&rule_pattern) {
             let status = std::process::Command::new("ip")
-                .args(["rule", "add", "iif", &bridge_for_rule, "lookup", &table_str, "priority", "5100"])
+                .args([
+                    "rule",
+                    "add",
+                    "iif",
+                    &bridge_for_rule,
+                    "lookup",
+                    &table_str,
+                    "priority",
+                    "5100",
+                ])
                 .status()?;
             if !status.success() {
                 anyhow::bail!("ip rule add failed");
@@ -384,11 +467,11 @@ async fn ensure_one(netlink: Option<&Overlay>, docker: &Docker, network: &str, i
         })
         .await
         .with_context(|| format!("ensuring the {network} docker network"))?;
-    
+
     if created {
         info!(network = %network, %subnet, %bridge, iface = %iface, %mtu, "egress network up");
     }
-    
+
     Ok(())
 }
 
@@ -414,15 +497,23 @@ mod tests {
     use cl_config::{ClusterConfig, Network};
 
     fn cfg() -> ClusterConfig {
-        let mut cfg =
-            ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses");
+        let mut cfg = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml"))
+            .expect("example parses");
         cfg.networks.insert(
             "vpn".to_string(),
-            Network { kind: NetworkKind::Egress, subnet: None, domain: None },
+            Network {
+                kind: NetworkKind::Egress,
+                subnet: None,
+                domain: None,
+            },
         );
         cfg.networks.insert(
             "wg".to_string(),
-            Network { kind: NetworkKind::Wireguard, subnet: None, domain: None },
+            Network {
+                kind: NetworkKind::Wireguard,
+                subnet: None,
+                domain: None,
+            },
         );
         cfg
     }
@@ -430,11 +521,10 @@ mod tests {
     #[test]
     fn a_node_with_an_interface_address_implements_the_network() {
         let mut cfg = cfg();
-        cfg.nodes
-            .get_mut("n1")
-            .unwrap()
-            .network
-            .insert("vpn".to_string(), NodeAddress::Interface(cl_config::InterfaceAddress::new("wg0")));
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "vpn".to_string(),
+            NodeAddress::Interface(cl_config::InterfaceAddress::new("wg0")),
+        );
         let interfaces = interfaces_of(&cfg, "n1");
         let (kind, addr) = interfaces.get("vpn").expect("vpn implemented");
         assert_eq!(*kind, NetworkKind::Egress);
@@ -444,11 +534,10 @@ mod tests {
     #[test]
     fn a_node_with_a_wireguard_address_implements_it_as_wireguard_kind() {
         let mut cfg = cfg();
-        cfg.nodes
-            .get_mut("n1")
-            .unwrap()
-            .network
-            .insert("wg".to_string(), NodeAddress::Interface(cl_config::InterfaceAddress::new("wg-wg")));
+        cfg.nodes.get_mut("n1").unwrap().network.insert(
+            "wg".to_string(),
+            NodeAddress::Interface(cl_config::InterfaceAddress::new("wg-wg")),
+        );
         let interfaces = interfaces_of(&cfg, "n1");
         let (kind, addr) = interfaces.get("wg").expect("wg implemented");
         assert_eq!(*kind, NetworkKind::Wireguard);
@@ -475,7 +564,10 @@ mod tests {
     #[tokio::test]
     async fn an_egress_address_with_no_fallback_never_probes_and_uses_its_interface() {
         let addr = cl_config::InterfaceAddress::new("wg0");
-        assert_eq!(effective_interface(NetworkKind::Egress, &addr, "vpn").await, "wg0");
+        assert_eq!(
+            effective_interface(NetworkKind::Egress, &addr, "vpn").await,
+            "wg0"
+        );
     }
 
     #[tokio::test]
@@ -485,7 +577,10 @@ mod tests {
             interface: "end0".to_string(),
             health_check_ip: "1.1.1.1".parse().unwrap(),
         });
-        assert_eq!(effective_interface(NetworkKind::Wireguard, &addr, "wg").await, "wg-wg");
+        assert_eq!(
+            effective_interface(NetworkKind::Wireguard, &addr, "wg").await,
+            "wg-wg"
+        );
     }
 
     #[tokio::test]
@@ -498,6 +593,9 @@ mod tests {
             interface: "end0".to_string(),
             health_check_ip: "1.1.1.1".parse().unwrap(),
         });
-        assert_eq!(effective_interface(NetworkKind::Egress, &addr, "vpn").await, "end0");
+        assert_eq!(
+            effective_interface(NetworkKind::Egress, &addr, "vpn").await,
+            "end0"
+        );
     }
 }

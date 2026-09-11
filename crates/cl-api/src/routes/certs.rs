@@ -28,7 +28,10 @@ struct CertificateSummary {
     has_chain: bool,
 }
 
-async fn list_certificates(_identity: Identity, State(state): State<AppState>) -> Json<Vec<CertificateSummary>> {
+async fn list_certificates(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<CertificateSummary>> {
     let cluster_state = state.cluster.state().await;
     Json(
         cluster_state
@@ -52,7 +55,10 @@ struct TlsFingerprint {
 /// TLS, for the "Add a node" flow to hand a joining node its
 /// `--tls-fingerprint` pin without the operator having to compare it by
 /// hand.
-async fn tls_fingerprint(_identity: Identity, State(state): State<AppState>) -> Json<TlsFingerprint> {
+async fn tls_fingerprint(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<TlsFingerprint> {
     Json(TlsFingerprint {
         fingerprint: state.tls_fingerprint.clone(),
     })
@@ -86,7 +92,10 @@ struct DnsRecordSummary {
     zone: String,
 }
 
-async fn list_dns(_identity: Identity, State(state): State<AppState>) -> Json<Vec<DnsRecordSummary>> {
+async fn list_dns(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<DnsRecordSummary>> {
     let cluster_state = state.cluster.state().await;
     Json(
         cluster_state

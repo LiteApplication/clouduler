@@ -48,7 +48,10 @@ fn is_reserved_secret(name: &str) -> bool {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/configs", get(list_configs))
-        .route("/api/configs/{name}", get(get_config).put(put_config).delete(delete_config))
+        .route(
+            "/api/configs/{name}",
+            get(get_config).put(put_config).delete(delete_config),
+        )
         .route("/api/secrets", get(list_secrets))
         .route("/api/secrets/key", get(get_key).post(post_key))
         .route("/api/secrets/{name}", put(put_secret).delete(delete_secret))
@@ -62,7 +65,10 @@ struct ConfigSummary {
     owner: Option<String>,
 }
 
-async fn list_configs(_identity: Identity, State(state): State<AppState>) -> Json<Vec<ConfigSummary>> {
+async fn list_configs(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<ConfigSummary>> {
     let cluster_state = state.cluster.state().await;
     Json(
         cluster_state
@@ -169,7 +175,10 @@ struct SecretSummary {
 /// Never includes a value, at any role: the contract is explicit that a
 /// secret value leaves the sealing node exactly once, at write time, and
 /// never comes back out through the api.
-async fn list_secrets(_identity: Identity, State(state): State<AppState>) -> Json<Vec<SecretSummary>> {
+async fn list_secrets(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<SecretSummary>> {
     let cluster_state = state.cluster.state().await;
     Json(
         cluster_state
@@ -211,10 +220,12 @@ async fn put_secret(
     }
     let plaintext = match body {
         PutSecretRequest::Literal { value } => value.into_bytes(),
-        PutSecretRequest::File { content } => cl_raft::base64_decode(&content)
-            .map_err(ApiError::BadRequest)?,
+        PutSecretRequest::File { content } => {
+            cl_raft::base64_decode(&content).map_err(ApiError::BadRequest)?
+        }
         PutSecretRequest::Generate { generate } => {
-            secrets::generate(generate.length, generate.charset).map_err(|e| ApiError::BadRequest(e.to_string()))?
+            secrets::generate(generate.length, generate.charset)
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?
         }
     };
     if plaintext.len() > MAX_OBJECT_BYTES {
@@ -328,12 +339,18 @@ mod tests {
     fn the_git_backup_objects_are_excluded_from_the_generic_listings() {
         assert!(is_reserved(cl_backup::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG));
         assert!(is_reserved(cl_backup::status::LAST_EXPORT_CONFIG));
-        assert!(is_reserved_secret(cl_backup::deploy_key::DEPLOY_KEY_PRIVATE_SECRET));
+        assert!(is_reserved_secret(
+            cl_backup::deploy_key::DEPLOY_KEY_PRIVATE_SECRET
+        ));
     }
 
     #[test]
     fn the_restic_destination_secrets_are_excluded_from_the_generic_secret_listing() {
-        assert!(is_reserved_secret(&cl_restic::secret_names::password_secret_name("d1")));
-        assert!(is_reserved_secret(&cl_restic::secret_names::credentials_secret_name("d1")));
+        assert!(is_reserved_secret(
+            &cl_restic::secret_names::password_secret_name("d1")
+        ));
+        assert!(is_reserved_secret(
+            &cl_restic::secret_names::credentials_secret_name("d1")
+        ));
     }
 }

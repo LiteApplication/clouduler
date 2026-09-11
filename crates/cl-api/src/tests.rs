@@ -61,7 +61,10 @@ async fn harness() -> Harness {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(node.is_leader(), "single node cluster must elect itself leader");
+    assert!(
+        node.is_leader(),
+        "single node cluster must elect itself leader"
+    );
 
     node.submit(cl_raft::Request::UpsertNode(NodeState {
         name: "n0".into(),
@@ -95,7 +98,9 @@ async fn harness() -> Harness {
     .expect("submit keys");
 
     let cluster_config = ClusterConfig {
-        cluster: ClusterMeta { name: "test".into() },
+        cluster: ClusterMeta {
+            name: "test".into(),
+        },
         networks: BTreeMap::from([(
             "internal".to_string(),
             Network {
@@ -110,7 +115,10 @@ async fn harness() -> Harness {
             cl_config::Node {
                 id: n0_id,
                 role: cl_config::NodeRole::Manager,
-                network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("127.0.0.1".parse().unwrap()))]),
+                network: BTreeMap::from([(
+                    "internal".to_string(),
+                    cl_config::NodeAddress::Ip("127.0.0.1".parse().unwrap()),
+                )]),
                 drives: BTreeMap::new(),
                 labels: BTreeMap::new(),
                 rpc_port: cl_config::DEFAULT_RPC_PORT,
@@ -195,7 +203,12 @@ async fn unauthenticated_requests_are_rejected() {
     let h = harness().await;
     let resp = h
         .router
-        .oneshot(Request::builder().uri("/api/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -457,8 +470,14 @@ async fn setting_the_cloudflare_token_can_be_rotated() {
         )
     };
 
-    assert_eq!(put("cf-token-1").await.unwrap().status(), StatusCode::NO_CONTENT);
-    assert_eq!(put("cf-token-2").await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        put("cf-token-1").await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put("cf-token-2").await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
 
     let status = h
         .router
@@ -549,8 +568,14 @@ async fn setting_the_oidc_client_secret_can_be_rotated() {
         )
     };
 
-    assert_eq!(put("oidc-secret-1").await.unwrap().status(), StatusCode::NO_CONTENT);
-    assert_eq!(put("oidc-secret-2").await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        put("oidc-secret-1").await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put("oidc-secret-2").await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
 
     let status = h
         .router
@@ -604,7 +629,10 @@ async fn setting_the_self_update_github_token_marks_it_configured() {
         .unwrap();
     assert_eq!(status.status(), StatusCode::OK);
     let body: serde_json::Value = serde_json::from_slice(
-        &http_body_util::BodyExt::collect(status.into_body()).await.unwrap().to_bytes(),
+        &http_body_util::BodyExt::collect(status.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
     )
     .unwrap();
     assert_eq!(body["configured"], true);
@@ -694,7 +722,10 @@ async fn a_viewer_never_receives_a_secret_value() {
         .unwrap()
         .to_bytes();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
-    assert!(!text.contains("hunter2"), "a secret value must never be returned");
+    assert!(
+        !text.contains("hunter2"),
+        "a secret value must never be returned"
+    );
 }
 
 #[tokio::test]
@@ -867,8 +898,16 @@ async fn rejoining_under_a_removed_name_is_not_blocked_by_the_old_tombstone() {
         .await
         .unwrap();
     let status = resp.status();
-    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
 
     // The old instance's id is still tombstoned - only the new one is admitted.
     assert!(h.state.cluster.state().await.removed.contains(&old_id));
@@ -895,7 +934,10 @@ async fn redirects_can_be_created_listed_and_removed() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
     let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["target"], "https://new.example.com");
@@ -912,7 +954,10 @@ async fn redirects_can_be_created_listed_and_removed() {
         )
         .await
         .unwrap();
-    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
     let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
 
@@ -947,7 +992,8 @@ async fn renaming_a_network_updates_config_stacks_and_redirects() {
         );
     }
 
-    let redirect_body = r#"{"host":"old","network":"internal","target":"https://new.example.com","status":301}"#;
+    let redirect_body =
+        r#"{"host":"old","network":"internal","target":"https://new.example.com","status":301}"#;
     let resp = h
         .router
         .clone()
@@ -967,7 +1013,10 @@ async fn renaming_a_network_updates_config_stacks_and_redirects() {
     let spec = "services:\n  web:\n    image: nginx\n    networks: [internal]\nnetworks:\n  internal: {}\n";
     h.state
         .cluster
-        .submit(cl_raft::Request::DeployStack { name: "site".into(), spec: spec.into() })
+        .submit(cl_raft::Request::DeployStack {
+            name: "site".into(),
+            spec: spec.into(),
+        })
         .await
         .expect("deploy stack");
 
@@ -1021,7 +1070,10 @@ async fn renaming_a_drive_updates_config_and_stacks() {
             cl_config::Node {
                 id: uuid::Uuid::new_v4(),
                 role: cl_config::NodeRole::Manager,
-                network: BTreeMap::from([("internal".to_string(), cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()))]),
+                network: BTreeMap::from([(
+                    "internal".to_string(),
+                    cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()),
+                )]),
                 drives: BTreeMap::from([("fast".to_string(), "/mnt/fast".into())]),
                 labels: BTreeMap::new(),
                 rpc_port: cl_config::DEFAULT_RPC_PORT,
@@ -1038,7 +1090,10 @@ async fn renaming_a_drive_updates_config_and_stacks() {
     let spec = "services:\n  web:\n    image: nginx\n    volumes: [fast/data:/data]\n";
     h.state
         .cluster
-        .submit(cl_raft::Request::DeployStack { name: "site".into(), spec: spec.into() })
+        .submit(cl_raft::Request::DeployStack {
+            name: "site".into(),
+            spec: spec.into(),
+        })
         .await
         .expect("deploy stack");
 
@@ -1061,7 +1116,13 @@ async fn renaming_a_drive_updates_config_and_stacks() {
     let cfg = h.state.cluster_config.read().await;
     assert!(cfg.drives.contains_key("bulk"));
     assert!(!cfg.drives.contains_key("fast"));
-    assert_eq!(cfg.nodes["n0"].drives.get("bulk").map(|p| p.to_str().unwrap()), Some("/mnt/fast"));
+    assert_eq!(
+        cfg.nodes["n0"]
+            .drives
+            .get("bulk")
+            .map(|p| p.to_str().unwrap()),
+        Some("/mnt/fast")
+    );
     drop(cfg);
 
     let state = h.state.cluster.state().await;
@@ -1097,7 +1158,12 @@ async fn redeploying_without_resending_a_config_keeps_it() {
     let h = harness().await;
     let spec = "services:\n  web:\n    image: nginx\n    configs: [site_conf]\nconfigs:\n  site_conf:\n    file: ./site.conf\n";
 
-    let status = deploy(&h, "site", &format!(r#"{{"spec":{spec:?},"configs":{{"site_conf":"aGVsbG8="}}}}"#)).await;
+    let status = deploy(
+        &h,
+        "site",
+        &format!(r#"{{"spec":{spec:?},"configs":{{"site_conf":"aGVsbG8="}}}}"#),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let state = h.state.cluster.state().await;
@@ -1110,7 +1176,10 @@ async fn redeploying_without_resending_a_config_keeps_it() {
     assert_eq!(status, StatusCode::OK);
 
     let state = h.state.cluster.state().await;
-    assert!(state.configs.contains_key("site_conf"), "config must not be dropped");
+    assert!(
+        state.configs.contains_key("site_conf"),
+        "config must not be dropped"
+    );
     assert!(
         state.stacks["site"].configs.contains("site_conf"),
         "stack must still own the config it never stopped referencing"
@@ -1140,8 +1209,14 @@ async fn a_config_referenced_without_a_file_shows_up_in_used_configs_not_owned_c
 
     let state = h.state.cluster.state().await;
     let stack = &state.stacks["site"];
-    assert!(!stack.configs.contains("shared_conf"), "the stack does not own it");
-    assert!(stack.used_configs.contains("shared_conf"), "but the stack does use it");
+    assert!(
+        !stack.configs.contains("shared_conf"),
+        "the stack does not own it"
+    );
+    assert!(
+        stack.used_configs.contains("shared_conf"),
+        "but the stack does use it"
+    );
 }
 
 /// A brand new file-backed config with no content anywhere is a request the
@@ -1182,7 +1257,8 @@ async fn a_redirect_with_an_unknown_network_is_rejected() {
 #[tokio::test]
 async fn a_redirect_with_an_invalid_status_is_rejected() {
     let h = harness().await;
-    let body = r#"{"host":"old","network":"internal","target":"https://new.example.com","status":200}"#;
+    let body =
+        r#"{"host":"old","network":"internal","target":"https://new.example.com","status":200}"#;
 
     let resp = h
         .router
@@ -1295,8 +1371,16 @@ async fn instance_summaries_carry_the_fields_their_consumers_read() {
     let first = &value[0];
 
     for field in [
-        "id", "node", "desired", "state", "running", "health", "image", "image_digest",
-        "started_at", "migration",
+        "id",
+        "node",
+        "desired",
+        "state",
+        "running",
+        "health",
+        "image",
+        "image_digest",
+        "started_at",
+        "migration",
     ] {
         assert!(first.get(field).is_some(), "missing {field} in {first}");
     }
@@ -1387,20 +1471,28 @@ async fn internal_instance_and_node_routes_reject_an_unsigned_request() {
         .await
         .expect("assign");
 
-    for path in ["/api/instances/internal/blog.web.0/summary", "/api/nodes/internal/n0/usage"] {
+    for path in [
+        "/api/instances/internal/blog.web.0/summary",
+        "/api/nodes/internal/n0/usage",
+    ] {
         let resp = h
             .router
             .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path} answered without a signature");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} answered without a signature"
+        );
     }
 }
 
 async fn signed_get(h: &Harness, path: &str) -> axum::response::Response {
     let key_guard = h.state.key.read().await;
-    let signature = cl_secret::internal_auth::sign(key_guard.as_ref().expect("test cluster holds a key"), path);
+    let signature =
+        cl_secret::internal_auth::sign(key_guard.as_ref().expect("test cluster holds a key"), path);
     drop(key_guard);
     h.router
         .clone()
@@ -1613,12 +1705,14 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
 
     h.state
         .cluster
-        .submit(cl_raft::Request::StoreCertificate(cl_raft::CertificateState {
-            fqdn: "example.test".to_string(),
-            chain_pem: "chain".to_string(),
-            key_pem: "key".to_string(),
-            not_after: 0,
-        }))
+        .submit(cl_raft::Request::StoreCertificate(
+            cl_raft::CertificateState {
+                fqdn: "example.test".to_string(),
+                chain_pem: "chain".to_string(),
+                key_pem: "key".to_string(),
+                not_after: 0,
+            },
+        ))
         .await
         .expect("submit certificate");
 
@@ -1694,7 +1788,13 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
     // the *shape* is the contract, so the volatile ones are blanked rather
     // than making the test flaky.
     let mut shapes = serde_json::Value::Object(shapes);
-    let tempdir = h.state.config_path.parent().unwrap().to_string_lossy().to_string();
+    let tempdir = h
+        .state
+        .config_path
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     normalize(&mut shapes, &tempdir);
 
     let rendered = serde_json::to_string_pretty(&shapes).unwrap() + "\n";
@@ -1753,7 +1853,10 @@ async fn the_updates_view_lists_every_assignment() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
     let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let row = &rows[0];
     assert_eq!(row["id"], "blog.web.0");
@@ -1798,7 +1901,10 @@ async fn registry_logins_do_not_show_up_among_the_users_secrets() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
     let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let names: Vec<&str> = listed
         .as_array()
@@ -1806,5 +1912,8 @@ async fn registry_logins_do_not_show_up_among_the_users_secrets() {
         .iter()
         .filter_map(|s| s["name"].as_str())
         .collect();
-    assert!(!names.contains(&name.as_str()), "{name} leaked into {names:?}");
+    assert!(
+        !names.contains(&name.as_str()),
+        "{name} leaked into {names:?}"
+    );
 }

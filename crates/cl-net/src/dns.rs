@@ -121,12 +121,16 @@ pub fn answer<'a>(records: &'a [ZoneRecord], name: &str) -> Option<&'a [Ipv4Addr
 /// `origin`, ready to serve. `origin` must be a fully qualified name (e.g.
 /// `int.example.com.`).
 fn build_authority(origin: &Name, records: &[ZoneRecord]) -> Result<InMemoryZoneHandler> {
-    let mut handler = InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
+    let mut handler =
+        InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
 
     let rname = Name::parse("hostmaster", Some(origin))
         .map_err(|e| NetError::Dns(format!("invalid zone origin {origin}: {e}")))?;
     let soa = SOA::new(origin.clone(), rname, 1, 3600, 600, 86400, RECORD_TTL);
-    handler.upsert_mut(Record::from_rdata(origin.clone(), RECORD_TTL, RData::SOA(soa)), 1);
+    handler.upsert_mut(
+        Record::from_rdata(origin.clone(), RECORD_TTL, RData::SOA(soa)),
+        1,
+    );
 
     for record in records {
         let name = Name::parse(&record.name, Some(origin))
@@ -239,7 +243,10 @@ impl InternalDns {
     /// system resolver configuration (`/etc/resolv.conf`).
     pub async fn serve(&self, bind_addr: SocketAddr) -> Result<()> {
         let mut catalog = Catalog::new();
-        catalog.upsert(self.zone.origin().clone(), vec![self.zone.clone() as Arc<dyn ZoneHandler>]);
+        catalog.upsert(
+            self.zone.origin().clone(),
+            vec![self.zone.clone() as Arc<dyn ZoneHandler>],
+        );
 
         let forward_origin = LowerName::from(Name::root());
         let forwarder = ForwardZoneHandler::builder(TokioRuntimeProvider::default())
@@ -249,12 +256,17 @@ impl InternalDns {
         catalog.upsert(forward_origin, vec![Arc::new(forwarder)]);
 
         let mut server = Server::new(catalog);
-        let socket = tokio::net::UdpSocket::bind(bind_addr).await.map_err(|source| NetError::Io {
-            context: format!("dns bind {bind_addr}"),
-            source,
-        })?;
+        let socket = tokio::net::UdpSocket::bind(bind_addr)
+            .await
+            .map_err(|source| NetError::Io {
+                context: format!("dns bind {bind_addr}"),
+                source,
+            })?;
         server.register_socket(socket);
-        server.block_until_done().await.map_err(|e| NetError::Dns(e.to_string()))
+        server
+            .block_until_done()
+            .await
+            .map_err(|e| NetError::Dns(e.to_string()))
     }
 }
 

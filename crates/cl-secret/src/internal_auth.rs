@@ -17,14 +17,16 @@ use crate::key::ClusterKey;
 /// to a specific route so a captured header for one internal endpoint cannot
 /// be replayed against another.
 pub fn sign(key: &ClusterKey, label: &str) -> String {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes()).expect("any length key is valid for hmac-sha256");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
+        .expect("any length key is valid for hmac-sha256");
     mac.update(label.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
 
 /// Constant-time check of a signature presented by a caller.
 pub fn verify(key: &ClusterKey, label: &str, presented: &str) -> bool {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes()).expect("any length key is valid for hmac-sha256");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
+        .expect("any length key is valid for hmac-sha256");
     mac.update(label.as_bytes());
     let Ok(presented_bytes) = hex::decode(presented) else {
         return false;

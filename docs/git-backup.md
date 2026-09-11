@@ -134,26 +134,22 @@ Any node can receive the request; a non-leader forwards it internally to
 whichever node currently leads, since only the leader has the deploy key.
 The leader fetches the tracked branch and:
 
-1. Builds the **current live cluster state** into a virtual tree (the same
-   tree a fresh export would produce right now).
-2. Compares the `secrets/` subtree OID between that live baseline and the
-   incoming candidate commit. If the candidate touches any secrets that
-   differ from what the cluster already has, the pull is rejected - secret
-   rotation must go through the API, not via git. The rejected commit is
-   preserved on `rejected/<branch>-<sha>` and the tracked branch is reverted
-   to the live state with an explanatory commit on top.
-3. If secrets are compatible, reads the candidate's `cluster.yaml`, stack
+1. Compares the remote candidate commit with the cluster's last known good
+   commit recorded in Raft (from previous exports, pulls, or reconciles). If the
+   candidate matches the last known good commit or tree, the pull is a no-op.
+2. Compares the `secrets/` subtree OID between the last known good commit and
+   the incoming candidate commit. If the candidate touches any secrets, the pull
+   is rejected - secret rotation must go through the API, not via git. When
+   rejected, the candidate commit history is preserved on `rejected/<branch>-<sha>`
+   with an explanatory commit on top, and the tracked branch is force-pushed back
+   to the last working commit (the state right before the bad pull happened).
+3. If secrets were not modified, reads the candidate's `cluster.yaml`, stack
    specs, and plain configs directly from the fetched tree objects (no
    working-directory checkout) and validates them.
 4. On success, applies the pulled tree: reconciles cluster state by
    diffing the parsed tree against the current cluster state and applying
    the delta (adding, updating, or removing configs, stacks, and secrets).
-
-The baseline comparison is always against what the cluster is *running right
-now* - not against a historical bookmark or a previously-persisted "known
-good" ref. This means leadership rotation between an export and a pull can
-never cause a spurious rejection: the comparison is always apples-to-apples
-against the live state, regardless of which node happens to be leader.
+   The accepted commit is recorded in Raft as the new last known good commit.
 
 The last pull's outcome (applied commit, or the rejection reason and
 preserved branch) shows on the same config page.
@@ -161,12 +157,19 @@ preserved branch) shows on the same config page.
 ## Commands
 
 ```
-clouduler git-backup pull    # run the same pull manually, e.g. to test the setup
+clouduler git-backup pull         # run the pull manually, e.g. to test the setup
+clouduler git-backup reconcile    # force cluster state to mirror into the git repo
 ```
 
 `pull` is exactly what the webhook triggers, without needing a working webhook
 to test it. It talks to the cluster over the same internal, key-authenticated
 channel `clouduler logs`/`exec` use, not the webhook token.
+
+`reconcile` clones/fetches the repository, removes `cluster.yaml`, `stacks/`,
+`secrets/`, and `configs/` while preserving unmanaged files in the repo (such as
+`README.md`, `AGENTS.md`, or docs), regenerates all cluster objects fresh from
+Raft data, commits and pushes to the git repository, and updates Raft with the
+new commit as the last known good commit. webhook token.
 
 ## Restoring
 

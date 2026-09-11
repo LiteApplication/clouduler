@@ -15,11 +15,11 @@ use futures::{StreamExt, TryStreamExt};
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_REQUEST,
 };
-use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
 use rtnetlink::packet_route::AddressFamily;
+use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVxlan};
 
 use crate::error::{NetError, Result};
@@ -251,7 +251,12 @@ impl Overlay {
 
     /// Index of a link by name, if it exists.
     async fn find_link(&self, name: &str) -> Result<Option<u32>> {
-        let mut links = self.handle.link().get().match_name(name.to_string()).execute();
+        let mut links = self
+            .handle
+            .link()
+            .get()
+            .match_name(name.to_string())
+            .execute();
         match links.try_next().await {
             Ok(Some(link)) => Ok(Some(link.header.index)),
             Ok(None) => Ok(None),
@@ -289,7 +294,8 @@ impl Overlay {
         // Before the address: the gateway is only safely anycast once every
         // node answers ARP for it with the same MAC. See `gateway_mac`.
         self.ensure_mac(name, index, gateway_mac(name)).await?;
-        self.ensure_address(name, index, gateway, prefix_len).await?;
+        self.ensure_address(name, index, gateway, prefix_len)
+            .await?;
         self.ensure_up(name, index).await?;
         disable_tx_checksum_offload(name)?;
         Ok(index)
@@ -335,8 +341,10 @@ impl Overlay {
             }
         };
 
-        self.ensure_mtu(&format!("{name} (mtu)"), index, mtu).await?;
-        self.ensure_controller(&format!("{name} (enslave)"), index, bridge_index).await?;
+        self.ensure_mtu(&format!("{name} (mtu)"), index, mtu)
+            .await?;
+        self.ensure_controller(&format!("{name} (enslave)"), index, bridge_index)
+            .await?;
         self.ensure_up(&format!("{name} (up)"), index).await?;
         Ok(index)
     }
@@ -361,7 +369,11 @@ impl Overlay {
     async fn ensure_mac(&self, name: &str, index: u32, mac: [u8; 6]) -> Result<()> {
         self.handle
             .link()
-            .set(LinkUnspec::new_with_index(index).address(mac.to_vec()).build())
+            .set(
+                LinkUnspec::new_with_index(index)
+                    .address(mac.to_vec())
+                    .build(),
+            )
             .execute()
             .await
             .map_err(|e| NetError::from_netlink(format!("{name} (mac)"), e))
@@ -388,7 +400,11 @@ impl Overlay {
     async fn ensure_controller(&self, name: &str, index: u32, bridge_index: u32) -> Result<()> {
         self.handle
             .link()
-            .set(LinkUnspec::new_with_index(index).controller(bridge_index).build())
+            .set(
+                LinkUnspec::new_with_index(index)
+                    .controller(bridge_index)
+                    .build(),
+            )
             .execute()
             .await
             .map_err(|e| NetError::from_netlink(name, e))
@@ -404,7 +420,12 @@ impl Overlay {
         gateway: Ipv4Addr,
         prefix_len: u8,
     ) -> Result<()> {
-        let mut addrs = self.handle.address().get().set_link_index_filter(index).execute();
+        let mut addrs = self
+            .handle
+            .address()
+            .get()
+            .set_link_index_filter(index)
+            .execute();
         while let Some(addr) = addrs
             .try_next()
             .await
@@ -570,8 +591,7 @@ impl Overlay {
         let mut request = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(
             wildcard_fdb_message(index, peer),
         ));
-        request.header.flags =
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND;
+        request.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND;
 
         let mut response = self
             .handle
@@ -608,7 +628,9 @@ fn wildcard_fdb_message(index: u32, dest: Ipv4Addr) -> NeighbourMessage {
         .push(NeighbourAttribute::LinkLayerAddress(WILDCARD_MAC.to_vec()));
     message
         .attributes
-        .push(NeighbourAttribute::Destination(NeighbourAddress::Inet(dest)));
+        .push(NeighbourAttribute::Destination(NeighbourAddress::Inet(
+            dest,
+        )));
     message
 }
 
@@ -710,9 +732,10 @@ mod tests {
 
     #[test]
     fn fdb_diff_is_empty_when_in_sync() {
-        let peers: BTreeSet<Ipv4Addr> = ["10.10.0.1".parse().unwrap(), "10.10.0.2".parse().unwrap()]
-            .into_iter()
-            .collect();
+        let peers: BTreeSet<Ipv4Addr> =
+            ["10.10.0.1".parse().unwrap(), "10.10.0.2".parse().unwrap()]
+                .into_iter()
+                .collect();
         let diff = diff_fdb(&peers, &peers);
         assert!(diff.add.is_empty());
         assert!(diff.remove.is_empty());
@@ -720,12 +743,14 @@ mod tests {
 
     #[test]
     fn fdb_diff_finds_additions_and_removals() {
-        let desired: BTreeSet<Ipv4Addr> = ["10.10.0.1".parse().unwrap(), "10.10.0.3".parse().unwrap()]
-            .into_iter()
-            .collect();
-        let actual: BTreeSet<Ipv4Addr> = ["10.10.0.1".parse().unwrap(), "10.10.0.2".parse().unwrap()]
-            .into_iter()
-            .collect();
+        let desired: BTreeSet<Ipv4Addr> =
+            ["10.10.0.1".parse().unwrap(), "10.10.0.3".parse().unwrap()]
+                .into_iter()
+                .collect();
+        let actual: BTreeSet<Ipv4Addr> =
+            ["10.10.0.1".parse().unwrap(), "10.10.0.2".parse().unwrap()]
+                .into_iter()
+                .collect();
         let diff = diff_fdb(&desired, &actual);
         assert_eq!(diff.add, vec!["10.10.0.3".parse::<Ipv4Addr>().unwrap()]);
         assert_eq!(diff.remove, vec!["10.10.0.2".parse::<Ipv4Addr>().unwrap()]);

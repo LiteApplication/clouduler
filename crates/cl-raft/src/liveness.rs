@@ -163,7 +163,9 @@ mod tests {
         let mut tracker = LivenessTracker::new();
         tracker.seen("n1", base);
 
-        assert!(tracker.expired(at(base, 20), Duration::from_secs(30)).is_empty());
+        assert!(tracker
+            .expired(at(base, 20), Duration::from_secs(30))
+            .is_empty());
         assert_eq!(
             tracker.expired(at(base, 31), Duration::from_secs(30)),
             vec!["n1".to_string()]
@@ -177,7 +179,9 @@ mod tests {
         tracker.seen("n1", base);
         tracker.seen("n1", at(base, 31));
 
-        assert!(tracker.expired(at(base, 40), Duration::from_secs(30)).is_empty());
+        assert!(tracker
+            .expired(at(base, 40), Duration::from_secs(30))
+            .is_empty());
         assert!(tracker.is_live("n1", at(base, 40), Duration::from_secs(30)));
     }
 
@@ -220,11 +224,17 @@ mod tests {
         // not run anything in that window, however long it lasts.
         assert!(fence.is_fenced());
         assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
-        assert_eq!(fence.observe(false, at(base, 60), timeout), FenceAction::None);
+        assert_eq!(
+            fence.observe(false, at(base, 60), timeout),
+            FenceAction::None
+        );
         assert!(fence.is_fenced());
 
         // and it opens on the first sighting of a quorum, not a timeout later.
-        assert_eq!(fence.observe(true, at(base, 61), timeout), FenceAction::Release);
+        assert_eq!(
+            fence.observe(true, at(base, 61), timeout),
+            FenceAction::Release
+        );
         assert!(!fence.is_fenced());
     }
 
@@ -250,7 +260,10 @@ mod tests {
         let mut fence = settled(base, timeout);
 
         assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
-        assert_eq!(fence.observe(false, at(base, 5), timeout), FenceAction::None);
+        assert_eq!(
+            fence.observe(false, at(base, 5), timeout),
+            FenceAction::None
+        );
         assert_eq!(fence.observe(true, at(base, 6), timeout), FenceAction::None);
         assert!(!fence.is_fenced());
     }
@@ -262,9 +275,15 @@ mod tests {
         let mut fence = settled(base, timeout);
 
         assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
-        assert_eq!(fence.observe(false, at(base, 15), timeout), FenceAction::Fence);
+        assert_eq!(
+            fence.observe(false, at(base, 15), timeout),
+            FenceAction::Fence
+        );
         // Staying fenced must not keep firing the stop action.
-        assert_eq!(fence.observe(false, at(base, 30), timeout), FenceAction::None);
+        assert_eq!(
+            fence.observe(false, at(base, 30), timeout),
+            FenceAction::None
+        );
         assert!(fence.is_fenced());
     }
 
@@ -276,10 +295,16 @@ mod tests {
 
         fence.observe(false, base, timeout);
         fence.observe(false, at(base, 15), timeout);
-        assert_eq!(fence.observe(true, at(base, 20), timeout), FenceAction::Release);
+        assert_eq!(
+            fence.observe(true, at(base, 20), timeout),
+            FenceAction::Release
+        );
         assert!(!fence.is_fenced());
         // Release fires once, not on every later tick.
-        assert_eq!(fence.observe(true, at(base, 21), timeout), FenceAction::None);
+        assert_eq!(
+            fence.observe(true, at(base, 21), timeout),
+            FenceAction::None
+        );
     }
 
     #[test]
@@ -292,7 +317,13 @@ mod tests {
         fence.observe(true, at(base, 10), timeout);
         // A second dip starts counting from scratch, not from the first one.
         fence.observe(false, at(base, 12), timeout);
-        assert_eq!(fence.observe(false, at(base, 20), timeout), FenceAction::None);
-        assert_eq!(fence.observe(false, at(base, 27), timeout), FenceAction::Fence);
+        assert_eq!(
+            fence.observe(false, at(base, 20), timeout),
+            FenceAction::None
+        );
+        assert_eq!(
+            fence.observe(false, at(base, 27), timeout),
+            FenceAction::Fence
+        );
     }
 }

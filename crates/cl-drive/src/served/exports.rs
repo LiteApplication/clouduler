@@ -51,7 +51,11 @@ pub fn remove_export(root: &Path, client_subnet: &str) -> Result<()> {
     let spec = format!("{client_subnet}:{}", root.display());
     match run_exportfs(&["-u", &spec]) {
         Ok(()) => Ok(()),
-        Err(DriveError::Transfer { message }) if message.to_lowercase().contains("not exported") => Ok(()),
+        Err(DriveError::Transfer { message })
+            if message.to_lowercase().contains("not exported") =>
+        {
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -60,10 +64,16 @@ fn run_exportfs(args: &[&str]) -> Result<()> {
     let output = Command::new("exportfs")
         .args(args)
         .output()
-        .map_err(|source| DriveError::Io { path: Path::new("exportfs").to_path_buf(), source })?;
+        .map_err(|source| DriveError::Io {
+            path: Path::new("exportfs").to_path_buf(),
+            source,
+        })?;
     if !output.status.success() {
         return Err(DriveError::Transfer {
-            message: format!("exportfs {args:?} failed: {}", String::from_utf8_lossy(&output.stderr)),
+            message: format!(
+                "exportfs {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
         });
     }
     Ok(())
@@ -81,7 +91,9 @@ fn run_exportfs(args: &[&str]) -> Result<()> {
 /// never becomes an active server for anything.
 pub fn check_available() -> Result<()> {
     if !Path::new("/proc/fs/nfsd").exists() && !kernel_module_present("nfsd") {
-        return Err(DriveError::Config("kernel NFS server support (nfsd) is not available".into()));
+        return Err(DriveError::Config(
+            "kernel NFS server support (nfsd) is not available".into(),
+        ));
     }
     run_exportfs(&["-v"])?;
     if !server_running_from("/proc/fs/nfsd/pool_threads") {
@@ -107,7 +119,12 @@ fn kernel_module_present(name: &str) -> bool {
 /// server threads are running at all.
 fn server_running_from(pool_threads_path: &str) -> bool {
     std::fs::read_to_string(pool_threads_path)
-        .map(|s| s.split_whitespace().filter_map(|n| n.parse::<u32>().ok()).sum::<u32>() > 0)
+        .map(|s| {
+            s.split_whitespace()
+                .filter_map(|n| n.parse::<u32>().ok())
+                .sum::<u32>()
+                > 0
+        })
         .unwrap_or(false)
 }
 

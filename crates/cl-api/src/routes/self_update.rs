@@ -34,7 +34,10 @@ pub fn is_reserved_secret(name: &str) -> bool {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/self-update/github-token", get(github_token_status).put(set_github_token))
+        .route(
+            "/api/self-update/github-token",
+            get(github_token_status).put(set_github_token),
+        )
         .route("/api/self-update/repo", put(set_repo).get(get_repo))
         .route("/api/self-update/run", post(start_run).get(get_run))
         .route("/api/self-update/cancel", post(cancel_run))
@@ -48,9 +51,14 @@ struct GithubTokenStatus {
     configured: bool,
 }
 
-async fn github_token_status(_identity: Identity, State(state): State<AppState>) -> Json<GithubTokenStatus> {
+async fn github_token_status(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<GithubTokenStatus> {
     let cluster_state = state.cluster.state().await;
-    Json(GithubTokenStatus { configured: cluster_state.secrets.contains_key(GITHUB_TOKEN_SECRET) })
+    Json(GithubTokenStatus {
+        configured: cluster_state.secrets.contains_key(GITHUB_TOKEN_SECRET),
+    })
 }
 
 #[derive(Deserialize)]
@@ -73,7 +81,8 @@ async fn set_github_token(
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-    let sealed = Sealed::seal(key, GITHUB_TOKEN_SECRET, token.as_bytes()).map_err(ApiError::internal)?;
+    let sealed =
+        Sealed::seal(key, GITHUB_TOKEN_SECRET, token.as_bytes()).map_err(ApiError::internal)?;
     let key_fingerprint = key.fingerprint();
     drop(key_guard);
 
@@ -116,12 +125,17 @@ async fn set_repo(
         ));
     }
 
-    config.self_update = Some(SelfUpdateConfig { release_url: body.release_url.trim().to_string() });
+    config.self_update = Some(SelfUpdateConfig {
+        release_url: body.release_url.trim().to_string(),
+    });
     super::config::apply_config(&state, &config).await?;
     Ok(StatusCode::OK)
 }
 
-async fn get_repo(_identity: Identity, State(state): State<AppState>) -> Json<Option<SelfUpdateConfig>> {
+async fn get_repo(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Option<SelfUpdateConfig>> {
     Json(state.cluster_config.read().await.self_update.clone())
 }
 
@@ -131,14 +145,18 @@ async fn start_run(
 ) -> Result<Json<UpdateRunState>, ApiError> {
     let config = state.cluster_config.read().await;
     if config.self_update.is_none() {
-        return Err(ApiError::Conflict("no self-update release is configured".into()));
+        return Err(ApiError::Conflict(
+            "no self-update release is configured".into(),
+        ));
     }
     drop(config);
 
     let cluster_state = state.cluster.state().await;
     if let Some(existing) = load_run(&cluster_state) {
         if existing.in_progress() {
-            return Err(ApiError::Conflict("a self-update run is already in progress".into()));
+            return Err(ApiError::Conflict(
+                "a self-update run is already in progress".into(),
+            ));
         }
     }
 
@@ -148,12 +166,18 @@ async fn start_run(
     Ok(Json(run))
 }
 
-async fn get_run(_identity: Identity, State(state): State<AppState>) -> Json<Option<UpdateRunState>> {
+async fn get_run(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Option<UpdateRunState>> {
     let cluster_state = state.cluster.state().await;
     Json(load_run(&cluster_state))
 }
 
-async fn cancel_run(_admin: RequireAdmin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn cancel_run(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
     let cluster_state = state.cluster.state().await;
     let mut run = load_run(&cluster_state)
         .ok_or_else(|| ApiError::Conflict("no self-update run is on record".into()))?;
@@ -192,7 +216,10 @@ fn now() -> i64 {
 /// Swap in the artifact this node already downloaded and trigger the same
 /// clean shutdown `SIGINT` drives. The unit's `Restart=always` brings the
 /// process back up running the new binary.
-async fn internal_restart(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn internal_restart(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
     let current_exe = std::env::current_exe().map_err(ApiError::internal)?;
     cl_update::install::install_binary(&state.self_update_artifact_path, &current_exe)
         .map_err(ApiError::internal)?;

@@ -93,10 +93,12 @@ pub async fn serve_tcp(
     routes: Routes,
     proxy_protocol: bool,
 ) -> Result<()> {
-    let listener = TcpListener::bind(bind).await.map_err(|source| NetError::Io {
-        context: format!("bind tcp {bind}"),
-        source,
-    })?;
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|source| NetError::Io {
+            context: format!("bind tcp {bind}"),
+            source,
+        })?;
 
     loop {
         let (client, peer) = listener.accept().await.map_err(|source| NetError::Io {
@@ -128,7 +130,9 @@ async fn forward_tcp(
 ) -> Result<()> {
     let Some(backend_addr) = *route.borrow_and_update() else {
         let _ = client.shutdown().await;
-        return Err(NetError::Dns("published port has no running instance".into()));
+        return Err(NetError::Dns(
+            "published port has no running instance".into(),
+        ));
     };
 
     let mut backend = match TcpStream::connect(backend_addr).await {
@@ -229,19 +233,25 @@ fn proxy_v2_header(client: SocketAddr, local: SocketAddr) -> Vec<u8> {
 /// the session is torn down (and a new one started fresh) if the route
 /// changes or the session goes idle.
 pub async fn serve_udp(bind: SocketAddr, published: u16, routes: Routes) -> Result<()> {
-    let socket = std::sync::Arc::new(UdpSocket::bind(bind).await.map_err(|source| NetError::Io {
-        context: format!("bind udp {bind}"),
-        source,
-    })?);
+    let socket =
+        std::sync::Arc::new(UdpSocket::bind(bind).await.map_err(|source| NetError::Io {
+            context: format!("bind udp {bind}"),
+            source,
+        })?);
 
-    let mut sessions: BTreeMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<Vec<u8>>> = BTreeMap::new();
+    let mut sessions: BTreeMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<Vec<u8>>> =
+        BTreeMap::new();
     let mut buf = vec![0u8; 65_507];
 
     loop {
-        let (len, client_addr) = socket.recv_from(&mut buf).await.map_err(|source| NetError::Io {
-            context: format!("recv udp {bind}"),
-            source,
-        })?;
+        let (len, client_addr) =
+            socket
+                .recv_from(&mut buf)
+                .await
+                .map_err(|source| NetError::Io {
+                    context: format!("recv udp {bind}"),
+                    source,
+                })?;
         let mut datagram = buf[..len].to_vec();
 
         if let Some(tx) = sessions.get(&client_addr) {
@@ -335,7 +345,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((mut conn, _)) = listener.accept().await else { return };
+                let Ok((mut conn, _)) = listener.accept().await else {
+                    return;
+                };
                 tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
                     loop {
@@ -393,7 +405,12 @@ mod tests {
         let routes = Routes::new();
         routes.set(published.port(), Some(backend));
 
-        tokio::spawn(serve_tcp(published, published.port(), routes.clone(), false));
+        tokio::spawn(serve_tcp(
+            published,
+            published.port(),
+            routes.clone(),
+            false,
+        ));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(published).await.unwrap();
@@ -420,7 +437,9 @@ mod tests {
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
         tokio::spawn(async move {
-            let Ok((mut conn, _)) = listener.accept().await else { return };
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
             let mut buf = [0u8; 256];
             if let Ok(n) = conn.read(&mut buf).await {
                 sink.lock().unwrap().extend_from_slice(&buf[..n]);
@@ -440,7 +459,11 @@ mod tests {
         assert_eq!(header[13], 0x11, "AF_INET over STREAM");
         assert_eq!(&header[14..16], &12u16.to_be_bytes(), "v4 body is 12 bytes");
         assert_eq!(&header[16..20], &[203, 0, 113, 7], "the real client");
-        assert_eq!(&header[20..24], &[10, 244, 1, 1], "the address it connected to");
+        assert_eq!(
+            &header[20..24],
+            &[10, 244, 1, 1],
+            "the address it connected to"
+        );
         assert_eq!(&header[24..26], &54321u16.to_be_bytes());
         assert_eq!(&header[26..28], &25u16.to_be_bytes());
         assert_eq!(header.len(), 28);
@@ -448,7 +471,10 @@ mod tests {
 
     #[test]
     fn a_v6_header_is_well_formed() {
-        let header = proxy_v2_header("[2001:db8::1]:443".parse().unwrap(), "[2001:db8::2]:25".parse().unwrap());
+        let header = proxy_v2_header(
+            "[2001:db8::1]:443".parse().unwrap(),
+            "[2001:db8::2]:25".parse().unwrap(),
+        );
         assert_eq!(header[13], 0x21, "AF_INET6 over STREAM");
         assert_eq!(&header[14..16], &36u16.to_be_bytes());
         assert_eq!(header.len(), 52);
@@ -458,7 +484,10 @@ mod tests {
     /// block, and inventing an address would be worse than saying nothing.
     #[test]
     fn a_mixed_family_pair_falls_back_to_unspec() {
-        let header = proxy_v2_header("203.0.113.7:1".parse().unwrap(), "[2001:db8::2]:25".parse().unwrap());
+        let header = proxy_v2_header(
+            "203.0.113.7:1".parse().unwrap(),
+            "[2001:db8::2]:25".parse().unwrap(),
+        );
         assert_eq!(header[13], 0x00, "AF_UNSPEC");
         assert_eq!(&header[14..16], &0u16.to_be_bytes(), "no body");
         assert_eq!(header.len(), 16);

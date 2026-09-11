@@ -124,12 +124,12 @@ impl Allocations {
             })
             .collect();
 
-        let candidates = self
-            .pool
-            .subnets(self.subnet_prefix)
-            .map_err(|_| NetError::SubnetExhausted {
-                pool: self.pool.to_string(),
-            })?;
+        let candidates =
+            self.pool
+                .subnets(self.subnet_prefix)
+                .map_err(|_| NetError::SubnetExhausted {
+                    pool: self.pool.to_string(),
+                })?;
 
         for candidate in candidates {
             let overlaps_claimed = claimed.iter().any(|c| nets_overlap(*c, candidate));
@@ -185,9 +185,9 @@ impl Allocations {
         // Prefer an address nobody has ever held: walk the host range in
         // order, skipping the gateway, anything reserved right now, and
         // anything sitting in the cooldown queue.
-        let fresh = subnet.hosts().find(|ip| {
-            *ip != gateway && !net.reserved.contains(ip) && !net.cooldown.contains(ip)
-        });
+        let fresh = subnet
+            .hosts()
+            .find(|ip| *ip != gateway && !net.reserved.contains(ip) && !net.cooldown.contains(ip));
 
         let chosen = if let Some(ip) = fresh {
             ip
@@ -402,7 +402,10 @@ mod tests {
         a.release_ip("gitlab", &instance(0));
 
         let second = a.allocate_ip("gitlab", &instance(1)).unwrap();
-        assert_ne!(first, second, "must not immediately hand back a just-released address");
+        assert_ne!(
+            first, second,
+            "must not immediately hand back a just-released address"
+        );
     }
 
     #[test]

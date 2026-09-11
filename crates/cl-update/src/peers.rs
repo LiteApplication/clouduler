@@ -44,7 +44,10 @@ web:
     #[test]
     fn resolves_the_internal_address_and_web_port() {
         let cfg = cfg();
-        assert_eq!(base_url(&cfg, "n1").as_deref(), Some("https://10.10.0.1:8443"));
+        assert_eq!(
+            base_url(&cfg, "n1").as_deref(),
+            Some("https://10.10.0.1:8443")
+        );
     }
 
     #[test]

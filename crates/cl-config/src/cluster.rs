@@ -504,8 +504,12 @@ impl Serialize for InterfaceAddress {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 fallback: &'a Option<EgressFallback>,
             }
-            Full { interface: &self.interface, open_ports: &self.open_ports, fallback: &self.fallback }
-                .serialize(serializer)
+            Full {
+                interface: &self.interface,
+                open_ports: &self.open_ports,
+                fallback: &self.fallback,
+            }
+            .serialize(serializer)
         }
     }
 }
@@ -531,10 +535,16 @@ impl<'de> Deserialize<'de> for InterfaceAddress {
             Full(Full),
         }
         Ok(match Raw::deserialize(deserializer)? {
-            Raw::Bare(interface) => InterfaceAddress { interface, open_ports: BTreeSet::new(), fallback: None },
-            Raw::Full(full) => {
-                InterfaceAddress { interface: full.interface, open_ports: full.open_ports, fallback: full.fallback }
-            }
+            Raw::Bare(interface) => InterfaceAddress {
+                interface,
+                open_ports: BTreeSet::new(),
+                fallback: None,
+            },
+            Raw::Full(full) => InterfaceAddress {
+                interface: full.interface,
+                open_ports: full.open_ports,
+                fallback: full.fallback,
+            },
         })
     }
 }
@@ -798,10 +808,11 @@ impl ClusterConfig {
     }
 
     pub fn parse(raw: &str) -> Result<Self> {
-        let cfg: ClusterConfig = serde_yaml::from_str(raw).map_err(|source| ConfigError::Parse {
-            path: PathBuf::from("<config>"),
-            source,
-        })?;
+        let cfg: ClusterConfig =
+            serde_yaml::from_str(raw).map_err(|source| ConfigError::Parse {
+                path: PathBuf::from("<config>"),
+                source,
+            })?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -819,7 +830,12 @@ impl ClusterConfig {
     pub fn egress_networks(&self) -> std::collections::BTreeSet<String> {
         self.networks
             .iter()
-            .filter(|(_, net)| matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat))
+            .filter(|(_, net)| {
+                matches!(
+                    net.kind,
+                    NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat
+                )
+            })
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -864,7 +880,9 @@ impl ClusterConfig {
     }
 
     pub fn managers(&self) -> impl Iterator<Item = (&String, &Node)> {
-        self.nodes.iter().filter(|(_, n)| n.role == NodeRole::Manager)
+        self.nodes
+            .iter()
+            .filter(|(_, n)| n.role == NodeRole::Manager)
     }
 
     /// Number of managers that must be reachable to hold quorum.
@@ -986,7 +1004,10 @@ mod tests {
 
     #[test]
     fn a_trailing_dot_is_stripped_and_used_verbatim() {
-        assert_eq!(qualify("app.example.net.", Some("cluster.lan")), "app.example.net");
+        assert_eq!(
+            qualify("app.example.net.", Some("cluster.lan")),
+            "app.example.net"
+        );
     }
 
     #[test]

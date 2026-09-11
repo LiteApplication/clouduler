@@ -61,15 +61,30 @@ mod tests {
 
     #[test]
     fn keep_last_alone() {
-        assert_eq!(forget_args(&target(Some(7), None)), vec!["--keep-last", "7"]);
+        assert_eq!(
+            forget_args(&target(Some(7), None)),
+            vec!["--keep-last", "7"]
+        );
     }
 
     #[test]
     fn keep_within_formats_days_and_hours() {
-        assert_eq!(forget_args(&target(None, Some(30 * 86_400))), vec!["--keep-within", "30d"]);
-        assert_eq!(forget_args(&target(None, Some(3600))), vec!["--keep-within", "1h"]);
-        assert_eq!(forget_args(&target(None, Some(30 * 86_400 + 5 * 3600))), vec!["--keep-within", "30d5h"]);
-        assert_eq!(forget_args(&target(None, Some(0))), vec!["--keep-within", "1h"]);
+        assert_eq!(
+            forget_args(&target(None, Some(30 * 86_400))),
+            vec!["--keep-within", "30d"]
+        );
+        assert_eq!(
+            forget_args(&target(None, Some(3600))),
+            vec!["--keep-within", "1h"]
+        );
+        assert_eq!(
+            forget_args(&target(None, Some(30 * 86_400 + 5 * 3600))),
+            vec!["--keep-within", "30d5h"]
+        );
+        assert_eq!(
+            forget_args(&target(None, Some(0))),
+            vec!["--keep-within", "1h"]
+        );
     }
 
     #[test]

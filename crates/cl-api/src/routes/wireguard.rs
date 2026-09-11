@@ -24,7 +24,10 @@ use crate::wireguard::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/wireguard/{network}/{node}", put(put_config).delete(remove_config))
+        .route(
+            "/api/wireguard/{network}/{node}",
+            put(put_config).delete(remove_config),
+        )
         .route("/api/wireguard-ingress", get(list).post(create))
         .route("/api/wireguard-ingress/{id}", put(update).delete(remove))
 }
@@ -33,7 +36,9 @@ async fn wireguard_network(state: &AppState, network: &str) -> Result<(), ApiErr
     let cfg = state.cluster_config.read().await;
     match cfg.networks.get(network) {
         Some(net) if net.kind == NetworkKind::Wireguard => Ok(()),
-        Some(_) => Err(ApiError::BadRequest(format!("{network} is not a wireguard network"))),
+        Some(_) => Err(ApiError::BadRequest(format!(
+            "{network} is not a wireguard network"
+        ))),
         None => Err(ApiError::BadRequest(format!("no network named {network}"))),
     }
 }
@@ -129,7 +134,10 @@ async fn remove_config(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<WireguardIngressRule>> {
+async fn list(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<WireguardIngressRule>> {
     let cluster_state = state.cluster.state().await;
     Json(WireguardIngressStore::load(&cluster_state).rules)
 }
@@ -175,7 +183,9 @@ async fn update(
     let cluster_state = state.cluster.state().await;
     let mut store = WireguardIngressStore::load(&cluster_state);
     let Some(existing) = store.rules.iter_mut().find(|r| r.id == id) else {
-        return Err(ApiError::NotFound(format!("no wireguard ingress rule {id}")));
+        return Err(ApiError::NotFound(format!(
+            "no wireguard ingress rule {id}"
+        )));
     };
     existing.network = body.network;
     existing.port = body.port;
@@ -197,7 +207,9 @@ async fn remove(
     let before = store.rules.len();
     store.rules.retain(|r| r.id != id);
     if store.rules.len() == before {
-        return Err(ApiError::NotFound(format!("no wireguard ingress rule {id}")));
+        return Err(ApiError::NotFound(format!(
+            "no wireguard ingress rule {id}"
+        )));
     }
     submit_store(&state, &store).await?;
     Ok(StatusCode::NO_CONTENT)

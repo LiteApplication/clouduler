@@ -11,14 +11,23 @@ use super::{Service, StackFile, DEFAULT_SYNC_INTERVAL};
 impl Service {
     /// Drives this service mounts a volume from.
     pub fn drives_used(&self) -> BTreeSet<String> {
-        self.volumes.iter().filter_map(|v| v.drive.clone()).collect()
+        self.volumes
+            .iter()
+            .filter_map(|v| v.drive.clone())
+            .collect()
     }
 
     /// `deploy.resources.limits.memory`, parsed into bytes. `None` when the
     /// service declares no memory limit at all - the rebalancer falls back to
     /// balancing such an instance by raw instance count instead.
     pub fn memory_limit_bytes(&self) -> Option<u64> {
-        self.deploy.as_ref()?.resources.as_ref()?.limits.as_ref()?.memory_bytes()
+        self.deploy
+            .as_ref()?
+            .resources
+            .as_ref()?
+            .limits
+            .as_ref()?
+            .memory_bytes()
     }
 
     fn auto_update(&self) -> Option<bool> {
@@ -37,14 +46,20 @@ impl Service {
     }
 
     fn backup_stop_before(&self) -> Option<bool> {
-        self.x_clouduler.as_ref().and_then(|x| x.backup.as_ref()).and_then(|b| b.stop_before)
+        self.x_clouduler
+            .as_ref()
+            .and_then(|x| x.backup.as_ref())
+            .and_then(|b| b.stop_before)
     }
 }
 
 impl StackFile {
     /// Union of every drive any service mounts a volume from.
     pub fn drives_used(&self) -> BTreeSet<String> {
-        self.services.values().flat_map(Service::drives_used).collect()
+        self.services
+            .values()
+            .flat_map(Service::drives_used)
+            .collect()
     }
 
     fn stack_auto_update(&self) -> Option<bool> {
@@ -63,7 +78,10 @@ impl StackFile {
     }
 
     fn stack_backup_stop_before(&self) -> Option<bool> {
-        self.x_clouduler.as_ref().and_then(|x| x.backup.as_ref()).and_then(|b| b.stop_before)
+        self.x_clouduler
+            .as_ref()
+            .and_then(|x| x.backup.as_ref())
+            .and_then(|b| b.stop_before)
     }
 
     /// Whether backing up a drive this service uses should stop it first:
@@ -149,8 +167,11 @@ impl StackFile {
     fn colocate_groups(&self) -> BTreeMap<String, String> {
         // Union-find over service names: every service starts as its own
         // root, then each `colocate` entry merges the two roots it names.
-        let mut parent: BTreeMap<String, String> =
-            self.services.keys().map(|n| (n.clone(), n.clone())).collect();
+        let mut parent: BTreeMap<String, String> = self
+            .services
+            .keys()
+            .map(|n| (n.clone(), n.clone()))
+            .collect();
 
         fn find(parent: &mut BTreeMap<String, String>, x: &str) -> String {
             let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
@@ -164,7 +185,9 @@ impl StackFile {
         }
 
         for (name, svc) in &self.services {
-            let Some(ext) = &svc.x_clouduler else { continue };
+            let Some(ext) = &svc.x_clouduler else {
+                continue;
+            };
             for other in &ext.colocate {
                 // An unknown target is caught by validation; here it's just
                 // skipped rather than joined against nothing.
@@ -191,7 +214,10 @@ impl StackFile {
             if members.len() < 2 {
                 continue;
             }
-            let key = format!("colocate:{}", members.iter().cloned().collect::<Vec<_>>().join(","));
+            let key = format!(
+                "colocate:{}",
+                members.iter().cloned().collect::<Vec<_>>().join(",")
+            );
             for member in members {
                 keys.insert(member.clone(), key.clone());
             }

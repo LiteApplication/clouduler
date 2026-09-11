@@ -66,7 +66,11 @@ fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String>
         .stacks
         .get(&instance.stack)
         .and_then(|stack| cl_config::StackFile::parse(&stack.spec).ok())
-        .and_then(|file| file.services.get(&instance.service).map(|s| s.image.clone()))
+        .and_then(|file| {
+            file.services
+                .get(&instance.service)
+                .map(|s| s.image.clone())
+        })
 }
 
 /// How many registry lookups one node runs at once. See `scan_local`.
@@ -203,7 +207,10 @@ async fn scan_node(state: &AppState, node: &str) -> Vec<ImageStatus> {
     }
 }
 
-async fn internal_scan(_auth: InternalAuth, State(state): State<AppState>) -> Json<Vec<ImageStatus>> {
+async fn internal_scan(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Json<Vec<ImageStatus>> {
     Json(scan_local(&state).await)
 }
 
@@ -228,7 +235,11 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
             Some(c) => {
                 let repository = cl_docker::ImageRef::parse(&c.image).repository;
                 match c.image_digest.as_deref() {
-                    Some(image_id) => docker.digest_of_image(image_id, &repository).await.ok().flatten(),
+                    Some(image_id) => docker
+                        .digest_of_image(image_id, &repository)
+                        .await
+                        .ok()
+                        .flatten(),
                     None => None,
                 }
             }
@@ -257,7 +268,12 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
     // size — the view 504'd rather than rendering. Bounded rather than
     // unlimited so a node with a hundred distinct images does not open a
     // hundred sockets, and because registries rate-limit anonymous pulls.
-    let images: Vec<String> = statuses.iter().filter_map(|s| s.image.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    let images: Vec<String> = statuses
+        .iter()
+        .filter_map(|s| s.image.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let latest: BTreeMap<String, Result<Option<String>, String>> = futures::stream::iter(images)
         .map(|image| {
             let docker = docker.clone();
@@ -343,7 +359,11 @@ async fn pin(
                 ok: response.error.is_none(),
                 error: response.error,
             },
-            Err(e) => BulkResult { id: row.id, ok: false, error: Some(e.to_string()) },
+            Err(e) => BulkResult {
+                id: row.id,
+                ok: false,
+                error: Some(e.to_string()),
+            },
         });
     }
 
@@ -395,7 +415,11 @@ async fn apply(
             .filter_map(|row| row.id.parse().ok())
             .collect()
     } else {
-        selection.instances.iter().filter_map(|id| id.parse().ok()).collect()
+        selection
+            .instances
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect()
     };
 
     let accepted: Vec<String> = instances.iter().map(|i| i.to_string()).collect();

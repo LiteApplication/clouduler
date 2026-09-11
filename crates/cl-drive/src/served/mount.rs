@@ -84,7 +84,9 @@ pub fn mount_permission() -> Result<()> {
     if unsafe { libc::geteuid() } == 0 {
         Ok(())
     } else {
-        Err(DriveError::Config("mounting a served drive over NFS needs root (CAP_SYS_ADMIN)".into()))
+        Err(DriveError::Config(
+            "mounting a served drive over NFS needs root (CAP_SYS_ADMIN)".into(),
+        ))
     }
 }
 
@@ -104,10 +106,16 @@ pub fn client_available() -> Result<()> {
 
 fn client_available_from(filesystems_path: &str, modules_path: &str) -> Result<()> {
     let registered = std::fs::read_to_string(filesystems_path)
-        .map(|s| s.lines().any(|line| line.split_whitespace().last() == Some("nfs4")))
+        .map(|s| {
+            s.lines()
+                .any(|line| line.split_whitespace().last() == Some("nfs4"))
+        })
         .unwrap_or(false);
     let loaded = std::fs::read_to_string(modules_path)
-        .map(|s| s.lines().any(|line| line.split_whitespace().next() == Some("nfsv4")))
+        .map(|s| {
+            s.lines()
+                .any(|line| line.split_whitespace().next() == Some("nfsv4"))
+        })
         .unwrap_or(false);
     if registered || loaded {
         return Ok(());
@@ -135,8 +143,10 @@ fn mount_options(server_ip: std::net::IpAddr, port: u16) -> String {
 }
 
 fn do_mount(spec: &MountSpec) -> Result<()> {
-    std::fs::create_dir_all(&spec.mountpoint)
-        .map_err(|source| DriveError::Io { path: spec.mountpoint.clone(), source })?;
+    std::fs::create_dir_all(&spec.mountpoint).map_err(|source| DriveError::Io {
+        path: spec.mountpoint.clone(),
+        source,
+    })?;
 
     let source = format!("{}:{}", spec.server.ip(), spec.export_path());
     let data = mount_options(spec.server.ip(), spec.server.port());
@@ -161,7 +171,10 @@ fn do_mount(spec: &MountSpec) -> Result<()> {
         )
     };
     if rc != 0 {
-        return Err(DriveError::Io { path: spec.mountpoint.clone(), source: io::Error::last_os_error() });
+        return Err(DriveError::Io {
+            path: spec.mountpoint.clone(),
+            source: io::Error::last_os_error(),
+        });
     }
     Ok(())
 }
@@ -188,7 +201,10 @@ fn unmount_clean(path: &Path) -> Result<()> {
     // Safety: `cpath` is valid for the duration of this call.
     let rc = unsafe { libc::umount2(cpath.as_ptr(), 0) };
     if rc != 0 {
-        return Err(DriveError::Io { path: path.to_path_buf(), source: io::Error::last_os_error() });
+        return Err(DriveError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::last_os_error(),
+        });
     }
     Ok(())
 }
@@ -202,7 +218,8 @@ fn is_mount_point(path: &Path) -> bool {
         return false;
     };
     let target = path.to_string_lossy();
-    info.lines().any(|line| line.split_whitespace().nth(4) == Some(target.as_ref()))
+    info.lines()
+        .any(|line| line.split_whitespace().nth(4) == Some(target.as_ref()))
 }
 
 /// A bounded `stat()` on `path`, run off the async runtime since it's a
@@ -261,7 +278,10 @@ impl MountManager {
         }
         do_mount(&spec)?;
         let key = spec.key();
-        self.mounts.lock().expect("mount table lock").insert(key, ActiveMount { spec });
+        self.mounts
+            .lock()
+            .expect("mount table lock")
+            .insert(key, ActiveMount { spec });
         Ok(())
     }
 
@@ -280,7 +300,13 @@ impl MountManager {
     /// failure so one stuck mount doesn't block the others from coming
     /// down; returns the first error seen, if any.
     pub fn unmount_all(&self) -> Result<()> {
-        let keys: Vec<String> = self.mounts.lock().expect("mount table lock").keys().cloned().collect();
+        let keys: Vec<String> = self
+            .mounts
+            .lock()
+            .expect("mount table lock")
+            .keys()
+            .cloned()
+            .collect();
         let mut first_err = None;
         for key in keys {
             if let Err(e) = self.unmount(&key) {
@@ -294,11 +320,19 @@ impl MountManager {
     /// Every key currently mounted (see `MountSpec::key`), for a caller that
     /// needs to converge the mount set against what's actually needed.
     pub fn mounted_keys(&self) -> BTreeSet<String> {
-        self.mounts.lock().expect("mount table lock").keys().cloned().collect()
+        self.mounts
+            .lock()
+            .expect("mount table lock")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     pub fn is_mounted(&self, key: &str) -> bool {
-        self.mounts.lock().expect("mount table lock").contains_key(key)
+        self.mounts
+            .lock()
+            .expect("mount table lock")
+            .contains_key(key)
     }
 
     /// Fail a mount over to a new active server. Unlike the old FUSE client
@@ -314,7 +348,10 @@ impl MountManager {
         {
             let mounts = self.mounts.lock().expect("mount table lock");
             match mounts.get(key) {
-                Some(active) if active.spec.server == new_spec.server && active.spec.remote_root == new_spec.remote_root => {
+                Some(active)
+                    if active.spec.server == new_spec.server
+                        && active.spec.remote_root == new_spec.remote_root =>
+                {
                     return Ok(false);
                 }
                 Some(_) => {}
@@ -341,7 +378,8 @@ impl MountManager {
         };
         for spec in specs {
             let key = spec.key();
-            let healthy = is_mount_point(&spec.mountpoint) && stat_within(&spec.mountpoint, Duration::from_secs(3)).await;
+            let healthy = is_mount_point(&spec.mountpoint)
+                && stat_within(&spec.mountpoint, Duration::from_secs(3)).await;
             if healthy {
                 continue;
             }
@@ -377,7 +415,9 @@ mod tests {
         let modules = tmp.path().join("modules");
         std::fs::write(&filesystems, "nodev\tsysfs\nnodev\tnfs4\n").unwrap();
         std::fs::write(&modules, "").unwrap();
-        assert!(client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).is_ok());
+        assert!(
+            client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).is_ok()
+        );
     }
 
     #[test]
@@ -387,7 +427,9 @@ mod tests {
         let modules = tmp.path().join("modules");
         std::fs::write(&filesystems, "nodev\tsysfs\n").unwrap();
         std::fs::write(&modules, "nfsv4 000000 0 - Live 0x0000000000000000\n").unwrap();
-        assert!(client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).is_ok());
+        assert!(
+            client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).is_ok()
+        );
     }
 
     #[test]
@@ -397,7 +439,8 @@ mod tests {
         let modules = tmp.path().join("modules");
         std::fs::write(&filesystems, "nodev\tsysfs\n").unwrap();
         std::fs::write(&modules, "ext4 000000 0 - Live 0x0000000000000000\n").unwrap();
-        let err = client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap()).unwrap_err();
+        let err = client_available_from(filesystems.to_str().unwrap(), modules.to_str().unwrap())
+            .unwrap_err();
         assert!(err.to_string().contains("nfsv4"));
     }
 
@@ -428,7 +471,10 @@ mod tests {
     fn mount_spec_key_distinguishes_whole_drive_from_a_volume_of_it() {
         let base = test_spec();
         assert_eq!(base.key(), "fast");
-        let vol = MountSpec { volume: Some("data".into()), ..base };
+        let vol = MountSpec {
+            volume: Some("data".into()),
+            ..base
+        };
         assert_eq!(vol.key(), "fast/data");
     }
 
@@ -436,7 +482,10 @@ mod tests {
     fn export_path_is_the_remote_root_or_a_volume_subpath_of_it() {
         let base = test_spec();
         assert_eq!(base.export_path(), "/srv/clouduler/fast");
-        let vol = MountSpec { volume: Some("data".into()), ..base };
+        let vol = MountSpec {
+            volume: Some("data".into()),
+            ..base
+        };
         assert_eq!(vol.export_path(), "/srv/clouduler/fast/data");
     }
 

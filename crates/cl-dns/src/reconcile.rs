@@ -162,7 +162,10 @@ fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
 fn delete_conflicting_live_records(desired: &[DesiredRecord], live: &[Record], out: &mut Plan) {
     let mut desired_kinds_by_name: HashMap<&str, HashSet<RecordType>> = HashMap::new();
     for d in desired {
-        desired_kinds_by_name.entry(d.fqdn.as_str()).or_default().insert(d.kind);
+        desired_kinds_by_name
+            .entry(d.fqdn.as_str())
+            .or_default()
+            .insert(d.kind);
     }
 
     let mut already_queued: HashSet<String> = out.delete.iter().cloned().collect();
@@ -347,7 +350,10 @@ mod tests {
         let want = vec![desired(RecordType::A, "svc.example.com", "1.2.3.4")];
         let p = plan(CLUSTER, &want, &[]);
         assert_eq!(p.create.len(), 2);
-        assert!(p.create.iter().any(|r| r.kind == RecordType::A && r.content == "1.2.3.4"));
+        assert!(p
+            .create
+            .iter()
+            .any(|r| r.kind == RecordType::A && r.content == "1.2.3.4"));
         assert!(p.create.iter().any(|r| r.kind == RecordType::TXT));
         assert!(p.update.is_empty());
         assert!(p.delete.is_empty());
@@ -360,9 +366,19 @@ mod tests {
     fn the_ownership_tag_is_sent_quoted() {
         let want = vec![desired(RecordType::A, "svc.example.com", "1.2.3.4")];
         let p = plan(CLUSTER, &want, &[]);
-        let tag = p.create.iter().find(|r| r.kind == RecordType::TXT).expect("tag created");
-        assert!(tag.content.starts_with('"') && tag.content.ends_with('"'), "{tag:?}");
-        assert_eq!(tag.content, format!("\"{}\"", tag_content(CLUSTER, "A:svc.example.com")));
+        let tag = p
+            .create
+            .iter()
+            .find(|r| r.kind == RecordType::TXT)
+            .expect("tag created");
+        assert!(
+            tag.content.starts_with('"') && tag.content.ends_with('"'),
+            "{tag:?}"
+        );
+        assert_eq!(
+            tag.content,
+            format!("\"{}\"", tag_content(CLUSTER, "A:svc.example.com"))
+        );
     }
 
     #[test]
@@ -424,7 +440,12 @@ mod tests {
         // the other - now surplus - is deleted; either way exactly one A
         // record survives at 10.0.0.1 and none stay behind at 10.0.0.2.
         assert_eq!(p.delete.len(), 1, "{p:?}");
-        assert!(p.update.iter().all(|(_, input)| input.content == "10.0.0.1"), "{p:?}");
+        assert!(
+            p.update
+                .iter()
+                .all(|(_, input)| input.content == "10.0.0.1"),
+            "{p:?}"
+        );
     }
 
     /// A previous leader failover left one record already pointing at the
@@ -500,7 +521,12 @@ mod tests {
     #[test]
     fn deletes_unowned_cname_blocking_a_new_a_record() {
         let want = vec![desired(RecordType::A, "auth.example.com", "1.2.3.4")];
-        let live_records = vec![live("r1", RecordType::CNAME, "auth.example.com", "osny.example.com")];
+        let live_records = vec![live(
+            "r1",
+            RecordType::CNAME,
+            "auth.example.com",
+            "osny.example.com",
+        )];
         let p = plan(CLUSTER, &want, &live_records);
         assert_eq!(p.delete, vec!["r1".to_string()]);
         assert_eq!(p.create.len(), 2); // record + tag
@@ -510,7 +536,11 @@ mod tests {
     /// CNAME must also be cleared.
     #[test]
     fn deletes_unowned_a_record_blocking_a_new_cname() {
-        let want = vec![desired(RecordType::CNAME, "auth.example.com", "osny.example.com")];
+        let want = vec![desired(
+            RecordType::CNAME,
+            "auth.example.com",
+            "osny.example.com",
+        )];
         let live_records = vec![live("r1", RecordType::A, "auth.example.com", "1.2.3.4")];
         let p = plan(CLUSTER, &want, &live_records);
         assert_eq!(p.delete, vec!["r1".to_string()]);
@@ -528,7 +558,10 @@ mod tests {
         ];
         let p = plan(CLUSTER, &want, &[]);
         assert_eq!(p.create.len(), 2, "{p:?}"); // the A record + its tag
-        assert!(p.create.iter().all(|c| c.kind != RecordType::CNAME), "{p:?}");
+        assert!(
+            p.create.iter().all(|c| c.kind != RecordType::CNAME),
+            "{p:?}"
+        );
     }
 
     /// `all-nodes` DNS publish mode merges every node's answer for a shared
@@ -538,11 +571,23 @@ mod tests {
     #[test]
     fn only_the_first_of_several_conflicting_cnames_survives() {
         let want = vec![
-            desired(RecordType::CNAME, "headscale.example.com", "soa.example.com"),
-            desired(RecordType::CNAME, "headscale.example.com", "osny.example.com"),
+            desired(
+                RecordType::CNAME,
+                "headscale.example.com",
+                "soa.example.com",
+            ),
+            desired(
+                RecordType::CNAME,
+                "headscale.example.com",
+                "osny.example.com",
+            ),
         ];
         let p = plan(CLUSTER, &want, &[]);
-        let cnames: Vec<_> = p.create.iter().filter(|c| c.kind == RecordType::CNAME).collect();
+        let cnames: Vec<_> = p
+            .create
+            .iter()
+            .filter(|c| c.kind == RecordType::CNAME)
+            .collect();
         assert_eq!(cnames.len(), 1, "{p:?}");
         assert_eq!(cnames[0].content, "soa.example.com");
     }
@@ -555,11 +600,20 @@ mod tests {
         let key = "CNAME:auth.example.com";
         let want = vec![desired(RecordType::A, "auth.example.com", "1.2.3.4")];
         let live_records = vec![
-            live("r1", RecordType::CNAME, "auth.example.com", "osny.example.com"),
+            live(
+                "r1",
+                RecordType::CNAME,
+                "auth.example.com",
+                "osny.example.com",
+            ),
             tag("t1", "auth.example.com", key),
         ];
         let p = plan(CLUSTER, &want, &live_records);
-        assert_eq!(p.delete.iter().filter(|id| id.as_str() == "r1").count(), 1, "{p:?}");
+        assert_eq!(
+            p.delete.iter().filter(|id| id.as_str() == "r1").count(),
+            1,
+            "{p:?}"
+        );
     }
 
     /// A non-benign create failure (e.g. a name already claimed by an
@@ -582,7 +636,10 @@ mod tests {
 
         let cf = Cloudflare::with_base_url("tok", server.uri());
         let plan = Plan {
-            create: vec![to_input(CLUSTER, &desired(RecordType::A, "human.example.com", "1.2.3.4"))],
+            create: vec![to_input(
+                CLUSTER,
+                &desired(RecordType::A, "human.example.com", "1.2.3.4"),
+            )],
             update: vec![],
             delete: vec![],
         };

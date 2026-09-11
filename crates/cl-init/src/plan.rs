@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use cl_config::{
-    ClusterConfig, ClusterMeta, Drive, DriveMode, Network, NetworkKind, Node, NodeAddress, NodeRole,
-    WebConfig, DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,
+    ClusterConfig, ClusterMeta, Drive, DriveMode, Network, NetworkKind, Node, NodeAddress,
+    NodeRole, WebConfig, DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,
 };
 use ipnet::IpNet;
 
@@ -105,7 +105,9 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         cluster: ClusterMeta {
             name: plan.cluster_name.clone(),
         },
-        networks: [(INTERNAL_NETWORK.to_string(), network)].into_iter().collect(),
+        networks: [(INTERNAL_NETWORK.to_string(), network)]
+            .into_iter()
+            .collect(),
         drives: plan.drives.clone(),
         nodes: [(plan.node.name.clone(), plan.node.to_node(INTERNAL_NETWORK))]
             .into_iter()
@@ -130,7 +132,9 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         backup: None,
     };
 
-    config.validate().context("the answers do not make a valid config")?;
+    config
+        .validate()
+        .context("the answers do not make a valid config")?;
     Ok(config)
 }
 
@@ -181,7 +185,9 @@ pub fn add_node(config: &ClusterConfig, plan: &NodePlan, replace: bool) -> Resul
     config
         .nodes
         .insert(plan.name.clone(), plan.to_node(&internal_name));
-    config.validate().context("adding this node breaks the config")?;
+    config
+        .validate()
+        .context("adding this node breaks the config")?;
     Ok(config)
 }
 
@@ -351,7 +357,9 @@ mod tests {
     fn joining_while_claiming_a_drive_the_cluster_does_not_have_is_refused() {
         let existing = new_cluster(&plan()).unwrap();
         let mut joiner = NodePlan::new("n2", NodeRole::Worker, ip("10.10.0.2"));
-        joiner.drives.insert("nope".into(), PathBuf::from("/srv/nope"));
+        joiner
+            .drives
+            .insert("nope".into(), PathBuf::from("/srv/nope"));
 
         let error = add_node(&existing, &joiner, false).unwrap_err().to_string();
         assert!(error.contains("nope"), "{error}");
@@ -368,7 +376,9 @@ mod tests {
         let existing = new_cluster(&plan).unwrap();
 
         let mut joiner = NodePlan::new("n2", NodeRole::Worker, ip("10.10.0.2"));
-        joiner.drives.insert("fast".into(), PathBuf::from("/mnt/fast"));
+        joiner
+            .drives
+            .insert("fast".into(), PathBuf::from("/mnt/fast"));
 
         let config = add_node(&existing, &joiner, false).expect("valid");
         assert!(config.node("n2").unwrap().implements("fast"));

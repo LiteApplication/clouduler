@@ -29,9 +29,9 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap_complete::engine::CompletionCandidate;
 use cl_config::ClusterConfig;
 use cl_raft::state::ClusterState;
+use clap_complete::engine::CompletionCandidate;
 
 use crate::stack;
 
@@ -55,10 +55,16 @@ fn load_config() -> Option<ClusterConfig> {
 fn live_state() -> Option<ClusterState> {
     let cfg = load_config()?;
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
         rt.block_on(async {
             let client = stack::client_for(&cfg, None).ok()?;
-            tokio::time::timeout(QUERY_TIMEOUT, client.state()).await.ok()?.ok()
+            tokio::time::timeout(QUERY_TIMEOUT, client.state())
+                .await
+                .ok()?
+                .ok()
         })
     })
     .join()
@@ -71,7 +77,11 @@ fn help(text: impl Into<clap::builder::StyledStr>) -> Option<clap::builder::Styl
 }
 
 fn instances_in_stack(state: &ClusterState, name: &str) -> usize {
-    state.assignments.keys().filter(|id| id.stack == name).count()
+    state
+        .assignments
+        .keys()
+        .filter(|id| id.stack == name)
+        .count()
 }
 
 fn drive_mode_label(mode: &cl_config::DriveMode) -> &'static str {
@@ -131,13 +141,18 @@ pub fn targets(current: &OsStr) -> Vec<CompletionCandidate> {
         if !id.starts_with(current) {
             continue;
         }
-        let running = state.container_status.get(&assignment.instance).map(|c| c.running);
+        let running = state
+            .container_status
+            .get(&assignment.instance)
+            .map(|c| c.running);
         let status = match running {
             Some(true) => "running",
             Some(false) => "stopped",
             None => "unreported",
         };
-        out.push(CompletionCandidate::new(id).help(help(format!("on {}, {status}", assignment.node))));
+        out.push(
+            CompletionCandidate::new(id).help(help(format!("on {}, {status}", assignment.node))),
+        );
     }
 
     out
@@ -180,7 +195,8 @@ pub fn drive_names(current: &OsStr) -> Vec<CompletionCandidate> {
         .iter()
         .filter(|(n, _)| n.starts_with(current))
         .map(|(name, drive)| {
-            CompletionCandidate::new(name.clone()).help(help(format!("{} drive", drive_mode_label(&drive.mode))))
+            CompletionCandidate::new(name.clone())
+                .help(help(format!("{} drive", drive_mode_label(&drive.mode))))
         })
         .collect()
 }
@@ -199,7 +215,10 @@ pub fn volume_ids(current: &OsStr) -> Vec<CompletionCandidate> {
         .volumes
         .values()
         .filter(|v| v.id.to_string().starts_with(current))
-        .map(|v| CompletionCandidate::new(v.id.to_string()).help(help(format!("primary on {}", v.primary))))
+        .map(|v| {
+            CompletionCandidate::new(v.id.to_string())
+                .help(help(format!("primary on {}", v.primary)))
+        })
         .collect()
 }
 
@@ -254,7 +273,10 @@ pub fn backup_target_ids(current: &OsStr) -> Vec<CompletionCandidate> {
         .restic_targets
         .values()
         .filter(|t| t.id.starts_with(current))
-        .map(|t| CompletionCandidate::new(t.id.clone()).help(help(format!("{} -> {}", t.drive, t.destination_id))))
+        .map(|t| {
+            CompletionCandidate::new(t.id.clone())
+                .help(help(format!("{} -> {}", t.drive, t.destination_id)))
+        })
         .collect()
 }
 
@@ -271,7 +293,10 @@ pub fn folder_import_target(current: &OsStr) -> Vec<CompletionCandidate> {
     match current.split_once('/') {
         None => drive_names(OsStr::new(current))
             .into_iter()
-            .map(|c| CompletionCandidate::new(format!("{}/", c.get_value().to_string_lossy())).help(c.get_help().cloned()))
+            .map(|c| {
+                CompletionCandidate::new(format!("{}/", c.get_value().to_string_lossy()))
+                    .help(c.get_help().cloned())
+            })
             .collect(),
         Some((drive, rest)) if !rest.contains('/') => {
             let Some(state) = live_state() else {
@@ -286,4 +311,22 @@ pub fn folder_import_target(current: &OsStr) -> Vec<CompletionCandidate> {
         }
         Some(_) => Vec::new(),
     }
+}
+
+/// Complete a stored registry host name for `registry test` and `registry rm`.
+pub fn registry_servers(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(current) = current.to_str() else {
+        return Vec::new();
+    };
+    let Some(state) = live_state() else {
+        return Vec::new();
+    };
+
+    state
+        .secrets
+        .keys()
+        .filter_map(|k| k.strip_prefix(cl_sched::registries::SECRET_PREFIX))
+        .filter(|s| s.starts_with(current))
+        .map(|server| CompletionCandidate::new(server.to_string()))
+        .collect()
 }

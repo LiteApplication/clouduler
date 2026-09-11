@@ -19,8 +19,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_raft::ids::VolumeId;
 use cl_raft::state::{
-    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger, DriveBackupTarget,
-    RestoreRequest, RestoreScope, RestoreStatus,
+    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger,
+    DriveBackupTarget, RestoreRequest, RestoreScope, RestoreStatus,
 };
 use cl_raft::Request as ClusterRequest;
 use cl_restic::destination::{remote_repo, ssh_command_args};
@@ -35,13 +35,25 @@ use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/restic/destinations", get(list_destinations).put(put_destination))
-        .route("/api/restic/destinations/{id}", axum::routing::delete(remove_destination))
+        .route(
+            "/api/restic/destinations",
+            get(list_destinations).put(put_destination),
+        )
+        .route(
+            "/api/restic/destinations/{id}",
+            axum::routing::delete(remove_destination),
+        )
         .route("/api/restic/targets", get(list_targets).put(put_target))
-        .route("/api/restic/targets/{id}", axum::routing::delete(remove_target))
+        .route(
+            "/api/restic/targets/{id}",
+            axum::routing::delete(remove_target),
+        )
         .route("/api/restic/targets/{id}/run", post(run_target))
         .route("/api/restic/runs", get(list_runs))
-        .route("/api/restic/destinations/{id}/snapshots", get(list_snapshots))
+        .route(
+            "/api/restic/destinations/{id}/snapshots",
+            get(list_snapshots),
+        )
         .route("/api/restic/restore/drive", post(restore_drive))
         .route("/api/restic/restore/volume", post(restore_volume))
         .route("/api/restic/restore/service", post(restore_service))
@@ -56,7 +68,10 @@ struct DestinationSummary {
     has_credentials: bool,
 }
 
-async fn list_destinations(_identity: Identity, State(state): State<AppState>) -> Json<Vec<DestinationSummary>> {
+async fn list_destinations(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<DestinationSummary>> {
     let cluster_state = state.cluster.state().await;
     Json(
         cluster_state
@@ -106,9 +121,15 @@ async fn put_destination(
 
     let password_secret = cl_restic::secret_names::password_secret_name(&body.id);
     match body.password {
-        Some(password) => seal_and_submit(&state, key, &password_secret, password.as_bytes()).await?,
+        Some(password) => {
+            seal_and_submit(&state, key, &password_secret, password.as_bytes()).await?
+        }
         None if existing.is_some() => {}
-        None => return Err(ApiError::BadRequest("password is required for a new destination".into())),
+        None => {
+            return Err(ApiError::BadRequest(
+                "password is required for a new destination".into(),
+            ))
+        }
     }
 
     let credentials_secret_name = cl_restic::secret_names::credentials_secret_name(&body.id);
@@ -120,14 +141,17 @@ async fn put_destination(
             }
             None => existing.as_ref().and_then(|d| d.credentials_secret.clone()),
         },
-        BackupDestinationKind::S3 { .. } => match (body.s3_access_key_id, body.s3_secret_access_key) {
-            (Some(access_key), Some(secret_key)) => {
-                let plaintext = format!("{access_key}\n{secret_key}");
-                seal_and_submit(&state, key, &credentials_secret_name, plaintext.as_bytes()).await?;
-                Some(credentials_secret_name)
+        BackupDestinationKind::S3 { .. } => {
+            match (body.s3_access_key_id, body.s3_secret_access_key) {
+                (Some(access_key), Some(secret_key)) => {
+                    let plaintext = format!("{access_key}\n{secret_key}");
+                    seal_and_submit(&state, key, &credentials_secret_name, plaintext.as_bytes())
+                        .await?;
+                    Some(credentials_secret_name)
+                }
+                _ => existing.as_ref().and_then(|d| d.credentials_secret.clone()),
             }
-            _ => existing.as_ref().and_then(|d| d.credentials_secret.clone()),
-        },
+        }
         BackupDestinationKind::NodeLocal { .. } => None,
     };
 
@@ -148,7 +172,12 @@ async fn put_destination(
     Ok(StatusCode::OK)
 }
 
-async fn seal_and_submit(state: &AppState, key: &cl_secret::ClusterKey, name: &str, plaintext: &[u8]) -> Result<(), ApiError> {
+async fn seal_and_submit(
+    state: &AppState,
+    key: &cl_secret::ClusterKey,
+    name: &str,
+    plaintext: &[u8],
+) -> Result<(), ApiError> {
     let sealed = Sealed::seal(key, name, plaintext).map_err(ApiError::internal)?;
     let response = state
         .cluster
@@ -166,7 +195,11 @@ async fn seal_and_submit(state: &AppState, key: &cl_secret::ClusterKey, name: &s
     Ok(())
 }
 
-async fn remove_destination(_admin: RequireAdmin, State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn remove_destination(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     let response = state
         .cluster
         .submit(ClusterRequest::RemoveBackupDestination { id })
@@ -178,7 +211,10 @@ async fn remove_destination(_admin: RequireAdmin, State(state): State<AppState>,
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_targets(_identity: Identity, State(state): State<AppState>) -> Json<Vec<DriveBackupTarget>> {
+async fn list_targets(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<DriveBackupTarget>> {
     let cluster_state = state.cluster.state().await;
     Json(cluster_state.restic_targets.values().cloned().collect())
 }
@@ -200,10 +236,17 @@ struct PutTargetRequest {
     stop_containers: Option<bool>,
 }
 
-async fn put_target(_admin: RequireAdmin, State(state): State<AppState>, Json(body): Json<PutTargetRequest>) -> Result<StatusCode, ApiError> {
+async fn put_target(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<PutTargetRequest>,
+) -> Result<StatusCode, ApiError> {
     let cluster_state = state.cluster.state().await;
     // Preserve last_run across an edit - it isn't part of the request body.
-    let last_run = cluster_state.restic_targets.get(&body.id).and_then(|t| t.last_run);
+    let last_run = cluster_state
+        .restic_targets
+        .get(&body.id)
+        .and_then(|t| t.last_run);
 
     let response = state
         .cluster
@@ -227,7 +270,11 @@ async fn put_target(_admin: RequireAdmin, State(state): State<AppState>, Json(bo
     Ok(StatusCode::OK)
 }
 
-async fn remove_target(_admin: RequireAdmin, State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn remove_target(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     let response = state
         .cluster
         .submit(ClusterRequest::RemoveBackupTarget { id })
@@ -242,7 +289,11 @@ async fn remove_target(_admin: RequireAdmin, State(state): State<AppState>, Path
 /// Trigger a run immediately, outside its schedule. `clouduler`'s
 /// `backup_runner::start_runner` polls for `Running` runs on its own, so
 /// this is a plain submit with no daemon-side nudge needed.
-async fn run_target(admin: RequireAdmin, State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<String>, ApiError> {
+async fn run_target(
+    admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<String>, ApiError> {
     let cluster_state = state.cluster.state().await;
     let target = cluster_state
         .restic_targets
@@ -257,7 +308,9 @@ async fn run_target(admin: RequireAdmin, State(state): State<AppState>, Path(id)
         .values()
         .any(|r| r.target_id == id && matches!(r.outcome, BackupRunOutcome::Running { .. }))
     {
-        return Err(ApiError::Conflict(format!("a backup is already running for target {id}")));
+        return Err(ApiError::Conflict(format!(
+            "a backup is already running for target {id}"
+        )));
     }
 
     let run_id = Uuid::new_v4().to_string();
@@ -271,7 +324,9 @@ async fn run_target(admin: RequireAdmin, State(state): State<AppState>, Path(id)
             started_at: unix_now(),
             finished_at: None,
             outcome: BackupRunOutcome::Running { percent: None },
-            triggered_by: BackupTrigger::Manual { by: admin.0.username },
+            triggered_by: BackupTrigger::Manual {
+                by: admin.0.username,
+            },
         }))
         .await
         .map_err(ApiError::not_leader)?;
@@ -286,7 +341,11 @@ struct RunsQuery {
     target: Option<String>,
 }
 
-async fn list_runs(_identity: Identity, State(state): State<AppState>, Query(query): Query<RunsQuery>) -> Json<Vec<BackupRun>> {
+async fn list_runs(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Query(query): Query<RunsQuery>,
+) -> Json<Vec<BackupRun>> {
     let cluster_state = state.cluster.state().await;
     let mut runs: Vec<BackupRun> = cluster_state
         .restic_runs
@@ -298,7 +357,11 @@ async fn list_runs(_identity: Identity, State(state): State<AppState>, Query(que
     Json(runs)
 }
 
-async fn list_snapshots(_identity: Identity, State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Vec<SnapshotInfo>>, ApiError> {
+async fn list_snapshots(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<SnapshotInfo>>, ApiError> {
     let cluster_state = state.cluster.state().await;
     let destination = cluster_state
         .restic_destinations
@@ -315,7 +378,9 @@ async fn list_snapshots(_identity: Identity, State(state): State<AppState>, Path
     let entry = cluster_state
         .secrets
         .get(&destination.password_secret)
-        .ok_or_else(|| ApiError::Conflict("this destination's password secret is missing".into()))?;
+        .ok_or_else(|| {
+            ApiError::Conflict("this destination's password secret is missing".into())
+        })?;
     let sealed = Sealed::from_blob(entry.sealed.clone());
     let password = sealed
         .open(&key, &destination.password_secret)
@@ -323,17 +388,25 @@ async fn list_snapshots(_identity: Identity, State(state): State<AppState>, Path
         .and_then(|p| String::from_utf8(p).ok())
         .ok_or_else(|| ApiError::Conflict("cannot open this destination's password".into()))?;
 
-    let cred_dir = std::env::temp_dir().join("clouduler-restic-snapshots").join(&id);
+    let cred_dir = std::env::temp_dir()
+        .join("clouduler-restic-snapshots")
+        .join(&id);
     std::fs::create_dir_all(&cred_dir).map_err(ApiError::internal)?;
     let password_path = cred_dir.join("password");
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(&password_path, &password).map_err(ApiError::internal)?;
-        std::fs::set_permissions(&password_path, std::fs::Permissions::from_mode(0o600)).map_err(ApiError::internal)?;
+        std::fs::set_permissions(&password_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(ApiError::internal)?;
     }
 
     let resolved = remote_repo(&destination);
-    let repo = ResticRepo::new(resolved, ssh_command_args(&destination), &password_path, &[]);
+    let repo = ResticRepo::new(
+        resolved,
+        ssh_command_args(&destination),
+        &password_path,
+        &[],
+    );
     let list = tokio::task::spawn_blocking(move || {
         let result = repo.snapshots();
         let _ = std::fs::remove_file(&password_path);
@@ -385,7 +458,9 @@ async fn restore_volume(
 ) -> Result<Json<String>, ApiError> {
     submit_restore(
         &state,
-        RestoreScope::Volume { volume: VolumeId::new(body.drive, body.volume) },
+        RestoreScope::Volume {
+            volume: VolumeId::new(body.drive, body.volume),
+        },
         Some(body.destination_id),
         body.snapshot,
         admin.0.username,
@@ -410,7 +485,10 @@ async fn restore_service(
 ) -> Result<Json<String>, ApiError> {
     submit_restore(
         &state,
-        RestoreScope::Service { stack: body.stack, service: body.service },
+        RestoreScope::Service {
+            stack: body.stack,
+            service: body.service,
+        },
         body.destination_id,
         body.snapshot,
         admin.0.username,
@@ -446,9 +524,13 @@ async fn submit_restore(
     Ok(Json(id))
 }
 
-async fn list_restore_requests(_identity: Identity, State(state): State<AppState>) -> Json<Vec<RestoreRequest>> {
+async fn list_restore_requests(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<RestoreRequest>> {
     let cluster_state = state.cluster.state().await;
-    let mut requests: Vec<RestoreRequest> = cluster_state.restore_requests.values().cloned().collect();
+    let mut requests: Vec<RestoreRequest> =
+        cluster_state.restore_requests.values().cloned().collect();
     requests.sort_by_key(|r| std::cmp::Reverse(r.requested_at));
     Json(requests)
 }

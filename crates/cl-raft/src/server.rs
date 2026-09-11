@@ -14,7 +14,9 @@ use crate::contact::Contact;
 use crate::ids::NodeId;
 use crate::network::Peer;
 use crate::quorum::QuorumWatch;
-use crate::rpc::{decode, encode, frame, Query, QueryResult, RpcRequest, RpcResponse, StatusReport};
+use crate::rpc::{
+    decode, encode, frame, Query, QueryResult, RpcRequest, RpcResponse, StatusReport,
+};
 use crate::state::{Request as StateRequest, Response as StateResponse};
 use crate::store::StateMachine;
 use crate::types::Raft;
@@ -58,7 +60,8 @@ async fn handle(stream: TcpStream, ctx: Context) -> std::io::Result<()> {
             Ok(request) => request,
             Err(e) => {
                 warn!(error = %e, "undecodable rpc frame");
-                conn.send(encode(&RpcResponse::Error(e.to_string()))?).await?;
+                conn.send(encode(&RpcResponse::Error(e.to_string()))?)
+                    .await?;
                 continue;
             }
         };
@@ -129,7 +132,10 @@ async fn write(ctx: &Context, request: StateRequest) -> Result<StateResponse, St
         .map(|node| node.addr.clone())
         .ok_or_else(|| format!("leader {leader} has no known address"))?;
 
-    match Peer::connect(&addr).call(&RpcRequest::Forward(request)).await {
+    match Peer::connect(&addr)
+        .call(&RpcRequest::Forward(request))
+        .await
+    {
         Ok(RpcResponse::Forward(result)) => result,
         Ok(RpcResponse::Error(msg)) => Err(msg),
         Ok(other) => Err(format!("unexpected reply from leader {leader}: {other:?}")),

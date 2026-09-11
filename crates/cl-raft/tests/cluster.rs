@@ -55,7 +55,12 @@ impl Harness {
         }
 
         let members: BTreeMap<_, _> = (0..count)
-            .map(|i| (node_id(test_id(&format!("n{i}"))), BasicNode::new(addrs[i].to_string())))
+            .map(|i| {
+                (
+                    node_id(test_id(&format!("n{i}"))),
+                    BasicNode::new(addrs[i].to_string()),
+                )
+            })
             .collect();
         nodes[0].initialize(members).await.expect("initialize");
 
@@ -267,7 +272,11 @@ async fn a_config_edit_replicates_to_every_node() {
 
     cluster.await_version(1).await;
     for node in &cluster.nodes {
-        let stored = node.state().await.cluster_config.expect("config replicated");
+        let stored = node
+            .state()
+            .await
+            .cluster_config
+            .expect("config replicated");
         assert_eq!(stored.yaml, yaml);
         assert_eq!(stored.generation, 1);
     }

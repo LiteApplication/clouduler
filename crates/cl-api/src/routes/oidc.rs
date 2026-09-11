@@ -24,7 +24,10 @@ use crate::oidc::OIDC_CLIENT_SECRET;
 use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/oidc/client-secret", get(secret_status).put(set_secret))
+    Router::new().route(
+        "/api/oidc/client-secret",
+        get(secret_status).put(set_secret),
+    )
 }
 
 #[derive(Serialize)]
@@ -68,7 +71,8 @@ async fn set_secret(
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-    let sealed = Sealed::seal(key, OIDC_CLIENT_SECRET, secret.as_bytes()).map_err(ApiError::internal)?;
+    let sealed =
+        Sealed::seal(key, OIDC_CLIENT_SECRET, secret.as_bytes()).map_err(ApiError::internal)?;
     let key_fingerprint = key.fingerprint();
     drop(key_guard);
 

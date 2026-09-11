@@ -20,14 +20,20 @@ use crate::server::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/nodes", get(list).post(add))
-        .route("/api/nodes/{name}", get(detail).patch(patch_node).delete(remove))
+        .route(
+            "/api/nodes/{name}",
+            get(detail).patch(patch_node).delete(remove),
+        )
         .route("/api/nodes/{name}/logs", get(logs))
         .route("/api/nodes/{name}/interfaces", get(interfaces))
         // Node-to-node only, HMAC authenticated: what `detail`/`interfaces`
         // forward to when asked about a node other than the one answering.
         // See `internal_peer`.
         .route("/api/nodes/internal/{name}/usage", get(internal_usage))
-        .route("/api/nodes/internal/{name}/interfaces", get(internal_interfaces))
+        .route(
+            "/api/nodes/internal/{name}/interfaces",
+            get(internal_interfaces),
+        )
 }
 
 #[derive(Serialize)]
@@ -156,7 +162,10 @@ fn internal_usage_path(name: &str) -> String {
 
 /// Node-to-node: always this node's own reading, regardless of `name` — a
 /// node only ever forwards to the node it is actually asking about.
-async fn internal_usage(_auth: InternalAuth, State(_state): State<AppState>) -> Json<ResourceUsage> {
+async fn internal_usage(
+    _auth: InternalAuth,
+    State(_state): State<AppState>,
+) -> Json<ResourceUsage> {
     Json(local_resource_usage())
 }
 
@@ -237,7 +246,10 @@ fn internal_interfaces_path(name: &str) -> String {
 }
 
 /// Node-to-node: always this node's own interfaces, regardless of `name`.
-async fn internal_interfaces(_auth: InternalAuth, State(_state): State<AppState>) -> Json<Vec<String>> {
+async fn internal_interfaces(
+    _auth: InternalAuth,
+    State(_state): State<AppState>,
+) -> Json<Vec<String>> {
     Json(local_interfaces())
 }
 
@@ -325,7 +337,9 @@ async fn remove(
     let mut config = state.cluster_config.read().await.clone();
     let had_entry = config.nodes.remove(&name).is_some();
     if had_entry {
-        config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        config
+            .validate()
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     }
 
     submit(&state, ClusterRequest::RemoveNode { node: name.clone() }).await?;
@@ -354,7 +368,8 @@ async fn logs(
     }
     // No in-process log ring buffer is wired up yet; an empty stream is a
     // truthful placeholder until one exists.
-    let empty = futures::stream::empty::<Result<axum::response::sse::Event, std::convert::Infallible>>();
+    let empty =
+        futures::stream::empty::<Result<axum::response::sse::Event, std::convert::Infallible>>();
     Ok(axum::response::sse::Sse::new(empty))
 }
 

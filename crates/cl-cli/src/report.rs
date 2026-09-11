@@ -65,11 +65,7 @@ pub fn drives(cfg: &ClusterConfig) {
             .iter()
             .filter(|(_, n)| n.implements(name))
             .map(|(n, _)| n.as_str());
-        println!(
-            "{name}\tsync={:?}\tnodes={}",
-            drive.sync_interval,
-            list(on)
-        );
+        println!("{name}\tsync={:?}\tnodes={}", drive.sync_interval, list(on));
     }
 }
 

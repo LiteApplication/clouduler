@@ -272,7 +272,10 @@ mod tests {
         let r = parse("source: nginx_conf\ntarget: /etc/nginx/nginx.conf\n");
         let encoded = serde_yaml::to_string(&r).expect("encode");
         for absent in ["mode", "uid", "gid", "env"] {
-            assert!(!encoded.contains(absent), "unexpected `{absent}` in:\n{encoded}");
+            assert!(
+                !encoded.contains(absent),
+                "unexpected `{absent}` in:\n{encoded}"
+            );
         }
     }
 
@@ -291,7 +294,8 @@ mod tests {
 
     #[test]
     fn write_cannot_be_combined_with_env() {
-        let err = serde_yaml::from_str::<ObjectRef>("source: c\nwrite: true\nenv: FOO\n").unwrap_err();
+        let err =
+            serde_yaml::from_str::<ObjectRef>("source: c\nwrite: true\nenv: FOO\n").unwrap_err();
         assert!(err.to_string().contains("write"));
     }
 

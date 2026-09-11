@@ -22,11 +22,18 @@ impl Http01Store {
     }
 
     pub fn get(&self, token: &str) -> Option<String> {
-        self.tokens.lock().expect("http01 store poisoned").get(token).cloned()
+        self.tokens
+            .lock()
+            .expect("http01 store poisoned")
+            .get(token)
+            .cloned()
     }
 
     pub fn remove(&self, token: &str) {
-        self.tokens.lock().expect("http01 store poisoned").remove(token);
+        self.tokens
+            .lock()
+            .expect("http01 store poisoned")
+            .remove(token);
     }
 }
 

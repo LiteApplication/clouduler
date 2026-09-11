@@ -74,7 +74,11 @@ pub struct DirMeta {
 
 impl DirMeta {
     fn from_metadata(meta: &std::fs::Metadata) -> Self {
-        Self { mode: meta.mode() & 0o7777, uid: meta.uid(), gid: meta.gid() }
+        Self {
+            mode: meta.mode() & 0o7777,
+            uid: meta.uid(),
+            gid: meta.gid(),
+        }
     }
 }
 
@@ -245,8 +249,10 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         return Ok(Manifest::default());
     }
 
-    let root_meta = std::fs::symlink_metadata(root)
-        .map_err(|source| DriveError::Io { path: root.to_path_buf(), source })?;
+    let root_meta = std::fs::symlink_metadata(root).map_err(|source| DriveError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
 
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry.map_err(|e| DriveError::Io {
@@ -262,7 +268,9 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
 
         let rel = path
             .strip_prefix(root)
-            .map_err(|_| DriveError::PathEscape { path: path.display().to_string() })?
+            .map_err(|_| DriveError::PathEscape {
+                path: path.display().to_string(),
+            })?
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
 
@@ -277,8 +285,10 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         }
 
         if file_type.is_symlink() {
-            let target = std::fs::read_link(path)
-                .map_err(|source| DriveError::Io { path: path.to_path_buf(), source })?;
+            let target = std::fs::read_link(path).map_err(|source| DriveError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
             files.insert(
                 rel,
                 FileMeta {
@@ -325,7 +335,11 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         );
     }
 
-    Ok(Manifest { files, dirs, root: DirMeta::from_metadata(&root_meta) })
+    Ok(Manifest {
+        files,
+        dirs,
+        root: DirMeta::from_metadata(&root_meta),
+    })
 }
 
 #[cfg(test)]
@@ -334,7 +348,12 @@ mod tests {
     use std::fs;
 
     fn meta(size: u64, mtime: i64) -> FileMeta {
-        FileMeta { size, mtime_nanos: mtime, mode: 0o644, ..Default::default() }
+        FileMeta {
+            size,
+            mtime_nanos: mtime,
+            mode: 0o644,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -357,7 +376,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
         let manifest = scan(tmp.path(), true).unwrap();
-        assert_eq!(manifest.files["a.txt"].hash, Some(*blake3::hash(b"hello").as_bytes()));
+        assert_eq!(
+            manifest.files["a.txt"].hash,
+            Some(*blake3::hash(b"hello").as_bytes())
+        );
     }
 
     #[test]
@@ -450,8 +472,22 @@ mod tests {
     fn diff_reports_a_dir_whose_owner_or_mode_drifted_as_changed_not_added() {
         let mut old = Manifest::default();
         let mut new = Manifest::default();
-        old.dirs.insert("sub".into(), DirMeta { mode: 0o755, uid: 1000, gid: 1000 });
-        new.dirs.insert("sub".into(), DirMeta { mode: 0o750, uid: 1001, gid: 1000 });
+        old.dirs.insert(
+            "sub".into(),
+            DirMeta {
+                mode: 0o755,
+                uid: 1000,
+                gid: 1000,
+            },
+        );
+        new.dirs.insert(
+            "sub".into(),
+            DirMeta {
+                mode: 0o750,
+                uid: 1001,
+                gid: 1000,
+            },
+        );
 
         let diff = new.diff(&old);
         assert_eq!(diff.changed_dirs, vec!["sub".to_string()]);
@@ -463,7 +499,11 @@ mod tests {
     fn diff_reports_root_metadata_only_when_it_differs() {
         let mut old = Manifest::default();
         let mut new = Manifest::default();
-        old.root = DirMeta { mode: 0o755, uid: 1000, gid: 1000 };
+        old.root = DirMeta {
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+        };
         new.root = old.root;
         assert_eq!(new.diff(&old).root, None);
 

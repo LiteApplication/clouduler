@@ -40,7 +40,11 @@ pub fn records_for(
         let ip = node.ip_on(network).ok_or_else(|| {
             DnsError::Invalid(format!("node has no address on network {network}"))
         })?;
-        let kind = if ip.is_ipv6() { RecordType::AAAA } else { RecordType::A };
+        let kind = if ip.is_ipv6() {
+            RecordType::AAAA
+        } else {
+            RecordType::A
+        };
         return Ok(vec![DesiredRecord {
             fqdn,
             kind,
@@ -51,9 +55,9 @@ pub fn records_for(
     }
 
     // Public network: fan out over whichever address fields are set.
-    let public = node.public_on(network).ok_or_else(|| {
-        DnsError::Invalid(format!("node has no address on network {network}"))
-    })?;
+    let public = node
+        .public_on(network)
+        .ok_or_else(|| DnsError::Invalid(format!("node has no address on network {network}")))?;
     if public.is_empty() {
         return Err(DnsError::Invalid(format!(
             "node has no address on network {network}"

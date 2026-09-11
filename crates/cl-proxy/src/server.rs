@@ -43,7 +43,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
 pub(crate) fn empty_body() -> ProxyBody {
-    Empty::<Bytes>::new().map_err(|never| match never {}).boxed()
+    Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed()
 }
 
 pub(crate) fn text_body(s: impl Into<Bytes>) -> ProxyBody {
@@ -114,7 +116,11 @@ impl ProxyServer {
         Self::with_auth_gate(routes, certs, None)
     }
 
-    pub fn with_auth_gate(routes: Arc<RouteTable>, certs: Arc<CertStore>, auth_gate: Option<Arc<AuthGate>>) -> Self {
+    pub fn with_auth_gate(
+        routes: Arc<RouteTable>,
+        certs: Arc<CertStore>,
+        auth_gate: Option<Arc<AuthGate>>,
+    ) -> Self {
         Self::full(routes, certs, auth_gate, Arc::new(Http01Store::default()))
     }
 
@@ -159,8 +165,13 @@ impl ProxyServer {
             };
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
-                let svc = service_fn(move |req| handle_http(req, routes.clone(), backends.clone(), peer));
-                if let Err(e) = http1::Builder::new().serve_connection(io, svc).with_upgrades().await {
+                let svc =
+                    service_fn(move |req| handle_http(req, routes.clone(), backends.clone(), peer));
+                if let Err(e) = http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .with_upgrades()
+                    .await
+                {
                     debug!(error = %e, "http connection closed");
                 }
             });
@@ -230,7 +241,11 @@ async fn accept_tls(
     let tls_stream = start.into_stream(config).await?;
     let io = TokioIo::new(tls_stream);
     let svc = service_fn(move |req| handle_https(req, routes.clone(), backends.clone(), peer));
-    if let Err(e) = http1::Builder::new().serve_connection(io, svc).with_upgrades().await {
+    if let Err(e) = http1::Builder::new()
+        .serve_connection(io, svc)
+        .with_upgrades()
+        .await
+    {
         debug!(error = %e, "https connection error");
     }
     Ok(())
@@ -278,10 +293,7 @@ fn gate_by_network(route: &Route, peer: SocketAddr) -> Option<Response<ProxyBody
 }
 
 /// Answers a redirect route directly, never touching a backend.
-fn respond_redirect(
-    redirect: &RedirectTarget,
-    path_and_query: &str,
-) -> Response<ProxyBody> {
+fn respond_redirect(redirect: &RedirectTarget, path_and_query: &str) -> Response<ProxyBody> {
     let location = if redirect.preserve_path {
         format!("{}{path_and_query}", redirect.url)
     } else {
@@ -330,7 +342,12 @@ fn full_url(scheme: &str, host: &str, path_and_query: &str) -> String {
 /// Answers with a `redirect_regex` match, if the route carries one and it
 /// matches this request's full URL. `None` means fall through to normal
 /// proxying (or the plain-http-to-https redirect, whichever comes next).
-fn respond_redirect_regex(route: &Route, scheme: &str, host: &str, path_and_query: &str) -> Option<Response<ProxyBody>> {
+fn respond_redirect_regex(
+    route: &Route,
+    scheme: &str,
+    host: &str,
+    path_and_query: &str,
+) -> Option<Response<ProxyBody>> {
     let (regex, cfg) = route.redirect_regex()?;
     let url = full_url(scheme, host, path_and_query);
     if !regex.is_match(&url) {
@@ -376,7 +393,11 @@ async fn handle_http(
         return Ok(resp);
     }
 
-    let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
 
     if let Some(redirect) = &route.redirect {
         return Ok(respond_redirect(redirect, path_and_query));
@@ -433,7 +454,11 @@ async fn handle_https(
         return Ok(resp);
     }
 
-    let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
 
     if let Some(redirect) = &route.redirect {
         return Ok(respond_redirect(redirect, path_and_query));
@@ -452,7 +477,10 @@ async fn handle_https(
 /// config), so both are currently no-ops here; the pure functions they'd call
 /// live in `middleware.rs` and are unit tested there.
 fn apply_route_middlewares(route: &Route, req: &mut Request<Incoming>) {
-    if route.middlewares.contains(&cl_config::Middleware::StripPrefix) {
+    if route
+        .middlewares
+        .contains(&cl_config::Middleware::StripPrefix)
+    {
         if let Some(prefix) = &route.path_prefix {
             let new_path = middleware::strip_prefix(req.uri().path(), prefix);
             let path_and_query = match req.uri().query() {
@@ -488,12 +516,18 @@ fn forward_auth_config(route: &Route) -> Option<&cl_config::ForwardAuth> {
 
 /// Whether the route carries the `authenticated` middleware.
 fn is_authenticated_route(route: &Route) -> bool {
-    route.middlewares.contains(&cl_config::Middleware::Authenticated)
+    route
+        .middlewares
+        .contains(&cl_config::Middleware::Authenticated)
 }
 
 /// Turns a `forward_auth::Outcome::Deny` into the response sent to the
 /// client, relaying the auth endpoint's own status/headers/body verbatim.
-fn deny_response(status: StatusCode, headers: hyper::HeaderMap, body: Bytes) -> Response<ProxyBody> {
+fn deny_response(
+    status: StatusCode,
+    headers: hyper::HeaderMap,
+    body: Bytes,
+) -> Response<ProxyBody> {
     let mut builder = Response::builder().status(status);
     if let Some(map) = builder.headers_mut() {
         *map = headers;
@@ -503,7 +537,13 @@ fn deny_response(status: StatusCode, headers: hyper::HeaderMap, body: Bytes) -> 
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
-async fn proxy(mut req: Request<Incoming>, route: &Route, scheme: &str, peer: SocketAddr, backends: &Backends) -> Response<ProxyBody> {
+async fn proxy(
+    mut req: Request<Incoming>,
+    route: &Route,
+    scheme: &str,
+    peer: SocketAddr,
+    backends: &Backends,
+) -> Response<ProxyBody> {
     apply_route_middlewares(route, &mut req);
 
     if is_authenticated_route(route) {
@@ -520,8 +560,18 @@ async fn proxy(mut req: Request<Incoming>, route: &Route, scheme: &str, peer: So
     }
 
     if let Some(cfg) = forward_auth_config(route) {
-        match forward_auth::check(&backends.forward_auth_client, cfg, req.method(), req.uri(), req.headers()).await {
-            forward_auth::Outcome::Deny(status, headers, body) => return deny_response(status, headers, body),
+        match forward_auth::check(
+            &backends.forward_auth_client,
+            cfg,
+            req.method(),
+            req.uri(),
+            req.headers(),
+        )
+        .await
+        {
+            forward_auth::Outcome::Deny(status, headers, body) => {
+                return deny_response(status, headers, body)
+            }
             forward_auth::Outcome::Allow(allowed) => {
                 for (name, value) in allowed {
                     req.headers_mut().insert(name, value);
@@ -628,7 +678,8 @@ async fn proxy(mut req: Request<Incoming>, route: &Route, scheme: &str, peer: So
     };
 
     if let Some(value) = picked.set_cookie {
-        if let Ok(v) = HeaderValue::from_str(&format!("{STICKY_COOKIE}={value}; Path=/; HttpOnly")) {
+        if let Ok(v) = HeaderValue::from_str(&format!("{STICKY_COOKIE}={value}; Path=/; HttpOnly"))
+        {
             resp.headers_mut().insert(hyper::header::SET_COOKIE, v);
         }
     }
@@ -640,9 +691,14 @@ async fn proxy(mut req: Request<Incoming>, route: &Route, scheme: &str, peer: So
     resp
 }
 
-fn backend_uri(addr: SocketAddr, original: &http::Uri) -> std::result::Result<http::Uri, http::Error> {
+fn backend_uri(
+    addr: SocketAddr,
+    original: &http::Uri,
+) -> std::result::Result<http::Uri, http::Error> {
     let path_and_query = original.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    format!("http://{addr}{path_and_query}").parse::<http::Uri>().map_err(Into::into)
+    format!("http://{addr}{path_and_query}")
+        .parse::<http::Uri>()
+        .map_err(Into::into)
 }
 
 fn extract_cookie(headers: &hyper::HeaderMap, name: &str) -> Option<String> {
@@ -704,17 +760,24 @@ async fn proxy_websocket(
     // then fails to match it against the expected path and silently drops the
     // connection. Origin-form (path+query only) is what a reverse proxy must
     // send to an origin server.
-    let path_and_query =
-        parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_string();
-    parts.uri = path_and_query.parse().map_err(|e: http::uri::InvalidUri| {
-        crate::error::ProxyError::Tls(e.to_string())
-    })?;
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    parts.uri = path_and_query
+        .parse()
+        .map_err(|e: http::uri::InvalidUri| crate::error::ProxyError::Tls(e.to_string()))?;
 
     let backend_req = Request::from_parts(parts, Empty::<Bytes>::new());
 
-    let stream = TcpStream::connect(backend)
-        .await
-        .map_err(|e| crate::error::ProxyError::BackendUnreachable { addr: backend, source: e })?;
+    let stream = TcpStream::connect(backend).await.map_err(|e| {
+        crate::error::ProxyError::BackendUnreachable {
+            addr: backend,
+            source: e,
+        }
+    })?;
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
         .await
@@ -728,13 +791,12 @@ async fn proxy_websocket(
         }
     });
 
-    let mut backend_resp = sender
-        .send_request(backend_req)
-        .await
-        .map_err(|e| crate::error::ProxyError::BackendUnreachable {
+    let mut backend_resp = sender.send_request(backend_req).await.map_err(|e| {
+        crate::error::ProxyError::BackendUnreachable {
             addr: backend,
             source: std::io::Error::other(e.to_string()),
-        })?;
+        }
+    })?;
 
     if backend_resp.status() != StatusCode::SWITCHING_PROTOCOLS {
         let (rparts, rbody) = backend_resp.into_parts();

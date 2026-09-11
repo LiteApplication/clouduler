@@ -44,7 +44,9 @@ async fn echo(req: Request<Incoming>) -> Result<Response<http_body_util::Full<By
         }
     }
     let body = format!("{} {}", req.method(), req.uri().path());
-    Ok(builder.body(http_body_util::Full::new(Bytes::from(body))).unwrap())
+    Ok(builder
+        .body(http_body_util::Full::new(Bytes::from(body)))
+        .unwrap())
 }
 
 async fn wait_for_port(addr: SocketAddr) {
@@ -79,8 +81,14 @@ async fn proxies_request_with_forwarded_headers() {
     assert_eq!(client.status, 200);
     assert_eq!(client.body, "GET /hello");
     assert!(client.headers.contains_key("x-echo-x-forwarded-for"));
-    assert_eq!(client.headers.get("x-echo-x-forwarded-proto").unwrap(), "http");
-    assert_eq!(client.headers.get("x-echo-x-forwarded-host").unwrap(), "app.test");
+    assert_eq!(
+        client.headers.get("x-echo-x-forwarded-proto").unwrap(),
+        "http"
+    );
+    assert_eq!(
+        client.headers.get("x-echo-x-forwarded-host").unwrap(),
+        "app.test"
+    );
 }
 
 #[tokio::test]
@@ -156,18 +164,36 @@ async fn an_acme_challenge_token_is_served_regardless_of_host_or_routing() {
     tokio::spawn(async move { s.serve_http(http_addr).await.unwrap() });
     wait_for_port(http_addr).await;
 
-    let resp = reqwest_like_get(http_addr, "nowhere.test", "/.well-known/acme-challenge/the-token").await;
+    let resp = reqwest_like_get(
+        http_addr,
+        "nowhere.test",
+        "/.well-known/acme-challenge/the-token",
+    )
+    .await;
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body, "the-token.thumbprint");
 
-    let missing = reqwest_like_get(http_addr, "nowhere.test", "/.well-known/acme-challenge/other-token").await;
+    let missing = reqwest_like_get(
+        http_addr,
+        "nowhere.test",
+        "/.well-known/acme-challenge/other-token",
+    )
+    .await;
     assert_eq!(missing.status, 404);
 }
 
 #[tokio::test]
 async fn http_redirects_to_https_when_route_has_tls() {
     let backend = spawn_echo_backend().await;
-    let route = Route::new("secure.test", None, true, vec![], false, "svc", vec![backend]);
+    let route = Route::new(
+        "secure.test",
+        None,
+        true,
+        vec![],
+        false,
+        "svc",
+        vec![backend],
+    );
     let routes = Arc::new(RouteTable::new(vec![route]));
     let certs = Arc::new(CertStore::new());
     let server = Arc::new(ProxyServer::new(routes, certs));
@@ -179,7 +205,10 @@ async fn http_redirects_to_https_when_route_has_tls() {
 
     let resp = reqwest_like_get(http_addr, "secure.test", "/path").await;
     assert_eq!(resp.status, 308);
-    assert_eq!(resp.headers.get("location").unwrap(), "https://secure.test/path");
+    assert_eq!(
+        resp.headers.get("location").unwrap(),
+        "https://secure.test/path"
+    );
 }
 
 #[tokio::test]
@@ -216,7 +245,11 @@ struct SimpleResponse {
 }
 
 async fn reqwest_like_get(addr: SocketAddr, host: &str, path: &str) -> SimpleResponse {
-    let raw = raw_request(addr, &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")).await;
+    let raw = raw_request(
+        addr,
+        &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
     parse_response(&raw)
 }
 
@@ -246,7 +279,11 @@ fn parse_response(raw: &str) -> SimpleResponse {
             headers.insert(k.trim().to_lowercase(), v.trim().to_string());
         }
     }
-    SimpleResponse { status, headers, body }
+    SimpleResponse {
+        status,
+        headers,
+        body,
+    }
 }
 
 // ---- per-route proxy settings ----
@@ -294,7 +331,11 @@ async fn a_body_over_the_limit_is_refused_with_413() {
     assert_eq!(resp.status, 413);
     // The backend must never have been contacted, so nothing it echoes back
     // should be present.
-    assert!(!resp.headers.contains_key("x-echo-host"), "{:?}", resp.headers);
+    assert!(
+        !resp.headers.contains_key("x-echo-host"),
+        "{:?}",
+        resp.headers
+    );
 }
 
 #[tokio::test]
@@ -329,7 +370,10 @@ async fn host_is_rewritten_to_the_backend_by_default() {
     let backend = spawn_echo_backend().await;
     let addr = serve_route(plain_route(backend, cl_proxy::RouteOptions::permissive())).await;
     let resp = reqwest_like_get(addr, "app.test", "/").await;
-    assert_eq!(resp.headers.get("x-echo-host").unwrap(), &backend.to_string());
+    assert_eq!(
+        resp.headers.get("x-echo-host").unwrap(),
+        &backend.to_string()
+    );
 }
 
 #[tokio::test]
@@ -371,7 +415,8 @@ async fn an_upgrade_is_rejected_when_websockets_are_off() {
 /// receives on each connection and never responds — enough to see exactly
 /// what request-target the proxy put on the wire for an upgrade, without a
 /// higher-level HTTP parser normalizing it back to a path for us.
-async fn spawn_line_capturing_backend() -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<String>) {
+async fn spawn_line_capturing_backend() -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<String>)
+{
     use tokio::io::AsyncReadExt;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -408,7 +453,10 @@ async fn a_websocket_upgrade_is_forwarded_with_an_origin_form_request_target() {
     let (backend, mut lines) = spawn_line_capturing_backend().await;
     let addr = serve_route(plain_route(
         backend,
-        cl_proxy::RouteOptions { websockets: true, ..cl_proxy::RouteOptions::default() },
+        cl_proxy::RouteOptions {
+            websockets: true,
+            ..cl_proxy::RouteOptions::default()
+        },
     ))
     .await;
 
@@ -433,7 +481,10 @@ async fn a_websocket_upgrade_is_forwarded_with_an_origin_form_request_target() {
         .expect("backend never received a connection")
         .expect("backend connection closed without sending a line");
 
-    assert_eq!(first_line, "GET /api/socket.io/?EIO=4&transport=websocket HTTP/1.1");
+    assert_eq!(
+        first_line,
+        "GET /api/socket.io/?EIO=4&transport=websocket HTTP/1.1"
+    );
 }
 
 /// A slow backend must not hold the connection open forever when the route
@@ -516,13 +567,12 @@ async fn a_public_route_has_no_subnet_restriction() {
 
 #[tokio::test]
 async fn a_redirect_route_never_touches_a_backend() {
-    let route = Route::new("old.test", None, false, vec![], false, "redirect", vec![]).with_redirect(
-        cl_proxy::RedirectTarget {
+    let route = Route::new("old.test", None, false, vec![], false, "redirect", vec![])
+        .with_redirect(cl_proxy::RedirectTarget {
             url: "https://new.test".to_string(),
             preserve_path: false,
             status: 301,
-        },
-    );
+        });
     let addr = serve_route(route).await;
 
     let resp = reqwest_like_get(addr, "old.test", "/anything").await;
@@ -532,18 +582,20 @@ async fn a_redirect_route_never_touches_a_backend() {
 
 #[tokio::test]
 async fn a_redirect_route_can_preserve_the_path_and_query() {
-    let route = Route::new("old.test", None, false, vec![], false, "redirect", vec![]).with_redirect(
-        cl_proxy::RedirectTarget {
+    let route = Route::new("old.test", None, false, vec![], false, "redirect", vec![])
+        .with_redirect(cl_proxy::RedirectTarget {
             url: "https://new.test".to_string(),
             preserve_path: true,
             status: 302,
-        },
-    );
+        });
     let addr = serve_route(route).await;
 
     let resp = reqwest_like_get(addr, "old.test", "/a/b?x=1").await;
     assert_eq!(resp.status, 302);
-    assert_eq!(resp.headers.get("location").unwrap(), "https://new.test/a/b?x=1");
+    assert_eq!(
+        resp.headers.get("location").unwrap(),
+        "https://new.test/a/b?x=1"
+    );
 }
 
 // ---- redirect_regex ----
@@ -568,7 +620,10 @@ async fn redirect_regex_rewrites_and_redirects_on_a_match() {
 
     let resp = reqwest_like_get(addr, "app.test", "/old/thing").await;
     assert_eq!(resp.status, 308);
-    assert_eq!(resp.headers.get("location").unwrap(), "http://app.test/new/thing");
+    assert_eq!(
+        resp.headers.get("location").unwrap(),
+        "http://app.test/new/thing"
+    );
 }
 
 #[tokio::test]
@@ -689,13 +744,25 @@ async fn forward_auth_denies_and_never_reaches_the_backend() {
 
     let resp = reqwest_like_get(addr, "app.test", "/protected").await;
     assert_eq!(resp.status, 401);
-    assert!(!resp.headers.contains_key("x-echo-host"), "{:?}", resp.headers);
+    assert!(
+        !resp.headers.contains_key("x-echo-host"),
+        "{:?}",
+        resp.headers
+    );
 }
 
 // ---- CORS ----
 
 fn cors_route(backend: SocketAddr, policy: cl_config::CorsPolicy) -> Route {
-    Route::new("app.test", None, false, vec![Middleware::Cors(policy)], false, "svc", vec![backend])
+    Route::new(
+        "app.test",
+        None,
+        false,
+        vec![Middleware::Cors(policy)],
+        false,
+        "svc",
+        vec![backend],
+    )
 }
 
 fn open_cors() -> cl_config::CorsPolicy {
@@ -720,7 +787,10 @@ async fn a_cors_preflight_is_answered_without_reaching_the_backend() {
     .await;
     let resp = parse_response(&raw);
     assert_eq!(resp.status, 204);
-    assert_eq!(resp.headers.get("access-control-allow-origin").unwrap(), "https://app.example.com");
+    assert_eq!(
+        resp.headers.get("access-control-allow-origin").unwrap(),
+        "https://app.example.com"
+    );
     assert!(resp.body.is_empty());
 }
 
@@ -736,7 +806,10 @@ async fn a_real_cors_request_carries_the_allow_headers() {
     .await;
     let resp = parse_response(&raw);
     assert_eq!(resp.status, 200);
-    assert_eq!(resp.headers.get("access-control-allow-origin").unwrap(), "https://app.example.com");
+    assert_eq!(
+        resp.headers.get("access-control-allow-origin").unwrap(),
+        "https://app.example.com"
+    );
 }
 
 #[tokio::test]

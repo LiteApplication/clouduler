@@ -85,7 +85,10 @@ pub struct Materializer {
 impl Materializer {
     /// `data_dir` is this node's data directory. `key` tracks the cluster
     /// key live; without one, secrets cannot be materialized.
-    pub fn new(data_dir: &Path, key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>) -> Self {
+    pub fn new(
+        data_dir: &Path,
+        key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    ) -> Self {
         Self {
             root: data_dir.join(OBJECT_DIR),
             key,
@@ -130,13 +133,15 @@ impl Materializer {
         let mut config_edits = Vec::new();
 
         for reference in configs {
-            let entry = state.configs.get(&reference.source).ok_or_else(|| {
-                SchedError::MissingObject {
-                    kind: "config",
-                    name: reference.source.clone(),
-                    instance: instance.to_string(),
-                }
-            })?;
+            let entry =
+                state
+                    .configs
+                    .get(&reference.source)
+                    .ok_or_else(|| SchedError::MissingObject {
+                        kind: "config",
+                        name: reference.source.clone(),
+                        instance: instance.to_string(),
+                    })?;
             let content = entry.decode().map_err(|e| SchedError::BadObject {
                 name: reference.source.clone(),
                 reason: e,
@@ -166,13 +171,15 @@ impl Materializer {
         }
 
         for reference in secrets {
-            let entry = state.secrets.get(&reference.source).ok_or_else(|| {
-                SchedError::MissingObject {
-                    kind: "secret",
-                    name: reference.source.clone(),
-                    instance: instance.to_string(),
-                }
-            })?;
+            let entry =
+                state
+                    .secrets
+                    .get(&reference.source)
+                    .ok_or_else(|| SchedError::MissingObject {
+                        kind: "secret",
+                        name: reference.source.clone(),
+                        instance: instance.to_string(),
+                    })?;
 
             // A node without the key holds only ciphertext, so it must refuse
             // to start the container rather than mount something unusable.
@@ -203,7 +210,8 @@ impl Materializer {
                 // environment, the same as a value from `environment:`.
                 let value = String::from_utf8(plaintext).map_err(|_| SchedError::BadObject {
                     name: reference.source.clone(),
-                    reason: "secret is not valid UTF-8, so it cannot be an environment variable".into(),
+                    reason: "secret is not valid UTF-8, so it cannot be an environment variable"
+                        .into(),
                 })?;
                 env.push((var.clone(), value));
                 continue;
@@ -219,7 +227,11 @@ impl Materializer {
             )?);
         }
 
-        Ok(Prepared { mounts: out, env, config_edits })
+        Ok(Prepared {
+            mounts: out,
+            env,
+            config_edits,
+        })
     }
 
     /// Materializes a `write: true` config, watching for a container's edit
@@ -284,7 +296,10 @@ impl Materializer {
 
         let m = self.write_object(dir, reference, content, container_path, false, revision)?;
         write_private(&rev_path, revision.to_string().as_bytes(), false)?;
-        out.push(Materialized { writable: true, ..m });
+        out.push(Materialized {
+            writable: true,
+            ..m
+        });
         Ok(None)
     }
 
@@ -376,10 +391,11 @@ fn write_private(path: &Path, content: &[u8], secret: bool) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })?;
-    file.write_all(content).map_err(|source| SchedError::ObjectIo {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    file.write_all(content)
+        .map_err(|source| SchedError::ObjectIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
     file.sync_all().map_err(|source| SchedError::ObjectIo {
         path: path.to_path_buf(),
         source,
@@ -390,12 +406,12 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
-            SchedError::ObjectIo {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(
+            |source| SchedError::ObjectIo {
                 path: path.to_path_buf(),
                 source,
-            }
-        })?;
+            },
+        )?;
     }
     let _ = (path, mode);
     Ok(())
@@ -433,7 +449,13 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let out = m
             .prepare(
                 &state,
@@ -459,7 +481,10 @@ mod tests {
             std::fs::read(&config.host_path).expect("read"),
             b"server { listen 80; }"
         );
-        assert_eq!(config.container_path, PathBuf::from("/etc/nginx/nginx.conf"));
+        assert_eq!(
+            config.container_path,
+            PathBuf::from("/etc/nginx/nginx.conf")
+        );
         assert!(config.mount().read_only);
 
         let secret = &out.mounts[1];
@@ -492,7 +517,10 @@ mod tests {
         let state = state_with_objects(&ClusterKey::generate());
 
         // A different key: say so plainly rather than reporting corruption.
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::generate()))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(ClusterKey::generate()))).1,
+        );
         let err = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .unwrap_err();
@@ -522,7 +550,13 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
@@ -538,7 +572,10 @@ mod tests {
 
             // The directory itself must not be readable by other users.
             let parent = out.mounts[0].host_path.parent().expect("parent");
-            let dir_mode = std::fs::metadata(parent).expect("meta").permissions().mode();
+            let dir_mode = std::fs::metadata(parent)
+                .expect("meta")
+                .permissions()
+                .mode();
             assert_eq!(dir_mode & 0o077, 0);
         }
     }
@@ -549,7 +586,13 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let out = m
             .prepare(
                 &state,
@@ -584,7 +627,13 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let out = m
             .prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
@@ -602,7 +651,13 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         m.prepare(&state, &instance(), &[], &[ObjectRef::new("db_password")])
             .expect("prepare");
         let other = InstanceId::new("site", "web", 1);
@@ -622,7 +677,13 @@ mod tests {
         let key = ClusterKey::generate();
         let mut state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let first = m
             .prepare(&state, &instance(), &[ObjectRef::new("nginx_conf")], &[])
             .expect("prepare");
@@ -650,7 +711,13 @@ mod tests {
         let key = ClusterKey::generate();
         let state = state_with_objects(&key);
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let out = m
             .prepare(
                 &state,
@@ -668,8 +735,14 @@ mod tests {
             )
             .expect("prepare");
 
-        assert!(out.mounts.is_empty(), "an env secret is not mounted as a file");
-        assert_eq!(out.env, vec![("DB_PASSWORD".to_string(), "hunter2".to_string())]);
+        assert!(
+            out.mounts.is_empty(),
+            "an env secret is not mounted as a file"
+        );
+        assert_eq!(
+            out.env,
+            vec![("DB_PASSWORD".to_string(), "hunter2".to_string())]
+        );
     }
 
     #[test]
@@ -685,7 +758,13 @@ mod tests {
             owner: None,
         });
 
-        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(Some(Arc::new(ClusterKey::parse(&key.encode()).expect("key")))).1);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
         let err = m
             .prepare(
                 &state,
@@ -706,7 +785,10 @@ mod tests {
     }
 
     fn writable(source: &str) -> ObjectRef {
-        ObjectRef { write: true, ..ObjectRef::new(source) }
+        ObjectRef {
+            write: true,
+            ..ObjectRef::new(source)
+        }
     }
 
     #[test]
@@ -753,7 +835,8 @@ mod tests {
             .expect("prepare");
 
         // The container writes to its own mount of the file.
-        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }").expect("simulate edit");
+        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }")
+            .expect("simulate edit");
 
         let second = m
             .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
@@ -779,7 +862,8 @@ mod tests {
         let first = m
             .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
             .expect("prepare");
-        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }").expect("simulate edit");
+        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }")
+            .expect("simulate edit");
 
         let edit = m
             .prepare(&state, &instance(), &[writable("nginx_conf")], &[])

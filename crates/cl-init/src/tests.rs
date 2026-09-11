@@ -185,8 +185,8 @@ async fn wait_until_listening(addr: SocketAddr) {
 #[tokio::test]
 async fn a_node_fetches_the_config_adds_itself_and_the_cluster_keeps_it() {
     let server = serve(&founding_config(), None).await;
-    let peer = super::join::Peer::connect(&server.address, server.token.clone(), None)
-        .expect("client");
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
 
     let fetched = peer.fetch_config().await.expect("fetch");
     assert_eq!(fetched.cluster.name, "home");
@@ -212,8 +212,8 @@ async fn a_node_fetches_the_config_adds_itself_and_the_cluster_keeps_it() {
 #[tokio::test]
 async fn the_pushed_config_lands_in_the_replicated_state() {
     let server = serve(&founding_config(), None).await;
-    let peer = super::join::Peer::connect(&server.address, server.token.clone(), None)
-        .expect("client");
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
 
     let fetched = peer.fetch_config().await.expect("fetch");
     let joining = NodePlan::new("n2", NodeRole::Worker, ip("10.10.0.2"));
@@ -236,8 +236,8 @@ async fn the_pushed_config_lands_in_the_replicated_state() {
 #[tokio::test]
 async fn the_join_is_confirmed_so_it_does_not_roll_itself_back() {
     let server = serve(&founding_config(), None).await;
-    let peer = super::join::Peer::connect(&server.address, server.token.clone(), None)
-        .expect("client");
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
 
     let fetched = peer.fetch_config().await.expect("fetch");
     let joining = NodePlan::new("n2", NodeRole::Worker, ip("10.10.0.2"));
@@ -274,8 +274,8 @@ async fn a_matching_certificate_pin_is_accepted() {
 async fn a_certificate_that_is_not_the_pinned_one_stops_the_join() {
     let server = serve(&founding_config(), None).await;
     let wrong = super::join::fingerprint(b"some other certificate");
-    let peer =
-        super::join::Peer::connect(&server.address, server.token.clone(), Some(wrong)).expect("client");
+    let peer = super::join::Peer::connect(&server.address, server.token.clone(), Some(wrong))
+        .expect("client");
 
     assert!(peer.fetch_config().await.is_err());
 }
@@ -283,8 +283,8 @@ async fn a_certificate_that_is_not_the_pinned_one_stops_the_join() {
 #[tokio::test]
 async fn a_bad_api_key_is_reported_as_a_bad_api_key() {
     let server = serve(&founding_config(), None).await;
-    let peer = super::join::Peer::connect(&server.address, "cl_nope_nope".into(), None)
-        .expect("client");
+    let peer =
+        super::join::Peer::connect(&server.address, "cl_nope_nope".into(), None).expect("client");
 
     let error = peer.fetch_config().await.unwrap_err().to_string();
     assert!(error.contains("api key"), "{error}");

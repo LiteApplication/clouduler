@@ -101,10 +101,12 @@ impl Orchestrator {
             return self.save(run).await;
         }
 
-        let all_ready = run
-            .per_node
-            .values()
-            .all(|p| matches!(p, NodePhase::Ready | NodePhase::Restarting | NodePhase::Done));
+        let all_ready = run.per_node.values().all(|p| {
+            matches!(
+                p,
+                NodePhase::Ready | NodePhase::Restarting | NodePhase::Done
+            )
+        });
         if !all_ready {
             return Ok(());
         }
@@ -199,9 +201,14 @@ impl Orchestrator {
         if now() - started > RESTART_TIMEOUT.as_secs() as i64 {
             run.per_node.insert(
                 name.to_string(),
-                NodePhase::RestartFailed { reason: "did not come back in time".into() },
+                NodePhase::RestartFailed {
+                    reason: "did not come back in time".into(),
+                },
             );
-            run.fail(format!("{name} did not come back in time after restart"), now());
+            run.fail(
+                format!("{name} did not come back in time after restart"),
+                now(),
+            );
         }
     }
 
@@ -211,7 +218,10 @@ impl Orchestrator {
             return;
         };
         let Some(key) = self.cluster_key.borrow().clone() else {
-            run.fail("this node has no cluster key to sign the restart request with", now());
+            run.fail(
+                "this node has no cluster key to sign the restart request with",
+                now(),
+            );
             return;
         };
         match internal_client::trigger_restart(&self.http, &base_url, &key).await {
@@ -307,7 +317,10 @@ mod tests {
     #[test]
     fn restart_order_puts_workers_first_then_managers_then_the_leader_last() {
         let nodes = BTreeMap::from([
-            ("leader".to_string(), node("leader", Role::Manager, "x86_64")),
+            (
+                "leader".to_string(),
+                node("leader", Role::Manager, "x86_64"),
+            ),
             ("mgr2".to_string(), node("mgr2", Role::Manager, "x86_64")),
             ("w1".to_string(), node("w1", Role::Worker, "x86_64")),
             ("w2".to_string(), node("w2", Role::Worker, "x86_64")),

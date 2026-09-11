@@ -115,7 +115,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
     /// Run forever, syncing every volume this node is primary for once its
     /// interval elapses. Intended to be spawned as a background task.
     pub async fn run(&self, intervals: &dyn IntervalSource) {
-        let mut next_due: std::collections::BTreeMap<VolumeId, Instant> = std::collections::BTreeMap::new();
+        let mut next_due: std::collections::BTreeMap<VolumeId, Instant> =
+            std::collections::BTreeMap::new();
         let mut ticker = tokio::time::interval(self.tick);
 
         loop {
@@ -135,7 +136,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 }
                 let is_served = self.registry.is_served(&id.drive);
                 let is_source = if is_served {
-                    self.registry.active_server(&id.drive, &state.unreachable) == Some(self.registry.node())
+                    self.registry.active_server(&id.drive, &state.unreachable)
+                        == Some(self.registry.node())
                 } else {
                     volume.primary == self.registry.node()
                 };
@@ -165,15 +167,23 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                         .iter()
                         .filter(|name| name.as_str() != self.registry.node())
                         .filter_map(|name| {
-                            state.nodes.get(name).map(|n| ReplicaTarget { node: name.clone(), addr: n.rpc_addr })
+                            state.nodes.get(name).map(|n| ReplicaTarget {
+                                node: name.clone(),
+                                addr: n.rpc_addr,
+                            })
                         })
                         .collect()
                 } else {
                     state
                         .nodes
                         .iter()
-                        .filter(|(name, n)| *name != self.registry.node() && n.implements(&id.drive))
-                        .map(|(name, n)| ReplicaTarget { node: name.clone(), addr: n.rpc_addr })
+                        .filter(|(name, n)| {
+                            *name != self.registry.node() && n.implements(&id.drive)
+                        })
+                        .map(|(name, n)| ReplicaTarget {
+                            node: name.clone(),
+                            addr: n.rpc_addr,
+                        })
                         .collect()
                 };
 
@@ -196,12 +206,27 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             let drive_addr = crate::transport::drive_port(target.addr.port());
             let peer = std::net::SocketAddr::new(target.addr.ip(), drive_addr);
 
-            match self.engine.sync(&src, peer, &id, generation, None, crate::progress::ProgressSink::none()).await {
+            match self
+                .engine
+                .sync(
+                    &src,
+                    peer,
+                    &id,
+                    generation,
+                    None,
+                    crate::progress::ProgressSink::none(),
+                )
+                .await
+            {
                 Ok(stats) => {
                     debug!(%id, node = %target.node, ?stats, "volume synced");
                     if let Err(e) = self
                         .node
-                        .submit(Request::SetVolumeReplica { id: id.clone(), node: target.node.clone(), generation })
+                        .submit(Request::SetVolumeReplica {
+                            id: id.clone(),
+                            node: target.node.clone(),
+                            generation,
+                        })
                         .await
                     {
                         warn!(%id, node = %target.node, error = %e, "failed to record replica progress");
@@ -223,7 +248,10 @@ pub struct StaticIntervals {
 }
 
 impl StaticIntervals {
-    pub fn new(default: Duration, overrides: std::collections::BTreeMap<VolumeId, Duration>) -> Self {
+    pub fn new(
+        default: Duration,
+        overrides: std::collections::BTreeMap<VolumeId, Duration>,
+    ) -> Self {
         Self { default, overrides }
     }
 }
@@ -256,7 +284,10 @@ mod tests {
         let interval = Duration::from_secs(100);
         assert_eq!(jitter(interval, 0.0), Duration::from_secs(0));
         assert!(jitter(interval, 0.5) < interval);
-        assert!(jitter(interval, 1.5) < interval, "out of range spread is clamped");
+        assert!(
+            jitter(interval, 1.5) < interval,
+            "out of range spread is clamped"
+        );
     }
 
     #[test]
@@ -267,7 +298,10 @@ mod tests {
             std::collections::BTreeMap::from([(volume.clone(), Duration::from_secs(30))]),
         );
         assert_eq!(intervals.interval_for(&volume), Duration::from_secs(30));
-        assert_eq!(intervals.interval_for(&VolumeId::new("fast", "other")), Duration::from_secs(900));
+        assert_eq!(
+            intervals.interval_for(&VolumeId::new("fast", "other")),
+            Duration::from_secs(900)
+        );
     }
 
     #[tokio::test]
@@ -275,11 +309,17 @@ mod tests {
         let guard = InFlightGuard::new();
         let id = VolumeId::new("fast", "data");
         assert!(guard.try_start(&id).await);
-        assert!(!guard.try_start(&id).await, "second start should be refused");
+        assert!(
+            !guard.try_start(&id).await,
+            "second start should be refused"
+        );
         assert!(guard.is_running(&id).await);
         guard.finish(&id).await;
         assert!(!guard.is_running(&id).await);
-        assert!(guard.try_start(&id).await, "start allowed again after finish");
+        assert!(
+            guard.try_start(&id).await,
+            "start allowed again after finish"
+        );
     }
 
     #[tokio::test]
@@ -288,6 +328,9 @@ mod tests {
         let a = VolumeId::new("fast", "a");
         let b = VolumeId::new("fast", "b");
         assert!(guard.try_start(&a).await);
-        assert!(guard.try_start(&b).await, "a different volume is unaffected");
+        assert!(
+            guard.try_start(&b).await,
+            "a different volume is unaffected"
+        );
     }
 }

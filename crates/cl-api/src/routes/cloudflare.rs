@@ -69,7 +69,8 @@ async fn set_token(
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-    let sealed = Sealed::seal(key, CLOUDFLARE_TOKEN_SECRET, token.as_bytes()).map_err(ApiError::internal)?;
+    let sealed =
+        Sealed::seal(key, CLOUDFLARE_TOKEN_SECRET, token.as_bytes()).map_err(ApiError::internal)?;
     let key_fingerprint = key.fingerprint();
     drop(key_guard);
 

@@ -58,7 +58,10 @@ mod tests {
 
         install_binary(&source, &destination).expect("install");
         assert_eq!(std::fs::read(&destination).expect("read"), b"#!/bin/true\n");
-        let mode = std::fs::metadata(&destination).expect("stat").permissions().mode();
+        let mode = std::fs::metadata(&destination)
+            .expect("stat")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o755);
     }
 

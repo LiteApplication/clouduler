@@ -144,7 +144,11 @@ impl Channel {
     /// never backs off on — that's what floods the log every heartbeat for
     /// as long as the peer stays down. Timing out here first means we report
     /// `Unreachable`, which raft *does* back off on.
-    async fn call<E>(&self, request: RpcRequest, deadline: Duration) -> Result<RpcResponse, NetError<E>>
+    async fn call<E>(
+        &self,
+        request: RpcRequest,
+        deadline: Duration,
+    ) -> Result<RpcResponse, NetError<E>>
     where
         E: std::error::Error,
     {
@@ -183,7 +187,10 @@ impl RaftNetwork<TypeConfig> for Channel {
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, NetError> {
-        match self.call(RpcRequest::AppendEntries(rpc), option.soft_ttl()).await? {
+        match self
+            .call(RpcRequest::AppendEntries(rpc), option.soft_ttl())
+            .await?
+        {
             RpcResponse::AppendEntries(response) => Ok(response),
             other => Err(self.unexpected(other)),
         }
@@ -197,7 +204,10 @@ impl RaftNetwork<TypeConfig> for Channel {
         InstallSnapshotResponse<NodeId>,
         NetError<RaftError<NodeId, openraft::error::InstallSnapshotError>>,
     > {
-        match self.call(RpcRequest::InstallSnapshot(rpc), option.soft_ttl()).await? {
+        match self
+            .call(RpcRequest::InstallSnapshot(rpc), option.soft_ttl())
+            .await?
+        {
             RpcResponse::InstallSnapshot(response) => Ok(response),
             other => Err(self.unexpected(other)),
         }

@@ -24,15 +24,25 @@ pub async fn reload(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
         .map(|c| c.generation)
         .unwrap_or(0);
 
-    debug!(expect_generation, bytes = yaml.len(), "submitting PutClusterConfig");
+    debug!(
+        expect_generation,
+        bytes = yaml.len(),
+        "submitting PutClusterConfig"
+    );
     let response = client
-        .submit(Request::PutClusterConfig { yaml, expect_generation })
+        .submit(Request::PutClusterConfig {
+            yaml,
+            expect_generation,
+        })
         .await
         .map_err(|e| anyhow!("{e}"))?;
     if let Some(error) = response.error {
         bail!("cluster rejected the config: {error}");
     }
 
-    println!("reloaded config into the cluster, generation {}", expect_generation + 1);
+    println!(
+        "reloaded config into the cluster, generation {}",
+        expect_generation + 1
+    );
     Ok(())
 }

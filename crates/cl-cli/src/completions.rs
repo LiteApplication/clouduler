@@ -59,7 +59,8 @@ pub fn print(shell: ShellArg) -> Result<()> {
 
 /// Detect the shell from `$SHELL` (`/bin/zsh` -> zsh) when none was given.
 fn detect_shell() -> Result<ShellArg> {
-    let shell = std::env::var("SHELL").context("cannot detect a shell: $SHELL is not set; pass one explicitly")?;
+    let shell = std::env::var("SHELL")
+        .context("cannot detect a shell: $SHELL is not set; pass one explicitly")?;
     let name = shell.rsplit('/').next().unwrap_or(&shell);
     match name {
         "bash" => Ok(ShellArg::Bash),
@@ -146,12 +147,17 @@ pub fn install(shell: Option<ShellArg>) -> Result<()> {
 
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     if existing.contains(&line) {
-        println!("{} already sources clouduler completions ({})", path.display(), shell.name());
+        println!(
+            "{} already sources clouduler completions ({})",
+            path.display(),
+            shell.name()
+        );
         return Ok(());
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
 
     let mut f = std::fs::OpenOptions::new()
@@ -170,7 +176,11 @@ pub fn install(shell: Option<ShellArg>) -> Result<()> {
     }
     .with_context(|| format!("writing {}", path.display()))?;
 
-    println!("added clouduler {} completions to {}", shell.name(), path.display());
+    println!(
+        "added clouduler {} completions to {}",
+        shell.name(),
+        path.display()
+    );
     println!("start a new shell (or re-source the file) to pick them up");
     Ok(())
 }

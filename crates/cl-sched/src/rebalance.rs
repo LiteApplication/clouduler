@@ -58,8 +58,17 @@ fn mem_permille(used: u64, total: u64) -> u64 {
     used.saturating_mul(1000).checked_div(total).unwrap_or(0)
 }
 
-fn load_of(state: &ClusterState, node: &str, count: &BTreeMap<String, usize>, mem_used: &BTreeMap<String, u64>) -> NodeLoad {
-    let total = state.nodes.get(node).map(|n| n.memory_total_bytes).unwrap_or(0);
+fn load_of(
+    state: &ClusterState,
+    node: &str,
+    count: &BTreeMap<String, usize>,
+    mem_used: &BTreeMap<String, u64>,
+) -> NodeLoad {
+    let total = state
+        .nodes
+        .get(node)
+        .map(|n| n.memory_total_bytes)
+        .unwrap_or(0);
     NodeLoad {
         mem_permille: mem_permille(mem_used.get(node).copied().unwrap_or(0), total),
         count: count.get(node).copied().unwrap_or(0),
@@ -110,8 +119,10 @@ pub fn plan(
     served_drives: &BTreeSet<String>,
     everywhere_networks: &BTreeSet<String>,
 ) -> Vec<Move> {
-    let memory_bytes: BTreeMap<&InstanceId, u64> =
-        desired.iter().filter_map(|d| Some((&d.id, d.memory_bytes?))).collect();
+    let memory_bytes: BTreeMap<&InstanceId, u64> = desired
+        .iter()
+        .filter_map(|d| Some((&d.id, d.memory_bytes?)))
+        .collect();
 
     let mut count: BTreeMap<String, usize> = state
         .nodes
@@ -133,7 +144,11 @@ pub fn plan(
         let Some(assignment) = state.assignments.get(&item.id) else {
             continue;
         };
-        if assignment.migration.as_ref().is_some_and(|m| !m.phase.is_terminal()) {
+        if assignment
+            .migration
+            .as_ref()
+            .is_some_and(|m| !m.phase.is_terminal())
+        {
             continue;
         }
         let Ok((eligible, _)) = candidates(state, item, served_drives, everywhere_networks) else {
@@ -159,7 +174,12 @@ pub fn plan(
             .map(|m| m.current.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .max_by_key(|node| (load_of(state, node, &count, &mem_used), std::cmp::Reverse(node.clone())))
+            .max_by_key(|node| {
+                (
+                    load_of(state, node, &count, &mem_used),
+                    std::cmp::Reverse(node.clone()),
+                )
+            })
         else {
             break;
         };
@@ -183,10 +203,20 @@ pub fn plan(
             break;
         };
         let to_load = load_of(state, &to, &count, &mem_used);
-        let moved_bytes = memory_bytes.get(&movable[idx].item.id).copied().unwrap_or(0);
-        let to_total = state.nodes.get(&to).map(|n| n.memory_total_bytes).unwrap_or(0);
+        let moved_bytes = memory_bytes
+            .get(&movable[idx].item.id)
+            .copied()
+            .unwrap_or(0);
+        let to_total = state
+            .nodes
+            .get(&to)
+            .map(|n| n.memory_total_bytes)
+            .unwrap_or(0);
         let to_after = NodeLoad {
-            mem_permille: mem_permille(mem_used.get(&to).copied().unwrap_or(0) + moved_bytes, to_total),
+            mem_permille: mem_permille(
+                mem_used.get(&to).copied().unwrap_or(0) + moved_bytes,
+                to_total,
+            ),
             count: to_load.count + 1,
         };
 
@@ -195,7 +225,9 @@ pub fn plan(
         }
 
         let m = movable.remove(idx);
-        *count.get_mut(&from).expect("from has a load entry, it hosts m") -= 1;
+        *count
+            .get_mut(&from)
+            .expect("from has a load entry, it hosts m") -= 1;
         *count.entry(to.clone()).or_insert(0) += 1;
         if moved_bytes > 0 {
             let from_used = mem_used.entry(from.clone()).or_insert(0);
@@ -394,7 +426,9 @@ mod tests {
 
         let items: Vec<_> = (0..3).map(|i| desired("web", i)).collect();
         let moves = plan(&state, &items, &no_served(), &no_everywhere());
-        assert!(moves.iter().all(|m| m.instance != InstanceId::new("site", "web", 0)));
+        assert!(moves
+            .iter()
+            .all(|m| m.instance != InstanceId::new("site", "web", 0)));
     }
 
     #[test]
@@ -476,7 +510,9 @@ mod tests {
             assign(&mut state, "web", i, "n1");
         }
 
-        let items: Vec<_> = (0..3).map(|i| sized_desired("web", i, Some(1_000_000))).collect();
+        let items: Vec<_> = (0..3)
+            .map(|i| sized_desired("web", i, Some(1_000_000)))
+            .collect();
         let moves = plan(&state, &items, &no_served(), &no_everywhere());
 
         assert_eq!(moves.len(), 1);

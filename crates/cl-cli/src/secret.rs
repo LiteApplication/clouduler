@@ -29,7 +29,8 @@ pub async fn set(
     let plaintext = match (value, file) {
         (Some(v), _) => v.into_bytes(),
         (None, Some(path)) => {
-            let mut buf = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let mut buf =
+                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
             if !no_trim && buf.last() == Some(&b'\n') {
                 buf.pop();
             }

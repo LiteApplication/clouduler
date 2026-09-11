@@ -113,10 +113,7 @@ mod tests {
         let request = RpcRequest::Forward(StateRequest::NoOp);
         let raw = encode(&request).expect("encode");
         let decoded: RpcRequest = decode(&raw).expect("decode");
-        assert!(matches!(
-            decoded,
-            RpcRequest::Forward(StateRequest::NoOp)
-        ));
+        assert!(matches!(decoded, RpcRequest::Forward(StateRequest::NoOp)));
     }
 
     #[test]

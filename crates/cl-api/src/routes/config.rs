@@ -8,7 +8,9 @@ use cl_config::{ClusterConfig, StackFile};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{Identity, RequireAdmin};
-use crate::config_edit::{connection_sensitive_change, PendingEdit, PendingStatus, DEFAULT_ROLLBACK_AFTER};
+use crate::config_edit::{
+    connection_sensitive_change, PendingEdit, PendingStatus, DEFAULT_ROLLBACK_AFTER,
+};
 use crate::error::ApiError;
 use crate::redirects::{RedirectStore, REDIRECTS_CONFIG};
 use crate::server::AppState;
@@ -42,7 +44,9 @@ async fn put_config(
     State(state): State<AppState>,
     Json(body): Json<PutConfigRequest>,
 ) -> Result<StatusCode, ApiError> {
-    body.config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    body.config
+        .validate()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let rollback_after = match body.rollback_after {
         Some(text) => humantime::parse_duration(&text)
@@ -157,7 +161,9 @@ async fn rename_network(
         return Err(ApiError::BadRequest(format!("no network named {old_name}")));
     }
     if config.networks.contains_key(&new_name) {
-        return Err(ApiError::BadRequest(format!("a network named {new_name} already exists")));
+        return Err(ApiError::BadRequest(format!(
+            "a network named {new_name} already exists"
+        )));
     }
 
     let net = config.networks.remove(&old_name).expect("checked above");
@@ -172,7 +178,9 @@ async fn rename_network(
     if config.web.network == old_name {
         config.web.network = new_name.clone();
     }
-    config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    config
+        .validate()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     apply_config(&state, &config).await?;
 
     // Each node's imported wireguard config is sealed under a secret name
@@ -184,18 +192,25 @@ async fn rename_network(
 
     let cluster_state = state.cluster.state().await;
     for (stack_name, stack) in &cluster_state.stacks {
-        let Ok(mut file) = StackFile::parse(&stack.spec) else { continue };
+        let Ok(mut file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
         if !rename_network_in_stack(&mut file, &old_name, &new_name) {
             continue;
         }
         let spec = serde_yaml::to_string(&file).map_err(ApiError::internal)?;
         let response = state
             .cluster
-            .submit(cl_raft::Request::DeployStack { name: stack_name.clone(), spec })
+            .submit(cl_raft::Request::DeployStack {
+                name: stack_name.clone(),
+                spec,
+            })
             .await
             .map_err(ApiError::not_leader)?;
         if let Some(msg) = response.error {
-            return Err(ApiError::Internal(format!("renaming network in stack {stack_name}: {msg}")));
+            return Err(ApiError::Internal(format!(
+                "renaming network in stack {stack_name}: {msg}"
+            )));
         }
     }
 
@@ -223,7 +238,9 @@ fn rename_network_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
                 changed = true;
             }
         }
-        let Some(ext) = svc.x_clouduler.as_mut() else { continue };
+        let Some(ext) = svc.x_clouduler.as_mut() else {
+            continue;
+        };
         for route in ext.proxy.iter_mut() {
             if route.network == old {
                 route.network = new.to_string();
@@ -275,7 +292,9 @@ async fn rename_drive(
         return Err(ApiError::BadRequest(format!("no drive named {old_name}")));
     }
     if config.drives.contains_key(&new_name) {
-        return Err(ApiError::BadRequest(format!("a drive named {new_name} already exists")));
+        return Err(ApiError::BadRequest(format!(
+            "a drive named {new_name} already exists"
+        )));
     }
 
     let drive = config.drives.remove(&old_name).expect("checked above");
@@ -285,23 +304,32 @@ async fn rename_drive(
             node.drives.insert(new_name.clone(), path);
         }
     }
-    config.validate().map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    config
+        .validate()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     apply_config(&state, &config).await?;
 
     let cluster_state = state.cluster.state().await;
     for (stack_name, stack) in &cluster_state.stacks {
-        let Ok(mut file) = StackFile::parse(&stack.spec) else { continue };
+        let Ok(mut file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
         if !rename_drive_in_stack(&mut file, &old_name, &new_name) {
             continue;
         }
         let spec = serde_yaml::to_string(&file).map_err(ApiError::internal)?;
         let response = state
             .cluster
-            .submit(cl_raft::Request::DeployStack { name: stack_name.clone(), spec })
+            .submit(cl_raft::Request::DeployStack {
+                name: stack_name.clone(),
+                spec,
+            })
             .await
             .map_err(ApiError::not_leader)?;
         if let Some(msg) = response.error {
-            return Err(ApiError::Internal(format!("renaming drive in stack {stack_name}: {msg}")));
+            return Err(ApiError::Internal(format!(
+                "renaming drive in stack {stack_name}: {msg}"
+            )));
         }
     }
 
@@ -337,7 +365,9 @@ async fn rename_wireguard_secrets(
     for node in nodes {
         let old_name = crate::wireguard::wireguard_secret_name(old, node);
         let cluster_state = state.cluster.state().await;
-        let Some(entry) = cluster_state.secrets.get(&old_name).cloned() else { continue };
+        let Some(entry) = cluster_state.secrets.get(&old_name).cloned() else {
+            continue;
+        };
         drop(cluster_state);
 
         let new_name = crate::wireguard::wireguard_secret_name(new, node);
@@ -352,7 +382,9 @@ async fn rename_wireguard_secrets(
             .await
             .map_err(ApiError::not_leader)?;
         if let Some(msg) = response.error {
-            return Err(ApiError::Internal(format!("moving wireguard config for {node}: {msg}")));
+            return Err(ApiError::Internal(format!(
+                "moving wireguard config for {node}: {msg}"
+            )));
         }
 
         let response = state
@@ -361,7 +393,9 @@ async fn rename_wireguard_secrets(
             .await
             .map_err(ApiError::not_leader)?;
         if let Some(msg) = response.error {
-            return Err(ApiError::Internal(format!("removing old wireguard config for {node}: {msg}")));
+            return Err(ApiError::Internal(format!(
+                "removing old wireguard config for {node}: {msg}"
+            )));
         }
     }
     Ok(())
@@ -423,7 +457,11 @@ async fn rename_in_static_routes(state: &AppState, old: &str, new: &str) -> Resu
     Ok(())
 }
 
-async fn rename_in_wireguard_ingress(state: &AppState, old: &str, new: &str) -> Result<(), ApiError> {
+async fn rename_in_wireguard_ingress(
+    state: &AppState,
+    old: &str,
+    new: &str,
+) -> Result<(), ApiError> {
     let cluster_state = state.cluster.state().await;
     let mut store = WireguardIngressStore::load(&cluster_state);
     let mut changed = false;
@@ -488,7 +526,10 @@ async fn validate_config(
         }),
         Err(cl_config::ConfigError::Invalid { at, msg }) => Json(ValidationResponse {
             valid: false,
-            errors: vec![ValidationError { path: at, message: msg }],
+            errors: vec![ValidationError {
+                path: at,
+                message: msg,
+            }],
         }),
         Err(other) => Json(ValidationResponse {
             valid: false,
@@ -500,7 +541,10 @@ async fn validate_config(
     }
 }
 
-async fn confirm(_admin: RequireAdmin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn confirm(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
     let mut pending = state.pending_edit.lock().await;
     let edit = pending
         .as_mut()
@@ -511,7 +555,10 @@ async fn confirm(_admin: RequireAdmin, State(state): State<AppState>) -> Result<
     Ok(StatusCode::OK)
 }
 
-async fn rollback(_admin: RequireAdmin, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn rollback(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
     let mut pending = state.pending_edit.lock().await;
     let edit = pending
         .as_mut()
@@ -624,7 +671,10 @@ networks:
             "secrets:",
             "x-clouduler",
         ] {
-            assert!(!yaml.contains(absent), "unexpected default field `{absent}` in:\n{yaml}");
+            assert!(
+                !yaml.contains(absent),
+                "unexpected default field `{absent}` in:\n{yaml}"
+            );
         }
 
         let reparsed = StackFile::parse(&yaml).expect("round trips");

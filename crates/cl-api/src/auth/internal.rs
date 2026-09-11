@@ -18,7 +18,10 @@ pub struct InternalAuth;
 impl FromRequestParts<AppState> for InternalAuth {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let presented = parts
             .headers
             .get(cl_update::internal_client::AUTH_HEADER)

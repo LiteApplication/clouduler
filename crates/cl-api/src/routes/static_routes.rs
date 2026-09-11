@@ -13,13 +13,16 @@ use serde::Deserialize;
 
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
-use crate::static_routes::{new_id, StaticRouteRule, StaticRouteStore, STATIC_ROUTES_CONFIG};
 use crate::server::AppState;
+use crate::static_routes::{new_id, StaticRouteRule, StaticRouteStore, STATIC_ROUTES_CONFIG};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/static-routes", get(list).post(create))
-        .route("/api/static-routes/{id}", axum::routing::put(update).delete(remove))
+        .route(
+            "/api/static-routes/{id}",
+            axum::routing::put(update).delete(remove),
+        )
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<StaticRouteRule>> {
@@ -140,7 +143,10 @@ async fn validate(state: &AppState, body: &StaticRouteBody) -> Result<(), ApiErr
     }
     let cluster_config = state.cluster_config.read().await;
     if !cluster_config.networks.contains_key(&body.network) {
-        return Err(ApiError::BadRequest(format!("no network named {}", body.network)));
+        return Err(ApiError::BadRequest(format!(
+            "no network named {}",
+            body.network
+        )));
     }
     Ok(())
 }

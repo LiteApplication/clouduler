@@ -189,14 +189,22 @@ impl Store {
         // assignment's `desired` means nothing needs restoring by hand once
         // `emergency_stack` clears: every stack's own desired state was never
         // altered.
-        let others: Vec<String> = sm.data.nodes.keys().filter(|n| n.as_str() != this_name).cloned().collect();
+        let others: Vec<String> = sm
+            .data
+            .nodes
+            .keys()
+            .filter(|n| n.as_str() != this_name)
+            .cloned()
+            .collect();
         sm.data.unreachable.extend(others);
 
         for volume in stack_volumes {
             match sm.data.volumes.get_mut(volume) {
                 Some(existing) => {
                     existing.primary = this_name.to_string();
-                    existing.replicas.insert(this_name.to_string(), existing.generation);
+                    existing
+                        .replicas
+                        .insert(this_name.to_string(), existing.generation);
                 }
                 None => {
                     sm.data.volumes.insert(
@@ -205,7 +213,10 @@ impl Store {
                             id: volume.clone(),
                             generation: 1,
                             primary: this_name.to_string(),
-                            replicas: std::collections::BTreeMap::from([(this_name.to_string(), 1)]),
+                            replicas: std::collections::BTreeMap::from([(
+                                this_name.to_string(),
+                                1,
+                            )]),
                         },
                     );
                 }
@@ -322,7 +333,11 @@ impl Store {
         }
 
         write_meta(&self.db, KEY_COMMITTED, &Some(log_id))?;
-        write_meta(&self.db, KEY_VOTE, &crate::types::Vote::new_committed(term, id))?;
+        write_meta(
+            &self.db,
+            KEY_VOTE,
+            &crate::types::Vote::new_committed(term, id),
+        )?;
 
         sm.last_applied = Some(log_id);
         sm.membership = StoredMembership::new(Some(log_id), membership.clone());
@@ -367,7 +382,9 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError> {
         let db = self.db.clone();
         blocking(move || {
-            let purged: Option<LogId> = read_meta(&db, KEY_PURGED)?.map(|raw| decode(&raw)).transpose()?;
+            let purged: Option<LogId> = read_meta(&db, KEY_PURGED)?
+                .map(|raw| decode(&raw))
+                .transpose()?;
 
             let txn = db.begin_read().map_err(read_err)?;
             let table = txn.open_table(LOGS).map_err(read_err)?;
@@ -380,7 +397,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                 None => purged,
             };
 
-            Ok(LogState { last_purged_log_id: purged, last_log_id: last })
+            Ok(LogState {
+                last_purged_log_id: purged,
+                last_log_id: last,
+            })
         })
         .await
     }
@@ -397,7 +417,12 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
     async fn read_vote(&mut self) -> Result<Option<Vote>, StorageError> {
         let db = self.db.clone();
-        blocking(move || read_meta(&db, KEY_VOTE)?.map(|raw| decode(&raw)).transpose()).await
+        blocking(move || {
+            read_meta(&db, KEY_VOTE)?
+                .map(|raw| decode(&raw))
+                .transpose()
+        })
+        .await
     }
 
     async fn save_committed(&mut self, committed: Option<LogId>) -> Result<(), StorageError> {
@@ -414,7 +439,11 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         .await
     }
 
-    async fn append<I>(&mut self, entries: I, callback: LogFlushed<TypeConfig>) -> Result<(), StorageError>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: LogFlushed<TypeConfig>,
+    ) -> Result<(), StorageError>
     where
         I: IntoIterator<Item = Entry> + Send,
         I::IntoIter: Send,
@@ -446,7 +475,9 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             let txn = db.begin_write().map_err(write_err)?;
             {
                 let mut table = txn.open_table(LOGS).map_err(write_err)?;
-                table.retain_in(log_id.index.., |_, _| false).map_err(write_err)?;
+                table
+                    .retain_in(log_id.index.., |_, _| false)
+                    .map_err(write_err)?;
             }
             txn.commit().map_err(write_err)
         })
@@ -464,7 +495,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                     .map_err(write_err)?;
                 let mut meta = txn.open_table(META).map_err(write_err)?;
                 let encoded = encode(&log_id)?;
-                meta.insert(KEY_PURGED, encoded.as_slice()).map_err(write_err)?;
+                meta.insert(KEY_PURGED, encoded.as_slice())
+                    .map_err(write_err)?;
             }
             txn.commit().map_err(write_err)
         })
@@ -573,7 +605,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         self.persist(&sm).await?;
 
         let db = self.db.clone();
-        let stored = StoredSnapshot { meta: meta.clone(), data };
+        let stored = StoredSnapshot {
+            meta: meta.clone(),
+            data,
+        };
         blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await
     }
 
@@ -613,7 +648,10 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         };
 
         let db = self.db.clone();
-        let stored = StoredSnapshot { meta: meta.clone(), data: data.clone() };
+        let stored = StoredSnapshot {
+            meta: meta.clone(),
+            data: data.clone(),
+        };
         blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await?;
 
         Ok(Snapshot {
@@ -630,7 +668,8 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, StorageError> {
-    serde_json::from_slice(raw).map_err(|e| StorageIOError::<NodeId>::read(AnyError::new(&e)).into())
+    serde_json::from_slice(raw)
+        .map_err(|e| StorageIOError::<NodeId>::read(AnyError::new(&e)).into())
 }
 
 enum LoadedStateMachine {
@@ -640,7 +679,9 @@ enum LoadedStateMachine {
     /// could apply, because none has been written for a version that
     /// doesn't exist yet from its point of view. Callers decide what
     /// "ignore it, log clearly" means for their situation.
-    TooNew { found: u32 },
+    TooNew {
+        found: u32,
+    },
 }
 
 /// Peeks a `StateMachine` blob's `schema_version` before committing to a
@@ -651,7 +692,10 @@ enum LoadedStateMachine {
 fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
     let value: serde_json::Value = serde_json::from_slice(raw)
         .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
-    let found = value.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let found = value
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     if found > crate::state::CURRENT_SCHEMA_VERSION {
         return Ok(LoadedStateMachine::TooNew { found });
     }

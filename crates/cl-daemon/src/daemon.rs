@@ -11,12 +11,12 @@ use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
 use cl_raft::ids::node_id;
 use cl_raft::liveness::{Fence, FenceAction};
 use cl_raft::node::{ClusterNode, Options};
-use cl_secret::ClusterKey;
+use cl_raft::state::{Availability, NodeState, Request, Role};
 use cl_sched::materialize::Materializer;
 use cl_sched::Scheduler;
-use std::sync::atomic::{AtomicBool, Ordering};
-use cl_raft::state::{Availability, NodeState, Request, Role};
+use cl_secret::ClusterKey;
 use openraft::BasicNode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 /// How long to wait for dockerd at startup before carrying on without it.
@@ -83,7 +83,9 @@ pub async fn run(
     // it shares the one allocation instead of each holding its own copy.
     let key = load_cluster_key(&cfg, node).map(Arc::new);
     let node_keypair = load_node_keypair(&cfg);
-    let node_pubkey = node_keypair.as_ref().map(cl_secret::NodeKeypair::public_key_encoded);
+    let node_pubkey = node_keypair
+        .as_ref()
+        .map(cl_secret::NodeKeypair::public_key_encoded);
 
     // Broadcasts the cluster config and cluster key to every subsystem that
     // needs a cheap, always-current read rather than a snapshot frozen at
@@ -108,10 +110,11 @@ pub async fn run(
     form_cluster(&cfg, &node_name, &cluster).await?;
 
     let failover = cfg.failover.clone();
-    let detector = tokio::spawn(cluster.clone().run_failure_detector(
-        failover.probe_interval,
-        failover.node_timeout,
-    ));
+    let detector = tokio::spawn(
+        cluster
+            .clone()
+            .run_failure_detector(failover.probe_interval, failover.node_timeout),
+    );
 
     // Shared between the fence watcher and the scheduler, which consults it
     // before starting anything. Closed to begin with, matching `Fence::new`:
@@ -230,7 +233,14 @@ pub async fn run(
     let overlay = crate::overlay::start(&cfg, &node_name, &cluster, docker.clone());
     let egress = crate::egress::start(&cfg, &node_name, &cluster, docker.clone(), key_rx.clone());
 
-    let self_update = start_self_update(&cfg, &node_name, &cluster, &data_dir, internal_http.clone(), key_rx.clone());
+    let self_update = start_self_update(
+        &cfg,
+        &node_name,
+        &cluster,
+        &data_dir,
+        internal_http.clone(),
+        key_rx.clone(),
+    );
 
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
@@ -253,14 +263,31 @@ pub async fn run(
     ));
 
     let cfg_for_restore = cfg.clone();
-    let watcher = tokio::spawn(watch_leadership(cfg, config_path, cluster.clone(), failover.probe_interval));
+    let watcher = tokio::spawn(watch_leadership(
+        cfg,
+        config_path,
+        cluster.clone(),
+        failover.probe_interval,
+    ));
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
-    let git_backup = tokio::spawn(watch_git_backup(cluster.clone(), config_rx.clone(), key_rx.clone(), data_dir.clone()));
+    let git_backup = tokio::spawn(watch_git_backup(
+        cluster.clone(),
+        config_rx.clone(),
+        key_rx.clone(),
+        data_dir.clone(),
+    ));
 
     // restic is opt-in - only worth warning about if something actually
     // depends on it, unlike ethtool (which every overlay network needs).
-    if cluster.state().await.restic_targets.values().any(|t| t.enabled) && !cl_restic::dependency::restic_available() {
+    if cluster
+        .state()
+        .await
+        .restic_targets
+        .values()
+        .any(|t| t.enabled)
+        && !cl_restic::dependency::restic_available()
+    {
         warn!("restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed");
     }
     let backup_due_checker = tokio::spawn(crate::backup_runner::start_due_checker(cluster.clone()));
@@ -272,7 +299,11 @@ pub async fn run(
         key_rx.clone(),
         data_dir.clone(),
     );
-    let restore_watcher = crate::backup_restore::start_restore_watcher(cfg_for_restore, cluster.clone(), node_name.clone());
+    let restore_watcher = crate::backup_restore::start_restore_watcher(
+        cfg_for_restore,
+        cluster.clone(),
+        node_name.clone(),
+    );
 
     tokio::select! {
         result = tokio::signal::ctrl_c() => { result?; }
@@ -464,10 +495,7 @@ fn start_self_update(
         artifact_path,
     };
 
-    Some((
-        tokio::spawn(orchestrator.run()),
-        tokio::spawn(worker.run()),
-    ))
+    Some((tokio::spawn(orchestrator.run()), tokio::spawn(worker.run())))
 }
 
 /// Keep `docker` pointed at a live client for as long as the process runs.
@@ -695,7 +723,8 @@ async fn watch_git_backup(
         if last_snapshot.as_ref() == Some(&snapshot) {
             continue;
         }
-        let changes = cl_backup::snapshot::diff(&last_snapshot.clone().unwrap_or_default(), &snapshot);
+        let changes =
+            cl_backup::snapshot::diff(&last_snapshot.clone().unwrap_or_default(), &snapshot);
         let message = cl_backup::snapshot::commit_message(&changes);
 
         if !cl_backup::deploy_key::is_present(&state) {
@@ -709,7 +738,15 @@ async fn watch_git_backup(
         // it either way.
         let state = cluster.state().await;
 
-        let (result, updated_cache) = run_git_export_blocking(state, key, backup_cfg.clone(), dir.clone(), message.clone(), secret_cache).await;
+        let (result, updated_cache) = run_git_export_blocking(
+            state,
+            key,
+            backup_cfg.clone(),
+            dir.clone(),
+            message.clone(),
+            secret_cache,
+        )
+        .await;
         secret_cache = updated_cache;
         let last_export = match &result {
             Ok(commit) => {
@@ -768,7 +805,8 @@ fn run_git_export(
         .context("this node's cluster key cannot open the git deploy key")?;
 
     let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
-    let repo = cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
+    let repo =
+        cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
     let oid = repo.sync(&files, message, &private_key_pem)?;
     Ok(oid.map(|oid| oid.to_string()))
 }
@@ -794,11 +832,17 @@ async fn run_git_export_blocking(
     .await
     {
         Ok(outcome) => outcome,
-        Err(e) => (Err(anyhow!("git export task panicked: {e}")), cache_before_attempt),
+        Err(e) => (
+            Err(anyhow!("git export task panicked: {e}")),
+            cache_before_attempt,
+        ),
     }
 }
 
-async fn generate_and_publish_deploy_key(cluster: &Arc<ClusterNode>, key: &ClusterKey) -> anyhow::Result<()> {
+async fn generate_and_publish_deploy_key(
+    cluster: &Arc<ClusterNode>,
+    key: &ClusterKey,
+) -> anyhow::Result<()> {
     let keypair = cl_backup::deploy_key::DeployKeypair::generate()?;
     let public_entry = cl_backup::deploy_key::public_config_entry(&keypair);
     let private_entry = cl_backup::deploy_key::private_secret_entry(&keypair, key)?;
@@ -830,7 +874,10 @@ async fn generate_and_publish_deploy_key(cluster: &Arc<ClusterNode>, key: &Clust
     Ok(())
 }
 
-async fn publish_last_export(cluster: &Arc<ClusterNode>, export: &cl_backup::status::LastExport) -> anyhow::Result<()> {
+async fn publish_last_export(
+    cluster: &Arc<ClusterNode>,
+    export: &cl_backup::status::LastExport,
+) -> anyhow::Result<()> {
     let content = cl_raft::state::base64_encode(&serde_json::to_vec(export)?);
     let response = cluster
         .submit(Request::PutConfig {
@@ -876,7 +923,9 @@ async fn watch_cluster_config(
             Ok(parsed) => {
                 let _ = config_tx.send(Arc::new(parsed));
             }
-            Err(e) => warn!(error = %e, "replicated cluster config failed to parse, not broadcasting it"),
+            Err(e) => {
+                warn!(error = %e, "replicated cluster config failed to parse, not broadcasting it")
+            }
         }
 
         let current = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -894,7 +943,9 @@ async fn watch_cluster_config(
                     "cluster config updated"
                 );
             }
-            Err(e) => warn!(error = %e, path = %config_path.display(), "cannot write the config file"),
+            Err(e) => {
+                warn!(error = %e, path = %config_path.display(), "cannot write the config file")
+            }
         }
     }
 }
@@ -978,7 +1029,9 @@ async fn watch_leadership(
                     Ok(response) if response.error.is_none() => {
                         info!("another manager is reachable again, ending emergency mode");
                     }
-                    Ok(response) => warn!(error = ?response.error, "could not clear emergency mode"),
+                    Ok(response) => {
+                        warn!(error = ?response.error, "could not clear emergency mode")
+                    }
                     Err(e) => warn!(error = %e, "could not clear emergency mode"),
                 }
             }
@@ -1009,13 +1062,20 @@ async fn watch_leadership(
 /// peer actually confirms it, and gives up quietly if none answer (e.g. this
 /// is the very first node, still forming the cluster, or the network is
 /// briefly partitioned).
-async fn bail_if_removed(cfg: &ClusterConfig, this_node: &Node, node_name: &str, data_dir: &Path) -> Result<()> {
+async fn bail_if_removed(
+    cfg: &ClusterConfig,
+    this_node: &Node,
+    node_name: &str,
+    data_dir: &Path,
+) -> Result<()> {
     let own_id = this_node.id;
     for (name, node) in &cfg.nodes {
         if name == node_name {
             continue;
         }
-        let Some(addr) = cfg.rpc_addr(node) else { continue };
+        let Some(addr) = cfg.rpc_addr(node) else {
+            continue;
+        };
 
         let client = cl_raft::Client::connect(addr.to_string());
         let state = match tokio::time::timeout(Duration::from_secs(5), client.state()).await {
@@ -1030,7 +1090,9 @@ async fn bail_if_removed(cfg: &ClusterConfig, this_node: &Node, node_name: &str,
                 "this node was removed from the cluster while it was down; wiping local secrets"
             );
             wipe_local_secrets(cfg, data_dir);
-            bail!("removed from the cluster while down; local secrets wiped, re-provision to rejoin");
+            bail!(
+                "removed from the cluster while down; local secrets wiped, re-provision to rejoin"
+            );
         }
         return Ok(());
     }
@@ -1073,7 +1135,10 @@ async fn form_cluster(cfg: &ClusterConfig, node_name: &str, cluster: &ClusterNod
     let members: BTreeMap<_, _> = cfg
         .managers()
         .filter_map(|(_name, node)| {
-            Some((node_id(node.id), BasicNode::new(cfg.rpc_addr(node)?.to_string())))
+            Some((
+                node_id(node.id),
+                BasicNode::new(cfg.rpc_addr(node)?.to_string()),
+            ))
         })
         .collect();
     info!(members = members.len(), "forming cluster");
@@ -1271,7 +1336,10 @@ fn to_state(
                 }
                 Some((
                     name.clone(),
-                    open_ports.iter().map(|p| (to_port_protocol(p.protocol), p.port)).collect(),
+                    open_ports
+                        .iter()
+                        .map(|p| (to_port_protocol(p.protocol), p.port))
+                        .collect(),
                 ))
             })
             .collect(),
@@ -1352,7 +1420,8 @@ mod tests {
     use cl_raft::state::{ClusterConfigEntry, ClusterState};
 
     fn boot_cfg() -> ClusterConfig {
-        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml"))
+            .expect("example parses")
     }
 
     #[test]
@@ -1380,7 +1449,10 @@ mod tests {
     #[test]
     fn live_config_falls_back_to_boot_on_unparseable_replicated_yaml() {
         let state = ClusterState {
-            cluster_config: Some(ClusterConfigEntry { yaml: "not: valid: cluster: config".to_string(), generation: 1 }),
+            cluster_config: Some(ClusterConfigEntry {
+                yaml: "not: valid: cluster: config".to_string(),
+                generation: 1,
+            }),
             ..ClusterState::default()
         };
 

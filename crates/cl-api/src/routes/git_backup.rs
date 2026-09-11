@@ -28,9 +28,14 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cl_backup::deploy_key::{public_from_state, DEPLOY_KEY_PRIVATE_SECRET, DEPLOY_KEY_PUBLIC_CONFIG};
-use cl_backup::git::{build_git_tree, parse_tree};
-use cl_backup::status::{load as load_last_export, load_pull, LastExport, LastPull, RejectedPull, LAST_EXPORT_CONFIG, LAST_PULL_CONFIG};
+use cl_backup::deploy_key::{
+    public_from_state, DEPLOY_KEY_PRIVATE_SECRET, DEPLOY_KEY_PUBLIC_CONFIG,
+};
+use cl_backup::git::parse_tree;
+use cl_backup::status::{
+    last_known_good_commit, load as load_last_export, load_pull, LastExport, LastPull,
+    RejectedPull, LAST_EXPORT_CONFIG, LAST_PULL_CONFIG,
+};
 use cl_backup::tree::ParsedTree;
 use cl_config::{ClusterConfig, StackFile};
 use cl_raft::Request as ClusterRequest;
@@ -63,10 +68,21 @@ pub fn is_reserved_secret(name: &str) -> bool {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/git-backup/status", get(status))
-        .route("/api/git-backup/webhook-secret", get(webhook_secret_status).put(set_webhook_secret))
+        .route(
+            "/api/git-backup/webhook-secret",
+            get(webhook_secret_status).put(set_webhook_secret),
+        )
         .route("/api/git-backup/webhook/{token}", post(webhook))
-        .route("/api/git-backup/webhook/internal-trigger", post(internal_trigger))
+        .route(
+            "/api/git-backup/webhook/internal-trigger",
+            post(internal_trigger),
+        )
+        .route(
+            "/api/git-backup/webhook/internal-reconcile",
+            post(internal_reconcile),
+        )
         .route("/api/git-backup/pull", post(pull_now))
+        .route("/api/git-backup/reconcile", post(reconcile_now))
 }
 
 #[derive(Serialize)]
@@ -96,9 +112,14 @@ struct WebhookSecretStatus {
     configured: bool,
 }
 
-async fn webhook_secret_status(_identity: Identity, State(state): State<AppState>) -> Json<WebhookSecretStatus> {
+async fn webhook_secret_status(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<WebhookSecretStatus> {
     let cluster_state = state.cluster.state().await;
-    Json(WebhookSecretStatus { configured: cluster_state.secrets.contains_key(WEBHOOK_SECRET) })
+    Json(WebhookSecretStatus {
+        configured: cluster_state.secrets.contains_key(WEBHOOK_SECRET),
+    })
 }
 
 #[derive(Deserialize)]
@@ -180,7 +201,10 @@ async fn leader_node_name(state: &AppState) -> Option<String> {
 /// at. Any node can receive it; a non-leader forwards the trigger to
 /// whichever node currently leads, the same HMAC-authenticated channel
 /// `internal_peer` uses for every other node-to-node call.
-async fn webhook(State(state): State<AppState>, UrlPath(token): UrlPath<String>) -> Result<StatusCode, ApiError> {
+async fn webhook(
+    State(state): State<AppState>,
+    UrlPath(token): UrlPath<String>,
+) -> Result<StatusCode, ApiError> {
     if !verify_webhook_token(&state, &token).await {
         return Err(ApiError::Unauthenticated("bad webhook token".into()));
     }
@@ -196,14 +220,22 @@ async fn trigger_pull(state: &AppState) -> Result<(), ApiError> {
         let leader = leader_node_name(state)
             .await
             .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
-        return internal_peer::post_empty(state, &leader, "/api/git-backup/webhook/internal-trigger").await;
+        return internal_peer::post_empty(
+            state,
+            &leader,
+            "/api/git-backup/webhook/internal-trigger",
+        )
+        .await;
     }
     run_pull(state).await
 }
 
 /// Node-to-node only: what `trigger_pull` forwards to when this node is not
 /// the leader.
-async fn internal_trigger(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn internal_trigger(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
     run_pull(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -211,9 +243,144 @@ async fn internal_trigger(_auth: InternalAuth, State(state): State<AppState>) ->
 /// `clouduler git-backup pull`: manually run the same pull the webhook would
 /// have triggered, without waiting for (or even configuring) one. Internal
 /// auth rather than the webhook token.
-async fn pull_now(_auth: InternalAuth, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn pull_now(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
     trigger_pull(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Trigger a reconcile on the leader. If called on a non-leader, forwards
+/// to the leader over the internal authenticated channel.
+async fn trigger_reconcile(state: &AppState) -> Result<(), ApiError> {
+    if !state.cluster.is_leader() {
+        let leader = leader_node_name(state)
+            .await
+            .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+        return internal_peer::post_empty(
+            state,
+            &leader,
+            "/api/git-backup/webhook/internal-reconcile",
+        )
+        .await;
+    }
+    run_reconcile(state).await
+}
+
+/// Node-to-node only: what `trigger_reconcile` forwards to when this node is not the leader.
+async fn internal_reconcile(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    run_reconcile(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `clouduler git-backup reconcile`: manually force the cluster to reconcile
+/// with the git repo: builds cluster.yaml, stacks, configs, and secrets from Raft
+/// data, commits and pushes to git, and updates the last known good commit.
+async fn reconcile_now(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    trigger_reconcile(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
+    let backup_cfg = state
+        .cluster_config
+        .read()
+        .await
+        .backup
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("git backup is not configured".into()))?;
+
+    let cluster_state = state.cluster.state().await;
+    let key = {
+        let key_guard = state.key.read().await;
+        key_guard
+            .as_ref()
+            .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?
+            .clone()
+    };
+    let private_key_pem =
+        cl_backup::deploy_key::load_private(&cluster_state, &key).ok_or_else(|| {
+            ApiError::Conflict(
+                "no git deploy key yet - it is generated after the first export".into(),
+            )
+        })?;
+    let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)
+        .map_err(|e| ApiError::Conflict(format!("invalid age recipient: {e}")))?;
+
+    let cache_path = state.data_dir.join("git_backup_cache.json");
+    let mut cache_state = cl_backup::cache_state::CacheState::load(&cache_path);
+    let files = cl_backup::tree::build(
+        &cluster_state,
+        &key,
+        &recipient,
+        &mut cache_state.secret_cache,
+    );
+
+    let dir = state.data_dir.join("git-backup");
+    let commit_oid = tokio::task::spawn_blocking(move || {
+        let backup =
+            cl_backup::git::GitBackup::open_or_init(&dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
+        backup.reconcile(&files, "reconcile: mirror cluster state", &private_key_pem)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+
+    cache_state.last_snapshot = Some(cl_backup::snapshot::Snapshot::from_state(&cluster_state));
+    if let Err(e) = cache_state.save(&cache_path) {
+        warn!(
+            error = %e,
+            "git backup: could not persist change-detection cache after reconcile"
+        );
+    }
+
+    publish_last_export(
+        state,
+        &LastExport {
+            at: unix_now(),
+            summary: "reconcile: mirror cluster state".to_string(),
+            commit: Some(commit_oid.to_string()),
+            error: None,
+        },
+    )
+    .await?;
+
+    publish_last_pull(
+        state,
+        LastPull {
+            at: unix_now(),
+            commit: Some(commit_oid.to_string()),
+            rejected: None,
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn publish_last_export(state: &AppState, export: &LastExport) -> Result<(), ApiError> {
+    let content =
+        cl_raft::state::base64_encode(&serde_json::to_vec(export).map_err(ApiError::internal)?);
+    let response = state
+        .cluster
+        .submit(ClusterRequest::PutConfig {
+            name: LAST_EXPORT_CONFIG.to_string(),
+            content,
+            owner: None,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Internal(format!("publishing export status: {msg}")));
+    }
+    Ok(())
 }
 
 /// What the blocking git2 half of a pull decided, handed back to async code
@@ -249,18 +416,15 @@ async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?
             .clone()
     };
-    let private_key_pem = cl_backup::deploy_key::load_private(&cluster_state, &key)
-        .ok_or_else(|| ApiError::Conflict("no git deploy key yet - it is generated after the first export".into()))?;
+    let private_key_pem =
+        cl_backup::deploy_key::load_private(&cluster_state, &key).ok_or_else(|| {
+            ApiError::Conflict(
+                "no git deploy key yet - it is generated after the first export".into(),
+            )
+        })?;
     let existing_secrets: BTreeSet<String> = cluster_state.secrets.keys().cloned().collect();
-    let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)
-        .map_err(|e| ApiError::Conflict(format!("invalid age recipient: {e}")))?;
-
-    // We need the cluster state, key, recipient, and secret cache to
-    // compute the "known good" baseline tree. The secret cache for pull
-    // is transient (pull doesn't persist it — it just needs a consistent
-    // snapshot of secrets for one comparison).
-    let mut secret_cache = cl_backup::tree::SecretCache::new();
-    let good_tree_files = cl_backup::tree::build(&cluster_state, &key, &recipient, &mut secret_cache);
+    let last_good_oid = last_known_good_commit(&cluster_state)
+        .and_then(|s| git2::Oid::from_str(&s).ok());
 
     let dir = state.data_dir.join("git-backup");
     let decision = tokio::task::spawn_blocking(move || {
@@ -269,7 +433,7 @@ async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             &backup_cfg,
             &private_key_pem,
             &existing_secrets,
-            &good_tree_files,
+            last_good_oid,
         )
     })
     .await
@@ -278,7 +442,10 @@ async fn run_pull(state: &AppState) -> Result<(), ApiError> {
 
     match decision {
         PullDecision::NoChange => Ok(()),
-        PullDecision::Rejected { reason, preserved_branch } => {
+        PullDecision::Rejected {
+            reason,
+            preserved_branch,
+        } => {
             warn!(
                 %reason,
                 %preserved_branch,
@@ -289,12 +456,19 @@ async fn run_pull(state: &AppState) -> Result<(), ApiError> {
                 LastPull {
                     at: unix_now(),
                     commit: None,
-                    rejected: Some(RejectedPull { reason, preserved_branch }),
+                    rejected: Some(RejectedPull {
+                        reason,
+                        preserved_branch,
+                    }),
                 },
             )
             .await
         }
-        PullDecision::Accepted { candidate, cluster_config, parsed } => {
+        PullDecision::Accepted {
+            candidate,
+            cluster_config,
+            parsed,
+        } => {
             apply_pulled_tree(state, &cluster_config, &parsed).await?;
             // No need to advance any local ref — the export path is
             // stateless (always fetches fresh). The next export's
@@ -314,7 +488,8 @@ async fn run_pull(state: &AppState) -> Result<(), ApiError> {
 }
 
 async fn publish_last_pull(state: &AppState, last_pull: LastPull) -> Result<(), ApiError> {
-    let content = cl_raft::state::base64_encode(&serde_json::to_vec(&last_pull).map_err(ApiError::internal)?);
+    let content =
+        cl_raft::state::base64_encode(&serde_json::to_vec(&last_pull).map_err(ApiError::internal)?);
     let response = state
         .cluster
         .submit(ClusterRequest::PutConfig {
@@ -338,17 +513,15 @@ fn unix_now() -> u64 {
 }
 
 /// The blocking git2 half of a pull: fetch the remote, compare the secrets
-/// subtree against the cluster's *current live state* (computed fresh every
-/// call, not from a historical bookmark), parse the candidate tree directly
-/// from the odb, and validate. This eliminates the old leadership-rotation
-/// bug where a stale bookmark caused legitimate commits to be misidentified
-/// as unauthorized secret rotations.
+/// subtree against the cluster's last known good commit (or reject if secrets
+/// changed, since git cannot authoritatively supply new secret content), parse
+/// the candidate tree directly from the odb, and validate.
 fn pull_and_decide(
     dir: &Path,
     cfg: &cl_config::GitBackupConfig,
     private_key_pem: &str,
     existing_secrets: &BTreeSet<String>,
-    good_tree_files: &[cl_backup::tree::TreeFile],
+    last_good_oid: Option<git2::Oid>,
 ) -> cl_backup::Result<PullDecision> {
     let backup = cl_backup::git::GitBackup::open_or_init(dir, &cfg.repo_url, &cfg.branch)?;
 
@@ -356,25 +529,31 @@ fn pull_and_decide(
         return Ok(PullDecision::NoChange);
     };
 
-    // Build the "known good" baseline tree from the files the cluster is
-    // currently running — this is computed fresh each call from the live
-    // raft state, so it is never stale regardless of leadership changes.
-    let good_tree_oid = build_git_tree(backup.repo(), good_tree_files)?;
-
-    // Compare: if the remote tip's tree is identical to our baseline,
-    // nothing has changed.
-    let candidate_commit = backup.repo().find_commit(candidate)?;
-    if candidate_commit.tree()?.id() == good_tree_oid {
+    if Some(candidate) == last_good_oid {
         return Ok(PullDecision::NoChange);
     }
 
+    let candidate_commit = backup.repo().find_commit(candidate)?;
+
+    if let Some(good_oid) = last_good_oid {
+        if let Ok(good_commit) = backup.repo().find_commit(good_oid) {
+            if good_commit.tree()?.id() == candidate_commit.tree()?.id() {
+                return Ok(PullDecision::NoChange);
+            }
+        }
+    }
+
     // Check whether the secrets/ subtree changed — if so, reject.
-    if backup.secrets_subtree_changed(Some(good_tree_oid), candidate)? {
+    if backup.secrets_subtree_changed(last_good_oid, candidate)? {
         let reason = "the pulled commit changes something under secrets/, which this cluster cannot decrypt back \
                        into a live secret - secret rotation must go through the api, not git"
             .to_string();
-        let outcome = backup.reject_and_restore(candidate, Some(good_tree_oid), &reason, private_key_pem)?;
-        return Ok(PullDecision::Rejected { reason, preserved_branch: outcome.preserved_branch });
+        let outcome =
+            backup.reject_and_restore(candidate, last_good_oid, &reason, private_key_pem)?;
+        return Ok(PullDecision::Rejected {
+            reason,
+            preserved_branch: outcome.preserved_branch,
+        });
     }
 
     // Parse the candidate tree directly from the odb — no working
@@ -389,8 +568,16 @@ fn pull_and_decide(
             parsed: Box::new(parsed),
         }),
         Err(reason) => {
-            let outcome = backup.reject_and_restore(candidate, Some(good_tree_oid), &reason, private_key_pem)?;
-            Ok(PullDecision::Rejected { reason, preserved_branch: outcome.preserved_branch })
+            let outcome = backup.reject_and_restore(
+                candidate,
+                last_good_oid,
+                &reason,
+                private_key_pem,
+            )?;
+            Ok(PullDecision::Rejected {
+                reason,
+                preserved_branch: outcome.preserved_branch,
+            })
         }
     }
 }
@@ -400,7 +587,10 @@ fn pull_and_decide(
 /// this cluster already holds - git can never supply new secret content, see
 /// the git-backup design notes). A raft-submission failure after this passes
 /// is not treated as malformed; see the git-backup design notes.
-fn validate_parsed(parsed: &ParsedTree, existing_secrets: &BTreeSet<String>) -> Result<ClusterConfig, String> {
+fn validate_parsed(
+    parsed: &ParsedTree,
+    existing_secrets: &BTreeSet<String>,
+) -> Result<ClusterConfig, String> {
     let Some(yaml) = &parsed.cluster_yaml else {
         return Err("no cluster.yaml in the pulled tree".to_string());
     };
@@ -408,12 +598,16 @@ fn validate_parsed(parsed: &ParsedTree, existing_secrets: &BTreeSet<String>) -> 
 
     for (name, spec) in &parsed.stacks {
         let stack = StackFile::parse(spec).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
-        stack.validate(&cluster_config).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
+        stack
+            .validate(&cluster_config)
+            .map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
 
         let requirements = stack.requirements();
         for config_name in &requirements.file_configs {
             if !parsed.configs.contains_key(config_name) {
-                return Err(format!("stacks/{name}.yaml: config {config_name} has no content under configs/"));
+                return Err(format!(
+                    "stacks/{name}.yaml: config {config_name} has no content under configs/"
+                ));
             }
         }
         for secret_name in &requirements.file_secrets {
@@ -431,9 +625,14 @@ fn validate_parsed(parsed: &ParsedTree, existing_secrets: &BTreeSet<String>) -> 
 /// Reconciles the cluster to match a validated pulled tree: the cluster
 /// config, every stack (deployed or removed), and the plain configs they
 /// reference (deployed, orphaned to no owner, or removed).
-async fn apply_pulled_tree(state: &AppState, cluster_config: &ClusterConfig, parsed: &ParsedTree) -> Result<(), ApiError> {
+async fn apply_pulled_tree(
+    state: &AppState,
+    cluster_config: &ClusterConfig,
+    parsed: &ParsedTree,
+) -> Result<(), ApiError> {
     let current = state.cluster.state().await;
-    let yaml_changed = current.cluster_config.as_ref().map(|c| c.yaml.as_str()) != parsed.cluster_yaml.as_deref();
+    let yaml_changed =
+        current.cluster_config.as_ref().map(|c| c.yaml.as_str()) != parsed.cluster_yaml.as_deref();
     if yaml_changed {
         super::config::apply_config(state, cluster_config).await?;
     }

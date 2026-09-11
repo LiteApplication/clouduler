@@ -50,7 +50,10 @@ fn acme_err(e: instant_acme::Error) -> ProxyError {
 
 /// Loads a persisted account, or creates and persists a new one when none
 /// exists yet at `credentials_path`.
-pub async fn load_or_create_account(config: &AcmeConfig, credentials_path: &Path) -> Result<Account> {
+pub async fn load_or_create_account(
+    config: &AcmeConfig,
+    credentials_path: &Path,
+) -> Result<Account> {
     if let Ok(raw) = tokio::fs::read(credentials_path).await {
         let creds: AccountCredentials =
             serde_json::from_slice(&raw).map_err(|e| ProxyError::Acme(e.to_string()))?;
@@ -83,7 +86,8 @@ pub async fn load_or_create_account(config: &AcmeConfig, credentials_path: &Path
         .await
         .map_err(acme_err)?;
 
-    let serialized = serde_json::to_vec_pretty(&credentials).map_err(|e| ProxyError::Acme(e.to_string()))?;
+    let serialized =
+        serde_json::to_vec_pretty(&credentials).map_err(|e| ProxyError::Acme(e.to_string()))?;
     if let Some(parent) = credentials_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -118,7 +122,8 @@ pub async fn issue_certificate(
         .map_err(acme_err)?;
 
     let mut created: Vec<cl_dns::Record> = Vec::new();
-    let setup: Result<()> = complete_authorizations(&mut order, cf, zone_id, propagation_timeout, &mut created).await;
+    let setup: Result<()> =
+        complete_authorizations(&mut order, cf, zone_id, propagation_timeout, &mut created).await;
 
     for record in &created {
         if let Err(e) = cl_dns::clear_challenge(cf, zone_id, record).await {
@@ -127,13 +132,19 @@ pub async fn issue_certificate(
     }
     setup?;
 
-    let status = order.poll_ready(&RetryPolicy::default()).await.map_err(acme_err)?;
+    let status = order
+        .poll_ready(&RetryPolicy::default())
+        .await
+        .map_err(acme_err)?;
     if status != OrderStatus::Ready {
         return Err(ProxyError::Acme(format!("order not ready: {status:?}")));
     }
 
     let key_pem = order.finalize().await.map_err(acme_err)?;
-    let chain_pem = order.poll_certificate(&RetryPolicy::default()).await.map_err(acme_err)?;
+    let chain_pem = order
+        .poll_certificate(&RetryPolicy::default())
+        .await
+        .map_err(acme_err)?;
     let not_after = leaf_not_after(&chain_pem)?;
 
     Ok(IssuedCertificate {
@@ -163,7 +174,11 @@ async fn complete_authorizations(
 
         let domain = match challenge.identifier().identifier {
             Identifier::Dns(dns) => dns.clone(),
-            other => return Err(ProxyError::Acme(format!("unsupported identifier type: {other:?}"))),
+            other => {
+                return Err(ProxyError::Acme(format!(
+                    "unsupported identifier type: {other:?}"
+                )))
+            }
         };
         let key_auth = challenge.key_authorization();
         let value = key_auth.dns_value();
@@ -187,7 +202,11 @@ async fn complete_authorizations(
 /// `issue_certificate`'s DNS-01 instead. As with DNS-01, every token this
 /// places in `store` is removed at the end regardless of outcome, so a
 /// failed order never leaves a stray challenge response behind.
-pub async fn issue_certificate_http01(account: &Account, store: &Http01Store, name: &str) -> Result<IssuedCertificate> {
+pub async fn issue_certificate_http01(
+    account: &Account,
+    store: &Http01Store,
+    name: &str,
+) -> Result<IssuedCertificate> {
     let identifiers = vec![Identifier::Dns(name.to_string())];
     let mut order = account
         .new_order(&NewOrder::new(&identifiers))
@@ -202,13 +221,19 @@ pub async fn issue_certificate_http01(account: &Account, store: &Http01Store, na
     }
     setup?;
 
-    let status = order.poll_ready(&RetryPolicy::default()).await.map_err(acme_err)?;
+    let status = order
+        .poll_ready(&RetryPolicy::default())
+        .await
+        .map_err(acme_err)?;
     if status != OrderStatus::Ready {
         return Err(ProxyError::Acme(format!("order not ready: {status:?}")));
     }
 
     let key_pem = order.finalize().await.map_err(acme_err)?;
-    let chain_pem = order.poll_certificate(&RetryPolicy::default()).await.map_err(acme_err)?;
+    let chain_pem = order
+        .poll_certificate(&RetryPolicy::default())
+        .await
+        .map_err(acme_err)?;
     let not_after = leaf_not_after(&chain_pem)?;
 
     Ok(IssuedCertificate {
@@ -247,7 +272,9 @@ async fn complete_authorizations_http01(
 fn leaf_not_after(chain_pem: &str) -> Result<i64> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(chain_pem.as_bytes())
         .map_err(|e| ProxyError::CertParse(e.to_string()))?;
-    let cert = pem.parse_x509().map_err(|e| ProxyError::CertParse(e.to_string()))?;
+    let cert = pem
+        .parse_x509()
+        .map_err(|e| ProxyError::CertParse(e.to_string()))?;
     Ok(cert.validity().not_after.timestamp())
 }
 
@@ -309,8 +336,12 @@ pub async fn renewal_tick(
         info!(fqdn = %cert.fqdn, "renewing certificate");
         let names = vec![cert.fqdn.clone()];
         let issued = match zones.zone_id_for(&cert.fqdn) {
-            Some(zone_id) => issue_certificate(account, cf, &zone_id, &names, propagation_timeout).await,
-            None if allow_http01(&cert.fqdn) => issue_certificate_http01(account, http01_store, &cert.fqdn).await,
+            Some(zone_id) => {
+                issue_certificate(account, cf, &zone_id, &names, propagation_timeout).await
+            }
+            None if allow_http01(&cert.fqdn) => {
+                issue_certificate_http01(account, http01_store, &cert.fqdn).await
+            }
             None => {
                 warn!(fqdn = %cert.fqdn, "no zone configured for certificate, skipping renewal");
                 continue;
@@ -368,12 +399,18 @@ mod tests {
 
     #[test]
     fn default_directory_is_production() {
-        assert_eq!(AcmeConfig::default().directory_url, LETS_ENCRYPT_PRODUCTION_URL);
+        assert_eq!(
+            AcmeConfig::default().directory_url,
+            LETS_ENCRYPT_PRODUCTION_URL
+        );
     }
 
     #[test]
     fn staging_constant_is_distinct_from_default() {
-        assert_ne!(LETS_ENCRYPT_STAGING_URL, AcmeConfig::default().directory_url);
+        assert_ne!(
+            LETS_ENCRYPT_STAGING_URL,
+            AcmeConfig::default().directory_url
+        );
     }
 
     #[test]
@@ -381,7 +418,11 @@ mod tests {
         let now = 1_000_000;
         let window = Duration::from_secs(30 * 24 * 60 * 60);
         assert!(needs_renewal(now + 10, now, window));
-        assert!(!needs_renewal(now + window.as_secs() as i64 + 10, now, window));
+        assert!(!needs_renewal(
+            now + window.as_secs() as i64 + 10,
+            now,
+            window
+        ));
     }
 
     #[test]

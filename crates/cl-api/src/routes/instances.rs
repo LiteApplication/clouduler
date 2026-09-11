@@ -40,7 +40,10 @@ pub fn router() -> Router<AppState> {
         // Node-to-node only, HMAC authenticated: what the public routes above
         // forward to when the instance they were asked about lives on another
         // node. See `internal_peer`.
-        .route("/api/instances/internal/{id}/summary", get(internal_summary))
+        .route(
+            "/api/instances/internal/{id}/summary",
+            get(internal_summary),
+        )
         .route("/api/instances/internal/{id}/logs", get(internal_logs))
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
         .route("/api/instances/internal/{id}/update", post(internal_update))
@@ -51,7 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/internal/{id}/exec", get(internal_exec))
         // Node-to-node only, same as `exec`: `clouduler capture` resolves the
         // instance's node itself and connects here directly.
-        .route("/api/instances/internal/{id}/capture", get(internal_capture))
+        .route(
+            "/api/instances/internal/{id}/capture",
+            get(internal_capture),
+        )
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,7 +189,11 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
         (Some(c), Some(docker)) => {
             let repository = cl_docker::ImageRef::parse(&c.image).repository;
             match c.image_digest.as_deref() {
-                Some(image_id) => docker.digest_of_image(image_id, &repository).await.ok().flatten(),
+                Some(image_id) => docker
+                    .digest_of_image(image_id, &repository)
+                    .await
+                    .ok()
+                    .flatten(),
                 None => None,
             }
         }
@@ -202,19 +212,31 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
         }
     };
 
-    let migration_sync = assignment
-        .migration
-        .as_ref()
-        .and_then(|_| state.migration_sync.read().unwrap().get(&assignment.instance).copied());
+    let migration_sync = assignment.migration.as_ref().and_then(|_| {
+        state
+            .migration_sync
+            .read()
+            .unwrap()
+            .get(&assignment.instance)
+            .copied()
+    });
     let redeploy_step = if local {
-        state.redeploy_steps.read().await.get(&assignment.instance).copied()
+        state
+            .redeploy_steps
+            .read()
+            .await
+            .get(&assignment.instance)
+            .copied()
     } else {
         None
     };
     let (reason, step) = compose_progress(
         instance_state,
         redeploy_step,
-        assignment.migration.as_ref().map(|m| (&m.phase, migration_sync)),
+        assignment
+            .migration
+            .as_ref()
+            .map(|m| (&m.phase, migration_sync)),
     );
 
     InstanceSummary {
@@ -247,8 +269,14 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
 /// belongs to, keyed `stack.service` since one route load balances every
 /// replica of a service rather than publishing one per instance. `None` when
 /// the service publishes no route, or no check has run for it yet.
-fn proxy_health_of(state: &AppState, assignment: &cl_raft::Assignment) -> Option<ProxyHealthSummary> {
-    let key = format!("{}.{}", assignment.instance.stack, assignment.instance.service);
+fn proxy_health_of(
+    state: &AppState,
+    assignment: &cl_raft::Assignment,
+) -> Option<ProxyHealthSummary> {
+    let key = format!(
+        "{}.{}",
+        assignment.instance.stack, assignment.instance.service
+    );
     let health = state.proxy_health.get(&key)?;
     Some(ProxyHealthSummary {
         host: health.host,
@@ -284,7 +312,10 @@ fn run_state_to_summary(status: cl_docker::RunState, desired: DesiredState) -> &
 fn compose_progress(
     instance_state: &str,
     redeploy: Option<cl_sched::RedeployPhase>,
-    migration: Option<(&cl_raft::state::MigrationPhase, Option<cl_drive::MigrationSyncProgress>)>,
+    migration: Option<(
+        &cl_raft::state::MigrationPhase,
+        Option<cl_drive::MigrationSyncProgress>,
+    )>,
 ) -> (Option<String>, Option<(u8, u8)>) {
     if let Some((phase, sync_progress)) = migration {
         return compose_migration_reason(phase, sync_progress);
@@ -294,7 +325,10 @@ fn compose_progress(
     };
     let step = phase.step_number();
     (
-        Some(format!("redeploying ({instance_state}, step {step}/{})", cl_sched::REDEPLOY_TOTAL_STEPS)),
+        Some(format!(
+            "redeploying ({instance_state}, step {step}/{})",
+            cl_sched::REDEPLOY_TOTAL_STEPS
+        )),
         Some((step, cl_sched::REDEPLOY_TOTAL_STEPS)),
     )
 }
@@ -325,7 +359,8 @@ mod progress_tests {
 
     #[test]
     fn redeploy_reason_names_the_step_and_the_docker_state() {
-        let (reason, step) = compose_progress(STATE_EXITED, Some(cl_sched::RedeployPhase::Stopping), None);
+        let (reason, step) =
+            compose_progress(STATE_EXITED, Some(cl_sched::RedeployPhase::Stopping), None);
         assert_eq!(reason.as_deref(), Some("redeploying (exited, step 2/3)"));
         assert_eq!(step, Some((2, 3)));
     }
@@ -346,7 +381,10 @@ mod progress_tests {
             files_total: 12,
         };
         let (reason, step) = compose_migration_reason(&MigrationPhase::Syncing, Some(progress));
-        assert_eq!(reason.as_deref(), Some("migrating (syncing volume 1/2, 5/12 files)"));
+        assert_eq!(
+            reason.as_deref(),
+            Some("migrating (syncing volume 1/2, 5/12 files)")
+        );
         assert_eq!(step, Some((1, 2)));
     }
 }
@@ -359,7 +397,13 @@ pub(crate) async fn progress_snapshot(
     state: &AppState,
     cluster_state: &cl_raft::ClusterState,
 ) -> Vec<(String, crate::stream::InstanceProgressEvent)> {
-    let summaries = futures::future::join_all(cluster_state.assignments.values().map(|a| summarize(state, a))).await;
+    let summaries = futures::future::join_all(
+        cluster_state
+            .assignments
+            .values()
+            .map(|a| summarize(state, a)),
+    )
+    .await;
     summaries
         .into_iter()
         .map(|s| {
@@ -385,7 +429,13 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<In
     // Concurrent rather than one at a time: a single unreachable node whose
     // instances sit behind `FETCH_TIMEOUT` must not serialize onto the whole
     // list's latency.
-    let mut out = futures::future::join_all(cluster_state.assignments.values().map(|a| summarize(&state, a))).await;
+    let mut out = futures::future::join_all(
+        cluster_state
+            .assignments
+            .values()
+            .map(|a| summarize(&state, a)),
+    )
+    .await;
     out.extend(pending_placements(&state, &cluster_state).await);
     Json(out)
 }
@@ -394,7 +444,10 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<In
 /// because no node in the cluster currently satisfies what they need. Nothing
 /// in `cluster_state.assignments` represents these, so they are computed live
 /// from the same placement logic the scheduler runs, rather than stored.
-async fn pending_placements(state: &AppState, cluster_state: &cl_raft::ClusterState) -> Vec<InstanceSummary> {
+async fn pending_placements(
+    state: &AppState,
+    cluster_state: &cl_raft::ClusterState,
+) -> Vec<InstanceSummary> {
     let config = state.cluster_config.read().await;
     let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
     let desired = cl_sched::desired_instances(
@@ -516,7 +569,12 @@ async fn restart(
     // fresh pick a never-yet-placed instance would get.
     let mut probe = cluster_state.clone();
     probe.assignments.remove(&instance);
-    let outcome = cl_sched::place::place(&probe, std::slice::from_ref(&item), &served_drives, &nat_networks);
+    let outcome = cl_sched::place::place(
+        &probe,
+        std::slice::from_ref(&item),
+        &served_drives,
+        &nat_networks,
+    );
     let target = outcome
         .decisions
         .into_iter()
@@ -524,11 +582,15 @@ async fn restart(
             cl_sched::place::Decision::Place { node, .. } => Some(node),
             cl_sched::place::Decision::Remove { .. } => None,
         })
-        .ok_or_else(|| ApiError::Conflict("no node in the cluster can run this instance right now".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::Conflict("no node in the cluster can run this instance right now".to_string())
+        })?;
 
     let response = state
         .cluster
-        .submit(ClusterRequest::Unassign { instance: instance.clone() })
+        .submit(ClusterRequest::Unassign {
+            instance: instance.clone(),
+        })
         .await
         .map_err(ApiError::not_leader)?;
     if let Some(msg) = response.error {
@@ -613,7 +675,11 @@ fn required_drives(
         .stacks
         .get(&instance.stack)
         .and_then(|stack| cl_config::StackFile::parse(&stack.spec).ok())
-        .and_then(|file| file.services.get(&instance.service).map(Service::drives_used))
+        .and_then(|file| {
+            file.services
+                .get(&instance.service)
+                .map(Service::drives_used)
+        })
         .unwrap_or_default()
 }
 
@@ -636,7 +702,10 @@ struct RebalanceResponse {
 /// so the usual placement and drive checks still apply to every one of them;
 /// a move rejected by a race with something else (a manual move, a redeploy)
 /// just does not happen, it does not fail the rest of the batch.
-async fn rebalance(_admin: RequireAdmin, State(state): State<AppState>) -> Result<Json<RebalanceResponse>, ApiError> {
+async fn rebalance(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<Json<RebalanceResponse>, ApiError> {
     let cluster_state = state.cluster.state().await;
     let config = state.cluster_config.read().await;
     let colocate_proxy_hosts = config.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
@@ -650,7 +719,8 @@ async fn rebalance(_admin: RequireAdmin, State(state): State<AppState>) -> Resul
     let nat_networks = config.nat_networks();
     drop(config);
 
-    let planned = cl_sched::rebalance::plan(&cluster_state, &desired, &served_drives, &nat_networks);
+    let planned =
+        cl_sched::rebalance::plan(&cluster_state, &desired, &served_drives, &nat_networks);
 
     let mut moves = Vec::new();
     for m in planned {
@@ -670,7 +740,9 @@ async fn rebalance(_admin: RequireAdmin, State(state): State<AppState>) -> Resul
                 from: m.from,
                 to: m.to,
             }),
-            Some(error) => warn!(instance = %m.instance, from = %m.from, to = %m.to, %error, "rebalance move was rejected"),
+            Some(error) => {
+                warn!(instance = %m.instance, from = %m.from, to = %m.to, %error, "rebalance move was rejected")
+            }
         }
     }
     Ok(Json(RebalanceResponse { moves }))
@@ -720,7 +792,10 @@ async fn update(
 ///
 /// Shared with `routes::updates`, which drives the same thing across a whole
 /// list of instances from the Updates view.
-pub(crate) async fn update_instance(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
+pub(crate) async fn update_instance(
+    state: &AppState,
+    instance: InstanceId,
+) -> Result<(), ApiError> {
     let cluster_state = state.cluster.state().await;
     let assignment = cluster_state
         .assignments
@@ -761,7 +836,9 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
         .inspect(&name)
         .await
         .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("container {name} does not exist on this node")))?;
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("container {name} does not exist on this node"))
+        })?;
 
     // The stack's declared reference, e.g. `nginx:1.25` — not the running
     // container's `image`, which once this instance has been pinned before
@@ -774,7 +851,11 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
         .stacks
         .get(&instance.stack)
         .and_then(|stack| StackFile::parse(&stack.spec).ok())
-        .and_then(|file| file.services.get(&instance.service).map(|s| s.image.clone()))
+        .and_then(|file| {
+            file.services
+                .get(&instance.service)
+                .map(|s| s.image.clone())
+        })
         .ok_or_else(|| ApiError::NotFound(format!("no stack service for instance {instance}")))?;
     drop(cluster_state);
 
@@ -849,7 +930,11 @@ fn internal_logs_path(instance: &InstanceId) -> String {
     format!("/api/instances/internal/{instance}/logs")
 }
 
-async fn serve_logs(state: &AppState, instance: &InstanceId, query: LogsQuery) -> Result<Response, ApiError> {
+async fn serve_logs(
+    state: &AppState,
+    instance: &InstanceId,
+    query: LogsQuery,
+) -> Result<Response, ApiError> {
     let opts = LogOptions {
         follow: query.follow,
         tail: query.tail.map(Tail::Lines).unwrap_or(Tail::Lines(200)),
@@ -927,12 +1012,16 @@ impl TryFrom<ExecQuery> for ExecSpec {
     type Error = ApiError;
 
     fn try_from(query: ExecQuery) -> Result<Self, Self::Error> {
-        let cmd: Vec<String> =
-            serde_json::from_str(&query.cmd).map_err(|e| ApiError::BadRequest(format!("cmd: {e}")))?;
+        let cmd: Vec<String> = serde_json::from_str(&query.cmd)
+            .map_err(|e| ApiError::BadRequest(format!("cmd: {e}")))?;
         if cmd.is_empty() {
             return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
         }
-        Ok(ExecSpec { cmd, tty: query.tty, user: query.user })
+        Ok(ExecSpec {
+            cmd,
+            tty: query.tty,
+            user: query.user,
+        })
     }
 }
 
@@ -959,7 +1048,9 @@ async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, s
     let mut session = match docker.exec(&container, spec).await {
         Ok(session) => session,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("exec: {e}").into())).await;
+            let _ = socket
+                .send(Message::Text(format!("exec: {e}").into()))
+                .await;
             return;
         }
     };
@@ -1055,7 +1146,10 @@ async fn internal_capture(
         }
     };
     if !file.networks.contains_key(&network) {
-        return Err(ApiError::BadRequest(format!("stack {} declares no network {network}", instance.stack)));
+        return Err(ApiError::BadRequest(format!(
+            "stack {} declares no network {network}",
+            instance.stack
+        )));
     }
 
     let overlay = cl_sched::run::overlay_name(&instance.stack, &network);
@@ -1081,7 +1175,9 @@ async fn bridge_capture(mut socket: WebSocket, iface: String, pcap: bool, filter
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("tcpdump: {e}").into())).await;
+            let _ = socket
+                .send(Message::Text(format!("tcpdump: {e}").into()))
+                .await;
             let _ = socket.send(Message::Close(None)).await;
             return;
         }
@@ -1102,7 +1198,10 @@ async fn bridge_capture(mut socket: WebSocket, iface: String, pcap: bool, filter
             match stderr.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if err_tx.send(String::from_utf8_lossy(&buf[..n]).into_owned()).is_err() {
+                    if err_tx
+                        .send(String::from_utf8_lossy(&buf[..n]).into_owned())
+                        .is_err()
+                    {
                         break;
                     }
                 }

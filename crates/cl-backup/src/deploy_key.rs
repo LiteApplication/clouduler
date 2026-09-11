@@ -108,13 +108,23 @@ mod tests {
         assert!(!is_present(&state));
 
         let public_entry = public_config_entry(&keypair);
-        state.configs.insert(public_entry.name.clone(), public_entry);
+        state
+            .configs
+            .insert(public_entry.name.clone(), public_entry);
         let private_entry = private_secret_entry(&keypair, &key).expect("seal");
-        state.secrets.insert(private_entry.name.clone(), private_entry);
+        state
+            .secrets
+            .insert(private_entry.name.clone(), private_entry);
 
         assert!(is_present(&state));
-        assert_eq!(public_from_state(&state).as_deref(), Some(keypair.public_openssh.as_str()));
-        assert_eq!(load_private(&state, &key).as_deref(), Some(keypair.private_pem.as_str()));
+        assert_eq!(
+            public_from_state(&state).as_deref(),
+            Some(keypair.public_openssh.as_str())
+        );
+        assert_eq!(
+            load_private(&state, &key).as_deref(),
+            Some(keypair.private_pem.as_str())
+        );
     }
 
     #[test]
@@ -123,7 +133,9 @@ mod tests {
         let key = ClusterKey::generate();
         let mut state = ClusterState::default();
         let private_entry = private_secret_entry(&keypair, &key).expect("seal");
-        state.secrets.insert(private_entry.name.clone(), private_entry);
+        state
+            .secrets
+            .insert(private_entry.name.clone(), private_entry);
 
         assert!(load_private(&state, &ClusterKey::generate()).is_none());
     }

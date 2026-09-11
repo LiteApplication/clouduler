@@ -41,7 +41,10 @@ struct DriveNodeStatus {
     reachable: bool,
 }
 
-async fn list_drives(_identity: Identity, State(state): State<AppState>) -> Json<Vec<DriveSummary>> {
+async fn list_drives(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<DriveSummary>> {
     let cluster_config = state.cluster_config.read().await;
     let cluster_state = state.cluster.state().await;
     Json(
@@ -87,7 +90,10 @@ struct ReplicaStatus {
     in_sync: bool,
 }
 
-async fn list_volumes(_identity: Identity, State(state): State<AppState>) -> Json<Vec<VolumeSummary>> {
+async fn list_volumes(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Vec<VolumeSummary>> {
     let cluster_state = state.cluster.state().await;
     Json(
         cluster_state

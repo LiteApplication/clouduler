@@ -29,7 +29,8 @@ export function RegistryAccounts({ accounts, onClose, onChanged }: Props) {
   const [server, setServer] = useState('docker.io');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [busy, setBusy] = useState<'save' | 'test' | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState<'save' | 'test' | 'remove' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -67,7 +68,7 @@ export function RegistryAccounts({ accounts, onClose, onChanged }: Props) {
     setOk(null);
     try {
       await api.putRegistry({ server, username, password });
-      setOk(`saved the login for ${server}`);
+      setOk(`Saved credentials for ${server}`);
       setPassword('');
       onChanged();
     } catch (e) {
@@ -78,17 +79,22 @@ export function RegistryAccounts({ accounts, onClose, onChanged }: Props) {
   }
 
   async function remove(target: string) {
+    if (!confirm(`Remove stored login for ${target}?`)) return;
+    setBusy('remove');
     setError(null);
     setOk(null);
     try {
       await api.removeRegistry(target);
+      setOk(`Removed login for ${target}`);
       onChanged();
     } catch (e) {
       setError(describe(e));
+    } finally {
+      setBusy(null);
     }
   }
 
-  const complete = server.trim() !== '' && username.trim() !== '' && password !== '';
+  const complete = server.trim() !== '' && username.trim() !== '' && password.trim() !== '';
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -99,6 +105,7 @@ export function RegistryAccounts({ accounts, onClose, onChanged }: Props) {
         aria-label="Registry accounts"
         ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
+        style={{ width: 'min(640px, 100%)' }}
       >
         <div className="section-head">
           <h2>
@@ -109,28 +116,36 @@ export function RegistryAccounts({ accounts, onClose, onChanged }: Props) {
           </button>
         </div>
 
-        <p className="page-sub">
-          Used to pull private images and to ask a registry what a tag currently points at. Stored as sealed
-          cluster secrets; passwords are never readable back.
+        <p className="page-sub" style={{ marginTop: '-4px' }}>
+          Credentials used to pull private images and check for tag updates.
+          Passwords are sealed with the cluster key and never sent back in plaintext.
         </p>
 
-        {accounts.length > 0 && (
+        {accounts.length > 0 ? (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Registry</th>
                   <th>Username</th>
-                  <th />
+                  <th style={{ width: '40px' }} />
                 </tr>
               </thead>
               <tbody>
                 {accounts.map((a) => (
                   <tr key={a.server}>
-                    <td className="mono">{a.server}</td>
+                    <td className="mono" style={{ fontWeight: 550 }}>
+                      {a.server}
+                    </td>
                     <td>{a.username}</td>
-                    <td>
-                      <button className="ghost icon-btn" aria-label={`Remove ${a.server}`} onClick={() => void remove(a.server)}>
+                    <td style={{ textAlign: 'right' }}>
+                      <button
+                        className="ghost icon-btn"
+                        title={`Remove ${a.server}`}
+                        aria-label={`Remove ${a.server}`}
+                        disabled={busy !== null}
+                        onClick={() => void remove(a.server)}
+                      >
                         <Icon name="trash" />
                       </button>
                     </td>
@@ -139,45 +154,132 @@ export function RegistryAccounts({ accounts, onClose, onChanged }: Props) {
               </tbody>
             </table>
           </div>
+        ) : (
+          <div
+            style={{
+              padding: 'var(--space-3)',
+              background: 'var(--surface-2)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-dim)',
+              fontSize: '13px',
+              textAlign: 'center',
+            }}
+          >
+            No registry credentials stored yet
+          </div>
         )}
 
-        <label>
-          Registry
-          <input
-            list="known-registries"
-            value={server}
-            onChange={(e) => setServer(e.target.value)}
-            placeholder="docker.io"
-          />
-          <datalist id="known-registries">
+        <div style={{ marginTop: 'var(--space-2)', borderTop: '1px solid var(--border)', paddingTop: 'var(--space-3)' }}>
+          <h3 style={{ fontSize: '14px', margin: '0 0 var(--space-2) 0', fontWeight: 600 }}>
+            Add or update credentials
+          </h3>
+
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: 'var(--space-3)' }}>
+            <span style={{ fontSize: '12px', color: 'var(--text-faint)', alignSelf: 'center', marginRight: '4px' }}>
+              Quick select:
+            </span>
             {KNOWN_REGISTRIES.map((r) => (
-              <option key={r} value={r} />
+              <button
+                key={r}
+                type="button"
+                className="ghost"
+                style={{
+                  padding: '2px 8px',
+                  fontSize: '12px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: server === r ? 'var(--surface-3)' : 'transparent',
+                }}
+                onClick={() => setServer(r)}
+              >
+                {r}
+              </button>
             ))}
-          </datalist>
-        </label>
-        <label>
-          Username
-          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" />
-        </label>
-        <label>
-          Password or access token
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-        </label>
+          </div>
 
-        {error && <p className="banner banner-bad">{error}</p>}
-        {ok && <p className="banner banner-good">{ok}</p>}
+          <div className="field">
+            <label htmlFor="reg-server">Registry Host</label>
+            <input
+              id="reg-server"
+              type="text"
+              list="known-registries"
+              value={server}
+              onChange={(e) => setServer(e.target.value)}
+              placeholder="e.g. docker.io, ghcr.io, or git.example.com:5000"
+            />
+            <datalist id="known-registries">
+              {KNOWN_REGISTRIES.map((r) => (
+                <option key={r} value={r} />
+              ))}
+            </datalist>
+          </div>
 
-        <div className="btn-row">
-          <button className="ghost" disabled={!complete || busy !== null} onClick={() => void test()}>
-            {busy === 'test' ? <span className="spinner" /> : <Icon name="check" />} Test
+          <div className="field">
+            <label htmlFor="reg-username">Username</label>
+            <input
+              id="reg-username"
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="e.g. your-username or token-name"
+              autoComplete="off"
+            />
+          </div>
+
+          <div className="field">
+            <label htmlFor="reg-password">Password or Personal Access Token</label>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <input
+                id="reg-password"
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Write-only token or password"
+                autoComplete="new-password"
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                className="ghost icon-btn"
+                title={showPassword ? 'Hide password' : 'Show password'}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                onClick={() => setShowPassword((v) => !v)}
+              >
+                <Icon name={showPassword ? 'eye-off' : 'eye'} />
+              </button>
+            </div>
+            <span className="field-hint">
+              Credentials are tested against the registry before being stored in the cluster.
+            </span>
+          </div>
+        </div>
+
+        {error && (
+          <p className="banner banner-bad">
+            <Icon name="alert-circle" /> {error}
+          </p>
+        )}
+        {ok && (
+          <p className="banner banner-good">
+            <Icon name="check" /> {ok}
+          </p>
+        )}
+
+        <div className="btn-row" style={{ marginTop: 'var(--space-2)' }}>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!complete || busy !== null}
+            onClick={() => void test()}
+          >
+            {busy === 'test' ? <span className="spinner" /> : <Icon name="check" />} Test connection
           </button>
-          <button className="primary" disabled={!complete || busy !== null} onClick={() => void save()}>
-            {busy === 'save' ? <span className="spinner" /> : <Icon name="upload" />} Save
+          <button
+            type="button"
+            className="primary"
+            disabled={!complete || busy !== null}
+            onClick={() => void save()}
+          >
+            {busy === 'save' ? <span className="spinner" /> : <Icon name="upload" />} Save credentials
           </button>
         </div>
       </div>

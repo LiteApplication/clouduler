@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use cl_raft::ids::VolumeId;
 use clap::{Parser, Subcommand};
 use clap_complete::engine::ArgValueCompleter;
-use cl_raft::ids::VolumeId;
 
 use crate::completion;
 
@@ -13,7 +13,12 @@ pub struct Cli {
     /// Cluster config file.
     ///
     /// No short flag: `-c` is `folder-import`'s copy method instead.
-    #[arg(long, global = true, env = "CLOUDULER_CONFIG", default_value = "/etc/clouduler/cluster.yaml")]
+    #[arg(
+        long,
+        global = true,
+        env = "CLOUDULER_CONFIG",
+        default_value = "/etc/clouduler/cluster.yaml"
+    )]
     pub config: PathBuf,
 
     /// Directory holding this node's local state. Overrides the one in the
@@ -80,6 +85,16 @@ pub enum Command {
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
+    },
+    /// Manage container registry logins, similar to `docker login`.
+    ///
+    /// A login is checked against the registry before it is stored, sealed
+    /// with the cluster key, and replicated through raft, the same way the
+    /// web ui's registry accounts panel stores one. These talk to a running
+    /// daemon.
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommand,
     },
     /// Inspect drives.
     Drive {
@@ -647,6 +662,61 @@ pub enum SecretCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum RegistryCommand {
+    /// Add or replace the login used to pull from a registry, like
+    /// `docker login`.
+    ///
+    /// Checked against the registry before anything is stored: a wrong
+    /// password is rejected here, on the spot, instead of failing later on
+    /// some other node in the middle of a pull. Needs this node's cluster
+    /// key, the same way `secret set` does.
+    Login {
+        /// Registry host, e.g. `docker.io`, `ghcr.io`, or a private
+        /// `host[:port]`. Docker Hub's several spellings all fold to the
+        /// same stored login.
+        server: String,
+        /// Username on that registry.
+        #[arg(short, long)]
+        username: String,
+        /// Password or access token. Omit both this and --password-stdin to
+        /// be prompted without echoing, which keeps it out of the shell
+        /// history.
+        #[arg(long, conflicts_with = "password_stdin")]
+        password: Option<String>,
+        /// Read the password from stdin instead of prompting, for scripts
+        /// and CI where a prompt would just hang.
+        #[arg(long)]
+        password_stdin: bool,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// List the registries with a login stored. Usernames only: a password
+    /// is never readable back once stored.
+    List {
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Check a stored login against its registry again, without changing it.
+    Test {
+        /// Registry host the login was stored under.
+        #[arg(add = ArgValueCompleter::new(completion::registry_servers))]
+        server: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Remove a stored registry login.
+    #[command(alias = "rm")]
+    Remove {
+        /// Registry host the login was stored under.
+        #[arg(add = ArgValueCompleter::new(completion::registry_servers))]
+        server: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum DriveCommand {
     /// List the drives and the nodes implementing them.
     List,
@@ -763,6 +833,15 @@ pub enum GitBackupCommand {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
+    /// Reconcile the git repository with current cluster state: builds
+    /// cluster.yaml, stacks, configs, and secrets from Raft data, commits
+    /// and pushes to git, and updates the last known good commit.
+    Reconcile {
+        /// Node to ask. Defaults to any manager in the config; a non-leader
+        /// forwards the trigger to whichever node currently leads.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -799,7 +878,11 @@ pub struct BackupDestinationAddArgs {
     pub node: Option<String>,
     /// `node-local`: directory on that node. `ssh`: directory on the
     /// remote host.
-    #[arg(long, required_if_eq("kind", "node-local"), required_if_eq("kind", "ssh"))]
+    #[arg(
+        long,
+        required_if_eq("kind", "node-local"),
+        required_if_eq("kind", "ssh")
+    )]
     pub path: Option<String>,
     /// `ssh`: remote host.
     #[arg(long, required_if_eq("kind", "ssh"))]

@@ -59,7 +59,12 @@ impl SecretCache {
 /// `cache` is updated in place: a reused or freshly-encrypted secret's entry
 /// moves forward, and secrets no longer in `state.secrets` are dropped so
 /// the cache can't grow unbounded across renames/removals.
-pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Recipient, cache: &mut SecretCache) -> Vec<TreeFile> {
+pub fn build(
+    state: &ClusterState,
+    key: &ClusterKey,
+    recipient: &age::x25519::Recipient,
+    cache: &mut SecretCache,
+) -> Vec<TreeFile> {
     let mut files = Vec::new();
 
     if let Some(cfg) = &state.cluster_config {
@@ -85,7 +90,9 @@ pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Re
                 path: format!("configs/{name}"),
                 contents: bytes,
             }),
-            Err(e) => tracing::warn!(config = %name, error = %e, "git backup: skipping undecodable config"),
+            Err(e) => {
+                tracing::warn!(config = %name, error = %e, "git backup: skipping undecodable config")
+            }
         }
     }
 
@@ -103,7 +110,9 @@ pub fn build(state: &ClusterState, key: &ClusterKey, recipient: &age::x25519::Re
                 };
                 match crate::age::encrypt(recipient, &plaintext) {
                     Ok(ciphertext) => {
-                        cache.0.insert(name.clone(), (entry.revision, ciphertext.clone()));
+                        cache
+                            .0
+                            .insert(name.clone(), (entry.revision, ciphertext.clone()));
                         ciphertext
                     }
                     Err(e) => {
@@ -149,7 +158,10 @@ pub fn parse_dir(root: &Path) -> Result<ParsedTree> {
         let Some(name) = name.strip_suffix(".yaml") else {
             continue;
         };
-        stacks.insert(name.to_string(), String::from_utf8_lossy(&bytes).into_owned());
+        stacks.insert(
+            name.to_string(),
+            String::from_utf8_lossy(&bytes).into_owned(),
+        );
     }
 
     let mut configs = BTreeMap::new();
@@ -182,7 +194,10 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(BackupError::Io { path: path.to_path_buf(), source }),
+        Err(source) => Err(BackupError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -190,12 +205,20 @@ fn list_dir(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(BackupError::Io { path: dir.to_path_buf(), source }),
+        Err(source) => {
+            return Err(BackupError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
     };
 
     let mut out = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|source| BackupError::Io { path: dir.to_path_buf(), source })?;
+        let entry = entry.map_err(|source| BackupError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -203,7 +226,10 @@ fn list_dir(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let bytes = std::fs::read(&path).map_err(|source| BackupError::Io { path: path.clone(), source })?;
+        let bytes = std::fs::read(&path).map_err(|source| BackupError::Io {
+            path: path.clone(),
+            source,
+        })?;
         out.push((name.to_string(), bytes));
     }
     Ok(out)
@@ -268,7 +294,12 @@ mod tests {
         let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec!["cluster.yaml", "configs/nginx.conf", "secrets/db-password.age", "stacks/web.yaml"]
+            vec![
+                "cluster.yaml",
+                "configs/nginx.conf",
+                "secrets/db-password.age",
+                "stacks/web.yaml"
+            ]
         );
     }
 
@@ -301,8 +332,12 @@ mod tests {
         );
 
         let files = build(&state, &key, &recipient, &mut SecretCache::new());
-        assert!(!files.iter().any(|f| f.path.contains("_clouduler_git_backup_last_export")));
-        assert!(!files.iter().any(|f| f.path.contains("_clouduler_git_deploy_key_pub")));
+        assert!(!files
+            .iter()
+            .any(|f| f.path.contains("_clouduler_git_backup_last_export")));
+        assert!(!files
+            .iter()
+            .any(|f| f.path.contains("_clouduler_git_deploy_key_pub")));
         assert!(files.iter().any(|f| f.path == "configs/nginx.conf"));
     }
 
@@ -336,8 +371,14 @@ mod tests {
 
         let parsed = parse_dir(dir.path()).expect("parse");
         assert_eq!(parsed.cluster_yaml.as_deref(), Some("nodes: []\n"));
-        assert_eq!(parsed.stacks.get("web").map(String::as_str), Some("services: {}\n"));
-        assert_eq!(parsed.configs.get("nginx.conf").map(Vec::as_slice), Some(b"server {}".as_slice()));
+        assert_eq!(
+            parsed.stacks.get("web").map(String::as_str),
+            Some("services: {}\n")
+        );
+        assert_eq!(
+            parsed.configs.get("nginx.conf").map(Vec::as_slice),
+            Some(b"server {}".as_slice())
+        );
 
         let ciphertext = parsed.secrets.get("db-password").expect("secret present");
         let plaintext = crate::age::decrypt(&identity, ciphertext).expect("decrypt");
@@ -359,8 +400,16 @@ mod tests {
         let first = build(&state, &key, &recipient, &mut cache);
         let second = build(&state, &key, &recipient, &mut cache);
 
-        let first_secret = &first.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents;
-        let second_secret = &second.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents;
+        let first_secret = &first
+            .iter()
+            .find(|f| f.path == "secrets/db-password.age")
+            .unwrap()
+            .contents;
+        let second_secret = &second
+            .iter()
+            .find(|f| f.path == "secrets/db-password.age")
+            .unwrap()
+            .contents;
         assert_eq!(first_secret, second_secret);
     }
 
@@ -375,7 +424,12 @@ mod tests {
         let mut cache = SecretCache::new();
 
         let first = build(&state, &key, &recipient, &mut cache);
-        let first_secret = first.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents.clone();
+        let first_secret = first
+            .iter()
+            .find(|f| f.path == "secrets/db-password.age")
+            .unwrap()
+            .contents
+            .clone();
 
         let sealed = Sealed::seal(&key, "db-password", b"new-password").expect("seal");
         let entry = state.secrets.get_mut("db-password").unwrap();
@@ -383,7 +437,11 @@ mod tests {
         entry.revision = 2;
 
         let second = build(&state, &key, &recipient, &mut cache);
-        let second_secret = &second.iter().find(|f| f.path == "secrets/db-password.age").unwrap().contents;
+        let second_secret = &second
+            .iter()
+            .find(|f| f.path == "secrets/db-password.age")
+            .unwrap()
+            .contents;
         assert_ne!(&first_secret, second_secret);
         let plaintext = crate::age::decrypt(&identity, second_secret).expect("decrypt");
         assert_eq!(plaintext, b"new-password");

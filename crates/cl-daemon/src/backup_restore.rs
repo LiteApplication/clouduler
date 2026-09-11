@@ -31,7 +31,9 @@ use cl_config::{ClusterConfig, StackFile};
 use cl_drive::DriveRegistry;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{BackupDestination, ClusterState, DesiredState, Request, RestoreScope, RestoreStatus};
+use cl_raft::state::{
+    BackupDestination, ClusterState, DesiredState, Request, RestoreScope, RestoreStatus,
+};
 use cl_restic::restic::{ResticRepo, SnapshotInfo};
 use cl_restic::restore::include_path_for_volume;
 use cl_secret::ClusterKey;
@@ -40,8 +42,8 @@ use tracing::{debug, warn};
 
 use crate::backup_runner::instances_using_drive;
 use crate::backup_secrets;
-use cl_raft::state::instances_using_volume;
 use cl_raft::client::client_for;
+use cl_raft::state::instances_using_volume;
 
 /// How often every node checks for `Pending` restore requests it can serve.
 const RESTORE_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -51,13 +53,19 @@ const RESTORE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// just the leader, the same as `backup_runner::start_runner`: "can serve
 /// this drive" is a local fact each node checks about itself, not a decision
 /// that needs a single writer.
-pub fn start_restore_watcher(cfg: ClusterConfig, cluster: Arc<ClusterNode>, node_name: String) -> JoinHandle<()> {
+pub fn start_restore_watcher(
+    cfg: ClusterConfig,
+    cluster: Arc<ClusterNode>,
+    node_name: String,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(RESTORE_POLL_INTERVAL);
         loop {
             ticker.tick().await;
             let state = cluster.state().await;
-            let Some(node) = cfg.node(&node_name) else { continue };
+            let Some(node) = cfg.node(&node_name) else {
+                continue;
+            };
 
             for request in state.restore_requests.values() {
                 if !matches!(request.status, RestoreStatus::Pending) {
@@ -95,18 +103,28 @@ pub fn start_restore_watcher(cfg: ClusterConfig, cluster: Arc<ClusterNode>, node
                     Ok(()) => RestoreStatus::Succeeded,
                     Err(e) => {
                         warn!(request = %request.id, error = %e, "restore request failed");
-                        RestoreStatus::Failed { error: e.to_string() }
+                        RestoreStatus::Failed {
+                            error: e.to_string(),
+                        }
                     }
                 };
                 let _ = cluster
-                    .submit(Request::SetRestoreStatus { id: request.id.clone(), status, at: unix_now() })
+                    .submit(Request::SetRestoreStatus {
+                        id: request.id.clone(),
+                        status,
+                        at: unix_now(),
+                    })
                     .await;
             }
         }
     })
 }
 
-async fn execute_restore(cfg: &ClusterConfig, node_name: &str, request: &cl_raft::state::RestoreRequest) -> Result<()> {
+async fn execute_restore(
+    cfg: &ClusterConfig,
+    node_name: &str,
+    request: &cl_raft::state::RestoreRequest,
+) -> Result<()> {
     let snapshot = request.snapshot.as_deref();
     match &request.scope {
         RestoreScope::Drive { drive } => {
@@ -124,7 +142,16 @@ async fn execute_restore(cfg: &ClusterConfig, node_name: &str, request: &cl_raft
             restore_volume(cfg, node_name, volume, destination, snapshot, None).await
         }
         RestoreScope::Service { stack, service } => {
-            restore_service(cfg, node_name, stack, service, request.destination_id.as_deref(), snapshot, None).await
+            restore_service(
+                cfg,
+                node_name,
+                stack,
+                service,
+                request.destination_id.as_deref(),
+                snapshot,
+                None,
+            )
+            .await
         }
     }
 }
@@ -162,7 +189,8 @@ pub async fn restore_drive(
 
     println!("restoring {drive} from {destination_id}");
     let target_dir = ctx.registry.root(drive)?.to_path_buf();
-    ctx.restore(&state, destination_id, snapshot, &target_dir, None).await?;
+    ctx.restore(&state, destination_id, snapshot, &target_dir, None)
+        .await?;
 
     ctx.restart(&stopped).await?;
     println!("restored {drive}");
@@ -190,7 +218,14 @@ pub async fn restore_volume(
     println!("restoring {volume} from {destination_id}");
     let target_dir = ctx.registry.root(&volume.drive)?.to_path_buf();
     let include = include_path_for_volume(&volume.volume);
-    ctx.restore(&state, destination_id, snapshot, &target_dir, Some(&include)).await?;
+    ctx.restore(
+        &state,
+        destination_id,
+        snapshot,
+        &target_dir,
+        Some(&include),
+    )
+    .await?;
 
     ctx.restart(&stopped).await?;
     println!("restored {volume}");
@@ -221,7 +256,10 @@ pub async fn restore_service(
     }
     let instances = instances_of_service(&state, stack, service);
 
-    println!("stopping {} instance(s) of {stack}/{service}", instances.len());
+    println!(
+        "stopping {} instance(s) of {stack}/{service}",
+        instances.len()
+    );
     let stopped = ctx.stop(&state, &instances).await?;
 
     let mut drives: Vec<&str> = volumes.iter().map(|v| v.drive.as_str()).collect();
@@ -232,7 +270,8 @@ pub async fn restore_service(
         let destination = resolve_service_destination(&state, drive, destination_id)?;
         println!("restoring {drive} (for {stack}/{service}) from {destination}");
         let target_dir = ctx.registry.root(drive)?.to_path_buf();
-        ctx.restore(&state, &destination, snapshot, &target_dir, None).await?;
+        ctx.restore(&state, &destination, snapshot, &target_dir, None)
+            .await?;
     }
 
     ctx.restart(&stopped).await?;
@@ -244,7 +283,11 @@ pub async fn restore_service(
 /// given, otherwise the sole destination any enabled target on that drive
 /// backs up to - ambiguous only when more than one exists, in which case the
 /// caller must say which.
-fn resolve_service_destination(state: &ClusterState, drive: &str, explicit: Option<&str>) -> Result<String> {
+fn resolve_service_destination(
+    state: &ClusterState,
+    drive: &str,
+    explicit: Option<&str>,
+) -> Result<String> {
     if let Some(id) = explicit {
         return Ok(id.to_string());
     }
@@ -278,8 +321,12 @@ fn instances_of_service(state: &ClusterState, stack: &str, service: &str) -> Vec
 }
 
 fn service_volumes(state: &ClusterState, stack: &str, service: &str) -> Result<Vec<VolumeId>> {
-    let stack_state = state.stacks.get(stack).ok_or_else(|| anyhow!("stack {stack} not found"))?;
-    let file = StackFile::parse(&stack_state.spec).with_context(|| format!("parsing stack {stack}"))?;
+    let stack_state = state
+        .stacks
+        .get(stack)
+        .ok_or_else(|| anyhow!("stack {stack} not found"))?;
+    let file =
+        StackFile::parse(&stack_state.spec).with_context(|| format!("parsing stack {stack}"))?;
     let svc = file
         .services
         .get(service)
@@ -287,7 +334,12 @@ fn service_volumes(state: &ClusterState, stack: &str, service: &str) -> Result<V
     Ok(svc
         .volumes
         .iter()
-        .filter_map(|mount| Some(VolumeId::new(mount.drive.as_ref()?.clone(), mount.volume.as_ref()?.clone())))
+        .filter_map(|mount| {
+            Some(VolumeId::new(
+                mount.drive.as_ref()?.clone(),
+                mount.volume.as_ref()?.clone(),
+            ))
+        })
         .collect())
 }
 
@@ -315,10 +367,20 @@ impl Ctx {
             )
         })?;
         let client = client_for(cfg, via)?;
-        Ok(Self { client, registry, key, node_name: node_name.to_string(), data_dir: node.data_dir(cfg).to_path_buf() })
+        Ok(Self {
+            client,
+            registry,
+            key,
+            node_name: node_name.to_string(),
+            data_dir: node.data_dir(cfg).to_path_buf(),
+        })
     }
 
-    async fn stop(&self, state: &ClusterState, instances: &[InstanceId]) -> Result<Vec<InstanceId>> {
+    async fn stop(
+        &self,
+        state: &ClusterState,
+        instances: &[InstanceId],
+    ) -> Result<Vec<InstanceId>> {
         if instances.is_empty() {
             return Ok(Vec::new());
         }
@@ -348,8 +410,13 @@ impl Ctx {
             .get(destination_id)
             .ok_or_else(|| anyhow!("unknown backup destination {destination_id}"))?
             .clone();
-        let cred_dir = self.data_dir.join("restic").join("creds").join(&destination.id);
-        let (repo, _guards) = backup_secrets::build_repo(state, &self.key, &cred_dir, &destination)?;
+        let cred_dir = self
+            .data_dir
+            .join("restic")
+            .join("creds")
+            .join(&destination.id);
+        let (repo, _guards) =
+            backup_secrets::build_repo(state, &self.key, &cred_dir, &destination)?;
 
         let target_dir = target_dir.to_path_buf();
         let include = include.map(str::to_string);
@@ -374,7 +441,9 @@ fn resolve_snapshot(repo: &ResticRepo, requested: Option<&str>) -> Result<String
             return Ok(id.to_string());
         }
     }
-    let snapshots = repo.snapshots().map_err(|e| anyhow!("listing snapshots: {e}"))?;
+    let snapshots = repo
+        .snapshots()
+        .map_err(|e| anyhow!("listing snapshots: {e}"))?;
     latest_of(&snapshots)
         .map(|s| s.id.clone())
         .ok_or_else(|| anyhow!("this repository has no snapshots yet"))
@@ -384,10 +453,17 @@ fn latest_of(snapshots: &[SnapshotInfo]) -> Option<&SnapshotInfo> {
     snapshots.iter().max_by(|a, b| a.time.cmp(&b.time))
 }
 
-async fn set_desired(client: &cl_raft::client::Client, instances: &[InstanceId], desired: DesiredState) -> Result<()> {
+async fn set_desired(
+    client: &cl_raft::client::Client,
+    instances: &[InstanceId],
+    desired: DesiredState,
+) -> Result<()> {
     for instance in instances {
         let response = client
-            .submit(Request::SetDesiredState { instance: instance.clone(), desired })
+            .submit(Request::SetDesiredState {
+                instance: instance.clone(),
+                desired,
+            })
             .await
             .map_err(|e| anyhow!("{e}"))?;
         if let Some(error) = response.error {
@@ -414,7 +490,12 @@ fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
 /// self-reported `container_status` (see
 /// `cl_sched::run::Scheduler::report_container_status`) for anything
 /// assigned elsewhere, rather than blindly sleeping out `deadline` for those.
-async fn wait_for_stopped(client: &cl_raft::client::Client, node_name: &str, instances: &[InstanceId], deadline: Duration) {
+async fn wait_for_stopped(
+    client: &cl_raft::client::Client,
+    node_name: &str,
+    instances: &[InstanceId],
+    deadline: Duration,
+) {
     let Ok(docker) = cl_docker::Docker::connect() else {
         tokio::time::sleep(deadline).await;
         return;
@@ -466,12 +547,20 @@ mod tests {
     use super::*;
 
     fn snap(id: &str, time: &str) -> SnapshotInfo {
-        SnapshotInfo { id: id.into(), time: time.into(), tags: Vec::new() }
+        SnapshotInfo {
+            id: id.into(),
+            time: time.into(),
+            tags: Vec::new(),
+        }
     }
 
     #[test]
     fn latest_of_picks_the_most_recent_by_time() {
-        let snapshots = vec![snap("a", "2024-01-01T00:00:00Z"), snap("b", "2024-06-01T00:00:00Z"), snap("c", "2024-03-01T00:00:00Z")];
+        let snapshots = vec![
+            snap("a", "2024-01-01T00:00:00Z"),
+            snap("b", "2024-06-01T00:00:00Z"),
+            snap("c", "2024-03-01T00:00:00Z"),
+        ];
         assert_eq!(latest_of(&snapshots).unwrap().id, "b");
     }
 
@@ -483,7 +572,10 @@ mod tests {
     #[test]
     fn resolve_service_destination_passes_through_an_explicit_choice() {
         let state = ClusterState::default();
-        assert_eq!(resolve_service_destination(&state, "fast", Some("d2")).unwrap(), "d2");
+        assert_eq!(
+            resolve_service_destination(&state, "fast", Some("d2")).unwrap(),
+            "d2"
+        );
     }
 
     #[test]

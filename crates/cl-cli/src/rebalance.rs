@@ -74,6 +74,10 @@ fn required_drives(state: &ClusterState, instance: &InstanceId) -> BTreeSet<Stri
         .stacks
         .get(&instance.stack)
         .and_then(|stack| StackFile::parse(&stack.spec).ok())
-        .and_then(|file| file.services.get(&instance.service).map(cl_config::Service::drives_used))
+        .and_then(|file| {
+            file.services
+                .get(&instance.service)
+                .map(cl_config::Service::drives_used)
+        })
         .unwrap_or_default()
 }

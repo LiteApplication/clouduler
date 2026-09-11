@@ -103,7 +103,17 @@ async fn syncs_a_directory_tree_byte_for_byte() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    let stats = engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("sync");
+    let stats = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("sync");
 
     assert_eq!(stats.files_added, 3);
     assert!(tree_equal(src.path(), &dst_volume(&dst)));
@@ -130,12 +140,32 @@ async fn a_synced_file_is_not_re_diffed_as_changed() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    let first = engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("first sync");
+    let first = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("first sync");
     assert_eq!(first.files_added, 1);
 
     // Nothing on either side changed between passes; a second sync must ship
     // nothing at all.
-    let second = engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.expect("second sync");
+    let second = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("second sync");
     assert_eq!(second.files_added, 0);
     assert_eq!(second.files_changed, 0);
     assert_eq!(second.files_removed, 0);
@@ -160,8 +190,21 @@ async fn a_small_edit_sends_far_fewer_bytes_than_the_whole_file() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    let first = engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("first sync");
-    assert!(first.bytes_sent >= 200_000, "first sync ships the whole file");
+    let first = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("first sync");
+    assert!(
+        first.bytes_sent >= 200_000,
+        "first sync ships the whole file"
+    );
 
     // Flip a handful of bytes in the middle; everything else is unchanged.
     for byte in content.iter_mut().skip(100_000).take(16) {
@@ -172,16 +215,30 @@ async fn a_small_edit_sends_far_fewer_bytes_than_the_whole_file() {
     // Force the mtime forward: some filesystems round to whole seconds, and
     // this test must not depend on real time passing between the two writes.
     let file = std::fs::File::open(&big_path).unwrap();
-    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
+    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+        .unwrap();
 
-    let second = engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.expect("second sync");
+    let second = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("second sync");
     assert_eq!(second.files_changed, 1);
     assert!(
         second.bytes_sent < 20_000,
         "delta should be a small fraction of the file, got {} bytes",
         second.bytes_sent
     );
-    assert_eq!(std::fs::read(dst_volume(&dst).join("big.bin")).unwrap(), content);
+    assert_eq!(
+        std::fs::read(dst_volume(&dst).join("big.bin")).unwrap(),
+        content
+    );
 }
 
 #[tokio::test]
@@ -194,11 +251,31 @@ async fn deleting_a_file_removes_it_on_the_peer() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("first sync");
+    engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("first sync");
     assert!(dst_volume(&dst).join("gone.txt").exists());
 
     std::fs::remove_file(src.path().join("gone.txt")).unwrap();
-    let stats = engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.expect("second sync");
+    let stats = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("second sync");
 
     assert_eq!(stats.files_removed, 1);
     assert!(!dst_volume(&dst).join("gone.txt").exists());
@@ -215,15 +292,45 @@ async fn renaming_a_file_moves_it_instead_of_retransferring() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("first sync");
+    engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("first sync");
 
-    std::fs::rename(src.path().join("old_name.bin"), src.path().join("new_name.bin")).unwrap();
-    let stats = engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.expect("second sync");
+    std::fs::rename(
+        src.path().join("old_name.bin"),
+        src.path().join("new_name.bin"),
+    )
+    .unwrap();
+    let stats = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("second sync");
 
     assert_eq!(stats.files_renamed, 1);
-    assert_eq!(stats.files_added, 0, "a rename should not count as a fresh add");
+    assert_eq!(
+        stats.files_added, 0,
+        "a rename should not count as a fresh add"
+    );
     assert!(!dst_volume(&dst).join("old_name.bin").exists());
-    assert_eq!(std::fs::read(dst_volume(&dst).join("new_name.bin")).unwrap(), content);
+    assert_eq!(
+        std::fs::read(dst_volume(&dst).join("new_name.bin")).unwrap(),
+        content
+    );
 }
 
 /// Rename detection matches on content hash, and content equality is not
@@ -251,7 +358,17 @@ async fn many_identical_files_replaced_at_once_still_sync() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("first sync");
+    engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("first sync");
 
     // Swap the whole lot for a differently named set with the same contents,
     // exactly as postgres does when it rewrites relations under new
@@ -263,15 +380,39 @@ async fn many_identical_files_replaced_at_once_still_sync() {
         std::fs::write(src.path().join(format!("same_new_{i}")), b"identical body").unwrap();
     }
 
-    let stats = engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.expect("second sync must not die");
+    let stats = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("second sync must not die");
     assert!(tree_equal(src.path(), &dst_volume(&dst)));
 
     // Each source is claimed at most once, so renames never exceed the
     // number of files that actually went away.
-    assert!(stats.files_renamed <= 20, "a source was reused: {} renames", stats.files_renamed);
+    assert!(
+        stats.files_renamed <= 20,
+        "a source was reused: {} renames",
+        stats.files_renamed
+    );
 
     // And it settles: a third pass has nothing left to do.
-    let third = engine.sync(src.path(), addr, &volume_id(), 3, None, ProgressSink::none()).await.expect("third sync");
+    let third = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            3,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("third sync");
     assert_eq!(third.files_added, 0);
     assert_eq!(third.files_changed, 0);
     assert_eq!(third.files_removed, 0);
@@ -292,32 +433,63 @@ async fn a_rename_whose_source_is_missing_does_not_abort_the_sync() {
     let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let mut conn = transport::frame(stream);
 
-    transport::send(&mut conn, &Message::Hello { volume: volume_id(), generation: 1, staging: None })
-        .await
-        .expect("hello");
-    assert!(matches!(transport::recv(&mut conn).await.expect("ready"), Some(Message::Ready(_))));
+    transport::send(
+        &mut conn,
+        &Message::Hello {
+            volume: volume_id(),
+            generation: 1,
+            staging: None,
+        },
+    )
+    .await
+    .expect("hello");
+    assert!(matches!(
+        transport::recv(&mut conn).await.expect("ready"),
+        Some(Message::Ready(_))
+    ));
 
     let (uid, gid) = current_owner();
-    transport::send(&mut conn, &Message::Rename { from: "not_there".into(), to: "wherever".into(), mode: 0o644, uid, gid, mtime_nanos: 1_000_000_000 })
-        .await
-        .expect("rename");
+    transport::send(
+        &mut conn,
+        &Message::Rename {
+            from: "not_there".into(),
+            to: "wherever".into(),
+            mode: 0o644,
+            uid,
+            gid,
+            mtime_nanos: 1_000_000_000,
+        },
+    )
+    .await
+    .expect("rename");
     // The connection has to still be alive and complete the sync normally.
-    transport::send(&mut conn, &Message::WholeFile {
-        path: "after.txt".into(),
-        mode: 0o644,
-        uid,
-        gid,
-        mtime_nanos: 1_000_000_000,
-        is_symlink: false,
-        link_target: None,
-        data: b"still here".to_vec(),
-    })
+    transport::send(
+        &mut conn,
+        &Message::WholeFile {
+            path: "after.txt".into(),
+            mode: 0o644,
+            uid,
+            gid,
+            mtime_nanos: 1_000_000_000,
+            is_symlink: false,
+            link_target: None,
+            data: b"still here".to_vec(),
+        },
+    )
     .await
     .expect("whole file after a failed rename");
 
-    transport::send(&mut conn, &Message::Done).await.expect("done");
-    assert_eq!(transport::recv(&mut conn).await.expect("ack"), Some(Message::Ack(1)));
-    assert_eq!(std::fs::read(dst_volume(&dst).join("after.txt")).unwrap(), b"still here");
+    transport::send(&mut conn, &Message::Done)
+        .await
+        .expect("done");
+    assert_eq!(
+        transport::recv(&mut conn).await.expect("ack"),
+        Some(Message::Ack(1))
+    );
+    assert_eq!(
+        std::fs::read(dst_volume(&dst).join("after.txt")).unwrap(),
+        b"still here"
+    );
     let _ = src;
 }
 
@@ -333,9 +505,16 @@ async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
     let mut conn = cl_drive::transport::frame(stream);
     let volume = volume_id();
 
-    cl_drive::transport::send(&mut conn, &cl_drive::Message::Hello { volume: volume.clone(), generation: 1, staging: None })
-        .await
-        .unwrap();
+    cl_drive::transport::send(
+        &mut conn,
+        &cl_drive::Message::Hello {
+            volume: volume.clone(),
+            generation: 1,
+            staging: None,
+        },
+    )
+    .await
+    .unwrap();
     match cl_drive::transport::recv(&mut conn).await.unwrap() {
         Some(cl_drive::Message::Ready(_)) => {}
         other => panic!("expected ready, got {other:?}"),
@@ -366,12 +545,19 @@ async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
     drop(conn);
 
     let target = dst_volume(&dst).join("committed.bin");
-    assert_eq!(std::fs::read(&target).unwrap(), payload, "a fully framed message is applied whole");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        payload,
+        "a fully framed message is applied whole"
+    );
 
     // No stray temp file left dangling under the volume root.
     for entry in std::fs::read_dir(dst_volume(&dst)).unwrap() {
         let name = entry.unwrap().file_name();
-        assert!(!name.to_string_lossy().starts_with('.'), "leaked temp file: {name:?}");
+        assert!(
+            !name.to_string_lossy().starts_with('.'),
+            "leaked temp file: {name:?}"
+        );
     }
 }
 
@@ -398,11 +584,27 @@ async fn a_file_bigger_than_one_chunk_arrives_intact() {
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    let stats = engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("sync");
+    let stats = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("sync");
 
     assert_eq!(stats.files_added, 2);
-    assert_eq!(std::fs::read(dst_volume(&dst).join("big.bin")).unwrap(), content);
-    assert_eq!(std::fs::read(dst_volume(&dst).join("small.txt")).unwrap(), b"tail file");
+    assert_eq!(
+        std::fs::read(dst_volume(&dst).join("big.bin")).unwrap(),
+        content
+    );
+    assert_eq!(
+        std::fs::read(dst_volume(&dst).join("small.txt")).unwrap(),
+        b"tail file"
+    );
 }
 
 #[tokio::test]
@@ -411,26 +613,74 @@ async fn dir_and_root_permissions_replicate_and_a_later_drift_is_fixed() {
     let dst = tempfile::tempdir().unwrap();
 
     std::fs::create_dir(src.path().join("sub")).unwrap();
-    std::fs::set_permissions(src.path().join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        src.path().join("sub"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
     let engine = DeltaEngine::default();
-    engine.sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.expect("first sync");
+    engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("first sync");
 
     let dst_root = dst_volume(&dst);
-    assert_eq!(std::fs::metadata(&dst_root).unwrap().permissions().mode() & 0o7777, 0o750);
-    assert_eq!(std::fs::metadata(dst_root.join("sub")).unwrap().permissions().mode() & 0o7777, 0o700);
+    assert_eq!(
+        std::fs::metadata(&dst_root).unwrap().permissions().mode() & 0o7777,
+        0o750
+    );
+    assert_eq!(
+        std::fs::metadata(dst_root.join("sub"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o700
+    );
 
     // A permission fix applied on the source after the first sync — both the
     // root and an existing (not newly added) directory — has to propagate on
     // the next pass via `SetRootMeta`/`SetDirMeta`, not just at creation time.
-    std::fs::set_permissions(src.path().join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(
+        src.path().join("sub"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.expect("second sync");
+    engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("second sync");
 
-    assert_eq!(std::fs::metadata(&dst_root).unwrap().permissions().mode() & 0o7777, 0o755);
-    assert_eq!(std::fs::metadata(dst_root.join("sub")).unwrap().permissions().mode() & 0o7777, 0o755);
+    assert_eq!(
+        std::fs::metadata(&dst_root).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+    assert_eq!(
+        std::fs::metadata(dst_root.join("sub"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o755
+    );
 }
 
 /// A `staging: true` push must land even on a receiver whose registry does
@@ -470,18 +720,48 @@ async fn a_staging_push_lands_on_a_node_that_does_not_implement_the_drive() {
 
     let engine = DeltaEngine::default();
     let staging = Some(destination_path.to_string_lossy().into_owned());
-    let stats = engine.sync(src.path(), addr, &volume_id(), 1, staging, ProgressSink::none()).await.expect("staging sync");
+    let stats = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            staging,
+            ProgressSink::none(),
+        )
+        .await
+        .expect("staging sync");
     assert_eq!(stats.files_added, 1);
     assert_eq!(
-        std::fs::read(dst.path().join(".mydest-staging").join(DRIVE).join(VOLUME).join("a.txt")).unwrap(),
+        std::fs::read(
+            dst.path()
+                .join(".mydest-staging")
+                .join(DRIVE)
+                .join(VOLUME)
+                .join("a.txt")
+        )
+        .unwrap(),
         b"hello"
     );
 
     // The same receiver refuses a normal (non-staging) sync of a drive it
     // does not implement: `receive` errors out before ever sending `Ready`,
     // so the sender just sees the connection close.
-    let err = engine.sync(src.path(), addr, &volume_id(), 2, None, ProgressSink::none()).await.unwrap_err();
-    assert!(format!("{err}").contains("peer closed before ready"), "{err}");
+    let err = engine
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            2,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("peer closed before ready"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -493,11 +773,22 @@ async fn migrated_manifest_matches_after_verification_scan() {
     std::fs::write(src.path().join("a.txt"), b"content").unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    DeltaEngine::default().sync(src.path(), addr, &volume_id(), 1, None, ProgressSink::none()).await.unwrap();
+    DeltaEngine::default()
+        .sync(
+            src.path(),
+            addr,
+            &volume_id(),
+            1,
+            None,
+            ProgressSink::none(),
+        )
+        .await
+        .unwrap();
 
     let source_manifest = cl_drive::scan_volume(src.path(), true).unwrap();
-    let target_manifest =
-        cl_drive::transport::request_manifest(addr, &volume_id(), true).await.unwrap();
+    let target_manifest = cl_drive::transport::request_manifest(addr, &volume_id(), true)
+        .await
+        .unwrap();
     let diff = source_manifest.diff(&target_manifest);
     assert!(diff.added.is_empty() && diff.changed.is_empty() && diff.removed.is_empty());
 }

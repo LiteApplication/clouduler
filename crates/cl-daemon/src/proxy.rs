@@ -27,7 +27,9 @@ use cl_proxy::{
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request};
+use cl_raft::state::{
+    dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request,
+};
 use cl_secret::{ClusterKey, Sealed};
 use ipnet::IpNet;
 use tracing::{info, warn};
@@ -79,8 +81,12 @@ struct Desired {
 
 fn desired_of(cfg: &ClusterConfig) -> Desired {
     Desired {
-        listen: cfg.proxy.enabled.then_some((cfg.proxy.http_port, cfg.proxy.https_port)),
-        acme: acme_setup(cfg, Path::new("")).map(|a| (a.config.contact_emails, a.config.directory_url)),
+        listen: cfg
+            .proxy
+            .enabled
+            .then_some((cfg.proxy.http_port, cfg.proxy.https_port)),
+        acme: acme_setup(cfg, Path::new(""))
+            .map(|a| (a.config.contact_emails, a.config.directory_url)),
         dns: cfg.cloudflare.is_some(),
     }
 }
@@ -124,7 +130,9 @@ pub fn start(
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
         let mut listen = build_listen(&desired, &cluster, &config_rx, &key_rx, &health, &http01);
-        let mut acme = build_acme(&desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01);
+        let mut acme = build_acme(
+            &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
+        );
         let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
@@ -163,7 +171,9 @@ pub fn start(
                 if let Some(group) = acme.take() {
                     group.teardown();
                 }
-                acme = build_acme(&live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01);
+                acme = build_acme(
+                    &live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
+                );
             }
             if live.dns != desired.dns {
                 if let Some(group) = dns.take() {
@@ -175,7 +185,11 @@ pub fn start(
         }
     });
 
-    Proxy { supervisor, shutdown_tx, health }
+    Proxy {
+        supervisor,
+        shutdown_tx,
+        health,
+    }
 }
 
 /// The two listeners plus the routing table/certificate reconcile loop.
@@ -192,8 +206,17 @@ fn build_listen(
 
     let routes = Arc::new(RouteTable::default());
     let certs = Arc::new(CertStore::new());
-    let auth_gate = Arc::new(cl_proxy::AuthGate::new(config_rx.clone(), key_rx.clone(), cluster.clone()));
-    let server = Arc::new(cl_proxy::ProxyServer::full(routes.clone(), certs.clone(), Some(auth_gate), http01.clone()));
+    let auth_gate = Arc::new(cl_proxy::AuthGate::new(
+        config_rx.clone(),
+        key_rx.clone(),
+        cluster.clone(),
+    ));
+    let server = Arc::new(cl_proxy::ProxyServer::full(
+        routes.clone(),
+        certs.clone(),
+        Some(auth_gate),
+        http01.clone(),
+    ));
     let mut tasks = Vec::new();
 
     for (port, tls) in [(http_port, false), (https_port, true)] {
@@ -213,8 +236,17 @@ fn build_listen(
         info!(%addr, tls, "proxy listening");
     }
 
-    tasks.push(tokio::spawn(reconcile_loop(config_rx.clone(), cluster.clone(), routes.clone(), certs)));
-    tasks.push(tokio::spawn(cl_proxy::run_health_checks(routes, health.clone(), cl_proxy::HEALTH_CHECK_INTERVAL)));
+    tasks.push(tokio::spawn(reconcile_loop(
+        config_rx.clone(),
+        cluster.clone(),
+        routes.clone(),
+        certs,
+    )));
+    tasks.push(tokio::spawn(cl_proxy::run_health_checks(
+        routes,
+        health.clone(),
+        cl_proxy::HEALTH_CHECK_INTERVAL,
+    )));
 
     Some(Group { tasks })
 }
@@ -255,7 +287,11 @@ fn build_dns(
         return None;
     }
     Some(Group {
-        tasks: vec![tokio::spawn(run_dns_reconcile(cluster.clone(), config_rx.clone(), key_rx.clone()))],
+        tasks: vec![tokio::spawn(run_dns_reconcile(
+            cluster.clone(),
+            config_rx.clone(),
+            key_rx.clone(),
+        ))],
     })
 }
 
@@ -298,7 +334,10 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
     for placement in crate::placement::service_placements(state, cfg) {
         let instance = format!("{}.{}", placement.stack, placement.service);
         for entry in &placement.extensions.proxy {
-            let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
+            let domain = cfg
+                .networks
+                .get(&entry.network)
+                .and_then(|n| n.domain.as_deref());
             routes.push(
                 Route::new(
                     qualify(&entry.host, domain),
@@ -341,7 +380,10 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
         .rules
         .into_iter()
         .map(|rule| {
-            let domain = cfg.networks.get(&rule.network).and_then(|n| n.domain.as_deref());
+            let domain = cfg
+                .networks
+                .get(&rule.network)
+                .and_then(|n| n.domain.as_deref());
             Route::new(
                 qualify(&rule.host, domain),
                 rule.path_prefix.clone(),
@@ -415,7 +457,10 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
     let entries = StaticRouteStore::load(state).routes;
     let mut routes = Vec::with_capacity(entries.len());
     for entry in &entries {
-        let domain = cfg.networks.get(&entry.network).and_then(|n| n.domain.as_deref());
+        let domain = cfg
+            .networks
+            .get(&entry.network)
+            .and_then(|n| n.domain.as_deref());
         let backends = match tokio::net::lookup_host(&entry.backend).await {
             Ok(addrs) => addrs.collect(),
             Err(e) => {
@@ -824,7 +869,10 @@ async fn run_dns_reconcile(
 /// every node's address for it lets a client's write land on a follower,
 /// which can only 503 and point elsewhere. `desired_records` gives that
 /// hostname the leader's address alone.
-pub fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<(String, String), BTreeSet<String>> {
+pub fn desired_dns_hosts(
+    cfg: &ClusterConfig,
+    state: &ClusterState,
+) -> BTreeMap<(String, String), BTreeSet<String>> {
     let mut hosts: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let all_nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
     let owning_node_only = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
@@ -836,14 +884,23 @@ pub fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<
             all_nodes.clone()
         };
         for entry in &placement.extensions.proxy {
-            hosts.entry((entry.host.clone(), entry.network.clone())).or_default().extend(nodes.clone());
+            hosts
+                .entry((entry.host.clone(), entry.network.clone()))
+                .or_default()
+                .extend(nodes.clone());
         }
     }
     for entry in StaticRouteStore::load(state).routes {
-        hosts.entry((entry.host, entry.network)).or_default().extend(all_nodes.clone());
+        hosts
+            .entry((entry.host, entry.network))
+            .or_default()
+            .extend(all_nodes.clone());
     }
     for rule in RedirectStore::load(state).rules {
-        hosts.entry((rule.host, rule.network)).or_default().extend(all_nodes.clone());
+        hosts
+            .entry((rule.host, rule.network))
+            .or_default()
+            .extend(all_nodes.clone());
     }
     hosts
 }
@@ -851,16 +908,25 @@ pub fn desired_dns_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<
 /// The config node matching a raft leader id, if it is known and still in the
 /// config. `None` when leadership is unsettled, in which case the caller
 /// publishes nothing for the leader-only web hostname rather than guess.
-fn leader_node(cfg: &ClusterConfig, leader_id: Option<cl_raft::NodeId>) -> Option<&cl_config::Node> {
+fn leader_node(
+    cfg: &ClusterConfig,
+    leader_id: Option<cl_raft::NodeId>,
+) -> Option<&cl_config::Node> {
     let leader_id = leader_id?;
-    cfg.nodes.values().find(|node| cl_raft::node_id(node.id) == leader_id)
+    cfg.nodes
+        .values()
+        .find(|node| cl_raft::node_id(node.id) == leader_id)
 }
 
 /// Resolves `desired_dns_hosts` against every node, deduplicated, plus the
 /// web ui hostname against the leader alone. A node with no address on a
 /// given hostname's network is skipped rather than failing the whole pass: a
 /// private network only some nodes sit on is normal.
-fn desired_records(cfg: &ClusterConfig, leader_id: Option<cl_raft::NodeId>, state: &ClusterState) -> Vec<DesiredRecord> {
+fn desired_records(
+    cfg: &ClusterConfig,
+    leader_id: Option<cl_raft::NodeId>,
+    state: &ClusterState,
+) -> Vec<DesiredRecord> {
     let mut out: Vec<DesiredRecord> = Vec::new();
     let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
 
@@ -887,9 +953,17 @@ fn desired_records(cfg: &ClusterConfig, leader_id: Option<cl_raft::NodeId>, stat
 /// Appends `records` to `out`, skipping any already seen by (type, fqdn,
 /// content) - the same hostname/network combination can turn up more than
 /// once (a stack route and a static route sharing a host, say).
-fn push_new(out: &mut Vec<DesiredRecord>, seen: &mut BTreeSet<(String, String, String)>, records: Vec<DesiredRecord>) {
+fn push_new(
+    out: &mut Vec<DesiredRecord>,
+    seen: &mut BTreeSet<(String, String, String)>,
+    records: Vec<DesiredRecord>,
+) {
     for record in records {
-        let key = (format!("{:?}", record.kind), record.fqdn.clone(), record.content.clone());
+        let key = (
+            format!("{:?}", record.kind),
+            record.fqdn.clone(),
+            record.content.clone(),
+        );
         if seen.insert(key) {
             out.push(record);
         }
@@ -899,12 +973,23 @@ fn push_new(out: &mut Vec<DesiredRecord>, seen: &mut BTreeSet<(String, String, S
 /// One reconcile pass: computes desired records, groups them by the
 /// Cloudflare zone that covers each fqdn, and converges each zone's live
 /// records to match. Failures on one zone don't stop the others.
-async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Cloudflare, zones: &Zones, state: &ClusterState) {
-    let mut by_zone: std::collections::HashMap<(String, String), Vec<DesiredRecord>> = std::collections::HashMap::new();
+async fn reconcile_dns(
+    cfg: &ClusterConfig,
+    cluster: &Arc<ClusterNode>,
+    cf: &Cloudflare,
+    zones: &Zones,
+    state: &ClusterState,
+) {
+    let mut by_zone: std::collections::HashMap<(String, String), Vec<DesiredRecord>> =
+        std::collections::HashMap::new();
     for record in desired_records(cfg, cluster.quorum().leader(), state) {
         let Some(zone_id) = zones.zone_id_for(&record.fqdn) else {
             warn!(fqdn = %record.fqdn, "no cloudflare zone covers this name, not publishing a dns record");
-            if !state.dns_records.contains_key(&dns_key(&record.fqdn, &format!("{:?}", record.kind), &record.content)) {
+            if !state.dns_records.contains_key(&dns_key(
+                &record.fqdn,
+                &format!("{:?}", record.kind),
+                &record.content,
+            )) {
                 set_dns_status(
                     cluster,
                     &record.fqdn,
@@ -923,20 +1008,36 @@ async fn reconcile_dns(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>, cf: &Clo
             .find(|(_, id)| id == &zone_id)
             .map(|(name, _)| name.clone())
             .unwrap_or_default();
-        by_zone.entry((zone_id, zone_name)).or_default().push(record);
+        by_zone
+            .entry((zone_id, zone_name))
+            .or_default()
+            .push(record);
     }
 
     for ((zone_id, zone_name), desired) in by_zone {
         // Mark anything not live yet as pending before the round trip, so the
         // ui has something to show while cloudflare is being talked to.
         for record in &desired {
-            if !state.dns_records.contains_key(&dns_key(&record.fqdn, &format!("{:?}", record.kind), &record.content))
-                && state.dns_status.get(&record.fqdn) != Some(&ReconcileStatus::Pending)
+            if !state.dns_records.contains_key(&dns_key(
+                &record.fqdn,
+                &format!("{:?}", record.kind),
+                &record.content,
+            )) && state.dns_status.get(&record.fqdn) != Some(&ReconcileStatus::Pending)
             {
                 set_dns_status(cluster, &record.fqdn, ReconcileStatus::Pending).await;
             }
         }
-        if let Err(e) = reconcile_zone(cluster, &cfg.cluster.name, cf, &zone_id, &zone_name, desired.clone(), state).await {
+        if let Err(e) = reconcile_zone(
+            cluster,
+            &cfg.cluster.name,
+            cf,
+            &zone_id,
+            &zone_name,
+            desired.clone(),
+            state,
+        )
+        .await
+        {
             warn!(zone = %zone_name, error = %e, "dns reconcile failed for this zone");
             // Attribute the failure to the specific hostname(s) it names, not
             // every hostname sharing this zone: a collision on one stack's
@@ -993,7 +1094,11 @@ async fn reconcile_zone(
         let record_type = format!("{:?}", record.kind);
         let provider_id = live
             .iter()
-            .find(|r| r.name == record.fqdn && format!("{:?}", r.kind) == record_type && r.content == record.content)
+            .find(|r| {
+                r.name == record.fqdn
+                    && format!("{:?}", r.kind) == record_type
+                    && r.content == record.content
+            })
             .and_then(|r| r.id.clone());
         // No live match after a (possibly partial) apply means this record's
         // create/update actually failed - recording it as published anyway
@@ -1020,7 +1125,10 @@ async fn reconcile_zone(
 
     for (key, existing) in &state.dns_records {
         if existing.zone == zone_name && !want_keys.contains(key) {
-            if let Err(e) = cluster.submit(Request::RemoveDnsRecord { key: key.clone() }).await {
+            if let Err(e) = cluster
+                .submit(Request::RemoveDnsRecord { key: key.clone() })
+                .await
+            {
                 warn!(%key, error = %e, "could not remove the stale dns entry");
             }
         }
@@ -1035,7 +1143,8 @@ mod tests {
     use crate::placement::fixtures::{state_with, SPEC};
 
     fn cfg() -> ClusterConfig {
-        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml"))
+            .expect("example parses")
     }
 
     /// `desired_of` is what the supervisor diffs on every pass to decide
@@ -1107,7 +1216,10 @@ mod tests {
         // "default" - SPEC's stack network - so it can never resolve a
         // backend address for it. `placement::fixtures::cluster_config`
         // declares "default" as the internal network SPEC actually needs.
-        let routes = service_routes(&crate::placement::fixtures::cluster_config(), &state_with(SPEC, 2));
+        let routes = service_routes(
+            &crate::placement::fixtures::cluster_config(),
+            &state_with(SPEC, 2),
+        );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].backends().len(), 2);
         assert_eq!(routes[0].backends()[0].port(), 80);
@@ -1156,7 +1268,11 @@ mod tests {
         let backend = route.backends()[0];
         assert!(backend.ip().is_loopback(), "{backend}");
         assert_eq!(backend.port(), cfg.web.backend_port);
-        assert_ne!(backend.port(), cfg.web.port, "must not point at the tls listener");
+        assert_ne!(
+            backend.port(),
+            cfg.web.port,
+            "must not point at the tls listener"
+        );
     }
 
     /// The api derives its OIDC redirect from the request, and the event
@@ -1252,7 +1368,10 @@ services:
           port: 80
 ";
         let routes = service_routes(&cfg(), &state_with(LAN_SPEC, 1));
-        let subnet = routes[0].options.allowed_subnet.expect("private network is gated");
+        let subnet = routes[0]
+            .options
+            .allowed_subnet
+            .expect("private network is gated");
         assert!(subnet.contains(&std::net::IpAddr::from([192, 168, 1, 50])));
         assert!(!subnet.contains(&std::net::IpAddr::from([8, 8, 8, 8])));
     }
@@ -1299,7 +1418,11 @@ services:
         assert!(route.tls);
     }
 
-    fn static_route(host: &str, network: &str, backend: &str) -> cl_api::static_routes::StaticRouteRule {
+    fn static_route(
+        host: &str,
+        network: &str,
+        backend: &str,
+    ) -> cl_api::static_routes::StaticRouteRule {
         cl_api::static_routes::StaticRouteRule {
             id: "s1".into(),
             host: host.into(),
@@ -1315,7 +1438,10 @@ services:
         }
     }
 
-    fn with_static_routes(mut state: ClusterState, routes: Vec<cl_api::static_routes::StaticRouteRule>) -> ClusterState {
+    fn with_static_routes(
+        mut state: ClusterState,
+        routes: Vec<cl_api::static_routes::StaticRouteRule>,
+    ) -> ClusterState {
         let store = cl_api::static_routes::StaticRouteStore { routes };
         state.configs.insert(
             cl_api::static_routes::STATIC_ROUTES_CONFIG.to_string(),
@@ -1332,12 +1458,18 @@ services:
     #[tokio::test]
     async fn a_static_route_resolves_its_backend_and_is_gated() {
         let cfg = cfg();
-        let state = with_static_routes(state_with(SPEC, 0), vec![static_route("files", "lan", "127.0.0.1:9999")]);
+        let state = with_static_routes(
+            state_with(SPEC, 0),
+            vec![static_route("files", "lan", "127.0.0.1:9999")],
+        );
 
         let routes = static_backend_routes(&cfg, &state).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].host, "files.lan.example.com");
-        assert_eq!(routes[0].backends(), &[SocketAddr::from(([127, 0, 0, 1], 9999))]);
+        assert_eq!(
+            routes[0].backends(),
+            &[SocketAddr::from(([127, 0, 0, 1], 9999))]
+        );
         assert!(routes[0].options.allowed_subnet.is_some());
     }
 
@@ -1346,7 +1478,11 @@ services:
         let cfg = cfg();
         let state = with_static_routes(
             state_with(SPEC, 1),
-            vec![static_route("files", "wan", "does-not-resolve.invalid:9999")],
+            vec![static_route(
+                "files",
+                "wan",
+                "does-not-resolve.invalid:9999",
+            )],
         );
         let hosts = tls_hosts(&cfg, &state);
         assert!(hosts.contains_key("files.example.com"));
@@ -1363,8 +1499,10 @@ services:
 
     #[test]
     fn desired_dns_hosts_includes_static_routes_and_redirects() {
-        let mut state =
-            with_static_routes(state_with(SPEC, 0), vec![static_route("printer", "lan", "192.168.1.50:9100")]);
+        let mut state = with_static_routes(
+            state_with(SPEC, 0),
+            vec![static_route("printer", "lan", "192.168.1.50:9100")],
+        );
         let store = cl_api::redirects::RedirectStore {
             rules: vec![cl_api::redirects::RedirectRule {
                 id: "r1".into(),
@@ -1396,7 +1534,10 @@ services:
     #[test]
     fn desired_records_publish_every_nodes_address_for_proxied_routes() {
         let records = desired_records(&cfg(), None, &state_with(SPEC, 1));
-        let blog: Vec<_> = records.iter().filter(|r| r.fqdn == "blog.example.com").collect();
+        let blog: Vec<_> = records
+            .iter()
+            .filter(|r| r.fqdn == "blog.example.com")
+            .collect();
         assert_eq!(blog.len(), cfg().nodes.len(), "{blog:?}");
     }
 
@@ -1409,11 +1550,18 @@ services:
         cfg.proxy.dns_publish = cl_config::DnsPublishMode::OwningNode;
 
         let records = desired_records(&cfg, None, &state_with(SPEC, 1));
-        let blog: Vec<_> = records.iter().filter(|r| r.fqdn == "blog.example.com").collect();
+        let blog: Vec<_> = records
+            .iter()
+            .filter(|r| r.fqdn == "blog.example.com")
+            .collect();
         // n1 (the only node running the container) publishes both its ipv4
         // and ipv6 address; n2's cname must not appear.
         assert_eq!(blog.len(), 2, "{blog:?}");
-        assert!(blog.iter().all(|r| r.content == "203.0.113.5" || r.content == "2001:db8::5"), "{blog:?}");
+        assert!(
+            blog.iter()
+                .all(|r| r.content == "203.0.113.5" || r.content == "2001:db8::5"),
+            "{blog:?}"
+        );
     }
 
     /// A static route is not backed by a container, so `OwningNode` mode
@@ -1422,10 +1570,16 @@ services:
     fn owning_node_mode_still_publishes_static_routes_on_every_node() {
         let mut cfg = cfg();
         cfg.proxy.dns_publish = cl_config::DnsPublishMode::OwningNode;
-        let state = with_static_routes(state_with(SPEC, 0), vec![static_route("printer", "wan", "192.168.1.50:9100")]);
+        let state = with_static_routes(
+            state_with(SPEC, 0),
+            vec![static_route("printer", "wan", "192.168.1.50:9100")],
+        );
 
         let records = desired_records(&cfg, None, &state);
-        let printer: Vec<_> = records.iter().filter(|r| r.fqdn == "printer.example.com").collect();
+        let printer: Vec<_> = records
+            .iter()
+            .filter(|r| r.fqdn == "printer.example.com")
+            .collect();
         assert_eq!(printer.len(), cfg.nodes.len(), "{printer:?}");
     }
 
@@ -1438,7 +1592,10 @@ services:
         let leader_id = cl_raft::node_id(leader.id);
 
         let records = desired_records(&cfg, Some(leader_id), &state_with(SPEC, 1));
-        let dashboard: Vec<_> = records.iter().filter(|r| r.fqdn == "cloud.int.example.com").collect();
+        let dashboard: Vec<_> = records
+            .iter()
+            .filter(|r| r.fqdn == "cloud.int.example.com")
+            .collect();
         assert_eq!(dashboard.len(), 1, "{dashboard:?}");
         assert_eq!(dashboard[0].content, "10.10.0.1");
     }
@@ -1459,8 +1616,14 @@ services:
                 ("int.example.com".into(), "child".into()),
             ],
         };
-        assert_eq!(zones.zone_id_for("a.int.example.com").as_deref(), Some("child"));
-        assert_eq!(zones.zone_id_for("a.example.com").as_deref(), Some("parent"));
+        assert_eq!(
+            zones.zone_id_for("a.int.example.com").as_deref(),
+            Some("child")
+        );
+        assert_eq!(
+            zones.zone_id_for("a.example.com").as_deref(),
+            Some("parent")
+        );
         assert_eq!(zones.zone_id_for("example.org"), None);
     }
 }

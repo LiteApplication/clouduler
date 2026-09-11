@@ -286,6 +286,7 @@ GET    /api/git-backup/webhook-secret               read    whether a webhook to
 PUT    /api/git-backup/webhook-secret               { "token": "..." } set/replace the webhook token
 POST   /api/git-backup/webhook/:token               git host -> cluster: trigger a pull, token in the url
 POST   /api/git-backup/pull                         internal auth: same pull, for `clouduler git-backup pull`
+POST   /api/git-backup/reconcile                    internal auth: reconcile git repo from Raft, for `clouduler git-backup reconcile`
 ```
 
 The `backup:` fields themselves (repo url, age recipient, branch) go

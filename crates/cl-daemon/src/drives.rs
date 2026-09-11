@@ -63,7 +63,10 @@ struct Topology {
 }
 
 fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
-    let drives = cfg.node(node_name).map(|n| n.drives.clone()).unwrap_or_default();
+    let drives = cfg
+        .node(node_name)
+        .map(|n| n.drives.clone())
+        .unwrap_or_default();
     let served_by = cfg
         .drives
         .iter()
@@ -215,7 +218,11 @@ pub fn start(
         })
     };
 
-    Drives { supervisor, shutdown_tx, registry }
+    Drives {
+        supervisor,
+        shutdown_tx,
+        registry,
+    }
 }
 
 /// Build every task and mount this node's current drive topology calls for,
@@ -253,7 +260,8 @@ async fn build(
         // `start_volume_mounts`, not a directory this node owns.
         for (name, path) in &node.drives {
             let is_served = cfg.drives.get(name).is_some_and(|d| d.is_served());
-            let is_mount_only = is_served && !cfg.drives[name].served_by.iter().any(|s| s == node_name);
+            let is_mount_only =
+                is_served && !cfg.drives[name].served_by.iter().any(|s| s == node_name);
             if is_mount_only {
                 continue;
             }
@@ -289,8 +297,14 @@ async fn build(
                 }
             }));
 
-            let scheduler = SyncScheduler::new(cluster.clone(), registry.clone(), Arc::new(DeltaEngine::default()));
-            let intervals = DriveIntervals { config_rx: config_rx.clone() };
+            let scheduler = SyncScheduler::new(
+                cluster.clone(),
+                registry.clone(),
+                Arc::new(DeltaEngine::default()),
+            );
+            let intervals = DriveIntervals {
+                config_rx: config_rx.clone(),
+            };
             running.tasks.push(tokio::spawn(async move {
                 scheduler.run(&intervals).await;
             }));
@@ -302,7 +316,9 @@ async fn build(
             .drives
             .iter()
             .filter(|(name, drive)| {
-                drive.is_served() && node.implements(name) && drive.served_by.iter().any(|s| s == node_name)
+                drive.is_served()
+                    && node.implements(name)
+                    && drive.served_by.iter().any(|s| s == node_name)
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -310,7 +326,8 @@ async fn build(
             let watch_cluster = cluster.clone();
             let watch_registry = registry.clone();
             running.tasks.push(tokio::spawn(async move {
-                ensure_served_volume_directories(watch_cluster, watch_registry, served_drive_names).await;
+                ensure_served_volume_directories(watch_cluster, watch_registry, served_drive_names)
+                    .await;
             }));
         }
     }
@@ -333,10 +350,9 @@ async fn build(
 fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(PathBuf, String)> {
     let mut exported = Vec::new();
 
-    let serves_something = cfg
-        .drives
-        .iter()
-        .any(|(name, drive)| drive.is_served() && node.implements(name) && drive.served_by.iter().any(|s| s == node_name));
+    let serves_something = cfg.drives.iter().any(|(name, drive)| {
+        drive.is_served() && node.implements(name) && drive.served_by.iter().any(|s| s == node_name)
+    });
     if !serves_something {
         return exported;
     }
@@ -354,7 +370,10 @@ fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(Pat
     let subnet = subnet.to_string();
 
     for (name, drive) in &cfg.drives {
-        if !drive.is_served() || !node.implements(name) || !drive.served_by.iter().any(|s| s == node_name) {
+        if !drive.is_served()
+            || !node.implements(name)
+            || !drive.served_by.iter().any(|s| s == node_name)
+        {
             continue;
         }
         let root = node.drives[name].clone();
@@ -382,7 +401,11 @@ fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(Pat
 /// not just the active server, so a directory a failover promotes into
 /// service is already there instead of surfacing as a mount error the
 /// moment it takes over.
-async fn ensure_served_volume_directories(cluster: Arc<ClusterNode>, registry: Arc<DriveRegistry>, drives: Vec<String>) {
+async fn ensure_served_volume_directories(
+    cluster: Arc<ClusterNode>,
+    registry: Arc<DriveRegistry>,
+    drives: Vec<String>,
+) {
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
     loop {
         ticker.tick().await;
@@ -395,7 +418,9 @@ async fn ensure_served_volume_directories(cluster: Arc<ClusterNode>, registry: A
             match registry.ensure_volume(id) {
                 Ok(_) if !already_there => info!(%id, "created served drive volume directory"),
                 Ok(_) => {}
-                Err(e) => warn!(%id, error = %e, "could not create a served drive volume's directory"),
+                Err(e) => {
+                    warn!(%id, error = %e, "could not create a served drive volume's directory")
+                }
             }
         }
     }
@@ -451,13 +476,22 @@ fn start_volume_mounts(
                 warn!(drive = %name, server = %server_name, "serving candidate does not declare a local path for this drive");
                 continue;
             };
-            candidates.insert(server_name.clone(), (SocketAddr::new(server_ip, cl_drive::NFS_PORT), root.clone()));
+            candidates.insert(
+                server_name.clone(),
+                (SocketAddr::new(server_ip, cl_drive::NFS_PORT), root.clone()),
+            );
         }
         if candidates.is_empty() {
             warn!(drive = %name, "none of this drive's serving candidates could be resolved");
             continue;
         }
-        served_drives.insert(name.clone(), ServedDriveInfo { served_by: drive.served_by.clone(), candidates });
+        served_drives.insert(
+            name.clone(),
+            ServedDriveInfo {
+                served_by: drive.served_by.clone(),
+                candidates,
+            },
+        );
     }
 
     if served_drives.is_empty() {
@@ -500,7 +534,14 @@ fn start_volume_mounts(
     let watch_node = node_name.to_string();
     let watch_manager = manager.clone();
     running.tasks.push(tokio::spawn(async move {
-        watch_volume_mounts(watch_cluster, watch_node, data_dir, served_drives, watch_manager).await;
+        watch_volume_mounts(
+            watch_cluster,
+            watch_node,
+            data_dir,
+            served_drives,
+            watch_manager,
+        )
+        .await;
     }));
     running.tasks.push(tokio::spawn(async move {
         manager.supervise(Duration::from_secs(30)).await;
@@ -541,13 +582,18 @@ async fn watch_volume_mounts(
                 continue;
             };
             for mount in &service.volumes {
-                let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) else {
+                let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref())
+                else {
                     continue;
                 };
                 let Some(info) = served_drives.get(drive) else {
                     continue;
                 };
-                let Some(active) = info.served_by.iter().map(String::as_str).find(|n| !state.unreachable.contains(*n))
+                let Some(active) = info
+                    .served_by
+                    .iter()
+                    .map(String::as_str)
+                    .find(|n| !state.unreachable.contains(*n))
                 else {
                     // No reachable server for this drive right now; nothing
                     // useful to mount against.
@@ -646,7 +692,9 @@ web: { address: cloud, network: internal }
     }
 
     fn intervals(cfg: ClusterConfig) -> DriveIntervals {
-        DriveIntervals { config_rx: tokio::sync::watch::channel(Arc::new(cfg)).1 }
+        DriveIntervals {
+            config_rx: tokio::sync::watch::channel(Arc::new(cfg)).1,
+        }
     }
 
     #[test]
@@ -675,13 +723,19 @@ web: { address: cloud, network: internal }
     fn a_config_update_changes_the_interval_without_rebuilding_anything() {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(config()));
         let intervals = DriveIntervals { config_rx: rx };
-        assert_eq!(intervals.interval_for(&VolumeId::new("fast", "data")), Duration::from_secs(30));
+        assert_eq!(
+            intervals.interval_for(&VolumeId::new("fast", "data")),
+            Duration::from_secs(30)
+        );
 
         let mut edited = config();
         edited.drives.get_mut("fast").unwrap().sync_interval = Duration::from_secs(5);
         tx.send(Arc::new(edited)).unwrap();
 
-        assert_eq!(intervals.interval_for(&VolumeId::new("fast", "data")), Duration::from_secs(5));
+        assert_eq!(
+            intervals.interval_for(&VolumeId::new("fast", "data")),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
@@ -694,7 +748,12 @@ web: { address: cloud, network: internal }
     #[test]
     fn topology_changes_when_this_nodes_drive_set_changes() {
         let mut added = config();
-        added.nodes.get_mut("n1").unwrap().drives.insert("new".to_string(), "/srv/new".into());
+        added
+            .nodes
+            .get_mut("n1")
+            .unwrap()
+            .drives
+            .insert("new".to_string(), "/srv/new".into());
         assert_ne!(topology_of(&config(), "n1"), topology_of(&added, "n1"));
     }
 }

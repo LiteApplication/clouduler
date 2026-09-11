@@ -121,7 +121,10 @@ fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str)
     let digests = info.repo_digests.as_ref()?;
     digests
         .iter()
-        .find(|d| d.split_once('@').is_some_and(|(repo, _)| repo == repository))
+        .find(|d| {
+            d.split_once('@')
+                .is_some_and(|(repo, _)| repo == repository)
+        })
         .or_else(|| digests.first())
         .and_then(|d| d.split_once('@'))
         .map(|(_, digest)| digest.to_string())
@@ -156,8 +159,14 @@ impl Docker {
     /// anonymous, and passing credentials for a registry the image does not
     /// come from is worse than passing none: docker forwards them to whatever
     /// host the reference names.
-    pub async fn pull_as(&self, image: &str, credentials: Option<&RegistryCredentials>) -> Result<String> {
-        let options = CreateImageOptionsBuilder::new().from_image(&pull_reference(image)).build();
+    pub async fn pull_as(
+        &self,
+        image: &str,
+        credentials: Option<&RegistryCredentials>,
+    ) -> Result<String> {
+        let options = CreateImageOptionsBuilder::new()
+            .from_image(&pull_reference(image))
+            .build();
         let mut stream = self
             .inner
             .create_image(Some(options), None, credentials.map(Into::into));
@@ -190,7 +199,11 @@ impl Docker {
     /// now: the tag has usually moved on, which is the whole point of asking.
     /// A container's `image_digest` is a local image id, so this is the only
     /// way back to a registry content digest for it.
-    pub async fn digest_of_image(&self, image_id: &str, repository: &str) -> Result<Option<String>> {
+    pub async fn digest_of_image(
+        &self,
+        image_id: &str,
+        repository: &str,
+    ) -> Result<Option<String>> {
         match self.inner.inspect_image(image_id).await {
             Ok(info) => Ok(digest_for_repository(&info, repository)),
             Err(e) => match classify(e) {
@@ -296,7 +309,10 @@ mod tests {
     #[test]
     fn pull_reference_leaves_a_tagged_or_digested_image_alone() {
         assert_eq!(pull_reference("nginx:1.25"), "nginx:1.25");
-        assert_eq!(pull_reference("nginx@sha256:deadbeef"), "nginx@sha256:deadbeef");
+        assert_eq!(
+            pull_reference("nginx@sha256:deadbeef"),
+            "nginx@sha256:deadbeef"
+        );
         assert_eq!(pull_reference("nginx:latest"), "nginx:latest");
     }
 
@@ -339,7 +355,10 @@ mod tests {
             ]),
             ..Default::default()
         };
-        assert_eq!(digest_for_repository(&info, "nginx"), Some("sha256:hub".to_string()));
+        assert_eq!(
+            digest_for_repository(&info, "nginx"),
+            Some("sha256:hub".to_string())
+        );
     }
 
     #[test]
@@ -348,7 +367,10 @@ mod tests {
             repo_digests: Some(vec!["nginx@sha256:abc".to_string()]),
             ..Default::default()
         };
-        assert_eq!(digest_for_repository(&info, "somewhere/else"), Some("sha256:abc".to_string()));
+        assert_eq!(
+            digest_for_repository(&info, "somewhere/else"),
+            Some("sha256:abc".to_string())
+        );
     }
 
     #[test]
@@ -359,8 +381,14 @@ mod tests {
 
     #[test]
     fn a_host_like_first_segment_is_the_registry() {
-        assert_eq!(ImageRef::parse("git.example.com/team/app:1.0").registry(), "git.example.com");
-        assert_eq!(ImageRef::parse("registry.local:5000/app").registry(), "registry.local:5000");
+        assert_eq!(
+            ImageRef::parse("git.example.com/team/app:1.0").registry(),
+            "git.example.com"
+        );
+        assert_eq!(
+            ImageRef::parse("registry.local:5000/app").registry(),
+            "registry.local:5000"
+        );
         assert_eq!(ImageRef::parse("localhost/app").registry(), "localhost");
     }
 }

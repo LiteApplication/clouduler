@@ -645,7 +645,10 @@ mod tests {
 
         let body = spec.to_create_body();
         assert_eq!(
-            body.host_config.expect("host config").network_mode.as_deref(),
+            body.host_config
+                .expect("host config")
+                .network_mode
+                .as_deref(),
             Some("blog_default")
         );
     }
@@ -849,7 +852,10 @@ mod tests {
         });
         let body = spec.to_create_body();
         let tmpfs = body.host_config.unwrap().tmpfs.expect("tmpfs set");
-        assert_eq!(tmpfs.get("/cache").map(String::as_str), Some("size=67108864"));
+        assert_eq!(
+            tmpfs.get("/cache").map(String::as_str),
+            Some("size=67108864")
+        );
         assert_eq!(tmpfs.get("/scratch").map(String::as_str), Some("ro"));
     }
 

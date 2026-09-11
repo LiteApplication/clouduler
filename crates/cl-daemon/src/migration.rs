@@ -129,7 +129,10 @@ pub fn start(
                 let node_name = node_name.clone();
                 let instance = job.instance.clone();
                 tokio::spawn(async move {
-                    let control = DockerControl { node: node_name, docker };
+                    let control = DockerControl {
+                        node: node_name,
+                        docker,
+                    };
                     let migration = MigrationJob {
                         instance: job.instance,
                         source_node: job.source_node,

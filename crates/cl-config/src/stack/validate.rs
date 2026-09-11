@@ -43,7 +43,9 @@ impl StackFile {
 
     fn validate_colocate(&self) -> Result<()> {
         for (name, svc) in &self.services {
-            let Some(ext) = &svc.x_clouduler else { continue };
+            let Some(ext) = &svc.x_clouduler else {
+                continue;
+            };
             for other in &ext.colocate {
                 if other == name {
                     return Err(ConfigError::invalid(
@@ -64,11 +66,12 @@ impl StackFile {
 
     fn validate_stop_signals(&self) -> Result<()> {
         for (name, svc) in &self.services {
-            let Some(signal) = &svc.stop_signal else { continue };
-            let valid = signal
-                .strip_prefix("SIG")
-                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_uppercase()))
-                || (!signal.is_empty() && signal.chars().all(|c| c.is_ascii_digit()));
+            let Some(signal) = &svc.stop_signal else {
+                continue;
+            };
+            let valid = signal.strip_prefix("SIG").is_some_and(|rest| {
+                !rest.is_empty() && rest.chars().all(|c| c.is_ascii_uppercase())
+            }) || (!signal.is_empty() && signal.chars().all(|c| c.is_ascii_digit()));
             if !valid {
                 return Err(ConfigError::invalid(
                     format!("services.{name}.stop_signal"),
@@ -139,13 +142,18 @@ impl StackFile {
 
         for (name, svc) in &self.services {
             for (idx, port) in svc.ports.iter().enumerate() {
-                let Some(published) = port.published else { continue };
+                let Some(published) = port.published else {
+                    continue;
+                };
                 for p in published.start..=published.end {
                     let at = format!("services.{name}.ports[{idx}]");
                     if let Some(existing) = seen.insert((port.protocol, p), at.clone()) {
                         return Err(ConfigError::invalid(
                             at,
-                            format!("port {p}/{} is already published by {existing}", port.protocol),
+                            format!(
+                                "port {p}/{} is already published by {existing}",
+                                port.protocol
+                            ),
                         ));
                     }
                 }
@@ -153,7 +161,9 @@ impl StackFile {
             if let Some(ext) = &svc.x_clouduler {
                 for (idx, expose) in ext.expose.iter().enumerate() {
                     let at = format!("services.{name}.x-clouduler.expose[{idx}]");
-                    if let Some(existing) = seen.insert((expose.protocol, expose.published), at.clone()) {
+                    if let Some(existing) =
+                        seen.insert((expose.protocol, expose.published), at.clone())
+                    {
                         return Err(ConfigError::invalid(
                             at,
                             format!(
@@ -209,7 +219,9 @@ impl StackFile {
                 if !cluster.nodes.values().any(|n| n.network.contains_key(net)) {
                     return Err(ConfigError::invalid(
                         format!("services.{name}.networks"),
-                        format!("no node implements network {net}, this service could never be placed"),
+                        format!(
+                            "no node implements network {net}, this service could never be placed"
+                        ),
                     ));
                 }
             }
@@ -245,7 +257,9 @@ impl StackFile {
     fn validate_whole_drive_mounts(&self, cluster: &ClusterConfig) -> Result<()> {
         for (name, svc) in &self.services {
             for (idx, vol) in svc.volumes.iter().enumerate() {
-                let (Some(drive), Some(volume)) = (&vol.drive, &vol.volume) else { continue };
+                let (Some(drive), Some(volume)) = (&vol.drive, &vol.volume) else {
+                    continue;
+                };
                 if volume != "." {
                     continue;
                 }
@@ -289,7 +303,9 @@ impl StackFile {
 
     fn validate_proxy_expose_networks(&self, cluster: &ClusterConfig) -> Result<()> {
         for (name, svc) in &self.services {
-            let Some(ext) = &svc.x_clouduler else { continue };
+            let Some(ext) = &svc.x_clouduler else {
+                continue;
+            };
             for (idx, route) in ext.proxy.iter().enumerate() {
                 let at = format!("services.{name}.x-clouduler.proxy[{idx}]");
                 let Some(net) = cluster.networks.get(&route.network) else {
@@ -301,7 +317,10 @@ impl StackFile {
                 if net.domain.is_none() {
                     return Err(ConfigError::invalid(
                         format!("{at}.network"),
-                        format!("network {} has no domain, so it cannot serve an HTTP route", route.network),
+                        format!(
+                            "network {} has no domain, so it cannot serve an HTTP route",
+                            route.network
+                        ),
                     ));
                 }
                 for cors in route.middlewares.iter().filter_map(|m| match m {
@@ -321,7 +340,10 @@ impl StackFile {
                 let Some(net) = cluster.networks.get(&expose.network) else {
                     return Err(ConfigError::invalid(
                         format!("{at}.network"),
-                        format!("no network named {} declared in the cluster", expose.network),
+                        format!(
+                            "no network named {} declared in the cluster",
+                            expose.network
+                        ),
                     ));
                 };
                 // Only a public network's router, or a wireguard tunnel's far
@@ -336,11 +358,17 @@ impl StackFile {
                         protocol: expose.protocol,
                     };
                     let reachable = cluster.nodes.values().any(|n| {
-                        n.network.get(&expose.network).is_some_and(|addr| match addr {
-                            crate::cluster::NodeAddress::Public(p) => p.open_ports.contains(&wanted),
-                            crate::cluster::NodeAddress::Interface(i) => i.open_ports.contains(&wanted),
-                            crate::cluster::NodeAddress::Ip(_) => false,
-                        })
+                        n.network
+                            .get(&expose.network)
+                            .is_some_and(|addr| match addr {
+                                crate::cluster::NodeAddress::Public(p) => {
+                                    p.open_ports.contains(&wanted)
+                                }
+                                crate::cluster::NodeAddress::Interface(i) => {
+                                    i.open_ports.contains(&wanted)
+                                }
+                                crate::cluster::NodeAddress::Ip(_) => false,
+                            })
                     });
                     if !reachable {
                         return Err(ConfigError::invalid(
@@ -398,7 +426,9 @@ impl StackFile {
             }
         }
         for name in self.services.keys() {
-            let Some(node) = self.effective_node(name) else { continue };
+            let Some(node) = self.effective_node(name) else {
+                continue;
+            };
             if !cluster.nodes.contains_key(&node) {
                 return Err(ConfigError::invalid(
                     format!("services.{name}.x-clouduler.node"),
@@ -409,12 +439,17 @@ impl StackFile {
                 // A nat network needs no interface address anywhere: every
                 // node implements it the same way, so a pin to any node is
                 // always fine.
-                let is_nat = cluster.networks.get(&net).map(|n| n.kind) == Some(crate::cluster::NetworkKind::Nat);
+                let is_nat = cluster.networks.get(&net).map(|n| n.kind)
+                    == Some(crate::cluster::NetworkKind::Nat);
                 let implements = is_nat
                     || cluster
                         .nodes
                         .get(&node)
-                        .map(|n| n.network.get(&net).is_some_and(|a| a.as_interface().is_some()))
+                        .map(|n| {
+                            n.network
+                                .get(&net)
+                                .is_some_and(|a| a.as_interface().is_some())
+                        })
                         .unwrap_or(false);
                 if !implements {
                     return Err(ConfigError::invalid(
@@ -430,7 +465,9 @@ impl StackFile {
     fn validate_placement_constraints(&self, cluster: &ClusterConfig) -> Result<()> {
         for (name, svc) in &self.services {
             let Some(deploy) = &svc.deploy else { continue };
-            let Some(placement) = &deploy.placement else { continue };
+            let Some(placement) = &deploy.placement else {
+                continue;
+            };
             for (idx, constraint) in placement.constraints.iter().enumerate() {
                 let Some(node) = constraint
                     .strip_prefix("node.hostname==")
@@ -462,7 +499,12 @@ fn drive_root_holders(cluster: &ClusterConfig, drive_name: &str) -> BTreeSet<Str
         drive
             .served_by
             .iter()
-            .filter(|n| cluster.nodes.get(n.as_str()).is_some_and(|node| node.implements(drive_name)))
+            .filter(|n| {
+                cluster
+                    .nodes
+                    .get(n.as_str())
+                    .is_some_and(|node| node.implements(drive_name))
+            })
             .cloned()
             .collect()
     } else {
@@ -482,7 +524,8 @@ fn is_dns_label(s: &str) -> bool {
     if s.starts_with('-') || s.ends_with('-') {
         return false;
     }
-    s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[cfg(test)]
@@ -627,7 +670,9 @@ services:
           port: 80
 "#;
         let err = stack(raw).validate(&cluster()).unwrap_err();
-        assert!(err.to_string().contains("services.a.x-clouduler.proxy[0].network"));
+        assert!(err
+            .to_string()
+            .contains("services.a.x-clouduler.proxy[0].network"));
     }
 
     #[test]
@@ -655,7 +700,9 @@ services:
         );
         let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
         let err = stack(raw).validate(&cluster).unwrap_err();
-        assert!(err.to_string().contains("no node implements network unreachable"));
+        assert!(err
+            .to_string()
+            .contains("no node implements network unreachable"));
     }
 
     #[test]
@@ -669,11 +716,16 @@ services:
     networks: [home]
     x-clouduler: { node: n1 }
 "#;
-        let yaml = CLUSTER_YAML.replace("  vpn:\n    type: egress\n", "  vpn:\n    type: egress\n  home:\n    type: nat\n");
+        let yaml = CLUSTER_YAML.replace(
+            "  vpn:\n    type: egress\n",
+            "  vpn:\n    type: egress\n  home:\n    type: nat\n",
+        );
         let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
         // No node has (or needs) an interface address on `home`, yet the
         // service, even pinned to a specific node, is still accepted.
-        stack(raw).validate(&cluster).expect("a nat network is implemented by every node");
+        stack(raw)
+            .validate(&cluster)
+            .expect("a nat network is implemented by every node");
     }
 
     #[test]
@@ -687,10 +739,15 @@ services:
     image: x
     networks: [vpn, home]
 "#;
-        let yaml = CLUSTER_YAML.replace("  vpn:\n    type: egress\n", "  vpn:\n    type: egress\n  home:\n    type: nat\n");
+        let yaml = CLUSTER_YAML.replace(
+            "  vpn:\n    type: egress\n",
+            "  vpn:\n    type: egress\n  home:\n    type: nat\n",
+        );
         let cluster = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
         let err = stack(raw).validate(&cluster).unwrap_err();
-        assert!(err.to_string().contains("only one egress network is allowed per service"));
+        assert!(err
+            .to_string()
+            .contains("only one egress network is allowed per service"));
     }
 
     #[test]
@@ -706,7 +763,9 @@ services:
           network: wan
 "#;
         let err = stack(raw).validate(&cluster()).unwrap_err();
-        assert!(err.to_string().contains("no node has 25/tcp open on network wan"));
+        assert!(err
+            .to_string()
+            .contains("no node has 25/tcp open on network wan"));
     }
 
     #[test]
@@ -758,7 +817,9 @@ services:
         let mut cfg = ClusterConfig::parse(&yaml).expect("patched cluster is valid");
 
         let err = stack(raw).validate(&cfg).unwrap_err();
-        assert!(err.to_string().contains("no node has 51413/tcp open on network vpn"));
+        assert!(err
+            .to_string()
+            .contains("no node has 51413/tcp open on network vpn"));
 
         cfg.nodes.get_mut("n1").unwrap().network.insert(
             "vpn".to_string(),
@@ -773,7 +834,9 @@ services:
                 fallback: None,
             }),
         );
-        stack(raw).validate(&cfg).expect("n1's tunnel has the port open");
+        stack(raw)
+            .validate(&cfg)
+            .expect("n1's tunnel has the port open");
     }
 
     #[test]
@@ -817,7 +880,9 @@ services:
         let raw = "services:\n  a:\n    image: x\n    volumes:\n      - bulk/.:/data\n    x-clouduler: { node: n1 }\n";
         let err = stack(raw).validate(&cluster()).unwrap_err();
         assert!(err.to_string().contains("services.a.volumes[0]"));
-        assert!(err.to_string().contains("can be served by more than one node"));
+        assert!(err
+            .to_string()
+            .contains("can be served by more than one node"));
     }
 
     fn single_holder_cluster() -> ClusterConfig {
@@ -848,7 +913,9 @@ services:
     #[test]
     fn whole_drive_mount_pinned_to_the_sole_holder_is_accepted() {
         let raw = "services:\n  a:\n    image: x\n    volumes:\n      - fast/.:/data\n    x-clouduler: { node: n1 }\n";
-        stack(raw).validate(&single_holder_cluster()).expect("pinned to the drive's only holder");
+        stack(raw)
+            .validate(&single_holder_cluster())
+            .expect("pinned to the drive's only holder");
     }
 
     #[test]

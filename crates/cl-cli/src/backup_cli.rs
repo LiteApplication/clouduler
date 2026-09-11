@@ -5,7 +5,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::state::{
-    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger, DriveBackupTarget, Request,
+    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger,
+    DriveBackupTarget, Request,
 };
 use cl_restic::destination::remote_repo;
 use cl_restic::restic::ResticRepo;
@@ -13,9 +14,12 @@ use cl_restic::secret_names::{credentials_secret_name, password_secret_name};
 use cl_secret::{ClusterKey, Sealed};
 use uuid::Uuid;
 
+use crate::cli::{
+    BackupDestinationAddArgs, BackupDestinationCommand, BackupDestinationKindArg,
+    BackupTargetCommand,
+};
 use cl_daemon::backup_restore;
 use cl_daemon::backup_runner::instances_using_drive;
-use crate::cli::{BackupDestinationAddArgs, BackupDestinationCommand, BackupDestinationKindArg, BackupTargetCommand};
 use cl_init::prompt::Prompt;
 use cl_raft::client::client_for;
 
@@ -23,7 +27,9 @@ pub async fn destination(cfg: &ClusterConfig, command: BackupDestinationCommand)
     match command {
         BackupDestinationCommand::Add(args) => add_destination(cfg, *args).await,
         BackupDestinationCommand::List { via } => list_destinations(cfg, via.as_deref()).await,
-        BackupDestinationCommand::Remove { id, via } => remove_destination(cfg, &id, via.as_deref()).await,
+        BackupDestinationCommand::Remove { id, via } => {
+            remove_destination(cfg, &id, via.as_deref()).await
+        }
     }
 }
 
@@ -40,7 +46,22 @@ pub async fn target(cfg: &ClusterConfig, command: BackupTargetCommand) -> Result
             stop_containers,
             enabled,
             via,
-        } => set_target(cfg, id, drive, destination, frequency, time_of_day, keep_last, keep_within, stop_containers, enabled, via.as_deref()).await,
+        } => {
+            set_target(
+                cfg,
+                id,
+                drive,
+                destination,
+                frequency,
+                time_of_day,
+                keep_last,
+                keep_within,
+                stop_containers,
+                enabled,
+                via.as_deref(),
+            )
+            .await
+        }
         BackupTargetCommand::List { via } => list_targets(cfg, via.as_deref()).await,
         BackupTargetCommand::Remove { id, via } => remove_target(cfg, &id, via.as_deref()).await,
     }
@@ -49,18 +70,32 @@ pub async fn target(cfg: &ClusterConfig, command: BackupTargetCommand) -> Result
 async fn add_destination(cfg: &ClusterConfig, args: BackupDestinationAddArgs) -> Result<()> {
     let kind = match args.kind {
         BackupDestinationKindArg::NodeLocal => BackupDestinationKind::NodeLocal {
-            node: args.node.ok_or_else(|| anyhow!("--node is required for --kind node-local"))?,
-            path: args.path.ok_or_else(|| anyhow!("--path is required for --kind node-local"))?,
+            node: args
+                .node
+                .ok_or_else(|| anyhow!("--node is required for --kind node-local"))?,
+            path: args
+                .path
+                .ok_or_else(|| anyhow!("--path is required for --kind node-local"))?,
         },
         BackupDestinationKindArg::Ssh => BackupDestinationKind::Ssh {
-            host: args.host.ok_or_else(|| anyhow!("--host is required for --kind ssh"))?,
+            host: args
+                .host
+                .ok_or_else(|| anyhow!("--host is required for --kind ssh"))?,
             port: args.port,
-            user: args.user.ok_or_else(|| anyhow!("--user is required for --kind ssh"))?,
-            path: args.path.ok_or_else(|| anyhow!("--path is required for --kind ssh"))?,
+            user: args
+                .user
+                .ok_or_else(|| anyhow!("--user is required for --kind ssh"))?,
+            path: args
+                .path
+                .ok_or_else(|| anyhow!("--path is required for --kind ssh"))?,
         },
         BackupDestinationKindArg::S3 => BackupDestinationKind::S3 {
-            bucket: args.bucket.ok_or_else(|| anyhow!("--bucket is required for --kind s3"))?,
-            endpoint: args.endpoint.ok_or_else(|| anyhow!("--endpoint is required for --kind s3"))?,
+            bucket: args
+                .bucket
+                .ok_or_else(|| anyhow!("--bucket is required for --kind s3"))?,
+            endpoint: args
+                .endpoint
+                .ok_or_else(|| anyhow!("--endpoint is required for --kind s3"))?,
             region: args.region,
             prefix: args.prefix,
         },
@@ -81,21 +116,30 @@ async fn add_destination(cfg: &ClusterConfig, args: BackupDestinationAddArgs) ->
     let credentials_secret = match kind {
         BackupDestinationKind::Ssh { .. } => match args.ssh_key_file {
             Some(path) => {
-                let pem = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                let pem =
+                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
                 let name = credentials_secret_name(&args.id);
                 seal_and_submit(&client, &key, &name, &pem).await?;
                 Some(name)
             }
             None => None,
         },
-        BackupDestinationKind::S3 { .. } => match (args.s3_access_key_id, args.s3_secret_access_key) {
-            (Some(access_key), Some(secret_key)) => {
-                let name = credentials_secret_name(&args.id);
-                seal_and_submit(&client, &key, &name, format!("{access_key}\n{secret_key}").as_bytes()).await?;
-                Some(name)
+        BackupDestinationKind::S3 { .. } => {
+            match (args.s3_access_key_id, args.s3_secret_access_key) {
+                (Some(access_key), Some(secret_key)) => {
+                    let name = credentials_secret_name(&args.id);
+                    seal_and_submit(
+                        &client,
+                        &key,
+                        &name,
+                        format!("{access_key}\n{secret_key}").as_bytes(),
+                    )
+                    .await?;
+                    Some(name)
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         BackupDestinationKind::NodeLocal { .. } => None,
     };
 
@@ -116,7 +160,12 @@ async fn add_destination(cfg: &ClusterConfig, args: BackupDestinationAddArgs) ->
     Ok(())
 }
 
-async fn seal_and_submit(client: &cl_raft::client::Client, key: &ClusterKey, name: &str, plaintext: &[u8]) -> Result<()> {
+async fn seal_and_submit(
+    client: &cl_raft::client::Client,
+    key: &ClusterKey,
+    name: &str,
+    plaintext: &[u8],
+) -> Result<()> {
     let sealed = Sealed::seal(key, name, plaintext).with_context(|| format!("sealing {name}"))?;
     let response = client
         .submit(Request::PutSecret {
@@ -138,7 +187,10 @@ fn generate_password() -> String {
 }
 
 async fn list_destinations(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     if state.restic_destinations.is_empty() {
         println!("no backup destinations");
         return Ok(());
@@ -146,8 +198,15 @@ async fn list_destinations(cfg: &ClusterConfig, via: Option<&str>) -> Result<()>
     for (id, d) in &state.restic_destinations {
         let kind = match &d.kind {
             BackupDestinationKind::NodeLocal { node, path } => format!("node-local {node}:{path}"),
-            BackupDestinationKind::Ssh { host, port, user, path } => format!("ssh {user}@{host}:{port}{path}"),
-            BackupDestinationKind::S3 { bucket, endpoint, .. } => format!("s3 {endpoint}/{bucket}"),
+            BackupDestinationKind::Ssh {
+                host,
+                port,
+                user,
+                path,
+            } => format!("ssh {user}@{host}:{port}{path}"),
+            BackupDestinationKind::S3 {
+                bucket, endpoint, ..
+            } => format!("s3 {endpoint}/{bucket}"),
         };
         println!("{id}\t{}\t{kind}", d.name);
     }
@@ -185,7 +244,9 @@ async fn set_target(
         .with_context(|| format!("parsing --frequency {frequency}"))?
         .as_secs();
     let keep_within_secs = keep_within
-        .map(|s| humantime::parse_duration(&s).with_context(|| format!("parsing --keep-within {s}")))
+        .map(|s| {
+            humantime::parse_duration(&s).with_context(|| format!("parsing --keep-within {s}"))
+        })
         .transpose()?
         .map(|d| d.as_secs());
     if let Some(tod) = &time_of_day {
@@ -227,15 +288,24 @@ async fn set_target(
 }
 
 async fn list_targets(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     if state.restic_targets.is_empty() {
         println!("no backup targets");
         return Ok(());
     }
     for (id, t) in &state.restic_targets {
         let enabled = if t.enabled { "enabled" } else { "disabled" };
-        let last_run = t.last_run.map(|s| s.to_string()).unwrap_or_else(|| "never".to_string());
-        println!("{id}\tdrive={}\tdestination={}\t{enabled}\tevery {}s\tlast_run={last_run}", t.drive, t.destination_id, t.frequency_secs);
+        let last_run = t
+            .last_run
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "never".to_string());
+        println!(
+            "{id}\tdrive={}\tdestination={}\t{enabled}\tevery {}s\tlast_run={last_run}",
+            t.drive, t.destination_id, t.frequency_secs
+        );
     }
     Ok(())
 }
@@ -259,7 +329,10 @@ async fn remove_target(cfg: &ClusterConfig, id: &str, via: Option<&str>) -> Resu
 pub async fn run(cfg: &ClusterConfig, id: &str, via: Option<&str>) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
-    let target = state.restic_targets.get(id).ok_or_else(|| anyhow!("unknown backup target {id}"))?;
+    let target = state
+        .restic_targets
+        .get(id)
+        .ok_or_else(|| anyhow!("unknown backup target {id}"))?;
     if state
         .restic_runs
         .values()
@@ -300,8 +373,15 @@ fn whoami() -> String {
     std::env::var("USER").unwrap_or_else(|_| "cli".to_string())
 }
 
-pub async fn history(cfg: &ClusterConfig, target_id: Option<&str>, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+pub async fn history(
+    cfg: &ClusterConfig,
+    target_id: Option<&str>,
+    via: Option<&str>,
+) -> Result<()> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     let mut runs: Vec<&BackupRun> = state
         .restic_runs
         .values()
@@ -315,18 +395,28 @@ pub async fn history(cfg: &ClusterConfig, target_id: Option<&str>, via: Option<&
     }
     for run in runs {
         let outcome = match &run.outcome {
-            BackupRunOutcome::Running { percent: Some(p) } => format!("running ({:.0}%)", p * 100.0),
+            BackupRunOutcome::Running { percent: Some(p) } => {
+                format!("running ({:.0}%)", p * 100.0)
+            }
             BackupRunOutcome::Running { percent: None } => "running".to_string(),
-            BackupRunOutcome::Succeeded { snapshot_id, bytes } => format!("succeeded snapshot={snapshot_id} bytes={bytes}"),
+            BackupRunOutcome::Succeeded { snapshot_id, bytes } => {
+                format!("succeeded snapshot={snapshot_id} bytes={bytes}")
+            }
             BackupRunOutcome::Failed { error } => format!("failed: {error}"),
         };
-        println!("{}\ttarget={}\tdrive={}\tstarted={}\t{outcome}", run.id, run.target_id, run.drive, run.started_at);
+        println!(
+            "{}\ttarget={}\tdrive={}\tstarted={}\t{outcome}",
+            run.id, run.target_id, run.drive, run.started_at
+        );
     }
     Ok(())
 }
 
 pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     let destination = state
         .restic_destinations
         .get(destination_id)
@@ -342,7 +432,9 @@ pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&s
     let password = cl_daemon::backup_secrets::open_secret(&state, &key, password_secret)
         .ok_or_else(|| anyhow!("cannot open the repo password for destination {destination_id}"))?;
 
-    let cred_dir = std::env::temp_dir().join("clouduler-restic-snapshots").join(destination_id);
+    let cred_dir = std::env::temp_dir()
+        .join("clouduler-restic-snapshots")
+        .join(destination_id);
     std::fs::create_dir_all(&cred_dir)?;
     let password_path = cred_dir.join("password");
     {
@@ -353,7 +445,12 @@ pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&s
     let _guard = cl_daemon::backup_secrets::TempFileGuard(password_path.clone());
 
     let resolved = remote_repo(destination);
-    let repo = ResticRepo::new(resolved, cl_restic::destination::ssh_command_args(destination), &password_path, &[]);
+    let repo = ResticRepo::new(
+        resolved,
+        cl_restic::destination::ssh_command_args(destination),
+        &password_path,
+        &[],
+    );
     let list = tokio::task::spawn_blocking(move || repo.snapshots())
         .await
         .map_err(|e| anyhow!("the restic task panicked: {e}"))?
@@ -369,17 +466,36 @@ pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&s
     Ok(())
 }
 
-pub async fn restore_drive(cfg: &ClusterConfig, node: &str, drive: &str, destination: &str, snapshot: Option<&str>, yes: bool, via: Option<&str>) -> Result<()> {
+pub async fn restore_drive(
+    cfg: &ClusterConfig,
+    node: &str,
+    drive: &str,
+    destination: &str,
+    snapshot: Option<&str>,
+    yes: bool,
+    via: Option<&str>,
+) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let count = instances_using_drive(&state, drive).len();
-    if !confirm_restore(yes, &format!("restore drive {drive} from {destination}, stopping {count} instance(s)?"))? {
+    if !confirm_restore(
+        yes,
+        &format!("restore drive {drive} from {destination}, stopping {count} instance(s)?"),
+    )? {
         bail!("aborted");
     }
     backup_restore::restore_drive(cfg, node, drive, destination, snapshot, via).await
 }
 
-pub async fn restore_volume(cfg: &ClusterConfig, node: &str, volume: &cl_raft::ids::VolumeId, destination: &str, snapshot: Option<&str>, yes: bool, via: Option<&str>) -> Result<()> {
+pub async fn restore_volume(
+    cfg: &ClusterConfig,
+    node: &str,
+    volume: &cl_raft::ids::VolumeId,
+    destination: &str,
+    snapshot: Option<&str>,
+    yes: bool,
+    via: Option<&str>,
+) -> Result<()> {
     if !confirm_restore(yes, &format!("restore volume {volume} from {destination}?"))? {
         bail!("aborted");
     }
@@ -397,7 +513,10 @@ pub async fn restore_service(
     yes: bool,
     via: Option<&str>,
 ) -> Result<()> {
-    if !confirm_restore(yes, &format!("restore every volume used by {stack}/{service}?"))? {
+    if !confirm_restore(
+        yes,
+        &format!("restore every volume used by {stack}/{service}?"),
+    )? {
         bail!("aborted");
     }
     backup_restore::restore_service(cfg, node, stack, service, destination, snapshot, via).await
@@ -405,6 +524,8 @@ pub async fn restore_service(
 
 fn confirm_restore(yes: bool, question: &str) -> Result<bool> {
     let mut prompt = Prompt::new(std::io::stdin().lock(), std::io::stdout(), !yes);
-    prompt.say("this stops the affected containers and overwrites their data with the restored snapshot")?;
+    prompt.say(
+        "this stops the affected containers and overwrites their data with the restored snapshot",
+    )?;
     prompt.confirm(question, yes)
 }

@@ -69,7 +69,9 @@ pub async fn await_propagation(
     let poll_interval = Duration::from_secs(2);
 
     loop {
-        let records = cf.list_records(zone_id, Some(&name), Some(RecordType::TXT)).await?;
+        let records = cf
+            .list_records(zone_id, Some(&name), Some(RecordType::TXT))
+            .await?;
         if records.iter().any(|r| r.content == expected_value) {
             break;
         }
@@ -85,20 +87,29 @@ pub async fn await_propagation(
 
 /// Polls the zone's own authoritative nameservers directly for `name` until
 /// a TXT record matching `expected_value` shows up, or `deadline` passes.
-async fn await_authoritative(zone: &str, name: &str, expected_value: &str, deadline: Instant) -> Result<()> {
+async fn await_authoritative(
+    zone: &str,
+    name: &str,
+    expected_value: &str,
+    deadline: Instant,
+) -> Result<()> {
     let servers = authoritative_servers(zone).await?;
     let resolver = direct_resolver(&servers)?;
     let poll_interval = Duration::from_secs(2);
 
     loop {
-        if let Ok(lookup) = resolver.lookup(format!("{name}."), ResolveRecordType::TXT).await {
+        if let Ok(lookup) = resolver
+            .lookup(format!("{name}."), ResolveRecordType::TXT)
+            .await
+        {
             let matched = lookup.answers().iter().any(|record| match &record.data {
-                RData::TXT(txt) => txt
-                    .txt_data
-                    .iter()
-                    .map(|chunk| String::from_utf8_lossy(chunk))
-                    .collect::<String>()
-                    == expected_value,
+                RData::TXT(txt) => {
+                    txt.txt_data
+                        .iter()
+                        .map(|chunk| String::from_utf8_lossy(chunk))
+                        .collect::<String>()
+                        == expected_value
+                }
                 _ => false,
             });
             if matched {
@@ -129,13 +140,17 @@ async fn authoritative_servers(zone: &str) -> Result<Vec<IpAddr>> {
 
     let mut ips = Vec::new();
     for record in ns_lookup.answers() {
-        let RData::NS(ns) = &record.data else { continue };
+        let RData::NS(ns) = &record.data else {
+            continue;
+        };
         if let Ok(addrs) = system.lookup_ip(ns.0.to_string()).await {
             ips.extend(addrs.iter());
         }
     }
     if ips.is_empty() {
-        return Err(DnsError::Resolve(format!("could not resolve any nameserver address for {zone}")));
+        return Err(DnsError::Resolve(format!(
+            "could not resolve any nameserver address for {zone}"
+        )));
     }
     Ok(ips)
 }
@@ -150,5 +165,7 @@ fn direct_resolver(servers: &[IpAddr]) -> Result<hickory_resolver::Resolver<Toki
     }
     let mut builder = Resolver::builder_with_config(config, TokioRuntimeProvider::default());
     builder.options_mut().cache_size = 0;
-    builder.build().map_err(|e| DnsError::Resolve(e.to_string()))
+    builder
+        .build()
+        .map_err(|e| DnsError::Resolve(e.to_string()))
 }

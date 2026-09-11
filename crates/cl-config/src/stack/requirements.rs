@@ -79,8 +79,10 @@ impl StackFile {
                     r.drives.insert(drive.clone());
                 }
             }
-            r.configs.extend(svc.configs.iter().map(|c| c.source.clone()));
-            r.secrets.extend(svc.secrets.iter().map(|s| s.source.clone()));
+            r.configs
+                .extend(svc.configs.iter().map(|c| c.source.clone()));
+            r.secrets
+                .extend(svc.secrets.iter().map(|s| s.source.clone()));
         }
 
         for (name, cfg) in &self.configs {
@@ -116,8 +118,10 @@ impl StackFile {
                     r.whole_drive_mounts.insert(drive.clone());
                 }
             }
-            r.configs.extend(svc.configs.iter().map(|c| c.source.clone()));
-            r.secrets.extend(svc.secrets.iter().map(|s| s.source.clone()));
+            r.configs
+                .extend(svc.configs.iter().map(|c| c.source.clone()));
+            r.secrets
+                .extend(svc.secrets.iter().map(|s| s.source.clone()));
             r.pinned_node = self.effective_node(name);
             if let Some(constraints) = svc.deploy.as_ref().and_then(|d| d.placement.as_ref()) {
                 r.placement_constraints = constraints.constraints.clone();
@@ -126,7 +130,11 @@ impl StackFile {
                 r.bound_ports = ext
                     .expose
                     .iter()
-                    .map(|e| BoundPort { network: e.network.clone(), protocol: e.protocol, published: e.published })
+                    .map(|e| BoundPort {
+                        network: e.network.clone(),
+                        protocol: e.protocol,
+                        published: e.published,
+                    })
                     .collect();
             }
             out.insert(name.clone(), r);
@@ -141,9 +149,14 @@ impl StackFile {
     pub fn hosts(&self, cfg: &ClusterConfig) -> BTreeSet<String> {
         let mut hosts = BTreeSet::new();
         for svc in self.services.values() {
-            let Some(extensions) = &svc.x_clouduler else { continue };
+            let Some(extensions) = &svc.x_clouduler else {
+                continue;
+            };
             for route in &extensions.proxy {
-                let domain = cfg.networks.get(&route.network).and_then(|n| n.domain.as_deref());
+                let domain = cfg
+                    .networks
+                    .get(&route.network)
+                    .and_then(|n| n.domain.as_deref());
                 hosts.insert(qualify(&route.host, domain));
             }
         }
@@ -163,7 +176,10 @@ mod tests {
     fn hosts_qualifies_a_bare_label_with_its_networks_domain() {
         let cluster = ClusterConfig::parse(CLUSTER_YAML).expect("reference cluster is valid");
         let stack = StackFile::parse(GITLAB_YAML).expect("gitlab stack parses");
-        assert_eq!(stack.hosts(&cluster), BTreeSet::from(["gitlab.example.com".to_string()]));
+        assert_eq!(
+            stack.hosts(&cluster),
+            BTreeSet::from(["gitlab.example.com".to_string()])
+        );
     }
 
     #[test]
@@ -195,7 +211,10 @@ secrets:
 "#;
         let stack = StackFile::parse(spec).expect("parse");
         let r = stack.requirements();
-        assert_eq!(r.networks, BTreeSet::from(["internal".into(), "public".into()]));
+        assert_eq!(
+            r.networks,
+            BTreeSet::from(["internal".into(), "public".into()])
+        );
         assert_eq!(r.drives, BTreeSet::from(["data".into()]));
         assert_eq!(r.configs, BTreeSet::from(["headscale_config".into()]));
         assert_eq!(r.secrets, BTreeSet::from(["db_password".into()]));
@@ -233,7 +252,10 @@ secrets:
         assert!(web.drives.is_empty());
 
         let worker = &per_service["worker"];
-        assert_eq!(worker.networks, BTreeSet::from(["internal".into(), "public".into()]));
+        assert_eq!(
+            worker.networks,
+            BTreeSet::from(["internal".into(), "public".into()])
+        );
         assert_eq!(worker.drives, BTreeSet::from(["data".into()]));
         assert!(worker.secrets.is_empty());
     }
@@ -268,8 +290,18 @@ networks: {}
 
         let web = &per_service["web"];
         assert_eq!(web.pinned_node, Some("n1".to_string()));
-        assert_eq!(web.placement_constraints, vec!["node.labels.fast==true".to_string()]);
-        assert_eq!(web.bound_ports, vec![BoundPort { network: "public".into(), protocol: Protocol::Tcp, published: 8080 }]);
+        assert_eq!(
+            web.placement_constraints,
+            vec!["node.labels.fast==true".to_string()]
+        );
+        assert_eq!(
+            web.bound_ports,
+            vec![BoundPort {
+                network: "public".into(),
+                protocol: Protocol::Tcp,
+                published: 8080
+            }]
+        );
         assert_eq!(web.whole_drive_mounts, BTreeSet::from(["fast".to_string()]));
         assert_eq!(web.drives, BTreeSet::from(["fast".to_string()]));
 

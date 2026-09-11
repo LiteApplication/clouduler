@@ -62,6 +62,36 @@ pub fn load_pull(state: &ClusterState) -> Option<LastPull> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Returns the commit oid of the most recent successful operation (export or pull).
+pub fn last_known_good_commit(state: &ClusterState) -> Option<String> {
+    let export = load(state).and_then(|e| {
+        if e.error.is_none() {
+            e.commit.map(|c| (e.at, c))
+        } else {
+            None
+        }
+    });
+    let pull = load_pull(state).and_then(|p| {
+        if p.rejected.is_none() {
+            p.commit.map(|c| (p.at, c))
+        } else {
+            None
+        }
+    });
+    match (export, pull) {
+        (Some((at_e, commit_e)), Some((at_p, commit_p))) => {
+            if at_p >= at_e {
+                Some(commit_p)
+            } else {
+                Some(commit_e)
+            }
+        }
+        (Some((_, commit)), None) => Some(commit),
+        (None, Some((_, commit))) => Some(commit),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +125,65 @@ mod tests {
     fn absent_when_never_exported() {
         let state = ClusterState::default();
         assert_eq!(load(&state), None);
+    }
+
+    #[test]
+    fn last_known_good_commit_prefers_most_recent_successful_operation() {
+        let mut state = ClusterState::default();
+        assert_eq!(last_known_good_commit(&state), None);
+
+        let export = LastExport {
+            at: 100,
+            summary: "export".into(),
+            commit: Some("commit_export".into()),
+            error: None,
+        };
+        state.configs.insert(
+            LAST_EXPORT_CONFIG.to_string(),
+            ConfigEntry {
+                name: LAST_EXPORT_CONFIG.to_string(),
+                content: cl_raft::base64_encode(&serde_json::to_vec(&export).unwrap()),
+                revision: 1,
+                owner: None,
+            },
+        );
+        assert_eq!(last_known_good_commit(&state), Some("commit_export".to_string()));
+
+        // Rejected pull should not overwrite good export commit
+        let rejected_pull = LastPull {
+            at: 200,
+            commit: None,
+            rejected: Some(RejectedPull {
+                reason: "bad".into(),
+                preserved_branch: "rejected/main-bad".into(),
+            }),
+        };
+        state.configs.insert(
+            LAST_PULL_CONFIG.to_string(),
+            ConfigEntry {
+                name: LAST_PULL_CONFIG.to_string(),
+                content: cl_raft::base64_encode(&serde_json::to_vec(&rejected_pull).unwrap()),
+                revision: 2,
+                owner: None,
+            },
+        );
+        assert_eq!(last_known_good_commit(&state), Some("commit_export".to_string()));
+
+        // Successful pull should become the latest
+        let good_pull = LastPull {
+            at: 300,
+            commit: Some("commit_pull".into()),
+            rejected: None,
+        };
+        state.configs.insert(
+            LAST_PULL_CONFIG.to_string(),
+            ConfigEntry {
+                name: LAST_PULL_CONFIG.to_string(),
+                content: cl_raft::base64_encode(&serde_json::to_vec(&good_pull).unwrap()),
+                revision: 3,
+                owner: None,
+            },
+        );
+        assert_eq!(last_known_good_commit(&state), Some("commit_pull".to_string()));
     }
 }

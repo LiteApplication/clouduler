@@ -110,7 +110,9 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
     debug!(name, had_entry, "submitting RemoveNode");
 
     let response = client
-        .submit(Request::RemoveNode { node: name.to_string() })
+        .submit(Request::RemoveNode {
+            node: name.to_string(),
+        })
         .await
         .map_err(|e| anyhow!("{e}"))?;
     if let Some(error) = response.error {
@@ -119,9 +121,15 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
 
     if had_entry {
         let yaml = serde_yaml::to_string(&config).context("re-encoding the config")?;
-        debug!(expect_generation, "submitting PutClusterConfig to drop the node from the config");
+        debug!(
+            expect_generation,
+            "submitting PutClusterConfig to drop the node from the config"
+        );
         let response = client
-            .submit(Request::PutClusterConfig { yaml, expect_generation })
+            .submit(Request::PutClusterConfig {
+                yaml,
+                expect_generation,
+            })
             .await
             .map_err(|e| anyhow!("{e}"))?;
         if let Some(error) = response.error {
@@ -166,7 +174,8 @@ pub async fn emergency(
     // Scoped so the store is closed again before `cl_raft::node::emergency`
     // reopens the same file for real.
     let spec = {
-        let store = cl_raft::store::Store::open(data_dir.join("raft.redb")).map_err(|e| anyhow!("{e}"))?;
+        let store =
+            cl_raft::store::Store::open(data_dir.join("raft.redb")).map_err(|e| anyhow!("{e}"))?;
         let shared = store.shared_state();
         let guard = shared.read().await;
         guard
@@ -212,10 +221,17 @@ pub async fn emergency(
         if stack_volumes.is_empty() {
             "none".to_string()
         } else {
-            stack_volumes.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+            stack_volumes
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     ))?;
-    if !prompt.confirm(&format!("force {name} to be the cluster's sole voter and bring up {stack} on it?"), yes)? {
+    if !prompt.confirm(
+        &format!("force {name} to be the cluster's sole voter and bring up {stack} on it?"),
+        yes,
+    )? {
         bail!("aborted");
     }
 

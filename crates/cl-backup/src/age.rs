@@ -33,7 +33,9 @@ pub fn encrypt(recipient: &age::x25519::Recipient, plaintext: &[u8]) -> Result<V
     writer
         .write_all(plaintext)
         .map_err(|e| BackupError::Encrypt(e.to_string()))?;
-    writer.finish().map_err(|e| BackupError::Encrypt(e.to_string()))?;
+    writer
+        .finish()
+        .map_err(|e| BackupError::Encrypt(e.to_string()))?;
     Ok(out)
 }
 
@@ -106,6 +108,9 @@ mod tests {
         let recipient_str = identity.to_public().to_string();
         let parsed = parse_recipient(&recipient_str).expect("parse");
         let ciphertext = encrypt(&parsed, b"hunter2").expect("encrypt");
-        assert_eq!(decrypt(&identity, &ciphertext).expect("decrypt"), b"hunter2");
+        assert_eq!(
+            decrypt(&identity, &ciphertext).expect("decrypt"),
+            b"hunter2"
+        );
     }
 }

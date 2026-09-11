@@ -146,7 +146,12 @@ impl Docker {
     /// not useful information here (the reconcile loop calls this on every
     /// create, not just the first), so it reads as success like the rest of
     /// this file's idempotent `ensure_*` calls.
-    pub async fn connect_network(&self, container: &str, network: &str, ipv4: Option<Ipv4Addr>) -> Result<()> {
+    pub async fn connect_network(
+        &self,
+        container: &str,
+        network: &str,
+        ipv4: Option<Ipv4Addr>,
+    ) -> Result<()> {
         let request = NetworkConnectRequest {
             container: container.to_string(),
             endpoint_config: ipv4.map(|ip| bollard::models::EndpointSettings {
@@ -180,7 +185,17 @@ impl Docker {
         let pid = self.container_pid(container).await?;
 
         let output = tokio::process::Command::new("nsenter")
-            .args(["-t", &pid.to_string(), "-n", "ip", "route", "replace", "default", "via", &gateway.to_string()])
+            .args([
+                "-t",
+                &pid.to_string(),
+                "-n",
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via",
+                &gateway.to_string(),
+            ])
             .output()
             .await
             .map_err(|e| DockerError::Other(format!("running nsenter for {container}: {e}")))?;
@@ -209,12 +224,18 @@ impl Docker {
     }
 
     async fn container_pid(&self, container: &str) -> Result<i64> {
-        let details = self.inner.inspect_container(container, None).await.map_err(classify)?;
+        let details = self
+            .inner
+            .inspect_container(container, None)
+            .await
+            .map_err(classify)?;
         details
             .state
             .and_then(|s| s.pid)
             .filter(|&pid| pid > 0)
-            .ok_or_else(|| DockerError::Other(format!("container {container} has no pid, is it running?")))
+            .ok_or_else(|| {
+                DockerError::Other(format!("container {container} has no pid, is it running?"))
+            })
     }
 
     pub async fn network_exists(&self, name: &str) -> Result<bool> {
@@ -251,7 +272,11 @@ impl Docker {
             .filters(&filters)
             .build();
 
-        let networks = self.inner.list_networks(Some(options)).await.map_err(classify)?;
+        let networks = self
+            .inner
+            .list_networks(Some(options))
+            .await
+            .map_err(classify)?;
         Ok(networks
             .into_iter()
             .filter(|n| {

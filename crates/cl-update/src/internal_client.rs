@@ -30,7 +30,10 @@ pub async fn trigger_restart(
         .await
         .map_err(|e| format!("requesting restart on {base_url}: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("{base_url}{RESTART_PATH} answered {}", resp.status()));
+        return Err(format!(
+            "{base_url}{RESTART_PATH} answered {}",
+            resp.status()
+        ));
     }
     Ok(())
 }

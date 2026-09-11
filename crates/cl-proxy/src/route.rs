@@ -115,9 +115,9 @@ impl Route {
         self.redirect_regex
             .get_or_init(|| {
                 self.middlewares.iter().find_map(|m| match m {
-                    Middleware::RedirectRegex(cfg) => {
-                        regex::Regex::new(&cfg.regex).ok().map(|re| (re, cfg.clone()))
-                    }
+                    Middleware::RedirectRegex(cfg) => regex::Regex::new(&cfg.regex)
+                        .ok()
+                        .map(|re| (re, cfg.clone())),
                     _ => None,
                 })
             })
@@ -277,9 +277,7 @@ fn best_path_match(candidates: &[Arc<Route>], path: &str) -> Option<Arc<Route>> 
 pub(crate) fn wildcard_matches(base: &str, host: &str) -> bool {
     match host.strip_suffix(base) {
         Some(prefix) => {
-            prefix.ends_with('.')
-                && prefix.len() > 1
-                && !prefix[..prefix.len() - 1].contains('.')
+            prefix.ends_with('.') && prefix.len() > 1 && !prefix[..prefix.len() - 1].contains('.')
         }
         None => false,
     }
@@ -290,9 +288,15 @@ fn build(routes: Vec<Route>) -> Snapshot {
     for route in routes {
         let route = Arc::new(route);
         if let Some(base) = route.host.strip_prefix("*.") {
-            snap.wildcard.entry(base.to_string()).or_default().push(route);
+            snap.wildcard
+                .entry(base.to_string())
+                .or_default()
+                .push(route);
         } else {
-            snap.exact.entry(route.host.clone()).or_default().push(route);
+            snap.exact
+                .entry(route.host.clone())
+                .or_default()
+                .push(route);
         }
     }
     snap
@@ -343,15 +347,35 @@ mod tests {
             route("app.example.com", Some("/api"), vec![addr(2)]),
             route("app.example.com", Some("/api/v2"), vec![addr(3)]),
         ]);
-        assert_eq!(table.lookup("app.example.com", "/api/v2/things").unwrap().backends(), &[addr(3)]);
-        assert_eq!(table.lookup("app.example.com", "/api/v1").unwrap().backends(), &[addr(2)]);
-        assert_eq!(table.lookup("app.example.com", "/other").unwrap().backends(), &[addr(1)]);
+        assert_eq!(
+            table
+                .lookup("app.example.com", "/api/v2/things")
+                .unwrap()
+                .backends(),
+            &[addr(3)]
+        );
+        assert_eq!(
+            table
+                .lookup("app.example.com", "/api/v1")
+                .unwrap()
+                .backends(),
+            &[addr(2)]
+        );
+        assert_eq!(
+            table
+                .lookup("app.example.com", "/other")
+                .unwrap()
+                .backends(),
+            &[addr(1)]
+        );
     }
 
     #[test]
     fn host_with_no_prefix_matches_everything() {
         let table = RouteTable::new(vec![route("app.example.com", None, vec![addr(1)])]);
-        assert!(table.lookup("app.example.com", "/anything/deep/path").is_some());
+        assert!(table
+            .lookup("app.example.com", "/anything/deep/path")
+            .is_some());
     }
 
     #[test]
@@ -370,7 +394,10 @@ mod tests {
     fn round_robin_distributes_across_backends() {
         let r = route("app.example.com", None, vec![addr(1), addr(2), addr(3)]);
         let picks: Vec<SocketAddr> = (0..6).map(|_| r.pick(None).unwrap().addr).collect();
-        assert_eq!(picks, vec![addr(1), addr(2), addr(3), addr(1), addr(2), addr(3)]);
+        assert_eq!(
+            picks,
+            vec![addr(1), addr(2), addr(3), addr(1), addr(2), addr(3)]
+        );
     }
 
     #[test]
@@ -415,6 +442,9 @@ mod tests {
     fn reload_is_atomic_and_visible_immediately() {
         let table = RouteTable::new(vec![route("app.example.com", None, vec![addr(1)])]);
         table.reload(vec![route("app.example.com", None, vec![addr(2)])]);
-        assert_eq!(table.lookup("app.example.com", "/").unwrap().backends(), &[addr(2)]);
+        assert_eq!(
+            table.lookup("app.example.com", "/").unwrap().backends(),
+            &[addr(2)]
+        );
     }
 }

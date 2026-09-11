@@ -21,7 +21,10 @@ where
     }
 
     match Repr::deserialize(deserializer)? {
-        Repr::Map(map) => Ok(map.into_iter().map(|(k, v)| (k, value_to_string(v))).collect()),
+        Repr::Map(map) => Ok(map
+            .into_iter()
+            .map(|(k, v)| (k, value_to_string(v)))
+            .collect()),
         Repr::List(list) => list
             .into_iter()
             .map(|entry| {
@@ -42,7 +45,10 @@ fn value_to_string(v: Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
-        other => serde_yaml::to_string(&other).unwrap_or_default().trim().to_string(),
+        other => serde_yaml::to_string(&other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 

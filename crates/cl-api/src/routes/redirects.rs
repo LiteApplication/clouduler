@@ -16,7 +16,10 @@ use crate::server::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/redirects", get(list).post(create))
-        .route("/api/redirects/{id}", axum::routing::put(update).delete(remove))
+        .route(
+            "/api/redirects/{id}",
+            axum::routing::put(update).delete(remove),
+        )
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<RedirectRule>> {
@@ -115,7 +118,10 @@ async fn validate(state: &AppState, body: &RedirectBody) -> Result<(), ApiError>
     }
     let cluster_config = state.cluster_config.read().await;
     if !cluster_config.networks.contains_key(&body.network) {
-        return Err(ApiError::BadRequest(format!("no network named {}", body.network)));
+        return Err(ApiError::BadRequest(format!(
+            "no network named {}",
+            body.network
+        )));
     }
     Ok(())
 }

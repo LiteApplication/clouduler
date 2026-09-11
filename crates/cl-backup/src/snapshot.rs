@@ -87,9 +87,30 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
         changes.push(Change::ClusterConfigChanged);
     }
 
-    diff_map(&old.stacks, &new.stacks, &mut changes, Change::StackAdded, Change::StackUpdated, Change::StackRemoved);
-    diff_map(&old.configs, &new.configs, &mut changes, Change::ConfigAdded, Change::ConfigUpdated, Change::ConfigRemoved);
-    diff_map(&old.secrets, &new.secrets, &mut changes, Change::SecretAdded, Change::SecretUpdated, Change::SecretRemoved);
+    diff_map(
+        &old.stacks,
+        &new.stacks,
+        &mut changes,
+        Change::StackAdded,
+        Change::StackUpdated,
+        Change::StackRemoved,
+    );
+    diff_map(
+        &old.configs,
+        &new.configs,
+        &mut changes,
+        Change::ConfigAdded,
+        Change::ConfigUpdated,
+        Change::ConfigRemoved,
+    );
+    diff_map(
+        &old.secrets,
+        &new.secrets,
+        &mut changes,
+        Change::SecretAdded,
+        Change::SecretUpdated,
+        Change::SecretRemoved,
+    );
 
     changes
 }
@@ -170,7 +191,10 @@ mod tests {
     #[test]
     fn publishing_last_export_status_does_not_look_like_a_change() {
         let mut state = ClusterState::default();
-        state.configs.insert(LAST_EXPORT_CONFIG.to_string(), config_entry(LAST_EXPORT_CONFIG, 1));
+        state.configs.insert(
+            LAST_EXPORT_CONFIG.to_string(),
+            config_entry(LAST_EXPORT_CONFIG, 1),
+        );
         let before = Snapshot::from_state(&state);
 
         state.configs.get_mut(LAST_EXPORT_CONFIG).unwrap().revision = 2;
@@ -185,7 +209,10 @@ mod tests {
         let mut state = ClusterState::default();
         let before = Snapshot::from_state(&state);
 
-        state.configs.insert(DEPLOY_KEY_PUBLIC_CONFIG.to_string(), config_entry(DEPLOY_KEY_PUBLIC_CONFIG, 1));
+        state.configs.insert(
+            DEPLOY_KEY_PUBLIC_CONFIG.to_string(),
+            config_entry(DEPLOY_KEY_PUBLIC_CONFIG, 1),
+        );
         let after = Snapshot::from_state(&state);
 
         assert_eq!(before, after);
@@ -210,8 +237,16 @@ mod tests {
 
     #[test]
     fn detects_add_update_remove_per_kind() {
-        let old = snap(&[("web", 1), ("db", 1)], &[("nginx.conf", 1)], &[("db-password", 1)]);
-        let new = snap(&[("web", 2), ("api", 1)], &[], &[("db-password", 1), ("api-key", 1)]);
+        let old = snap(
+            &[("web", 1), ("db", 1)],
+            &[("nginx.conf", 1)],
+            &[("db-password", 1)],
+        );
+        let new = snap(
+            &[("web", 2), ("api", 1)],
+            &[],
+            &[("db-password", 1), ("api-key", 1)],
+        );
 
         let changes = diff(&old, &new);
         assert!(changes.contains(&Change::StackUpdated("web".into())));
@@ -219,7 +254,9 @@ mod tests {
         assert!(changes.contains(&Change::StackAdded("api".into())));
         assert!(changes.contains(&Change::ConfigRemoved("nginx.conf".into())));
         assert!(changes.contains(&Change::SecretAdded("api-key".into())));
-        assert!(!changes.iter().any(|c| matches!(c, Change::SecretUpdated(_))));
+        assert!(!changes
+            .iter()
+            .any(|c| matches!(c, Change::SecretUpdated(_))));
     }
 
     #[test]
@@ -235,7 +272,15 @@ mod tests {
     fn commit_message_caps_long_lists() {
         let old = snap(&[], &[], &[]);
         let new = snap(
-            &[("a", 1), ("b", 1), ("c", 1), ("d", 1), ("e", 1), ("f", 1), ("g", 1)],
+            &[
+                ("a", 1),
+                ("b", 1),
+                ("c", 1),
+                ("d", 1),
+                ("e", 1),
+                ("f", 1),
+                ("g", 1),
+            ],
             &[],
             &[],
         );

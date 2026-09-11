@@ -35,14 +35,26 @@ use crate::transport;
 /// crate over `cl-docker`; a fake implementation is all migration.rs needs
 /// to be exercised in tests.
 pub trait InstanceControl: Send + Sync {
-    fn stop_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, Result<()>>;
-    fn start_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, Result<()>>;
+    fn stop_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> BoxFuture<'a, Result<()>>;
+    fn start_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> BoxFuture<'a, Result<()>>;
     /// Take the stopped container away on the node it was moved off.
     ///
     /// Must treat an already-absent container as success: the source node's
     /// own reconcile loop removes containers it is no longer assigned, so it
     /// races this and either one may win.
-    fn remove_instance<'a>(&'a self, instance: &'a InstanceId, node: &'a str) -> BoxFuture<'a, Result<()>>;
+    fn remove_instance<'a>(
+        &'a self,
+        instance: &'a InstanceId,
+        node: &'a str,
+    ) -> BoxFuture<'a, Result<()>>;
 }
 
 /// Everything needed to carry one migration through to completion.
@@ -83,7 +95,10 @@ impl MigrationJob<'_> {
     /// a non-empty `volumes`, so a node that backs no drives never gets here.
     fn require_registry(&self) -> Result<&DriveRegistry> {
         self.registry.ok_or_else(|| DriveError::Transfer {
-            message: format!("{} has volumes to move but this node backs no drives", self.instance),
+            message: format!(
+                "{} has volumes to move but this node backs no drives",
+                self.instance
+            ),
         })
     }
 }
@@ -109,16 +124,24 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
     // released. Acquired once up front rather than inside each arm, so a
     // `Syncing` resume holds it too without `Stopping` running again to grab it.
     let mut transfer_permit = match phase {
-        MigrationPhase::Stopping | MigrationPhase::Syncing => {
-            Some(job.transfer_gate.clone().acquire_owned().await.expect("transfer gate is never closed"))
-        }
+        MigrationPhase::Stopping | MigrationPhase::Syncing => Some(
+            job.transfer_gate
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("transfer gate is never closed"),
+        ),
         _ => None,
     };
 
     loop {
         match phase {
             MigrationPhase::Stopping => {
-                if let Err(e) = job.control.stop_instance(&job.instance, &job.source_node).await {
+                if let Err(e) = job
+                    .control
+                    .stop_instance(&job.instance, &job.source_node)
+                    .await
+                {
                     return Err(fail(node, &job.instance, e).await);
                 }
                 phase = advance(node, &job.instance, MigrationPhase::Syncing).await?;
@@ -147,15 +170,24 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
                 // The point of no return: every volume's primary moves to the
                 // target. Only reached once sync and verify both succeeded.
                 for volume in &job.volumes {
-                    node.submit(Request::TouchVolume { id: volume.clone(), primary: job.target_node.clone() })
-                        .await
-                        .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
+                    node.submit(Request::TouchVolume {
+                        id: volume.clone(),
+                        primary: job.target_node.clone(),
+                    })
+                    .await
+                    .map_err(|e| DriveError::Transfer {
+                        message: e.to_string(),
+                    })?;
                 }
                 phase = advance(node, &job.instance, MigrationPhase::Starting).await?;
             }
 
             MigrationPhase::Starting => {
-                if let Err(e) = job.control.start_instance(&job.instance, &job.target_node).await {
+                if let Err(e) = job
+                    .control
+                    .start_instance(&job.instance, &job.target_node)
+                    .await
+                {
                     return Err(fail(node, &job.instance, e).await);
                 }
                 // Best effort, and deliberately not a reason to fail: the
@@ -165,7 +197,11 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
                 // migration. Failing the job over it would report a move that
                 // actually succeeded as `Failed` and invite someone to retry
                 // it, which is far worse than one stale container.
-                if let Err(e) = job.control.remove_instance(&job.instance, &job.source_node).await {
+                if let Err(e) = job
+                    .control
+                    .remove_instance(&job.instance, &job.source_node)
+                    .await
+                {
                     warn!(
                         instance = %job.instance,
                         node = %job.source_node,
@@ -181,7 +217,9 @@ pub async fn run(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()> {
 
             MigrationPhase::Done => return Ok(()),
 
-            MigrationPhase::Failed { reason } => return Err(DriveError::Transfer { message: reason }),
+            MigrationPhase::Failed { reason } => {
+                return Err(DriveError::Transfer { message: reason })
+            }
         }
     }
 }
@@ -214,7 +252,12 @@ fn migration_progress_writer(
     crate::progress::ProgressSink::new(move |files_done, files_total| {
         tracker.write().unwrap().insert(
             instance.clone(),
-            crate::progress::MigrationSyncProgress { volume_index, volume_count, files_done, files_total },
+            crate::progress::MigrationSyncProgress {
+                volume_index,
+                volume_count,
+                files_done,
+                files_total,
+            },
         );
     })
 }
@@ -231,17 +274,31 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
         let generation = state
             .volumes
             .get(volume)
-            .ok_or_else(|| DriveError::VolumeNotFound { volume: volume.clone() })?
+            .ok_or_else(|| DriveError::VolumeNotFound {
+                volume: volume.clone(),
+            })?
             .generation;
 
         let src_path = job.require_registry()?.volume_path(volume)?;
         let progress = match &job.sync_progress {
-            Some(tracker) => {
-                migration_progress_writer(tracker.clone(), job.instance.clone(), idx as u64 + 1, volume_count)
-            }
+            Some(tracker) => migration_progress_writer(
+                tracker.clone(),
+                job.instance.clone(),
+                idx as u64 + 1,
+                volume_count,
+            ),
             None => crate::progress::ProgressSink::none(),
         };
-        job.engine.sync(&src_path, job.target_addr, volume, generation, None, progress).await?;
+        job.engine
+            .sync(
+                &src_path,
+                job.target_addr,
+                volume,
+                generation,
+                None,
+                progress,
+            )
+            .await?;
 
         node.submit(Request::SetVolumeReplica {
             id: volume.clone(),
@@ -249,7 +306,9 @@ async fn sync_all_inner(node: &ClusterNode, job: &MigrationJob<'_>) -> Result<()
             generation,
         })
         .await
-        .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
+        .map_err(|e| DriveError::Transfer {
+            message: e.to_string(),
+        })?;
     }
     Ok(())
 }
@@ -300,7 +359,9 @@ async fn advance(
             phase: phase.clone(),
         })
         .await
-        .map_err(|e| DriveError::Transfer { message: e.to_string() })?;
+        .map_err(|e| DriveError::Transfer {
+            message: e.to_string(),
+        })?;
     if let Some(err) = response.error {
         return Err(DriveError::Transfer { message: err });
     }
@@ -313,7 +374,9 @@ async fn fail(node: &ClusterNode, instance: &InstanceId, err: DriveError) -> Dri
     let _ = node
         .submit(Request::AdvanceMigration {
             instance: instance.clone(),
-            phase: MigrationPhase::Failed { reason: err.to_string() },
+            phase: MigrationPhase::Failed {
+                reason: err.to_string(),
+            },
         })
         .await;
     err
@@ -327,13 +390,25 @@ mod tests {
 
     struct AlwaysOk;
     impl InstanceControl for AlwaysOk {
-        fn stop_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, Result<()>> {
+        fn stop_instance<'a>(
+            &'a self,
+            _i: &'a InstanceId,
+            _n: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
-        fn start_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, Result<()>> {
+        fn start_instance<'a>(
+            &'a self,
+            _i: &'a InstanceId,
+            _n: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
-        fn remove_instance<'a>(&'a self, _i: &'a InstanceId, _n: &'a str) -> BoxFuture<'a, Result<()>> {
+        fn remove_instance<'a>(
+            &'a self,
+            _i: &'a InstanceId,
+            _n: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -371,7 +446,10 @@ mod tests {
         sink.report(1, 4);
         sink.report(4, 4);
 
-        assert_eq!(tracker.read().unwrap().get(&instance).unwrap().files_done, 4);
+        assert_eq!(
+            tracker.read().unwrap().get(&instance).unwrap().files_done,
+            4
+        );
     }
 
     struct UnusedEngine;
@@ -392,7 +470,10 @@ mod tests {
         }
     }
 
-    fn job_with_tracker(tracker: crate::progress::MigrationSyncTracker, instance: InstanceId) -> MigrationJob<'static> {
+    fn job_with_tracker(
+        tracker: crate::progress::MigrationSyncTracker,
+        instance: InstanceId,
+    ) -> MigrationJob<'static> {
         MigrationJob {
             instance,
             source_node: "src".into(),
@@ -419,12 +500,20 @@ mod tests {
         let tracker: crate::progress::MigrationSyncTracker = Arc::default();
         tracker.write().unwrap().insert(
             instance.clone(),
-            crate::progress::MigrationSyncProgress { volume_index: 1, volume_count: 2, files_done: 0, files_total: 0 },
+            crate::progress::MigrationSyncProgress {
+                volume_index: 1,
+                volume_count: 2,
+                files_done: 0,
+                files_total: 0,
+            },
         );
         let job = job_with_tracker(tracker.clone(), instance.clone());
         let result = finish_sync(&job, Ok(()));
         assert!(result.is_ok());
-        assert!(tracker.read().unwrap().get(&instance).is_none(), "success path must clear the tracker entry");
+        assert!(
+            tracker.read().unwrap().get(&instance).is_none(),
+            "success path must clear the tracker entry"
+        );
 
         // The failure path is what the bug actually broke: before the fix,
         // an early `?` return from the volume loop skipped the cleanup that
@@ -432,12 +521,25 @@ mod tests {
         let tracker: crate::progress::MigrationSyncTracker = Arc::default();
         tracker.write().unwrap().insert(
             instance.clone(),
-            crate::progress::MigrationSyncProgress { volume_index: 1, volume_count: 2, files_done: 0, files_total: 0 },
+            crate::progress::MigrationSyncProgress {
+                volume_index: 1,
+                volume_count: 2,
+                files_done: 0,
+                files_total: 0,
+            },
         );
         let job = job_with_tracker(tracker.clone(), instance.clone());
-        let err = DriveError::VolumeNotFound { volume: VolumeId::new("drive", "missing") };
+        let err = DriveError::VolumeNotFound {
+            volume: VolumeId::new("drive", "missing"),
+        };
         let result = finish_sync(&job, Err(err));
-        assert!(result.is_err(), "finish_sync must hand back the original error");
-        assert!(tracker.read().unwrap().get(&instance).is_none(), "failure path must also clear the tracker entry");
+        assert!(
+            result.is_err(),
+            "finish_sync must hand back the original error"
+        );
+        assert!(
+            tracker.read().unwrap().get(&instance).is_none(),
+            "failure path must also clear the tracker entry"
+        );
     }
 }

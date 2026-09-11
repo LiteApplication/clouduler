@@ -23,7 +23,9 @@ pub enum ApiError {
     Unavailable(String),
     /// This node is not the leader. Carries the leader's address so the
     /// caller can retry there directly.
-    NotLeader { leader: Option<String> },
+    NotLeader {
+        leader: Option<String>,
+    },
     Internal(String),
 }
 
@@ -89,7 +91,8 @@ impl IntoResponse for ApiError {
         let mut resp = (status, Json(body)).into_response();
         if let Some(leader) = leader {
             if let Ok(value) = HeaderValue::from_str(&leader) {
-                resp.headers_mut().insert(axum::http::header::LOCATION, value);
+                resp.headers_mut()
+                    .insert(axum::http::header::LOCATION, value);
             }
         }
         resp

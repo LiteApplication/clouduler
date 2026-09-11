@@ -145,7 +145,8 @@ impl AuthGate {
                 return Ok(cached.clone());
             }
         }
-        let issuer_url = IssuerUrl::new(issuer.to_string()).map_err(|e| format!("bad issuer url: {e}"))?;
+        let issuer_url =
+            IssuerUrl::new(issuer.to_string()).map_err(|e| format!("bad issuer url: {e}"))?;
         let discovered = CoreProviderMetadata::discover_async(issuer_url, &self.http)
             .await
             .map_err(|e| format!("oidc discovery failed: {e}"))?;
@@ -169,7 +170,10 @@ impl AuthGate {
             ));
         };
         let Some(host) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
-            return GateOutcome::Respond(status_response(StatusCode::BAD_REQUEST, "missing host header"));
+            return GateOutcome::Respond(status_response(
+                StatusCode::BAD_REQUEST,
+                "missing host header",
+            ));
         };
         let host = host.to_string();
         let path = req.uri().path();
@@ -216,7 +220,11 @@ impl AuthGate {
         .set_redirect_uri(redirect);
 
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let mut request = client.authorize_url(CoreAuthenticationFlow::AuthorizationCode, CsrfToken::new_random, Nonce::new_random);
+        let mut request = client.authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            CsrfToken::new_random,
+            Nonce::new_random,
+        );
         for scope in &settings.scopes {
             request = request.add_scope(Scope::new(scope.clone()));
         }
@@ -226,7 +234,12 @@ impl AuthGate {
         self.gc_expired().await;
         self.pending.lock().await.insert(
             csrf_token.secret().clone(),
-            PendingLogin { nonce, pkce_verifier, return_to, started_at: Instant::now() },
+            PendingLogin {
+                nonce,
+                pkce_verifier,
+                return_to,
+                started_at: Instant::now(),
+            },
         );
 
         GateOutcome::Respond(redirect_response(auth_url.as_str()))
@@ -240,19 +253,32 @@ impl AuthGate {
         settings: &cl_config::OidcConfig,
     ) -> GateOutcome {
         let Some(key) = self.key() else {
-            return GateOutcome::Respond(status_response(StatusCode::SERVICE_UNAVAILABLE, "this node holds no cluster key"));
+            return GateOutcome::Respond(status_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this node holds no cluster key",
+            ));
         };
         let query = req.uri().query().unwrap_or("");
         let params: HashMap<String, String> = form_urlencoded_parse(query);
-        let (Some(code), Some(state)) = (params.get("code").cloned(), params.get("state").cloned()) else {
-            return GateOutcome::Respond(status_response(StatusCode::BAD_REQUEST, "missing code or state"));
+        let (Some(code), Some(state)) = (params.get("code").cloned(), params.get("state").cloned())
+        else {
+            return GateOutcome::Respond(status_response(
+                StatusCode::BAD_REQUEST,
+                "missing code or state",
+            ));
         };
 
         let Some(pending) = self.pending.lock().await.remove(&state) else {
-            return GateOutcome::Respond(status_response(StatusCode::UNAUTHORIZED, "unknown or expired login"));
+            return GateOutcome::Respond(status_response(
+                StatusCode::UNAUTHORIZED,
+                "unknown or expired login",
+            ));
         };
         if pending.started_at.elapsed() > LOGIN_TIMEOUT {
-            return GateOutcome::Respond(status_response(StatusCode::UNAUTHORIZED, "login took too long"));
+            return GateOutcome::Respond(status_response(
+                StatusCode::UNAUTHORIZED,
+                "login took too long",
+            ));
         }
 
         let metadata = match self.metadata(&settings.issuer).await {
@@ -274,24 +300,45 @@ impl AuthGate {
             .exchange_code(AuthorizationCode::new(code))
             .map_err(|e| format!("token endpoint not configured: {e}"))
         {
-            Ok(req) => match req.set_pkce_verifier(pending.pkce_verifier).request_async(&self.http).await {
+            Ok(req) => match req
+                .set_pkce_verifier(pending.pkce_verifier)
+                .request_async(&self.http)
+                .await
+            {
                 Ok(resp) => resp,
-                Err(e) => return GateOutcome::Respond(status_response(StatusCode::UNAUTHORIZED, &format!("token exchange failed: {e}"))),
+                Err(e) => {
+                    return GateOutcome::Respond(status_response(
+                        StatusCode::UNAUTHORIZED,
+                        &format!("token exchange failed: {e}"),
+                    ))
+                }
             },
             Err(e) => return GateOutcome::Respond(bad_gateway(e)),
         };
 
         let Some(id_token) = token_response.id_token() else {
-            return GateOutcome::Respond(status_response(StatusCode::UNAUTHORIZED, "provider did not return an id token"));
+            return GateOutcome::Respond(status_response(
+                StatusCode::UNAUTHORIZED,
+                "provider did not return an id token",
+            ));
         };
         let verifier = client.id_token_verifier();
         let claims = match id_token.claims(&verifier, &pending.nonce) {
             Ok(c) => c,
-            Err(e) => return GateOutcome::Respond(status_response(StatusCode::UNAUTHORIZED, &format!("id token verification failed: {e}"))),
+            Err(e) => {
+                return GateOutcome::Respond(status_response(
+                    StatusCode::UNAUTHORIZED,
+                    &format!("id token verification failed: {e}"),
+                ))
+            }
         };
         let subject = claims.subject().as_str().to_string();
 
-        let expires_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() + SESSION_TTL.as_secs();
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + SESSION_TTL.as_secs();
         let cookie_value = sign_cookie(&key, &subject, expires_at);
         let mut resp = redirect_response(&pending.return_to);
         if let Ok(v) = HeaderValue::from_str(&format!(
@@ -354,7 +401,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -377,7 +426,10 @@ fn form_urlencoded_parse(query: &str) -> HashMap<String, String> {
                             i += 1;
                         }
                         b'%' if i + 2 < bytes.len() => {
-                            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                            if let Ok(byte) = u8::from_str_radix(
+                                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                                16,
+                            ) {
                                 out.push(byte);
                                 i += 3;
                             } else {
@@ -421,7 +473,9 @@ fn verify_cookie(key: &ClusterKey, value: &str) -> Option<String> {
         return None;
     }
 
-    let subject_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(subject_b64).ok()?;
+    let subject_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(subject_b64)
+        .ok()?;
     let subject = String::from_utf8(subject_bytes).ok()?;
     let label = format!("{LABEL_PREFIX}:{subject}:{expires_at}");
     internal_auth::verify(key, &label, sig).then_some(subject)
@@ -434,15 +488,24 @@ mod tests {
     #[test]
     fn a_cookie_verifies_against_the_key_that_signed_it() {
         let key = ClusterKey::generate();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let cookie = sign_cookie(&key, "alice@example.com", now + 3600);
-        assert_eq!(verify_cookie(&key, &cookie), Some("alice@example.com".to_string()));
+        assert_eq!(
+            verify_cookie(&key, &cookie),
+            Some("alice@example.com".to_string())
+        );
     }
 
     #[test]
     fn an_expired_cookie_does_not_verify() {
         let key = ClusterKey::generate();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let cookie = sign_cookie(&key, "alice@example.com", now.saturating_sub(1));
         assert_eq!(verify_cookie(&key, &cookie), None);
     }
@@ -451,7 +514,10 @@ mod tests {
     fn a_cookie_signed_by_a_different_key_does_not_verify() {
         let key = ClusterKey::generate();
         let other = ClusterKey::generate();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let cookie = sign_cookie(&key, "alice@example.com", now + 3600);
         assert_eq!(verify_cookie(&other, &cookie), None);
     }
@@ -459,10 +525,16 @@ mod tests {
     #[test]
     fn a_tampered_subject_does_not_verify() {
         let key = ClusterKey::generate();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let cookie = sign_cookie(&key, "alice@example.com", now + 3600);
         let (_, rest) = cookie.split_once('.').unwrap();
-        let forged = format!("{}.{rest}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mallory@example.com"));
+        let forged = format!(
+            "{}.{rest}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mallory@example.com")
+        );
         assert_eq!(verify_cookie(&key, &forged), None);
     }
 

@@ -31,18 +31,24 @@ pub struct LogsArgs {
     pub tail: u32,
 }
 
-pub async fn run(cfg: &ClusterConfig, target: &str, args: LogsArgs, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+pub async fn run(
+    cfg: &ClusterConfig,
+    target: &str,
+    args: LogsArgs,
+    via: Option<&str>,
+) -> Result<()> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     let instances = resolve_target(&state, target)?;
 
-    let key = Arc::new(
-        ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-            format!(
-                "loading the cluster key from {} to authenticate to the node(s) running this",
-                cfg.secrets.key_file.display()
-            )
-        })?,
-    );
+    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {} to authenticate to the node(s) running this",
+            cfg.secrets.key_file.display()
+        )
+    })?);
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -61,7 +67,9 @@ pub async fn run(cfg: &ClusterConfig, target: &str, args: LogsArgs, via: Option<
             let follow = args.follow;
             let tail = args.tail;
             tokio::spawn(async move {
-                if let Err(e) = stream_one(&cfg, &http, &key, &assignment, follow, tail, label).await {
+                if let Err(e) =
+                    stream_one(&cfg, &http, &key, &assignment, follow, tail, label).await
+                {
                     eprintln!("{}: {e}", assignment.instance);
                 }
             })
@@ -84,18 +92,24 @@ pub async fn run(cfg: &ClusterConfig, target: &str, args: LogsArgs, via: Option<
 /// still-live output that reads in order across nodes.
 const FOLLOW_BUFFER: Duration = Duration::from_millis(400);
 
-pub async fn merged(cfg: &ClusterConfig, target: &str, args: LogsArgs, via: Option<&str>) -> Result<()> {
-    let state = client_for(cfg, via)?.state().await.map_err(|e| anyhow!("{e}"))?;
+pub async fn merged(
+    cfg: &ClusterConfig,
+    target: &str,
+    args: LogsArgs,
+    via: Option<&str>,
+) -> Result<()> {
+    let state = client_for(cfg, via)?
+        .state()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     let instances = resolve_target(&state, target)?;
 
-    let key = Arc::new(
-        ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
-            format!(
-                "loading the cluster key from {} to authenticate to the node(s) running this",
-                cfg.secrets.key_file.display()
-            )
-        })?,
-    );
+    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {} to authenticate to the node(s) running this",
+            cfg.secrets.key_file.display()
+        )
+    })?);
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -204,8 +218,12 @@ async fn fetch_events(
     tail: u32,
     tx: tokio::sync::mpsc::UnboundedSender<MergedEvent>,
 ) -> Result<()> {
-    let base = cl_update::peers::base_url(cfg, &assignment.node)
-        .ok_or_else(|| anyhow!("node {} has no address on the internal network", assignment.node))?;
+    let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
+        anyhow!(
+            "node {} has no address on the internal network",
+            assignment.node
+        )
+    })?;
     let path = format!(
         "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
         assignment.instance
@@ -217,7 +235,12 @@ async fn fetch_events(
         .header(AUTH_HEADER, signature)
         .send()
         .await
-        .with_context(|| format!("asking {} for {}'s logs", assignment.node, assignment.instance))?;
+        .with_context(|| {
+            format!(
+                "asking {} for {}'s logs",
+                assignment.node, assignment.instance
+            )
+        })?;
     if !resp.status().is_success() {
         bail!("{} answered {}", assignment.node, resp.status());
     }
@@ -248,7 +271,12 @@ async fn fetch_events(
                 // The channel's other end goes away only when `merged` has
                 // already flushed and returned; nothing left to do with a
                 // send that fails at that point.
-                let _ = tx.send(MergedEvent { instance: instance.clone(), timestamp, kind: event.clone(), text });
+                let _ = tx.send(MergedEvent {
+                    instance: instance.clone(),
+                    timestamp,
+                    kind: event.clone(),
+                    text,
+                });
             }
         }
     }
@@ -301,8 +329,12 @@ async fn stream_one(
     tail: u32,
     label: bool,
 ) -> Result<()> {
-    let base = cl_update::peers::base_url(cfg, &assignment.node)
-        .ok_or_else(|| anyhow!("node {} has no address on the internal network", assignment.node))?;
+    let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
+        anyhow!(
+            "node {} has no address on the internal network",
+            assignment.node
+        )
+    })?;
     let path = format!(
         "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
         assignment.instance
@@ -314,7 +346,12 @@ async fn stream_one(
         .header(AUTH_HEADER, signature)
         .send()
         .await
-        .with_context(|| format!("asking {} for {}'s logs", assignment.node, assignment.instance))?;
+        .with_context(|| {
+            format!(
+                "asking {} for {}'s logs",
+                assignment.node, assignment.instance
+            )
+        })?;
     if !resp.status().is_success() {
         bail!("{} answered {}", assignment.node, resp.status());
     }
@@ -362,7 +399,9 @@ fn emit(event: &str, data: &str, prefix: Option<&str>) {
     let prefix = prefix.map(|p| format!("{p} | ")).unwrap_or_default();
     match event {
         "stdout" | "stderr" => {
-            let text = serde_json::from_str::<LogPayload>(data).map(|p| p.text).unwrap_or_else(|_| data.to_string());
+            let text = serde_json::from_str::<LogPayload>(data)
+                .map(|p| p.text)
+                .unwrap_or_else(|_| data.to_string());
             if event == "stderr" {
                 eprintln!("{prefix}{text}");
             } else {
@@ -407,8 +446,14 @@ mod tests {
     #[test]
     fn a_single_instance_id_resolves_to_just_that_assignment() {
         let mut state = ClusterState::default();
-        state.assignments.insert(InstanceId::new("site", "web", 0), assignment("site", "web", 0, "n1"));
-        state.assignments.insert(InstanceId::new("site", "web", 1), assignment("site", "web", 1, "n2"));
+        state.assignments.insert(
+            InstanceId::new("site", "web", 0),
+            assignment("site", "web", 0, "n1"),
+        );
+        state.assignments.insert(
+            InstanceId::new("site", "web", 1),
+            assignment("site", "web", 1, "n2"),
+        );
 
         let resolved = resolve_target(&state, "site.web.0").expect("resolves");
         assert_eq!(resolved.len(), 1);
@@ -419,9 +464,18 @@ mod tests {
     fn a_stack_name_resolves_to_every_one_of_its_running_instances() {
         let mut state = ClusterState::default();
         state.stacks.insert("site".to_string(), stack_state("site"));
-        state.assignments.insert(InstanceId::new("site", "web", 0), assignment("site", "web", 0, "n1"));
-        state.assignments.insert(InstanceId::new("site", "worker", 0), assignment("site", "worker", 0, "n2"));
-        state.assignments.insert(InstanceId::new("other", "web", 0), assignment("other", "web", 0, "n3"));
+        state.assignments.insert(
+            InstanceId::new("site", "web", 0),
+            assignment("site", "web", 0, "n1"),
+        );
+        state.assignments.insert(
+            InstanceId::new("site", "worker", 0),
+            assignment("site", "worker", 0, "n2"),
+        );
+        state.assignments.insert(
+            InstanceId::new("other", "web", 0),
+            assignment("other", "web", 0, "n3"),
+        );
 
         let resolved = resolve_target(&state, "site").expect("resolves");
         assert_eq!(resolved.len(), 2);

@@ -1,13 +1,12 @@
 use anyhow::Result;
+use cl_cli::cli::{
+    BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, GitBackupCommand,
+    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand,
+};
+use cl_config::ClusterConfig;
+use cl_init::detect;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
-use cl_cli::cli::{
-    BackupCommand, Cli, Command, CompletionsCommand,
-    ConfigCommand, DriveCommand, GitBackupCommand, NodeCommand, SecretCommand, SourceCommand,
-    StackCommand,
-};
-use cl_init::detect;
-use cl_config::ClusterConfig;
 use tracing_subscriber::EnvFilter;
 
 fn install_crypto_provider() {
@@ -82,14 +81,14 @@ async fn main() -> Result<()> {
                 };
                 cl_cli::node::add(&cfg, name, role, rpc_addr, &drive, &label, via.as_deref()).await
             }
-            NodeCommand::Remove { name, via } => cl_cli::node::remove(&cfg, &name, via.as_deref()).await,
+            NodeCommand::Remove { name, via } => {
+                cl_cli::node::remove(&cfg, &name, via.as_deref()).await
+            }
             NodeCommand::SetAvailability {
                 name,
                 availability,
                 via,
-            } => {
-                cl_cli::node::set_availability(&cfg, &name, availability, via.as_deref()).await
-            }
+            } => cl_cli::node::set_availability(&cfg, &name, availability, via.as_deref()).await,
         },
         Command::Stack { command } => match command {
             StackCommand::Deploy { file, name, via } => {
@@ -111,8 +110,19 @@ async fn main() -> Result<()> {
             StackCommand::Restart { name, via } => {
                 cl_cli::stack::restart(&cfg, &name, via.as_deref()).await
             }
-            StackCommand::Logs { name, follow, tail, via } => {
-                cl_cli::logs::merged(&cfg, &name, cl_cli::logs::LogsArgs { follow, tail }, via.as_deref()).await
+            StackCommand::Logs {
+                name,
+                follow,
+                tail,
+                via,
+            } => {
+                cl_cli::logs::merged(
+                    &cfg,
+                    &name,
+                    cl_cli::logs::LogsArgs { follow, tail },
+                    via.as_deref(),
+                )
+                .await
             }
             StackCommand::Unhealthy {
                 node,
@@ -130,7 +140,12 @@ async fn main() -> Result<()> {
                         logs: Some(logs.unwrap_or(10)),
                     }
                 } else {
-                    cl_cli::health::ShowFlags { node, uptime, placement, logs }
+                    cl_cli::health::ShowFlags {
+                        node,
+                        uptime,
+                        placement,
+                        logs,
+                    }
                 };
                 cl_cli::health::run(&cfg, via.as_deref(), flags).await
             }
@@ -140,10 +155,11 @@ async fn main() -> Result<()> {
                         cl_cli::stack::source_get(&cfg, &name, via.as_deref()).await
                     }
                     SourceCommand::Set { file } => {
-                        cl_cli::stack::source_set(&cfg, &name, file.as_deref(), via.as_deref()).await
+                        cl_cli::stack::source_set(&cfg, &name, file.as_deref(), via.as_deref())
+                            .await
                     }
                 }
-            },
+            }
         },
         Command::Secret { command } => match command {
             SecretCommand::Set {
@@ -152,8 +168,37 @@ async fn main() -> Result<()> {
                 file,
                 no_trim,
                 via,
-            } => cl_cli::secret::set(&cfg, &name, value, file.as_deref(), no_trim, via.as_deref()).await,
+            } => {
+                cl_cli::secret::set(&cfg, &name, value, file.as_deref(), no_trim, via.as_deref())
+                    .await
+            }
             SecretCommand::List { via } => cl_cli::secret::list(&cfg, via.as_deref()).await,
+        },
+        Command::Registry { command } => match command {
+            RegistryCommand::Login {
+                server,
+                username,
+                password,
+                password_stdin,
+                via,
+            } => {
+                cl_cli::registry::login(
+                    &cfg,
+                    &server,
+                    &username,
+                    password,
+                    password_stdin,
+                    via.as_deref(),
+                )
+                .await
+            }
+            RegistryCommand::List { via } => cl_cli::registry::list(&cfg, via.as_deref()).await,
+            RegistryCommand::Test { server, via } => {
+                cl_cli::registry::test(&cfg, &server, via.as_deref()).await
+            }
+            RegistryCommand::Remove { server, via } => {
+                cl_cli::registry::remove(&cfg, &server, via.as_deref()).await
+            }
         },
         Command::Drive { command } => match command {
             DriveCommand::List => {
@@ -194,7 +239,8 @@ async fn main() -> Result<()> {
                     data_dir_override: cli.data_dir,
                     yes,
                 },
-            ).await
+            )
+            .await
         }
         Command::Rebalance { via, yes } => cl_cli::rebalance::run(&cfg, via.as_deref(), yes).await,
         Command::Status => {
@@ -206,7 +252,15 @@ async fn main() -> Result<()> {
             follow,
             tail,
             via,
-        } => cl_cli::logs::run(&cfg, &target, cl_cli::logs::LogsArgs { follow, tail }, via.as_deref()).await,
+        } => {
+            cl_cli::logs::run(
+                &cfg,
+                &target,
+                cl_cli::logs::LogsArgs { follow, tail },
+                via.as_deref(),
+            )
+            .await
+        }
         Command::Exec {
             target,
             user,
@@ -225,7 +279,9 @@ async fn main() -> Result<()> {
                 cl_cli::backup_cli::destination(&cfg, command).await
             }
             BackupCommand::Target { command } => cl_cli::backup_cli::target(&cfg, command).await,
-            BackupCommand::Run { id, via } => cl_cli::backup_cli::run(&cfg, &id, via.as_deref()).await,
+            BackupCommand::Run { id, via } => {
+                cl_cli::backup_cli::run(&cfg, &id, via.as_deref()).await
+            }
             BackupCommand::History { target, via } => {
                 cl_cli::backup_cli::history(&cfg, target.as_deref(), via.as_deref()).await
             }
@@ -247,7 +303,8 @@ async fn main() -> Result<()> {
                     snapshot.as_deref(),
                     yes,
                     via.as_deref(),
-                ).await
+                )
+                .await
             }
             BackupCommand::RestoreVolume {
                 volume,
@@ -264,7 +321,8 @@ async fn main() -> Result<()> {
                     snapshot.as_deref(),
                     yes,
                     via.as_deref(),
-                ).await
+                )
+                .await
             }
             BackupCommand::RestoreService {
                 stack,
@@ -283,11 +341,17 @@ async fn main() -> Result<()> {
                     snapshot.as_deref(),
                     yes,
                     via.as_deref(),
-                ).await
+                )
+                .await
             }
         },
         Command::GitBackup { command } => match command {
-            GitBackupCommand::Pull { via } => cl_cli::git_backup_cli::pull(&cfg, via.as_deref()).await,
+            GitBackupCommand::Pull { via } => {
+                cl_cli::git_backup_cli::pull(&cfg, via.as_deref()).await
+            }
+            GitBackupCommand::Reconcile { via } => {
+                cl_cli::git_backup_cli::reconcile(&cfg, via.as_deref()).await
+            }
         },
     }
 }

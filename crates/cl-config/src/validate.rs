@@ -84,10 +84,17 @@ impl ClusterConfig {
                 }
                 _ => {}
             }
-            if matches!(net.kind, NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat) && net.domain.is_some() {
+            if matches!(
+                net.kind,
+                NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat
+            ) && net.domain.is_some()
+            {
                 return Err(ConfigError::invalid(
                     format!("{at}.domain"),
-                    format!("a {} network is not addressable and must not declare a domain", net.kind),
+                    format!(
+                        "a {} network is not addressable and must not declare a domain",
+                        net.kind
+                    ),
                 ));
             }
             if let Some(domain) = &net.domain {
@@ -283,7 +290,9 @@ impl ClusterConfig {
                         if !node.implements(name) {
                             return Err(ConfigError::invalid(
                                 format!("drives.{name}.served_by"),
-                                format!("{server} must map {name} to the directory holding its copy"),
+                                format!(
+                                    "{server} must map {name} to the directory holding its copy"
+                                ),
                             ));
                         }
                     }
@@ -419,7 +428,10 @@ impl ClusterConfig {
         }
         // Only a clash on this node's loopback, but that is where the proxy
         // sends dashboard traffic, so it would forward to itself.
-        for (field, port) in [("proxy.http_port", proxy.http_port), ("proxy.https_port", proxy.https_port)] {
+        for (field, port) in [
+            ("proxy.http_port", proxy.http_port),
+            ("proxy.https_port", proxy.https_port),
+        ] {
             if port == self.web.backend_port {
                 return Err(ConfigError::invalid(
                     field,
@@ -571,7 +583,10 @@ cloudflare:
         let cfg = ClusterConfig::parse(BASE).unwrap();
         let n1 = &cfg.nodes["n1"];
         assert_eq!(n1.ip_on("lan").unwrap().to_string(), "192.168.1.1");
-        assert_eq!(n1.public_on("wan").unwrap().ipv4.unwrap().to_string(), "203.0.113.5");
+        assert_eq!(
+            n1.public_on("wan").unwrap().ipv4.unwrap().to_string(),
+            "203.0.113.5"
+        );
         assert!(n1.ip_on("wan").is_none());
         assert_eq!(
             cfg.nodes["n2"].public_on("wan").unwrap().domain.as_deref(),
@@ -589,10 +604,12 @@ cloudflare:
 
     #[test]
     fn only_one_internal_network_is_allowed() {
-        let err = parse(&[("lan:       { type: private", "lan:       { type: internal")]).unwrap_err();
+        let err =
+            parse(&[("lan:       { type: private", "lan:       { type: internal")]).unwrap_err();
         assert!(err.to_string().contains("only one internal network"));
 
-        let err = parse(&[("tailscale: { type: internal", "tailscale: { type: private")]).unwrap_err();
+        let err =
+            parse(&[("tailscale: { type: internal", "tailscale: { type: private")]).unwrap_err();
         assert!(err.to_string().contains("exactly one internal network"));
     }
 
@@ -619,11 +636,14 @@ cloudflare:
         let err = parse(&[("lan: 192.168.1.1", "lan: { ipv4: 192.168.1.1 }")]).unwrap_err();
         assert!(err.to_string().contains("takes a bare IP address"));
 
-        let err = parse(&[
-            ("wan: { ipv4: 203.0.113.5, ipv6: \"2001:db8::5\" }", "wan: 203.0.113.5"),
-        ])
+        let err = parse(&[(
+            "wan: { ipv4: 203.0.113.5, ipv6: \"2001:db8::5\" }",
+            "wan: 203.0.113.5",
+        )])
         .unwrap_err();
-        assert!(err.to_string().contains("takes an ipv4, ipv6 and/or domain"));
+        assert!(err
+            .to_string()
+            .contains("takes an ipv4, ipv6 and/or domain"));
     }
 
     #[test]
@@ -646,14 +666,18 @@ cloudflare:
 
     #[test]
     fn public_networks_reject_a_subnet() {
-        let err = parse(&[("wan:       { type: public,", "wan:       { type: public, subnet: 1.0.0.0/8,")])
-            .unwrap_err();
+        let err = parse(&[(
+            "wan:       { type: public,",
+            "wan:       { type: public, subnet: 1.0.0.0/8,",
+        )])
+        .unwrap_err();
         assert!(err.to_string().contains("must not declare a subnet"));
     }
 
     #[test]
     fn drive_references_must_resolve() {
-        let err = parse(&[("drives: { fast: /mnt/fast }", "drives: { bulk: /mnt/bulk }")]).unwrap_err();
+        let err =
+            parse(&[("drives: { fast: /mnt/fast }", "drives: { bulk: /mnt/bulk }")]).unwrap_err();
         assert!(err.to_string().contains("no drive named bulk"));
     }
 
@@ -668,8 +692,11 @@ cloudflare:
         // A drive can be declared before any node is given a local path for
         // it; scheduling rejects placement onto a node lacking it, and that
         // is enough; config validation doesn't need to block staging it.
-        parse(&[("  fast: { sync_interval: 5m }", "  fast: { sync_interval: 5m }\n  bulk: { sync_interval: 5m }")])
-            .unwrap();
+        parse(&[(
+            "  fast: { sync_interval: 5m }",
+            "  fast: { sync_interval: 5m }\n  bulk: { sync_interval: 5m }",
+        )])
+        .unwrap();
     }
 
     #[test]
@@ -706,7 +733,10 @@ cloudflare:
                 "  wan:       { type: public,   domain: example.com }",
                 "  wan:       { type: public,   domain: example.com }\n  home:      { type: nat }",
             ),
-            ("      tailscale: 10.10.0.1", "      tailscale: 10.10.0.1\n      home: eth0"),
+            (
+                "      tailscale: 10.10.0.1",
+                "      tailscale: 10.10.0.1\n      home: eth0",
+            ),
         ])
         .unwrap_err();
         assert!(err.to_string().contains("takes no node address"));
@@ -725,7 +755,9 @@ cloudflare:
             ),
         ])
         .expect("valid");
-        let addr = cfg.nodes["n1"].network["vpn"].as_interface_address().expect("interface address");
+        let addr = cfg.nodes["n1"].network["vpn"]
+            .as_interface_address()
+            .expect("interface address");
         assert_eq!(addr.interface, "wg0");
         assert_eq!(addr.open_ports.len(), 2);
         assert!(addr.open_ports.contains(&crate::cluster::OpenPort {
@@ -754,10 +786,15 @@ cloudflare:
             ),
         ])
         .expect("valid");
-        let addr = cfg.nodes["n1"].network["vpn"].as_interface_address().expect("interface address");
+        let addr = cfg.nodes["n1"].network["vpn"]
+            .as_interface_address()
+            .expect("interface address");
         let fallback = addr.fallback.as_ref().expect("fallback set");
         assert_eq!(fallback.interface, "wlan0");
-        assert_eq!(fallback.health_check_ip, "1.1.1.1".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(
+            fallback.health_check_ip,
+            "1.1.1.1".parse::<std::net::IpAddr>().unwrap()
+        );
 
         let yaml = serde_yaml::to_string(&cfg.nodes["n1"].network["vpn"]).unwrap();
         assert!(yaml.contains("fallback"));
@@ -774,7 +811,9 @@ cloudflare:
             ),
         ])
         .unwrap_err();
-        assert!(err.to_string().contains("different interface than the primary"));
+        assert!(err
+            .to_string()
+            .contains("different interface than the primary"));
     }
 
     #[test]
@@ -784,13 +823,17 @@ cloudflare:
             "  wan:       { type: public,   domain: example.com }\n  vpn:       { type: wireguard, domain: vpn.example.com }",
         )])
         .unwrap_err();
-        assert!(err.to_string().contains("wireguard network is not addressable"));
+        assert!(err
+            .to_string()
+            .contains("wireguard network is not addressable"));
     }
 
     #[test]
     fn network_domain_must_be_covered_by_a_zone() {
         let err = parse(&[("zones: [example.com]", "zones: [other.com]")]).unwrap_err();
-        assert!(err.to_string().contains("not covered by any configured cloudflare zone"));
+        assert!(err
+            .to_string()
+            .contains("not covered by any configured cloudflare zone"));
     }
 
     #[test]
@@ -808,7 +851,9 @@ cloudflare:
             "failover: { node_timeout: 10s, fence_timeout: 20s }\nweb: { address: cloud, network: tailscale }",
         )])
         .unwrap_err();
-        assert!(err.to_string().contains("must be shorter than node_timeout"));
+        assert!(err
+            .to_string()
+            .contains("must be shorter than node_timeout"));
     }
 
     #[test]
@@ -818,7 +863,9 @@ cloudflare:
             "failover: { fence_timeout: 5s, probe_interval: 5s }\nweb: { address: cloud, network: tailscale }",
         )])
         .unwrap_err();
-        assert!(err.to_string().contains("must be shorter than fence_timeout"));
+        assert!(err
+            .to_string()
+            .contains("must be shorter than fence_timeout"));
     }
 
     #[test]
@@ -828,8 +875,14 @@ cloudflare:
             "failover: { node_timeout: 2m, fence_timeout: 45s, probe_interval: 10s }\nweb: { address: cloud, network: tailscale }",
         )])
         .expect("valid");
-        assert_eq!(cfg.failover.node_timeout, std::time::Duration::from_secs(120));
-        assert_eq!(cfg.failover.fence_timeout, std::time::Duration::from_secs(45));
+        assert_eq!(
+            cfg.failover.node_timeout,
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            cfg.failover.fence_timeout,
+            std::time::Duration::from_secs(45)
+        );
     }
 
     #[test]
@@ -849,7 +902,8 @@ cloudflare:
         let cfg = ClusterConfig::parse(BASE).unwrap();
         assert_eq!(cfg.nodes_implementing(&["fast".into()]).count(), 2);
         assert_eq!(
-            cfg.nodes_implementing(&["fast".into(), "bulk".into()]).count(),
+            cfg.nodes_implementing(&["fast".into(), "bulk".into()])
+                .count(),
             0
         );
     }
@@ -875,8 +929,11 @@ cloudflare:
         assert_eq!(cfg.data_dir, std::path::PathBuf::from("/var/lib/clouduler"));
         assert_eq!(cfg.nodes["n1"].data_dir(&cfg), cfg.data_dir);
 
-        let cfg = parse(&[("    role: worker", "    data_dir: /mnt/big/clouduler\n    role: worker")])
-            .expect("valid");
+        let cfg = parse(&[(
+            "    role: worker",
+            "    data_dir: /mnt/big/clouduler\n    role: worker",
+        )])
+        .expect("valid");
         assert_eq!(
             cfg.nodes["n2"].data_dir(&cfg),
             std::path::Path::new("/mnt/big/clouduler")
@@ -887,8 +944,11 @@ cloudflare:
 
     #[test]
     fn data_dirs_must_be_absolute() {
-        let err = parse(&[("    role: worker", "    data_dir: relative/path\n    role: worker")])
-            .unwrap_err();
+        let err = parse(&[(
+            "    role: worker",
+            "    data_dir: relative/path\n    role: worker",
+        )])
+        .unwrap_err();
         assert!(err.to_string().contains("absolute path"));
     }
 
@@ -897,7 +957,8 @@ cloudflare:
         // Nobody has picked a server for it yet, but the daemon already
         // treats that as "nothing to do", so config validation doesn't need
         // to block staging it.
-        let cfg = parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).expect("valid");
+        let cfg =
+            parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).expect("valid");
         assert!(cfg.drives["fast"].served_by.is_empty());
     }
 
@@ -949,7 +1010,10 @@ cloudflare:
             "fast: { mode: served, served_by: [n1, n2] }",
         )])
         .expect("valid");
-        assert_eq!(cfg.drives["fast"].served_by, vec!["n1".to_string(), "n2".to_string()]);
+        assert_eq!(
+            cfg.drives["fast"].served_by,
+            vec!["n1".to_string(), "n2".to_string()]
+        );
     }
 
     #[test]

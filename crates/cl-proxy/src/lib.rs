@@ -20,16 +20,18 @@ mod middleware;
 mod route;
 mod server;
 
-pub use auth_gate::AuthGate;
 pub use acme::{
     issue_certificate, issue_certificate_http01, load_or_create_account, needs_renewal,
     renewal_tick, run_renewal_loop, AcmeConfig, IssuedCertificate, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL, RENEWAL_WINDOW,
 };
+pub use auth_gate::AuthGate;
 pub use certs::{ensure_crypto_provider, parse_certified_key, CertResolver, CertStore};
 pub use error::{ProxyError, Result};
+pub use health::{
+    run as run_health_checks, BackendHealth, HealthTable, CHECK_INTERVAL as HEALTH_CHECK_INTERVAL,
+};
 pub use http01::Http01Store;
-pub use health::{run as run_health_checks, BackendHealth, HealthTable, CHECK_INTERVAL as HEALTH_CHECK_INTERVAL};
 pub use middleware::{
     apply_headers, basic_auth_challenge, check_basic_auth, cors_origin_allowed,
     cors_response_headers, is_cors_preflight, is_upgrade, redirect_https, strip_hop_by_hop,

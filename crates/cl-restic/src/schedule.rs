@@ -62,7 +62,11 @@ mod tests {
 
     const DAY: i64 = 86_400;
 
-    fn target(frequency_secs: u64, time_of_day: Option<&str>, last_run: Option<i64>) -> DriveBackupTarget {
+    fn target(
+        frequency_secs: u64,
+        time_of_day: Option<&str>,
+        last_run: Option<i64>,
+    ) -> DriveBackupTarget {
         DriveBackupTarget {
             id: "t1".into(),
             drive: "fast".into(),

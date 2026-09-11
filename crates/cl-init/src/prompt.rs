@@ -52,7 +52,11 @@ impl<R: BufRead, W: Write> Prompt<R, W> {
     }
 
     /// Ask for a value that may legitimately be left unset.
-    pub fn ask_optional(&mut self, question: &str, default: Option<&str>) -> Result<Option<String>> {
+    pub fn ask_optional(
+        &mut self,
+        question: &str,
+        default: Option<&str>,
+    ) -> Result<Option<String>> {
         if !self.interactive {
             return Ok(default.map(str::to_string));
         }
@@ -197,7 +201,11 @@ mod tests {
 
     #[test]
     fn a_non_interactive_prompt_answers_with_the_default_and_reads_nothing() {
-        let mut prompt = Prompt::new(std::io::Cursor::new(b"ignored\n".to_vec()), Vec::new(), false);
+        let mut prompt = Prompt::new(
+            std::io::Cursor::new(b"ignored\n".to_vec()),
+            Vec::new(),
+            false,
+        );
         assert_eq!(prompt.ask("name", Some("n1")).unwrap(), "n1");
         assert!(prompt.confirm("go", true).unwrap());
     }

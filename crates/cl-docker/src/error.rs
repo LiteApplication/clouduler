@@ -51,7 +51,11 @@ impl DockerError {
 /// Turn a raw bollard error into ours, pulling 404s out as `NotFound` so callers
 /// can match on them without inspecting bollard's error type directly.
 pub(crate) fn classify(err: bollard::errors::Error) -> DockerError {
-    if let bollard::errors::Error::DockerResponseServerError { status_code, message } = &err {
+    if let bollard::errors::Error::DockerResponseServerError {
+        status_code,
+        message,
+    } = &err
+    {
         match status_code {
             404 => return DockerError::NotFound(message.clone()),
             // The registry is throttling, not refusing. Worth its own variant

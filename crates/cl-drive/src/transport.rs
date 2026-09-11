@@ -76,17 +76,30 @@ pub enum Message {
     /// destination itself lives on. Nothing else in this protocol cares -
     /// added here rather than as a new `Message` variant since only the
     /// initial handshake needs to say it.
-    Hello { volume: VolumeId, generation: u64, staging: Option<String> },
+    Hello {
+        volume: VolumeId,
+        generation: u64,
+        staging: Option<String>,
+    },
     /// Receiver's current manifest, scanned without hashing.
     Ready(Manifest),
     /// A one-shot manifest request outside a sync, used for migration
     /// verification. Answered with `Ready` and the connection closed.
-    ManifestRequest { volume: VolumeId, hash_content: bool },
+    ManifestRequest {
+        volume: VolumeId,
+        hash_content: bool,
+    },
     SignatureRequest(String),
-    Signature { path: String, data: Vec<u8> },
+    Signature {
+        path: String,
+        data: Vec<u8>,
+    },
     HashRequest(String),
     /// `None` when the receiver has no such file, e.g. a stale rename guess.
-    Hash { path: String, hash: Option<[u8; 32]> },
+    Hash {
+        path: String,
+        hash: Option<[u8; 32]>,
+    },
     WholeFile {
         path: String,
         mode: u32,
@@ -105,10 +118,25 @@ pub enum Message {
     /// Starts a chunked whole-file transfer for a regular file too large to
     /// send as one `WholeFile` frame. Followed by one or more
     /// `WholeFileChunk`s and a final `WholeFileEnd`.
-    WholeFileBegin { path: String, mode: u32, uid: u32, gid: u32, mtime_nanos: i64 },
-    WholeFileChunk { data: Vec<u8> },
+    WholeFileBegin {
+        path: String,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        mtime_nanos: i64,
+    },
+    WholeFileChunk {
+        data: Vec<u8>,
+    },
     WholeFileEnd,
-    Delta { path: String, mode: u32, uid: u32, gid: u32, mtime_nanos: i64, data: Vec<u8> },
+    Delta {
+        path: String,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        mtime_nanos: i64,
+        data: Vec<u8>,
+    },
     /// Move `from` to `to` on the receiver, then stamp the sender's `mode`,
     /// ownership and `mtime_nanos` on it.
     ///
@@ -118,7 +146,14 @@ pub enum Message {
     /// Without restamping, `Manifest::diff` sees a mismatch on the very next
     /// pass and re-sends the file whole, which is exactly the work the
     /// rename existed to avoid. Same reasoning as `WholeFile::mtime_nanos`.
-    Rename { from: String, to: String, mode: u32, uid: u32, gid: u32, mtime_nanos: i64 },
+    Rename {
+        from: String,
+        to: String,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        mtime_nanos: i64,
+    },
     Delete(String),
     /// Sender is done; receiver replies with `Ack`.
     Done,
@@ -132,18 +167,32 @@ pub enum Message {
     /// New variants go at the end: `Message` is encoded with bincode, which
     /// writes the variant's index and is not self-describing, so inserting
     /// anywhere else silently renumbers every variant after it.
-    MakeDir { path: String, mode: u32, uid: u32, gid: u32 },
+    MakeDir {
+        path: String,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
     /// Remove a directory the sender no longer has. Best effort and
     /// non-recursive on the receiving side.
     RemoveDir(String),
     /// Restamp a directory the peer already has whose mode, uid or gid
     /// diverged — an existing directory whose ownership changed underneath
     /// it, not a new one.
-    SetDirMeta { path: String, mode: u32, uid: u32, gid: u32 },
+    SetDirMeta {
+        path: String,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
     /// Restamp the volume root itself. The root is never "added" or
     /// "removed" like an ordinary directory, so its own permissions and
     /// ownership travel over their own message.
-    SetRootMeta { mode: u32, uid: u32, gid: u32 },
+    SetRootMeta {
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
 }
 
 pub type Connection = Framed<TcpStream, LengthDelimitedCodec>;
@@ -170,7 +219,9 @@ pub async fn recv(conn: &mut Connection) -> io::Result<Option<Message>> {
 }
 
 fn io_err(e: io::Error) -> DriveError {
-    DriveError::Transfer { message: e.to_string() }
+    DriveError::Transfer {
+        message: e.to_string(),
+    }
 }
 
 /// Accept connections and run the receive side of the sync protocol until
@@ -216,11 +267,20 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
     let mut conn = frame(stream);
 
     let (volume, generation, staging) = match recv(&mut conn).await.map_err(io_err)? {
-        Some(Message::Hello { volume, generation, staging }) => (volume, generation, staging),
-        Some(Message::ManifestRequest { volume, hash_content }) => {
+        Some(Message::Hello {
+            volume,
+            generation,
+            staging,
+        }) => (volume, generation, staging),
+        Some(Message::ManifestRequest {
+            volume,
+            hash_content,
+        }) => {
             let root = registry.ensure_volume(&volume)?;
             let manifest = scan::scan_off_runtime(root, hash_content).await?;
-            send(&mut conn, &Message::Ready(manifest)).await.map_err(io_err)?;
+            send(&mut conn, &Message::Ready(manifest))
+                .await
+                .map_err(io_err)?;
             return Ok(());
         }
         Some(other) => {
@@ -232,11 +292,15 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
     };
 
     let root = match &staging {
-        Some(destination_path) => registry.ensure_staging_volume(Path::new(destination_path), &volume)?,
+        Some(destination_path) => {
+            registry.ensure_staging_volume(Path::new(destination_path), &volume)?
+        }
         None => registry.ensure_volume(&volume)?,
     };
     let manifest = scan::scan_off_runtime(root.clone(), false).await?;
-    send(&mut conn, &Message::Ready(manifest)).await.map_err(io_err)?;
+    send(&mut conn, &Message::Ready(manifest))
+        .await
+        .map_err(io_err)?;
 
     // State for a `WholeFileBegin`/`WholeFileChunk`*/`WholeFileEnd` sequence
     // in progress: the final target, the temp file it's being written to,
@@ -245,14 +309,25 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
 
     loop {
         match recv(&mut conn).await.map_err(io_err)? {
-            Some(Message::WholeFileBegin { path, mode, uid, gid, mtime_nanos }) => {
+            Some(Message::WholeFileBegin {
+                path,
+                mode,
+                uid,
+                gid,
+                mtime_nanos,
+            }) => {
                 let target = resolve_relative(&root, &path)?;
                 if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|source| DriveError::Io { path: parent.to_path_buf(), source })?;
+                    std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
                 }
                 let tmp = temp_path(&target);
-                let file = std::fs::File::create(&tmp).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+                let file = std::fs::File::create(&tmp).map_err(|source| DriveError::Io {
+                    path: tmp.clone(),
+                    source,
+                })?;
                 chunked = Some((target, tmp, mode, uid, gid, mtime_nanos, file));
             }
             Some(Message::WholeFileChunk { data }) => {
@@ -280,14 +355,29 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                     })?;
                 off_runtime("finishing a chunked file", move || {
                     drop(file);
-                    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-                    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))
-                        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+                    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(
+                        |source| DriveError::Io {
+                            path: tmp.clone(),
+                            source,
+                        },
+                    )?;
+                    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid)).map_err(|source| {
+                        DriveError::Io {
+                            path: tmp.clone(),
+                            source,
+                        }
+                    })?;
                     let mtime = scan::nanos_to_filetime(mtime_nanos);
-                    filetime::set_file_times(&tmp, mtime, mtime)
-                        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-                    std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io { path: target, source })
+                    filetime::set_file_times(&tmp, mtime, mtime).map_err(|source| {
+                        DriveError::Io {
+                            path: tmp.clone(),
+                            source,
+                        }
+                    })?;
+                    std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io {
+                        path: target,
+                        source,
+                    })
                 })
                 .await?;
             }
@@ -300,41 +390,82 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                     Ok(Signature::calculate(&data, signature_options()).into_serialized())
                 })
                 .await?;
-                send(&mut conn, &Message::Signature { path, data }).await.map_err(io_err)?;
+                send(&mut conn, &Message::Signature { path, data })
+                    .await
+                    .map_err(io_err)?;
             }
             Some(Message::HashRequest(path)) => {
                 let target = resolve_relative(&root, &path)?;
                 // Streamed, not `fs::read`: a hash is requested for every
                 // file the sender no longer has, whatever its size.
-                let hash = off_runtime("hashing a file", move || Ok(scan::hash_file(&target).ok())).await?;
-                send(&mut conn, &Message::Hash { path, hash }).await.map_err(io_err)?;
+                let hash = off_runtime("hashing a file", move || Ok(scan::hash_file(&target).ok()))
+                    .await?;
+                send(&mut conn, &Message::Hash { path, hash })
+                    .await
+                    .map_err(io_err)?;
             }
-            Some(Message::WholeFile { path, mode, uid, gid, mtime_nanos, is_symlink, link_target, data }) => {
+            Some(Message::WholeFile {
+                path,
+                mode,
+                uid,
+                gid,
+                mtime_nanos,
+                is_symlink,
+                link_target,
+                data,
+            }) => {
                 let root = root.clone();
                 off_runtime("writing a whole file", move || {
-                    write_whole(&root, &path, mode, uid, gid, mtime_nanos, is_symlink, link_target.as_deref(), &data)
+                    write_whole(
+                        &root,
+                        &path,
+                        mode,
+                        uid,
+                        gid,
+                        mtime_nanos,
+                        is_symlink,
+                        link_target.as_deref(),
+                        &data,
+                    )
                 })
                 .await?;
             }
-            Some(Message::Delta { path, mode, uid, gid, mtime_nanos, data }) => {
+            Some(Message::Delta {
+                path,
+                mode,
+                uid,
+                gid,
+                mtime_nanos,
+                data,
+            }) => {
                 let target = resolve_relative(&root, &path)?;
                 // Reading the base, applying the delta and writing the result
                 // is whole-file IO on both ends plus the patch itself.
                 off_runtime("applying a delta", move || {
                     let base = std::fs::read(&target).unwrap_or_default();
                     let mut out = Vec::new();
-                    apply(&base, &data, &mut out)
-                        .map_err(|e| DriveError::Transfer { message: format!("apply delta for {path}: {e}") })?;
+                    apply(&base, &data, &mut out).map_err(|e| DriveError::Transfer {
+                        message: format!("apply delta for {path}: {e}"),
+                    })?;
                     write_temp_then_rename(&target, &out, mode, uid, gid, mtime_nanos)
                 })
                 .await?;
             }
-            Some(Message::Rename { from, to, mode, uid, gid, mtime_nanos }) => {
+            Some(Message::Rename {
+                from,
+                to,
+                mode,
+                uid,
+                gid,
+                mtime_nanos,
+            }) => {
                 let src = resolve_relative(&root, &from)?;
                 let dst = resolve_relative(&root, &to)?;
                 if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|source| DriveError::Io { path: parent.to_path_buf(), source })?;
+                    std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
                 }
                 // A rename is only ever the sender's *guess* that two files
                 // with equal content are the same file moved. A guess that
@@ -352,34 +483,68 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                         return Err(DriveError::Io { path: dst, source });
                     }
                 } else {
-                    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io { path: dst.clone(), source })?;
-                    std::os::unix::fs::chown(&dst, Some(uid), Some(gid))
-                        .map_err(|source| DriveError::Io { path: dst.clone(), source })?;
+                    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode)).map_err(
+                        |source| DriveError::Io {
+                            path: dst.clone(),
+                            source,
+                        },
+                    )?;
+                    std::os::unix::fs::chown(&dst, Some(uid), Some(gid)).map_err(|source| {
+                        DriveError::Io {
+                            path: dst.clone(),
+                            source,
+                        }
+                    })?;
                     let mtime = scan::nanos_to_filetime(mtime_nanos);
                     filetime::set_file_times(&dst, mtime, mtime)
                         .map_err(|source| DriveError::Io { path: dst, source })?;
                 }
             }
-            Some(Message::MakeDir { path, mode, uid, gid }) => {
+            Some(Message::MakeDir {
+                path,
+                mode,
+                uid,
+                gid,
+            }) => {
                 let target = resolve_relative(&root, &path)?;
                 off_runtime("creating a directory", move || {
-                    std::fs::create_dir_all(&target)
-                        .map_err(|source| DriveError::Io { path: target.clone(), source })?;
+                    std::fs::create_dir_all(&target).map_err(|source| DriveError::Io {
+                        path: target.clone(),
+                        source,
+                    })?;
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io { path: target.clone(), source })?;
-                    std::os::unix::fs::chown(&target, Some(uid), Some(gid))
-                        .map_err(|source| DriveError::Io { path: target, source })
+                        .map_err(|source| DriveError::Io {
+                            path: target.clone(),
+                            source,
+                        })?;
+                    std::os::unix::fs::chown(&target, Some(uid), Some(gid)).map_err(|source| {
+                        DriveError::Io {
+                            path: target,
+                            source,
+                        }
+                    })
                 })
                 .await?;
             }
-            Some(Message::SetDirMeta { path, mode, uid, gid }) => {
+            Some(Message::SetDirMeta {
+                path,
+                mode,
+                uid,
+                gid,
+            }) => {
                 let target = resolve_relative(&root, &path)?;
                 off_runtime("restamping a directory", move || {
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io { path: target.clone(), source })?;
-                    std::os::unix::fs::chown(&target, Some(uid), Some(gid))
-                        .map_err(|source| DriveError::Io { path: target, source })
+                        .map_err(|source| DriveError::Io {
+                            path: target.clone(),
+                            source,
+                        })?;
+                    std::os::unix::fs::chown(&target, Some(uid), Some(gid)).map_err(|source| {
+                        DriveError::Io {
+                            path: target,
+                            source,
+                        }
+                    })
                 })
                 .await?;
             }
@@ -387,7 +552,10 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let root = root.clone();
                 off_runtime("restamping the volume root", move || {
                     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode))
-                        .map_err(|source| DriveError::Io { path: root.clone(), source })?;
+                        .map_err(|source| DriveError::Io {
+                            path: root.clone(),
+                            source,
+                        })?;
                     std::os::unix::fs::chown(&root, Some(uid), Some(gid))
                         .map_err(|source| DriveError::Io { path: root, source })
                 })
@@ -413,11 +581,18 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 match std::fs::remove_file(&target) {
                     Ok(()) => {}
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(source) => return Err(DriveError::Io { path: target, source }),
+                    Err(source) => {
+                        return Err(DriveError::Io {
+                            path: target,
+                            source,
+                        })
+                    }
                 }
             }
             Some(Message::Done) => {
-                send(&mut conn, &Message::Ack(generation)).await.map_err(io_err)?;
+                send(&mut conn, &Message::Ack(generation))
+                    .await
+                    .map_err(io_err)?;
                 break;
             }
             Some(other) => warn!(?other, "unexpected message on drive transport"),
@@ -430,19 +605,35 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
 
 /// Ask a peer for its manifest without starting a sync. Used by migration
 /// verification to compare source and target after the final delta.
-pub async fn request_manifest(peer: SocketAddr, volume: &VolumeId, hash_content: bool) -> Result<Manifest> {
+pub async fn request_manifest(
+    peer: SocketAddr,
+    volume: &VolumeId,
+    hash_content: bool,
+) -> Result<Manifest> {
     let stream = tokio::time::timeout(crate::delta::CONNECT_TIMEOUT, TcpStream::connect(peer))
         .await
-        .map_err(|_| DriveError::Transfer { message: format!("connecting to {peer} timed out") })?
+        .map_err(|_| DriveError::Transfer {
+            message: format!("connecting to {peer} timed out"),
+        })?
         .map_err(io_err)?;
     let mut conn = frame(stream);
-    send(&mut conn, &Message::ManifestRequest { volume: volume.clone(), hash_content })
-        .await
-        .map_err(io_err)?;
+    send(
+        &mut conn,
+        &Message::ManifestRequest {
+            volume: volume.clone(),
+            hash_content,
+        },
+    )
+    .await
+    .map_err(io_err)?;
     match recv(&mut conn).await.map_err(io_err)? {
         Some(Message::Ready(manifest)) => Ok(manifest),
-        Some(other) => Err(DriveError::Transfer { message: format!("expected ready, got {other:?}") }),
-        None => Err(DriveError::Transfer { message: "peer closed before ready".into() }),
+        Some(other) => Err(DriveError::Transfer {
+            message: format!("expected ready, got {other:?}"),
+        }),
+        None => Err(DriveError::Transfer {
+            message: "peer closed before ready".into(),
+        }),
     }
 }
 
@@ -462,19 +653,44 @@ fn temp_path(target: &Path) -> PathBuf {
 /// receiver's next scan see a fresh mtime that never matches the sender's,
 /// so `Manifest::diff` would keep reporting the file changed and re-sync it
 /// every pass forever.
-fn write_temp_then_rename(target: &Path, data: &[u8], mode: u32, uid: u32, gid: u32, mtime_nanos: i64) -> Result<()> {
+fn write_temp_then_rename(
+    target: &Path,
+    data: &[u8],
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    mtime_nanos: i64,
+) -> Result<()> {
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| DriveError::Io { path: parent.to_path_buf(), source })?;
+        std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
     let tmp = temp_path(target);
-    std::fs::write(&tmp, data).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))
-        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+    std::fs::write(&tmp, data).map_err(|source| DriveError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|source| {
+        DriveError::Io {
+            path: tmp.clone(),
+            source,
+        }
+    })?;
+    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid)).map_err(|source| DriveError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
     let mtime = scan::nanos_to_filetime(mtime_nanos);
-    filetime::set_file_times(&tmp, mtime, mtime).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-    std::fs::rename(&tmp, target).map_err(|source| DriveError::Io { path: target.to_path_buf(), source })?;
+    filetime::set_file_times(&tmp, mtime, mtime).map_err(|source| DriveError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, target).map_err(|source| DriveError::Io {
+        path: target.to_path_buf(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -500,17 +716,28 @@ fn write_whole(
         message: format!("symlink {rel} sent with no target"),
     })?;
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| DriveError::Io { path: parent.to_path_buf(), source })?;
+        std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
     let tmp = temp_path(&target);
     let _ = std::fs::remove_file(&tmp);
-    std::os::unix::fs::symlink(link_target, &tmp).map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
+    std::os::unix::fs::symlink(link_target, &tmp).map_err(|source| DriveError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
     // A symlink's own mode is meaningless on Linux (always 0o777) and
     // `set_permissions` follows the link rather than the symlink itself, so
     // only ownership is stamped here — with `lchown`, which does not follow.
-    std::os::unix::fs::lchown(&tmp, Some(uid), Some(gid))
-        .map_err(|source| DriveError::Io { path: tmp.clone(), source })?;
-    std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io { path: target, source })?;
+    std::os::unix::fs::lchown(&tmp, Some(uid), Some(gid)).map_err(|source| DriveError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, &target).map_err(|source| DriveError::Io {
+        path: target,
+        source,
+    })?;
     Ok(())
 }
 
@@ -526,14 +753,30 @@ mod tests {
 
     #[test]
     fn every_message_variant_round_trips_through_bincode() {
-        msg_round_trip(Message::Hello { volume: VolumeId::new("fast", "data"), generation: 3, staging: None });
+        msg_round_trip(Message::Hello {
+            volume: VolumeId::new("fast", "data"),
+            generation: 3,
+            staging: None,
+        });
         msg_round_trip(Message::Ready(Manifest::default()));
-        msg_round_trip(Message::ManifestRequest { volume: VolumeId::new("fast", "data"), hash_content: true });
+        msg_round_trip(Message::ManifestRequest {
+            volume: VolumeId::new("fast", "data"),
+            hash_content: true,
+        });
         msg_round_trip(Message::SignatureRequest("a.txt".into()));
-        msg_round_trip(Message::Signature { path: "a.txt".into(), data: vec![1, 2, 3] });
+        msg_round_trip(Message::Signature {
+            path: "a.txt".into(),
+            data: vec![1, 2, 3],
+        });
         msg_round_trip(Message::HashRequest("a.txt".into()));
-        msg_round_trip(Message::Hash { path: "a.txt".into(), hash: Some([9u8; 32]) });
-        msg_round_trip(Message::Hash { path: "missing.txt".into(), hash: None });
+        msg_round_trip(Message::Hash {
+            path: "a.txt".into(),
+            hash: Some([9u8; 32]),
+        });
+        msg_round_trip(Message::Hash {
+            path: "missing.txt".into(),
+            hash: None,
+        });
         msg_round_trip(Message::WholeFile {
             path: "a.txt".into(),
             mode: 0o644,
@@ -551,7 +794,9 @@ mod tests {
             gid: 1000,
             mtime_nanos: 123,
         });
-        msg_round_trip(Message::WholeFileChunk { data: vec![1, 2, 3] });
+        msg_round_trip(Message::WholeFileChunk {
+            data: vec![1, 2, 3],
+        });
         msg_round_trip(Message::WholeFileEnd);
         msg_round_trip(Message::Delta {
             path: "a.txt".into(),
@@ -573,10 +818,24 @@ mod tests {
         msg_round_trip(Message::Done);
         msg_round_trip(Message::Ack(7));
         msg_round_trip(Message::Error("boom".into()));
-        msg_round_trip(Message::MakeDir { path: "sub".into(), mode: 0o755, uid: 1000, gid: 1000 });
+        msg_round_trip(Message::MakeDir {
+            path: "sub".into(),
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+        });
         msg_round_trip(Message::RemoveDir("sub".into()));
-        msg_round_trip(Message::SetDirMeta { path: "sub".into(), mode: 0o750, uid: 1000, gid: 1000 });
-        msg_round_trip(Message::SetRootMeta { mode: 0o700, uid: 1000, gid: 1000 });
+        msg_round_trip(Message::SetDirMeta {
+            path: "sub".into(),
+            mode: 0o750,
+            uid: 1000,
+            gid: 1000,
+        });
+        msg_round_trip(Message::SetRootMeta {
+            mode: 0o700,
+            uid: 1000,
+            gid: 1000,
+        });
     }
 
     #[test]

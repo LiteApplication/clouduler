@@ -63,7 +63,10 @@ impl Row {
             || self.proxy_error.is_some()
             || self.health == "unhealthy"
             || self.desired == DesiredState::Stopped
-            || matches!(self.state.as_str(), "restarting" | "unknown" | "pending_placement")
+            || matches!(
+                self.state.as_str(),
+                "restarting" | "unknown" | "pending_placement"
+            )
             || (self.desired == DesiredState::Running && self.state == "exited")
     }
 }
@@ -74,10 +77,12 @@ impl Row {
 fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
     match (desired, state) {
         (DesiredState::Stopped, "exited" | "stopped") => Some("stopped (stack stop)".to_string()),
-        (DesiredState::Stopped, other) => {
-            Some(format!("desired state is stopped, but the container is still {other}"))
+        (DesiredState::Stopped, other) => Some(format!(
+            "desired state is stopped, but the container is still {other}"
+        )),
+        (DesiredState::Running, "exited") => {
+            Some("exited but desired state is running".to_string())
         }
-        (DesiredState::Running, "exited") => Some("exited but desired state is running".to_string()),
         // Assigned to a node, wanted running, and no container exists there
         // at all. Distinct from `exited`, which at least got as far as being
         // created: this is a node that has not acted on its assignment —
@@ -87,9 +92,9 @@ fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
         (DesiredState::Running, "stopped") => {
             Some("no container exists on its node, but desired state is running".to_string())
         }
-        (DesiredState::Running, "restarting") => {
-            Some("restarting - usually a container crashing and being restarted in a loop".to_string())
-        }
+        (DesiredState::Running, "restarting") => Some(
+            "restarting - usually a container crashing and being restarted in a loop".to_string(),
+        ),
         _ => None,
     }
 }
@@ -222,12 +227,18 @@ fn cluster_warnings(state: &ClusterState) -> Vec<String> {
 }
 
 fn print_row(row: &Row, flags: &ShowFlags) {
-    let mut line = format!("  {}\tstate={}\thealth={}", row.instance, row.state, row.health);
+    let mut line = format!(
+        "  {}\tstate={}\thealth={}",
+        row.instance, row.state, row.health
+    );
     if flags.node {
         line.push_str(&format!("\tnode={}", row.node.as_deref().unwrap_or("-")));
     }
     if flags.uptime {
-        line.push_str(&format!("\tuptime={}", uptime_of(row.started_at.as_deref())));
+        line.push_str(&format!(
+            "\tuptime={}",
+            uptime_of(row.started_at.as_deref())
+        ));
     }
     if flags.placement {
         if let Some(reason) = &row.reason {
@@ -248,7 +259,9 @@ fn uptime_of(started_at: Option<&str>) -> String {
         return "-".to_string();
     };
     match SystemTime::now().duration_since(started) {
-        Ok(elapsed) => humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string(),
+        Ok(elapsed) => {
+            humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string()
+        }
         Err(_) => "-".to_string(),
     }
 }
@@ -366,8 +379,8 @@ async fn row_for_assignment(
         Ok(summary) => {
             // State first: a container that is not running at all is the more
             // useful thing to say about it than which image it isn't running.
-            let reason =
-                describe_state(assignment.desired, &summary.state).or_else(|| describe_pin_drift(&summary));
+            let reason = describe_state(assignment.desired, &summary.state)
+                .or_else(|| describe_pin_drift(&summary));
             let proxy_error = summary.proxy.and_then(|p| p.error);
             (
                 stack,
@@ -410,7 +423,8 @@ async fn fetch_summary(
     node: &str,
     instance: &cl_raft::ids::InstanceId,
 ) -> Result<InstanceSummary> {
-    let base = cl_update::peers::base_url(cfg, node).ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
+    let base = cl_update::peers::base_url(cfg, node)
+        .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
     let path = internal_summary_path(instance);
     let signature = cl_secret::internal_auth::sign(key, &path);
 
@@ -423,7 +437,9 @@ async fn fetch_summary(
     if !resp.status().is_success() {
         anyhow::bail!("{node} answered {}", resp.status());
     }
-    resp.json().await.with_context(|| format!("parsing {node}'s answer about {instance}"))
+    resp.json()
+        .await
+        .with_context(|| format!("parsing {node}'s answer about {instance}"))
 }
 
 /// Instances every deployed stack wants but that have no running assignment,
@@ -493,7 +509,14 @@ fn internal_logs_path(instance: &str) -> String {
 
 /// Best-effort: a log fetch failing must not stop the rest of the report from
 /// printing, so this prints its own error line rather than returning one.
-async fn print_log_tail(cfg: &ClusterConfig, http: &reqwest::Client, key: &ClusterKey, node: &str, instance: &str, tail: u32) {
+async fn print_log_tail(
+    cfg: &ClusterConfig,
+    http: &reqwest::Client,
+    key: &ClusterKey,
+    node: &str,
+    instance: &str,
+    tail: u32,
+) {
     if let Err(e) = fetch_log_tail(cfg, http, key, node, instance, tail).await {
         println!("    (could not fetch logs: {e})");
     }
@@ -507,7 +530,8 @@ async fn fetch_log_tail(
     instance: &str,
     tail: u32,
 ) -> Result<()> {
-    let base = cl_update::peers::base_url(cfg, node).ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
+    let base = cl_update::peers::base_url(cfg, node)
+        .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
     let path = format!("{}?follow=false&tail={tail}", internal_logs_path(instance));
     let signature = cl_secret::internal_auth::sign(key, &path);
 
@@ -534,7 +558,9 @@ async fn fetch_log_tail(
                 event = name.to_string();
             } else if let Some(data) = line.strip_prefix("data: ") {
                 if event == "stdout" || event == "stderr" {
-                    let text = serde_json::from_str::<LogPayload>(data).map(|p| p.text).unwrap_or_else(|_| data.to_string());
+                    let text = serde_json::from_str::<LogPayload>(data)
+                        .map(|p| p.text)
+                        .unwrap_or_else(|_| data.to_string());
                     println!("    | {text}");
                 }
             }
@@ -552,7 +578,6 @@ struct LogPayload {
 mod tests {
     use super::*;
     use cl_raft::ids::VolumeId;
-
 
     fn summary(pinned: Option<&str>, running: Option<&str>) -> InstanceSummary {
         InstanceSummary {
@@ -614,7 +639,10 @@ mod tests {
     /// would bury the real faults.
     #[test]
     fn an_unknown_digest_on_either_side_is_not_drift() {
-        assert_eq!(describe_pin_drift(&summary(Some("sha256:a"), Some("sha256:a"))), None);
+        assert_eq!(
+            describe_pin_drift(&summary(Some("sha256:a"), Some("sha256:a"))),
+            None
+        );
         assert_eq!(describe_pin_drift(&summary(Some("sha256:a"), None)), None);
         assert_eq!(describe_pin_drift(&summary(None, Some("sha256:a"))), None);
     }
@@ -622,7 +650,11 @@ mod tests {
     /// Built by hand rather than through `apply`: the volume requests all
     /// validate that the primary is a roster member implementing the drive,
     /// and one of these cases is deliberately a primary that is not.
-    fn state_with_volume(primary: &str, generation: u64, replica: Option<(&str, u64)>) -> ClusterState {
+    fn state_with_volume(
+        primary: &str,
+        generation: u64,
+        replica: Option<(&str, u64)>,
+    ) -> ClusterState {
         let mut state = ClusterState::default();
         let id = VolumeId::new("fast", "data");
         let mut replicas = std::collections::BTreeMap::from([(primary.to_string(), generation)]);
@@ -647,7 +679,9 @@ mod tests {
         let generation = state.volumes[&VolumeId::new("fast", "data")].generation;
         let warnings = cluster_warnings(&state);
         assert!(
-            warnings.iter().any(|w| w.contains("replica on n2") && w.contains("behind")),
+            warnings
+                .iter()
+                .any(|w| w.contains("replica on n2") && w.contains("behind")),
             "expected a lag warning for generation {generation}, got {warnings:?}",
         );
     }
@@ -670,7 +704,9 @@ mod tests {
         let state = state_with_volume("gone", 1, None);
         let warnings = cluster_warnings(&state);
         assert!(
-            warnings.iter().any(|w| w.contains("not a member of the cluster")),
+            warnings
+                .iter()
+                .any(|w| w.contains("not a member of the cluster")),
             "{warnings:?}",
         );
     }

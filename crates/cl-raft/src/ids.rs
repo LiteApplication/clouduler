@@ -68,7 +68,9 @@ impl FromStr for InstanceId {
         let service = parts.next();
         let stack = parts.next();
         match (stack, service, index) {
-            (Some(stack), Some(service), Some(index)) if !stack.is_empty() && !service.is_empty() => {
+            (Some(stack), Some(service), Some(index))
+                if !stack.is_empty() && !service.is_empty() =>
+            {
                 Ok(InstanceId::new(stack, service, index))
             }
             _ => Err(format!("{s} is not a stack.service.index instance id")),
@@ -165,7 +167,10 @@ mod tests {
     #[test]
     fn ids_round_trip_through_their_string_form() {
         let instance = InstanceId::new("gitlab", "web", 3);
-        assert_eq!(instance.to_string().parse::<InstanceId>().unwrap(), instance);
+        assert_eq!(
+            instance.to_string().parse::<InstanceId>().unwrap(),
+            instance
+        );
 
         let volume = VolumeId::new("fast", "data");
         assert_eq!(volume.to_string().parse::<VolumeId>().unwrap(), volume);

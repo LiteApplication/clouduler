@@ -26,7 +26,13 @@ pub enum Outcome {
 /// Calls `cfg.address`, forwarding a minimal set of identifying headers plus
 /// `X-Forwarded-Method`/`X-Forwarded-Uri` (Traefik's convention, so the auth
 /// endpoint can make its decision based on what was actually requested).
-pub async fn check(client: &reqwest::Client, cfg: &ForwardAuth, method: &Method, uri: &Uri, headers: &HeaderMap) -> Outcome {
+pub async fn check(
+    client: &reqwest::Client,
+    cfg: &ForwardAuth,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Outcome {
     let mut request = client.get(cfg.address.as_str());
     for name in FORWARDED_REQUEST_HEADERS {
         if let Some(value) = headers.get(*name) {
@@ -103,7 +109,9 @@ mod tests {
                         let handler = handler.clone();
                         async move { Ok::<_, Infallible>(handler(req).await) }
                     });
-                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, svc).await;
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
                 });
             }
         });
@@ -111,7 +119,11 @@ mod tests {
     }
 
     fn cfg(address: String) -> ForwardAuth {
-        ForwardAuth { address, auth_response_headers: vec!["X-User".to_string()], timeout: None }
+        ForwardAuth {
+            address,
+            auth_response_headers: vec!["X-User".to_string()],
+            timeout: None,
+        }
     }
 
     #[tokio::test]

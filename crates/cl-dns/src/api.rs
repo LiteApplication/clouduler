@@ -133,7 +133,12 @@ impl Cloudflare {
     /// Resolves a zone name to its id, caching the result. Cloudflare has no
     /// "get zone by name" endpoint, so this lists zones filtered by name.
     pub async fn zone_id(&self, name: &str) -> Result<String> {
-        if let Some(id) = self.zone_cache.lock().expect("zone cache poisoned").get(name) {
+        if let Some(id) = self
+            .zone_cache
+            .lock()
+            .expect("zone cache poisoned")
+            .get(name)
+        {
             return Ok(id.clone());
         }
 
@@ -198,7 +203,8 @@ impl Cloudflare {
 
     pub async fn create_record(&self, zone_id: &str, record: &RecordInput) -> Result<Record> {
         let url = format!("{}/zones/{}/dns_records", self.base_url, zone_id);
-        self.request(reqwest::Method::POST, &url, Some(record)).await
+        self.request(reqwest::Method::POST, &url, Some(record))
+            .await
     }
 
     pub async fn update_record(
@@ -207,13 +213,21 @@ impl Cloudflare {
         record_id: &str,
         record: &RecordInput,
     ) -> Result<Record> {
-        let url = format!("{}/zones/{}/dns_records/{}", self.base_url, zone_id, record_id);
+        let url = format!(
+            "{}/zones/{}/dns_records/{}",
+            self.base_url, zone_id, record_id
+        );
         self.request(reqwest::Method::PUT, &url, Some(record)).await
     }
 
     pub async fn delete_record(&self, zone_id: &str, record_id: &str) -> Result<()> {
-        let url = format!("{}/zones/{}/dns_records/{}", self.base_url, zone_id, record_id);
-        let _: serde_json::Value = self.request(reqwest::Method::DELETE, &url, None::<()>).await?;
+        let url = format!(
+            "{}/zones/{}/dns_records/{}",
+            self.base_url, zone_id, record_id
+        );
+        let _: serde_json::Value = self
+            .request(reqwest::Method::DELETE, &url, None::<()>)
+            .await?;
         Ok(())
     }
 
@@ -249,7 +263,10 @@ impl Cloudflare {
 
         loop {
             attempt += 1;
-            let mut req = self.http.request(method.clone(), url).bearer_auth(&self.token);
+            let mut req = self
+                .http
+                .request(method.clone(), url)
+                .bearer_auth(&self.token);
             if let Some(body) = &body {
                 req = req.json(body);
             }
@@ -271,12 +288,11 @@ impl Cloudflare {
                 source,
             })?;
 
-            let parsed: ApiResponse<T> = serde_json::from_str(&text).map_err(|_| {
-                DnsError::Api {
+            let parsed: ApiResponse<T> =
+                serde_json::from_str(&text).map_err(|_| DnsError::Api {
                     code: status.as_u16() as u32,
                     message: format!("unexpected response body: {text}"),
-                }
-            })?;
+                })?;
 
             if !parsed.success {
                 let err = parsed
@@ -360,9 +376,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/user/tokens/verify"))
             .and(header("Authorization", "Bearer secret-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(
-                serde_json::json!({ "status": "active" }),
-            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(ok_envelope(serde_json::json!({ "status": "active" }))),
+            )
             .mount(&server)
             .await;
 
@@ -376,9 +393,11 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/zones"))
             .and(query_param("name", "example.com"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(serde_json::json!([
-                { "id": "zone-abc", "name": "example.com" }
-            ]))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(
+                serde_json::json!([
+                    { "id": "zone-abc", "name": "example.com" }
+                ]),
+            )))
             .expect(1) // second zone_id call must hit the cache, not the server
             .mount(&server)
             .await;
@@ -393,7 +412,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/zones"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(serde_json::json!([]))))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(ok_envelope(serde_json::json!([]))),
+            )
             .mount(&server)
             .await;
 
@@ -454,7 +475,10 @@ mod tests {
             .await;
 
         let cf = Cloudflare::with_base_url("tok", server.uri());
-        let records = cf.list_records("zone1", None, None).await.expect("parses despite the MX record");
+        let records = cf
+            .list_records("zone1", None, None)
+            .await
+            .expect("parses despite the MX record");
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind, RecordType::Other);
         assert_eq!(records[1].kind, RecordType::A);
@@ -465,10 +489,12 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/zones/zone1/dns_records"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(serde_json::json!({
-                "id": "new1", "zone_id": "zone1", "name": "svc.example.com",
-                "type": "A", "content": "1.2.3.4", "ttl": 1, "proxied": false
-            }))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(
+                serde_json::json!({
+                    "id": "new1", "zone_id": "zone1", "name": "svc.example.com",
+                    "type": "A", "content": "1.2.3.4", "ttl": 1, "proxied": false
+                }),
+            )))
             .mount(&server)
             .await;
 
@@ -492,7 +518,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/zones/zone1/dns_records"))
             .respond_with(
-                ResponseTemplate::new(400).set_body_json(err_envelope(81057, "Record already exists.")),
+                ResponseTemplate::new(400)
+                    .set_body_json(err_envelope(81057, "Record already exists.")),
             )
             .mount(&server)
             .await;
@@ -517,7 +544,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/user/tokens/verify"))
             .respond_with(
-                ResponseTemplate::new(401).set_body_json(err_envelope(9109, "Invalid access token")),
+                ResponseTemplate::new(401)
+                    .set_body_json(err_envelope(9109, "Invalid access token")),
             )
             .mount(&server)
             .await;
@@ -538,9 +566,10 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/user/tokens/verify"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_envelope(
-                serde_json::json!({ "status": "active" }),
-            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(ok_envelope(serde_json::json!({ "status": "active" }))),
+            )
             .mount(&server)
             .await;
 

@@ -15,7 +15,10 @@ use super::{Identity, Role};
 impl FromRequestParts<AppState> for Identity {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         if let Some(header) = parts.headers.get(axum::http::header::AUTHORIZATION) {
             let value = header
                 .to_str()
@@ -31,7 +34,9 @@ impl FromRequestParts<AppState> for Identity {
                     })
                     .ok_or_else(|| ApiError::Unauthenticated("invalid api key".into()));
             }
-            return Err(ApiError::Unauthenticated("malformed authorization header".into()));
+            return Err(ApiError::Unauthenticated(
+                "malformed authorization header".into(),
+            ));
         }
 
         let jar = CookieJar::from_headers(&parts.headers);
@@ -53,7 +58,10 @@ pub struct RequireAdmin(pub Identity);
 impl FromRequestParts<AppState> for RequireAdmin {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let identity = Identity::from_request_parts(parts, state).await?;
         if identity.role.is_admin() {
             Ok(RequireAdmin(identity))

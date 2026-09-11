@@ -255,7 +255,13 @@ async fn emergency_registers_a_volume_it_has_never_seen_before() {
     let store = Store::open(&path).expect("reopen");
     let volume = VolumeId::new("fast", "fresh");
     store
-        .emergency(1, "10.10.0.1:7373".parse().expect("addr"), "n1", "site", &[volume.clone()].into())
+        .emergency(
+            1,
+            "10.10.0.1:7373".parse().expect("addr"),
+            "n1",
+            "site",
+            &[volume.clone()].into(),
+        )
         .await
         .expect("emergency");
 
@@ -346,7 +352,12 @@ async fn restore_state_replaces_content_but_never_membership() {
     });
 
     store
-        .restore_state(cluster_config.clone(), stacks.clone(), configs.clone(), secrets.clone())
+        .restore_state(
+            cluster_config.clone(),
+            stacks.clone(),
+            configs.clone(),
+            secrets.clone(),
+        )
         .await
         .expect("restore");
 

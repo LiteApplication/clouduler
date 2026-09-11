@@ -114,7 +114,10 @@ mod tests {
             let value = generate(256, charset).unwrap();
             let alphabet = charset.alphabet();
             for byte in &value {
-                assert!(alphabet.contains(byte), "{byte} not in {charset:?} alphabet");
+                assert!(
+                    alphabet.contains(byte),
+                    "{byte} not in {charset:?} alphabet"
+                );
             }
         }
     }
@@ -130,6 +133,8 @@ mod tests {
     fn hex_output_is_lowercase_hex() {
         let value = generate(64, Charset::Hex).unwrap();
         let text = String::from_utf8(value).unwrap();
-        assert!(text.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

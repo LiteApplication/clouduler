@@ -73,14 +73,19 @@ impl TryFrom<RawVolume> for VolumeMount {
                 }
                 if long.kind.as_deref() == Some("tmpfs") {
                     if long.source.is_some() {
-                        return Err("a tmpfs volume cannot have a source, it has no backing drive".to_string());
+                        return Err(
+                            "a tmpfs volume cannot have a source, it has no backing drive"
+                                .to_string(),
+                        );
                     }
                     return Ok(VolumeMount {
                         drive: None,
                         volume: None,
                         target: PathBuf::from(long.target),
                         read_only: long.read_only,
-                        tmpfs: Some(TmpfsOptions { size: long.tmpfs.and_then(|t| t.size) }),
+                        tmpfs: Some(TmpfsOptions {
+                            size: long.tmpfs.and_then(|t| t.size),
+                        }),
                     });
                 }
                 match long.source {
@@ -150,10 +155,14 @@ fn split_source(source: &str) -> Result<(String, String), String> {
         ));
     }
     match source.split_once('/') {
-        Some((drive, volume)) if !drive.is_empty() && !volume.is_empty() && !volume.contains('/') => {
+        Some((drive, volume))
+            if !drive.is_empty() && !volume.is_empty() && !volume.contains('/') =>
+        {
             Ok((drive.to_string(), volume.to_string()))
         }
-        Some(_) => Err(format!("\"{source}\" is not a valid drive/volume reference")),
+        Some(_) => Err(format!(
+            "\"{source}\" is not a valid drive/volume reference"
+        )),
         None => Err(format!(
             "\"{source}\" must use drive/volume syntax, e.g. fast/gitlab-data"
         )),
@@ -195,7 +204,11 @@ fn parse_short(raw: &str) -> Result<VolumeMount, String> {
             let read_only = match *mode {
                 "ro" => true,
                 "rw" => false,
-                other => return Err(format!("unknown volume mode \"{other}\", expected ro or rw")),
+                other => {
+                    return Err(format!(
+                        "unknown volume mode \"{other}\", expected ro or rw"
+                    ))
+                }
             };
             Ok(VolumeMount {
                 drive: Some(drive),
@@ -254,20 +267,25 @@ mod tests {
 
     #[test]
     fn long_form_bind_rejected() {
-        let err = serde_yaml::from_str::<VolumeMount>(
-            "{ type: bind, source: /srv/data, target: /data }",
-        )
-        .unwrap_err();
+        let err =
+            serde_yaml::from_str::<VolumeMount>("{ type: bind, source: /srv/data, target: /data }")
+                .unwrap_err();
         assert!(err.to_string().contains("bind mounts are not supported"));
     }
 
     #[test]
     fn serializes_back_to_the_short_form() {
         let v = parse("fast/gitlab-data:/data").unwrap();
-        assert_eq!(serde_yaml::to_string(&v).unwrap().trim(), "fast/gitlab-data:/data");
+        assert_eq!(
+            serde_yaml::to_string(&v).unwrap().trim(),
+            "fast/gitlab-data:/data"
+        );
 
         let v = parse("fast/gitlab-data:/data:ro").unwrap();
-        assert_eq!(serde_yaml::to_string(&v).unwrap().trim(), "fast/gitlab-data:/data:ro");
+        assert_eq!(
+            serde_yaml::to_string(&v).unwrap().trim(),
+            "fast/gitlab-data:/data:ro"
+        );
 
         let v = parse("/anon").unwrap();
         assert_eq!(serde_yaml::to_string(&v).unwrap().trim(), "/anon");
@@ -285,10 +303,8 @@ mod tests {
 
     #[test]
     fn tmpfs_volume_parses_with_a_size() {
-        let v: VolumeMount = serde_yaml::from_str(
-            "{ type: tmpfs, target: /cache, tmpfs: { size: 64m } }",
-        )
-        .unwrap();
+        let v: VolumeMount =
+            serde_yaml::from_str("{ type: tmpfs, target: /cache, tmpfs: { size: 64m } }").unwrap();
         assert_eq!(v.drive, None);
         assert_eq!(v.volume, None);
         assert_eq!(v.target, PathBuf::from("/cache"));
@@ -313,10 +329,9 @@ mod tests {
 
     #[test]
     fn tmpfs_volume_round_trips() {
-        let v: VolumeMount = serde_yaml::from_str(
-            "{ type: tmpfs, target: /cache, tmpfs: { size: 64MiB } }",
-        )
-        .unwrap();
+        let v: VolumeMount =
+            serde_yaml::from_str("{ type: tmpfs, target: /cache, tmpfs: { size: 64MiB } }")
+                .unwrap();
         let encoded = serde_yaml::to_string(&v).unwrap();
         let reparsed: VolumeMount = serde_yaml::from_str(&encoded).unwrap();
         assert_eq!(reparsed, v);

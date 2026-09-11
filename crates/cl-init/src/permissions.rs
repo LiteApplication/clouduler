@@ -101,7 +101,10 @@ fn ensure_group() -> anyhow::Result<()> {
 }
 
 fn lookup_gid() -> Option<Gid> {
-    Group::from_name(GROUP).ok().flatten().map(|group| group.gid)
+    Group::from_name(GROUP)
+        .ok()
+        .flatten()
+        .map(|group| group.gid)
 }
 
 /// Whether the calling process's user belongs to the `clouduler` group,

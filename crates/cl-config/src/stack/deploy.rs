@@ -67,11 +67,19 @@ pub struct Resources {
 pub struct DeployRestartPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub delay: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub window: Option<Duration>,
 }
 
@@ -81,7 +89,11 @@ pub struct DeployRestartPolicy {
 pub struct UpdateConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub delay: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<String>,
@@ -136,8 +148,14 @@ update_config:
         .unwrap();
         assert_eq!(d.replicas, Some(3));
         assert_eq!(d.mode, Some(DeployMode::Replicated));
-        assert_eq!(d.placement.unwrap().constraints, vec!["node.hostname==n1".to_string()]);
-        assert_eq!(d.resources.unwrap().limits.unwrap().cpus.as_deref(), Some("1.0"));
+        assert_eq!(
+            d.placement.unwrap().constraints,
+            vec!["node.hostname==n1".to_string()]
+        );
+        assert_eq!(
+            d.resources.unwrap().limits.unwrap().cpus.as_deref(),
+            Some("1.0")
+        );
         assert_eq!(d.restart_policy.unwrap().max_attempts, Some(3));
         assert_eq!(d.update_config.unwrap().parallelism, Some(1));
     }

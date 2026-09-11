@@ -60,7 +60,10 @@ pub fn is_upgrade(headers: &HeaderMap) -> bool {
         .get_all("connection")
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .any(|v| v.split(',').any(|tok| tok.trim().eq_ignore_ascii_case("upgrade")));
+        .any(|v| {
+            v.split(',')
+                .any(|tok| tok.trim().eq_ignore_ascii_case("upgrade"))
+        });
     has_upgrade_token && headers.contains_key("upgrade")
 }
 
@@ -119,7 +122,10 @@ pub fn check_basic_auth(headers: &HeaderMap, creds: &BasicAuthCreds) -> bool {
 pub fn basic_auth_challenge(realm: &str) -> http::response::Builder {
     http::Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header(http::header::WWW_AUTHENTICATE, format!("Basic realm=\"{realm}\""))
+        .header(
+            http::header::WWW_AUTHENTICATE,
+            format!("Basic realm=\"{realm}\""),
+        )
 }
 
 /// Static header additions/removals a route can apply to the proxied request.
@@ -172,10 +178,14 @@ pub fn cors_response_headers(
             HeaderName::from_static("access-control-allow-origin"),
             HeaderValue::from_str(origin).unwrap_or_else(|_| HeaderValue::from_static("*")),
         ),
-        (HeaderName::from_static("vary"), HeaderValue::from_static("Origin")),
+        (
+            HeaderName::from_static("vary"),
+            HeaderValue::from_static("Origin"),
+        ),
         (
             HeaderName::from_static("access-control-allow-methods"),
-            HeaderValue::from_str(&policy.methods.join(", ")).unwrap_or_else(|_| HeaderValue::from_static("*")),
+            HeaderValue::from_str(&policy.methods.join(", "))
+                .unwrap_or_else(|_| HeaderValue::from_static("*")),
         ),
     ];
     let allow_headers = if policy.headers.is_empty() {
@@ -184,7 +194,10 @@ pub fn cors_response_headers(
         Some(policy.headers.join(", "))
     };
     if let Some(value) = allow_headers.and_then(|v| HeaderValue::from_str(&v).ok()) {
-        out.push((HeaderName::from_static("access-control-allow-headers"), value));
+        out.push((
+            HeaderName::from_static("access-control-allow-headers"),
+            value,
+        ));
     }
     if policy.allow_credentials {
         out.push((
@@ -209,7 +222,10 @@ mod tests {
     #[test]
     fn strips_hop_by_hop_and_connection_named_headers() {
         let mut headers = HeaderMap::new();
-        headers.insert("connection", HeaderValue::from_static("keep-alive, x-custom"));
+        headers.insert(
+            "connection",
+            HeaderValue::from_static("keep-alive, x-custom"),
+        );
         headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
         headers.insert("x-custom", HeaderValue::from_static("drop-me"));
         headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
@@ -236,9 +252,14 @@ mod tests {
 
     #[test]
     fn redirect_https_sets_location_and_status() {
-        let resp = redirect_https("app.example.com", "/foo?x=1").body(()).unwrap();
+        let resp = redirect_https("app.example.com", "/foo?x=1")
+            .body(())
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
-        assert_eq!(resp.headers().get(http::header::LOCATION).unwrap(), "https://app.example.com/foo?x=1");
+        assert_eq!(
+            resp.headers().get(http::header::LOCATION).unwrap(),
+            "https://app.example.com/foo?x=1"
+        );
     }
 
     #[test]
@@ -319,7 +340,10 @@ mod tests {
                 .find(|(n, _)| n.as_str() == name)
                 .map(|(_, v)| v.to_str().unwrap())
         };
-        assert_eq!(get("access-control-allow-origin"), Some("https://app.example.com"));
+        assert_eq!(
+            get("access-control-allow-origin"),
+            Some("https://app.example.com")
+        );
         assert_eq!(get("access-control-allow-methods"), Some("GET, POST"));
         assert_eq!(get("access-control-allow-credentials"), None);
     }
@@ -338,10 +362,16 @@ mod tests {
     #[test]
     fn cors_preflight_detected_by_method_and_header() {
         let mut headers = HeaderMap::new();
-        headers.insert("access-control-request-method", HeaderValue::from_static("POST"));
+        headers.insert(
+            "access-control-request-method",
+            HeaderValue::from_static("POST"),
+        );
         assert!(is_cors_preflight(&http::Method::OPTIONS, &headers));
         assert!(!is_cors_preflight(&http::Method::GET, &headers));
-        assert!(!is_cors_preflight(&http::Method::OPTIONS, &HeaderMap::new()));
+        assert!(!is_cors_preflight(
+            &http::Method::OPTIONS,
+            &HeaderMap::new()
+        ));
     }
 
     #[test]

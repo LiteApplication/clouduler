@@ -43,11 +43,19 @@ fn parse_source(source: &str) -> Result<RepoRef, String> {
     };
 
     match (parts.next(), parts.next(), parts.next()) {
-        (None, None, None) => Ok(RepoRef { owner, repo, tag: None }),
-        (Some("releases"), Some("tag"), Some(tag)) if !tag.is_empty() => {
-            Ok(RepoRef { owner, repo, tag: Some(tag.to_string()) })
-        }
-        _ => Err(format!("{source} is neither a repo url nor a release tag url")),
+        (None, None, None) => Ok(RepoRef {
+            owner,
+            repo,
+            tag: None,
+        }),
+        (Some("releases"), Some("tag"), Some(tag)) if !tag.is_empty() => Ok(RepoRef {
+            owner,
+            repo,
+            tag: Some(tag.to_string()),
+        }),
+        _ => Err(format!(
+            "{source} is neither a repo url nor a release tag url"
+        )),
     }
 }
 
@@ -92,7 +100,9 @@ fn client(token: Option<&str>) -> Result<octocrab::Octocrab, String> {
     if let Some(token) = token {
         builder = builder.personal_token(token.to_string());
     }
-    builder.build().map_err(|e| format!("building github client: {e}"))
+    builder
+        .build()
+        .map_err(|e| format!("building github client: {e}"))
 }
 
 /// Resolve `source` (a repo url or a release tag url) to the release it
@@ -105,10 +115,20 @@ pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedReleas
     let releases = repo_handler.releases();
     let release = match &repo_ref.tag {
         Some(tag) => releases.get_by_tag(tag).await.map_err(|e| {
-            format!("fetching release {tag} of {}/{}: {}", repo_ref.owner, repo_ref.repo, describe(&e))
+            format!(
+                "fetching release {tag} of {}/{}: {}",
+                repo_ref.owner,
+                repo_ref.repo,
+                describe(&e)
+            )
         })?,
         None => releases.get_latest().await.map_err(|e| {
-            format!("fetching the latest release of {}/{}: {}", repo_ref.owner, repo_ref.repo, describe(&e))
+            format!(
+                "fetching the latest release of {}/{}: {}",
+                repo_ref.owner,
+                repo_ref.repo,
+                describe(&e)
+            )
         })?,
     };
 
@@ -116,7 +136,13 @@ pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedReleas
     for arch in ["x86_64", "aarch64"] {
         let name = asset_name(arch);
         if let Some(asset) = release.assets.iter().find(|a| a.name == name) {
-            assets.insert(arch.to_string(), ReleaseAsset { id: asset.id.0, name: asset.name.clone() });
+            assets.insert(
+                arch.to_string(),
+                ReleaseAsset {
+                    id: asset.id.0,
+                    name: asset.name.clone(),
+                },
+            );
         }
     }
     if assets.is_empty() {
@@ -126,7 +152,12 @@ pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedReleas
         ));
     }
 
-    Ok(ResolvedRelease { owner: repo_ref.owner, repo: repo_ref.repo, tag: release.tag_name, assets })
+    Ok(ResolvedRelease {
+        owner: repo_ref.owner,
+        repo: repo_ref.repo,
+        tag: release.tag_name,
+        assets,
+    })
 }
 
 /// Download one release asset's raw bytes via the GitHub API, which (unlike
@@ -139,7 +170,10 @@ pub async fn download_asset(
     asset: &ReleaseAsset,
     token: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/assets/{}", asset.id);
+    let url = format!(
+        "https://api.github.com/repos/{owner}/{repo}/releases/assets/{}",
+        asset.id
+    );
     let mut request = client
         .get(&url)
         .header("Accept", "application/octet-stream")
@@ -147,7 +181,10 @@ pub async fn download_asset(
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let response = request.send().await.map_err(|e| format!("downloading {}: {e}", asset.name))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("downloading {}: {e}", asset.name))?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -172,14 +209,16 @@ mod tests {
 
     #[test]
     fn a_trailing_slash_on_a_bare_repo_url_is_tolerated() {
-        let repo_ref = parse_source("https://github.com/LiteApplication/clouduler/").expect("parse");
+        let repo_ref =
+            parse_source("https://github.com/LiteApplication/clouduler/").expect("parse");
         assert_eq!(repo_ref.tag, None);
     }
 
     #[test]
     fn a_release_tag_url_pins_that_tag() {
         let repo_ref =
-            parse_source("https://github.com/LiteApplication/clouduler/releases/tag/v0.1.0").expect("parse");
+            parse_source("https://github.com/LiteApplication/clouduler/releases/tag/v0.1.0")
+                .expect("parse");
         assert_eq!(repo_ref.owner, "LiteApplication");
         assert_eq!(repo_ref.repo, "clouduler");
         assert_eq!(repo_ref.tag.as_deref(), Some("v0.1.0"));

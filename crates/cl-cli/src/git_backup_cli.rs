@@ -16,7 +16,8 @@ use cl_update::internal_client::AUTH_HEADER;
 fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
     match via {
         Some(name) => {
-            cfg.node(name).ok_or_else(|| anyhow!("no node named {name} in the config"))?;
+            cfg.node(name)
+                .ok_or_else(|| anyhow!("no node named {name} in the config"))?;
             Ok(name)
         }
         None => cfg
@@ -60,5 +61,11 @@ async fn trigger(cfg: &ClusterConfig, via: Option<&str>, path: &str) -> Result<(
 pub async fn pull(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
     trigger(cfg, via, "/api/git-backup/pull").await?;
     println!("triggered a git backup pull");
+    Ok(())
+}
+
+pub async fn reconcile(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
+    trigger(cfg, via, "/api/git-backup/reconcile").await?;
+    println!("triggered a git backup reconcile");
     Ok(())
 }

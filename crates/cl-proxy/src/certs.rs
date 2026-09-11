@@ -34,7 +34,9 @@ fn chain_for(chain_pem: &str) -> Result<Vec<CertificateDer<'static>>> {
         rustls_pemfile::certs(&mut chain_pem.as_bytes()).collect();
     let certs = certs.map_err(|e| ProxyError::CertParse(e.to_string()))?;
     if certs.is_empty() {
-        return Err(ProxyError::CertParse("no certificates found in PEM".to_string()));
+        return Err(ProxyError::CertParse(
+            "no certificates found in PEM".to_string(),
+        ));
     }
     Ok(certs)
 }

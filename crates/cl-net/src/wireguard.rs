@@ -62,8 +62,12 @@ pub fn parse_wg_quick(text: &str) -> Result<WireguardConfig> {
     let mut current: Option<BTreeMap<String, String>> = None;
     let mut in_peer = false;
 
-    let flush_peer = |current: &mut Option<BTreeMap<String, String>>, peers: &mut Vec<WireguardPeer>| -> Result<()> {
-        let Some(fields) = current.take() else { return Ok(()) };
+    let flush_peer = |current: &mut Option<BTreeMap<String, String>>,
+                      peers: &mut Vec<WireguardPeer>|
+     -> Result<()> {
+        let Some(fields) = current.take() else {
+            return Ok(());
+        };
         let public_key = fields
             .get("publickey")
             .ok_or_else(|| parse_err("a [Peer] section is missing PublicKey"))?
@@ -73,7 +77,10 @@ pub fn parse_wg_quick(text: &str) -> Result<WireguardConfig> {
                 .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(|s| s.parse::<IpNet>().map_err(|_| parse_err(&format!("invalid AllowedIPs entry {s}"))))
+                .map(|s| {
+                    s.parse::<IpNet>()
+                        .map_err(|_| parse_err(&format!("invalid AllowedIPs entry {s}")))
+                })
                 .collect::<Result<Vec<_>>>()?,
             None => Vec::new(),
         };
@@ -82,7 +89,9 @@ pub fn parse_wg_quick(text: &str) -> Result<WireguardConfig> {
             endpoint: fields.get("endpoint").cloned(),
             allowed_ips,
             preshared_key: fields.get("presharedkey").cloned(),
-            persistent_keepalive: fields.get("persistentkeepalive").and_then(|s| s.parse().ok()),
+            persistent_keepalive: fields
+                .get("persistentkeepalive")
+                .and_then(|s| s.parse().ok()),
         });
         Ok(())
     };
@@ -143,7 +152,12 @@ pub fn parse_wg_quick(text: &str) -> Result<WireguardConfig> {
         return Err(parse_err("no [Peer] section found"));
     }
 
-    Ok(WireguardConfig { private_key, address, listen_port, peers })
+    Ok(WireguardConfig {
+        private_key,
+        address,
+        listen_port,
+        peers,
+    })
 }
 
 fn parse_err(msg: &str) -> NetError {
@@ -168,11 +182,21 @@ pub fn ensure_wireguard_interface(name: &str, cfg: &WireguardConfig) -> Result<(
     }
 
     let tmp = write_tempfile(&wg_setconf_body(cfg))?;
-    let result = run_ok("wg", &["setconf", name, tmp.to_str().expect("temp path is always utf8")]);
+    let result = run_ok(
+        "wg",
+        &[
+            "setconf",
+            name,
+            tmp.to_str().expect("temp path is always utf8"),
+        ],
+    );
     let _ = std::fs::remove_file(&tmp);
     result?;
 
-    run_ok("ip", &["address", "replace", &cfg.address.to_string(), "dev", name])?;
+    run_ok(
+        "ip",
+        &["address", "replace", &cfg.address.to_string(), "dev", name],
+    )?;
     run_ok("ip", &["link", "set", name, "up"])?;
     Ok(())
 }
@@ -183,7 +207,8 @@ pub fn teardown_wireguard_interface(name: &str) -> Result<()> {
         .args(["link", "del", name])
         .output()
         .map_err(|e| io_err(format!("ip link del {name}"), e))?;
-    if !out.status.success() && !String::from_utf8_lossy(&out.stderr).contains("Cannot find device") {
+    if !out.status.success() && !String::from_utf8_lossy(&out.stderr).contains("Cannot find device")
+    {
         return Err(cmd_err("ip link del", &out.stderr));
     }
     Ok(())
@@ -231,12 +256,16 @@ fn write_tempfile(content: &str) -> Result<std::path::PathBuf> {
         .mode(0o600)
         .open(&path)
         .map_err(|e| io_err("creating wireguard temp file".to_string(), e))?;
-    file.write_all(content.as_bytes()).map_err(|e| io_err("writing wireguard temp file".to_string(), e))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| io_err("writing wireguard temp file".to_string(), e))?;
     Ok(path)
 }
 
 fn run_ok(bin: &str, args: &[&str]) -> Result<()> {
-    let out = Command::new(bin).args(args).output().map_err(|e| io_err(format!("{bin} {}", args.join(" ")), e))?;
+    let out = Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|e| io_err(format!("{bin} {}", args.join(" ")), e))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -272,17 +301,43 @@ pub struct IngressRule {
 ///
 /// Scoped to `-i <iface>` throughout: never opens these ports on the bridge,
 /// the internal network, or anywhere else.
-pub fn wireguard_ingress_iptables_plan(iface: &str, target_addr: IpAddr, rules: &[IngressRule]) -> IngressIptablesPlan {
+pub fn wireguard_ingress_iptables_plan(
+    iface: &str,
+    target_addr: IpAddr,
+    rules: &[IngressRule],
+) -> IngressIptablesPlan {
     let chain = short_name("CLDR-WGIN-", iface, CHAIN_USABLE);
-    let mut setup = vec![argv(&["-N", &chain]), argv(&["-t", "nat", "-N", &chain]), argv(&["-F", &chain]), argv(&["-t", "nat", "-F", &chain])];
+    let mut setup = vec![
+        argv(&["-N", &chain]),
+        argv(&["-t", "nat", "-N", &chain]),
+        argv(&["-F", &chain]),
+        argv(&["-t", "nat", "-F", &chain]),
+    ];
 
     for rule in rules {
         let proto = rule.protocol.to_string();
         let port = rule.port.to_string();
-        setup.push(argv(&["-A", &chain, "-i", iface, "-p", &proto, "--dport", &port, "-j", "ACCEPT"]));
+        setup.push(argv(&[
+            "-A", &chain, "-i", iface, "-p", &proto, "--dport", &port, "-j", "ACCEPT",
+        ]));
         if rule.target_port != rule.port {
             let dest = format!("{target_addr}:{}", rule.target_port);
-            setup.push(argv(&["-t", "nat", "-A", &chain, "-i", iface, "-p", &proto, "--dport", &port, "-j", "DNAT", "--to-destination", &dest]));
+            setup.push(argv(&[
+                "-t",
+                "nat",
+                "-A",
+                &chain,
+                "-i",
+                iface,
+                "-p",
+                &proto,
+                "--dport",
+                &port,
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
+            ]));
         }
     }
 
@@ -290,8 +345,14 @@ pub fn wireguard_ingress_iptables_plan(iface: &str, target_addr: IpAddr, rules: 
         chain: chain.clone(),
         setup,
         jumps: vec![
-            (argv(&["-C", "INPUT", "-j", &chain]), argv(&["-A", "INPUT", "-j", &chain])),
-            (argv(&["-t", "nat", "-C", "PREROUTING", "-j", &chain]), argv(&["-t", "nat", "-A", "PREROUTING", "-j", &chain])),
+            (
+                argv(&["-C", "INPUT", "-j", &chain]),
+                argv(&["-A", "INPUT", "-j", &chain]),
+            ),
+            (
+                argv(&["-t", "nat", "-C", "PREROUTING", "-j", &chain]),
+                argv(&["-t", "nat", "-A", "PREROUTING", "-j", &chain]),
+            ),
         ],
     }
 }
@@ -326,7 +387,10 @@ pub fn apply_wireguard_ingress_iptables(plan: &IngressIptablesPlan) -> Result<()
 }
 
 fn run_iptables(args: &[String]) -> Result<()> {
-    let output = Command::new("iptables").args(args).output().map_err(|e| io_err(format!("iptables {}", args.join(" ")), e))?;
+    let output = Command::new("iptables")
+        .args(args)
+        .output()
+        .map_err(|e| io_err(format!("iptables {}", args.join(" ")), e))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -407,17 +471,33 @@ PersistentKeepalive = 25
 
     #[test]
     fn ingress_plan_scopes_rules_to_the_tunnel_interface() {
-        let rules = [IngressRule { port: 2222, protocol: Protocol::Tcp, target_port: 22 }];
+        let rules = [IngressRule {
+            port: 2222,
+            protocol: Protocol::Tcp,
+            target_port: 22,
+        }];
         let plan = wireguard_ingress_iptables_plan("wg-vpn", "10.10.0.5".parse().unwrap(), &rules);
-        let accept = plan.setup.iter().find(|a| a.contains(&"ACCEPT".to_string())).expect("an accept rule");
+        let accept = plan
+            .setup
+            .iter()
+            .find(|a| a.contains(&"ACCEPT".to_string()))
+            .expect("an accept rule");
         assert!(accept.windows(2).any(|w| w == ["-i", "wg-vpn"]));
-        let dnat = plan.setup.iter().find(|a| a.contains(&"DNAT".to_string())).expect("a dnat rule");
+        let dnat = plan
+            .setup
+            .iter()
+            .find(|a| a.contains(&"DNAT".to_string()))
+            .expect("a dnat rule");
         assert!(dnat.iter().any(|a| a == "10.10.0.5:22"));
     }
 
     #[test]
     fn ingress_plan_skips_dnat_when_ports_match() {
-        let rules = [IngressRule { port: 22, protocol: Protocol::Tcp, target_port: 22 }];
+        let rules = [IngressRule {
+            port: 22,
+            protocol: Protocol::Tcp,
+            target_port: 22,
+        }];
         let plan = wireguard_ingress_iptables_plan("wg-vpn", "10.10.0.5".parse().unwrap(), &rules);
         assert!(!plan.setup.iter().any(|a| a.contains(&"DNAT".to_string())));
     }

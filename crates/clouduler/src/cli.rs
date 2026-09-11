@@ -763,6 +763,15 @@ pub enum GitBackupCommand {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
+    /// Reconcile the git repository with current cluster state: builds
+    /// cluster.yaml, stacks, configs, and secrets from Raft data, commits
+    /// and pushes to git, and updates the last known good commit.
+    Reconcile {
+        /// Node to ask. Defaults to any manager in the config; a non-leader
+        /// forwards the trigger to whichever node currently leads.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

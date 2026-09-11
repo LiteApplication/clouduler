@@ -118,13 +118,34 @@ pub fn egress_iptables_plan(bridge: &str, subnet: Ipv4Net, iface: &str) -> Egres
         setup: vec![
             argv(&["-t", "nat", "-N", &nat_chain]),
             argv(&["-t", "nat", "-F", &nat_chain]),
-            argv(&["-t", "nat", "-A", &nat_chain, "-s", &subnet, "-o", iface, "-j", "MASQUERADE"]),
+            argv(&[
+                "-t",
+                "nat",
+                "-A",
+                &nat_chain,
+                "-s",
+                &subnet,
+                "-o",
+                iface,
+                "-j",
+                "MASQUERADE",
+            ]),
             argv(&["-N", &fwd_chain]),
             argv(&["-F", &fwd_chain]),
             argv(&["-A", &fwd_chain, "-i", bridge, "-o", iface, "-j", "ACCEPT"]),
             argv(&[
-                "-A", &fwd_chain, "-i", iface, "-o", bridge, "-m", "state", "--state",
-                "ESTABLISHED,RELATED", "-j", "ACCEPT",
+                "-A",
+                &fwd_chain,
+                "-i",
+                iface,
+                "-o",
+                bridge,
+                "-m",
+                "state",
+                "--state",
+                "ESTABLISHED,RELATED",
+                "-j",
+                "ACCEPT",
             ]),
             // Anything from the bridge that didn't just get accepted out
             // `iface` above is dropped here: the kill-switch. No interface,
@@ -135,8 +156,14 @@ pub fn egress_iptables_plan(bridge: &str, subnet: Ipv4Net, iface: &str) -> Egres
         // these two live in shared built-in chains, so re-adding them on
         // every reconcile would duplicate rather than replace.
         jumps: vec![
-            (argv(&["-t", "nat", "-C", "POSTROUTING", "-j", &nat_chain]), argv(&["-t", "nat", "-A", "POSTROUTING", "-j", &nat_chain])),
-            (argv(&["-C", "FORWARD", "-j", &fwd_chain]), argv(&["-A", "FORWARD", "-j", &fwd_chain])),
+            (
+                argv(&["-t", "nat", "-C", "POSTROUTING", "-j", &nat_chain]),
+                argv(&["-t", "nat", "-A", "POSTROUTING", "-j", &nat_chain]),
+            ),
+            (
+                argv(&["-C", "FORWARD", "-j", &fwd_chain]),
+                argv(&["-A", "FORWARD", "-j", &fwd_chain]),
+            ),
         ],
     }
 }
@@ -157,10 +184,16 @@ fn argv(parts: &[&str]) -> Vec<String> {
 
 /// Ensure the bridge exists, with the gateway address for `subnet`, up. No
 /// VXLAN device: unlike a stack overlay this bridge is node-local only.
-pub async fn ensure_egress_bridge(overlay: &Overlay, network: &str, subnet: Ipv4Net) -> Result<String> {
+pub async fn ensure_egress_bridge(
+    overlay: &Overlay,
+    network: &str,
+    subnet: Ipv4Net,
+) -> Result<String> {
     let bridge = egress_bridge_name(network);
     let gateway = egress_gateway(subnet);
-    overlay.ensure_bridge(&bridge, gateway, subnet.prefix_len(), 1500).await?;
+    overlay
+        .ensure_bridge(&bridge, gateway, subnet.prefix_len(), 1500)
+        .await?;
     Ok(bridge)
 }
 
@@ -199,7 +232,15 @@ const PROBE_TIMEOUT_SECS: u32 = 2;
 /// internet. Pure and unit tested; `probe_reachable` below is the privileged
 /// half that actually runs it.
 pub fn ping_plan(iface: &str, target: IpAddr) -> Vec<String> {
-    argv(&["-I", iface, "-c", "1", "-W", &PROBE_TIMEOUT_SECS.to_string(), &target.to_string()])
+    argv(&[
+        "-I",
+        iface,
+        "-c",
+        "1",
+        "-W",
+        &PROBE_TIMEOUT_SECS.to_string(),
+        &target.to_string(),
+    ])
 }
 
 /// True if `target` answered a single ICMP echo sent out `iface`. Needs the
@@ -228,7 +269,11 @@ fn run_iptables(args: &[String]) -> Result<()> {
         Ok(())
     } else {
         Err(NetError::Io {
-            context: format!("iptables {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr)),
+            context: format!(
+                "iptables {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            ),
             source: std::io::Error::other("iptables exited non-zero"),
         })
     }
@@ -281,19 +326,34 @@ mod tests {
             .filter(|argv| argv.contains(&"-A".to_string()) && argv.contains(&plan.fwd_chain))
             .map(|argv| argv.join(" "))
             .collect();
-        assert!(fwd.iter().any(|r| r.contains("-o wg0") && r.contains("-j ACCEPT")));
+        assert!(fwd
+            .iter()
+            .any(|r| r.contains("-o wg0") && r.contains("-j ACCEPT")));
         // The drop has to come after the accept-out-wg0 rule, or it would
         // never be reached; iptables evaluates in order, and this list is
         // fed to iptables in the order it appears here.
-        let drop_pos = fwd.iter().position(|r| r.ends_with("-j DROP")).expect("a drop rule");
-        let accept_pos = fwd.iter().position(|r| r.contains("-o wg0")).expect("an accept rule");
-        assert!(accept_pos < drop_pos, "accept-out-the-interface must be evaluated before the drop");
+        let drop_pos = fwd
+            .iter()
+            .position(|r| r.ends_with("-j DROP"))
+            .expect("a drop rule");
+        let accept_pos = fwd
+            .iter()
+            .position(|r| r.contains("-o wg0"))
+            .expect("an accept rule");
+        assert!(
+            accept_pos < drop_pos,
+            "accept-out-the-interface must be evaluated before the drop"
+        );
     }
 
     #[test]
     fn the_masquerade_rule_scopes_to_the_subnet_and_interface() {
         let plan = egress_iptables_plan("clex-vpn", "10.245.7.0/24".parse().unwrap(), "wg0");
-        let nat = plan.setup.iter().find(|a| a.contains(&"MASQUERADE".to_string())).expect("a masquerade rule");
+        let nat = plan
+            .setup
+            .iter()
+            .find(|a| a.contains(&"MASQUERADE".to_string()))
+            .expect("a masquerade rule");
         assert!(nat.iter().any(|a| a == "10.245.7.0/24"));
         assert!(nat.windows(2).any(|w| w == ["-o", "wg0"]));
     }

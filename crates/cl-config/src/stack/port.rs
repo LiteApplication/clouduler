@@ -59,7 +59,10 @@ impl PortRange {
             }
             None => {
                 let port: u16 = s.parse().map_err(|_| format!("invalid port \"{s}\""))?;
-                Ok(PortRange { start: port, end: port })
+                Ok(PortRange {
+                    start: port,
+                    end: port,
+                })
             }
         }
     }
@@ -199,17 +202,33 @@ fn parse_short(raw: &str) -> Result<PortMapping, String> {
     let parts: Vec<&str> = main.split(':').collect();
     let (host_ip, published, target) = match parts.as_slice() {
         [target] => (None, None, PortRange::parse(target)?),
-        [published, target] => (None, Some(PortRange::parse(published)?), PortRange::parse(target)?),
+        [published, target] => (
+            None,
+            Some(PortRange::parse(published)?),
+            PortRange::parse(target)?,
+        ),
         [ip, published, target] => {
-            let ip: IpAddr = ip.parse().map_err(|_| format!("invalid host ip \"{ip}\""))?;
-            (Some(ip), Some(PortRange::parse(published)?), PortRange::parse(target)?)
+            let ip: IpAddr = ip
+                .parse()
+                .map_err(|_| format!("invalid host ip \"{ip}\""))?;
+            (
+                Some(ip),
+                Some(PortRange::parse(published)?),
+                PortRange::parse(target)?,
+            )
         }
         _ => return Err(format!("invalid port syntax \"{raw}\"")),
     };
 
     check_range_lengths(published.as_ref(), &target)?;
 
-    Ok(PortMapping { host_ip, published, target, protocol, mode: PublishMode::default() })
+    Ok(PortMapping {
+        host_ip,
+        published,
+        target,
+        protocol,
+        mode: PublishMode::default(),
+    })
 }
 
 #[cfg(test)]
@@ -232,7 +251,13 @@ mod tests {
     #[test]
     fn published_and_target() {
         let p = short("8080:80");
-        assert_eq!(p.published, Some(PortRange { start: 8080, end: 8080 }));
+        assert_eq!(
+            p.published,
+            Some(PortRange {
+                start: 8080,
+                end: 8080
+            })
+        );
         assert_eq!(p.target, PortRange { start: 80, end: 80 });
     }
 
@@ -240,7 +265,13 @@ mod tests {
     fn host_ip_published_target_protocol() {
         let p = short("127.0.0.1:8080:80/tcp");
         assert_eq!(p.host_ip, Some("127.0.0.1".parse().unwrap()));
-        assert_eq!(p.published, Some(PortRange { start: 8080, end: 8080 }));
+        assert_eq!(
+            p.published,
+            Some(PortRange {
+                start: 8080,
+                end: 8080
+            })
+        );
         assert_eq!(p.target, PortRange { start: 80, end: 80 });
         assert_eq!(p.protocol, Protocol::Tcp);
     }
@@ -248,7 +279,13 @@ mod tests {
     #[test]
     fn port_ranges() {
         let p = short("8080-8090:80-90");
-        assert_eq!(p.published, Some(PortRange { start: 8080, end: 8090 }));
+        assert_eq!(
+            p.published,
+            Some(PortRange {
+                start: 8080,
+                end: 8090
+            })
+        );
         assert_eq!(p.target, PortRange { start: 80, end: 90 });
     }
 
@@ -298,7 +335,13 @@ protocol: udp
         )
         .unwrap();
         assert_eq!(p.target, PortRange { start: 80, end: 80 });
-        assert_eq!(p.published, Some(PortRange { start: 8080, end: 8080 }));
+        assert_eq!(
+            p.published,
+            Some(PortRange {
+                start: 8080,
+                end: 8080
+            })
+        );
         assert_eq!(p.protocol, Protocol::Udp);
     }
 }

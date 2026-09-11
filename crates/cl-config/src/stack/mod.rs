@@ -4,19 +4,19 @@
 mod bytesize;
 mod de;
 mod deploy;
-mod objects;
 mod derived;
 mod extensions;
 mod healthcheck;
+mod objects;
 mod port;
 mod requirements;
 mod validate;
 mod volume;
 
+pub use bytesize::ByteSize;
 pub use deploy::{
     Deploy, DeployMode, DeployRestartPolicy, Placement, ResourceSpec, Resources, UpdateConfig,
 };
-pub use bytesize::ByteSize;
 pub use extensions::{
     CorsPolicy, DockerSocket, ExposePort, ForwardAuth, Middleware, ProxyRoute, RedirectRegex,
     ServiceExtensions, StackDefaults, VolumeSyncOverride,
@@ -55,7 +55,11 @@ pub struct StackFile {
     pub configs: BTreeMap<String, Option<StackConfig>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, Option<StackSecret>>,
-    #[serde(rename = "x-clouduler", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x-clouduler",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub x_clouduler: Option<StackDefaults>,
 }
 
@@ -99,11 +103,23 @@ pub struct Service {
     pub command: Option<Command>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Command>,
-    #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de::map_or_list",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub environment: BTreeMap<String, String>,
-    #[serde(default, deserialize_with = "de::path_or_list", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de::path_or_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub env_file: Vec<PathBuf>,
-    #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de::map_or_list",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub labels: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
@@ -125,14 +141,22 @@ pub struct Service {
     pub cap_add: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_drop: Vec<String>,
-    #[serde(default, deserialize_with = "de::map_or_list", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de::map_or_list",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub sysctls: BTreeMap<String, String>,
     /// Makes the container's root filesystem read-only. A service that writes
     /// outside its declared volumes will fail rather than silently
     /// accumulating state nothing backs up.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
-    #[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stop_grace_period: Option<Duration>,
     /// Signal sent on a graceful stop, e.g. `SIGINT`. Defaults to the image's
     /// own `STOPSIGNAL` (usually `SIGTERM`) when unset.
@@ -146,7 +170,11 @@ pub struct Service {
     pub secrets: Vec<ObjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<Deploy>,
-    #[serde(rename = "x-clouduler", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x-clouduler",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub x_clouduler: Option<ServiceExtensions>,
 }
 
@@ -196,7 +224,9 @@ impl From<RestartPolicy> for String {
             RestartPolicy::No => "no".to_string(),
             RestartPolicy::Always => "always".to_string(),
             RestartPolicy::OnFailure { max_attempts: None } => "on-failure".to_string(),
-            RestartPolicy::OnFailure { max_attempts: Some(n) } => format!("on-failure:{n}"),
+            RestartPolicy::OnFailure {
+                max_attempts: Some(n),
+            } => format!("on-failure:{n}"),
             RestartPolicy::UnlessStopped => "unless-stopped".to_string(),
         }
     }
@@ -254,7 +284,10 @@ mod tests {
     fn parses_gitlab_stack() {
         let stack = StackFile::parse(GITLAB_YAML).expect("gitlab stack parses");
         let gitlab = &stack.services["gitlab"];
-        assert!(gitlab.volumes.iter().any(|v| v.drive.as_deref() == Some("fast")));
+        assert!(gitlab
+            .volumes
+            .iter()
+            .any(|v| v.drive.as_deref() == Some("fast")));
 
         let ext = gitlab.x_clouduler.as_ref().expect("gitlab has x-clouduler");
         assert_eq!(ext.proxy.len(), 1);
@@ -266,13 +299,17 @@ mod tests {
     #[test]
     fn gitlab_stack_validates_against_reference_cluster() {
         let stack = StackFile::parse(GITLAB_YAML).unwrap();
-        stack.validate(&cluster()).expect("gitlab stack matches the reference cluster");
+        stack
+            .validate(&cluster())
+            .expect("gitlab stack matches the reference cluster");
     }
 
     #[test]
     fn simple_stack_validates_against_reference_cluster() {
         let stack = StackFile::parse(SIMPLE_YAML).unwrap();
-        stack.validate(&cluster()).expect("simple stack matches the reference cluster");
+        stack
+            .validate(&cluster())
+            .expect("simple stack matches the reference cluster");
     }
 
     /// The qemu suite's publishing scenario is the only end to end cover for
@@ -308,18 +345,26 @@ web:
 ";
         let cluster = ClusterConfig::parse(QEMU_CLUSTER).expect("qemu cluster shape is valid");
         let stack = StackFile::parse(PUBLISH_YAML).expect("publish stack parses");
-        stack.validate(&cluster).expect("publish stack matches the qemu cluster");
+        stack
+            .validate(&cluster)
+            .expect("publish stack matches the qemu cluster");
     }
 
     #[test]
     fn command_accepts_both_forms() {
         let raw = "services:\n  a:\n    image: x\n    command: [\"echo\", \"hi\"]\n";
         let stack = StackFile::parse(raw).unwrap();
-        assert_eq!(stack.services["a"].command, Some(Command::Exec(vec!["echo".into(), "hi".into()])));
+        assert_eq!(
+            stack.services["a"].command,
+            Some(Command::Exec(vec!["echo".into(), "hi".into()]))
+        );
 
         let raw = "services:\n  a:\n    image: x\n    command: echo hi\n";
         let stack = StackFile::parse(raw).unwrap();
-        assert_eq!(stack.services["a"].command, Some(Command::Shell("echo hi".into())));
+        assert_eq!(
+            stack.services["a"].command,
+            Some(Command::Shell("echo hi".into()))
+        );
     }
 
     #[test]
@@ -357,7 +402,9 @@ web:
         let stack = StackFile::parse(raw).unwrap();
         assert_eq!(
             stack.services["a"].restart,
-            Some(RestartPolicy::OnFailure { max_attempts: Some(5) })
+            Some(RestartPolicy::OnFailure {
+                max_attempts: Some(5)
+            })
         );
     }
 
@@ -419,13 +466,23 @@ services:
         let cluster = cluster();
 
         // service level override wins
-        assert_eq!(stack.sync_interval("a", "data", &cluster), Duration::from_secs(600));
+        assert_eq!(
+            stack.sync_interval("a", "data", &cluster),
+            Duration::from_secs(600)
+        );
         // falls back to the stack wide default
-        assert_eq!(stack.sync_interval("b", "data", &cluster), Duration::from_secs(1800));
+        assert_eq!(
+            stack.sync_interval("b", "data", &cluster),
+            Duration::from_secs(1800)
+        );
         // falls back to the drive default when nothing else applies
-        let raw_no_defaults = "services:\n  c:\n    image: x\n    volumes:\n      - fast/data:/data\n";
+        let raw_no_defaults =
+            "services:\n  c:\n    image: x\n    volumes:\n      - fast/data:/data\n";
         let stack2 = StackFile::parse(raw_no_defaults).unwrap();
-        assert_eq!(stack2.sync_interval("c", "data", &cluster), cluster.drives["fast"].sync_interval);
+        assert_eq!(
+            stack2.sync_interval("c", "data", &cluster),
+            cluster.drives["fast"].sync_interval
+        );
     }
 
     #[test]
@@ -454,7 +511,15 @@ services:
       - /anon
 "#;
         let stack = StackFile::parse(raw).unwrap();
-        assert_eq!(stack.drives_used(), ["bulk".to_string(), "fast".to_string()].into_iter().collect());
-        assert_eq!(stack.services["a"].drives_used(), ["fast".to_string()].into_iter().collect());
+        assert_eq!(
+            stack.drives_used(),
+            ["bulk".to_string(), "fast".to_string()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            stack.services["a"].drives_used(),
+            ["fast".to_string()].into_iter().collect()
+        );
     }
 }

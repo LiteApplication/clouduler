@@ -70,6 +70,7 @@ rcgen = "0.14"
 redb = "2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rpassword = "7"
 rtnetlink = "0.22"
 rustls = "0.23"
 rustls-pemfile = "2"

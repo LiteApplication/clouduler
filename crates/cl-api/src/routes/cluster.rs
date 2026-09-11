@@ -55,7 +55,9 @@ async fn status(_identity: Identity, State(state): State<AppState>) -> Json<Stat
         node: state.node_name.clone(),
         is_leader: state.cluster.is_leader(),
         has_quorum: quorum.has_quorum,
-        leader: quorum.leader.and_then(|id| node_name_for(&cluster_state, id)),
+        leader: quorum
+            .leader
+            .and_then(|id| node_name_for(&cluster_state, id)),
         voters: quorum.voters,
         reachable: quorum.reachable.len(),
         managers_total: managers.len(),

@@ -76,7 +76,11 @@ impl fmt::Display for ByteSize {
     /// config that was written as `10MiB` comes back out that way rather than
     /// as a wall of digits.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (suffix, factor) in [("GiB", 1024u64 * 1024 * 1024), ("MiB", 1024 * 1024), ("KiB", 1024)] {
+        for (suffix, factor) in [
+            ("GiB", 1024u64 * 1024 * 1024),
+            ("MiB", 1024 * 1024),
+            ("KiB", 1024),
+        ] {
             if self.0 >= factor && self.0.is_multiple_of(factor) {
                 return write!(f, "{}{suffix}", self.0 / factor);
             }

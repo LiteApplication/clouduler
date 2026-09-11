@@ -27,7 +27,10 @@ pub struct ServicePlacement {
 }
 
 /// Every instance that has an overlay address, in instance order.
-pub fn instance_addresses(state: &ClusterState, cfg: &ClusterConfig) -> Vec<(InstanceId, Ipv4Addr)> {
+pub fn instance_addresses(
+    state: &ClusterState,
+    cfg: &ClusterConfig,
+) -> Vec<(InstanceId, Ipv4Addr)> {
     let Some(allocations) = Allocations::decode(state.overlay.as_deref()) else {
         return Vec::new();
     };
@@ -48,7 +51,8 @@ pub fn instance_addresses(state: &ClusterState, cfg: &ClusterConfig) -> Vec<(Ins
 
 /// Every service that publishes something, with its current backends.
 pub fn service_placements(state: &ClusterState, cfg: &ClusterConfig) -> Vec<ServicePlacement> {
-    let addresses: BTreeMap<InstanceId, Ipv4Addr> = instance_addresses(state, cfg).into_iter().collect();
+    let addresses: BTreeMap<InstanceId, Ipv4Addr> =
+        instance_addresses(state, cfg).into_iter().collect();
     let mut out = Vec::new();
 
     for (name, stack) in &state.stacks {
@@ -145,11 +149,15 @@ pub mod fixtures {
             DEFAULT_OVERLAY_POOL.parse().expect("pool parses"),
             DEFAULT_SUBNET_PREFIX,
         );
-        allocations.allocate_network(&network, &[]).expect("allocates");
+        allocations
+            .allocate_network(&network, &[])
+            .expect("allocates");
 
         for index in 0..replicas {
             let instance = InstanceId::new(STACK, "web", index);
-            allocations.allocate_ip(&network, &instance).expect("allocates");
+            allocations
+                .allocate_ip(&network, &instance)
+                .expect("allocates");
             state.assignments.insert(
                 instance.clone(),
                 Assignment {
@@ -232,7 +240,11 @@ mod tests {
     fn a_stopped_instance_is_not_published() {
         let mut state = state_with(SPEC, 1);
         let instance = InstanceId::new(STACK, "web", 0);
-        state.assignments.get_mut(&instance).expect("assigned").desired = DesiredState::Stopped;
+        state
+            .assignments
+            .get_mut(&instance)
+            .expect("assigned")
+            .desired = DesiredState::Stopped;
         assert!(instance_addresses(&state, &cluster_config()).is_empty());
     }
 

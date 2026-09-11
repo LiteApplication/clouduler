@@ -32,11 +32,18 @@ pub fn local_repo(local_path: &Path) -> ResolvedRepo {
 pub fn remote_repo(destination: &BackupDestination) -> ResolvedRepo {
     match &destination.kind {
         BackupDestinationKind::NodeLocal { path, .. } => local_repo(Path::new(path)),
-        BackupDestinationKind::Ssh { host, user, path, .. } => ResolvedRepo {
+        BackupDestinationKind::Ssh {
+            host, user, path, ..
+        } => ResolvedRepo {
             repository: format!("sftp:{user}@{host}:{path}"),
             extra_env: Vec::new(),
         },
-        BackupDestinationKind::S3 { bucket, endpoint, region, prefix } => {
+        BackupDestinationKind::S3 {
+            bucket,
+            endpoint,
+            region,
+            prefix,
+        } => {
             let mut repository = format!("s3:{endpoint}/{bucket}");
             if let Some(prefix) = prefix {
                 repository.push('/');
@@ -46,7 +53,10 @@ pub fn remote_repo(destination: &BackupDestination) -> ResolvedRepo {
                 .as_ref()
                 .map(|region| vec![("AWS_DEFAULT_REGION".to_string(), region.clone())])
                 .unwrap_or_default();
-            ResolvedRepo { repository, extra_env }
+            ResolvedRepo {
+                repository,
+                extra_env,
+            }
         }
     }
 }
@@ -55,7 +65,10 @@ pub fn remote_repo(destination: &BackupDestination) -> ResolvedRepo {
 /// the default 22 - restic's `sftp:` shorthand has no port syntax, so a
 /// non-default port has to be routed through `-o sftp.command`.
 pub fn ssh_command_args(destination: &BackupDestination) -> Vec<String> {
-    let BackupDestinationKind::Ssh { host, port, user, .. } = &destination.kind else {
+    let BackupDestinationKind::Ssh {
+        host, port, user, ..
+    } = &destination.kind
+    else {
         return Vec::new();
     };
     if *port == 22 {
@@ -89,14 +102,23 @@ mod tests {
     #[test]
     fn ssh_repo_uses_the_sftp_backend() {
         let resolved = remote_repo(&ssh(22));
-        assert_eq!(resolved.repository, "sftp:clouduler@backup.example.com:/srv/restic");
+        assert_eq!(
+            resolved.repository,
+            "sftp:clouduler@backup.example.com:/srv/restic"
+        );
         assert!(ssh_command_args(&ssh(22)).is_empty());
     }
 
     #[test]
     fn a_non_default_ssh_port_needs_an_explicit_sftp_command() {
         let args = ssh_command_args(&ssh(2222));
-        assert_eq!(args, vec!["-o".to_string(), "sftp.command=ssh clouduler@backup.example.com -p 2222 -s sftp".to_string()]);
+        assert_eq!(
+            args,
+            vec![
+                "-o".to_string(),
+                "sftp.command=ssh clouduler@backup.example.com -p 2222 -s sftp".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -114,8 +136,14 @@ mod tests {
             credentials_secret: Some("_clouduler_restic_creds_d1".into()),
         };
         let resolved = remote_repo(&destination);
-        assert_eq!(resolved.repository, "s3:s3.example.com/backups/clouduler/fast");
-        assert_eq!(resolved.extra_env, vec![("AWS_DEFAULT_REGION".to_string(), "us-east-1".to_string())]);
+        assert_eq!(
+            resolved.repository,
+            "s3:s3.example.com/backups/clouduler/fast"
+        );
+        assert_eq!(
+            resolved.extra_env,
+            vec![("AWS_DEFAULT_REGION".to_string(), "us-east-1".to_string())]
+        );
     }
 
     #[test]

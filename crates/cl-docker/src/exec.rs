@@ -83,18 +83,27 @@ impl Docker {
                 input,
             }),
             // Cannot happen: `detach` above is always false.
-            StartExecResults::Detached => Err(DockerError::Other("docker detached an attached exec".to_string())),
+            StartExecResults::Detached => Err(DockerError::Other(
+                "docker detached an attached exec".to_string(),
+            )),
         }
     }
 }
 
 fn from_log_output(output: LogOutput) -> ExecChunk {
     match output {
-        LogOutput::StdOut { message } => ExecChunk { stream: ExecStream::Stdout, bytes: message },
-        LogOutput::StdErr { message } => ExecChunk { stream: ExecStream::Stderr, bytes: message },
+        LogOutput::StdOut { message } => ExecChunk {
+            stream: ExecStream::Stdout,
+            bytes: message,
+        },
+        LogOutput::StdErr { message } => ExecChunk {
+            stream: ExecStream::Stderr,
+            bytes: message,
+        },
         // A tty exec's combined stream, and stdin echoed back, both land here.
-        LogOutput::StdIn { message } | LogOutput::Console { message } => {
-            ExecChunk { stream: ExecStream::Stdout, bytes: message }
-        }
+        LogOutput::StdIn { message } | LogOutput::Console { message } => ExecChunk {
+            stream: ExecStream::Stdout,
+            bytes: message,
+        },
     }
 }

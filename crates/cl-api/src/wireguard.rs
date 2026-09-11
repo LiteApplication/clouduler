@@ -65,8 +65,13 @@ mod tests {
 
     #[test]
     fn secret_name_is_scoped_per_network_and_node() {
-        assert_eq!(wireguard_secret_name("vpn", "n1"), "_clouduler_wireguard_config_vpn_n1");
-        assert!(is_reserved_wireguard_secret(&wireguard_secret_name("vpn", "n1")));
+        assert_eq!(
+            wireguard_secret_name("vpn", "n1"),
+            "_clouduler_wireguard_config_vpn_n1"
+        );
+        assert!(is_reserved_wireguard_secret(&wireguard_secret_name(
+            "vpn", "n1"
+        )));
         assert!(!is_reserved_wireguard_secret("db_password"));
     }
 

@@ -21,8 +21,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::{Docker, NetworkSpec};
-use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
+use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
@@ -104,7 +104,11 @@ fn is_single_node_network(cfg: &ClusterConfig, network: &str) -> bool {
     if net.kind != NetworkKind::Public {
         return false;
     }
-    cfg.nodes.values().filter(|node| node.network.contains_key(network)).count() <= 1
+    cfg.nodes
+        .values()
+        .filter(|node| node.network.contains_key(network))
+        .count()
+        <= 1
 }
 
 impl Context_ {
@@ -192,7 +196,8 @@ impl Context_ {
 
         let mut allocations = load_allocations(state.overlay.as_deref());
         if self.cluster.is_leader() {
-            self.allocate_missing(&mut allocations, &all, &cluster_subnets).await?;
+            self.allocate_missing(&mut allocations, &all, &cluster_subnets)
+                .await?;
         }
 
         if let Err(e) = self.sweep_orphans(netlink, &all).await {
@@ -209,7 +214,14 @@ impl Context_ {
                 continue;
             }
             if let Err(e) = self
-                .ensure_network(netlink, &allocations, overlay, needs_vxlan, internal_ip, &peers)
+                .ensure_network(
+                    netlink,
+                    &allocations,
+                    overlay,
+                    needs_vxlan,
+                    internal_ip,
+                    &peers,
+                )
                 .await
             {
                 // One broken network must not stop the others being built.
@@ -225,7 +237,10 @@ impl Context_ {
         // containers - see `cl_net::vxlan::gateway_mac`.
         if let Some(netlink) = netlink {
             for overlay in all.keys().filter(|overlay| !mine.contains(*overlay)) {
-                if let Err(e) = netlink.ensure_existing_bridge_mac(&bridge_name(overlay)).await {
+                if let Err(e) = netlink
+                    .ensure_existing_bridge_mac(&bridge_name(overlay))
+                    .await
+                {
                     debug!(network = %overlay, error = %e, "could not pin a leftover bridge's mac");
                 }
             }
@@ -240,11 +255,18 @@ impl Context_ {
     /// nothing else in the cluster remembers it, so the allocator can and
     /// eventually will hand that same subnet to a new stack network, which
     /// then fails to come up with a docker pool-overlap error.
-    async fn sweep_orphans(&self, netlink: Option<&Overlay>, wanted: &BTreeMap<String, BTreeSet<InstanceId>>) -> Result<()> {
+    async fn sweep_orphans(
+        &self,
+        netlink: Option<&Overlay>,
+        wanted: &BTreeMap<String, BTreeSet<InstanceId>>,
+    ) -> Result<()> {
         let Some(docker) = self.docker.read().await.clone() else {
             return Ok(());
         };
-        for name in docker.list_managed_networks(&[crate::egress::OWNER]).await? {
+        for name in docker
+            .list_managed_networks(&[crate::egress::OWNER])
+            .await?
+        {
             if wanted.contains_key(&name) {
                 continue;
             }
@@ -257,7 +279,9 @@ impl Context_ {
                 continue;
             }
             if let Some(netlink) = netlink {
-                netlink.teardown(&bridge_name(&name), &vxlan_name(&name)).await?;
+                netlink
+                    .teardown(&bridge_name(&name), &vxlan_name(&name))
+                    .await?;
             }
             info!(network = %name, "removed orphaned overlay network");
         }
@@ -335,10 +359,13 @@ impl Context_ {
             return Ok(());
         }
 
-        let encoded = serde_json::to_string(allocations).context("encoding the overlay allocations")?;
+        let encoded =
+            serde_json::to_string(allocations).context("encoding the overlay allocations")?;
         let response = self
             .cluster
-            .submit(Request::SetOverlayAllocations { allocations: encoded })
+            .submit(Request::SetOverlayAllocations {
+                allocations: encoded,
+            })
             .await?;
         if let Some(error) = response.error {
             warn!(%error, "could not publish the overlay allocations");
@@ -383,24 +410,33 @@ impl Context_ {
         let vni = needs_vxlan.then(|| allocate_vni(overlay, &BTreeSet::new()));
 
         let mtu = if needs_vxlan {
-            let internal_ip = internal_ip.expect("caller only sets needs_vxlan once internal_ip is Some");
-            let underlay = netlink
-                .underlay_for(internal_ip)
-                .await?
-                .with_context(|| format!("no interface holds the internal address {internal_ip}"))?;
+            let internal_ip =
+                internal_ip.expect("caller only sets needs_vxlan once internal_ip is Some");
+            let underlay = netlink.underlay_for(internal_ip).await?.with_context(|| {
+                format!("no interface holds the internal address {internal_ip}")
+            })?;
             let mtu = overlay_mtu(underlay.mtu, false);
 
             let bridge_index = netlink
                 .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
                 .await?;
             let vxlan_index = netlink
-                .ensure_vxlan(&vxlan, vni.expect("set above"), underlay.index, internal_ip, bridge_index, mtu)
+                .ensure_vxlan(
+                    &vxlan,
+                    vni.expect("set above"),
+                    underlay.index,
+                    internal_ip,
+                    bridge_index,
+                    mtu,
+                )
                 .await?;
             netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
             mtu
         } else {
             let mtu = cl_net::vxlan::DEFAULT_UNDERLAY_MTU;
-            netlink.ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu).await?;
+            netlink
+                .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
+                .await?;
             mtu
         };
 
@@ -431,7 +467,9 @@ impl Context_ {
 /// Starting over is the only option, and it is survivable: the addresses are
 /// re-derived, and containers pick them up on their next restart.
 fn load_allocations(stored: Option<&str>) -> Allocations {
-    let pool: Ipv4Net = DEFAULT_OVERLAY_POOL.parse().expect("the default pool parses");
+    let pool: Ipv4Net = DEFAULT_OVERLAY_POOL
+        .parse()
+        .expect("the default pool parses");
     match stored {
         Some(raw) => serde_json::from_str(raw).unwrap_or_else(|e| {
             warn!(error = %e, "overlay allocations could not be decoded, starting a fresh address book");
@@ -454,11 +492,16 @@ mod tests {
     #[test]
     fn a_stored_address_book_round_trips() {
         let mut original = load_allocations(None);
-        original.allocate_network("blog_default", &[]).expect("allocates");
+        original
+            .allocate_network("blog_default", &[])
+            .expect("allocates");
         let encoded = serde_json::to_string(&original).unwrap();
 
         let restored = load_allocations(Some(&encoded));
-        assert_eq!(restored.subnet("blog_default"), original.subnet("blog_default"));
+        assert_eq!(
+            restored.subnet("blog_default"),
+            original.subnet("blog_default")
+        );
     }
 
     /// A corrupt or incompatible stored value must not wedge the daemon: the
@@ -480,7 +523,8 @@ mod tests {
     }
 
     fn cfg() -> ClusterConfig {
-        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).expect("example parses")
+        ClusterConfig::parse(include_str!("../../../examples/cluster.yaml"))
+            .expect("example parses")
     }
 
     /// `wan` is declared by both n1 and n2 in the example config, so it needs

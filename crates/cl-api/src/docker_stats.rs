@@ -28,8 +28,16 @@ pub async fn stream(container_name: String) -> Result<impl Stream<Item = StatSam
 fn sample_from_response(resp: bollard::models::ContainerStatsResponse) -> StatSample {
     let cpu = resp.cpu_stats.unwrap_or_default();
     let precpu = resp.precpu_stats.unwrap_or_default();
-    let cpu_total = cpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0);
-    let precpu_total = precpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0);
+    let cpu_total = cpu
+        .cpu_usage
+        .as_ref()
+        .and_then(|u| u.total_usage)
+        .unwrap_or(0);
+    let precpu_total = precpu
+        .cpu_usage
+        .as_ref()
+        .and_then(|u| u.total_usage)
+        .unwrap_or(0);
     let system_cpu = cpu.system_cpu_usage.unwrap_or(0);
     let presystem_cpu = precpu.system_cpu_usage.unwrap_or(0);
     let online_cpus = cpu.online_cpus.unwrap_or(1) as u64;
@@ -40,10 +48,7 @@ fn sample_from_response(resp: bollard::models::ContainerStatsResponse) -> StatSa
         .unwrap_or_default()
         .values()
         .fold((0u64, 0u64), |(rx, tx), n| {
-            (
-                rx + n.rx_bytes.unwrap_or(0),
-                tx + n.tx_bytes.unwrap_or(0),
-            )
+            (rx + n.rx_bytes.unwrap_or(0), tx + n.tx_bytes.unwrap_or(0))
         });
 
     let (read, write) = resp
@@ -61,7 +66,13 @@ fn sample_from_response(resp: bollard::models::ContainerStatsResponse) -> StatSa
         });
 
     StatSample {
-        cpu_percent: cpu_percent(cpu_total, precpu_total, system_cpu, presystem_cpu, online_cpus),
+        cpu_percent: cpu_percent(
+            cpu_total,
+            precpu_total,
+            system_cpu,
+            presystem_cpu,
+            online_cpus,
+        ),
         memory_used_bytes: memory.usage.unwrap_or(0),
         memory_limit_bytes: memory.limit.unwrap_or(0),
         network_rx_bytes: rx,

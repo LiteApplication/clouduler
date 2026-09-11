@@ -273,7 +273,10 @@ impl ClusterNode {
                 // timeout, minutes long, and stalls this whole loop. A probe
                 // that has not answered within the probe interval is a miss.
                 let peer = Peer::connect(&node.rpc_addr.to_string());
-                if matches!(timeout(probe_interval, network::ping(&peer)).await, Ok(true)) {
+                if matches!(
+                    timeout(probe_interval, network::ping(&peer)).await,
+                    Ok(true)
+                ) {
                     tracker.seen(name, now);
                     alive.push(name.clone());
                 }
@@ -310,7 +313,10 @@ impl ClusterNode {
 
     /// Whether this node already belongs to a formed cluster.
     pub async fn is_initialized(&self) -> Result<bool> {
-        self.raft.is_initialized().await.map_err(ClusterError::Fatal)
+        self.raft
+            .is_initialized()
+            .await
+            .map_err(ClusterError::Fatal)
     }
 
     /// Add a voting manager to the cluster, but only once it is actually
@@ -335,7 +341,10 @@ impl ClusterNode {
             .map_err(ClusterError::membership)?;
 
         let peer = Peer::connect(&addr.to_string());
-        if !matches!(timeout(CONNECT_PROBE_TIMEOUT, network::ping(&peer)).await, Ok(true)) {
+        if !matches!(
+            timeout(CONNECT_PROBE_TIMEOUT, network::ping(&peer)).await,
+            Ok(true)
+        ) {
             return Err(ClusterError::Membership(format!(
                 "{addr} did not answer, not promoting it to voter yet"
             )));
@@ -422,11 +431,11 @@ impl ClusterNode {
                 .data);
         }
 
-        let leader = self
-            .quorum
-            .leader()
+        let leader = self.quorum.leader().ok_or(ClusterError::NoLeader)?;
+        let addr = self
+            .leader_addr(leader)
+            .await
             .ok_or(ClusterError::NoLeader)?;
-        let addr = self.leader_addr(leader).await.ok_or(ClusterError::NoLeader)?;
 
         let peer = Peer::connect(&addr);
         forward(&peer, request)

@@ -50,7 +50,11 @@ impl QuorumStatus {
 }
 
 /// Compute the gate from what raft reports.
-pub fn evaluate(voters: &BTreeSet<NodeId>, reachable: BTreeSet<NodeId>, leader: Option<NodeId>) -> QuorumStatus {
+pub fn evaluate(
+    voters: &BTreeSet<NodeId>,
+    reachable: BTreeSet<NodeId>,
+    leader: Option<NodeId>,
+) -> QuorumStatus {
     let reachable: BTreeSet<NodeId> = reachable.intersection(voters).copied().collect();
     let needed = voters.len() / 2 + 1;
     QuorumStatus {
@@ -74,11 +78,7 @@ pub fn from_metrics(
     leader_contact: &Contact,
     quorum_ack_timeout: Duration,
 ) -> QuorumStatus {
-    let voters: BTreeSet<NodeId> = metrics
-        .membership_config
-        .membership()
-        .voter_ids()
-        .collect();
+    let voters: BTreeSet<NodeId> = metrics.membership_config.membership().voter_ids().collect();
 
     let (has_quorum, reachable) = if metrics.state.is_leader() {
         let acked = metrics

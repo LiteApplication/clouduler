@@ -121,7 +121,10 @@ mod tests {
         raw[last] ^= 0xff;
 
         let tampered = Sealed::from_blob(base64::engine::general_purpose::STANDARD.encode(&raw));
-        assert!(matches!(tampered.open(&key, "db"), Err(SecretError::Decrypt)));
+        assert!(matches!(
+            tampered.open(&key, "db"),
+            Err(SecretError::Decrypt)
+        ));
     }
 
     #[test]
@@ -131,7 +134,10 @@ mod tests {
         let b = Sealed::seal(&key, "db", b"hunter2").expect("seal");
         // A fresh nonce each time, so identical secrets are not identifiable.
         assert_ne!(a.blob, b.blob);
-        assert_eq!(a.open(&key, "db").expect("open"), b.open(&key, "db").expect("open"));
+        assert_eq!(
+            a.open(&key, "db").expect("open"),
+            b.open(&key, "db").expect("open")
+        );
     }
 
     #[test]

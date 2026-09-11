@@ -158,7 +158,9 @@ impl ClusterKey {
 
         if decoded.len() != KEY_BYTES {
             decoded.zeroize();
-            return Err(format!("expected {KEY_BYTES} bytes, got a different length"));
+            return Err(format!(
+                "expected {KEY_BYTES} bytes, got a different length"
+            ));
         }
 
         let mut bytes = [0u8; KEY_BYTES];

@@ -21,11 +21,19 @@ fn main() {
     let real_dist = ui_dir.join("dist");
 
     println!("cargo:rerun-if-changed={}", ui_dir.join("src").display());
-    println!("cargo:rerun-if-changed={}", ui_dir.join("package.json").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        ui_dir.join("package.json").display()
+    );
 
     if ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
         let status = Command::new("npm")
-            .args(["--prefix", ui_dir.to_str().expect("utf8 path"), "run", "build"])
+            .args([
+                "--prefix",
+                ui_dir.to_str().expect("utf8 path"),
+                "run",
+                "build",
+            ])
             .status()
             .expect("failed to execute npm build");
 
@@ -49,7 +57,10 @@ fn main() {
 
     println!(
         "cargo:rustc-env=CL_API_UI_DIR={}",
-        embed_dir.canonicalize().expect("canonicalize embed dir").display()
+        embed_dir
+            .canonicalize()
+            .expect("canonicalize embed dir")
+            .display()
     );
 }
 

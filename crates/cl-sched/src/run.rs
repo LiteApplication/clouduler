@@ -14,17 +14,19 @@ use std::time::{Duration, Instant};
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::Docker;
 use cl_net::Allocations;
-use tokio::sync::RwLock;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{base64_encode, ClusterState, DesiredState, Request};
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::materialize::Materializer;
 use crate::place;
 use crate::plan::{self, Desired};
 
-use crate::reconcile::{self, Action, PullTracker, RedeployTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
+use crate::reconcile::{
+    self, Action, PullTracker, Reconciler, RedeployTracker, Target, DEFAULT_STOP_GRACE,
+};
 use crate::spec;
 
 /// How often to sweep, on top of reacting to state changes. A periodic pass
@@ -152,7 +154,12 @@ impl Scheduler {
     async fn schedule(&self, state: &ClusterState) -> crate::Result<()> {
         let live = self.live_config(state);
         let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
-        let desired = desired_instances(state, &live.egress_networks(), &live.port_gated_networks(), colocate_proxy_hosts);
+        let desired = desired_instances(
+            state,
+            &live.egress_networks(),
+            &live.port_gated_networks(),
+            colocate_proxy_hosts,
+        );
 
         let outcome = place::place(state, &desired, &live.served_drives(), &live.nat_networks());
         for unplaceable in &outcome.unplaceable {
@@ -184,12 +191,18 @@ impl Scheduler {
         // time round.
         let state = &self.cluster.state().await;
         for request in volume_requests(state, &live) {
-            let response = self.cluster.submit(request.clone()).await.map_err(Box::new)?;
+            let response = self
+                .cluster
+                .submit(request.clone())
+                .await
+                .map_err(Box::new)?;
             if let Some(error) = response.error {
                 warn!(?request, %error, "registering a volume was rejected");
             } else {
                 match &request {
-                    Request::UpsertVolume { id, primary } => info!(%id, %primary, "registered volume"),
+                    Request::UpsertVolume { id, primary } => {
+                        info!(%id, %primary, "registered volume")
+                    }
                     Request::TouchVolume { id, primary } => {
                         info!(%id, %primary, "volume primary follows the instance that mounts it")
                     }
@@ -215,9 +228,12 @@ impl Scheduler {
             Some(key) => crate::registries::Registries::load(state, &key),
             None => crate::registries::Registries::default(),
         };
-        let reconciler =
-            Reconciler::new(docker.clone(), self.pulling.clone(), self.redeploy_steps.clone())
-                .with_registries(registries);
+        let reconciler = Reconciler::new(
+            docker.clone(),
+            self.pulling.clone(),
+            self.redeploy_steps.clone(),
+        )
+        .with_registries(registries);
 
         let (targets, config_edits) = self.targets(state)?;
         let actual = docker.list_managed().await?;
@@ -235,8 +251,12 @@ impl Scheduler {
         // still happens either way - a rejected or unsubmittable move must
         // not leave the instance down for no reason.
         {
-            let keep: BTreeSet<&InstanceId> = targets.iter().map(|t| &t.assignment.instance).collect();
-            self.restarts.write().await.retain(|id, _| keep.contains(id));
+            let keep: BTreeSet<&InstanceId> =
+                targets.iter().map(|t| &t.assignment.instance).collect();
+            self.restarts
+                .write()
+                .await
+                .retain(|id, _| keep.contains(id));
         }
         for action in &actions {
             let Action::Start(id) = action else { continue };
@@ -275,7 +295,9 @@ impl Scheduler {
                         info!(config = %edit.name, "wrote a container's config edit back to the cluster");
                     }
                 }
-                Err(e) => warn!(config = %edit.name, error = %e, "could not submit a container's config edit"),
+                Err(e) => {
+                    warn!(config = %edit.name, error = %e, "could not submit a container's config edit")
+                }
             }
         }
 
@@ -288,15 +310,32 @@ impl Scheduler {
     /// instead of blindly sleeping out a worst-case deadline. Skipped when
     /// nothing changed since the last report, so a quiet node doesn't spam
     /// raft with an identical write every sweep.
-    async fn report_container_status(&self, state: &ClusterState, actual: &[cl_docker::ContainerState]) {
+    async fn report_container_status(
+        &self,
+        state: &ClusterState,
+        actual: &[cl_docker::ContainerState],
+    ) {
         let running: BTreeMap<InstanceId, bool> = actual
             .iter()
-            .filter_map(|c| Some((c.labels.get(cl_docker::LABEL_INSTANCE)?.parse::<InstanceId>().ok()?, c.running)))
+            .filter_map(|c| {
+                Some((
+                    c.labels
+                        .get(cl_docker::LABEL_INSTANCE)?
+                        .parse::<InstanceId>()
+                        .ok()?,
+                    c.running,
+                ))
+            })
             .collect();
 
         let report: BTreeMap<InstanceId, bool> = state
             .assignments_on(&self.node)
-            .map(|a| (a.instance.clone(), running.get(&a.instance).copied().unwrap_or(false)))
+            .map(|a| {
+                (
+                    a.instance.clone(),
+                    running.get(&a.instance).copied().unwrap_or(false),
+                )
+            })
             .collect();
 
         let current: BTreeMap<InstanceId, bool> = state
@@ -311,7 +350,10 @@ impl Scheduler {
         }
         if let Err(e) = self
             .cluster
-            .submit(Request::ReportContainerStatus { node: self.node.clone(), running: report })
+            .submit(Request::ReportContainerStatus {
+                node: self.node.clone(),
+                running: report,
+            })
             .await
         {
             warn!(error = %e, "could not report container status");
@@ -340,25 +382,40 @@ impl Scheduler {
     /// already under way, so a slow move in progress is not raced by a
     /// second one.
     async fn try_reschedule_away(&self, state: &ClusterState, id: &InstanceId) {
-        let Some(assignment) = state.assignments.get(id) else { return };
+        let Some(assignment) = state.assignments.get(id) else {
+            return;
+        };
         if assignment.node != self.node {
             return;
         }
-        if assignment.migration.as_ref().is_some_and(|m| !m.phase.is_terminal()) {
+        if assignment
+            .migration
+            .as_ref()
+            .is_some_and(|m| !m.phase.is_terminal())
+        {
             return;
         }
 
         let live = self.live_config(state);
         let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
-        let desired = desired_instances(state, &live.egress_networks(), &live.port_gated_networks(), colocate_proxy_hosts);
-        let Some(item) = desired.iter().find(|d| &d.id == id) else { return };
+        let desired = desired_instances(
+            state,
+            &live.egress_networks(),
+            &live.port_gated_networks(),
+            colocate_proxy_hosts,
+        );
+        let Some(item) = desired.iter().find(|d| &d.id == id) else {
+            return;
+        };
 
         if item.global || item.pinned_node.is_some() || item.anchor_keys().next().is_some() {
             warn!(instance = %id, "keeps restarting here but cannot be safely moved (pinned, global, or anchored), restarting in place");
             return;
         }
 
-        let Ok((eligible, _)) = place::candidates(state, item, &live.served_drives(), &live.nat_networks()) else {
+        let Ok((eligible, _)) =
+            place::candidates(state, item, &live.served_drives(), &live.nat_networks())
+        else {
             return;
         };
         let Some(target) = eligible
@@ -387,7 +444,9 @@ impl Scheduler {
                     self.restarts.write().await.remove(id);
                 }
             }
-            Err(e) => warn!(instance = %id, error = %e, "could not submit a move for a crash-looping instance"),
+            Err(e) => {
+                warn!(instance = %id, error = %e, "could not submit a move for a crash-looping instance")
+            }
         }
     }
 
@@ -395,7 +454,10 @@ impl Scheduler {
     /// configs and secrets on the way. Also returns any edit a container
     /// made to one of its writable config mounts, for the caller to feed
     /// back into the cluster.
-    fn targets(&self, state: &ClusterState) -> crate::Result<(Vec<Target>, Vec<crate::materialize::ConfigEdit>)> {
+    fn targets(
+        &self,
+        state: &ClusterState,
+    ) -> crate::Result<(Vec<Target>, Vec<crate::materialize::ConfigEdit>)> {
         let live = self.live_config(state);
         let (drive_roots, dynamic_mounts) = self.drive_roots(state, &live);
 
@@ -452,21 +514,21 @@ impl Scheduler {
 
             // A missing secret or a node without the key is a reason not to
             // start this one container, not to abandon the whole pass.
-            let objects = match self.materializer.prepare(
-                state,
-                instance,
-                &service.configs,
-                &service.secrets,
-            ) {
-                Ok(objects) => objects,
-                Err(e) => {
-                    warn!(instance = %instance, error = %e, "cannot prepare objects, skipping");
-                    continue;
-                }
-            };
+            let objects =
+                match self
+                    .materializer
+                    .prepare(state, instance, &service.configs, &service.secrets)
+                {
+                    Ok(objects) => objects,
+                    Err(e) => {
+                        warn!(instance = %instance, error = %e, "cannot prepare objects, skipping");
+                        continue;
+                    }
+                };
             config_edits.extend(objects.config_edits.clone());
 
-            let network = overlay_network_name(&file, &live).map(|n| overlay_name(&instance.stack, n));
+            let network =
+                overlay_network_name(&file, &live).map(|n| overlay_name(&instance.stack, n));
 
             // A container on a stack network gets the address the leader
             // allocated for it, not one docker picks: the other nodes read
@@ -478,7 +540,9 @@ impl Scheduler {
                 ..Default::default()
             };
             if let Some(network) = &network {
-                let Some(ip) = allocations.as_ref().and_then(|a| a.instance_ip(network, instance))
+                let Some(ip) = allocations
+                    .as_ref()
+                    .and_then(|a| a.instance_ip(network, instance))
                 else {
                     debug!(instance = %instance, network = %network, "no overlay address yet");
                     continue;
@@ -491,10 +555,12 @@ impl Scheduler {
                 .networks
                 .iter()
                 .find(|n| egress_networks.contains(*n))
-                .map(|n| match live.networks.get(n.as_str()).map(|net| net.kind) {
-                    Some(NetworkKind::Nat) => cl_net::egress::nat_docker_name(n),
-                    _ => cl_net::egress::egress_docker_name(n),
-                });
+                .map(
+                    |n| match live.networks.get(n.as_str()).map(|net| net.kind) {
+                        Some(NetworkKind::Nat) => cl_net::egress::nat_docker_name(n),
+                        _ => cl_net::egress::egress_docker_name(n),
+                    },
+                );
 
             // An instance on its way somewhere else must not be started here
             // again between the migration stopping it and the handover
@@ -515,7 +581,8 @@ impl Scheduler {
                 assignment.desired = DesiredState::Stopped;
             }
 
-            let revision = revision_with_mounts(stack.revision, service, &dynamic_mounts, placement.ip);
+            let revision =
+                revision_with_mounts(stack.revision, service, &dynamic_mounts, placement.ip);
 
             let spec = spec::build(
                 instance,
@@ -622,7 +689,11 @@ fn revision_with_mounts(
     dynamic_mounts: &BTreeSet<String>,
     ip: Option<std::net::Ipv4Addr>,
 ) -> u64 {
-    let mut drives: Vec<&str> = service.volumes.iter().filter_map(|v| v.drive.as_deref()).collect();
+    let mut drives: Vec<&str> = service
+        .volumes
+        .iter()
+        .filter_map(|v| v.drive.as_deref())
+        .collect();
     drives.sort_unstable();
     drives.dedup();
 
@@ -645,8 +716,15 @@ fn revision_with_mounts(
 /// is not reported unreachable. Mirrors `cl_drive::registry::DriveRegistry`'s
 /// `active_server`, computed independently here since placement/mount
 /// resolution only need the answer, not the rest of that crate.
-fn active_server<'a>(drive: &'a cl_config::Drive, unreachable: &BTreeSet<String>) -> Option<&'a str> {
-    drive.served_by.iter().map(String::as_str).find(|n| !unreachable.contains(*n))
+fn active_server<'a>(
+    drive: &'a cl_config::Drive,
+    unreachable: &BTreeSet<String>,
+) -> Option<&'a str> {
+    drive
+        .served_by
+        .iter()
+        .map(String::as_str)
+        .find(|n| !unreachable.contains(*n))
 }
 
 /// Whether `path` is itself a mount point (its device differs from its
@@ -782,7 +860,10 @@ pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Reques
 /// cluster.
 fn record_restart(deque: &mut VecDeque<Instant>, now: Instant) -> bool {
     deque.push_back(now);
-    while deque.front().is_some_and(|t| now.duration_since(*t) > CRASH_LOOP_WINDOW) {
+    while deque
+        .front()
+        .is_some_and(|t| now.duration_since(*t) > CRASH_LOOP_WINDOW)
+    {
         deque.pop_front();
     }
     deque.len() >= CRASH_LOOP_THRESHOLD
@@ -811,7 +892,11 @@ pub fn overlay_network_name<'a>(file: &'a StackFile, cfg: &ClusterConfig) -> Opt
     file.networks
         .keys()
         .find(|n| kind_of(n).is_some_and(NetworkKind::is_subnetted))
-        .or_else(|| file.networks.keys().find(|n| kind_of(n) == Some(NetworkKind::Public)))
+        .or_else(|| {
+            file.networks
+                .keys()
+                .find(|n| kind_of(n) == Some(NetworkKind::Public))
+        })
         .map(String::as_str)
 }
 
@@ -851,7 +936,11 @@ pub fn desired_instances(
 ) -> Vec<Desired> {
     let mut desired = Vec::new();
     for (name, stack) in &state.stacks {
-        if state.emergency_stack.as_deref().is_some_and(|only| only != name) {
+        if state
+            .emergency_stack
+            .as_deref()
+            .is_some_and(|only| only != name)
+        {
             continue;
         }
         match StackFile::parse(&stack.spec) {
@@ -972,7 +1061,8 @@ web: { address: cloud, network: tailscale }
     fn overlay_network_name_picks_the_subnetted_one() {
         let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
 
-        let internal = StackFile::parse("networks:\n  tailscale: {}\n  wan: {}\nservices: {}\n").unwrap();
+        let internal =
+            StackFile::parse("networks:\n  tailscale: {}\n  wan: {}\nservices: {}\n").unwrap();
         assert_eq!(overlay_network_name(&internal, &cfg), Some("tailscale"));
 
         // A stack whose networks are all egress needs no overlay at all:
@@ -990,7 +1080,8 @@ web: { address: cloud, network: tailscale }
     #[test]
     fn a_public_only_stack_still_gets_its_own_overlay() {
         let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
-        let public_only = StackFile::parse("networks:\n  public: {}\n  wan: {}\nservices: {}\n").unwrap();
+        let public_only =
+            StackFile::parse("networks:\n  public: {}\n  wan: {}\nservices: {}\n").unwrap();
         assert_eq!(overlay_network_name(&public_only, &cfg), Some("public"));
     }
 
@@ -1001,7 +1092,8 @@ web: { address: cloud, network: tailscale }
     #[test]
     fn an_internal_network_is_preferred_over_a_public_one() {
         let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
-        let both = StackFile::parse("networks:\n  public: {}\n  tailscale: {}\nservices: {}\n").unwrap();
+        let both =
+            StackFile::parse("networks:\n  public: {}\n  tailscale: {}\nservices: {}\n").unwrap();
         assert_eq!(overlay_network_name(&both, &cfg), Some("tailscale"));
     }
 
@@ -1020,9 +1112,7 @@ web: { address: cloud, network: tailscale }
     fn a_deployed_stack_produces_placements() {
         let requests = plan_requests(&state()).expect("plan");
         assert_eq!(requests.len(), 2);
-        assert!(requests
-            .iter()
-            .all(|r| matches!(r, Request::Assign { .. })));
+        assert!(requests.iter().all(|r| matches!(r, Request::Assign { .. })));
     }
 
     #[test]
@@ -1140,7 +1230,12 @@ services:
         }
 
         let id = VolumeId::new("fast", "data");
-        let instance = state.assignments.keys().next().expect("one assignment").clone();
+        let instance = state
+            .assignments
+            .keys()
+            .next()
+            .expect("one assignment")
+            .clone();
         let from = state.volumes[&id].primary.clone();
         let to = if from == "n1" { "n2" } else { "n1" };
 
@@ -1238,7 +1333,10 @@ web: { address: cloud, network: tailscale }
             Request::UpsertVolume { id, primary } if id == &VolumeId::new("fast", "data") && primary == "n2"
         ));
         for request in &requests {
-            assert!(state.apply(request).is_ok(), "primary must satisfy check_placement too");
+            assert!(
+                state.apply(request).is_ok(),
+                "primary must satisfy check_placement too"
+            );
         }
     }
 
@@ -1258,7 +1356,8 @@ web: { address: cloud, network: tailscale }
     fn a_drive_switching_between_local_and_fuse_mounted_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
         let local = revision_with_mounts(1, &service, &BTreeSet::new(), None);
-        let fuse_mounted = revision_with_mounts(1, &service, &BTreeSet::from(["fast".to_string()]), None);
+        let fuse_mounted =
+            revision_with_mounts(1, &service, &BTreeSet::from(["fast".to_string()]), None);
         assert_ne!(local, fuse_mounted);
     }
 
@@ -1324,9 +1423,15 @@ web: { address: cloud, network: tailscale }
         let mut deque = VecDeque::new();
         let base = Instant::now();
         assert!(!record_restart(&mut deque, base));
-        assert!(!record_restart(&mut deque, base + CRASH_LOOP_WINDOW + Duration::from_secs(1)));
+        assert!(!record_restart(
+            &mut deque,
+            base + CRASH_LOOP_WINDOW + Duration::from_secs(1)
+        ));
         // The first restart aged out, so this is only the second live one.
-        assert!(!record_restart(&mut deque, base + CRASH_LOOP_WINDOW + Duration::from_secs(2)));
+        assert!(!record_restart(
+            &mut deque,
+            base + CRASH_LOOP_WINDOW + Duration::from_secs(2)
+        ));
         assert_eq!(deque.len(), 2);
     }
 }

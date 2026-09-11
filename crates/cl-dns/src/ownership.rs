@@ -38,7 +38,10 @@ pub struct Tag {
 /// this stays tolerant of an unquoted value too so a tag written before
 /// quoting was added still parses.
 pub fn parse_tag(content: &str) -> Option<Tag> {
-    let content = content.strip_prefix('"').and_then(|c| c.strip_suffix('"')).unwrap_or(content);
+    let content = content
+        .strip_prefix('"')
+        .and_then(|c| c.strip_suffix('"'))
+        .unwrap_or(content);
     let mut cluster = None;
     let mut key = None;
     for field in content.split(';') {

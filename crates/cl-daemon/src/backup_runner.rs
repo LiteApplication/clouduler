@@ -51,8 +51,8 @@ use cl_drive::{drive_port, DeltaEngine, DriveRegistry, ProgressSink, SyncEngine}
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{
-    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger, ClusterState, DesiredState,
-    DriveBackupTarget, Request,
+    BackupDestination, BackupDestinationKind, BackupRun, BackupRunOutcome, BackupTrigger,
+    ClusterState, DesiredState, DriveBackupTarget, Request,
 };
 use cl_restic::retention::forget_args;
 use cl_secret::ClusterKey;
@@ -105,15 +105,18 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                 // would reject a second `Running` run for it anyway, but
                 // skipping here avoids a pointless submit every poll while
                 // it's in flight.
-                let already_running = state
-                    .restic_runs
-                    .values()
-                    .any(|r| r.target_id == target.id && matches!(r.outcome, BackupRunOutcome::Running { .. }));
+                let already_running = state.restic_runs.values().any(|r| {
+                    r.target_id == target.id
+                        && matches!(r.outcome, BackupRunOutcome::Running { .. })
+                });
                 if already_running {
                     continue;
                 }
                 let _ = cluster
-                    .submit(Request::SetBackupTargetLastRun { id: target.id.clone(), at: now })
+                    .submit(Request::SetBackupTargetLastRun {
+                        id: target.id.clone(),
+                        at: now,
+                    })
                     .await;
                 let run = BackupRun {
                     id: Uuid::new_v4().to_string(),
@@ -135,7 +138,9 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                 let max_age = state
                     .restic_targets
                     .get(&run.target_id)
-                    .map(|t| (t.frequency_secs as i64 * STALE_RUN_MULTIPLIER).min(STALE_RUN_CAP_SECS))
+                    .map(|t| {
+                        (t.frequency_secs as i64 * STALE_RUN_MULTIPLIER).min(STALE_RUN_CAP_SECS)
+                    })
                     .unwrap_or(STALE_RUN_CAP_SECS);
                 if now - run.started_at >= max_age {
                     let mut stale = run.clone();
@@ -171,16 +176,24 @@ pub fn start_runner(
 
         loop {
             ticker.tick().await;
-            let Some(registry) = registry.read().await.clone() else { continue };
-            let Some(key) = key_rx.borrow().clone() else { continue };
+            let Some(registry) = registry.read().await.clone() else {
+                continue;
+            };
+            let Some(key) = key_rx.borrow().clone() else {
+                continue;
+            };
             let state = cluster.state().await;
 
             for run in state.restic_runs.values() {
                 if !matches!(run.outcome, BackupRunOutcome::Running { .. }) {
                     continue;
                 }
-                let Some(target) = state.restic_targets.get(&run.target_id) else { continue };
-                let Some(destination) = state.restic_destinations.get(&run.destination_id) else { continue };
+                let Some(target) = state.restic_targets.get(&run.target_id) else {
+                    continue;
+                };
+                let Some(destination) = state.restic_destinations.get(&run.destination_id) else {
+                    continue;
+                };
                 // No blanket `registry.implements(&run.drive)` gate here:
                 // `is_source` below already requires it for every branch
                 // that needs to read the drive, but the `NodeLocal { node
@@ -197,16 +210,29 @@ pub fn start_runner(
                             continue;
                         }
                         claim_and_execute(
-                            &cluster, &registry, &docker, &key, &data_dir, &node_name, &state, run, target, destination,
+                            &cluster,
+                            &registry,
+                            &docker,
+                            &key,
+                            &data_dir,
+                            &node_name,
+                            &state,
+                            run,
+                            target,
+                            destination,
                             &in_flight,
                         )
                         .await;
                     }
-                    BackupDestinationKind::NodeLocal { node, path } if is_source && node != &node_name => {
+                    BackupDestinationKind::NodeLocal { node, path }
+                        if is_source && node != &node_name =>
+                    {
                         if !pushed.lock().await.insert(run.id.clone()) {
                             continue;
                         }
-                        if let Err(e) = push_drive_once(&state, &registry, &run.drive, node, path).await {
+                        if let Err(e) =
+                            push_drive_once(&state, &registry, &run.drive, node, path).await
+                        {
                             warn!(run = %run.id, drive = %run.drive, destination = %node, error = %e, "one-off backup sync failed");
                             // The destination can't run restic against data
                             // that never landed, and it can't tell a push
@@ -224,9 +250,20 @@ pub fn start_runner(
                             let _ = cluster.submit(Request::RecordBackupRun(failed)).await;
                         }
                     }
-                    BackupDestinationKind::Ssh { .. } | BackupDestinationKind::S3 { .. } if is_source => {
+                    BackupDestinationKind::Ssh { .. } | BackupDestinationKind::S3 { .. }
+                        if is_source =>
+                    {
                         claim_and_execute(
-                            &cluster, &registry, &docker, &key, &data_dir, &node_name, &state, run, target, destination,
+                            &cluster,
+                            &registry,
+                            &docker,
+                            &key,
+                            &data_dir,
+                            &node_name,
+                            &state,
+                            run,
+                            target,
+                            destination,
                             &in_flight,
                         )
                         .await;
@@ -255,12 +292,26 @@ async fn claim_and_execute(
     if !in_flight.lock().await.insert(run.id.clone()) {
         return;
     }
-    let result = execute(cluster, registry, docker, key, data_dir, node_name, state, run, target, destination).await;
+    let result = execute(
+        cluster,
+        registry,
+        docker,
+        key,
+        data_dir,
+        node_name,
+        state,
+        run,
+        target,
+        destination,
+    )
+    .await;
     let outcome = match &result {
         Ok(outcome) => outcome.clone(),
         Err(e) => {
             warn!(run = %run.id, drive = %run.drive, error = %e, "backup run failed");
-            BackupRunOutcome::Failed { error: e.to_string() }
+            BackupRunOutcome::Failed {
+                error: e.to_string(),
+            }
         }
     };
     let mut finished = run.clone();
@@ -321,16 +372,36 @@ async fn execute(
         // behind once the deadline passes is backed up as-is, same trade-off
         // `SYNC_GRACE_SECS` accepts for the `NodeLocal`-elsewhere case - the
         // next scheduled run corrects it.
-        wait_for_drive_synced(cluster, registry, &run.drive, node_name, Duration::from_secs(DRIVE_SYNC_GRACE_SECS as u64))
-            .await;
+        wait_for_drive_synced(
+            cluster,
+            registry,
+            &run.drive,
+            node_name,
+            Duration::from_secs(DRIVE_SYNC_GRACE_SECS as u64),
+        )
+        .await;
         registry.root(&run.drive)?.to_path_buf()
     } else {
         let BackupDestinationKind::NodeLocal { path, .. } = &destination.kind else {
-            bail!("destination {} has no local path to stage {} next to", destination.id, run.drive);
+            bail!(
+                "destination {} has no local path to stage {} next to",
+                destination.id,
+                run.drive
+            );
         };
         registry.ensure_staging_root(Path::new(path), &run.drive)?
     };
-    let result = run_restic_backup(cluster, key, data_dir, state, run, target, destination, &source_path).await;
+    let result = run_restic_backup(
+        cluster,
+        key,
+        data_dir,
+        state,
+        run,
+        target,
+        destination,
+        &source_path,
+    )
+    .await;
 
     if !stopped.is_empty() {
         set_desired(cluster, &stopped, DesiredState::Running).await?;
@@ -345,10 +416,20 @@ pub fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceI
     let mut found = Vec::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;
-        let Some(stack) = state.stacks.get(&instance.stack) else { continue };
-        let Ok(file) = StackFile::parse(&stack.spec) else { continue };
-        let Some(service) = file.services.get(&instance.service) else { continue };
-        if service.volumes.iter().any(|m| m.drive.as_deref() == Some(drive)) {
+        let Some(stack) = state.stacks.get(&instance.stack) else {
+            continue;
+        };
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        let Some(service) = file.services.get(&instance.service) else {
+            continue;
+        };
+        if service
+            .volumes
+            .iter()
+            .any(|m| m.drive.as_deref() == Some(drive))
+        {
             found.push(instance.clone());
         }
     }
@@ -361,7 +442,11 @@ pub fn instances_using_drive(state: &ClusterState, drive: &str) -> Vec<InstanceI
 /// unanimous explicit `false` skips stopping. No explicit answer from
 /// anyone defaults to `true` - stopping before touching live data is the
 /// safe default.
-fn resolve_stop_containers(target: &DriveBackupTarget, state: &ClusterState, instances: &[InstanceId]) -> bool {
+fn resolve_stop_containers(
+    target: &DriveBackupTarget,
+    state: &ClusterState,
+    instances: &[InstanceId],
+) -> bool {
     if let Some(explicit) = target.stop_containers {
         return explicit;
     }
@@ -388,10 +473,17 @@ fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
         .unwrap_or(cl_sched::reconcile::DEFAULT_STOP_GRACE)
 }
 
-async fn set_desired(cluster: &Arc<ClusterNode>, instances: &[InstanceId], desired: DesiredState) -> Result<()> {
+async fn set_desired(
+    cluster: &Arc<ClusterNode>,
+    instances: &[InstanceId],
+    desired: DesiredState,
+) -> Result<()> {
     for instance in instances {
         let response = cluster
-            .submit(Request::SetDesiredState { instance: instance.clone(), desired })
+            .submit(Request::SetDesiredState {
+                instance: instance.clone(),
+                desired,
+            })
             .await?;
         if let Some(error) = response.error {
             bail!("could not update the desired state of {instance}: {error}");
@@ -508,7 +600,11 @@ fn is_local_source(registry: &DriveRegistry, state: &ClusterState, drive: &str) 
     if registry.is_served(drive) {
         return registry.active_server(drive, &state.unreachable) == Some(registry.node());
     }
-    let mut volumes = state.volumes.iter().filter(|(id, _)| id.drive == drive).peekable();
+    let mut volumes = state
+        .volumes
+        .iter()
+        .filter(|(id, _)| id.drive == drive)
+        .peekable();
     if volumes.peek().is_none() {
         return false;
     }
@@ -538,7 +634,14 @@ async fn push_drive_once(
     for (id, vstate) in state.volumes.iter().filter(|(id, _)| id.drive == drive) {
         let src = registry.volume_path(id)?;
         engine
-            .sync(&src, peer, id, vstate.generation, Some(destination_path.to_string()), ProgressSink::none())
+            .sync(
+                &src,
+                peer,
+                id,
+                vstate.generation,
+                Some(destination_path.to_string()),
+                ProgressSink::none(),
+            )
             .await
             .map_err(|e| anyhow!("syncing {id} to {target_node}: {e}"))?;
     }
@@ -563,7 +666,8 @@ async fn run_restic_backup(
     destination: &BackupDestination,
     source_path: &Path,
 ) -> Result<BackupRunOutcome> {
-    backup_secrets::ensure_password_secret(cluster, key, state, &destination.password_secret).await?;
+    backup_secrets::ensure_password_secret(cluster, key, state, &destination.password_secret)
+        .await?;
     // Re-read: `ensure_password_secret` may just have written the entry
     // `build_repo` needs to open.
     let state = cluster.state().await;
@@ -587,7 +691,9 @@ async fn run_restic_backup(
             let percent = *progress_rx.borrow();
             let mut updated = run_for_progress.clone();
             updated.outcome = BackupRunOutcome::Running { percent };
-            let _ = cluster_for_progress.submit(Request::RecordBackupRun(updated)).await;
+            let _ = cluster_for_progress
+                .submit(Request::RecordBackupRun(updated))
+                .await;
         }
     });
 
@@ -609,8 +715,12 @@ async fn run_restic_backup(
                 }
             })
             .map_err(|e| anyhow!("restic backup: {e}"))?;
-        repo.forget(&forget).map_err(|e| anyhow!("restic forget: {e}"))?;
-        Ok(BackupRunOutcome::Succeeded { snapshot_id: outcome.snapshot_id, bytes: outcome.bytes })
+        repo.forget(&forget)
+            .map_err(|e| anyhow!("restic forget: {e}"))?;
+        Ok(BackupRunOutcome::Succeeded {
+            snapshot_id: outcome.snapshot_id,
+            bytes: outcome.bytes,
+        })
     })
     .await
     .map_err(|e| anyhow!("the restic task panicked: {e}"))?;
@@ -652,7 +762,13 @@ mod tests {
     }
 
     fn assignment(instance: InstanceId, node: &str) -> Assignment {
-        Assignment { instance, node: node.into(), desired: DesiredState::Running, image_digest: None, migration: None }
+        Assignment {
+            instance,
+            node: node.into(),
+            desired: DesiredState::Running,
+            image_digest: None,
+            migration: None,
+        }
     }
 
     fn target(stop_containers: Option<bool>) -> DriveBackupTarget {
@@ -673,7 +789,9 @@ mod tests {
     #[test]
     fn instances_using_drive_finds_every_service_mounting_it() {
         let mut state = ClusterState::default();
-        state.stacks.insert("app".into(), stack_with_volume("fast", "data", None));
+        state
+            .stacks
+            .insert("app".into(), stack_with_volume("fast", "data", None));
         let instance = InstanceId::new("app", "web", 0);
         state
             .assignments
@@ -686,13 +804,19 @@ mod tests {
     #[test]
     fn target_override_wins_regardless_of_stack_overrides() {
         let mut state = ClusterState::default();
-        state.stacks.insert("app".into(), stack_with_volume("fast", "data", Some(false)));
+        state
+            .stacks
+            .insert("app".into(), stack_with_volume("fast", "data", Some(false)));
         let instance = InstanceId::new("app", "web", 0);
         state
             .assignments
             .insert(instance.clone(), assignment(instance.clone(), "n1"));
 
-        assert!(resolve_stop_containers(&target(Some(true)), &state, &[instance]));
+        assert!(resolve_stop_containers(
+            &target(Some(true)),
+            &state,
+            &[instance]
+        ));
     }
 
     #[test]
@@ -704,7 +828,9 @@ mod tests {
     #[test]
     fn unanimous_false_skips_stopping() {
         let mut state = ClusterState::default();
-        state.stacks.insert("app".into(), stack_with_volume("fast", "data", Some(false)));
+        state
+            .stacks
+            .insert("app".into(), stack_with_volume("fast", "data", Some(false)));
         let instance = InstanceId::new("app", "web", 0);
         state
             .assignments
@@ -716,12 +842,20 @@ mod tests {
     #[test]
     fn any_explicit_true_wins_over_a_false() {
         let mut state = ClusterState::default();
-        state.stacks.insert("a".into(), stack_with_volume("fast", "x", Some(false)));
-        state.stacks.insert("b".into(), stack_with_volume("fast", "y", Some(true)));
+        state
+            .stacks
+            .insert("a".into(), stack_with_volume("fast", "x", Some(false)));
+        state
+            .stacks
+            .insert("b".into(), stack_with_volume("fast", "y", Some(true)));
         let i1 = InstanceId::new("a", "web", 0);
         let i2 = InstanceId::new("b", "web", 0);
-        state.assignments.insert(i1.clone(), assignment(i1.clone(), "n1"));
-        state.assignments.insert(i2.clone(), assignment(i2.clone(), "n1"));
+        state
+            .assignments
+            .insert(i1.clone(), assignment(i1.clone(), "n1"));
+        state
+            .assignments
+            .insert(i2.clone(), assignment(i2.clone(), "n1"));
 
         assert!(resolve_stop_containers(&target(None), &state, &[i1, i2]));
     }
