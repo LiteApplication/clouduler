@@ -807,7 +807,7 @@ fn run_git_export(
     let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
     let repo =
         cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
-    let oid = repo.sync(&files, message, &private_key_pem)?;
+    let oid = repo.sync(&files, message, &private_key_pem, None)?;
     Ok(oid.map(|oid| oid.to_string()))
 }
 

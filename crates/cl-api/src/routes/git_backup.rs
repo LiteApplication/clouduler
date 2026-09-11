@@ -327,7 +327,7 @@ async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
     let commit_oid = tokio::task::spawn_blocking(move || {
         let backup =
             cl_backup::git::GitBackup::open_or_init(&dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
-        backup.reconcile(&files, "reconcile: mirror cluster state", &private_key_pem)
+        backup.reconcile(&files, "reconcile: mirror cluster state", &private_key_pem, None)
     })
     .await
     .map_err(ApiError::internal)?
@@ -549,7 +549,7 @@ fn pull_and_decide(
                        into a live secret - secret rotation must go through the api, not git"
             .to_string();
         let outcome =
-            backup.reject_and_restore(candidate, last_good_oid, &reason, private_key_pem)?;
+            backup.reject_and_restore(candidate, last_good_oid, &reason, private_key_pem, None)?;
         return Ok(PullDecision::Rejected {
             reason,
             preserved_branch: outcome.preserved_branch,
@@ -568,12 +568,7 @@ fn pull_and_decide(
             parsed: Box::new(parsed),
         }),
         Err(reason) => {
-            let outcome = backup.reject_and_restore(
-                candidate,
-                last_good_oid,
-                &reason,
-                private_key_pem,
-            )?;
+            let outcome = backup.reject_and_restore(candidate, last_good_oid, &reason, private_key_pem, None)?;
             Ok(PullDecision::Rejected {
                 reason,
                 preserved_branch: outcome.preserved_branch,

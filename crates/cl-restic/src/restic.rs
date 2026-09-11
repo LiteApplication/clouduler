@@ -91,6 +91,15 @@ impl ResticRepo {
         mut on_progress: impl FnMut(f64),
     ) -> Result<BackupOutcome> {
         let mut args: Vec<String> = vec!["backup".into(), "--json".into()];
+        // Larger packs drastically cut index/metadata overhead for big
+        // datasets (700 GB+).  Default 4 MiB means millions of tiny packs;
+        // 32 MiB brings that to a manageable tens-of-thousands.
+        args.push("--pack-size".into());
+        args.push("32".into());
+        // More disk readers in parallel: the default of 2 leaves NVMe /
+        // fast-USB storage underutilised during the scan+read phase.
+        args.push("--read-concurrency".into());
+        args.push("4".into());
         for tag in tags {
             args.push("--tag".into());
             args.push((*tag).to_string());

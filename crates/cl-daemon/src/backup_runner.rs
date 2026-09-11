@@ -70,8 +70,8 @@ const RUN_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// A `Running` run older than `frequency_secs * this`, capped below, is
 /// presumed abandoned (the node that claimed it crashed or partitioned) and
 /// failed so the target is eligible to be picked up again on schedule.
-const STALE_RUN_MULTIPLIER: i64 = 2;
-const STALE_RUN_CAP_SECS: i64 = 24 * 3600;
+const STALE_RUN_MULTIPLIER: i64 = 3;
+const STALE_RUN_CAP_SECS: i64 = 72 * 3600;
 /// How long a `NodeLocal`-elsewhere destination waits, once a run starts,
 /// before running restic against whatever the source's one-off push has
 /// landed so far - see the module doc comment.
@@ -715,8 +715,11 @@ async fn run_restic_backup(
                 }
             })
             .map_err(|e| anyhow!("restic backup: {e}"))?;
-        repo.forget(&forget)
-            .map_err(|e| anyhow!("restic forget: {e}"))?;
+        if let Err(e) = repo.forget(&forget) {
+            // A prune/forget error (e.g. transient lock or network issue) shouldn't
+            // invalidate a successful snapshot of large data.
+            warn!("restic forget/prune warning (snapshot was preserved): {e}");
+        }
         Ok(BackupRunOutcome::Succeeded {
             snapshot_id: outcome.snapshot_id,
             bytes: outcome.bytes,

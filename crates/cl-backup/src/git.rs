@@ -96,6 +96,7 @@ impl GitBackup {
         files: &[TreeFile],
         message: &str,
         private_key_pem: &str,
+        author: Option<(&str, &str)>,
     ) -> Result<Option<git2::Oid>> {
         // Fetch the remote's current tip.
         let remote_tip = self.fetch_remote_tip(private_key_pem)?;
@@ -116,7 +117,10 @@ impl GitBackup {
             }
         }
 
-        let signature = Signature::now("clouduler", "clouduler@localhost")?;
+        let signature = match author {
+            Some((name, email)) => Signature::now(name, email)?,
+            None => Signature::now("clouduler", "clouduler@localhost")?,
+        };
 
         // One commit-and-push attempt against a given parent.
         let attempt = |parent: Option<git2::Oid>| -> Result<git2::Oid> {
@@ -198,6 +202,7 @@ impl GitBackup {
         files: &[TreeFile],
         message: &str,
         private_key_pem: &str,
+        author: Option<(&str, &str)>,
     ) -> Result<git2::Oid> {
         let remote_tip = self.fetch_remote_tip(private_key_pem)?;
         let remote_tip_commit = match remote_tip {
@@ -215,7 +220,10 @@ impl GitBackup {
             }
         }
 
-        let signature = Signature::now("clouduler", "clouduler@localhost")?;
+        let signature = match author {
+            Some((name, email)) => Signature::now(name, email)?,
+            None => Signature::now("clouduler", "clouduler@localhost")?,
+        };
         let attempt = |parent: Option<git2::Oid>| -> Result<git2::Oid> {
             let parents = match parent {
                 Some(oid) => vec![self.repo.find_commit(oid)?],
@@ -421,11 +429,15 @@ impl GitBackup {
         good_commit: Option<git2::Oid>,
         reason: &str,
         private_key_pem: &str,
+        author: Option<(&str, &str)>,
     ) -> Result<RejectOutcome> {
         let bad_commit = self.repo.find_commit(bad)?;
         let preserved_branch = format!("rejected/{}-{}", self.branch, &bad.to_string()[..12]);
 
-        let signature = Signature::now("clouduler", "clouduler@localhost")?;
+        let signature = match author {
+            Some((name, email)) => Signature::now(name, email)?,
+            None => Signature::now("clouduler", "clouduler@localhost")?,
+        };
         // An empty-diff commit on top of `bad`, on the preserved branch only,
         // so the explanation travels with the rejected history instead of
         // polluting the tracked branch with a synthetic commit.
@@ -822,7 +834,7 @@ mod tests {
 
         let dummy_key = "not-a-real-key";
         let oid = backup
-            .sync(&files, "add cluster.yaml", dummy_key)
+            .sync(&files, "add cluster.yaml", dummy_key, None)
             .expect("sync");
         assert!(oid.is_some());
         // The commit is reachable from the remote's branch ref.
@@ -852,9 +864,9 @@ mod tests {
         }];
 
         let dummy_key = "not-a-real-key";
-        let first = backup.sync(&files, "first", dummy_key).expect("sync");
+        let first = backup.sync(&files, "first", dummy_key, None).expect("sync");
         assert!(first.is_some());
-        let second = backup.sync(&files, "second", dummy_key).expect("sync");
+        let second = backup.sync(&files, "second", dummy_key, None).expect("sync");
         assert_eq!(second, None);
     }
 
@@ -872,7 +884,7 @@ mod tests {
         let backup = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
         let dummy_key = "not-a-real-key";
         let oid = backup
-            .sync(files, "seed", dummy_key)
+            .sync(files, "seed", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
         (backup, oid, local_dir)
@@ -905,7 +917,7 @@ mod tests {
             },
         ];
         let second_oid = second_leader
-            .sync(&second_files, "second leader's first export", dummy_key)
+            .sync(&second_files, "second leader's first export", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
 
@@ -987,7 +999,7 @@ mod tests {
             },
         ];
         let second_oid = backup
-            .sync(&second_files, "second", dummy_key)
+            .sync(&second_files, "second", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
 
@@ -1006,7 +1018,7 @@ mod tests {
             },
         ];
         let third_oid = backup
-            .sync(&third_files, "third", dummy_key)
+            .sync(&third_files, "third", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
 
@@ -1039,7 +1051,7 @@ mod tests {
             },
         ];
         let with_secret_oid = backup
-            .sync(&with_secret, "add secret", dummy_key)
+            .sync(&with_secret, "add secret", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
         assert!(backup
@@ -1062,7 +1074,7 @@ mod tests {
             contents: b"not: valid: yaml: at: all".to_vec(),
         }];
         let bad_oid = backup
-            .sync(&bad_files, "bad", dummy_key)
+            .sync(&bad_files, "bad", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
 
@@ -1072,6 +1084,7 @@ mod tests {
                 Some(good_oid),
                 "stack broken.yaml failed to parse",
                 dummy_key,
+                None,
             )
             .expect("reject_and_restore");
 
@@ -1136,12 +1149,12 @@ mod tests {
             contents: b"not valid".to_vec(),
         }];
         let bad_oid = backup
-            .sync(&bad_files, "bad", dummy_key)
+            .sync(&bad_files, "bad", dummy_key, None)
             .expect("sync")
             .expect("a real commit");
 
         let outcome = backup
-            .reject_and_restore(bad_oid, None, "cluster.yaml failed to parse", dummy_key)
+            .reject_and_restore(bad_oid, None, "cluster.yaml failed to parse", dummy_key, None)
             .expect("reject_and_restore");
 
         assert_eq!(outcome.restored_commit, Some(initial_oid));
@@ -1211,7 +1224,7 @@ mod tests {
         ];
 
         let reconcile_oid = backup
-            .reconcile(&raft_files, "reconcile: mirror cluster state", dummy_key)
+            .reconcile(&raft_files, "reconcile: mirror cluster state", dummy_key, None)
             .expect("reconcile");
         assert_ne!(reconcile_oid, first_oid);
 
@@ -1239,7 +1252,7 @@ mod tests {
 
         // Reconciling again with the same files should return the same commit without creating a new one
         let second_oid = backup
-            .reconcile(&raft_files, "reconcile again", dummy_key)
+            .reconcile(&raft_files, "reconcile again", dummy_key, None)
             .expect("second reconcile");
         assert_eq!(second_oid, reconcile_oid);
     }
@@ -1286,4 +1299,31 @@ mod tests {
         assert!(parsed.configs.is_empty());
         assert!(parsed.secrets.is_empty());
     }
+
+    #[test]
+    fn test_sync_with_custom_author() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        Repository::init_bare(bare_dir.path()).expect("init bare");
+
+        let local_dir = tempfile::tempdir().expect("local tempdir");
+        let repo_url = format!("file://{}", bare_dir.path().display());
+        let backup = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
+
+        let files = vec![TreeFile {
+            path: "cluster.yaml".to_string(),
+            contents: b"nodes: []\n".to_vec(),
+        }];
+
+        let dummy_key = "not-a-real-key";
+        let oid = backup
+            .sync(&files, "add cluster.yaml", dummy_key, Some(("alice", "alice@example.com")))
+            .expect("sync")
+            .expect("commit oid");
+
+        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
+        let commit = remote_repo.find_commit(oid).expect("find commit");
+        assert_eq!(commit.author().name(), Some("alice"));
+        assert_eq!(commit.author().email(), Some("alice@example.com"));
+    }
+
 }
