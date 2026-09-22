@@ -26,6 +26,7 @@ use cl_proxy::{
     Http01Store, RedirectTarget, Route, RouteOptions, RouteTable, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
+use cl_net::Allocations;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{
     dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request,
@@ -40,6 +41,19 @@ use tracing::{info, warn};
 fn allowed_subnet(cfg: &ClusterConfig, network: &str) -> Option<IpNet> {
     let net = cfg.networks.get(network)?;
     net.kind.is_subnetted().then_some(net.subnet).flatten()
+}
+
+/// Overlay subnets of every stack published on `network`, so a same-node
+/// client whose request never actually left the node still passes
+/// `gate_by_network` - see `RouteOptions::trusted_overlay_subnets`.
+fn trusted_overlay_subnets(state: &ClusterState, network: &str) -> Vec<IpNet> {
+    let Some(allocations) = Allocations::decode(state.overlay.as_deref()) else {
+        return Vec::new();
+    };
+    allocations
+        .subnets_for_cluster_network(network)
+        .map(IpNet::V4)
+        .collect()
 }
 
 /// How often routes and certificates are rebuilt from state.
@@ -358,6 +372,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
                     preserve_host: entry.preserve_host,
                     response_timeout: entry.response_timeout,
                     allowed_subnet: allowed_subnet(cfg, &entry.network),
+                    trusted_overlay_subnets: trusted_overlay_subnets(state, &entry.network),
                 }),
             );
         }
@@ -397,6 +412,7 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
             )
             .with_options(RouteOptions {
                 allowed_subnet: allowed_subnet(cfg, &rule.network),
+                trusted_overlay_subnets: trusted_overlay_subnets(state, &rule.network),
                 ..RouteOptions::default()
             })
             .with_redirect(RedirectTarget {
@@ -484,6 +500,7 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
                 preserve_host: entry.preserve_host,
                 response_timeout: entry.response_timeout,
                 allowed_subnet: allowed_subnet(cfg, &entry.network),
+                trusted_overlay_subnets: trusted_overlay_subnets(state, &entry.network),
             }),
         );
     }
@@ -1374,6 +1391,50 @@ services:
             .expect("private network is gated");
         assert!(subnet.contains(&std::net::IpAddr::from([192, 168, 1, 50])));
         assert!(!subnet.contains(&std::net::IpAddr::from([8, 8, 8, 8])));
+    }
+
+    /// A same-node client whose request to a private-network route never
+    /// actually leaves the node lands on the proxy with its raw overlay
+    /// address as the peer, not one inside the private network's declared
+    /// subnet - see `RouteOptions::trusted_overlay_subnets`. The route must
+    /// still trust that peer, because the stack it belongs to (`blog`) is
+    /// itself published on the same `lan` network.
+    #[test]
+    fn a_route_on_a_private_network_also_trusts_a_same_node_overlay_peer() {
+        const LAN_SPEC: &str = "\
+networks:
+  lan: {}
+services:
+  web:
+    image: nginx
+    networks: [lan]
+    x-clouduler:
+      proxy:
+        - host: files
+          network: lan
+          port: 80
+";
+        let mut state = state_with(LAN_SPEC, 1);
+        let mut allocations =
+            Allocations::decode(state.overlay.as_deref()).expect("state_with sets an overlay");
+        let overlay_subnet = allocations
+            .allocate_network("blog_lan", &[])
+            .expect("allocates a subnet for the stack's own lan overlay");
+        state.overlay = Some(serde_json::to_string(&allocations).expect("encodes"));
+
+        let routes = service_routes(&cfg(), &state);
+        let route = &routes[0];
+        let container_peer = std::net::IpAddr::from(overlay_subnet.hosts().next().unwrap());
+
+        assert!(route
+            .options
+            .allowed_subnet
+            .is_some_and(|s| !s.contains(&container_peer)));
+        assert!(route
+            .options
+            .trusted_overlay_subnets
+            .iter()
+            .any(|s| s.contains(&container_peer)));
     }
 
     #[test]

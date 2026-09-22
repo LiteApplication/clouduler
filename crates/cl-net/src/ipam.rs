@@ -91,6 +91,30 @@ impl Allocations {
         self.networks.keys().map(|s| s.as_str())
     }
 
+    /// Subnets of every stack overlay published on a given cluster network
+    /// (an overlay is named `<stack>_<cluster network>`, see
+    /// `cl_sched::run::overlay_name`).
+    ///
+    /// A container on one of these subnets reached a route the ordinary way,
+    /// clouduler placed it there, even when the packet that carries the
+    /// request never actually left the node: a client and a same-node
+    /// backend published on the same cluster network can have their traffic
+    /// delivered locally by the kernel (the destination address is one the
+    /// node already owns) instead of round-tripping through the underlay, so
+    /// the proxy sees the client's raw overlay address as the peer rather
+    /// than an address inside the cluster network's own subnet.
+    pub fn subnets_for_cluster_network<'a>(
+        &'a self,
+        cluster_network: &'a str,
+    ) -> impl Iterator<Item = Ipv4Net> + 'a {
+        let suffix = format!("_{cluster_network}");
+        self.networks.iter().filter_map(move |(name, alloc)| {
+            name.strip_suffix(suffix.as_str())
+                .filter(|stack| !stack.is_empty())
+                .map(|_| alloc.subnet)
+        })
+    }
+
     /// Gateway address for a network's subnet: always the first host address.
     pub fn gateway(&self, network: &str) -> Option<Ipv4Addr> {
         self.subnet(network).map(gateway_of)
@@ -300,6 +324,27 @@ mod tests {
         let gw = a.gateway("gitlab").unwrap();
         assert_eq!(gw, gateway_of(subnet));
         assert_eq!(gw.octets()[3], 1);
+    }
+
+    #[test]
+    fn subnets_for_cluster_network_matches_by_overlay_name_suffix() {
+        let mut a = Allocations::default();
+        let uptime = a.allocate_network("uptime-kuma_tailscale", &[]).unwrap();
+        let obsurwatch = a.allocate_network("obsurwatch_tailscale", &[]).unwrap();
+        a.allocate_network("gitlab_backups", &[]).unwrap();
+
+        let mut got: Vec<Ipv4Net> = a.subnets_for_cluster_network("tailscale").collect();
+        got.sort();
+        let mut want = vec![uptime, obsurwatch];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn subnets_for_cluster_network_ignores_a_bare_match_with_no_stack_prefix() {
+        let mut a = Allocations::default();
+        a.allocate_network("tailscale", &[]).unwrap();
+        assert_eq!(a.subnets_for_cluster_network("tailscale").count(), 0);
     }
 
     #[test]

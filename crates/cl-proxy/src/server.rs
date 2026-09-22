@@ -278,12 +278,20 @@ fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 }
 
 /// Rejects a request whose TCP peer does not sit inside the route's
-/// `allowed_subnet`. A route with no restriction (a public network) always
-/// passes. This is a check on the real socket peer, not a header, so it
-/// cannot be spoofed by a client claiming a different address.
+/// `allowed_subnet`, or one of its `trusted_overlay_subnets` (see that
+/// field's doc for why a same-node client needs the latter). A route with no
+/// restriction (a public network) always passes. This is a check on the real
+/// socket peer, not a header, so it cannot be spoofed by a client claiming a
+/// different address.
 fn gate_by_network(route: &Route, peer: SocketAddr) -> Option<Response<ProxyBody>> {
     let subnet = route.options.allowed_subnet?;
-    if subnet.contains(&peer.ip()) {
+    if subnet.contains(&peer.ip())
+        || route
+            .options
+            .trusted_overlay_subnets
+            .iter()
+            .any(|s| s.contains(&peer.ip()))
+    {
         return None;
     }
     Some(status_response(

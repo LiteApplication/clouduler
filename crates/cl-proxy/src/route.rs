@@ -35,6 +35,15 @@ pub struct RouteOptions {
     /// this subnet. Set for a route published on an internal or private
     /// network; `None` for a public one, which is reachable from anywhere.
     pub allowed_subnet: Option<IpNet>,
+    /// Additional subnets a client may connect from even when outside
+    /// `allowed_subnet`: the overlay subnets of every stack published on
+    /// this route's network. A same-node client and backend on that network
+    /// can have their traffic delivered locally by the kernel rather than
+    /// actually traversing the network, so the peer address `gate_by_network`
+    /// sees is the client's raw overlay address, not one inside
+    /// `allowed_subnet`. Always empty for a public route (`allowed_subnet` is
+    /// `None`, so this is never consulted).
+    pub trusted_overlay_subnets: Vec<IpNet>,
 }
 
 impl RouteOptions {
