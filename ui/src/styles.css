@@ -1151,6 +1151,13 @@ button.icon-btn {
 }
 
 .update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 180px;
+}
+
+.update-progress-head {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -1159,9 +1166,40 @@ button.icon-btn {
   font-size: 12.5px;
 }
 
-.update-progress .icon {
+.update-progress-head .icon {
   width: 14px;
   height: 14px;
+}
+
+.update-progress-track {
+  display: flex;
+  gap: 3px;
+}
+
+.update-progress-seg {
+  flex: 1;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+}
+
+.update-progress-seg.done {
+  background: var(--warn);
+}
+
+.update-progress-seg.active {
+  background: var(--warn);
+  animation: update-progress-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes update-progress-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .log-view {

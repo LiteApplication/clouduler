@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
-import type { BulkResult, RegistryAccount, UpdateRow } from '../api/types';
+import type { BulkResult, InstanceState, RegistryAccount, UpdateRow } from '../api/types';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
 import { useInstanceProgress } from '../state/progressStore';
@@ -40,45 +40,92 @@ const STATUS_TONE: Record<Status, 'good' | 'warn' | 'bad' | 'neutral'> = {
   unknown: 'neutral',
 };
 
-/** An update in flight goes through three real docker steps, in this order:
- *  the old container stays up throughout the pull, only coming down once the
- *  new bits are already on disk. `reason` (from `/api/instances/events`)
- *  spells out which one a redeploying instance is on, e.g.
- *  `"redeploying (pulling, step 1/3)"` — pull the phase word out of it so the
- *  row can show something a lot clearer than that raw string. */
-function updatePhase(reason: string | null): { label: string; icon: 'download' | 'stop' | 'restart' } | null {
-  if (!reason) return null;
-  if (reason.includes('pulling')) return { label: 'downloading image', icon: 'download' };
-  if (reason.includes('stopping')) return { label: 'stopping old container', icon: 'stop' };
-  if (reason.includes('starting')) return { label: 'starting new container', icon: 'restart' };
-  return { label: reason, icon: 'restart' };
+/** Rows needing action float to the top: an update available first, then a
+ *  pin drift, then an unknown verdict, with already-current rows last. */
+const STATUS_PRIORITY: Record<Status, number> = { update: 0, drift: 1, unknown: 2, current: 3 };
+
+type UpdatePhase = 'pulling' | 'stopping' | 'starting' | 'healthy';
+
+/** An update in flight goes through four real steps, in this order: the old
+ *  container stays up throughout the pull, only coming down once the new
+ *  bits are already on disk, and the new one is not "done" just because it
+ *  started — its healthcheck (if it has one) still has to pass. */
+const PHASE_ORDER: UpdatePhase[] = ['pulling', 'stopping', 'starting', 'healthy'];
+
+const PHASE_LABEL: Record<UpdatePhase, string> = {
+  pulling: 'downloading image',
+  stopping: 'stopping old container',
+  starting: 'starting new container',
+  healthy: 'waiting for health check',
+};
+
+const PHASE_ICON: Record<UpdatePhase, 'download' | 'stop' | 'restart' | 'activity'> = {
+  pulling: 'download',
+  stopping: 'stop',
+  starting: 'restart',
+  healthy: 'activity',
+};
+
+/** Which of the four phases an instance is in right now, or `null` once
+ *  there is nothing left to show. `reason` (from the SSE progress store,
+ *  `/api/instances/events`) drives the first three phases in real time and
+ *  comes from the reconciler's own redeploy step; the fourth has no
+ *  reconciler step behind it at all — it is this view noticing, from the
+ *  periodic `/api/instances` poll, that the new container is up but its
+ *  docker healthcheck has not reported healthy yet. A container with no
+ *  healthcheck configured skips straight past it. */
+function phaseOf(reason: string | null, live: InstanceState | undefined): UpdatePhase | null {
+  if (reason?.includes('pulling')) return 'pulling';
+  if (reason?.includes('stopping')) return 'stopping';
+  if (reason?.includes('starting')) return 'starting';
+  if (live?.health === 'starting') return 'healthy';
+  return null;
 }
 
-/** One row's live update feedback: the phase an in-flight update is on, kept
- *  apart so only this cell re-renders on every `progress` event rather than
- *  the whole table. */
-function UpdateProgressCell({ id, fallback }: { id: string; fallback: string }) {
+/** An instance an `apply` is watching counts as settled once it is back to a
+ *  steady state (`running`/`stopped`) with no reconciler step in progress
+ *  and, if it has a healthcheck, that check is no longer pending. Checking
+ *  `reason` here (not just `state`) matters: during the pull step the old
+ *  container is still up and reporting `running` the whole time, so a naive
+ *  state check would call the row settled before the update even started. */
+function isSettled(i: InstanceState): boolean {
+  return (i.state === 'running' || i.state === 'stopped') && !i.reason && i.health !== 'starting';
+}
+
+/** One row's live update feedback: a four-segment progress bar over
+ *  `PHASE_ORDER`, kept apart so only this cell re-renders on every SSE
+ *  `progress` event rather than the whole table. `live` (the instance's most
+ *  recent `/api/instances` poll) supplies the healthcheck phase SSE cannot. */
+function UpdateProgressBar({ id, live }: { id: string; live: InstanceState | undefined }) {
   const progress = useInstanceProgress(id);
-  const phase = updatePhase(progress?.reason ?? null);
+  const phase = phaseOf(progress?.reason ?? null, live);
   if (!phase) {
     return (
       <span className="muted">
-        <span className="spinner" /> {fallback}
+        <span className="spinner" /> starting
       </span>
     );
   }
+  const stepIndex = PHASE_ORDER.indexOf(phase);
   return (
-    <span className="update-progress">
-      <span className="spinner" />
-      <Icon name={phase.icon} />
-      {phase.label}
-      {progress?.step && (
+    <div className="update-progress">
+      <div className="update-progress-head">
+        <span className="spinner" />
+        <Icon name={PHASE_ICON[phase]} />
+        <span>{PHASE_LABEL[phase]}</span>
         <span className="mono faint">
-          {' '}
-          ({progress.step[0]}/{progress.step[1]})
+          ({stepIndex + 1}/{PHASE_ORDER.length})
         </span>
-      )}
-    </span>
+      </div>
+      <div className="update-progress-track" aria-hidden="true">
+        {PHASE_ORDER.map((p, i) => (
+          <span
+            key={p}
+            className={`update-progress-seg${i < stepIndex ? ' done' : ''}${i === stepIndex ? ' active' : ''}`}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -90,9 +137,12 @@ export function Updates() {
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BulkResult[] | null>(null);
   /** Instances an `apply` accepted and that have not settled yet. The phase
-   *  shown per row comes from the SSE-driven progress store (`UpdateProgressCell`);
+   *  shown per row comes from the SSE-driven progress store (`UpdateProgressBar`);
    *  this only tracks which instances to keep watching and when to stop. */
   const [pending, setPending] = useState<string[]>([]);
+  /** Each pending instance's most recent `/api/instances` poll, so
+   *  `UpdateProgressBar` can show the healthcheck phase SSE alone cannot. */
+  const [live, setLive] = useState<Record<string, InstanceState>>({});
 
   const load = useCallback(async () => {
     try {
@@ -123,12 +173,14 @@ export function Updates() {
   }, [load, loadAccounts]);
 
   // While updates are in flight, watch the instances themselves for when
-  // they settle — the per-row phase (downloading/stopping/starting) comes
-  // from the SSE progress store instead (`UpdateProgressCell`), but nothing
-  // there says "done"; that still has to come from a live docker inspect.
-  // `/api/instances` is cheap enough for a 3s poll, unlike `/api/updates`.
-  // When every accepted instance is running again, re-check digests once so
-  // the rows go green on their own.
+  // they settle — the per-row phase (downloading/stopping/starting/health
+  // check) comes from the SSE progress store plus this poll's `health`
+  // field (`UpdateProgressBar`), but nothing there says "done"; that still
+  // has to come from a live docker inspect. `/api/instances` is cheap enough
+  // for a 3s poll, unlike `/api/updates`. When every accepted instance has
+  // settled (see `isSettled` — not just "running again": the old container
+  // reports running throughout the pull too, so that alone is not "done"),
+  // re-check digests once so the rows go green on their own.
   useEffect(() => {
     if (pending.length === 0) return;
     let cancelled = false;
@@ -137,10 +189,14 @@ export function Updates() {
         const instances = await api.listInstances();
         if (cancelled) return;
         const watched = instances.filter((i) => pending.includes(i.id));
-        // `stopped` counts as settled too: an update that failed to come back
-        // must end the watch rather than spin forever.
-        if (watched.length > 0 && watched.every((i) => i.state === 'running' || i.state === 'stopped')) {
+        setLive((prev) => {
+          const next = { ...prev };
+          for (const i of watched) next[i.id] = i;
+          return next;
+        });
+        if (watched.length > 0 && watched.every(isSettled)) {
           setPending([]);
+          setLive({});
           void load();
         }
       } catch {
@@ -157,6 +213,14 @@ export function Updates() {
 
   const outdated = useMemo(() => (rows ?? []).filter((r) => statusOf(r) === 'update'), [rows]);
   const unpinned = useMemo(() => (rows ?? []).filter((r) => !r.pinned_digest && r.running_digest), [rows]);
+  // Needs-an-update rows first, so the table opens on what there is to act
+  // on rather than making it scroll past everything already current.
+  const sortedRows = useMemo(() => {
+    return [...(rows ?? [])].sort((a, b) => {
+      const priority = STATUS_PRIORITY[statusOf(a)] - STATUS_PRIORITY[statusOf(b)];
+      return priority !== 0 ? priority : a.id.localeCompare(b.id);
+    });
+  }, [rows]);
 
   async function run(label: string, action: () => Promise<BulkResult[]>) {
     setBusy(label);
@@ -180,7 +244,7 @@ export function Updates() {
    * far longer than a request may. So the ids are always sent explicitly —
    * this view is looking at the answer already, and letting the server
    * recompute it would make it re-scan every registry first — and per-row
-   * phase comes from `/api/instances/events` (`UpdateProgressCell`), with
+   * phase comes from `/api/instances/events` (`UpdateProgressBar`), with
    * `/api/instances` polled only to notice when the batch has settled.
    */
   async function startUpdate(ids: string[]) {
@@ -298,7 +362,7 @@ export function Updates() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => {
+            {sortedRows.map((row) => {
               const status = statusOf(row);
               return (
                 <tr key={row.id}>
@@ -323,7 +387,7 @@ export function Updates() {
                   </td>
                   <td>
                     {pending.includes(row.id) ? (
-                      <UpdateProgressCell id={row.id} fallback="starting" />
+                      <UpdateProgressBar id={row.id} live={live[row.id]} />
                     ) : (
                       status === 'update' && (
                         <button

@@ -49,6 +49,19 @@ async fn retry_on_unavailable(attempt: u32, status: reqwest::StatusCode) -> bool
     true
 }
 
+/// Same backoff, for when the request never got a response at all (dropped
+/// connection, handshake hiccup, timeout) rather than an explicit 503. On a
+/// mesh like tailscale these are just as transient as a 503 and just as
+/// worth a couple of quiet retries instead of failing a whole scan over one
+/// dropped packet — see the "could not scan a node" symptom this replaced.
+async fn retry_on_send_error(attempt: u32) -> bool {
+    if attempt + 1 >= RETRY_ATTEMPTS {
+        return false;
+    }
+    tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt)).await;
+    true
+}
+
 async fn peer_base_url(state: &AppState, node: &str) -> Result<String, ApiError> {
     let cfg = state.cluster_config.read().await;
     cl_update::peers::base_url(&cfg, node)
@@ -72,14 +85,22 @@ pub async fn fetch_json<T: DeserializeOwned>(
     let base = peer_base_url(state, node).await?;
     let signature = signature(state, path).await?;
     for attempt in 0.. {
-        let resp = state
+        let sent = state
             .http
             .get(format!("{base}{path}"))
             .header(cl_update::internal_client::AUTH_HEADER, signature.clone())
             .timeout(FETCH_TIMEOUT)
             .send()
-            .await
-            .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+            .await;
+        let resp = match sent {
+            Ok(resp) => resp,
+            Err(e) => {
+                if retry_on_send_error(attempt).await {
+                    continue;
+                }
+                return Err(ApiError::Unavailable(format!("asking {node}: {e}")));
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             if retry_on_unavailable(attempt, status).await {
