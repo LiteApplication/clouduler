@@ -49,6 +49,7 @@ const clusterConfig: ClusterConfig = {
       data_dir: null,
       docker_data_dir: null,
       generate_secret_key: null,
+      last_resort: false,
     },
   },
   proxy: { acme: { enabled: false }, enabled: true, http_port: 80, https_port: 443, dns_publish: 'all-nodes' },

@@ -232,12 +232,16 @@ pub struct PlaceOutcome {
 /// the *primary* to the instance costs one raft entry and no downtime, so that
 /// is what `run::volume_requests` does. Placement's only job here is to refuse
 /// nodes whose copy is not current, which is what keeps that promotion safe.
+/// A desired item's eligible nodes, and the rejection reason for each node
+/// that was ruled out.
+type Candidates<'a> = (Vec<&'a NodeState>, Vec<String>);
+
 pub fn candidates<'a>(
     state: &'a ClusterState,
     desired: &Desired,
     served_drives: &BTreeSet<String>,
     everywhere_networks: &BTreeSet<String>,
-) -> Result<(Vec<&'a NodeState>, Vec<String>)> {
+) -> Result<Candidates<'a>> {
     let constraints: Vec<Constraint> = desired
         .constraints
         .iter()
@@ -290,7 +294,7 @@ pub fn place(
 
     // Each item's own candidate nodes, computed once up front and reused by
     // every pass below instead of re-running `candidates` per item per pass.
-    let per_item: Vec<std::result::Result<(Vec<&NodeState>, Vec<String>), String>> = desired
+    let per_item: Vec<std::result::Result<Candidates, String>> = desired
         .iter()
         .map(|item| {
             candidates(state, item, served_drives, everywhere_networks).map_err(|e| e.to_string())
@@ -442,6 +446,7 @@ pub fn place(
 
         let target = eligible.iter().min_by_key(|node| {
             (
+                node.last_resort,
                 load.get(&node.name).copied().unwrap_or(0),
                 node.name.clone(),
             )
@@ -510,6 +515,7 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            last_resort: false,
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),
@@ -1045,6 +1051,28 @@ mod tests {
     }
 
     #[test]
+    fn a_last_resort_node_is_skipped_while_a_normal_node_is_eligible() {
+        let mut state = cluster();
+        let mut piosny = node("piosny", Role::Worker, &[]);
+        piosny.last_resort = true;
+        state.apply(&Request::UpsertNode(piosny));
+
+        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        assert_ne!(placed(&decisions, "web", 0), Some("piosny".to_string()));
+    }
+
+    #[test]
+    fn a_last_resort_node_is_used_when_it_is_the_only_option() {
+        let mut state = ClusterState::default();
+        let mut piosny = node("piosny", Role::Worker, &[]);
+        piosny.last_resort = true;
+        state.apply(&Request::UpsertNode(piosny));
+
+        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "web", 0), Some("piosny".to_string()));
+    }
+
+    #[test]
     fn an_unplaceable_instance_reports_why() {
         let state = cluster();
         let mut item = desired("db", 0);
@@ -1106,7 +1134,8 @@ mod tests {
     #[test]
     fn colocated_instances_respect_sibling_constraints_when_initially_placing() {
         let mut state = cluster();
-        // n1 has drive "fast", n2 and n3 do not.
+        // n1 has drive "bulk", n2 and n3 do not ("fast" is n1 and n2 both, so
+        // it would not actually narrow candidates to n1 alone).
         // n1 has 2 existing assignments, n2 and n3 have 0 (so lowest load would normally pick n2/n3).
         state.apply(&Request::Assign {
             instance: InstanceId::new("other", "a", 0),
@@ -1123,10 +1152,10 @@ mod tests {
         let mut dashboard = desired("dashboard", 0);
         dashboard.proxy_hosts = ["mem0.example.com".to_string()].into();
 
-        // API requires drive "fast" which only n1 implements.
+        // API requires drive "bulk" which only n1 implements.
         let mut api = desired("api", 0);
         api.proxy_hosts = ["mem0.example.com".to_string()].into();
-        api.drives = ["fast".to_string()].into();
+        api.drives = ["bulk".to_string()].into();
 
         let outcome = place(&state, &[dashboard, api], &no_served(), &no_everywhere());
         assert!(

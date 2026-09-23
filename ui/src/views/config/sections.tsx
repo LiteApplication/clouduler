@@ -633,6 +633,14 @@ export function NodeCard({
         hint="Only the first node bootstrapping a brand new cluster should be allowed to generate the key. A node joining an existing cluster should be set to 'Never', since a second key could not open secrets the rest of the cluster already sealed."
         disabled={disabled}
       />
+      <CheckboxField
+        id={`node-${name}-last-resort`}
+        label="Last resort"
+        value={node.last_resort}
+        onChange={(last_resort) => onChange({ last_resort })}
+        hint="Only place a stack here when no other eligible node can take it. Useful for a node whose one virtue is a large drive but whose cpu/ram are weak, so the scheduler doesn't pile general workload onto it just because it sorts first."
+        disabled={disabled}
+      />
 
       <h4 className="flex-row">
         <Icon name="network" /> Network addresses

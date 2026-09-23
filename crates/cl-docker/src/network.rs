@@ -104,10 +104,24 @@ impl Docker {
     /// there is no VXLAN device to enslave and no fixed egress interface to
     /// pin traffic to, so ordinary docker bridge NAT — masqueraded out
     /// whatever the host's own routing table picks for a given destination
-    /// — is exactly the behavior wanted. No explicit subnet either: nothing
-    /// outside this node ever needs to know it, so docker's own IPAM can
-    /// pick one.
-    pub async fn ensure_nat_network(&self, name: &str, owner: &str) -> Result<bool> {
+    /// — is exactly the behavior wanted.
+    ///
+    /// `subnet`/`gateway` are still pinned rather than left to docker's own
+    /// IPAM: a client on this network reaching a route on the same node
+    /// never actually leaves it (the kernel delivers the forwarded packet
+    /// straight to the local proxy listener instead of routing it back out
+    /// through POSTROUTING), so the proxy sees the container's raw address
+    /// on this subnet rather than a masqueraded one. `cl-daemon`'s proxy
+    /// wiring trusts that subnet for exactly this reason, which only works
+    /// if every node derives the same one deterministically instead of
+    /// asking docker to pick.
+    pub async fn ensure_nat_network(
+        &self,
+        name: &str,
+        owner: &str,
+        subnet: &str,
+        gateway: Ipv4Addr,
+    ) -> Result<bool> {
         if self.network_exists(name).await? {
             return Ok(false);
         }
@@ -121,6 +135,15 @@ impl Docker {
             name: name.to_string(),
             driver: Some("bridge".to_string()),
             labels: Some(labels),
+            ipam: Some(Ipam {
+                driver: Some("default".to_string()),
+                config: Some(vec![IpamConfig {
+                    subnet: Some(subnet.to_string()),
+                    gateway: Some(gateway.to_string()),
+                    ..Default::default()
+                }]),
+                options: None,
+            }),
             ..Default::default()
         };
 

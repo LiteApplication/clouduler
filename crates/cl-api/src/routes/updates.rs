@@ -46,6 +46,8 @@ pub fn router() -> Router<AppState> {
         // Node-to-node only, HMAC authenticated: one node's answer about the
         // containers it runs. See `internal_peer`.
         .route("/api/updates/internal/scan", get(internal_scan))
+        // Internal-auth only: `clouduler update`. See `apply_internal`.
+        .route("/api/updates/internal/apply", post(apply_internal))
 }
 
 const INTERNAL_SCAN_PATH: &str = "/api/updates/internal/scan";
@@ -402,13 +404,33 @@ async fn apply(
     body: Option<Json<InstanceSelection>>,
 ) -> Result<(StatusCode, Json<Accepted>), ApiError> {
     let selection = body.map(|Json(b)| b).unwrap_or_default();
+    Ok(apply_selection(&state, selection).await)
+}
 
+/// `clouduler update`: the same trigger as the ui's apply button, over the
+/// internal-auth channel the cli already uses for git-backup's manual
+/// triggers, since scheduling pulls is imperative action against the
+/// running daemon rather than a raft state change - there is nothing for
+/// `client.submit` to write.
+async fn apply_internal(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    body: Option<Json<InstanceSelection>>,
+) -> (StatusCode, Json<Accepted>) {
+    let selection = body.map(|Json(b)| b).unwrap_or_default();
+    apply_selection(&state, selection).await
+}
+
+async fn apply_selection(
+    state: &AppState,
+    selection: InstanceSelection,
+) -> (StatusCode, Json<Accepted>) {
     // Only scan when the caller did not say what it wanted. The ui always
     // does — it is looking at the answer already — so the common path costs
     // nothing. Scanning regardless meant a single-row update paid for a
     // full cluster-wide registry sweep before it even started pulling.
     let instances: Vec<InstanceId> = if selection.instances.is_empty() {
-        rows(&state)
+        rows(state)
             .await
             .into_iter()
             .filter(|row| row.update_available)
@@ -437,5 +459,5 @@ async fn apply(
         }
     });
 
-    Ok((StatusCode::ACCEPTED, Json(Accepted { accepted })))
+    (StatusCode::ACCEPTED, Json(Accepted { accepted }))
 }

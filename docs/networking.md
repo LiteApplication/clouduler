@@ -410,6 +410,24 @@ on the same 10 second reconcile loop
 (`crates/clouduler/src/egress.rs::RECONCILE_INTERVAL`), so adding one or
 attaching a service to it needs no daemon restart.
 
+Unlike `egress`, the subnet is not left to docker's own IPAM: it is derived
+deterministically from the network's name (`cl_net::egress::nat_subnet`),
+the same scheme `egress_subnet` uses in its own reserved `/16`. This matters
+for a nat-attached client reaching a gated route (a proxied host on an
+`internal` or `private` network) on the *same* node: the destination address
+is one the node already owns, so the kernel delivers the forwarded packet
+straight to the local listener instead of routing it back out through
+`POSTROUTING`, and MASQUERADE never runs. The proxy sees the container's raw,
+unmasqueraded address on the nat network's own subnet rather than one inside
+the target network's declared subnet. `cl-daemon`'s proxy wiring
+(`trusted_overlay_subnets`) trusts every nat network's subnet for exactly
+this reason, on every gated route regardless of which network it is
+published on — a nat-attached client's traffic can be masqueraded out
+whatever the host's routing table picks, so it can hairpin back into any
+locally hosted route, not just one on a matching network name. This only
+works because every node derives the same subnet for the same nat network
+name without coordinating, same as the interface names and VXLAN VNIs above.
+
 A service attaches to at most one network from `{egress, wireguard, nat}` at
 once, alongside its normal overlay network, the same "one extra network,
 attached after creation with its default route pointed at it" mechanism

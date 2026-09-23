@@ -278,6 +278,13 @@ export function NodeDetail() {
                       : 'never'}
                 </span>
               </div>
+              <div className="card stat">
+                <span className="stat-head">
+                  <Icon name="nodes" />
+                  <span className="stat-label">Scheduling</span>
+                </span>
+                <span className="stat-value">{configNode.last_resort ? 'last resort' : 'normal'}</span>
+              </div>
             </div>
 
             <div className="table-wrap">

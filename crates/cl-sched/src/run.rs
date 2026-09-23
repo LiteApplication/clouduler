@@ -1021,6 +1021,7 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            last_resort: false,
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),

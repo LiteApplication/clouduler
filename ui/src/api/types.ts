@@ -560,6 +560,11 @@ export interface NodeConfig {
   // A node that joined an existing cluster has this false so it cannot invent a
   // second cluster key, so it has to survive an edit here.
   generate_secret_key: boolean | null;
+  // Only host an instance when no other eligible node can take it. For a
+  // node whose one virtue is a large drive but weak cpu/ram, this keeps the
+  // scheduler from piling general workload onto it just because it sorts
+  // first.
+  last_resort: boolean;
 }
 
 export interface WebConfig {

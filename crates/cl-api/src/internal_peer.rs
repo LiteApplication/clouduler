@@ -50,12 +50,20 @@ async fn retry_on_unavailable(attempt: u32, status: reqwest::StatusCode) -> bool
 }
 
 /// Same backoff, for when the request never got a response at all (dropped
-/// connection, handshake hiccup, timeout) rather than an explicit 503. On a
-/// mesh like tailscale these are just as transient as a 503 and just as
-/// worth a couple of quiet retries instead of failing a whole scan over one
-/// dropped packet — see the "could not scan a node" symptom this replaced.
-async fn retry_on_send_error(attempt: u32) -> bool {
-    if attempt + 1 >= RETRY_ATTEMPTS {
+/// connection, handshake hiccup) rather than an explicit 503. On a mesh like
+/// tailscale these are just as transient as a 503 and just as worth a
+/// couple of quiet retries instead of failing a whole scan over one dropped
+/// packet — see the "could not scan a node" symptom this replaced.
+///
+/// Deliberately excludes timeouts (`reqwest::Error::is_timeout`): those
+/// already burned a full `FETCH_TIMEOUT`, so retrying stacks that wait up to
+/// `RETRY_ATTEMPTS` times instead of amortizing it away, and `scan_node`'s
+/// callers fan out to every node in parallel — one slow node then bounds the
+/// whole request and can trip an upstream proxy's own timeout (a 504)
+/// instead of the fast, contributes-nothing-and-moves-on failure the caller
+/// expects.
+async fn retry_on_send_error(attempt: u32, err: &reqwest::Error) -> bool {
+    if err.is_timeout() || attempt + 1 >= RETRY_ATTEMPTS {
         return false;
     }
     tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt)).await;
@@ -95,7 +103,7 @@ pub async fn fetch_json<T: DeserializeOwned>(
         let resp = match sent {
             Ok(resp) => resp,
             Err(e) => {
-                if retry_on_send_error(attempt).await {
+                if retry_on_send_error(attempt, &e).await {
                     continue;
                 }
                 return Err(ApiError::Unavailable(format!("asking {node}: {e}")));

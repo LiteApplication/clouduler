@@ -54,6 +54,7 @@ pub async fn add(
             drives,
             availability: Availability::Active,
             labels,
+            last_resort: false,
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),

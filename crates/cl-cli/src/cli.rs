@@ -324,6 +324,20 @@ pub enum Command {
         #[command(subcommand)]
         command: GitBackupCommand,
     },
+    /// Pull and recreate containers whose running image is behind what its
+    /// registry currently serves - the same trigger the web ui's Updates
+    /// page runs. Talks to a running daemon.
+    Update {
+        /// Instances to update (`stack.service.index`, as shown by `stack
+        /// show`). Omit to update every instance with an update available,
+        /// the same default the ui's "update all" uses.
+        #[arg(add = ArgValueCompleter::new(completion::targets))]
+        instances: Vec<String>,
+        /// Node to ask. Defaults to any manager in the config; a non-leader
+        /// forwards the trigger to whichever node currently leads.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
     /// Print or install shell completions.
     ///
     /// Completions are dynamic: past the fixed set of subcommands and flags,

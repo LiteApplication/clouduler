@@ -49,6 +49,10 @@ pub struct NodeState {
     /// `node.labels.<key>` constraints without reading the config file.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// `cl_config::Node::last_resort`, replicated so the scheduler can rank
+    /// this node last without reading the config file.
+    #[serde(default)]
+    pub last_resort: bool,
     /// Egress-kind networks this node has a host interface address for. Used
     /// the same way `drives` is: a service on one of these networks can only
     /// be placed on a node that implements it.
@@ -2302,6 +2306,7 @@ mod tests {
                 .collect(),
             availability: Availability::Active,
             labels: Default::default(),
+            last_resort: false,
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),

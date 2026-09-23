@@ -353,6 +353,9 @@ async fn main() -> Result<()> {
                 cl_cli::git_backup_cli::reconcile(&cfg, via.as_deref()).await
             }
         },
+        Command::Update { instances, via } => {
+            cl_cli::update_cli::apply(&cfg, instances, via.as_deref()).await
+        }
     }
 }
 

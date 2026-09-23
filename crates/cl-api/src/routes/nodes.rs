@@ -278,6 +278,7 @@ async fn add(
             rpc_addr: body.rpc_addr,
             drives: body.drives,
             labels: body.labels,
+            last_resort: false,
             availability: Availability::Active,
             egress_networks: Default::default(),
             networks: Default::default(),

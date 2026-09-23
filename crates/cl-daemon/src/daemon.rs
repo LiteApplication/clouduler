@@ -1308,6 +1308,7 @@ fn to_state(
         // has to actually remove it, or a stack keeps landing on a node that
         // no longer qualifies.
         labels: node.labels.clone(),
+        last_resort: node.last_resort,
         availability: current
             .map(|c| c.availability)
             .unwrap_or(Availability::Active),

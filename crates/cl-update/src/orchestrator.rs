@@ -304,6 +304,7 @@ mod tests {
             drives: Default::default(),
             availability: cl_raft::state::Availability::Active,
             labels: Default::default(),
+            last_resort: false,
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),

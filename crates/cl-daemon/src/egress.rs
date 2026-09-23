@@ -38,7 +38,7 @@ use cl_config::{ClusterConfig, InterfaceAddress, NetworkKind, NodeAddress};
 use cl_docker::{Docker, NetworkSpec};
 use cl_net::egress::{
     apply_egress_iptables, egress_docker_name, egress_gateway, egress_iptables_plan, egress_subnet,
-    ensure_egress_bridge, nat_docker_name,
+    ensure_egress_bridge, nat_docker_name, nat_subnet,
 };
 use cl_net::vxlan::Overlay;
 use cl_net::wireguard::{
@@ -475,18 +475,21 @@ async fn ensure_one(
     Ok(())
 }
 
-/// Bring up a nat-kind network's docker network: no bridge, no interface, no
+/// Bring up a nat-kind network's docker network: no interface and no
 /// iptables of clouduler's own — docker builds the bridge and NATs it out
 /// whatever the host's routing table picks, exactly like any bridge network
-/// docker would make on its own.
+/// docker would make on its own. The subnet itself is still ours to pick
+/// (see `cl_net::egress::nat_subnet`), so a same-node hairpin back into a
+/// gated route can be recognized and trusted (`proxy::trusted_overlay_subnets`).
 async fn ensure_nat(docker: &Docker, network: &str) -> Result<()> {
     let name = nat_docker_name(network);
+    let subnet = nat_subnet(network);
     let created = docker
-        .ensure_nat_network(&name, OWNER)
+        .ensure_nat_network(&name, OWNER, &subnet.to_string(), egress_gateway(subnet))
         .await
         .with_context(|| format!("ensuring the {network} nat docker network"))?;
     if created {
-        info!(network = %network, docker_name = %name, "nat network up");
+        info!(network = %network, docker_name = %name, %subnet, "nat network up");
     }
     Ok(())
 }

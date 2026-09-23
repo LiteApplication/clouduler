@@ -398,6 +398,13 @@ pub struct Node {
     /// key, and then you copy the real one in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_secret_key: Option<bool>,
+
+    /// This node should only host an instance when no other eligible node
+    /// can take it. For a node whose one virtue is a large drive but whose
+    /// cpu/ram are weak, it keeps the scheduler from piling general workload
+    /// onto it just because it happens to sort first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last_resort: bool,
 }
 
 fn default_rpc_port() -> u16 {

@@ -19,13 +19,14 @@ use std::time::Duration;
 use cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET;
 use cl_api::redirects::RedirectStore;
 use cl_api::static_routes::StaticRouteStore;
-use cl_config::{qualify, ClusterConfig};
+use cl_config::{qualify, ClusterConfig, NetworkKind};
 use cl_dns::{Cloudflare, DesiredRecord};
 use cl_proxy::{
     ensure_crypto_provider, issue_certificate, issue_certificate_http01, AcmeConfig, CertStore,
     Http01Store, RedirectTarget, Route, RouteOptions, RouteTable, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
+use cl_net::egress::nat_subnet;
 use cl_net::Allocations;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{
@@ -43,17 +44,33 @@ fn allowed_subnet(cfg: &ClusterConfig, network: &str) -> Option<IpNet> {
     net.kind.is_subnetted().then_some(net.subnet).flatten()
 }
 
-/// Overlay subnets of every stack published on `network`, so a same-node
-/// client whose request never actually left the node still passes
-/// `gate_by_network` - see `RouteOptions::trusted_overlay_subnets`.
-fn trusted_overlay_subnets(state: &ClusterState, network: &str) -> Vec<IpNet> {
-    let Some(allocations) = Allocations::decode(state.overlay.as_deref()) else {
-        return Vec::new();
+/// Overlay subnets of every stack published on `network`, plus every nat
+/// network's own subnet, so a same-node client whose request never actually
+/// left the node still passes `gate_by_network` - see
+/// `RouteOptions::trusted_overlay_subnets`.
+///
+/// A nat network's subnet is trusted for every gated route regardless of
+/// `network`, not just one matching by name: a nat-attached client's traffic
+/// is masqueraded out whatever the host's routing table picks for its
+/// destination, so it can hairpin back into any locally-hosted route, not
+/// only ones on its own network. When that happens the packet resolves to
+/// local delivery before it ever reaches `POSTROUTING`, so the proxy sees
+/// the container's raw nat-subnet address, unmasqueraded.
+fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> Vec<IpNet> {
+    let mut subnets: Vec<IpNet> = match Allocations::decode(state.overlay.as_deref()) {
+        Some(allocations) => allocations
+            .subnets_for_cluster_network(network)
+            .map(IpNet::V4)
+            .collect(),
+        None => Vec::new(),
     };
-    allocations
-        .subnets_for_cluster_network(network)
-        .map(IpNet::V4)
-        .collect()
+    subnets.extend(
+        cfg.networks
+            .iter()
+            .filter(|(_, net)| net.kind == NetworkKind::Nat)
+            .map(|(name, _)| IpNet::V4(nat_subnet(name))),
+    );
+    subnets
 }
 
 /// How often routes and certificates are rebuilt from state.
@@ -372,7 +389,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
                     preserve_host: entry.preserve_host,
                     response_timeout: entry.response_timeout,
                     allowed_subnet: allowed_subnet(cfg, &entry.network),
-                    trusted_overlay_subnets: trusted_overlay_subnets(state, &entry.network),
+                    trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
                 }),
             );
         }
@@ -412,7 +429,7 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
             )
             .with_options(RouteOptions {
                 allowed_subnet: allowed_subnet(cfg, &rule.network),
-                trusted_overlay_subnets: trusted_overlay_subnets(state, &rule.network),
+                trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &rule.network),
                 ..RouteOptions::default()
             })
             .with_redirect(RedirectTarget {
@@ -500,7 +517,7 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
                 preserve_host: entry.preserve_host,
                 response_timeout: entry.response_timeout,
                 allowed_subnet: allowed_subnet(cfg, &entry.network),
-                trusted_overlay_subnets: trusted_overlay_subnets(state, &entry.network),
+                trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
             }),
         );
     }
@@ -1435,6 +1452,53 @@ services:
             .trusted_overlay_subnets
             .iter()
             .any(|s| s.contains(&container_peer)));
+    }
+
+    /// A nat-attached client's traffic is masqueraded out whatever the host's
+    /// routing table picks; when its destination happens to be a route on
+    /// this same node, the packet is delivered locally before it ever
+    /// reaches `POSTROUTING`, so the proxy sees the container's raw address
+    /// on the nat network's own subnet, unmasqueraded (see
+    /// `cl_net::egress::nat_subnet`). A gated route must trust that subnet
+    /// even though it has nothing to do with the route's own network.
+    #[test]
+    fn a_route_on_a_private_network_also_trusts_a_nat_network_peer() {
+        const LAN_SPEC: &str = "\
+networks:
+  default: {}
+services:
+  web:
+    image: nginx
+    networks: [default]
+    x-clouduler:
+      proxy:
+        - host: files
+          network: lan
+          port: 80
+";
+        let mut cfg = cfg();
+        cfg.networks.insert(
+            "home".to_string(),
+            cl_config::Network {
+                kind: NetworkKind::Nat,
+                subnet: None,
+                domain: None,
+            },
+        );
+
+        let routes = service_routes(&cfg, &state_with(LAN_SPEC, 1));
+        let route = &routes[0];
+        let nat_peer = std::net::IpAddr::from(nat_subnet("home").hosts().next().unwrap());
+
+        assert!(route
+            .options
+            .allowed_subnet
+            .is_some_and(|s| !s.contains(&nat_peer)));
+        assert!(route
+            .options
+            .trusted_overlay_subnets
+            .iter()
+            .any(|s| s.contains(&nat_peer)));
     }
 
     #[test]

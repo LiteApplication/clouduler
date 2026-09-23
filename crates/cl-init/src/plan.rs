@@ -71,6 +71,9 @@ impl NodePlan {
             data_dir: self.data_dir.clone(),
             docker_data_dir: self.docker_data_dir.clone(),
             generate_secret_key: self.generate_secret_key,
+            // init does not ask about this either; a day-two concern set
+            // from the config file or the ui.
+            last_resort: false,
         }
     }
 }

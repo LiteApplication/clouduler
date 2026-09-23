@@ -34,6 +34,10 @@ pub(crate) const CHAIN_USABLE: usize = 28;
 /// (`cl_net::ipam::DEFAULT_OVERLAY_POOL`) and common RFC1918 LAN ranges.
 const EGRESS_POOL_BASE: u8 = 245;
 
+/// Reserved for nat-kind bridges, its own base so a nat and an egress network
+/// that hash to the same second octet still land on different subnets.
+const NAT_POOL_BASE: u8 = 246;
+
 /// The docker network name for an egress-kind cluster network. Global, not
 /// stack-scoped: unlike an overlay network, an egress network is shared
 /// cluster infrastructure that any stack can attach a service to.
@@ -88,6 +92,20 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 pub fn egress_subnet(network: &str) -> Ipv4Net {
     let second_octet = (fnv1a(network.as_bytes()) % 256) as u8;
     format!("10.{EGRESS_POOL_BASE}.{second_octet}.0/24")
+        .parse()
+        .expect("a /24 built from two bytes always parses")
+}
+
+/// A node-local `/24` for a nat network's docker bridge, deterministically
+/// derived from its name inside its own reserved pool, same idea as
+/// `egress_subnet`. Explicit rather than left to docker's own IPAM so that a
+/// same-node client hairpinning back through it - see `gate_by_network` in
+/// `cl-proxy` and `trusted_overlay_subnets` in the daemon's proxy wiring -
+/// arrives from an address every node can compute and trust without any
+/// cluster-wide coordination.
+pub fn nat_subnet(network: &str) -> Ipv4Net {
+    let second_octet = (fnv1a(network.as_bytes()) % 256) as u8;
+    format!("10.{NAT_POOL_BASE}.{second_octet}.0/24")
         .parse()
         .expect("a /24 built from two bytes always parses")
 }
@@ -309,6 +327,15 @@ mod tests {
     #[test]
     fn two_different_networks_usually_get_different_subnets() {
         assert_ne!(egress_subnet("vpn"), egress_subnet("vpn2"));
+    }
+
+    #[test]
+    fn a_nat_subnet_is_deterministic_and_never_collides_with_egress() {
+        let a = nat_subnet("home");
+        let b = nat_subnet("home");
+        assert_eq!(a, b);
+        assert!(a.addr().octets()[0] == 10 && a.addr().octets()[1] == NAT_POOL_BASE);
+        assert_ne!(NAT_POOL_BASE, EGRESS_POOL_BASE);
     }
 
     #[test]

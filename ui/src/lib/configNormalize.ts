@@ -61,6 +61,10 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
       data_dir: nullable(node.data_dir),
       docker_data_dir: nullable(node.docker_data_dir),
       generate_secret_key: nullable(node.generate_secret_key),
+      // Also has a serde default (skip_serializing_if omits it when false),
+      // so an older config with no such field must still read as unticked
+      // rather than undefined.
+      last_resort: node.last_resort ?? false,
     })),
     auth: {
       ...cfg.auth,
