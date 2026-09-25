@@ -267,7 +267,8 @@ pub enum Command {
         /// manager in the config.
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
-        /// Command to run and its arguments. Defaults to `sh`.
+        /// Command to run and its arguments. Defaults to `bash`, falling
+        /// back to `sh` if the image has no `bash`.
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },

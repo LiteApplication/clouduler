@@ -502,6 +502,19 @@ async fn redirect_non_leader(
         return Ok(next.run(request).await);
     }
 
+    // Node-to-node routes (`/api/.../internal/...`), HMAC-signed by
+    // `InternalAuth` rather than a session or api key: these carry out an
+    // action that only makes sense on the specific node addressed - restart
+    // itself, pull its own image, update its own container - not on
+    // whichever node happens to be leader right now. Gating them here meant
+    // every such call to a non-leader node (i.e. almost always, since most
+    // nodes are workers) answered 503 "not the leader" instead of doing the
+    // work, which is what made `/api/instances/internal/{id}/update` fail
+    // for every instance not living on the leader.
+    if path.contains("/internal/") {
+        return Ok(next.run(request).await);
+    }
+
     Err(ApiError::NotLeader {
         leader: leader_location(&state).await,
     })

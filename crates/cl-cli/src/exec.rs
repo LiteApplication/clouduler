@@ -27,6 +27,23 @@ use tokio_tungstenite::Connector;
 use crate::logs::resolve_target;
 use cl_raft::client::client_for;
 
+/// With no command given, try `bash` and fall back to `sh` inside the
+/// container itself rather than picking one client-side: many images (most
+/// `alpine`-based ones) have no `bash` at all, and the server rejects an
+/// empty `cmd` outright (see `cl-api`'s `ExecQuery`), so a bare `clouduler
+/// exec target` used to always 400. `sh` is assumed to exist - `docker exec`
+/// itself has nothing more minimal to fall back to.
+fn default_shell_command(cmd: Vec<String>) -> Vec<String> {
+    if !cmd.is_empty() {
+        return cmd;
+    }
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "exec bash 2>/dev/null || exec sh".to_string(),
+    ]
+}
+
 pub async fn run(
     cfg: &ClusterConfig,
     target: &str,
@@ -51,6 +68,7 @@ pub async fn run(
         );
     }
     let assignment = assignments.remove(0);
+    let cmd = default_shell_command(cmd);
 
     let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
         format!(
