@@ -26,7 +26,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_raft::ids::InstanceId;
-use cl_raft::state::ClusterState;
+use cl_raft::state::{ClusterState, UpdatePhase};
 use cl_raft::Request as ClusterRequest;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -389,14 +389,15 @@ struct Accepted {
 /// the worst possible reading, since the operator sees a failure and clicks
 /// again, stacking a second pull on the first.
 ///
-/// The caller watches progress through the instance list, which already
-/// reports `pulling` (see `AppState::pulling`) and then `running` — no new
-/// polling endpoint, and it stays correct if the browser's next request
-/// lands on a different node.
+/// The caller watches progress through `ClusterState::instance_updates`,
+/// which every step of every update is written into as it happens - so it
+/// arrives over the ordinary `/api/events` state stream, and reads the same
+/// from whichever node the browser is talking to.
 ///
-/// The updates themselves run sequentially inside the spawned task. Each one
-/// takes its container down and lets the reconcile loop build a new one, so
-/// doing the whole cluster at once would stop every replica of a service
+/// The updates themselves run sequentially inside the spawned task, each
+/// waiting for the previous one's new container to be up. Each one takes its
+/// container down and lets the reconcile loop build a new one, so doing the
+/// whole cluster at once would stop every replica of a service
 /// simultaneously — the one thing a rolling update exists to avoid.
 async fn apply(
     _admin: RequireAdmin,
@@ -444,20 +445,105 @@ async fn apply_selection(
             .collect()
     };
 
-    let accepted: Vec<String> = instances.iter().map(|i| i.to_string()).collect();
+    // Everything accepted is queued in the replicated record before
+    // answering, so every browser (on any node) sees the whole batch at once
+    // rather than each instance only once its turn comes. One already mid-
+    // update is left alone: stacking a second pull on it helps nobody.
+    let cluster_state = state.cluster.state().await;
+    let mut queued = Vec::new();
+    for instance in instances {
+        let Some(assignment) = cluster_state.assignments.get(&instance) else {
+            continue;
+        };
+        let in_flight = cluster_state
+            .instance_updates
+            .get(&instance)
+            .is_some_and(|u| !u.phase.is_terminal());
+        if in_flight {
+            continue;
+        }
+        cl_sched::progress::submit(
+            &state.cluster,
+            &instance,
+            &assignment.node,
+            UpdatePhase::Queued,
+            None,
+        )
+        .await;
+        queued.push((instance, assignment.node.clone()));
+    }
+    drop(cluster_state);
+
+    let accepted: Vec<String> = queued.iter().map(|(i, _)| i.to_string()).collect();
 
     let worker = state.clone();
     tokio::spawn(async move {
-        for instance in instances {
+        for (instance, node) in queued {
             match super::instances::update_instance(&worker, instance.clone()).await {
-                Ok(()) => info!(%instance, "updated"),
-                // Logged rather than returned: nothing is waiting on this any
-                // more. The instance itself shows the failure — it does not
-                // come back up — and `stack unhealthy` reports it.
-                Err(e) => warn!(%instance, error = %e, "update failed"),
+                Ok(()) => {
+                    // `update_instance` returns once the old container is
+                    // gone; the new one is the reconciler's to bring up. Wait
+                    // for that before touching the next instance, so a
+                    // service's replicas really do go down one at a time.
+                    match wait_for_update(&worker, &instance).await {
+                        Some(UpdatePhase::Started) => info!(%instance, "updated"),
+                        Some(phase) => warn!(%instance, ?phase, "update did not finish"),
+                        None => warn!(%instance, "gave up waiting for the update to finish"),
+                    }
+                }
+                // The record is what the operator watches, so the failure
+                // goes there too. The owning node records its own failures,
+                // but not one it never heard about (it was unreachable).
+                Err(e) => {
+                    warn!(%instance, error = %e, "update failed");
+                    let still_queued = worker
+                        .cluster
+                        .state()
+                        .await
+                        .instance_updates
+                        .get(&instance)
+                        .is_some_and(|u| u.phase == UpdatePhase::Queued);
+                    if still_queued {
+                        cl_sched::progress::submit(
+                            &worker.cluster,
+                            &instance,
+                            &node,
+                            UpdatePhase::Failed,
+                            Some(e.to_string()),
+                        )
+                        .await;
+                    }
+                }
             }
         }
     });
 
     (StatusCode::ACCEPTED, Json(Accepted { accepted }))
+}
+
+/// How long one instance's update may take, from its old container going
+/// away to its new one running, before the batch moves on regardless.
+const UPDATE_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Waits for an instance's update record to reach a terminal phase, and
+/// returns it. `None` on timeout, or if the record disappeared (the instance
+/// was removed or moved away).
+async fn wait_for_update(state: &AppState, instance: &InstanceId) -> Option<UpdatePhase> {
+    let deadline = tokio::time::Instant::now() + UPDATE_FINISH_TIMEOUT;
+    loop {
+        let phase = state
+            .cluster
+            .state()
+            .await
+            .instance_updates
+            .get(instance)
+            .map(|u| u.phase)?;
+        if phase.is_terminal() {
+            return Some(phase);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }

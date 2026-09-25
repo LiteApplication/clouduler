@@ -28,6 +28,7 @@ const cluster: ClusterState = {
   restic_targets: {},
   restic_runs: {},
   restore_requests: {},
+  instance_updates: {},
   overlay: null,
   version: 1,
 };

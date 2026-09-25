@@ -45,9 +45,6 @@ pub struct AppState {
     /// Read by `routes::instances` to report a "pulling" state that a docker
     /// inspect alone cannot distinguish from "about to be created".
     pub pulling: cl_sched::PullTracker,
-    /// Which redeploy step each instance being recreated is on. See
-    /// `cl_sched::RedeployTracker`.
-    pub redeploy_steps: cl_sched::RedeployTracker,
     /// Live per-volume progress for an instance's in-progress migration
     /// sync. See `cl_drive::MigrationSyncTracker`.
     pub migration_sync: cl_drive::MigrationSyncTracker,
@@ -126,7 +123,6 @@ pub struct ApiServerOptions {
     pub cluster: Arc<ClusterNode>,
     pub docker: Arc<RwLock<Option<Docker>>>,
     pub pulling: cl_sched::PullTracker,
-    pub redeploy_steps: cl_sched::RedeployTracker,
     pub migration_sync: cl_drive::MigrationSyncTracker,
     pub node_name: String,
     pub config_path: PathBuf,
@@ -199,7 +195,6 @@ impl ApiServer {
             cluster: options.cluster,
             docker: options.docker,
             pulling: options.pulling,
-            redeploy_steps: options.redeploy_steps,
             migration_sync: options.migration_sync,
             node_name: options.node_name,
             config_path: options.config_path,

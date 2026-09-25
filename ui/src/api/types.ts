@@ -122,11 +122,9 @@ export interface InstanceState {
    *  published for it or no check has landed yet — not that it's healthy;
    *  a present `proxy` with no `error` does mean healthy. */
   proxy?: ProxyHealth;
-  /** What is actively happening right now — a redeploy sub-step or a
+  /** What is actively happening right now — an update or redeploy step or a
    *  migration phase, composed server-side into one string — or absent when
-   *  the instance is steady-state. Only ever set on the node that actually
-   *  runs the instance; a summary fetched for one running elsewhere leaves
-   *  this absent even mid-operation. */
+   *  the instance is steady-state. */
   reason?: string | null;
   /** `[step, total]` alongside `reason`, for a progress bar; absent when
    *  `reason` describes something with no fixed step count (e.g. a
@@ -291,7 +289,27 @@ export interface ClusterState {
   restic_targets: Record<string, DriveBackupTarget>;
   restic_runs: Record<string, BackupRun>;
   restore_requests: Record<string, RestoreRequest>;
+  /** Image updates and redeploys in flight or recently finished, written
+   *  step by step by the node doing the work. Finished entries are cleared
+   *  by that node about 15 minutes later. */
+  instance_updates: Record<InstanceId, InstanceUpdate>;
   version: number;
+}
+
+/** The steps of an update, in order. The old container keeps serving
+ *  through `queued` and `pulling`; `started` and `failed` are terminal. */
+export type UpdatePhase = 'queued' | 'pulling' | 'stopping' | 'starting' | 'started' | 'failed';
+
+export interface InstanceUpdate {
+  /** The node whose docker is doing the work. */
+  node: string;
+  phase: UpdatePhase;
+  /** Unix seconds the update began. */
+  started_at: number;
+  /** Unix seconds of the latest phase change. */
+  at: number;
+  /** Only on `failed`. */
+  error?: string;
 }
 
 // ---- restic backups ----

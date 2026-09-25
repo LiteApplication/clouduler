@@ -4,6 +4,7 @@ pub mod error;
 pub mod materialize;
 pub mod place;
 pub mod plan;
+pub mod progress;
 pub mod rebalance;
 pub mod reconcile;
 pub mod registries;
@@ -14,9 +15,7 @@ pub use error::{Result, SchedError};
 pub use materialize::{Materialized, Materializer};
 pub use place::{candidates, place, Constraint, Decision, PlaceOutcome, Unplaceable};
 pub use plan::{expand, Desired};
-pub use reconcile::{
-    diff, Action, PullTracker, Reconciler, RedeployPhase, RedeployTracker, Target, LABEL_REVISION,
-    REDEPLOY_TOTAL_STEPS,
-};
+pub use progress::UpdateReporter;
+pub use reconcile::{diff, Action, PullTracker, Reconciler, Target, LABEL_REVISION};
 pub use registries::{Registries, StoredLogin};
 pub use run::{desired_instances, Scheduler};

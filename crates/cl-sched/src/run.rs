@@ -16,7 +16,7 @@ use cl_docker::Docker;
 use cl_net::Allocations;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{base64_encode, ClusterState, DesiredState, Request};
+use cl_raft::state::{base64_encode, ClusterState, DesiredState, Request, UpdatePhase};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -24,9 +24,8 @@ use crate::materialize::Materializer;
 use crate::place;
 use crate::plan::{self, Desired};
 
-use crate::reconcile::{
-    self, Action, PullTracker, Reconciler, RedeployTracker, Target, DEFAULT_STOP_GRACE,
-};
+use crate::progress::{unix_now, UpdateReporter};
+use crate::reconcile::{self, Action, PullTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
 use crate::spec;
 
 /// How often to sweep, on top of reacting to state changes. A periodic pass
@@ -44,6 +43,15 @@ const CRASH_LOOP_THRESHOLD: usize = 3;
 
 /// The window `CRASH_LOOP_THRESHOLD` is counted over.
 const CRASH_LOOP_WINDOW: Duration = Duration::from_secs(120);
+
+/// How long a finished (started or failed) update stays in the replicated
+/// record, so whoever started it can still see how it ended.
+const FINISHED_UPDATE_TTL_SECS: i64 = 15 * 60;
+
+/// How long an update may sit in one unfinished phase before it is presumed
+/// abandoned: queued by a node that went away before getting to it, or
+/// waiting on a container the reconciler never got to create.
+const STALLED_UPDATE_TTL_SECS: i64 = 60 * 60;
 
 pub struct Scheduler {
     node: String,
@@ -72,9 +80,10 @@ pub struct Scheduler {
     /// (an OOM kill, a crash on start) without needing a raft round trip just
     /// to count it. See `note_restart_and_check_crash_loop`.
     restarts: Arc<RwLock<BTreeMap<InstanceId, VecDeque<Instant>>>>,
-    /// Which redeploy step each instance being recreated is on, shared with
-    /// the api. See `cl_sched::RedeployTracker`.
-    redeploy_steps: RedeployTracker,
+    /// Unix seconds this scheduler was built, i.e. roughly when this daemon
+    /// started. An in-flight update on this node older than that was being
+    /// driven by a process that no longer exists.
+    booted_at: i64,
 }
 
 impl Scheduler {
@@ -85,7 +94,6 @@ impl Scheduler {
         materializer: Materializer,
         boot_config: ClusterConfig,
         pulling: PullTracker,
-        redeploy_steps: RedeployTracker,
     ) -> Self {
         Self {
             node,
@@ -96,7 +104,7 @@ impl Scheduler {
             boot_config,
             pulling,
             restarts: Arc::new(RwLock::new(BTreeMap::new())),
-            redeploy_steps,
+            booted_at: unix_now(),
         }
     }
 
@@ -228,12 +236,18 @@ impl Scheduler {
             Some(key) => crate::registries::Registries::load(state, &key),
             None => crate::registries::Registries::default(),
         };
-        let reconciler = Reconciler::new(
-            docker.clone(),
-            self.pulling.clone(),
-            self.redeploy_steps.clone(),
-        )
-        .with_registries(registries);
+        let updates = state
+            .instance_updates
+            .iter()
+            .filter(|(_, u)| u.node == self.node)
+            .map(|(id, u)| (id.clone(), u.phase))
+            .collect();
+        let reconciler = Reconciler::new(docker.clone(), self.pulling.clone())
+            .with_registries(registries)
+            .with_progress(
+                UpdateReporter::new(self.cluster.clone(), self.node.clone()),
+                updates,
+            );
 
         let (targets, config_edits) = self.targets(state)?;
         let actual = docker.list_managed().await?;
@@ -267,6 +281,7 @@ impl Scheduler {
 
         reconciler.apply(&actions, &targets, &actual).await?;
         self.report_container_status(state, &actual).await;
+        self.expire_updates(state, &actual).await;
 
         // Objects for instances that have moved on must not linger on disk.
         let keep: BTreeMap<String, ()> = targets
@@ -357,6 +372,51 @@ impl Scheduler {
             .await
         {
             warn!(error = %e, "could not report container status");
+        }
+    }
+
+    /// Tidy this node's entries in `instance_updates`: drop finished ones once
+    /// they have been visible long enough, and fail the ones nothing is
+    /// driving any more, so a daemon restart mid-update cannot leave a
+    /// progress bar spinning forever.
+    ///
+    /// Also the safety net for an update whose new container came up without
+    /// the reconciler recording it (a sweep that raced the update's own
+    /// writes): at `Starting` the old container is already gone, so any
+    /// running one is the new one.
+    async fn expire_updates(&self, state: &ClusterState, actual: &[cl_docker::ContainerState]) {
+        let now = unix_now();
+        let running: BTreeSet<InstanceId> = actual
+            .iter()
+            .filter(|c| c.running)
+            .filter_map(|c| c.labels.get(cl_docker::LABEL_INSTANCE)?.parse().ok())
+            .collect();
+        for (instance, update) in &state.instance_updates {
+            if update.node != self.node {
+                continue;
+            }
+            if update.phase == UpdatePhase::Starting && running.contains(instance) {
+                UpdateReporter::new(self.cluster.clone(), self.node.clone())
+                    .report(instance, UpdatePhase::Started, None)
+                    .await;
+                continue;
+            }
+            let request = match expire_verdict(update, now, self.booted_at) {
+                Some(None) => Request::ClearInstanceUpdate {
+                    instance: instance.clone(),
+                },
+                Some(Some(error)) => Request::SetInstanceUpdate {
+                    instance: instance.clone(),
+                    node: self.node.clone(),
+                    phase: UpdatePhase::Failed,
+                    error: Some(error.to_string()),
+                    at: now,
+                },
+                None => continue,
+            };
+            if let Err(e) = self.cluster.submit(request).await {
+                warn!(%instance, error = %e, "could not expire an update record");
+            }
         }
     }
 
@@ -1003,10 +1063,72 @@ pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
         .collect())
 }
 
+/// What to do with one of this node's update records: `None` keep it,
+/// `Some(None)` clear it, `Some(Some(why))` mark it failed.
+fn expire_verdict(
+    update: &cl_raft::state::InstanceUpdate,
+    now: i64,
+    booted_at: i64,
+) -> Option<Option<&'static str>> {
+    match update.phase {
+        phase if phase.is_terminal() => {
+            (now - update.at >= FINISHED_UPDATE_TTL_SECS).then_some(None)
+        }
+        _ if now - update.at >= STALLED_UPDATE_TTL_SECS => {
+            Some(Some("stalled: no progress for an hour"))
+        }
+        // Queued is written by whichever node took the request, so its
+        // timestamp says nothing about this process.
+        UpdatePhase::Queued => None,
+        // Pulling, stopping, starting: only ever written on this node, so
+        // one from before this process started has lost its driver.
+        _ => {
+            (update.at < booted_at).then_some(Some("interrupted: the daemon restarted mid-update"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cl_raft::state::{Availability, NodeState, Role};
+    use cl_raft::state::{Availability, InstanceUpdate, NodeState, Role};
+
+    fn update(phase: UpdatePhase, at: i64) -> InstanceUpdate {
+        InstanceUpdate {
+            node: "n1".into(),
+            phase,
+            started_at: at,
+            at,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn finished_updates_are_cleared_after_a_while() {
+        let done = update(UpdatePhase::Started, 1000);
+        assert_eq!(expire_verdict(&done, 1010, 0), None);
+        assert_eq!(
+            expire_verdict(&done, 1000 + FINISHED_UPDATE_TTL_SECS, 0),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn an_update_from_before_this_daemon_started_is_failed_but_a_queued_one_waits() {
+        let pulling = update(UpdatePhase::Pulling, 1000);
+        assert_eq!(expire_verdict(&pulling, 1010, 900), None);
+        assert!(matches!(
+            expire_verdict(&pulling, 1010, 1005),
+            Some(Some(_))
+        ));
+
+        let queued = update(UpdatePhase::Queued, 1000);
+        assert_eq!(expire_verdict(&queued, 1010, 1005), None);
+        assert!(matches!(
+            expire_verdict(&queued, 1000 + STALLED_UPDATE_TTL_SECS, 0),
+            Some(Some(_))
+        ));
+    }
     use std::path::PathBuf;
 
     fn node(name: &str, drives: &[&str]) -> NodeState {

@@ -151,7 +151,6 @@ async fn harness() -> Harness {
         cluster: Arc::new(node),
         docker: Arc::new(RwLock::new(Docker::connect().ok())),
         pulling: Arc::new(RwLock::new(Default::default())),
-        redeploy_steps: Arc::new(RwLock::new(Default::default())),
         migration_sync: Arc::new(std::sync::RwLock::new(Default::default())),
         node_name: "n0".to_string(),
         config_path: dir.path().join("cluster.yaml"),

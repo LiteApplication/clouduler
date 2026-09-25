@@ -714,6 +714,13 @@ pub struct ClusterState {
     /// blindly sleeping out a worst-case deadline. See `Request::ReportContainerStatus`.
     #[serde(default)]
     pub container_status: BTreeMap<InstanceId, ContainerStatus>,
+    /// Image updates and redeploys in flight (or recently finished), keyed by
+    /// instance, written step by step by whichever node is doing the work -
+    /// so every node's api, and so every browser, sees the same real
+    /// progress no matter which node it happens to be talking to. See
+    /// `InstanceUpdate`.
+    #[serde(default)]
+    pub instance_updates: BTreeMap<InstanceId, InstanceUpdate>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -728,6 +735,48 @@ pub struct ContainerStatus {
     /// instances it no longer runs) without touching what other nodes report.
     pub node: String,
     pub running: bool,
+}
+
+/// Where one instance's image update or redeploy stands. Written through
+/// `Request::SetInstanceUpdate` at every real docker step, and cleared by the
+/// owning node's scheduler a while after it reaches a terminal phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceUpdate {
+    /// The node whose docker the steps run on: the one the instance is
+    /// assigned to when the update began.
+    pub node: String,
+    pub phase: UpdatePhase,
+    /// Unix seconds this update began, carried over from phase to phase.
+    pub started_at: i64,
+    /// Unix seconds of the latest phase change.
+    pub at: i64,
+    /// Why it failed, only on `UpdatePhase::Failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The steps of an update, in the order they happen. The old container keeps
+/// serving through `Queued` and `Pulling`; it only goes away at `Stopping`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePhase {
+    /// Accepted, waiting for its turn: updates roll one instance at a time.
+    Queued,
+    /// Downloading the new image while the old container keeps running.
+    Pulling,
+    /// Stopping and removing the old container.
+    Stopping,
+    /// Creating and starting the new container.
+    Starting,
+    /// The new container is started.
+    Started,
+    Failed,
+}
+
+impl UpdatePhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, UpdatePhase::Started | UpdatePhase::Failed)
+    }
 }
 
 /// A command submitted through raft. Every mutation of cluster state is one of these.
@@ -934,6 +983,22 @@ pub enum Request {
         node: String,
         running: BTreeMap<InstanceId, bool>,
     },
+    /// Record the step an instance's update or redeploy has reached. `at` is
+    /// unix seconds, supplied by the caller so `apply` stays pure. Rejected
+    /// for an instance with no assignment, so nothing can leave an entry
+    /// behind for an instance that is gone.
+    SetInstanceUpdate {
+        instance: InstanceId,
+        node: String,
+        phase: UpdatePhase,
+        #[serde(default)]
+        error: Option<String>,
+        at: i64,
+    },
+    /// Forget an instance's update entry.
+    ClearInstanceUpdate {
+        instance: InstanceId,
+    },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
     /// Ends emergency mode: clears `ClusterState::emergency_stack`, letting
@@ -1103,6 +1168,17 @@ mod request_mirror {
         ReportContainerStatus {
             node: String,
             running: BTreeMap<InstanceId, bool>,
+        },
+        SetInstanceUpdate {
+            instance: InstanceId,
+            node: String,
+            phase: UpdatePhase,
+            #[serde(default)]
+            error: Option<String>,
+            at: i64,
+        },
+        ClearInstanceUpdate {
+            instance: InstanceId,
         },
         NoOp,
         ClearEmergency,
@@ -1380,6 +1456,7 @@ impl ClusterState {
                 // Drop the stack first so the in-use check below sees it gone.
                 let removed = self.stacks.remove(name);
                 self.assignments.retain(|id, _| &id.stack != name);
+                self.instance_updates.retain(|id, _| &id.stack != name);
                 if let Some(stack) = removed {
                     for config in &stack.configs {
                         if self.config_in_use(config).is_none() {
@@ -1445,6 +1522,7 @@ impl ClusterState {
 
             Request::Unassign { instance } => {
                 self.assignments.remove(instance);
+                self.instance_updates.remove(instance);
                 Ok(())
             }
 
@@ -1757,6 +1835,40 @@ impl ClusterState {
                         },
                     );
                 }
+                Ok(())
+            }
+
+            Request::SetInstanceUpdate {
+                instance,
+                node,
+                phase,
+                error,
+                at,
+            } => {
+                if !self.assignments.contains_key(instance) {
+                    return Err(format!("unknown instance {instance}"));
+                }
+                // A phase change of the same update keeps its start time; a
+                // fresh update after a finished one starts a new clock.
+                let started_at = match self.instance_updates.get(instance) {
+                    Some(current) if !current.phase.is_terminal() => current.started_at,
+                    _ => *at,
+                };
+                self.instance_updates.insert(
+                    instance.clone(),
+                    InstanceUpdate {
+                        node: node.clone(),
+                        phase: *phase,
+                        started_at,
+                        at: *at,
+                        error: error.clone(),
+                    },
+                );
+                Ok(())
+            }
+
+            Request::ClearInstanceUpdate { instance } => {
+                self.instance_updates.remove(instance);
                 Ok(())
             }
 
@@ -2221,6 +2333,16 @@ mod tests {
             Request::ReportContainerStatus {
                 node: "n1".into(),
                 running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
+            },
+            Request::SetInstanceUpdate {
+                instance: InstanceId::new("gitlab", "web", 0),
+                node: "n1".into(),
+                phase: UpdatePhase::Failed,
+                error: Some("pull failed".into()),
+                at: 5,
+            },
+            Request::ClearInstanceUpdate {
+                instance: InstanceId::new("gitlab", "web", 0),
             },
             Request::NoOp,
             Request::ClearEmergency,
@@ -3401,5 +3523,48 @@ mod tests {
             at: 30,
         });
         assert!(rejected.error.unwrap().contains("already finished"));
+    }
+
+    fn set_update(state: &mut ClusterState, phase: UpdatePhase, at: i64) -> Response {
+        state.apply(&Request::SetInstanceUpdate {
+            instance: InstanceId::new("gitlab", "web", 0),
+            node: "n1".into(),
+            phase,
+            error: None,
+            at,
+        })
+    }
+
+    #[test]
+    fn an_update_keeps_its_start_time_across_phases_and_restarts_it_once_finished() {
+        let mut state = cluster();
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+        let instance = InstanceId::new("gitlab", "web", 0);
+
+        assert!(set_update(&mut state, UpdatePhase::Queued, 10).is_ok());
+        assert!(set_update(&mut state, UpdatePhase::Pulling, 20).is_ok());
+        assert!(set_update(&mut state, UpdatePhase::Started, 30).is_ok());
+        let entry = &state.instance_updates[&instance];
+        assert_eq!(
+            (entry.phase, entry.started_at, entry.at),
+            (UpdatePhase::Started, 10, 30)
+        );
+
+        assert!(set_update(&mut state, UpdatePhase::Queued, 40).is_ok());
+        assert_eq!(state.instance_updates[&instance].started_at, 40);
+    }
+
+    #[test]
+    fn update_entries_go_away_with_their_instance() {
+        let mut state = cluster();
+        assert!(!set_update(&mut state, UpdatePhase::Pulling, 1).is_ok());
+        assert!(state.instance_updates.is_empty());
+
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+        assert!(set_update(&mut state, UpdatePhase::Pulling, 1).is_ok());
+        state.apply(&Request::Unassign {
+            instance: InstanceId::new("gitlab", "web", 0),
+        });
+        assert!(state.instance_updates.is_empty());
     }
 }

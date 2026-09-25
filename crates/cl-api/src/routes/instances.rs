@@ -144,9 +144,13 @@ fn internal_summary_path(instance: &InstanceId) -> String {
 /// back to `summarize_local`'s unknown/none answer rather than failing the
 /// whole list — the same degrade a caller already saw before cross-node
 /// forwarding existed.
-async fn summarize(state: &AppState, assignment: &cl_raft::Assignment) -> InstanceSummary {
+async fn summarize(
+    state: &AppState,
+    cluster_state: &cl_raft::ClusterState,
+    assignment: &cl_raft::Assignment,
+) -> InstanceSummary {
     if assignment.node == state.node_name {
-        return summarize_local(state, assignment).await;
+        return summarize_local(state, cluster_state, assignment).await;
     }
     match internal_peer::fetch_json::<InstanceSummary>(
         state,
@@ -158,7 +162,7 @@ async fn summarize(state: &AppState, assignment: &cl_raft::Assignment) -> Instan
         Ok(summary) => summary,
         Err(e) => {
             warn!(node = %assignment.node, instance = %assignment.instance, error = %e, "could not fetch instance summary from its node");
-            summarize_local(state, assignment).await
+            summarize_local(state, cluster_state, assignment).await
         }
     }
 }
@@ -167,7 +171,11 @@ async fn summarize(state: &AppState, assignment: &cl_raft::Assignment) -> Instan
 /// container. Also the graceful "unknown" answer for a remote assignment,
 /// used both as `summarize`'s fallback and as the direct answer for an
 /// instance genuinely assigned elsewhere (docker down, container not up yet).
-async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> InstanceSummary {
+async fn summarize_local(
+    state: &AppState,
+    cluster_state: &cl_raft::ClusterState,
+    assignment: &cl_raft::Assignment,
+) -> InstanceSummary {
     let local = assignment.node == state.node_name;
     // A local instance whose docker is unreachable reads as unknown, the same
     // as one on another node: in both cases nobody here can say what the
@@ -220,19 +228,10 @@ async fn summarize_local(state: &AppState, assignment: &cl_raft::Assignment) -> 
             .get(&assignment.instance)
             .copied()
     });
-    let redeploy_step = if local {
-        state
-            .redeploy_steps
-            .read()
-            .await
-            .get(&assignment.instance)
-            .copied()
-    } else {
-        None
-    };
+    // Replicated, so this is the real answer even for an instance whose node
+    // could not be asked just now.
     let (reason, step) = compose_progress(
-        instance_state,
-        redeploy_step,
+        cluster_state.instance_updates.get(&assignment.instance),
         assignment
             .migration
             .as_ref()
@@ -306,12 +305,11 @@ fn run_state_to_summary(status: cl_docker::RunState, desired: DesiredState) -> &
     }
 }
 
-/// One instance's redeploy step, or migration phase, turned into the string
+/// One instance's update step, or migration phase, turned into the string
 /// the ui shows verbatim and a `(step, total)` pair for anything that wants
 /// to render a progress bar instead. `None` for a steady-state instance.
 fn compose_progress(
-    instance_state: &str,
-    redeploy: Option<cl_sched::RedeployPhase>,
+    update: Option<&cl_raft::InstanceUpdate>,
     migration: Option<(
         &cl_raft::state::MigrationPhase,
         Option<cl_drive::MigrationSyncProgress>,
@@ -320,18 +318,31 @@ fn compose_progress(
     if let Some((phase, sync_progress)) = migration {
         return compose_migration_reason(phase, sync_progress);
     }
-    let Some(phase) = redeploy else {
+    let Some(update) = update else {
         return (None, None);
     };
-    let step = phase.step_number();
+    use cl_raft::UpdatePhase;
+    let (label, step) = match update.phase {
+        UpdatePhase::Queued => return (Some("update queued".to_string()), None),
+        UpdatePhase::Started => return (None, None),
+        UpdatePhase::Failed => {
+            let error = update.error.as_deref().unwrap_or("unknown error");
+            return (Some(format!("update failed: {error}")), None);
+        }
+        UpdatePhase::Pulling => ("downloading image", 1),
+        UpdatePhase::Stopping => ("stopping old container", 2),
+        UpdatePhase::Starting => ("starting new container", 3),
+    };
     (
         Some(format!(
-            "redeploying ({instance_state}, step {step}/{})",
-            cl_sched::REDEPLOY_TOTAL_STEPS
+            "updating ({label}, step {step}/{UPDATE_TOTAL_STEPS})"
         )),
-        Some((step, cl_sched::REDEPLOY_TOTAL_STEPS)),
+        Some((step, UPDATE_TOTAL_STEPS)),
     )
 }
+
+/// Pulling, stopping, starting, started.
+const UPDATE_TOTAL_STEPS: u8 = 4;
 
 fn compose_migration_reason(
     phase: &cl_raft::state::MigrationPhase,
@@ -357,12 +368,32 @@ mod progress_tests {
     use super::*;
     use cl_raft::state::MigrationPhase;
 
+    fn update(phase: cl_raft::UpdatePhase) -> cl_raft::InstanceUpdate {
+        cl_raft::InstanceUpdate {
+            node: "n1".into(),
+            phase,
+            started_at: 0,
+            at: 0,
+            error: None,
+        }
+    }
+
     #[test]
-    fn redeploy_reason_names_the_step_and_the_docker_state() {
-        let (reason, step) =
-            compose_progress(STATE_EXITED, Some(cl_sched::RedeployPhase::Stopping), None);
-        assert_eq!(reason.as_deref(), Some("redeploying (exited, step 2/3)"));
-        assert_eq!(step, Some((2, 3)));
+    fn update_reason_names_the_step() {
+        let (reason, step) = compose_progress(Some(&update(cl_raft::UpdatePhase::Stopping)), None);
+        assert_eq!(
+            reason.as_deref(),
+            Some("updating (stopping old container, step 2/4)")
+        );
+        assert_eq!(step, Some((2, 4)));
+    }
+
+    #[test]
+    fn a_started_update_is_steady_state() {
+        assert_eq!(
+            compose_progress(Some(&update(cl_raft::UpdatePhase::Started)), None),
+            (None, None)
+        );
     }
 
     #[test]
@@ -401,7 +432,7 @@ pub(crate) async fn progress_snapshot(
         cluster_state
             .assignments
             .values()
-            .map(|a| summarize(state, a)),
+            .map(|a| summarize(state, cluster_state, a)),
     )
     .await;
     summaries
@@ -433,7 +464,7 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<In
         cluster_state
             .assignments
             .values()
-            .map(|a| summarize(&state, a)),
+            .map(|a| summarize(&state, &cluster_state, a)),
     )
     .await;
     out.extend(pending_placements(&state, &cluster_state).await);
@@ -499,7 +530,7 @@ async fn detail(
         .get(&instance)
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
 
-    Ok(Json(summarize(&state, assignment).await))
+    Ok(Json(summarize(&state, &cluster_state, assignment).await))
 }
 
 /// Node-to-node: always answers about this node's own docker, regardless of
@@ -516,7 +547,9 @@ async fn internal_summary(
         .assignments
         .get(&instance)
         .ok_or_else(|| ApiError::NotFound(format!("no instance {id}")))?;
-    Ok(Json(summarize_local(&state, assignment).await))
+    Ok(Json(
+        summarize_local(&state, &cluster_state, assignment).await,
+    ))
 }
 
 /// Rerolls the instance's placement rather than restarting it in place: works
@@ -829,7 +862,27 @@ pub(crate) async fn update_instance(
 /// just recorded. Ordering against that write does not matter: if the sweep
 /// lands before the pin has applied locally, it creates from the plain tag,
 /// which the pull above has just repointed at the same new digest.
+///
+/// Every step is recorded in `ClusterState::instance_updates` as it happens;
+/// the reconciler records the last one (`Started`) once the new container is
+/// up.
 async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiError> {
+    let progress = cl_sched::UpdateReporter::new(state.cluster.clone(), state.node_name.clone());
+    let result = update_local_steps(state, &instance, &progress).await;
+    if let Err(e) = &result {
+        progress
+            .report(&instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
+            .await;
+    }
+    result
+}
+
+async fn update_local_steps(
+    state: &AppState,
+    instance: &InstanceId,
+    progress: &cl_sched::UpdateReporter,
+) -> Result<(), ApiError> {
+    use cl_raft::UpdatePhase;
     let name = instance.container_name();
     let docker = state.docker().await?;
     docker
@@ -859,6 +912,7 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
         .ok_or_else(|| ApiError::NotFound(format!("no stack service for instance {instance}")))?;
     drop(cluster_state);
 
+    progress.report(instance, UpdatePhase::Pulling, None).await;
     let registries = super::registries::load(state).await;
     // Marked for the same reason the reconcile loop marks its own pulls: a
     // docker inspect cannot tell "fetching the image" from "about to be
@@ -867,16 +921,25 @@ async fn update_local(state: &AppState, instance: InstanceId) -> Result<(), ApiE
     // finishes, so this is the only thing the ui has to watch.
     state.pulling.write().await.insert(instance.clone());
     let pulled = docker.pull_as(&image, registries.for_image(&image)).await;
-    state.pulling.write().await.remove(&instance);
+    state.pulling.write().await.remove(instance);
     let digest = pulled.map_err(ApiError::internal)?;
     state
         .cluster
-        .submit(ClusterRequest::SetImageDigest { instance, digest })
+        .submit(ClusterRequest::SetImageDigest {
+            instance: instance.clone(),
+            digest,
+        })
         .await
         .map_err(ApiError::not_leader)?;
 
+    progress.report(instance, UpdatePhase::Stopping, None).await;
     docker.stop(&name, STOP_GRACE).await.ok();
-    docker.remove(&name, true).await.map_err(ApiError::internal)
+    docker
+        .remove(&name, true)
+        .await
+        .map_err(ApiError::internal)?;
+    progress.report(instance, UpdatePhase::Starting, None).await;
+    Ok(())
 }
 
 /// How long the container being updated gets to stop cleanly. Matches the

@@ -5,6 +5,8 @@
 
 import { createContext, useContext, useEffect, useReducer, type ReactNode } from 'react';
 import type { InstanceProgressEvent } from '../api/types';
+import { updateProgress } from '../lib/updates';
+import { useClusterState } from './store';
 import { initialProgressState, progressReducer, type InstanceProgress, type ProgressState } from './progressReducer';
 
 const InstanceProgressContext = createContext<ProgressState | null>(null);
@@ -36,9 +38,15 @@ export function InstanceProgressProvider({ children }: { children: ReactNode }) 
 
 /** `null` when nothing is actively happening to this instance (or nothing
  *  has been received about it yet — the two are indistinguishable and that
- *  is fine, since the ui treats both as "show nothing extra"). */
+ *  is fine, since the ui treats both as "show nothing extra").
+ *
+ *  An update in flight is read straight from the replicated state, which is
+ *  pushed the moment each step lands, rather than waiting for the progress
+ *  stream to recompute every instance's summary. */
 export function useInstanceProgress(instanceId: string): InstanceProgress | null {
   const ctx = useContext(InstanceProgressContext);
   if (!ctx) throw new Error('useInstanceProgress must be used inside InstanceProgressProvider');
-  return ctx.byId[instanceId] ?? null;
+  const update = useClusterState()?.instance_updates?.[instanceId];
+  const fromUpdate = update ? updateProgress(update) : null;
+  return fromUpdate ?? ctx.byId[instanceId] ?? null;
 }

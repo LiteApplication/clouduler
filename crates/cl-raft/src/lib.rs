@@ -26,7 +26,7 @@ pub use quorum::{QuorumStatus, QuorumWatch};
 pub use state::{
     base64_decode, base64_encode, dns_key, instances_using_volume, Assignment, Availability,
     CertificateState, ClusterConfigEntry, ClusterState, ConfigEntry, DesiredState, DnsRecordState,
-    Migration, MigrationPhase, NodeState, PortProtocol, ReconcileStatus, Request, Response, Role,
-    SecretEntry, StackState, VolumeState, MAX_OBJECT_BYTES,
+    InstanceUpdate, Migration, MigrationPhase, NodeState, PortProtocol, ReconcileStatus, Request,
+    Response, Role, SecretEntry, StackState, UpdatePhase, VolumeState, MAX_OBJECT_BYTES,
 };
 pub use store::Store;

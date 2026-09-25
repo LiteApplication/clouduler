@@ -141,6 +141,7 @@
     },
     "dns_status": {},
     "emergency_stack": null,
+    "instance_updates": {},
     "nodes": {
       "n0": {
         "arch": "",

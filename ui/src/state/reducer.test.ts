@@ -21,6 +21,7 @@ function state(version: number): ClusterState {
     restic_targets: {},
     restic_runs: {},
     restore_requests: {},
+    instance_updates: {},
     unreachable: [],
     removed: [],
     overlay: null,

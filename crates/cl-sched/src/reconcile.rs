@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use cl_docker::{ContainerSpec, ContainerState, Docker, DockerError, LABEL_INSTANCE};
 use cl_raft::ids::InstanceId;
-use cl_raft::state::{Assignment, DesiredState};
+use cl_raft::state::{Assignment, DesiredState, UpdatePhase};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::error::Result;
+use crate::progress::UpdateReporter;
 use crate::registries::Registries;
 
 /// Instances whose image this node's reconciler is currently pulling. Shared
@@ -21,36 +22,6 @@ use crate::registries::Registries;
 /// guessing from the absence of a container — nothing in a docker inspect
 /// distinguishes "about to be created" from "still fetching the image".
 pub type PullTracker = Arc<RwLock<BTreeSet<InstanceId>>>;
-
-/// Which real docker step a redeploy (`Action::Recreate`, or `Action::Start`'s
-/// stale-network recovery — both go through `replace`) is currently on for
-/// one instance. Shared with the api the same way `PullTracker` is, so
-/// `GET /api/instances` can say "step 2/3" instead of just "exited".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RedeployPhase {
-    /// Fetching the new image, before anything about the running container
-    /// changes — matches `replace`'s actual order: the old container stays
-    /// up as long as possible.
-    Pulling,
-    /// Old container stopped and removed, new one not created yet.
-    Stopping,
-    /// New container created, starting.
-    Starting,
-}
-
-impl RedeployPhase {
-    pub fn step_number(self) -> u8 {
-        match self {
-            RedeployPhase::Pulling => 1,
-            RedeployPhase::Stopping => 2,
-            RedeployPhase::Starting => 3,
-        }
-    }
-}
-
-pub const REDEPLOY_TOTAL_STEPS: u8 = 3;
-
-pub type RedeployTracker = Arc<RwLock<BTreeMap<InstanceId, RedeployPhase>>>;
 
 /// What has to happen to one container to bring it in line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,7 +143,12 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<
 pub struct Reconciler {
     docker: Docker,
     pulling: PullTracker,
-    redeploy_steps: RedeployTracker,
+    /// Where redeploy and update steps get recorded. `None` records nothing.
+    progress: Option<UpdateReporter>,
+    /// This node's updates in flight (see `cl_raft::InstanceUpdate`), by
+    /// phase, so that a `Create`/`Start` finishing one reports how it went.
+    /// Any other `Create` is a plain deploy and stays out of the record.
+    updates: BTreeMap<InstanceId, UpdatePhase>,
     /// Registry logins this pass may pull with. Rebuilt per pass rather than
     /// held for the reconciler's life so a login added, rotated or removed
     /// through the api takes effect on the next sweep instead of at the next
@@ -181,12 +157,31 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
-    pub fn new(docker: Docker, pulling: PullTracker, redeploy_steps: RedeployTracker) -> Self {
+    pub fn new(docker: Docker, pulling: PullTracker) -> Self {
         Self {
             docker,
             pulling,
-            redeploy_steps,
+            progress: None,
+            updates: BTreeMap::new(),
             registries: Registries::default(),
+        }
+    }
+
+    /// Record every redeploy's steps, and the end of `updates`, through
+    /// `progress`.
+    pub fn with_progress(
+        mut self,
+        progress: UpdateReporter,
+        updates: BTreeMap<InstanceId, UpdatePhase>,
+    ) -> Self {
+        self.progress = Some(progress);
+        self.updates = updates;
+        self
+    }
+
+    async fn report(&self, id: &InstanceId, phase: UpdatePhase, error: Option<String>) {
+        if let Some(progress) = &self.progress {
+            progress.report(id, phase, error).await;
         }
     }
 
@@ -213,8 +208,21 @@ impl Reconciler {
 
         for action in actions {
             let id = action.instance();
-            if let Err(e) = self.apply_one(action, specs.get(id).copied()).await {
+            // A create or start finishing an update someone else began.
+            // A recreate records its own steps instead, see `replace`.
+            let tracked = finishes_update(action, self.updates.get(id).copied());
+            let result = self.apply_one(action, specs.get(id).copied()).await;
+            if let Err(e) = &result {
                 warn!(instance = %id, error = %e, "reconcile step failed");
+            }
+            if tracked {
+                match result {
+                    Ok(()) => self.report(id, UpdatePhase::Started, None).await,
+                    Err(e) => {
+                        self.report(id, UpdatePhase::Failed, Some(e.to_string()))
+                            .await
+                    }
+                }
             }
         }
 
@@ -357,33 +365,33 @@ impl Reconciler {
     /// new one attach cleanly, and `create` picks up whatever the network
     /// currently is rather than whatever it was when this container was
     /// last built.
+    ///
+    /// Every step lands in the replicated update record, so a redeploy shows
+    /// real progress from any node's api.
     async fn replace(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
-        let result = self.replace_inner(id, target, name).await;
-        self.redeploy_steps.write().await.remove(id);
+        let result = self.replace_steps(id, target, name).await;
+        match &result {
+            Ok(()) => self.report(id, UpdatePhase::Started, None).await,
+            Err(e) => {
+                self.report(id, UpdatePhase::Failed, Some(e.to_string()))
+                    .await
+            }
+        }
         result
     }
 
-    async fn replace_inner(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
-        self.redeploy_steps
-            .write()
-            .await
-            .insert(id.clone(), RedeployPhase::Pulling);
+    async fn replace_steps(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
+        self.report(id, UpdatePhase::Pulling, None).await;
         self.ensure_image(id, &target.spec.image).await?;
 
-        self.redeploy_steps
-            .write()
-            .await
-            .insert(id.clone(), RedeployPhase::Stopping);
+        self.report(id, UpdatePhase::Stopping, None).await;
         self.docker
             .stop(name, stop_timeout(Some(target)))
             .await
             .ok();
         self.docker.remove(name, true).await.ok();
 
-        self.redeploy_steps
-            .write()
-            .await
-            .insert(id.clone(), RedeployPhase::Starting);
+        self.report(id, UpdatePhase::Starting, None).await;
         let container_id = self.docker.create(&target.spec).await?;
         if let Some(egress) = &target.spec.egress_network {
             self.docker
@@ -396,6 +404,22 @@ impl Reconciler {
         }
         Ok(())
     }
+}
+
+/// Whether applying `action` brings up the new container of an update that
+/// is at `phase`. A missing container mid-update is the one the update took
+/// away (queued is excluded: that update has not touched anything yet). A
+/// stopped one only counts once the old container is known to be gone,
+/// otherwise this would be restarting the very container being replaced.
+fn finishes_update(action: &Action, phase: Option<UpdatePhase>) -> bool {
+    use UpdatePhase::*;
+    matches!(
+        (action, phase),
+        (
+            Action::Create(_),
+            Some(Pulling | Stopping | Starting | Failed)
+        ) | (Action::Start(_), Some(Starting | Failed))
+    )
 }
 
 /// Whether a docker error is the container's network having been torn down

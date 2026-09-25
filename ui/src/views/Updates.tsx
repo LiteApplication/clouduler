@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
-import type { BulkResult, InstanceState, RegistryAccount, UpdateRow } from '../api/types';
+import type { BulkResult, InstanceState, InstanceUpdate, RegistryAccount, UpdateRow } from '../api/types';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
-import { useInstanceProgress } from '../state/progressStore';
+import { UPDATE_PHASE_LABEL, UPDATE_STEPS, isUpdateActive, type UpdateStep } from '../lib/updates';
+import { useClusterState } from '../state/store';
 import { RegistryAccounts } from './RegistryAccounts';
 
 /** Digests are 71 characters of noise; the first few are enough to compare
@@ -44,81 +45,47 @@ const STATUS_TONE: Record<Status, 'good' | 'warn' | 'bad' | 'neutral'> = {
  *  pin drift, then an unknown verdict, with already-current rows last. */
 const STATUS_PRIORITY: Record<Status, number> = { update: 0, drift: 1, unknown: 2, current: 3 };
 
-type UpdatePhase = 'pulling' | 'stopping' | 'starting' | 'healthy';
-
-/** An update in flight goes through four real steps, in this order: the old
- *  container stays up throughout the pull, only coming down once the new
- *  bits are already on disk, and the new one is not "done" just because it
- *  started — its healthcheck (if it has one) still has to pass. */
-const PHASE_ORDER: UpdatePhase[] = ['pulling', 'stopping', 'starting', 'healthy'];
-
-const PHASE_LABEL: Record<UpdatePhase, string> = {
-  pulling: 'downloading image',
-  stopping: 'stopping old container',
-  starting: 'starting new container',
-  healthy: 'waiting for health check',
-};
-
-const PHASE_ICON: Record<UpdatePhase, 'download' | 'stop' | 'restart' | 'activity'> = {
+const STEP_ICON: Record<UpdateStep, 'download' | 'stop' | 'restart' | 'activity'> = {
   pulling: 'download',
   stopping: 'stop',
   starting: 'restart',
-  healthy: 'activity',
+  started: 'activity',
 };
 
-/** Which of the four phases an instance is in right now, or `null` once
- *  there is nothing left to show. `reason` (from the SSE progress store,
- *  `/api/instances/events`) drives the first three phases in real time and
- *  comes from the reconciler's own redeploy step; the fourth has no
- *  reconciler step behind it at all — it is this view noticing, from the
- *  periodic `/api/instances` poll, that the new container is up but its
- *  docker healthcheck has not reported healthy yet. A container with no
- *  healthcheck configured skips straight past it. */
-function phaseOf(reason: string | null, live: InstanceState | undefined): UpdatePhase | null {
-  if (reason?.includes('pulling')) return 'pulling';
-  if (reason?.includes('stopping')) return 'stopping';
-  if (reason?.includes('starting')) return 'starting';
-  if (live?.health === 'starting') return 'healthy';
-  return null;
-}
+/** How long after its new container started a row keeps watching its
+ *  healthcheck, via the `/api/instances` poll. */
+const HEALTH_WATCH_SECS = 180;
 
-/** An instance an `apply` is watching counts as settled once it is back to a
- *  steady state (`running`/`stopped`) with no reconciler step in progress
- *  and, if it has a healthcheck, that check is no longer pending. Checking
- *  `reason` here (not just `state`) matters: during the pull step the old
- *  container is still up and reporting `running` the whole time, so a naive
- *  state check would call the row settled before the update even started. */
-function isSettled(i: InstanceState): boolean {
-  return (i.state === 'running' || i.state === 'stopped') && !i.reason && i.health !== 'starting';
-}
-
-/** One row's live update feedback: a four-segment progress bar over
- *  `PHASE_ORDER`, kept apart so only this cell re-renders on every SSE
- *  `progress` event rather than the whole table. `live` (the instance's most
- *  recent `/api/instances` poll) supplies the healthcheck phase SSE cannot. */
-function UpdateProgressBar({ id, live }: { id: string; live: InstanceState | undefined }) {
-  const progress = useInstanceProgress(id);
-  const phase = phaseOf(progress?.reason ?? null, live);
-  if (!phase) {
+/** One row's live update progress, read from the replicated update record
+ *  (`ClusterState.instance_updates`), which the node doing the work writes
+ *  at every real step — so it is the same no matter which node this browser
+ *  is talking to. `update` is absent only in the instant between the server
+ *  accepting the request and its queued record reaching this browser.
+ *  `health` comes from the `/api/instances` poll: once the new container is
+ *  started, its healthcheck (if it has one) still has to pass. */
+function UpdateProgressBar({ update, health }: { update: InstanceUpdate | undefined; health: string | undefined }) {
+  const phase = update?.phase ?? 'queued';
+  if (phase === 'queued' || phase === 'failed') {
     return (
       <span className="muted">
-        <span className="spinner" /> starting
+        <span className="spinner" /> queued
       </span>
     );
   }
-  const stepIndex = PHASE_ORDER.indexOf(phase);
+  const stepIndex = UPDATE_STEPS.indexOf(phase);
+  const waitingForHealth = phase === 'started' && health === 'starting';
   return (
     <div className="update-progress">
       <div className="update-progress-head">
         <span className="spinner" />
-        <Icon name={PHASE_ICON[phase]} />
-        <span>{PHASE_LABEL[phase]}</span>
+        <Icon name={STEP_ICON[phase]} />
+        <span>{waitingForHealth ? 'started, waiting for health check' : UPDATE_PHASE_LABEL[phase]}</span>
         <span className="mono faint">
-          ({stepIndex + 1}/{PHASE_ORDER.length})
+          ({stepIndex + 1}/{UPDATE_STEPS.length})
         </span>
       </div>
       <div className="update-progress-track" aria-hidden="true">
-        {PHASE_ORDER.map((p, i) => (
+        {UPDATE_STEPS.map((p, i) => (
           <span
             key={p}
             className={`update-progress-seg${i < stepIndex ? ' done' : ''}${i === stepIndex ? ' active' : ''}`}
@@ -129,6 +96,10 @@ function UpdateProgressBar({ id, live }: { id: string; live: InstanceState | und
   );
 }
 
+function nowSecs(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
 export function Updates() {
   const [rows, setRows] = useState<UpdateRow[] | null>(null);
   const [accounts, setAccounts] = useState<RegistryAccount[]>([]);
@@ -136,13 +107,40 @@ export function Updates() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BulkResult[] | null>(null);
-  /** Instances an `apply` accepted and that have not settled yet. The phase
-   *  shown per row comes from the SSE-driven progress store (`UpdateProgressBar`);
-   *  this only tracks which instances to keep watching and when to stop. */
-  const [pending, setPending] = useState<string[]>([]);
-  /** Each pending instance's most recent `/api/instances` poll, so
-   *  `UpdateProgressBar` can show the healthcheck phase SSE alone cannot. */
+  const cluster = useClusterState();
+  const updates = useMemo(() => cluster?.instance_updates ?? {}, [cluster]);
+  /** Instances an `apply` accepted whose queued record has not reached this
+   *  browser yet, so a row never flickers back to its button in between. */
+  const [requested, setRequested] = useState<string[]>([]);
+  /** Recently started instances' latest `/api/instances` poll, for the
+   *  healthcheck that follows the last update step. */
   const [live, setLive] = useState<Record<string, InstanceState>>({});
+
+  // Everything below is derived from the replicated record, so an update
+  // started from another browser, the cli, or before this page was opened
+  // shows up here all the same.
+  const active = useMemo(
+    () => Object.keys(updates).filter((id) => isUpdateActive(updates[id])),
+    [updates],
+  );
+  const inFlight = useMemo(() => new Set([...active, ...requested]), [active, requested]);
+  const healthWatch = useMemo(
+    () =>
+      Object.keys(updates).filter((id) => {
+        const u = updates[id];
+        return u.phase === 'started' && nowSecs() - u.at < HEALTH_WATCH_SECS && live[id]?.health !== 'healthy';
+      }),
+    [updates, live],
+  );
+  const failedUpdates = useMemo(
+    () => Object.entries(updates).filter(([, u]) => u.phase === 'failed'),
+    [updates],
+  );
+  const phaseCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const id of active) counts[updates[id].phase] = (counts[updates[id].phase] ?? 0) + 1;
+    return counts;
+  }, [active, updates]);
 
   const load = useCallback(async () => {
     try {
@@ -172,33 +170,46 @@ export function Updates() {
     void loadAccounts();
   }, [load, loadAccounts]);
 
-  // While updates are in flight, watch the instances themselves for when
-  // they settle — the per-row phase (downloading/stopping/starting/health
-  // check) comes from the SSE progress store plus this poll's `health`
-  // field (`UpdateProgressBar`), but nothing there says "done"; that still
-  // has to come from a live docker inspect. `/api/instances` is cheap enough
-  // for a 3s poll, unlike `/api/updates`. When every accepted instance has
-  // settled (see `isSettled` — not just "running again": the old container
-  // reports running throughout the pull too, so that alone is not "done"),
-  // re-check digests once so the rows go green on their own.
+  // A requested instance stops being "requested" once its record is here.
+  // The timeout covers one the server skipped (already mid-update, or gone).
   useEffect(() => {
-    if (pending.length === 0) return;
+    setRequested((prev) => {
+      const next = prev.filter((id) => !isUpdateActive(updates[id]));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [updates]);
+  useEffect(() => {
+    if (requested.length === 0) return;
+    const id = setTimeout(() => setRequested([]), 15000);
+    return () => clearTimeout(id);
+  }, [requested]);
+
+  // Once the last update in flight finishes, re-check digests once so the
+  // rows go green on their own.
+  const wasActive = useRef(false);
+  useEffect(() => {
+    const nowActive = active.length > 0;
+    if (wasActive.current && !nowActive) void load();
+    wasActive.current = nowActive;
+  }, [active, load]);
+
+  // The replicated record ends at "started"; whether a healthcheck still
+  // has to pass is a live docker question. Polled only while some freshly
+  // started instance has not reported healthy.
+  const healthKey = healthWatch.join(',');
+  useEffect(() => {
+    if (!healthKey) return;
+    const watched = healthKey.split(',');
     let cancelled = false;
     const tick = async () => {
       try {
         const instances = await api.listInstances();
         if (cancelled) return;
-        const watched = instances.filter((i) => pending.includes(i.id));
         setLive((prev) => {
           const next = { ...prev };
-          for (const i of watched) next[i.id] = i;
+          for (const i of instances) if (watched.includes(i.id)) next[i.id] = i;
           return next;
         });
-        if (watched.length > 0 && watched.every(isSettled)) {
-          setPending([]);
-          setLive({});
-          void load();
-        }
       } catch {
         // A failed poll is not worth surfacing; the next tick retries.
       }
@@ -209,7 +220,7 @@ export function Updates() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [pending, load]);
+  }, [healthKey]);
 
   const outdated = useMemo(() => (rows ?? []).filter((r) => statusOf(r) === 'update'), [rows]);
   const unpinned = useMemo(() => (rows ?? []).filter((r) => !r.pinned_digest && r.running_digest), [rows]);
@@ -238,14 +249,12 @@ export function Updates() {
   }
 
   /**
-   * Start updates and follow them through the instance list.
-   *
-   * The server answers as soon as the work is scheduled, because a pull takes
-   * far longer than a request may. So the ids are always sent explicitly —
-   * this view is looking at the answer already, and letting the server
-   * recompute it would make it re-scan every registry first — and per-row
-   * phase comes from `/api/instances/events` (`UpdateProgressBar`), with
-   * `/api/instances` polled only to notice when the batch has settled.
+   * Start updates. The server answers once every instance is queued in the
+   * replicated update record, and rolls through them one at a time from
+   * there; each step arrives here over the cluster state stream. The ids are
+   * always sent explicitly — this view is looking at the answer already, and
+   * letting the server recompute it would make it re-scan every registry
+   * first.
    */
   async function startUpdate(ids: string[]) {
     setBusy(ids.length === 1 ? ids[0] : 'apply');
@@ -253,7 +262,7 @@ export function Updates() {
     setResults(null);
     try {
       const { accepted } = await api.applyUpdates(ids);
-      setPending(accepted);
+      setRequested(accepted);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -303,7 +312,7 @@ export function Updates() {
           </button>
           <button
             className="primary"
-            disabled={busy !== null || pending.length > 0 || outdated.length === 0}
+            disabled={busy !== null || inFlight.size > 0 || outdated.length === 0}
             onClick={() => void startUpdate(outdated.map((r) => r.id))}
           >
             {busy === 'apply' ? <span className="spinner" /> : <Icon name="download" />} Update all (
@@ -314,12 +323,30 @@ export function Updates() {
 
       {error && <p className="banner banner-bad">{error}</p>}
 
-      {pending.length > 0 && (
+      {inFlight.size > 0 && (
         <p className="banner banner-warn">
-          <span className="spinner" /> Updating {pending.length} instance(s): each downloads its new image first,
-          while the old container keeps serving traffic, then restarts onto it once the download lands. Watch
-          progress per instance below — this keeps going whether or not you stay on this page.
+          <span className="spinner" /> Updating {inFlight.size} instance(s), one at a time
+          {active.length > 0 &&
+            ` (${Object.entries(phaseCounts)
+              .map(([phase, n]) => `${n} ${UPDATE_PHASE_LABEL[phase as keyof typeof UPDATE_PHASE_LABEL]}`)
+              .join(', ')})`}
+          : each downloads its new image first, while the old container keeps serving traffic, then restarts onto
+          it once the download lands. Watch progress per instance below — this keeps going whether or not you stay
+          on this page.
         </p>
+      )}
+
+      {inFlight.size === 0 && failedUpdates.length > 0 && (
+        <div className="banner banner-bad">
+          {failedUpdates.length} update(s) failed:
+          <ul>
+            {failedUpdates.map(([id, u]) => (
+              <li key={id}>
+                <span className="mono">{id}</span> — {u.error ?? 'failed'}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {results && (
@@ -386,19 +413,14 @@ export function Updates() {
                     </Badge>
                   </td>
                   <td>
-                    {pending.includes(row.id) ? (
-                      <UpdateProgressBar id={row.id} live={live[row.id]} />
-                    ) : (
-                      status === 'update' && (
-                        <button
-                          className="ghost"
-                          disabled={busy !== null || pending.length > 0}
-                          onClick={() => void startUpdate([row.id])}
-                        >
-                          <Icon name="download" /> Update
-                        </button>
-                      )
-                    )}
+                    <UpdateCell
+                      update={updates[row.id]}
+                      requested={inFlight.has(row.id)}
+                      health={live[row.id]?.health}
+                      canUpdate={status === 'update'}
+                      disabled={busy !== null || inFlight.size > 0}
+                      onUpdate={() => void startUpdate([row.id])}
+                    />
                   </td>
                   <td>{row.node}</td>
                   <td className="mono">{row.image ?? '-'}</td>
@@ -422,6 +444,47 @@ export function Updates() {
           onClose={() => setAccountsOpen(false)}
           onChanged={() => void loadAccounts()}
         />
+      )}
+    </div>
+  );
+}
+
+/** One row's update column: live progress while an update is in flight (or
+ *  its new container is still passing its healthcheck), then how the last
+ *  one ended next to the button for the next. */
+function UpdateCell({
+  update,
+  requested,
+  health,
+  canUpdate,
+  disabled,
+  onUpdate,
+}: {
+  update: InstanceUpdate | undefined;
+  requested: boolean;
+  health: string | undefined;
+  canUpdate: boolean;
+  disabled: boolean;
+  onUpdate: () => void;
+}) {
+  const settling = update?.phase === 'started' && health === 'starting';
+  if (requested || settling) return <UpdateProgressBar update={update} health={health} />;
+  return (
+    <div className="btn-row">
+      {update?.phase === 'started' && (
+        <Badge tone="good" title={`new container started ${new Date(update.at * 1000).toLocaleTimeString()}`}>
+          updated
+        </Badge>
+      )}
+      {update?.phase === 'failed' && (
+        <Badge tone="bad" title={update.error}>
+          update failed
+        </Badge>
+      )}
+      {canUpdate && (
+        <button className="ghost" disabled={disabled} onClick={onUpdate}>
+          <Icon name="download" /> Update
+        </button>
       )}
     </div>
   );

@@ -118,13 +118,12 @@ pub fn cpu_percent(
 }
 
 /// How often `/api/instances/events` recomputes every instance's summary and
-/// checks for a change. Faster than `STATE_POLL_INTERVAL` on purpose:
-/// unlike raft state (replicated, so every node's view moves in lockstep),
-/// redeploy/migration progress is read straight off this node's own
-/// in-memory trackers and a live docker inspect, so there is no replication
-/// lag to wait out — the only cost of polling faster is the docker inspects
-/// themselves, which `summarize_local` already does cheaply enough for the
-/// existing 4-5s ui poll to call on every instance, every tick.
+/// checks for a change. Migration sync progress and docker's own state are
+/// read live off each instance's node (update and redeploy steps come from
+/// replicated state, which the ui also gets pushed over `/api/events`); the
+/// cost of polling is those docker inspects, which `summarize_local` already
+/// does cheaply enough for the existing 4-5s ui poll to call on every
+/// instance, every tick.
 const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// One instance's live progress, as sent over `/api/instances/events`.
@@ -140,38 +139,51 @@ pub struct InstanceProgressEvent {
 /// step)` changed since the last time this connection emitted anything for
 /// it. A steady instance is sent once (its current value) and then never
 /// again until something about it actually changes.
+///
+/// Every change found in one snapshot is sent before the next snapshot is
+/// taken. Returning after the first one used to make each event cost a whole
+/// cluster-wide recompute (a docker inspect, or a request to the owning node,
+/// per instance), so a burst of changes trickled out one per round trip and
+/// short-lived steps were routinely never seen at all.
 pub fn instance_progress_events(
     state: crate::server::AppState,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = futures::stream::unfold(
-        (
-            state,
-            std::collections::HashMap::<String, InstanceProgressEvent>::new(),
-        ),
-        |(state, mut last)| async move {
-            let mut interval = tokio::time::interval(PROGRESS_POLL_INTERVAL);
-            loop {
-                interval.tick().await;
-                let cluster_state = state.cluster.state().await;
-                for (id, event) in
-                    crate::routes::instances::progress_snapshot(&state, &cluster_state).await
-                {
-                    if last.get(&id) == Some(&event) {
-                        continue;
-                    }
-                    last.insert(id, event.clone());
-                    let sse_event = Event::default()
-                        .event("progress")
-                        .json_data(&event)
-                        .unwrap_or_else(|_| Event::default().event("progress").data("{}"));
-                    return Some((Ok(sse_event), (state, last)));
-                }
-                // Nothing changed this tick; loop back to `interval.tick()`
-                // rather than returning, so the connection stays open with
-                // no event sent — same shape as `cluster_state_events`.
+    struct Cursor {
+        state: crate::server::AppState,
+        last: std::collections::HashMap<String, InstanceProgressEvent>,
+        ready: std::collections::VecDeque<InstanceProgressEvent>,
+        interval: tokio::time::Interval,
+    }
+    let mut interval = tokio::time::interval(PROGRESS_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let cursor = Cursor {
+        state,
+        last: std::collections::HashMap::new(),
+        ready: std::collections::VecDeque::new(),
+        interval,
+    };
+    let stream = futures::stream::unfold(cursor, |mut cursor| async move {
+        loop {
+            if let Some(event) = cursor.ready.pop_front() {
+                let sse_event = Event::default()
+                    .event("progress")
+                    .json_data(&event)
+                    .unwrap_or_else(|_| Event::default().event("progress").data("{}"));
+                return Some((Ok(sse_event), cursor));
             }
-        },
-    );
+            cursor.interval.tick().await;
+            let cluster_state = cursor.state.cluster.state().await;
+            for (id, event) in
+                crate::routes::instances::progress_snapshot(&cursor.state, &cluster_state).await
+            {
+                if cursor.last.get(&id) == Some(&event) {
+                    continue;
+                }
+                cursor.last.insert(id, event.clone());
+                cursor.ready.push_back(event);
+            }
+        }
+    });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

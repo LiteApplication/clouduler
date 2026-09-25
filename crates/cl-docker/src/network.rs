@@ -122,7 +122,8 @@ impl Docker {
         subnet: &str,
         gateway: Ipv4Addr,
     ) -> Result<bool> {
-        if self.network_exists(name).await? {
+        if let Some(existing) = self.inspect_network_opt(name).await? {
+            warn_on_nat_subnet_drift(name, subnet, &existing);
             return Ok(false);
         }
 
@@ -262,14 +263,23 @@ impl Docker {
     }
 
     pub async fn network_exists(&self, name: &str) -> Result<bool> {
+        Ok(self.inspect_network_opt(name).await?.is_some())
+    }
+
+    /// `inspect_network`, but `Ok(None)` instead of an error when it does not
+    /// exist yet.
+    async fn inspect_network_opt(
+        &self,
+        name: &str,
+    ) -> Result<Option<bollard::models::NetworkInspect>> {
         match self
             .inner
             .inspect_network(name, None::<InspectNetworkOptions>)
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(network) => Ok(Some(network)),
             Err(e) => match classify(e) {
-                DockerError::NotFound(_) => Ok(false),
+                DockerError::NotFound(_) => Ok(None),
                 other => Err(other),
             },
         }
@@ -323,6 +333,34 @@ impl Docker {
                 other => Err(other),
             },
         }
+    }
+}
+
+/// Logs loudly when a nat network that already exists does not have the
+/// subnet clouduler would now pin it to.
+///
+/// Docker cannot change a network's subnet in place, so this cannot self
+/// heal: the network predates the pinning (added so `cl-daemon`'s proxy
+/// wiring can recognize a same-node nat peer, see `ensure_nat_network`'s doc
+/// comment) and every route gated on that trust will 403 a same-node peer on
+/// it until an operator removes the stack using it, deletes the docker
+/// network by hand, and lets it get recreated with the pinned subnet.
+fn warn_on_nat_subnet_drift(name: &str, expected: &str, existing: &bollard::models::NetworkInspect) {
+    let actual = existing
+        .ipam
+        .as_ref()
+        .and_then(|ipam| ipam.config.as_ref())
+        .and_then(|configs| configs.first())
+        .and_then(|c| c.subnet.as_deref());
+    if actual != Some(expected) {
+        tracing::warn!(
+            network = name,
+            expected_subnet = expected,
+            actual_subnet = actual.unwrap_or("unknown"),
+            "nat network's live subnet does not match the one clouduler now pins nat networks \
+             to; same-node peers on it will be rejected by gated proxy routes until the docker \
+             network is removed and recreated"
+        );
     }
 }
 
