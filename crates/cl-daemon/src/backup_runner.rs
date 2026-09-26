@@ -21,7 +21,10 @@
 //!
 //! restic always runs as a host process against a real local path, so a
 //! `NodeLocal` destination on a node that doesn't already hold the drive
-//! needs the data pushed there first (see `push_drive_once`, using the same
+//! needs the data pushed there first (`start_runner`'s push branch skips
+//! this entirely when the destination node already implements the drive -
+//! e.g. it's itself a replica - since it already has the data to back up
+//! directly). See `push_drive_once`, using the same
 //! one-off `SyncEngine::sync` call `cl_drive::migration` makes - deliberately
 //! never followed by `SetVolumeReplica`, since this is a point-in-time copy
 //! for restic to read, not a standing replica). `SyncEngine::sync` only ever
@@ -227,6 +230,21 @@ pub fn start_runner(
                     BackupDestinationKind::NodeLocal { node, path }
                         if is_source && node != &node_name =>
                     {
+                        // If the destination node already implements this
+                        // drive (e.g. it's itself a replica), it has the
+                        // data locally already - pushing a staged copy here
+                        // would just duplicate it on disk. That node's own
+                        // `NodeLocal { node == node_name }` branch below
+                        // runs restic straight off its existing copy
+                        // instead, once its grace period elapses (see
+                        // `execute`'s `registry.implements` check).
+                        if state
+                            .nodes
+                            .get(node)
+                            .is_some_and(|n| n.implements(&run.drive))
+                        {
+                            continue;
+                        }
                         if !pushed.lock().await.insert(run.id.clone()) {
                             continue;
                         }
