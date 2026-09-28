@@ -156,6 +156,11 @@ pub struct ApiServer {
     /// after boot; unrelated to anything a request handler touches.
     cluster: Arc<ClusterNode>,
     fqdn: String,
+    /// A clone of the same `AppState` every handler runs against, handed to
+    /// `cl-daemon`'s `watch_git_backup` so its export loop can pull through
+    /// the exact same reconcile path a webhook uses (see `routes::git_backup`)
+    /// before it clobbers a pending git-side change with a raft-driven export.
+    state: AppState,
 }
 
 /// SHA-256 fingerprint of the leaf certificate in a PEM chain, colon-hex
@@ -241,14 +246,21 @@ impl ApiServer {
         spawn_sync_cluster_config(state.clone());
 
         Ok(Self {
-            router: build_router(state),
+            router: build_router(state.clone()),
             listen_addr: options.listen_addr,
             plain_listen_addr: options.plain_listen_addr,
             tls_cert_pem: options.tls_cert_pem,
             tls_key_pem: options.tls_key_pem,
             cluster,
             fqdn,
+            state,
         })
+    }
+
+    /// The same `AppState` every handler runs against - see the field doc
+    /// comment for why `cl-daemon` needs this.
+    pub fn state(&self) -> AppState {
+        self.state.clone()
     }
 }
 

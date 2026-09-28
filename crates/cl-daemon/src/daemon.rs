@@ -170,7 +170,7 @@ pub async fn run(
     // comes up rather than needing a second wiring pass later.
     let proxy = crate::proxy::start(&cfg, &cluster, &data_dir, config_rx.clone(), key_rx.clone());
 
-    let api = start_api(StartApiArgs {
+    let (api, api_state) = start_api(StartApiArgs {
         cfg: &cfg,
         node,
         node_name: &node_name,
@@ -273,6 +273,7 @@ pub async fn run(
         config_rx.clone(),
         key_rx.clone(),
         data_dir.clone(),
+        api_state.clone(),
     ));
 
     // restic is opt-in - only worth warning about if something actually
@@ -364,7 +365,12 @@ struct StartApiArgs<'a> {
     proxy_health: cl_proxy::HealthTable,
 }
 
-async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>> {
+/// Returns the serve task alongside a clone of the `AppState` it built, so
+/// `watch_git_backup` can pull through the same reconcile path a webhook
+/// uses instead of duplicating it - see that function's doc comment.
+async fn start_api(
+    args: StartApiArgs<'_>,
+) -> (Option<tokio::task::JoinHandle<()>>, Option<cl_api::AppState>) {
     let StartApiArgs {
         cfg,
         node: _node,
@@ -395,7 +401,7 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
             }
             Err(e) => {
                 warn!(error = %e, "cannot generate a certificate, the api will not start");
-                return None;
+                return (None, None);
             }
         },
     };
@@ -434,17 +440,19 @@ async fn start_api(args: StartApiArgs<'_>) -> Option<tokio::task::JoinHandle<()>
         Ok(server) => server,
         Err(e) => {
             warn!(error = %e, "cannot build the api");
-            return None;
+            return (None, None);
         }
     };
+    let state = server.state();
 
     info!(%listen_addr, url = %format!("https://{fqdn}:{}", cfg.web.port), "web ui listening");
-    Some(tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         if let Err(e) = server.serve().await {
             // Port 443 needs root, and that is the usual reason this fails.
             warn!(error = %e, "api server stopped");
         }
-    }))
+    });
+    (Some(handle), Some(state))
 }
 
 /// Where a self-update artifact this node built or fetched is staged.
@@ -677,11 +685,26 @@ const GIT_BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// admin's git repo whenever `cfg.backup` is set and something tracked has
 /// changed, pushing as soon as a change is seen. Generates the cluster's ssh
 /// deploy keypair on the first tick it finds missing.
+///
+/// Every export is a full rebuild of the tracked tree straight from raft
+/// state (`cl_backup::tree::build`), which used to make this loop race the
+/// webhook-triggered pull (`routes::git_backup::run_pull`): a commit pushed
+/// directly to the repo (bypassing the api) sits on the remote, unseen by
+/// raft, until its webhook lands - and if any unrelated stack/config/secret
+/// happened to change in the meantime, this loop's very next tick rebuilt
+/// the tree straight from (stale) raft state and force-pushed over the
+/// manual commit, silently reverting it. Once the webhook's pull eventually
+/// landed, the following tick's export re-applied it - two commits, each
+/// mislabeled with whatever unrelated change actually happened to trigger
+/// them. `api_state`, when the api came up, lets this loop pull through the
+/// exact same path right before it would otherwise export, so a pending
+/// remote-only commit is folded into raft first and never gets clobbered.
 async fn watch_git_backup(
     cluster: Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     data_dir: PathBuf,
+    api_state: Option<cl_api::AppState>,
 ) {
     let dir = data_dir.join("git-backup");
     // The pull path no longer needs a separate working copy: it computes
@@ -715,6 +738,27 @@ async fn watch_git_backup(
         let state = cluster.state().await;
         let snapshot = cl_backup::snapshot::Snapshot::from_state(&state);
         if last_snapshot.as_ref() == Some(&snapshot) {
+            continue;
+        }
+
+        // Something tracked changed and an export is about to rebuild the
+        // whole tree from raft state - pull first, so a commit sitting on
+        // the remote that raft hasn't seen yet (a manual push, or a webhook
+        // still in flight) is folded in before that rebuild can clobber it.
+        // See this function's doc comment for the race this closes.
+        let state = match &api_state {
+            Some(app_state) => {
+                if let Err(e) = cl_api::routes::git_backup::run_pull(app_state).await {
+                    warn!(error = %e, "git backup: pre-export pull failed");
+                }
+                cluster.state().await
+            }
+            None => state,
+        };
+        let snapshot = cl_backup::snapshot::Snapshot::from_state(&state);
+        if last_snapshot.as_ref() == Some(&snapshot) {
+            // The pull above resolved the only outstanding difference and
+            // left nothing else to export this tick.
             continue;
         }
         let changes =

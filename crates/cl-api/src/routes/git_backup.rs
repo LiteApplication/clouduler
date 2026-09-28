@@ -399,7 +399,11 @@ enum PullDecision {
     },
 }
 
-async fn run_pull(state: &AppState) -> Result<(), ApiError> {
+/// Public so `cl-daemon`'s `watch_git_backup` can pull through this exact
+/// path right before an export would otherwise rebuild the tracked tree
+/// straight from raft state - see that function's doc comment for the race
+/// this closes.
+pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
     let backup_cfg = state
         .cluster_config
         .read()
@@ -643,6 +647,16 @@ async fn apply_pulled_tree(
                 configs.insert(config_name.clone(), bytes.clone());
             }
         }
+        // `DeployStack` always bumps the stack's revision, unconditionally -
+        // that revision feeds straight into every one of its instances'
+        // `clouduler.revision` label (`cl_sched::spec::build`), so an
+        // unconditional call here would recreate every container of every
+        // stack in the repo on every pull, not just the one(s) whose spec
+        // actually changed. Skip a stack whose pulled spec is byte-for-byte
+        // what the cluster already has.
+        if current.stacks.get(name).is_some_and(|s| &s.spec == spec) {
+            continue;
+        }
         deploy_from_files(state, name, spec.clone(), configs).await?;
     }
 
@@ -701,4 +715,81 @@ async fn apply_pulled_tree(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::harness;
+
+    const SPEC: &str = "services:\n  web:\n    image: nginx\n";
+    const SPEC_V2: &str = "services:\n  web:\n    image: nginx:1.27\n";
+
+    fn tree(stacks: &[(&str, &str)]) -> ParsedTree {
+        ParsedTree {
+            cluster_yaml: None,
+            stacks: stacks
+                .iter()
+                .map(|(n, s)| (n.to_string(), s.to_string()))
+                .collect(),
+            configs: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+        }
+    }
+
+    /// The bug a manual git push used to trigger: every stack named in a
+    /// pulled tree got redeployed (bumping its revision, and with it every
+    /// instance's `clouduler.revision` label - see `cl_sched::spec::build`),
+    /// which recreates the container, even when that stack's spec was
+    /// byte-for-byte unchanged. Only a stack whose pulled spec actually
+    /// differs from what the cluster already has may be redeployed.
+    #[tokio::test]
+    async fn a_pull_does_not_redeploy_an_unchanged_stack() {
+        let h = harness().await;
+        h.state
+            .cluster
+            .submit(ClusterRequest::DeployStack {
+                name: "site".to_string(),
+                spec: SPEC.to_string(),
+            })
+            .await
+            .expect("deploy");
+        let before = h.state.cluster.state().await;
+        assert_eq!(before.stacks["site"].revision, 1);
+
+        let cluster_config = h.state.cluster_config.read().await.clone();
+        apply_pulled_tree(&h.state, &cluster_config, &tree(&[("site", SPEC)]))
+            .await
+            .expect("apply unchanged tree");
+
+        let after = h.state.cluster.state().await;
+        assert_eq!(
+            after.stacks["site"].revision, 1,
+            "an unchanged spec must not bump the stack's revision"
+        );
+    }
+
+    /// The other half: a stack whose spec really did change must still be
+    /// redeployed.
+    #[tokio::test]
+    async fn a_pull_redeploys_a_changed_stack() {
+        let h = harness().await;
+        h.state
+            .cluster
+            .submit(ClusterRequest::DeployStack {
+                name: "site".to_string(),
+                spec: SPEC.to_string(),
+            })
+            .await
+            .expect("deploy");
+
+        let cluster_config = h.state.cluster_config.read().await.clone();
+        apply_pulled_tree(&h.state, &cluster_config, &tree(&[("site", SPEC_V2)]))
+            .await
+            .expect("apply changed tree");
+
+        let after = h.state.cluster.state().await;
+        assert_eq!(after.stacks["site"].revision, 2);
+        assert_eq!(after.stacks["site"].spec, SPEC_V2);
+    }
 }

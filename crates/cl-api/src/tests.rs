@@ -30,16 +30,18 @@ fn free_addr() -> SocketAddr {
 }
 
 /// Everything a test needs: the router, plus handles to poke at auth and
-/// session state directly rather than through http.
-struct Harness {
+/// session state directly rather than through http. `pub(crate)` so other
+/// route modules' own test submodules (e.g. `routes::git_backup`) can stand
+/// up a real single-node cluster without duplicating this setup.
+pub(crate) struct Harness {
     router: Router,
-    state: AppState,
+    pub(crate) state: AppState,
     _dir: TempDir,
     admin_key: String,
     n0_id: uuid::Uuid,
 }
 
-async fn harness() -> Harness {
+pub(crate) async fn harness() -> Harness {
     let dir = TempDir::new().expect("tempdir");
     let addr = free_addr();
     let n0_id = uuid::Uuid::new_v4();
