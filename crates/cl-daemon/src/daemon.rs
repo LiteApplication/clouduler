@@ -370,7 +370,10 @@ struct StartApiArgs<'a> {
 /// uses instead of duplicating it - see that function's doc comment.
 async fn start_api(
     args: StartApiArgs<'_>,
-) -> (Option<tokio::task::JoinHandle<()>>, Option<cl_api::AppState>) {
+) -> (
+    Option<tokio::task::JoinHandle<()>>,
+    Option<cl_api::AppState>,
+) {
     let StartApiArgs {
         cfg,
         node: _node,

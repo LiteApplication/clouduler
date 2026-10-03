@@ -325,9 +325,17 @@ async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
 
     let dir = state.data_dir.join("git-backup");
     let commit_oid = tokio::task::spawn_blocking(move || {
-        let backup =
-            cl_backup::git::GitBackup::open_or_init(&dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
-        backup.reconcile(&files, "reconcile: mirror cluster state", &private_key_pem, None)
+        let backup = cl_backup::git::GitBackup::open_or_init(
+            &dir,
+            &backup_cfg.repo_url,
+            &backup_cfg.branch,
+        )?;
+        backup.reconcile(
+            &files,
+            "reconcile: mirror cluster state",
+            &private_key_pem,
+            None,
+        )
     })
     .await
     .map_err(ApiError::internal)?
@@ -378,7 +386,9 @@ async fn publish_last_export(state: &AppState, export: &LastExport) -> Result<()
         .await
         .map_err(ApiError::not_leader)?;
     if let Some(msg) = response.error {
-        return Err(ApiError::Internal(format!("publishing export status: {msg}")));
+        return Err(ApiError::Internal(format!(
+            "publishing export status: {msg}"
+        )));
     }
     Ok(())
 }
@@ -427,8 +437,8 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             )
         })?;
     let existing_secrets: BTreeSet<String> = cluster_state.secrets.keys().cloned().collect();
-    let last_good_oid = last_known_good_commit(&cluster_state)
-        .and_then(|s| git2::Oid::from_str(&s).ok());
+    let last_good_oid =
+        last_known_good_commit(&cluster_state).and_then(|s| git2::Oid::from_str(&s).ok());
 
     let dir = state.data_dir.join("git-backup");
     let decision = tokio::task::spawn_blocking(move || {
@@ -572,7 +582,13 @@ fn pull_and_decide(
             parsed: Box::new(parsed),
         }),
         Err(reason) => {
-            let outcome = backup.reject_and_restore(candidate, last_good_oid, &reason, private_key_pem, None)?;
+            let outcome = backup.reject_and_restore(
+                candidate,
+                last_good_oid,
+                &reason,
+                private_key_pem,
+                None,
+            )?;
             Ok(PullDecision::Rejected {
                 reason,
                 preserved_branch: outcome.preserved_branch,

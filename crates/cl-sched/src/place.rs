@@ -1057,7 +1057,8 @@ mod tests {
         piosny.last_resort = true;
         state.apply(&Request::UpsertNode(piosny));
 
-        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        let decisions =
+            place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         assert_ne!(placed(&decisions, "web", 0), Some("piosny".to_string()));
     }
 
@@ -1068,7 +1069,8 @@ mod tests {
         piosny.last_resort = true;
         state.apply(&Request::UpsertNode(piosny));
 
-        let decisions = place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        let decisions =
+            place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         assert_eq!(placed(&decisions, "web", 0), Some("piosny".to_string()));
     }
 

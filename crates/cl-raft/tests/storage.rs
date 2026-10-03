@@ -40,7 +40,7 @@ fn node(name: &str) -> NodeState {
         drives: BTreeMap::from([("fast".to_string(), PathBuf::from("/srv/fast"))]),
         availability: Availability::Active,
         labels: Default::default(),
-            last_resort: false,
+        last_resort: false,
         egress_networks: Default::default(),
         networks: Default::default(),
         open_ports: Default::default(),

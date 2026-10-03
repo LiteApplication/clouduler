@@ -12,8 +12,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::client::client_for;
 use cl_raft::state::Request;
-use cl_secret::ClusterKey;
 use cl_sched::registries::{normalize_server, secret_name, verify, Registries, StoredLogin};
+use cl_secret::ClusterKey;
 use tracing::debug;
 
 fn http_client() -> Result<reqwest::Client> {
@@ -88,10 +88,15 @@ pub async fn login(
         username: username.to_string(),
         password,
     };
-    let (name, sealed) = login.seal(&key).with_context(|| format!("sealing the login for {server}"))?;
+    let (name, sealed) = login
+        .seal(&key)
+        .with_context(|| format!("sealing the login for {server}"))?;
 
     let client = client_for(cfg, via)?;
-    debug!(server = server.as_str(), "submitting PutSecret for a registry login");
+    debug!(
+        server = server.as_str(),
+        "submitting PutSecret for a registry login"
+    );
     let response = client
         .submit(Request::PutSecret {
             name,

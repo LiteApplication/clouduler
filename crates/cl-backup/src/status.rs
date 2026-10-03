@@ -147,7 +147,10 @@ mod tests {
                 owner: None,
             },
         );
-        assert_eq!(last_known_good_commit(&state), Some("commit_export".to_string()));
+        assert_eq!(
+            last_known_good_commit(&state),
+            Some("commit_export".to_string())
+        );
 
         // Rejected pull should not overwrite good export commit
         let rejected_pull = LastPull {
@@ -167,7 +170,10 @@ mod tests {
                 owner: None,
             },
         );
-        assert_eq!(last_known_good_commit(&state), Some("commit_export".to_string()));
+        assert_eq!(
+            last_known_good_commit(&state),
+            Some("commit_export".to_string())
+        );
 
         // Successful pull should become the latest
         let good_pull = LastPull {
@@ -184,6 +190,9 @@ mod tests {
                 owner: None,
             },
         );
-        assert_eq!(last_known_good_commit(&state), Some("commit_pull".to_string()));
+        assert_eq!(
+            last_known_good_commit(&state),
+            Some("commit_pull".to_string())
+        );
     }
 }

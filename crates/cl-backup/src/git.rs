@@ -230,14 +230,9 @@ impl GitBackup {
                 None => vec![],
             };
             let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-            let commit_oid = self.repo.commit(
-                None,
-                &signature,
-                &signature,
-                message,
-                &tree,
-                &parent_refs,
-            )?;
+            let commit_oid =
+                self.repo
+                    .commit(None, &signature, &signature, message, &tree, &parent_refs)?;
             self.repo.reference(
                 &format!("refs/heads/{}", self.branch),
                 commit_oid,
@@ -866,7 +861,9 @@ mod tests {
         let dummy_key = "not-a-real-key";
         let first = backup.sync(&files, "first", dummy_key, None).expect("sync");
         assert!(first.is_some());
-        let second = backup.sync(&files, "second", dummy_key, None).expect("sync");
+        let second = backup
+            .sync(&files, "second", dummy_key, None)
+            .expect("sync");
         assert_eq!(second, None);
     }
 
@@ -917,7 +914,12 @@ mod tests {
             },
         ];
         let second_oid = second_leader
-            .sync(&second_files, "second leader's first export", dummy_key, None)
+            .sync(
+                &second_files,
+                "second leader's first export",
+                dummy_key,
+                None,
+            )
             .expect("sync")
             .expect("a real commit");
 
@@ -969,8 +971,6 @@ mod tests {
         let dummy_key = "not-a-real-key";
         assert_eq!(puller.fetch_remote_tip(dummy_key).expect("fetch"), None);
     }
-
-
 
     #[test]
     fn secrets_subtree_changed_ignores_non_secret_churn() {
@@ -1154,7 +1154,13 @@ mod tests {
             .expect("a real commit");
 
         let outcome = backup
-            .reject_and_restore(bad_oid, None, "cluster.yaml failed to parse", dummy_key, None)
+            .reject_and_restore(
+                bad_oid,
+                None,
+                "cluster.yaml failed to parse",
+                dummy_key,
+                None,
+            )
             .expect("reject_and_restore");
 
         assert_eq!(outcome.restored_commit, Some(initial_oid));
@@ -1224,7 +1230,12 @@ mod tests {
         ];
 
         let reconcile_oid = backup
-            .reconcile(&raft_files, "reconcile: mirror cluster state", dummy_key, None)
+            .reconcile(
+                &raft_files,
+                "reconcile: mirror cluster state",
+                dummy_key,
+                None,
+            )
             .expect("reconcile");
         assert_ne!(reconcile_oid, first_oid);
 
@@ -1316,7 +1327,12 @@ mod tests {
 
         let dummy_key = "not-a-real-key";
         let oid = backup
-            .sync(&files, "add cluster.yaml", dummy_key, Some(("alice", "alice@example.com")))
+            .sync(
+                &files,
+                "add cluster.yaml",
+                dummy_key,
+                Some(("alice", "alice@example.com")),
+            )
             .expect("sync")
             .expect("commit oid");
 
@@ -1325,5 +1341,4 @@ mod tests {
         assert_eq!(commit.author().name(), Some("alice"));
         assert_eq!(commit.author().email(), Some("alice@example.com"));
     }
-
 }

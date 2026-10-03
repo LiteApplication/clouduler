@@ -128,7 +128,7 @@ pub(crate) async fn harness() -> Harness {
                 data_dir: None,
                 docker_data_dir: None,
                 generate_secret_key: None,
-            last_resort: false,
+                last_resort: false,
             },
         )]),
         web: WebConfig {
@@ -1083,7 +1083,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
                 data_dir: None,
                 docker_data_dir: None,
                 generate_secret_key: None,
-            last_resort: false,
+                last_resort: false,
             },
         );
         let net = cfg.networks.get_mut("internal").unwrap();
@@ -1410,7 +1410,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             drives: BTreeMap::new(),
             availability: Availability::Active,
             labels: Default::default(),
-        last_resort: false,
+            last_resort: false,
             egress_networks: Default::default(),
             networks: Default::default(),
             open_ports: Default::default(),

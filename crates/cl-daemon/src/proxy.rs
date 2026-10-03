@@ -21,13 +21,13 @@ use cl_api::redirects::RedirectStore;
 use cl_api::static_routes::StaticRouteStore;
 use cl_config::{qualify, ClusterConfig, NetworkKind};
 use cl_dns::{Cloudflare, DesiredRecord};
+use cl_net::egress::nat_subnet;
+use cl_net::Allocations;
 use cl_proxy::{
     ensure_crypto_provider, issue_certificate, issue_certificate_http01, AcmeConfig, CertStore,
     Http01Store, RedirectTarget, Route, RouteOptions, RouteTable, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
-use cl_net::egress::nat_subnet;
-use cl_net::Allocations;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{
     dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request,
