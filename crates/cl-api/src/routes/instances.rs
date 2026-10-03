@@ -1118,18 +1118,28 @@ async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, s
         }
     };
 
+    // The client's own stdin - not just its tty state - drives when it sends
+    // `Close`: a non-interactive caller (piped stdin, e.g. `ssh host clouduler
+    // exec ...` without `-tt`) hits EOF on its stdin almost immediately and
+    // closes right away, often before the command has produced any output at
+    // all. That close only means "no more input" - closing `session.input`
+    // (which the docker exec sees as its stdin closing, same as a real
+    // terminal hanging up) is the correct reaction, not tearing down the
+    // whole session and discarding output the command hasn't gotten to write
+    // yet.
+    let mut input = Some(session.input);
     loop {
         tokio::select! {
-            incoming = socket.recv() => {
+            incoming = socket.recv(), if input.is_some() => {
                 match incoming {
                     Some(Ok(Message::Binary(data))) => {
-                        if session.input.write_all(&data).await.is_err() {
-                            break;
+                        if input.as_mut().unwrap().write_all(&data).await.is_err() {
+                            input = None;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => input = None,
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
+                    Some(Err(_)) => input = None,
                 }
             }
             chunk = session.output.next() => {
