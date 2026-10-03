@@ -206,20 +206,52 @@ impl Docker {
     /// the workload.
     pub async fn set_default_route(&self, container: &str, network: &str) -> Result<()> {
         let gateway = self.network_gateway(network).await?;
+        self.ip_route_in_netns(
+            container,
+            &["replace", "default", "via", &gateway.to_string()],
+        )
+        .await
+    }
+
+    /// Keep traffic to `destinations` on the container's primary (overlay)
+    /// attachment, via `gateway`, instead of letting it follow the default
+    /// route.
+    ///
+    /// For a container whose default route was moved to an egress network
+    /// (`set_default_route`): the egress bridge's kill-switch drops anything
+    /// not leaving through its interface, which includes the node addresses
+    /// the reverse proxy answers on. A more specific `/32` route wins over
+    /// the default one, so those addresses stay reachable and everything else
+    /// is still under the kill-switch.
+    pub async fn pin_routes(
+        &self,
+        container: &str,
+        gateway: Ipv4Addr,
+        destinations: &[Ipv4Addr],
+    ) -> Result<()> {
+        for destination in destinations {
+            self.ip_route_in_netns(
+                container,
+                &[
+                    "replace",
+                    &format!("{destination}/32"),
+                    "via",
+                    &gateway.to_string(),
+                ],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// `ip route <args>` run inside the container's network namespace, from
+    /// the host, needing only the daemon's own privileges.
+    async fn ip_route_in_netns(&self, container: &str, args: &[&str]) -> Result<()> {
         let pid = self.container_pid(container).await?;
 
         let output = tokio::process::Command::new("nsenter")
-            .args([
-                "-t",
-                &pid.to_string(),
-                "-n",
-                "ip",
-                "route",
-                "replace",
-                "default",
-                "via",
-                &gateway.to_string(),
-            ])
+            .args(["-t", &pid.to_string(), "-n", "ip", "route"])
+            .args(args)
             .output()
             .await
             .map_err(|e| DockerError::Other(format!("running nsenter for {container}: {e}")))?;
@@ -227,7 +259,8 @@ impl Docker {
             Ok(())
         } else {
             Err(DockerError::Other(format!(
-                "nsenter route replace for {container} failed: {}",
+                "nsenter route {} for {container} failed: {}",
+                args.join(" "),
                 String::from_utf8_lossy(&output.stderr)
             )))
         }
@@ -345,7 +378,11 @@ impl Docker {
 /// comment) and every route gated on that trust will 403 a same-node peer on
 /// it until an operator removes the stack using it, deletes the docker
 /// network by hand, and lets it get recreated with the pinned subnet.
-fn warn_on_nat_subnet_drift(name: &str, expected: &str, existing: &bollard::models::NetworkInspect) {
+fn warn_on_nat_subnet_drift(
+    name: &str,
+    expected: &str,
+    existing: &bollard::models::NetworkInspect,
+) {
     let actual = existing
         .ipam
         .as_ref()

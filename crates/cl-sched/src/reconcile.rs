@@ -264,7 +264,18 @@ impl Reconciler {
             let Some(state) = running.get(&target.assignment.instance) else {
                 continue;
             };
-            if !state.running || state.networks.contains(egress) {
+            if !state.running {
+                continue;
+            }
+            if state.networks.contains(egress) {
+                // Already attached, but the node set or this service's
+                // networks may have changed since the routes were pinned, and
+                // a container started before this existed never had them.
+                // Idempotent (`ip route replace`).
+                let name = target.assignment.instance.container_name();
+                if let Err(e) = self.pin_proxy_routes(&name, &target.spec).await {
+                    warn!(instance = %target.assignment.instance, error = %e, "cannot keep the proxy addresses on the overlay");
+                }
                 continue;
             }
 
@@ -275,7 +286,7 @@ impl Reconciler {
                 continue;
             }
             let name = id.container_name();
-            if let Err(e) = self.docker.set_default_route(&name, egress).await {
+            if let Err(e) = self.route_egress(&name, &target.spec).await {
                 warn!(instance = %id, network = %egress, error = %e, "cannot route this container's traffic out the egress network");
             }
         }
@@ -317,9 +328,7 @@ impl Reconciler {
                         .await?;
                 }
                 self.docker.start(&name).await?;
-                if let Some(egress) = &target.spec.egress_network {
-                    self.docker.set_default_route(&name, egress).await?;
-                }
+                self.route_egress(&name, &target.spec).await?;
             }
             Action::Start(id) => {
                 info!(instance = %id, "starting");
@@ -333,8 +342,8 @@ impl Reconciler {
                 // A fresh start means a fresh pid, so a route pinned to the
                 // old one is gone too: has to be redone every time, not just
                 // on create.
-                if let Some(egress) = target.and_then(|t| t.spec.egress_network.as_ref()) {
-                    self.docker.set_default_route(&name, egress).await?;
+                if let Some(target) = target {
+                    self.route_egress(&name, &target.spec).await?;
                 }
             }
             Action::Stop(id) => {
@@ -399,9 +408,32 @@ impl Reconciler {
                 .await?;
         }
         self.docker.start(name).await?;
-        if let Some(egress) = &target.spec.egress_network {
-            self.docker.set_default_route(name, egress).await?;
+        self.route_egress(name, &target.spec).await
+    }
+
+    /// Points a started container's default route at its egress network, if
+    /// it has one, and keeps the proxy's node addresses on the overlay.
+    async fn route_egress(&self, name: &str, spec: &ContainerSpec) -> Result<()> {
+        let Some(egress) = &spec.egress_network else {
+            return Ok(());
+        };
+        self.docker.set_default_route(name, egress).await?;
+        self.pin_proxy_routes(name, spec).await
+    }
+
+    /// Without this, a route published on a network the service is a member
+    /// of resolves to a node address that is not on the overlay, follows the
+    /// egress default route and dies in the bridge's kill-switch.
+    async fn pin_proxy_routes(&self, name: &str, spec: &ContainerSpec) -> Result<()> {
+        let Some(gateway) = spec.pinned_gateway else {
+            return Ok(());
+        };
+        if spec.pinned_routes.is_empty() {
+            return Ok(());
         }
+        self.docker
+            .pin_routes(name, gateway, &spec.pinned_routes)
+            .await?;
         Ok(())
     }
 }

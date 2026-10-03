@@ -153,6 +153,14 @@ pub struct ContainerSpec {
     /// creation with `Docker::connect_network`, since docker only takes one
     /// network at create time.
     pub egress_network: Option<String>,
+    /// Addresses that must stay reachable over `network` even though the
+    /// default route points at `egress_network`: the nodes' addresses on the
+    /// internal network, where the reverse proxy answers for every route
+    /// published on a network this service is a member of. Empty when there
+    /// is no egress network. See `Docker::pin_routes`.
+    pub pinned_routes: Vec<Ipv4Addr>,
+    /// Next hop for `pinned_routes`: the overlay gateway of `network`.
+    pub pinned_gateway: Option<Ipv4Addr>,
 }
 
 impl ContainerSpec {

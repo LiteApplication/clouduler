@@ -335,6 +335,35 @@ anything else, so it is dropped rather than silently falling back to the
 node's normal WAN. Nothing has to notice the interface is down and react —
 the ruleset simply never had another way out.
 
+### Routes published on a network the service is a member of
+
+A service attached to both the internal network and an egress network keeps
+reaching every route the proxy publishes on that internal network, whichever
+stack the route belongs to. The internal DNS zone answers such a hostname
+(e.g. `omniroute.home.liteapp.fr`) with the nodes' addresses on the internal
+network, and those are not on the stack overlay. With the default route moved
+to the egress bridge they would follow it and hit the final `DROP` of the
+kill-switch.
+
+So for a service that lists the internal network in `networks:`, the daemon
+adds a `/32` route per node internal address via the overlay gateway inside
+the container's network namespace (`Docker::pin_routes`, applied right after
+`set_default_route` and re-applied idempotently every reconcile pass for
+containers already running). The more specific route wins; every other
+destination is still under the kill-switch. A service that is *not* a member
+of the internal network gets no such route.
+
+Reaching a node *other than the local one* also needs a source NAT, because
+overlay networks are created with docker's own masquerade off and the
+underlay drops a packet that still carries an overlay source address. Every
+node therefore keeps a `CLDR-OVL-SNAT` chain in `nat/POSTROUTING`
+(`cl_net::egress::overlay_snat_plan`, applied by the egress reconcile loop)
+that masquerades only the overlay pool towards the *other* nodes' internal
+addresses, so the remote proxy sees this node's internal address and the
+network gate lets it through. This applies to every overlay container, not
+just ones with an egress network: before it, a container could only reach a
+published route when DNS happened to answer with its own node.
+
 ### Optional fallback interface
 
 An egress-kind node address can name a second interface plus a

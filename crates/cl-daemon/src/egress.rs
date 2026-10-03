@@ -38,7 +38,7 @@ use cl_config::{ClusterConfig, InterfaceAddress, NetworkKind, NodeAddress};
 use cl_docker::{Docker, NetworkSpec};
 use cl_net::egress::{
     apply_egress_iptables, egress_docker_name, egress_gateway, egress_iptables_plan, egress_subnet,
-    ensure_egress_bridge, nat_docker_name, nat_subnet,
+    ensure_egress_bridge, nat_docker_name, nat_subnet, overlay_snat_plan,
 };
 use cl_net::vxlan::Overlay;
 use cl_net::wireguard::{
@@ -173,6 +173,10 @@ pub fn start(
                 }
             }
 
+            if let Err(e) = ensure_overlay_snat(&cfg, &node_name).await {
+                warn!(error = %e, "cannot apply the overlay source NAT towards the other nodes");
+            }
+
             let interfaces = interfaces_of(&cfg, &node_name);
             if interfaces.is_empty() {
                 continue;
@@ -219,6 +223,31 @@ pub fn start(
             }
         }
     })
+}
+
+/// Keeps an overlay container able to reach the other nodes' addresses on
+/// the internal network, where each node's reverse proxy answers. See
+/// `cl_net::egress::overlay_snat_plan` for why this needs a source NAT.
+async fn ensure_overlay_snat(cfg: &ClusterConfig, node_name: &str) -> Result<()> {
+    let others: Vec<std::net::Ipv4Addr> = cfg
+        .nodes
+        .iter()
+        .filter(|(name, _)| name.as_str() != node_name)
+        .filter_map(|(_, node)| match cfg.internal_ip(node) {
+            Some(IpAddr::V4(ip)) => Some(ip),
+            _ => None,
+        })
+        .collect();
+    let plan = overlay_snat_plan(
+        cl_net::ipam::DEFAULT_OVERLAY_POOL
+            .parse()
+            .context("parsing the default overlay pool")?,
+        &others,
+    );
+    tokio::task::spawn_blocking(move || apply_egress_iptables(&plan))
+        .await
+        .context("iptables task panicked")?
+        .context("applying the overlay source NAT")
 }
 
 /// Open this node's sealed config for `network` and bring the tunnel

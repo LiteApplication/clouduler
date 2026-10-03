@@ -186,6 +186,53 @@ pub fn egress_iptables_plan(bridge: &str, subnet: Ipv4Net, iface: &str) -> Egres
     }
 }
 
+/// Source-NATs a container's overlay address when it talks to another node's
+/// address on the internal network.
+///
+/// Overlay networks are created with docker's own masquerade off, so a packet
+/// from an overlay container to a node address (where that node's reverse
+/// proxy answers for every route published on the network) leaves this host
+/// still carrying the overlay source. The underlay (a tailnet, say) drops it,
+/// so the proxy was only reachable on the container's own node. Masquerading
+/// just `overlay_pool` -> `node_addrs` makes the remote proxy see this node's
+/// own internal address, which sits inside the network's subnet and passes the
+/// proxy's network gate. Nothing else is NATed: an overlay container has no
+/// route to anything outside the cluster except through an egress network.
+///
+/// A node's own address is never listed: it is delivered locally, before
+/// `POSTROUTING`.
+pub fn overlay_snat_plan(pool: Ipv4Net, node_addrs: &[Ipv4Addr]) -> EgressIptablesPlan {
+    let nat_chain = "CLDR-OVL-SNAT".to_string();
+    let pool = pool.to_string();
+    let mut setup = vec![
+        argv(&["-t", "nat", "-N", &nat_chain]),
+        argv(&["-t", "nat", "-F", &nat_chain]),
+    ];
+    for addr in node_addrs {
+        setup.push(argv(&[
+            "-t",
+            "nat",
+            "-A",
+            &nat_chain,
+            "-s",
+            &pool,
+            "-d",
+            &format!("{addr}/32"),
+            "-j",
+            "MASQUERADE",
+        ]));
+    }
+    EgressIptablesPlan {
+        nat_chain: nat_chain.clone(),
+        fwd_chain: String::new(),
+        setup,
+        jumps: vec![(
+            argv(&["-t", "nat", "-C", "POSTROUTING", "-j", &nat_chain]),
+            argv(&["-t", "nat", "-A", "POSTROUTING", "-j", &nat_chain]),
+        )],
+    }
+}
+
 pub struct EgressIptablesPlan {
     pub nat_chain: String,
     pub fwd_chain: String,
@@ -383,6 +430,28 @@ mod tests {
             .expect("a masquerade rule");
         assert!(nat.iter().any(|a| a == "10.245.7.0/24"));
         assert!(nat.windows(2).any(|w| w == ["-o", "wg0"]));
+    }
+
+    #[test]
+    fn the_overlay_snat_only_masquerades_the_pool_towards_the_listed_nodes() {
+        let plan = overlay_snat_plan(
+            "10.244.0.0/16".parse().unwrap(),
+            &[Ipv4Addr::new(100, 64, 0, 1), Ipv4Addr::new(100, 64, 0, 2)],
+        );
+        let rules: Vec<String> = plan
+            .setup
+            .iter()
+            .filter(|a| a.contains(&"-A".to_string()))
+            .map(|a| a.join(" "))
+            .collect();
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].contains("-s 10.244.0.0/16"));
+        assert!(rules[0].contains("-d 100.64.0.1/32"));
+        assert!(rules.iter().all(|r| r.ends_with("-j MASQUERADE")));
+        // No address, no rule: the chain is still flushed so a removed node
+        // stops being NATed.
+        let empty = overlay_snat_plan("10.244.0.0/16".parse().unwrap(), &[]);
+        assert!(!empty.setup.iter().any(|a| a.contains(&"-A".to_string())));
     }
 
     #[test]

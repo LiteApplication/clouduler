@@ -32,6 +32,9 @@ pub struct Placement {
     /// Docker network for a second, egress-kind attachment, if the service
     /// names one of those in its `networks:` list.
     pub egress_network: Option<String>,
+    /// Node addresses the proxy answers on, kept on the overlay attachment
+    /// rather than the egress default route. See `ContainerSpec::pinned_routes`.
+    pub proxy_addresses: Vec<std::net::Ipv4Addr>,
 }
 
 /// The configs and secrets already written to disk for an instance:
@@ -161,6 +164,12 @@ pub fn build(
         resources: resources(service),
         healthcheck: healthcheck(service),
         stop_signal: service.stop_signal.clone(),
+        pinned_gateway: placement.egress_network.as_ref().and(placement.resolver),
+        pinned_routes: placement
+            .egress_network
+            .as_ref()
+            .map(|_| placement.proxy_addresses.clone())
+            .unwrap_or_default(),
         egress_network: placement.egress_network,
     }
 }
@@ -336,6 +345,7 @@ mod tests {
             resolver: Some(std::net::Ipv4Addr::new(10, 244, 0, 1)),
             zone: Some("int.example.com".into()),
             egress_network: None,
+            proxy_addresses: Vec::new(),
         };
         let spec = build(
             &instance(),
@@ -364,6 +374,45 @@ mod tests {
             ]
         );
         assert_eq!(spec.dns_options, vec!["ndots:2".to_string()]);
+    }
+
+    /// A service with an egress network gets its default route moved there,
+    /// so the proxy's node addresses must be pinned to the overlay gateway or
+    /// the egress bridge's kill-switch drops them. Without an egress network
+    /// there is nothing to pin.
+    #[test]
+    fn proxy_addresses_are_pinned_only_alongside_an_egress_network() {
+        let s = service("services:\n  web:\n    image: nginx\n");
+        let node = std::net::Ipv4Addr::new(100, 64, 0, 1);
+        let gateway = std::net::Ipv4Addr::new(10, 244, 0, 1);
+        let build_with = |egress: Option<&str>| {
+            build(
+                &instance(),
+                &s,
+                Materialization {
+                    objects: &[],
+                    env: &[],
+                    drive_roots: &roots(),
+                },
+                Placement {
+                    network: Some("site_default".into()),
+                    resolver: Some(gateway),
+                    egress_network: egress.map(str::to_string),
+                    proxy_addresses: vec![node],
+                    ..Default::default()
+                },
+                None,
+                1,
+            )
+        };
+
+        let with = build_with(Some("egress_wan"));
+        assert_eq!(with.pinned_routes, vec![node]);
+        assert_eq!(with.pinned_gateway, Some(gateway));
+
+        let without = build_with(None);
+        assert!(without.pinned_routes.is_empty());
+        assert_eq!(without.pinned_gateway, None);
     }
 
     #[test]

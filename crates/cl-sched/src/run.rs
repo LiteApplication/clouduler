@@ -622,6 +622,21 @@ impl Scheduler {
                     },
                 );
 
+            // Node addresses on the internal network, where the proxy answers
+            // for routes published on it. Only a service that is a member of
+            // that network gets them kept off the egress default route.
+            let (internal_name, _) = live.internal_network();
+            if service.networks.iter().any(|n| n == internal_name) {
+                placement.proxy_addresses = live
+                    .nodes
+                    .values()
+                    .filter_map(|node| match live.internal_ip(node) {
+                        Some(std::net::IpAddr::V4(ip)) => Some(ip),
+                        _ => None,
+                    })
+                    .collect();
+            }
+
             // An instance on its way somewhere else must not be started here
             // again between the migration stopping it and the handover
             // finishing: the two loops would fight, and every restart would
