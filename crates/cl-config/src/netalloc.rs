@@ -41,12 +41,22 @@ pub fn subnet_octet(network: &str) -> u8 {
     (fnv1a(network.as_bytes()) % 256) as u8
 }
 
+/// The hasher behind every derived identifier that gets persisted: policy
+/// routing tables in the kernel, the revision label on containers and NFS
+/// fsids held by clients. SipHash-1-3 with zero keys is what
+/// `DefaultHasher::new()` happened to be when those values were first handed
+/// out, but std documents its algorithm as unspecified, so this pins it. The
+/// output must never change, or live networks, containers and mounts drift.
+pub fn stable_hasher() -> siphasher::sip::SipHasher13 {
+    siphasher::sip::SipHasher13::new_with_keys(0, 0)
+}
+
 /// The policy routing table an egress or wireguard network's bridge looks up.
 ///
-/// Deliberately the std hasher the daemon always used for this, not FNV: the
+/// Deliberately the SipHash the daemon always used for this, not FNV: the
 /// ids of networks that already exist on live nodes must not change.
 pub fn egress_table_id(network: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = stable_hasher();
     network.hash(&mut hasher);
     EGRESS_TABLE_BASE + (hasher.finish() % 1000) as u32
 }
@@ -83,6 +93,34 @@ pub fn check_interface_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    // Guards the move off `DefaultHasher` on the current toolchain. If a future
+    // rustc changes `DefaultHasher`, this may start failing: that is expected,
+    // delete it then and keep the hardcoded values below.
+    #[test]
+    fn stable_hasher_matches_default_hasher_today() {
+        for name in ["", "a", "vpn", "egress-net", "wg0", "réseau"] {
+            let mut old = DefaultHasher::new();
+            name.hash(&mut old);
+            let mut new = stable_hasher();
+            name.hash(&mut new);
+            assert_eq!(old.finish(), new.finish(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn stable_hasher_values_are_pinned() {
+        let hash = |s: &str| {
+            let mut h = stable_hasher();
+            s.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash("vpn"), 8819488551843405589);
+        assert_eq!(hash("egress-net"), 7284548392039946455);
+        assert_eq!(egress_table_id("vpn"), 5589);
+        assert_eq!(egress_table_id("egress-net"), 5455);
+    }
 
     #[test]
     fn interface_names_are_checked_like_the_kernel_does() {

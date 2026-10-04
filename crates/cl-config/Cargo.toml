@@ -8,6 +8,7 @@ license.workspace = true
 humantime-serde.workspace = true
 ipnet.workspace = true
 regex.workspace = true
+siphasher.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true

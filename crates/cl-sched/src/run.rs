@@ -949,7 +949,7 @@ fn revision_with_mounts(
     }
 
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = cl_config::stable_hasher();
     revision.hash(&mut hasher);
     bits.hash(&mut hasher);
     ip.hash(&mut hasher);
@@ -1407,6 +1407,52 @@ fn expire_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mounts_service() -> cl_config::Service {
+        service_with_volumes("      - fast/data:/data\n")
+    }
+
+    // Guards the move off `DefaultHasher` on the current toolchain. If a future
+    // rustc changes `DefaultHasher`, this may start failing: that is expected,
+    // delete it then and keep the pinned values.
+    #[test]
+    fn revision_matches_default_hasher_today() {
+        use std::hash::{Hash, Hasher};
+        let service = mounts_service();
+        let dynamic: BTreeSet<String> = ["fast".to_string()].into();
+        let ips = [None, Some(std::net::Ipv4Addr::new(10, 1, 2, 3))];
+        for revision in [0u64, 7, u64::MAX] {
+            for ip in ips {
+                let mut old = std::collections::hash_map::DefaultHasher::new();
+                revision.hash(&mut old);
+                1u64.hash(&mut old);
+                ip.hash(&mut old);
+                assert_eq!(
+                    revision_with_mounts(revision, &service, &dynamic, ip),
+                    old.finish()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn revision_values_are_pinned() {
+        let service = mounts_service();
+        let dynamic: BTreeSet<String> = ["fast".to_string()].into();
+        assert_eq!(
+            revision_with_mounts(7, &service, &dynamic, None),
+            5074014468841562254
+        );
+        assert_eq!(
+            revision_with_mounts(
+                7,
+                &service,
+                &BTreeSet::new(),
+                Some(std::net::Ipv4Addr::new(10, 1, 2, 3))
+            ),
+            12979125382987782001
+        );
+    }
     use cl_raft::state::{Assignment, Availability, DesiredState, InstanceUpdate, NodeState, Role};
 
     fn update(phase: UpdatePhase, at: i64) -> InstanceUpdate {

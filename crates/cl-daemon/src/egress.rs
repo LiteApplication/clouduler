@@ -498,6 +498,19 @@ async fn ensure_one(
         )
         .to_string();
 
+        // Rules left on this bridge by an older table id would match before
+        // the current one; see `plan_stale_rules`.
+        let stale_rules = cl_net::egress::plan_stale_rules(
+            &cl_net::egress::parse_policy_rules(&existing_rules),
+            &bridge_for_rule,
+            table_id,
+        );
+        let remove_stale = |actions: &[cl_net::egress::SweepAction]| {
+            for failed in cl_net::egress::run_sweep(actions).failed {
+                warn!(network = %network_owned, "removing stale egress routing: {failed}");
+            }
+        };
+
         if kind == NetworkKind::Wireguard {
             // A wireguard tunnel does cryptokey routing: there is no
             // next-hop gateway address the way a plain ethernet egress
@@ -562,6 +575,7 @@ async fn ensure_one(
                         .status()
                         .ok();
                 }
+                remove_stale(&stale_rules);
                 warn!(
                     network = %network_owned, iface = %iface_for_route,
                     "no default route found on this interface, egress is blocked until it has one",
@@ -608,6 +622,9 @@ async fn ensure_one(
                 anyhow::bail!("ip rule add failed");
             }
         }
+        // Only after the current rule is in place, so the bridge is never
+        // left without one.
+        remove_stale(&stale_rules);
         Ok(true)
     })
     .await

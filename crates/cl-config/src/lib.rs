@@ -17,7 +17,7 @@ pub use cluster::{
 };
 pub use error::{ConfigError, Result};
 pub use netalloc::{
-    check_interface_name, egress_table_id, fnv1a, subnet_octet, EGRESS_POOL_BASE,
+    check_interface_name, egress_table_id, fnv1a, stable_hasher, subnet_octet, EGRESS_POOL_BASE,
     EGRESS_TABLE_BASE, IFNAME_MAX_BYTES, NAT_POOL_BASE,
 };
 pub use stack::{

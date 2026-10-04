@@ -27,7 +27,7 @@ pub const NFS_PORT: u16 = 2049;
 /// restarted; this only needs to be stable and unique per drive on this
 /// host, not globally unique.
 fn fsid_of(drive: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = cl_config::stable_hasher();
     drive.hash(&mut hasher);
     (hasher.finish() % 1_000_000) as u32 + 1
 }
@@ -131,6 +131,24 @@ fn server_running_from(pool_threads_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Guards the move off `DefaultHasher` on the current toolchain. If a future
+    // rustc changes `DefaultHasher`, this may start failing: that is expected,
+    // delete it then and keep the pinned values.
+    #[test]
+    fn fsid_matches_default_hasher_today() {
+        for drive in ["fast", "bulk", "veryfast", "a"] {
+            let mut old = std::collections::hash_map::DefaultHasher::new();
+            drive.hash(&mut old);
+            assert_eq!(fsid_of(drive), (old.finish() % 1_000_000) as u32 + 1);
+        }
+    }
+
+    #[test]
+    fn fsid_values_are_pinned() {
+        assert_eq!(fsid_of("fast"), 620140);
+        assert_eq!(fsid_of("bulk"), 644159);
+    }
 
     #[test]
     fn fsid_is_deterministic_and_differs_per_drive() {

@@ -927,6 +927,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_yaml",
+ "siphasher",
  "tempfile",
  "thiserror 2.0.20",
  "uuid",
@@ -4951,6 +4952,12 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
 ]
+
+[[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"

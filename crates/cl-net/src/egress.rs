@@ -603,6 +603,32 @@ pub fn plan_sweep(host: &HostObjects, wanted: &Wanted) -> Vec<SweepAction> {
     actions
 }
 
+/// Decide which stale rules `bridge` has left over. A table id is derived from
+/// the network name, so a rule from an older id can outlive a daemon upgrade,
+/// match first and keep sending the bridge down an un-updated route. Pure, and
+/// scoped like [`plan_sweep`]: only priority [`POLICY_RULE_PRIORITY`] rules on
+/// this `clex-` bridge that point at a table other than `table`, never the
+/// table range alone. A stale table is flushed only once, and only when no
+/// rule that stays still looks it up.
+pub fn plan_stale_rules(rules: &[PolicyRule], bridge: &str, table: u32) -> Vec<SweepAction> {
+    let is_stale = |rule: &PolicyRule| {
+        rule.priority == POLICY_RULE_PRIORITY
+            && rule.iif == bridge
+            && rule.iif.starts_with("clex-")
+            && rule.table != table
+    };
+    let mut actions = Vec::new();
+    let mut flushed = BTreeSet::new();
+    for rule in rules.iter().filter(|r| is_stale(r)) {
+        actions.push(SweepAction::DelRule(rule.clone()));
+        let still_used = rules.iter().any(|r| !is_stale(r) && r.table == rule.table);
+        if !still_used && flushed.insert(rule.table) {
+            actions.push(SweepAction::FlushTable(rule.table));
+        }
+    }
+    actions
+}
+
 /// Parse `ip rule show`: `5100:\tfrom all iif clex-vpn lookup 5123`.
 pub fn parse_policy_rules(output: &str) -> Vec<PolicyRule> {
     output
@@ -1007,6 +1033,46 @@ mod tests {
             bridges: [egress_bridge_name("live")].into(),
             wg_ifaces: ["wg-live".to_string()].into(),
         }
+    }
+
+    #[test]
+    fn a_stale_rule_on_a_wanted_bridge_is_removed_with_its_table() {
+        let rules = parse_policy_rules(
+            "5100:\tfrom all iif clex-live lookup 5001\n\
+             5100:\tfrom all iif clex-live lookup 5777\n\
+             5100:\tfrom all iif clex-other lookup 5002\n",
+        );
+        let stale = PolicyRule {
+            priority: 5100,
+            iif: "clex-live".into(),
+            table: 5777,
+        };
+        assert_eq!(
+            plan_stale_rules(&rules, "clex-live", 5001),
+            vec![SweepAction::DelRule(stale), SweepAction::FlushTable(5777)]
+        );
+    }
+
+    #[test]
+    fn stale_rule_planning_leaves_foreign_rules_and_tables_alone() {
+        let rules = parse_policy_rules(
+            "5100:\tfrom all iif clex-live lookup 5001\n\
+             5200:\tfrom all iif clex-live lookup 5003\n\
+             5100:\tfrom all iif eth9 lookup 5004\n\
+             5100:\tfrom all iif clex-other lookup 5005\n\
+             5100:\tfrom all iif clex-live lookup 5005\n",
+        );
+        // The table is also used by clex-other's rule, so it is not flushed.
+        assert_eq!(
+            plan_stale_rules(&rules, "clex-live", 5001),
+            vec![SweepAction::DelRule(PolicyRule {
+                priority: 5100,
+                iif: "clex-live".into(),
+                table: 5005,
+            })]
+        );
+        assert!(plan_stale_rules(&rules, "eth9", 5001).is_empty());
+        assert!(plan_stale_rules(&rules[..1], "clex-live", 5001).is_empty());
     }
 
     #[test]
