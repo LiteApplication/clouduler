@@ -91,9 +91,14 @@ impl Allocations {
         self.networks.keys().map(|s| s.as_str())
     }
 
-    /// Subnets of every stack overlay published on a given cluster network
-    /// (an overlay is named `<stack>_<cluster network>`, see
-    /// `cl_sched::run::overlay_name`).
+    /// Subnets of the given overlays, looked up by exact name (an overlay is
+    /// named `<stack>_<cluster network>`, see `cl_sched::run::overlay_name`).
+    /// Names with no allocation are skipped.
+    ///
+    /// The caller works out which overlays sit on a cluster network from
+    /// cluster state rather than by parsing names back: both halves may
+    /// contain `_`, so a suffix match can't tell stack `x` on network `a_b`
+    /// from stack `x_a` on network `b`.
     ///
     /// A container on one of these subnets reached a route the ordinary way,
     /// clouduler placed it there, even when the packet that carries the
@@ -103,16 +108,11 @@ impl Allocations {
     /// node already owns) instead of round-tripping through the underlay, so
     /// the proxy sees the client's raw overlay address as the peer rather
     /// than an address inside the cluster network's own subnet.
-    pub fn subnets_for_cluster_network<'a>(
+    pub fn subnets_of_overlays<'a>(
         &'a self,
-        cluster_network: &'a str,
+        overlays: impl IntoIterator<Item = &'a str> + 'a,
     ) -> impl Iterator<Item = Ipv4Net> + 'a {
-        let suffix = format!("_{cluster_network}");
-        self.networks.iter().filter_map(move |(name, alloc)| {
-            name.strip_suffix(suffix.as_str())
-                .filter(|stack| !stack.is_empty())
-                .map(|_| alloc.subnet)
-        })
+        overlays.into_iter().filter_map(|name| self.subnet(name))
     }
 
     /// Gateway address for a network's subnet: always the first host address.
@@ -327,24 +327,26 @@ mod tests {
     }
 
     #[test]
-    fn subnets_for_cluster_network_matches_by_overlay_name_suffix() {
+    fn subnets_of_overlays_looks_up_exact_names() {
         let mut a = Allocations::default();
         let uptime = a.allocate_network("uptime-kuma_tailscale", &[]).unwrap();
         let obsurwatch = a.allocate_network("obsurwatch_tailscale", &[]).unwrap();
         a.allocate_network("gitlab_backups", &[]).unwrap();
 
-        let mut got: Vec<Ipv4Net> = a.subnets_for_cluster_network("tailscale").collect();
-        got.sort();
-        let mut want = vec![uptime, obsurwatch];
-        want.sort();
-        assert_eq!(got, want);
+        let got: Vec<Ipv4Net> = a
+            .subnets_of_overlays(["uptime-kuma_tailscale", "obsurwatch_tailscale"])
+            .collect();
+        assert_eq!(got, vec![uptime, obsurwatch]);
     }
 
     #[test]
-    fn subnets_for_cluster_network_ignores_a_bare_match_with_no_stack_prefix() {
+    fn subnets_of_overlays_skips_unallocated_and_does_not_suffix_match() {
         let mut a = Allocations::default();
-        a.allocate_network("tailscale", &[]).unwrap();
-        assert_eq!(a.subnets_for_cluster_network("tailscale").count(), 0);
+        a.allocate_network("x_a_b", &[]).unwrap();
+        // Stack `x` on network `a_b` must not be found when asking for
+        // stack `x_a` on network `b`'s overlay, or anything shorter.
+        assert_eq!(a.subnets_of_overlays(["x_a_b"]).count(), 1);
+        assert_eq!(a.subnets_of_overlays(["_b", "b", "a_b"]).count(), 0);
     }
 
     #[test]

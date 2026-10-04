@@ -100,6 +100,37 @@ struct DeployRequest {
     secrets: BTreeMap<String, String>,
 }
 
+/// Refuse a deploy whose overlay would share a docker network, subnet and
+/// bridge with a different stack's (see `cl_sched::run::overlay_collision`).
+/// Checked here rather than in raft apply, which has no cluster config to
+/// work out which network a stack's overlay is on.
+async fn check_overlay_collision(
+    state: &AppState,
+    name: &str,
+    parsed: &StackFile,
+) -> Result<(), ApiError> {
+    let cfg = state.cluster_config.read().await.clone();
+    let cluster_state = state.cluster.state().await;
+    let others: Vec<(&str, StackFile)> = cluster_state
+        .stacks
+        .iter()
+        .filter(|(other, _)| other.as_str() != name)
+        .filter_map(|(other, s)| Some((other.as_str(), StackFile::parse(&s.spec).ok()?)))
+        .collect();
+    let all = others
+        .iter()
+        .map(|(n, f)| (*n, f))
+        .chain(std::iter::once((name, parsed)));
+    match cl_sched::run::overlay_collision(&cfg, all) {
+        Some((overlay, a, b)) => Err(ApiError::Conflict(format!(
+            "stacks {a} and {b} would both use the overlay network {overlay} \
+             (`<stack>_<network>`), which would break isolation between them: \
+             rename one of the stacks or networks"
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn deploy(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -109,6 +140,7 @@ async fn deploy(
     let secrets_to_write = {
         let parsed =
             StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        check_overlay_collision(&state, &name, &parsed).await?;
         let requirements = parsed.requirements();
         let cluster_state = state.cluster.state().await;
         for config_name in &requirements.file_configs {
@@ -186,6 +218,7 @@ pub(crate) async fn deploy_from_files(
     configs: BTreeMap<String, Vec<u8>>,
 ) -> Result<(), ApiError> {
     let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    check_overlay_collision(state, name, &parsed).await?;
     let requirements = parsed.requirements();
 
     // The names this stack owns come from its own spec, not from whatever the

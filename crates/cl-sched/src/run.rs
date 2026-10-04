@@ -1204,6 +1204,36 @@ pub fn overlay_network_name<'a>(file: &'a StackFile, cfg: &ClusterConfig) -> Opt
         .map(String::as_str)
 }
 
+/// The first pair of distinct stacks whose overlays share a docker network
+/// name, as `(overlay, stack, other stack)`.
+///
+/// `overlay_name` joins with `_` and neither stack nor network names forbid
+/// it, so stack `a_b` on network `c` and stack `a` on network `b_c` both map
+/// to `a_b_c`: one IPAM allocation, one bridge, no isolation between them.
+/// The names can't change (live clusters already have them), so a deploy or
+/// a network rename that would create the collision is refused instead.
+pub fn overlay_collision<'a>(
+    cfg: &ClusterConfig,
+    stacks: impl IntoIterator<Item = (&'a str, &'a StackFile)>,
+) -> Option<(String, String, String)> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for (stack, file) in stacks {
+        let Some(network) = overlay_network_name(file, cfg) else {
+            continue;
+        };
+        let overlay = overlay_name(stack, network);
+        match seen.get(overlay.as_str()) {
+            Some(other) if *other != stack => {
+                return Some((overlay, (*other).to_string(), stack.to_string()));
+            }
+            _ => {
+                seen.insert(overlay, stack);
+            }
+        }
+    }
+    None
+}
+
 /// Drives every instance of a stack needs, for the placement call.
 pub fn drives_for(file: &StackFile) -> BTreeSet<String> {
     file.drives_used()
@@ -1577,6 +1607,28 @@ web: { address: cloud, network: tailscale }
         let both =
             StackFile::parse("networks:\n  public: {}\n  tailscale: {}\nservices: {}\n").unwrap();
         assert_eq!(overlay_network_name(&both, &cfg), Some("tailscale"));
+    }
+
+    #[test]
+    fn overlay_collision_catches_underscore_ambiguity() {
+        let mut cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
+        let public = cfg.networks.get("public").unwrap().clone();
+        cfg.networks.insert("b_public".into(), public);
+        let on = |net: &str| {
+            StackFile::parse(&format!("networks:\n  {net}: {{}}\nservices: {{}}\n")).unwrap()
+        };
+        let p = on("public");
+        let q = on("b_public");
+
+        // Stack `a_b` on `public` and stack `a` on `b_public` both want
+        // `a_b_public`.
+        assert_eq!(
+            overlay_collision(&cfg, [("a_b", &p), ("a", &q)]),
+            Some(("a_b_public".into(), "a_b".into(), "a".into()))
+        );
+        // Distinct stacks on one network, and a stack against itself, are fine.
+        assert_eq!(overlay_collision(&cfg, [("a", &p), ("b", &p)]), None);
+        assert_eq!(overlay_collision(&cfg, [("a", &q), ("a", &q)]), None);
     }
 
     fn state() -> ClusterState {

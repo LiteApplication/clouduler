@@ -1153,6 +1153,97 @@ async fn deploy(h: &Harness, name: &str, body: &str) -> StatusCode {
         .status()
 }
 
+/// `<stack>_<network>` is ambiguous when both halves hold an underscore:
+/// stack `a_b` on `internal` and stack `a` on `b_internal` would share one
+/// overlay (subnet, bridge, docker network), so the second deploy is refused.
+#[tokio::test]
+async fn deploying_a_stack_whose_overlay_collides_with_another_is_rejected() {
+    let h = harness().await;
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        let net = cfg.networks.get("internal").unwrap().clone();
+        cfg.networks.insert("b_internal".to_string(), net);
+    }
+    let on = |net: &str| {
+        let spec = format!("services:\n  web:\n    image: nginx\n    networks: [{net}]\nnetworks:\n  {net}: {{}}\n");
+        format!(r#"{{"spec":{spec:?}}}"#)
+    };
+
+    assert_eq!(deploy(&h, "a_b", &on("internal")).await, StatusCode::OK);
+    assert_eq!(
+        deploy(&h, "a", &on("b_internal")).await,
+        StatusCode::CONFLICT
+    );
+    assert!(!h.state.cluster.state().await.stacks.contains_key("a"));
+
+    // Redeploying the stack that already owns the overlay is not a collision.
+    assert_eq!(deploy(&h, "a_b", &on("internal")).await, StatusCode::OK);
+}
+
+/// Renaming public network `x` to `b_pub` would move stack `a`'s overlay onto
+/// `a_b_pub`, the name stack `a_b` (on `pub`) already has: refused, and the
+/// config is left alone.
+#[tokio::test]
+async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
+    let h = harness().await;
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        let net = cfg.networks.get_mut("internal").unwrap();
+        net.subnet = Some("10.10.0.0/24".parse().unwrap());
+        net.domain = Some("test.local".to_string());
+        cfg.nodes.get_mut("n0").unwrap().network.insert(
+            "internal".to_string(),
+            cl_config::NodeAddress::Ip("10.10.0.1".parse().unwrap()),
+        );
+        for name in ["pub", "x"] {
+            cfg.networks.insert(
+                name.to_string(),
+                Network {
+                    kind: NetworkKind::Public,
+                    subnet: None,
+                    domain: None,
+                },
+            );
+        }
+    }
+    for (name, net) in [("a_b", "pub"), ("a", "x")] {
+        let spec = format!(
+            "services:\n  web:\n    image: nginx\n    networks: [{net}]\nnetworks:\n  {net}: {{}}\n"
+        );
+        h.state
+            .cluster
+            .submit(cl_raft::Request::DeployStack {
+                name: name.into(),
+                spec,
+            })
+            .await
+            .expect("deploy stack");
+    }
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/networks/x/rename")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"new_name":"b_pub"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(h
+        .state
+        .cluster_config
+        .read()
+        .await
+        .networks
+        .contains_key("x"));
+}
+
 /// A redeploy that doesn't resend a file-backed config's content must not
 /// forget the stack owns it: `SetStackObjects` used to be handed exactly
 /// whatever the request's `configs` map contained, so a client that only

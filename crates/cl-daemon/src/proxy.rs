@@ -19,7 +19,7 @@ use std::time::Duration;
 use cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET;
 use cl_api::redirects::RedirectStore;
 use cl_api::static_routes::StaticRouteStore;
-use cl_config::{qualify, ClusterConfig, NetworkKind};
+use cl_config::{qualify, ClusterConfig, NetworkKind, StackFile};
 use cl_dns::{Cloudflare, DesiredRecord};
 use cl_net::egress::nat_subnet;
 use cl_net::Allocations;
@@ -32,6 +32,7 @@ use cl_raft::node::ClusterNode;
 use cl_raft::state::{
     dns_key, CertificateState, ClusterState, DnsRecordState, ReconcileStatus, Request,
 };
+use cl_sched::run::{overlay_name, overlay_network_name};
 use cl_secret::{ClusterKey, Sealed};
 use ipnet::IpNet;
 use tracing::{info, warn};
@@ -42,6 +43,19 @@ use tracing::{info, warn};
 fn allowed_subnet(cfg: &ClusterConfig, network: &str) -> Option<IpNet> {
     let net = cfg.networks.get(network)?;
     net.kind.is_subnetted().then_some(net.subnet).flatten()
+}
+
+/// Overlay names of every deployed stack whose overlay network (the one the
+/// scheduler builds for it, `overlay_network_name`) is exactly `network`.
+fn overlays_on_network(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> Vec<String> {
+    state
+        .stacks
+        .iter()
+        .filter_map(|(name, stack)| {
+            let file = StackFile::parse(&stack.spec).ok()?;
+            (overlay_network_name(&file, cfg)? == network).then(|| overlay_name(name, network))
+        })
+        .collect()
 }
 
 /// Overlay subnets of every stack published on `network`, plus every nat
@@ -58,10 +72,15 @@ fn allowed_subnet(cfg: &ClusterConfig, network: &str) -> Option<IpNet> {
 /// the container's raw nat-subnet address, unmasqueraded.
 fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> Vec<IpNet> {
     let mut subnets: Vec<IpNet> = match Allocations::decode(state.overlay.as_deref()) {
-        Some(allocations) => allocations
-            .subnets_for_cluster_network(network)
-            .map(IpNet::V4)
-            .collect(),
+        Some(allocations) => {
+            // Exact keys from state, never a parse of the overlay name back:
+            // `x_a_b` is stack `x` on `a_b` as much as stack `x_a` on `b`.
+            let overlays = overlays_on_network(cfg, state, network);
+            allocations
+                .subnets_of_overlays(overlays.iter().map(String::as_str))
+                .map(IpNet::V4)
+                .collect()
+        }
         None => Vec::new(),
     };
     subnets.extend(
@@ -1462,6 +1481,40 @@ services:
             .trusted_overlay_subnets
             .iter()
             .any(|s| s.contains(&container_peer)));
+    }
+
+    /// Overlay names are `<stack>_<network>` and both halves may contain `_`,
+    /// so stack `x` on network `a_lan` ("x_a_lan") also ends in `_lan`. Its
+    /// subnet must not be trusted for gated routes on `lan`.
+    #[test]
+    fn trusted_overlays_match_the_exact_network_not_a_name_suffix() {
+        let spec_on = |network: &str| format!("networks:\n  {network}: {{}}\nservices: {{}}\n");
+        let mut cfg = cfg();
+        let lan = cfg.networks.get("lan").expect("example has lan").clone();
+        cfg.networks.insert("a_lan".to_string(), lan);
+
+        let mut state = state_with(&spec_on("lan"), 0);
+        let mut y = state.stacks.remove("blog").unwrap();
+        y.name = "y".to_string();
+        let mut x = y.clone();
+        x.name = "x".to_string();
+        x.spec = spec_on("a_lan");
+        state.stacks.insert("y".to_string(), y);
+        state.stacks.insert("x".to_string(), x);
+
+        let mut allocations =
+            Allocations::decode(state.overlay.as_deref()).expect("state_with sets an overlay");
+        let y_subnet = allocations.allocate_network("y_lan", &[]).unwrap();
+        let x_subnet = allocations.allocate_network("x_a_lan", &[]).unwrap();
+        state.overlay = Some(serde_json::to_string(&allocations).expect("encodes"));
+
+        let on_lan = trusted_overlay_subnets(&cfg, &state, "lan");
+        assert!(on_lan.contains(&IpNet::V4(y_subnet)));
+        assert!(!on_lan.contains(&IpNet::V4(x_subnet)));
+
+        let on_a_lan = trusted_overlay_subnets(&cfg, &state, "a_lan");
+        assert!(on_a_lan.contains(&IpNet::V4(x_subnet)));
+        assert!(!on_a_lan.contains(&IpNet::V4(y_subnet)));
     }
 
     /// A nat-attached client's traffic is masqueraded out whatever the host's

@@ -55,6 +55,20 @@ async fn put_config(
     };
 
     let previous = state.cluster_config.read().await.clone();
+
+    // Adding or renaming a network changes which network each deployed stack's
+    // overlay sits on, which can make two stacks share one. Only a collision
+    // this edit introduces blocks it, so a cluster that already has one can
+    // still be edited to fix it.
+    let cluster_state = state.cluster.state().await;
+    if let Some((overlay, a, b)) = deployed_overlay_collision(&body.config, &cluster_state) {
+        if deployed_overlay_collision(&previous, &cluster_state).is_none() {
+            return Err(ApiError::Conflict(format!(
+                "this config would make stacks {a} and {b} share the overlay network {overlay}: \
+                 rename one of the stacks or networks"
+            )));
+        }
+    }
     apply_config(&state, &body.config).await?;
 
     // Only arm the rollback watchdog for edits that can cut off the
@@ -68,6 +82,20 @@ async fn put_config(
         spawn_rollback_watchdog(state, rollback_after);
     }
     Ok(StatusCode::OK)
+}
+
+/// First pair of deployed stacks that share an overlay network under `cfg`,
+/// see `cl_sched::run::overlay_collision`.
+fn deployed_overlay_collision(
+    cfg: &ClusterConfig,
+    cluster_state: &cl_raft::ClusterState,
+) -> Option<(String, String, String)> {
+    let files: Vec<(&str, StackFile)> = cluster_state
+        .stacks
+        .iter()
+        .filter_map(|(name, s)| Some((name.as_str(), StackFile::parse(&s.spec).ok()?)))
+        .collect();
+    cl_sched::run::overlay_collision(cfg, files.iter().map(|(n, f)| (*n, f)))
 }
 
 /// Waits out the rollback window, then restores the previous config unless it
@@ -181,6 +209,27 @@ async fn rename_network(
     config
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    // The rename moves every stack's overlay name too (`<stack>_<network>`),
+    // so refuse it up front if that makes two stacks share one.
+    let cluster_state = state.cluster.state().await;
+    let renamed: Vec<(&str, StackFile)> = cluster_state
+        .stacks
+        .iter()
+        .filter_map(|(name, stack)| {
+            let mut file = StackFile::parse(&stack.spec).ok()?;
+            rename_network_in_stack(&mut file, &old_name, &new_name);
+            Some((name.as_str(), file))
+        })
+        .collect();
+    if let Some((overlay, a, b)) =
+        cl_sched::run::overlay_collision(&config, renamed.iter().map(|(n, f)| (*n, f)))
+    {
+        return Err(ApiError::Conflict(format!(
+            "renaming {old_name} to {new_name} would make stacks {a} and {b} share the \
+             overlay network {overlay}: rename one of the stacks first"
+        )));
+    }
     apply_config(&state, &config).await?;
 
     // Each node's imported wireguard config is sealed under a secret name
