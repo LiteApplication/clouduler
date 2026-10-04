@@ -85,7 +85,7 @@ impl Orchestrator {
 
     async fn tick(&self) -> Result<(), String> {
         let state = self.cluster.state().await;
-        let Some(mut run) = load_run(&state) else {
+        let Some((mut run, revision)) = load_run_revision(&state) else {
             return Ok(());
         };
         if !run.in_progress() {
@@ -93,12 +93,12 @@ impl Orchestrator {
         }
 
         if run.release_tag.is_none() {
-            return self.resolve_release(run).await;
+            return self.resolve_release(run, revision).await;
         }
 
         if run.has_failed() {
             run.fail("a node reported a fetch or restart failure", now());
-            return self.save(run).await;
+            return self.save(run, revision).await;
         }
 
         let all_ready = run.per_node.values().all(|p| {
@@ -113,7 +113,7 @@ impl Orchestrator {
 
         if let Some(name) = restarting_node(&run) {
             self.check_restart_progress(&mut run, &state, &name);
-            return self.save(run).await;
+            return self.save(run, revision).await;
         }
 
         let Some(leader_name) = self.leader_name(&state) else {
@@ -122,14 +122,14 @@ impl Orchestrator {
         let order = restart_order(&state.nodes, &leader_name);
         for name in order {
             if run.per_node.get(&name) == Some(&NodePhase::Ready) {
-                self.restart_one(&mut run, &name).await;
-                return self.save(run).await;
+                self.restart_one(&mut run, &name, &state).await;
+                return self.save(run, revision).await;
             }
         }
 
         if run.is_complete() {
             run.finish(now());
-            self.save(run).await
+            self.save(run, revision).await
         } else {
             Ok(())
         }
@@ -138,10 +138,10 @@ impl Orchestrator {
     /// Resolve the configured release (once) into a tag and a per-arch asset
     /// map, then hand every node its assignment. Every node moves straight to
     /// `Fetching`: there is no build step left to gate on.
-    async fn resolve_release(&self, mut run: UpdateRunState) -> Result<(), String> {
+    async fn resolve_release(&self, mut run: UpdateRunState, revision: u64) -> Result<(), String> {
         let Some(self_update) = self.cluster_config.self_update.as_ref() else {
             run.fail("no self-update release is configured", now());
-            return self.save(run).await;
+            return self.save(run, revision).await;
         };
         let token = self.unseal_github_token().await;
 
@@ -160,7 +160,7 @@ impl Orchestrator {
             }
             Err(e) => run.fail(format!("resolving the release: {e}"), now()),
         }
-        self.save(run).await
+        self.save(run, revision).await
     }
 
     async fn unseal_github_token(&self) -> Option<String> {
@@ -212,7 +212,26 @@ impl Orchestrator {
         }
     }
 
-    async fn restart_one(&self, run: &mut UpdateRunState, name: &str) {
+    async fn restart_one(
+        &self,
+        run: &mut UpdateRunState,
+        name: &str,
+        state: &cl_raft::ClusterState,
+    ) {
+        // Already on the target binary: a restart would prove nothing (the
+        // hash cannot change) and only risks quorum, so skip it. This is also
+        // what keeps `check_restart_progress` honest: it confirms a restart
+        // by the hash changing, which needs the hash to differ beforehand.
+        if let Some(node) = state.nodes.get(name) {
+            if !needs_restart(node, run.arch_hashes.get(&node.arch).map(String::as_str)) {
+                run.per_node.insert(name.to_string(), NodePhase::Done);
+                info!(
+                    node = name,
+                    "already running the target binary, not restarting"
+                );
+                return;
+            }
+        }
         let Some(base_url) = peers::base_url(&self.cluster_config, name) else {
             run.fail(format!("no address on record for {name}"), now());
             return;
@@ -249,17 +268,14 @@ impl Orchestrator {
             .map(|node| node.name.clone())
     }
 
-    async fn save(&self, run: UpdateRunState) -> Result<(), String> {
-        let content = cl_raft::base64_encode(
-            &serde_json::to_vec(&run).map_err(|e| format!("encoding run state: {e}"))?,
-        );
+    /// Writes the run back only if nobody else has since: a worker's
+    /// `Ready` report landing between this tick's read and write would
+    /// otherwise be overwritten with the stale copy (and the reverse). A lost
+    /// race is an error; the next tick re-reads and redoes it.
+    async fn save(&self, run: UpdateRunState, revision: u64) -> Result<(), String> {
         let response = self
             .cluster
-            .submit(Request::PutConfig {
-                name: RUN_CONFIG.to_string(),
-                content,
-                owner: None,
-            })
+            .submit(put_run_request(&run, revision)?)
             .await
             .map_err(|e| format!("submitting run state: {e}"))?;
         if let Some(error) = response.error {
@@ -267,6 +283,27 @@ impl Orchestrator {
         }
         Ok(())
     }
+}
+
+/// Whether `node` has to be restarted to be running the build whose hash is
+/// `expected`. With no hash recorded there is nothing to compare, so restart.
+pub fn needs_restart(node: &NodeState, expected: Option<&str>) -> bool {
+    expected != Some(node.binary_hash.as_str())
+}
+
+/// The request that stores `run`, conditional on the object still being at
+/// `revision` (0 if there is none yet). Shared by every writer of the run:
+/// orchestrator, workers and the api's start/cancel.
+pub fn put_run_request(run: &UpdateRunState, revision: u64) -> Result<Request, String> {
+    let content = cl_raft::base64_encode(
+        &serde_json::to_vec(run).map_err(|e| format!("encoding run state: {e}"))?,
+    );
+    Ok(Request::PutConfigCas {
+        name: RUN_CONFIG.to_string(),
+        content,
+        owner: None,
+        expect_revision: revision,
+    })
 }
 
 fn restarting_node(run: &UpdateRunState) -> Option<String> {
@@ -278,9 +315,14 @@ fn restarting_node(run: &UpdateRunState) -> Option<String> {
 
 /// Read the current run state out of applied cluster state, if any.
 pub fn load_run(state: &cl_raft::ClusterState) -> Option<UpdateRunState> {
+    load_run_revision(state).map(|(run, _)| run)
+}
+
+/// `load_run`, plus the revision it was read at, for `put_run_request`.
+pub fn load_run_revision(state: &cl_raft::ClusterState) -> Option<(UpdateRunState, u64)> {
     let entry = state.configs.get(RUN_CONFIG)?;
     let raw = entry.decode().ok()?;
-    serde_json::from_slice(&raw).ok()
+    Some((serde_json::from_slice(&raw).ok()?, entry.revision))
 }
 
 fn now() -> i64 {
@@ -312,6 +354,31 @@ mod tests {
             binary_hash: String::new(),
             node_pubkey: None,
             memory_total_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_node_already_on_the_target_binary_is_not_restarted() {
+        let mut n = node("n1", Role::Worker, "x86_64");
+        n.binary_hash = "abc".into();
+        assert!(!needs_restart(&n, Some("abc")));
+        assert!(needs_restart(&n, Some("def")));
+        assert!(needs_restart(&n, None));
+    }
+
+    #[test]
+    fn the_run_is_stored_conditionally_on_the_revision_it_was_read_at() {
+        let run = UpdateRunState::new("r".into(), ["n1".to_string()], 0);
+        match put_run_request(&run, 7).expect("request") {
+            Request::PutConfigCas {
+                name,
+                expect_revision,
+                ..
+            } => {
+                assert_eq!(name, RUN_CONFIG);
+                assert_eq!(expect_revision, 7);
+            }
+            other => panic!("expected a conditional put, got {other:?}"),
         }
     }
 

@@ -16,6 +16,8 @@ pub use materialize::{Materialized, Materializer};
 pub use place::{candidates, place, Constraint, Decision, PlaceOutcome, Unplaceable};
 pub use plan::{expand, Desired};
 pub use progress::UpdateReporter;
-pub use reconcile::{diff, Action, PullTracker, Reconciler, Target, LABEL_REVISION};
+pub use reconcile::{
+    diff, pull_finished, pull_started, Action, PullTracker, Reconciler, Target, LABEL_REVISION,
+};
 pub use registries::{Registries, StoredLogin};
 pub use run::{desired_instances, Scheduler};

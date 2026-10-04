@@ -29,12 +29,14 @@ struct Harness {
     _dir: TempDir,
     nodes: Vec<ClusterNode>,
     addrs: Vec<SocketAddr>,
+    keys: cl_raft::KeyWatch,
 }
 
 impl Harness {
     /// Start `count` nodes and form a cluster with all of them voting.
     async fn start(count: usize) -> Self {
         let dir = TempDir::new().expect("temp dir");
+        let keys = cl_raft::throwaway_key();
         let mut nodes = Vec::new();
         let mut addrs = Vec::new();
 
@@ -47,6 +49,7 @@ impl Harness {
                 rpc_addr: addr,
                 data_dir: PathBuf::from(dir.path()).join(&name),
                 cluster_name: "test".into(),
+                keys: keys.clone(),
             })
             .await
             .expect("start node");
@@ -68,6 +71,7 @@ impl Harness {
             _dir: dir,
             nodes,
             addrs,
+            keys,
         }
     }
 
@@ -199,6 +203,7 @@ async fn a_worker_joins_as_a_non_voter() {
         rpc_addr: addr,
         data_dir: dir.path().join("w0"),
         cluster_name: "test".into(),
+        keys: cluster.keys.clone(),
     })
     .await
     .expect("start worker");
@@ -244,6 +249,7 @@ async fn a_node_without_a_cluster_holds_no_quorum() {
         rpc_addr: free_addr(),
         data_dir: dir.path().join("lonely"),
         cluster_name: "test".into(),
+        keys: cl_raft::throwaway_key(),
     })
     .await
     .expect("start node");
@@ -281,4 +287,52 @@ async fn a_config_edit_replicates_to_every_node() {
         assert_eq!(stored.yaml, yaml);
         assert_eq!(stored.generation, 1);
     }
+}
+
+#[tokio::test]
+async fn a_peer_holding_the_cluster_key_can_talk_to_a_node() {
+    let cluster = Harness::start(1).await;
+    let peer = cl_raft::network::Peer::connect(&cluster.addrs[0].to_string(), cluster.keys.clone());
+    assert!(cl_raft::network::ping(&peer).await);
+}
+
+#[tokio::test]
+async fn a_peer_with_the_wrong_key_is_refused() {
+    let cluster = Harness::start(1).await;
+    let peer =
+        cl_raft::network::Peer::connect(&cluster.addrs[0].to_string(), cl_raft::throwaway_key());
+    assert!(!cl_raft::network::ping(&peer).await);
+}
+
+/// The attack the handshake exists for: a bare socket that skips it and goes
+/// straight to a framed request, here one that would write cluster state.
+#[tokio::test]
+async fn a_raw_connection_cannot_submit_a_write_without_authenticating() {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::AsyncReadExt;
+
+    let cluster = Harness::start(1).await;
+    let leader = cluster.leader().await;
+    let before = cluster.nodes[leader].state().await.version;
+
+    let mut stream = tokio::net::TcpStream::connect(cluster.addrs[0])
+        .await
+        .expect("connect");
+    // Swallow the server's challenge, then ignore it and speak rpc anyway.
+    let mut hello = [0u8; 36];
+    stream.read_exact(&mut hello).await.expect("challenge");
+    let mut conn = cl_raft::rpc::frame(stream);
+    let request = cl_raft::rpc::RpcRequest::Forward(Request::PutConfig {
+        name: "evil".into(),
+        content: "x".into(),
+        owner: None,
+    });
+    let _ = conn.send(cl_raft::rpc::encode(&request).unwrap()).await;
+    // Whatever comes back, it must not be a decodable response.
+    let reply = tokio::time::timeout(Duration::from_secs(2), conn.next()).await;
+    assert!(
+        !matches!(reply, Ok(Some(Ok(_)))),
+        "an unauthenticated request got an answer"
+    );
+    assert_eq!(cluster.nodes[leader].state().await.version, before);
 }

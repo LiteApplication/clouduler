@@ -21,6 +21,7 @@ reqwest.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
+serde_urlencoded.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

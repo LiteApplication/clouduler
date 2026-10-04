@@ -23,8 +23,7 @@ use cl_raft::state::{
     DriveBackupTarget, RestoreRequest, RestoreScope, RestoreStatus,
 };
 use cl_raft::Request as ClusterRequest;
-use cl_restic::destination::{remote_repo, ssh_command_args};
-use cl_restic::restic::{ResticRepo, SnapshotInfo};
+use cl_restic::restic::SnapshotInfo;
 use cl_secret::Sealed;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -111,6 +110,17 @@ async fn put_destination(
     State(state): State<AppState>,
     Json(body): Json<PutDestinationRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // Before anything is sealed: a rejected destination must not leave
+    // orphaned secrets behind. The state machine checks the same rules.
+    let probe = BackupDestination {
+        id: body.id.clone(),
+        name: body.name.clone(),
+        kind: body.kind.clone(),
+        password_secret: String::new(),
+        credentials_secret: None,
+    };
+    cl_raft::backup_validate::validate_destination(&probe).map_err(ApiError::BadRequest)?;
+
     let cluster_state = state.cluster.state().await;
     let existing = cluster_state.restic_destinations.get(&body.id).cloned();
 
@@ -241,6 +251,11 @@ async fn put_target(
     State(state): State<AppState>,
     Json(body): Json<PutTargetRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if body.frequency_secs == 0 {
+        return Err(ApiError::BadRequest(
+            "frequency_secs must be at least 1".into(),
+        ));
+    }
     let cluster_state = state.cluster.state().await;
     // Preserve last_run across an edit - it isn't part of the request body.
     let last_run = cluster_state
@@ -369,47 +384,25 @@ async fn list_snapshots(
         .ok_or_else(|| ApiError::NotFound(format!("no backup destination {id}")))?
         .clone();
 
-    let key_guard = state.key.read().await;
-    let key = key_guard
-        .as_ref()
-        .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?
-        .clone();
+    let key = {
+        let key_guard = state.key.read().await;
+        key_guard
+            .as_ref()
+            .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?
+            .clone()
+    };
 
-    let entry = cluster_state
-        .secrets
-        .get(&destination.password_secret)
-        .ok_or_else(|| {
-            ApiError::Conflict("this destination's password secret is missing".into())
-        })?;
-    let sealed = Sealed::from_blob(entry.sealed.clone());
-    let password = sealed
-        .open(&key, &destination.password_secret)
-        .ok()
-        .and_then(|p| String::from_utf8(p).ok())
-        .ok_or_else(|| ApiError::Conflict("cannot open this destination's password".into()))?;
-
-    let cred_dir = std::env::temp_dir()
-        .join("clouduler-restic-snapshots")
-        .join(&id);
-    std::fs::create_dir_all(&cred_dir).map_err(ApiError::internal)?;
-    let password_path = cred_dir.join("password");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&password_path, &password).map_err(ApiError::internal)?;
-        std::fs::set_permissions(&password_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(ApiError::internal)?;
-    }
-
-    let resolved = remote_repo(&destination);
-    let repo = ResticRepo::new(
-        resolved,
-        ssh_command_args(&destination),
-        &password_path,
-        &[],
-    );
+    // The same repository builder the runner and restore use, so S3 keys and
+    // ssh identities are wired up too - and credentials are staged under the
+    // data directory (0700, unique per call), never a predictable /tmp path.
+    let cred_dir = state.data_dir.join("restic").join("creds").join(&id);
+    let (repo, guards) =
+        cl_restic::credentials::build_repo(&cluster_state, &key, &cred_dir, &destination)
+            .map_err(|e| ApiError::Conflict(e.to_string()))?;
     let list = tokio::task::spawn_blocking(move || {
         let result = repo.snapshots();
-        let _ = std::fs::remove_file(&password_path);
+        // Staged credentials go away as soon as restic is done with them.
+        drop(guards);
         result
     })
     .await
@@ -503,6 +496,9 @@ async fn submit_restore(
     snapshot: Option<String>,
     requested_by: String,
 ) -> Result<Json<String>, ApiError> {
+    if let Some(snapshot) = &snapshot {
+        cl_restic::restore::validate_snapshot_id(snapshot).map_err(ApiError::BadRequest)?;
+    }
     let id = Uuid::new_v4().to_string();
     let response = state
         .cluster

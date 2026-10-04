@@ -27,8 +27,15 @@ fn current_owner() -> (u32, u32) {
     unsafe { (libc::getuid(), libc::getgid()) }
 }
 
+/// One cluster key shared by every test in this file: listener and senders
+/// must agree on it or the handshake refuses them.
+fn test_keys() -> cl_raft::KeyWatch {
+    static KEYS: std::sync::OnceLock<cl_raft::KeyWatch> = std::sync::OnceLock::new();
+    KEYS.get_or_init(cl_raft::throwaway_key).clone()
+}
+
 /// Bind a receiver on an ephemeral loopback port, backed by `root/data`.
-/// Every accepted connection runs one `transport::receive` call.
+/// Runs the real `transport::serve_listener`, handshake included.
 fn spawn_receiver(root: &Path) -> (SocketAddr, Arc<DriveRegistry>, JoinHandle<()>) {
     let registry = Arc::new(DriveRegistry::from_drives(
         "target",
@@ -44,16 +51,7 @@ fn spawn_receiver(root: &Path) -> (SocketAddr, Arc<DriveRegistry>, JoinHandle<()
 
     let task_registry = registry.clone();
     let handle = tokio::spawn(async move {
-        loop {
-            let (stream, _peer) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => break,
-            };
-            let registry = task_registry.clone();
-            tokio::spawn(async move {
-                let _ = cl_drive::transport::receive(stream, &registry).await;
-            });
-        }
+        let _ = cl_drive::transport::serve_listener(listener, task_registry, test_keys()).await;
     });
 
     (addr, registry, handle)
@@ -102,7 +100,7 @@ async fn syncs_a_directory_tree_byte_for_byte() {
     std::os::unix::fs::symlink("a.txt", src.path().join("link")).unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let stats = engine
         .sync(
             src.path(),
@@ -139,7 +137,7 @@ async fn a_synced_file_is_not_re_diffed_as_changed() {
     std::fs::write(src.path().join("a.txt"), b"hello world").unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let first = engine
         .sync(
             src.path(),
@@ -189,7 +187,7 @@ async fn a_small_edit_sends_far_fewer_bytes_than_the_whole_file() {
     std::fs::write(src.path().join("big.bin"), &content).unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let first = engine
         .sync(
             src.path(),
@@ -250,7 +248,7 @@ async fn deleting_a_file_removes_it_on_the_peer() {
     std::fs::write(src.path().join("gone.txt"), b"leaves").unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     engine
         .sync(
             src.path(),
@@ -291,7 +289,7 @@ async fn renaming_a_file_moves_it_instead_of_retransferring() {
     std::fs::write(src.path().join("old_name.bin"), &content).unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     engine
         .sync(
             src.path(),
@@ -357,7 +355,7 @@ async fn many_identical_files_replaced_at_once_still_sync() {
     }
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     engine
         .sync(
             src.path(),
@@ -430,8 +428,9 @@ async fn a_rename_whose_source_is_missing_does_not_abort_the_sync() {
     let dst = tempfile::tempdir().unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    let mut conn = transport::frame(stream);
+    let mut conn = transport::connect_authenticated(addr, &test_keys())
+        .await
+        .expect("connect");
 
     transport::send(
         &mut conn,
@@ -501,8 +500,9 @@ async fn an_interrupted_transfer_never_leaves_a_partial_file_visible() {
     // Drive the wire protocol by hand so the connection can be dropped
     // mid-sync, after a whole file has been fully framed and sent but
     // before `Done`/`Ack` ever happens.
-    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let mut conn = cl_drive::transport::frame(stream);
+    let mut conn = cl_drive::transport::connect_authenticated(addr, &test_keys())
+        .await
+        .unwrap();
     let volume = volume_id();
 
     cl_drive::transport::send(
@@ -583,7 +583,7 @@ async fn a_file_bigger_than_one_chunk_arrives_intact() {
     std::fs::write(src.path().join("small.txt"), b"tail file").unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let stats = engine
         .sync(
             src.path(),
@@ -621,7 +621,7 @@ async fn dir_and_root_permissions_replicate_and_a_later_drift_is_fixed() {
     std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     engine
         .sync(
             src.path(),
@@ -700,25 +700,17 @@ async fn a_staging_push_lands_on_a_node_that_does_not_implement_the_drive() {
     // land in a hidden directory next to it, not under some fixed root.
     let registry = Arc::new(DriveRegistry::from_drives("target", BTreeMap::new()));
     let destination_path = dst.path().join("mydest");
+    registry.set_staging_destinations(vec![destination_path.clone()]);
     let std_listener = StdListener::bind("127.0.0.1:0").expect("bind");
     std_listener.set_nonblocking(true).expect("nonblocking");
     let addr = std_listener.local_addr().expect("addr");
     let listener = TcpListener::from_std(std_listener).expect("tokio listener");
     let task_registry = registry.clone();
     let _rx = tokio::spawn(async move {
-        loop {
-            let (stream, _peer) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => break,
-            };
-            let registry = task_registry.clone();
-            tokio::spawn(async move {
-                let _ = cl_drive::transport::receive(stream, &registry).await;
-            });
-        }
+        let _ = cl_drive::transport::serve_listener(listener, task_registry, test_keys()).await;
     });
 
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let staging = Some(destination_path.to_string_lossy().into_owned());
     let stats = engine
         .sync(
@@ -773,7 +765,7 @@ async fn migrated_manifest_matches_after_verification_scan() {
     std::fs::write(src.path().join("a.txt"), b"content").unwrap();
 
     let (addr, _registry, _rx) = spawn_receiver(dst.path());
-    DeltaEngine::default()
+    DeltaEngine::new(test_keys())
         .sync(
             src.path(),
             addr,
@@ -786,9 +778,10 @@ async fn migrated_manifest_matches_after_verification_scan() {
         .unwrap();
 
     let source_manifest = cl_drive::scan_volume(src.path(), true).unwrap();
-    let target_manifest = cl_drive::transport::request_manifest(addr, &volume_id(), true)
-        .await
-        .unwrap();
+    let target_manifest =
+        cl_drive::transport::request_manifest(addr, &volume_id(), true, &test_keys())
+            .await
+            .unwrap();
     let diff = source_manifest.diff(&target_manifest);
     assert!(diff.added.is_empty() && diff.changed.is_empty() && diff.removed.is_empty());
 }

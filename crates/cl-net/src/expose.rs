@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::error::{NetError, Result};
 
@@ -28,6 +28,37 @@ use crate::error::{NetError, Result};
 /// before its resources are reclaimed. UDP has no close handshake, so idle
 /// sessions have to be reaped on a timer instead.
 const UDP_SESSION_IDLE: Duration = Duration::from_secs(60);
+
+/// How many TCP connections one published port serves at once. Every accepted
+/// connection costs two file descriptors and a task, and these ports are open
+/// to whoever can reach the node, so without a cap a flood of connections (or a
+/// slow-loris) exhausts the daemon's descriptors and takes the whole process
+/// down with it. Past the cap a new connection is closed immediately.
+const MAX_TCP_CONNECTIONS: usize = 4096;
+
+/// How long to wait for the backend to accept before giving up on a client. A
+/// backend on a node that just died would otherwise hold the client (and its
+/// permit) for the kernel's multi-minute SYN retry schedule.
+const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to back off after an `accept` fails for a reason that is not the
+/// listener's fault (out of descriptors, a connection reset before accept).
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// How many UDP client sessions one published port tracks. Each is a socket
+/// and a task, and the source address of a UDP packet is trivially forged, so
+/// this bounds what a flood of distinct sources can allocate.
+const MAX_UDP_SESSIONS: usize = 4096;
+
+/// Datagrams queued per UDP session. Past this the datagram is dropped, which
+/// is what an overloaded UDP path does anyway, instead of buffering without
+/// bound behind a slow backend.
+const UDP_SESSION_QUEUE: usize = 64;
+
+/// How often finished UDP sessions are removed from the table. A session that
+/// went idle exits on its own; without this its entry would stay until the same
+/// client happened to send again.
+const UDP_PRUNE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The current backend for every published port this node forwards. Shared
 /// between the reconciler (which calls `set` as placement changes) and the
@@ -100,11 +131,30 @@ pub async fn serve_tcp(
             source,
         })?;
 
+    let permits = std::sync::Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
     loop {
-        let (client, peer) = listener.accept().await.map_err(|source| NetError::Io {
-            context: format!("accept tcp {bind}"),
-            source,
-        })?;
+        let (client, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(source) if is_transient_accept_error(&source) => {
+                // Running out of descriptors or a connection that died in the
+                // accept queue says nothing about the listener. Returning here
+                // would unpublish the port for the retry interval over one
+                // bad connection.
+                tracing::warn!(%bind, error = %source, "tcp accept failed, retrying");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
+            Err(source) => {
+                return Err(NetError::Io {
+                    context: format!("accept tcp {bind}"),
+                    source,
+                })
+            }
+        };
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            tracing::debug!(%bind, %peer, "too many connections, dropping");
+            continue;
+        };
         // The local address of the accepted socket, not the listener's: the
         // listener binds 0.0.0.0, and a PROXY header saying the connection
         // was destined for 0.0.0.0 is useless to the backend.
@@ -115,8 +165,28 @@ pub async fn serve_tcp(
                 .then(|| local.map(|local| proxy_v2_header(peer, local)))
                 .flatten();
             let _ = forward_tcp(client, &mut route, header).await;
+            drop(permit);
         });
     }
+}
+
+/// Whether an `accept` error is a passing condition of this one connection or
+/// of the process, not a sign the listener is broken.
+fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    // EMFILE, ENFILE, ENOMEM, ENOBUFS: out of descriptors or memory. They
+    // clear as other connections close.
+    const TRANSIENT_ERRNO: [i32; 4] = [24, 23, 12, 105];
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+    ) || error
+        .raw_os_error()
+        .is_some_and(|errno| TRANSIENT_ERRNO.contains(&errno))
 }
 
 /// Splice one accepted TCP connection to its current backend, aborting if
@@ -135,16 +205,24 @@ async fn forward_tcp(
         ));
     };
 
-    let mut backend = match TcpStream::connect(backend_addr).await {
-        Ok(stream) => stream,
-        Err(source) => {
-            let _ = client.shutdown().await;
-            return Err(NetError::Io {
-                context: format!("connect backend {backend_addr}"),
-                source,
-            });
-        }
-    };
+    let mut backend =
+        match tokio::time::timeout(BACKEND_CONNECT_TIMEOUT, TcpStream::connect(backend_addr))
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "backend did not accept in time",
+                ))
+            }) {
+            Ok(stream) => stream,
+            Err(source) => {
+                let _ = client.shutdown().await;
+                return Err(NetError::Io {
+                    context: format!("connect backend {backend_addr}"),
+                    source,
+                });
+            }
+        };
 
     // Before anything the client sent: the backend parses this header off the
     // head of the stream, so a single byte of client data ahead of it would
@@ -239,30 +317,50 @@ pub async fn serve_udp(bind: SocketAddr, published: u16, routes: Routes) -> Resu
             source,
         })?);
 
-    let mut sessions: BTreeMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<Vec<u8>>> =
-        BTreeMap::new();
+    let mut sessions: BTreeMap<SocketAddr, mpsc::Sender<Vec<u8>>> = BTreeMap::new();
     let mut buf = vec![0u8; 65_507];
+    let mut prune = tokio::time::interval(UDP_PRUNE_INTERVAL);
 
     loop {
-        let (len, client_addr) =
-            socket
-                .recv_from(&mut buf)
-                .await
-                .map_err(|source| NetError::Io {
-                    context: format!("recv udp {bind}"),
-                    source,
-                })?;
+        let (len, client_addr) = tokio::select! {
+            _ = prune.tick() => {
+                sessions.retain(|_, tx| !tx.is_closed());
+                continue;
+            }
+            received = socket.recv_from(&mut buf) => match received {
+                Ok(received) => received,
+                Err(source) if is_transient_accept_error(&source) => {
+                    tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+                Err(source) => {
+                    return Err(NetError::Io {
+                        context: format!("recv udp {bind}"),
+                        source,
+                    })
+                }
+            },
+        };
         let mut datagram = buf[..len].to_vec();
 
         if let Some(tx) = sessions.get(&client_addr) {
-            match tx.send(datagram) {
+            match tx.try_send(datagram) {
                 Ok(()) => continue,
+                // A backend slower than the client: drop, like any UDP hop.
+                Err(mpsc::error::TrySendError::Full(_)) => continue,
                 // Session task exited (idle timeout or route change); fall
                 // through and start a fresh one below.
-                Err(e) => {
+                Err(mpsc::error::TrySendError::Closed(returned)) => {
                     sessions.remove(&client_addr);
-                    datagram = e.0;
+                    datagram = returned;
                 }
+            }
+        }
+
+        if sessions.len() >= MAX_UDP_SESSIONS {
+            sessions.retain(|_, tx| !tx.is_closed());
+            if sessions.len() >= MAX_UDP_SESSIONS {
+                continue;
             }
         }
 
@@ -270,8 +368,8 @@ pub async fn serve_udp(bind: SocketAddr, published: u16, routes: Routes) -> Resu
             continue; // no instance running: silently drop, same as an unroutable packet
         };
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let _ = tx.send(datagram);
+        let (tx, rx) = mpsc::channel(UDP_SESSION_QUEUE);
+        let _ = tx.try_send(datagram);
         sessions.insert(client_addr, tx);
 
         tokio::spawn(run_udp_session(
@@ -292,9 +390,16 @@ async fn run_udp_session(
     client_addr: SocketAddr,
     backend_addr: SocketAddr,
     mut route: watch::Receiver<Option<SocketAddr>>,
-    mut inbound: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    mut inbound: mpsc::Receiver<Vec<u8>>,
 ) {
-    let Ok(backend) = UdpSocket::bind(("0.0.0.0", 0)).await else {
+    // In the backend's own address family: an IPv4 socket cannot be connected
+    // to an IPv6 backend, nor the reverse.
+    let local: SocketAddr = if backend_addr.is_ipv4() {
+        ([0, 0, 0, 0], 0).into()
+    } else {
+        ([0u16; 8], 0).into()
+    };
+    let Ok(backend) = UdpSocket::bind(local).await else {
         return;
     };
     if backend.connect(backend_addr).await.is_err() {
@@ -332,6 +437,50 @@ async fn run_udp_session(
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn running_out_of_descriptors_is_a_transient_accept_error() {
+        assert!(is_transient_accept_error(
+            &std::io::Error::from_raw_os_error(24)
+        ));
+        assert!(is_transient_accept_error(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionAborted
+        )));
+        // A closed or invalid listener is not coming back by retrying.
+        assert!(!is_transient_accept_error(
+            &std::io::Error::from_raw_os_error(9)
+        ));
+        assert!(!is_transient_accept_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_session_towards_an_ipv6_backend_binds_an_ipv6_socket() {
+        // Skipped quietly where the host has no IPv6 loopback.
+        let Ok(backend) = UdpSocket::bind("[::1]:0").await else {
+            return;
+        };
+        let backend_addr = backend.local_addr().unwrap();
+        let published = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let routes = Routes::new();
+        let (tx, rx) = mpsc::channel(UDP_SESSION_QUEUE);
+        tx.send(b"ping".to_vec()).await.unwrap();
+        tokio::spawn(run_udp_session(
+            published,
+            client.local_addr().unwrap(),
+            backend_addr,
+            routes.subscribe(1),
+            rx,
+        ));
+        let mut buf = [0u8; 16];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(2), backend.recv_from(&mut buf))
+            .await
+            .expect("the datagram reaches the v6 backend")
+            .unwrap();
+        assert_eq!(&buf[..len], b"ping");
+    }
 
     async fn free_addr() -> SocketAddr {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

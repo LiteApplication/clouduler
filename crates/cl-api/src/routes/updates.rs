@@ -470,55 +470,143 @@ async fn apply_selection(
             None,
         )
         .await;
-        queued.push((instance, assignment.node.clone()));
+        queued.push((
+            instance,
+            assignment.node.clone(),
+            assignment.image_digest.clone(),
+        ));
     }
     drop(cluster_state);
 
-    let accepted: Vec<String> = queued.iter().map(|(i, _)| i.to_string()).collect();
+    let accepted: Vec<String> = queued.iter().map(|(i, _, _)| i.to_string()).collect();
 
     let worker = state.clone();
-    tokio::spawn(async move {
-        for (instance, node) in queued {
-            match super::instances::update_instance(&worker, instance.clone()).await {
-                Ok(()) => {
-                    // `update_instance` returns once the old container is
-                    // gone; the new one is the reconciler's to bring up. Wait
-                    // for that before touching the next instance, so a
-                    // service's replicas really do go down one at a time.
-                    match wait_for_update(&worker, &instance).await {
-                        Some(UpdatePhase::Started) => info!(%instance, "updated"),
-                        Some(phase) => warn!(%instance, ?phase, "update did not finish"),
-                        None => warn!(%instance, "gave up waiting for the update to finish"),
-                    }
-                }
-                // The record is what the operator watches, so the failure
-                // goes there too. The owning node records its own failures,
-                // but not one it never heard about (it was unreachable).
-                Err(e) => {
-                    warn!(%instance, error = %e, "update failed");
-                    let still_queued = worker
-                        .cluster
-                        .state()
-                        .await
-                        .instance_updates
-                        .get(&instance)
-                        .is_some_and(|u| u.phase == UpdatePhase::Queued);
-                    if still_queued {
-                        cl_sched::progress::submit(
-                            &worker.cluster,
-                            &instance,
-                            &node,
-                            UpdatePhase::Failed,
-                            Some(e.to_string()),
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-    });
+    tokio::spawn(async move { roll_batch(worker, queued).await });
 
     (StatusCode::ACCEPTED, Json(Accepted { accepted }))
+}
+
+/// What `roll_batch` needs to know about one queued instance: where it runs,
+/// and what it was pinned to before the update touched anything.
+type QueuedUpdate = (InstanceId, String, Option<String>);
+
+/// Runs the batch one instance at a time and stops at the first that goes
+/// wrong.
+///
+/// A bad image would otherwise take down every replica in turn, which is the
+/// opposite of what rolling is for. On a failure or timeout the failed
+/// instance is put back on its previous digest (`rollback_target`), and every
+/// instance still queued is marked failed as cancelled, so nothing further is
+/// touched and the operator sees exactly where it stopped.
+async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
+    let mut remaining: std::collections::VecDeque<QueuedUpdate> = queued.into();
+    while let Some((instance, node, pin_before)) = remaining.pop_front() {
+        let failure = match super::instances::update_instance(&worker, instance.clone()).await {
+            // `update_instance` returns once the old container is gone; the
+            // new one is the reconciler's to bring up (and, with a
+            // healthcheck, to see healthy). Wait for that before touching the
+            // next instance, so a service's replicas really do go down one at
+            // a time.
+            Ok(()) => match wait_for_update(&worker, &instance).await {
+                Some((UpdatePhase::Started, _)) => {
+                    info!(%instance, "updated");
+                    None
+                }
+                Some((_, error)) => Some(error.unwrap_or_else(|| "the update failed".into())),
+                None => Some("gave up waiting for the update to finish".to_string()),
+            },
+            // The instance was removed after being queued: nothing to roll
+            // back and nothing wrong with the image.
+            Err(ApiError::NotFound(why)) => {
+                warn!(%instance, %why, "instance disappeared before its update");
+                continue;
+            }
+            Err(e) => Some(e.to_string()),
+        };
+
+        let Some(reason) = failure else {
+            // Keep the instances still waiting from looking abandoned
+            // (`Scheduler` fails a record queued for too long).
+            for (waiting, waiting_node, _) in &remaining {
+                let still_queued = worker
+                    .cluster
+                    .state()
+                    .await
+                    .instance_updates
+                    .get(waiting)
+                    .is_some_and(|u| u.phase == UpdatePhase::Queued);
+                if still_queued {
+                    cl_sched::progress::submit(
+                        &worker.cluster,
+                        waiting,
+                        waiting_node,
+                        UpdatePhase::Queued,
+                        None,
+                    )
+                    .await;
+                }
+            }
+            continue;
+        };
+
+        warn!(%instance, %reason, "update failed, halting the rolling update");
+        let cluster_state = worker.cluster.state().await;
+        let pin_now = cluster_state
+            .assignments
+            .get(&instance)
+            .and_then(|a| a.image_digest.clone());
+        let previous = cluster_state.previous_image_digests.get(&instance).cloned();
+        drop(cluster_state);
+        let note = match rollback_target(pin_before.as_deref(), pin_now.as_deref(), previous) {
+            Some(digest) => {
+                match super::instances::roll_back_instance(&worker, &instance, digest.clone()).await
+                {
+                    Ok(()) => format!("rolled back to {digest}"),
+                    Err(e) => format!("could not roll back to {digest}: {e}"),
+                }
+            }
+            None => "nothing to roll back".to_string(),
+        };
+        cl_sched::progress::submit(
+            &worker.cluster,
+            &instance,
+            &node,
+            UpdatePhase::Failed,
+            Some(format!("{reason} ({note})")),
+        )
+        .await;
+
+        for (cancelled, cancelled_node, _) in remaining.drain(..) {
+            cl_sched::progress::submit(
+                &worker.cluster,
+                &cancelled,
+                &cancelled_node,
+                UpdatePhase::Failed,
+                Some(format!(
+                    "cancelled: the update of {instance} failed, so the rolling update stopped"
+                )),
+            )
+            .await;
+        }
+    }
+}
+
+/// The digest to put back after a failed update, if the update changed
+/// anything. `pin_before` is the pin when the batch queued the instance and
+/// `pin_now` what it is after the failure: equal means the update never got
+/// as far as pinning (a failed pull), so there is nothing to undo and
+/// `previous`, which could be left over from an older update, must not be
+/// applied. `None` also when no earlier digest was ever recorded (the
+/// running one could not be resolved to a registry digest).
+fn rollback_target(
+    pin_before: Option<&str>,
+    pin_now: Option<&str>,
+    previous: Option<String>,
+) -> Option<String> {
+    if pin_before == pin_now {
+        return None;
+    }
+    previous
 }
 
 /// How long one instance's update may take, from its old container going
@@ -526,24 +614,54 @@ async fn apply_selection(
 const UPDATE_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Waits for an instance's update record to reach a terminal phase, and
-/// returns it. `None` on timeout, or if the record disappeared (the instance
-/// was removed or moved away).
-async fn wait_for_update(state: &AppState, instance: &InstanceId) -> Option<UpdatePhase> {
+/// returns it with the failure message, if any. `None` on timeout, or if the
+/// record disappeared (the instance was removed or moved away).
+async fn wait_for_update(
+    state: &AppState,
+    instance: &InstanceId,
+) -> Option<(UpdatePhase, Option<String>)> {
     let deadline = tokio::time::Instant::now() + UPDATE_FINISH_TIMEOUT;
     loop {
-        let phase = state
+        let (phase, error) = state
             .cluster
             .state()
             .await
             .instance_updates
             .get(instance)
-            .map(|u| u.phase)?;
+            .map(|u| (u.phase, u.error.clone()))?;
         if phase.is_terminal() {
-            return Some(phase);
+            return Some((phase, error));
         }
         if tokio::time::Instant::now() >= deadline {
             return None;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::rollback_target;
+
+    #[test]
+    fn rolls_back_only_when_the_update_changed_the_pin() {
+        let previous = Some("sha256:old".to_string());
+        // Pull failed before pinning: the stale "previous" is not ours.
+        assert_eq!(
+            rollback_target(Some("sha256:a"), Some("sha256:a"), previous.clone()),
+            None
+        );
+        assert_eq!(rollback_target(None, None, previous.clone()), None);
+        // Pinned by the update.
+        assert_eq!(
+            rollback_target(Some("sha256:old"), Some("sha256:new"), previous.clone()),
+            previous
+        );
+        assert_eq!(
+            rollback_target(None, Some("sha256:new"), previous.clone()),
+            previous
+        );
+        // Changed but nothing recorded to go back to.
+        assert_eq!(rollback_target(None, Some("sha256:new"), None), None);
     }
 }

@@ -20,6 +20,18 @@ use git2::{
 use crate::error::{BackupError, Result};
 use crate::tree::TreeFile;
 
+/// Serializes every operation on the on-disk `git-backup` repository inside
+/// this process: the export loop, the webhook/CLI/pre-export pulls and a
+/// manual reconcile all open the same directory, and libgit2 ref updates and
+/// the remote-tracking ref they fetch into are not safe to interleave. Hold
+/// the guard for the whole blocking git section.
+pub fn lock_repo() -> std::sync::MutexGuard<'static, ()> {
+    static REPO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    REPO_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub struct GitBackup {
     pub(crate) repo: Repository,
     repo_url: String,
@@ -417,7 +429,9 @@ impl GitBackup {
     /// Reacts to a fetched commit that failed validation: preserves it under
     /// its own branch with an explanatory commit on top, then force-pushes
     /// the tracked branch back to the last known good commit (or the bad
-    /// commit's parent if no known good commit was provided).
+    /// commit's parent if no known good commit was provided) - but only if
+    /// the remote tip is still the bad commit when re-checked right before
+    /// the force push; a remote that moved in the meantime is left alone.
     pub fn reject_and_restore(
         &self,
         bad: git2::Oid,
@@ -451,9 +465,28 @@ impl GitBackup {
             "preserve rejected commit with explanation",
         )?;
 
+        // The remote may have moved on since the caller fetched `bad` (a
+        // second manual push, an export from another leader term). A forced
+        // push of the tracked branch would silently destroy that newer work,
+        // so re-fetch right before and only force-restore if the tip is still
+        // exactly the commit being rejected. Otherwise leave the branch alone
+        // (only the preserved branch is pushed) - the next pull evaluates
+        // whatever is on the remote now.
+        let still_the_tip = self.fetch_remote_tip(private_key_pem)? == Some(bad);
+
         // Find the target commit to restore `self.branch` to:
         // prefer the known good commit, falling back to bad_commit's parent if available.
-        let target_oid = good_commit.or_else(|| bad_commit.parent_id(0).ok());
+        let target_oid = if still_the_tip {
+            good_commit.or_else(|| bad_commit.parent_id(0).ok())
+        } else {
+            tracing::warn!(
+                %bad,
+                "git backup: the remote tip moved while rejecting a pull, leaving the tracked branch untouched"
+            );
+            None
+        };
+        let preserve_refspec =
+            format!("refs/heads/{preserved_branch}:refs/heads/{preserved_branch}");
 
         if let Some(target_oid) = target_oid {
             let branch_ref = format!("refs/heads/{}", self.branch);
@@ -468,12 +501,8 @@ impl GitBackup {
                 "+refs/heads/{branch}:refs/heads/{branch}",
                 branch = self.branch
             );
-            let preserve_refspec =
-                format!("refs/heads/{preserved_branch}:refs/heads/{preserved_branch}");
             self.push_refspecs(&[force_refspec, preserve_refspec], private_key_pem)?;
         } else {
-            let preserve_refspec =
-                format!("refs/heads/{preserved_branch}:refs/heads/{preserved_branch}");
             self.push_refspecs(&[preserve_refspec], private_key_pem)?;
         }
 
@@ -1128,6 +1157,57 @@ mod tests {
                 .expect("remote main")
                 .target(),
             Some(good_oid)
+        );
+        assert!(remote_repo
+            .find_reference(&format!("refs/heads/{}", outcome.preserved_branch))
+            .is_ok());
+    }
+
+    #[test]
+    fn reject_and_restore_does_not_force_push_over_a_remote_that_moved() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let good_files = vec![TreeFile {
+            path: "cluster.yaml".to_string(),
+            contents: b"nodes: []\n".to_vec(),
+        }];
+        let (backup, good_oid, _local) = seeded_backup(&bare_dir, &good_files);
+        let dummy_key = "not-a-real-key";
+        let bad_files = vec![TreeFile {
+            path: "stacks/broken.yaml".to_string(),
+            contents: b"not: valid: yaml: at: all".to_vec(),
+        }];
+        let bad_oid = backup
+            .sync(&bad_files, "bad", dummy_key, None)
+            .expect("sync")
+            .expect("a real commit");
+
+        // Somebody else pushes on top of the bad commit before the reject
+        // gets to run.
+        let other_dir = tempfile::tempdir().expect("other tempdir");
+        let url = format!("file://{}", bare_dir.path().display());
+        let other = GitBackup::open_or_init(other_dir.path(), &url, "main").expect("open");
+        let newer_files = vec![TreeFile {
+            path: "stacks/fixed.yaml".to_string(),
+            contents: b"services: {}\n".to_vec(),
+        }];
+        let newer_oid = other
+            .sync(&newer_files, "newer", dummy_key, None)
+            .expect("sync")
+            .expect("a real commit");
+
+        let outcome = backup
+            .reject_and_restore(bad_oid, Some(good_oid), "stale", dummy_key, None)
+            .expect("reject_and_restore");
+
+        assert_eq!(outcome.restored_commit, None);
+        let remote_repo = Repository::open_bare(bare_dir.path()).expect("open bare");
+        assert_eq!(
+            remote_repo
+                .find_reference("refs/heads/main")
+                .expect("remote main")
+                .target(),
+            Some(newer_oid),
+            "the newer remote commit must survive"
         );
         assert!(remote_repo
             .find_reference(&format!("refs/heads/{}", outcome.preserved_branch))

@@ -39,7 +39,7 @@ const KEY_STATE_MACHINE: &str = "state_machine";
 const KEY_SNAPSHOT: &str = "snapshot";
 
 /// The applied state, persisted as a unit so it can never be half written.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateMachine {
     pub last_applied: Option<LogId>,
     pub membership: StoredMembership,
@@ -49,6 +49,21 @@ pub struct StateMachine {
     /// field existed reads as version `0`.
     #[serde(default)]
     pub schema_version: u32,
+}
+
+impl Default for StateMachine {
+    /// A fresh node's state is built by this build, so it is already in the
+    /// current shape: stamp the current schema version rather than `0`, or
+    /// the first real migration would re-run on data it was never meant for.
+    /// (`0` is only ever the serde default for blobs that predate the field.)
+    fn default() -> Self {
+        Self {
+            last_applied: None,
+            membership: StoredMembership::default(),
+            data: ClusterState::default(),
+            schema_version: crate::state::CURRENT_SCHEMA_VERSION,
+        }
+    }
 }
 
 /// A stored snapshot: its metadata plus the serialized state machine.
@@ -575,41 +590,70 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError> {
         let data = snapshot.into_inner();
-        // A decode failure here comes from a peer, not from this node's own
-        // disk, and this node already has valid state to keep serving - so
-        // unlike `Store::open`, both a too-new schema and a decode failure
-        // are refused-and-logged rather than propagated as a fatal
-        // `StorageError` (which openraft treats as unrecoverable and is
-        // exactly what turned a past shape change into a full crash-loop).
-        let restored = match load_state_machine(&data) {
-            Ok(LoadedStateMachine::Current(sm)) => *sm,
-            Ok(LoadedStateMachine::TooNew { found }) => {
+        // A snapshot this node cannot (or should not) install MUST fail the
+        // install. Returning `Ok(())` without touching state - as this once
+        // did - makes openraft believe the snapshot is installed: it advances
+        // `last_applied` to `meta.last_log_id`, purges the log up to there and
+        // applies later entries on top of the stale state, which silently and
+        // permanently diverges this node from the cluster.
+        //
+        // Trade-off: openraft 0.9 has no "retriable" error for this call. Any
+        // `StorageError` from `install_snapshot` is propagated by the state
+        // machine worker to the raft core, which treats it as fatal and shuts
+        // the core down (the leader then re-sends the snapshot after the
+        // process restarts, so a transient problem heals on restart). That is
+        // the crash-loop a past shape change caused when this was an error -
+        // but a stopped, loudly failing node that needs an upgrade is strictly
+        // better than a node serving and replicating wrong state. The error
+        // text says why, so the operator knows to upgrade this node.
+        let restored = match load_state_machine(&data)? {
+            LoadedStateMachine::Current(sm) => *sm,
+            LoadedStateMachine::TooNew { found } => {
                 tracing::error!(
                     found,
                     current = crate::state::CURRENT_SCHEMA_VERSION,
-                    "refusing a snapshot written by a newer schema than this build understands - update this node; continuing to serve its current state until then"
+                    "refusing a snapshot written by a newer schema than this build understands - update this node"
                 );
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "an incoming snapshot failed to decode even though its schema_version looked compatible - this is likely a genuine bug, not expected version skew; refusing it and continuing to serve current state"
-                );
-                return Ok(());
+                return Err(StorageIOError::<NodeId>::read(AnyError::error(format!(
+                    "snapshot is schema_version {found}, newer than this build's {} - upgrade this node to install it",
+                    crate::state::CURRENT_SCHEMA_VERSION
+                )))
+                .into());
             }
         };
+        if restored.last_applied != meta.last_log_id {
+            return Err(StorageIOError::<NodeId>::read(AnyError::error(format!(
+                "snapshot data is applied through {:?} but its metadata says {:?}; refusing to install an inconsistent snapshot",
+                restored.last_applied, meta.last_log_id
+            )))
+            .into());
+        }
+        let mut restored = restored;
+        restored.schema_version = crate::state::CURRENT_SCHEMA_VERSION;
 
+        // Hold the write lock across the disk write so a concurrent
+        // `build_snapshot` cannot interleave and leave an older snapshot
+        // stored over this newer one. State machine and snapshot go to disk
+        // in one transaction so a crash cannot leave one without the other.
         let mut sm = self.sm.write().await;
-        *sm = restored;
-        self.persist(&sm).await?;
-
         let db = self.db.clone();
         let stored = StoredSnapshot {
             meta: meta.clone(),
             data,
         };
-        blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await
+        let sm_copy = restored.clone();
+        blocking(move || {
+            write_metas(
+                &db,
+                &[
+                    (KEY_STATE_MACHINE, encode(&sm_copy)?),
+                    (KEY_SNAPSHOT, encode(&stored)?),
+                ],
+            )
+        })
+        .await?;
+        *sm = restored;
+        Ok(())
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, StorageError> {
@@ -630,21 +674,21 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot, StorageError> {
-        let (data, meta) = {
-            let sm = self.sm.read().await;
-            let data = encode(&*sm)?;
-            let meta = SnapshotMeta {
-                last_log_id: sm.last_applied,
-                last_membership: sm.membership.clone(),
-                // Version makes successive snapshots distinguishable, which is
-                // all openraft needs from the id.
-                snapshot_id: format!(
-                    "{}-{}",
-                    sm.last_applied.map(|id| id.index).unwrap_or(0),
-                    sm.data.version
-                ),
-            };
-            (data, meta)
+        // The read lock is held across the disk write: `install_snapshot`
+        // takes the write lock, so the two can no longer interleave and an
+        // older snapshot can't overwrite a newer installed one.
+        let sm = self.sm.read().await;
+        let data = encode(&*sm)?;
+        let meta = SnapshotMeta {
+            last_log_id: sm.last_applied,
+            last_membership: sm.membership.clone(),
+            // Version makes successive snapshots distinguishable, which is
+            // all openraft needs from the id.
+            snapshot_id: format!(
+                "{}-{}",
+                sm.last_applied.map(|id| id.index).unwrap_or(0),
+                sm.data.version
+            ),
         };
 
         let db = self.db.clone();
@@ -653,6 +697,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             data: data.clone(),
         };
         blocking(move || write_meta(&db, KEY_SNAPSHOT, &stored)).await?;
+        drop(sm);
 
         Ok(Snapshot {
             meta,
@@ -700,8 +745,10 @@ fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
         return Ok(LoadedStateMachine::TooNew { found });
     }
     let migrated = crate::migrations::migrate_to_current(value, found);
-    let sm: StateMachine = serde_json::from_value(migrated)
+    let mut sm: StateMachine = serde_json::from_value(migrated)
         .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
+    // Migrated (or already current): stamp it so it is never migrated twice.
+    sm.schema_version = crate::state::CURRENT_SCHEMA_VERSION;
     Ok(LoadedStateMachine::Current(Box::new(sm)))
 }
 
@@ -720,6 +767,18 @@ fn write_meta<T: Serialize>(db: &Database, key: &str, value: &T) -> Result<(), S
     {
         let mut table = txn.open_table(META).map_err(write_err)?;
         table.insert(key, encoded.as_slice()).map_err(write_err)?;
+    }
+    txn.commit().map_err(write_err)
+}
+
+/// Writes several META keys in one transaction, all or nothing.
+fn write_metas(db: &Database, entries: &[(&str, Vec<u8>)]) -> Result<(), StorageError> {
+    let txn = db.begin_write().map_err(write_err)?;
+    {
+        let mut table = txn.open_table(META).map_err(write_err)?;
+        for (key, value) in entries {
+            table.insert(*key, value.as_slice()).map_err(write_err)?;
+        }
     }
     txn.commit().map_err(write_err)
 }

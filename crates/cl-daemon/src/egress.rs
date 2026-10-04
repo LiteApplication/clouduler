@@ -37,17 +37,19 @@ use cl_api::wireguard::{wireguard_secret_name, WireguardIngressStore};
 use cl_config::{ClusterConfig, InterfaceAddress, NetworkKind, NodeAddress};
 use cl_docker::{Docker, NetworkSpec};
 use cl_net::egress::{
-    apply_egress_iptables, egress_docker_name, egress_gateway, egress_iptables_plan, egress_subnet,
-    ensure_egress_bridge, nat_docker_name, nat_subnet, overlay_snat_plan,
+    container_input_plan, container_pools, egress_bridge_name, egress_docker_name, egress_gateway,
+    egress_iptables_plan, egress_subnet, ensure_egress_bridge, nat_docker_name, nat_subnet,
+    overlay_pool, overlay_snat_plan, HostServices, Wanted,
 };
+use cl_net::iptables::apply_plan;
 use cl_net::vxlan::Overlay;
 use cl_net::wireguard::{
-    apply_wireguard_ingress_iptables, ensure_wireguard_interface, parse_wg_quick,
-    wireguard_ingress_iptables_plan, IngressRule, WireguardConfig,
+    ensure_wireguard_interface, parse_wg_quick, wireguard_ingress_iptables_plan, IngressRule,
+    WireguardConfig,
 };
 use cl_raft::node::ClusterNode;
 use cl_secret::{ClusterKey, Sealed};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -157,6 +159,13 @@ pub fn start(
             ticker.tick().await;
             cfg = live_config(&cluster, &cfg).await;
 
+            // Before the docker check on purpose: the filter protects the host
+            // from whatever containers exist, and must not wait for docker to
+            // (re)connect to be in place.
+            if let Err(e) = ensure_container_input(&cluster, &cfg).await {
+                warn!(error = %e, "cannot apply the container input filter");
+            }
+
             let Some(docker) = docker.read().await.clone() else {
                 continue;
             };
@@ -178,6 +187,13 @@ pub fn start(
             }
 
             let interfaces = interfaces_of(&cfg, &node_name);
+            // Only once raft has handed us a config and it names this node: a
+            // node missing from a stale or fallback config would otherwise
+            // look like "implements nothing" and have everything swept.
+            if cluster.state().await.cluster_config.is_some() && cfg.nodes.contains_key(&node_name)
+            {
+                sweep_orphans(&cfg, &docker, &interfaces).await;
+            }
             if interfaces.is_empty() {
                 continue;
             }
@@ -208,21 +224,42 @@ pub fn start(
                 }
             }
 
-            if let Some(addr) = internal_addr {
-                let cluster_state = cluster.state().await;
-                let ingress_store = WireguardIngressStore::load(&cluster_state);
-                for (network, (kind, iface_addr)) in &interfaces {
-                    if *kind != NetworkKind::Wireguard {
-                        continue;
-                    }
-                    let iface = &iface_addr.interface;
-                    if let Err(e) = apply_ingress(iface, addr, network, &ingress_store).await {
-                        warn!(network = %network, iface = %iface, error = %e, "cannot apply wireguard ingress rules");
-                    }
+            // Applied whether or not the node has an internal address yet: the
+            // default deny must not depend on it, only the DNAT target does.
+            let cluster_state = cluster.state().await;
+            let ingress_store = WireguardIngressStore::load(&cluster_state);
+            for (network, (kind, iface_addr)) in &interfaces {
+                if *kind != NetworkKind::Wireguard {
+                    continue;
+                }
+                let iface = &iface_addr.interface;
+                if let Err(e) =
+                    apply_ingress(iface, internal_addr, network, iface_addr, &ingress_store).await
+                {
+                    warn!(network = %network, iface = %iface, error = %e, "cannot apply wireguard ingress rules");
                 }
             }
         }
     })
+}
+
+/// Keeps containers from reaching the host's own listeners. See
+/// `cl_net::egress::container_input_plan` for exactly what is let through.
+async fn ensure_container_input(cluster: &Arc<ClusterNode>, cfg: &ClusterConfig) -> Result<()> {
+    let state = cluster.state().await;
+    let services = HostServices {
+        proxy_ports: if cfg.proxy.enabled {
+            vec![cfg.proxy.http_port, cfg.proxy.https_port]
+        } else {
+            Vec::new()
+        },
+        published: crate::expose::published_ports(&state, cfg),
+    };
+    let plan = container_input_plan(overlay_pool(), &container_pools(), &services);
+    tokio::task::spawn_blocking(move || apply_plan(&plan))
+        .await
+        .context("iptables task panicked")?
+        .context("applying the container input filter")
 }
 
 /// Keeps an overlay container able to reach the other nodes' addresses on
@@ -238,16 +275,99 @@ async fn ensure_overlay_snat(cfg: &ClusterConfig, node_name: &str) -> Result<()>
             _ => None,
         })
         .collect();
-    let plan = overlay_snat_plan(
-        cl_net::ipam::DEFAULT_OVERLAY_POOL
-            .parse()
-            .context("parsing the default overlay pool")?,
-        &others,
-    );
-    tokio::task::spawn_blocking(move || apply_egress_iptables(&plan))
+    // Only the proxy answers on another node for a container, so only its
+    // ports (and pings) are worth laundering through this node's address.
+    let proxy_ports: Vec<u16> = if cfg.proxy.enabled {
+        vec![cfg.proxy.http_port, cfg.proxy.https_port]
+    } else {
+        Vec::new()
+    };
+    let plan = overlay_snat_plan(overlay_pool(), &others, &proxy_ports);
+    tokio::task::spawn_blocking(move || apply_plan(&plan))
         .await
         .context("iptables task panicked")?
         .context("applying the overlay source NAT")
+}
+
+/// Remove what a network that is gone from this node left behind: its docker
+/// network, kill-switch and ingress chains with their jumps, policy route and
+/// bridge, and a wireguard tunnel (which would otherwise stay up holding its
+/// key, with its ingress ports open).
+///
+/// The docker network goes first and gates the rest. One that still has
+/// containers attached refuses removal, and then its bridge and kill-switch
+/// are kept: tearing the drop rule out from under a running container would
+/// let it out the host's main route. Everything is retried next tick.
+async fn sweep_orphans(
+    cfg: &ClusterConfig,
+    docker: &Docker,
+    interfaces: &BTreeMap<String, (NetworkKind, InterfaceAddress)>,
+) {
+    let mut wanted = Wanted::default();
+    for (network, (kind, addr)) in interfaces {
+        wanted.bridges.insert(egress_bridge_name(network));
+        if *kind == NetworkKind::Wireguard {
+            wanted.wg_ifaces.insert(addr.interface.clone());
+        }
+    }
+
+    match docker.list_networks_of_stack(OWNER).await {
+        Ok(names) => {
+            for name in names {
+                if let Some(network) = name.strip_prefix("egress_") {
+                    if interfaces.contains_key(network) {
+                        continue;
+                    }
+                    match docker.remove_network(&name).await {
+                        Ok(()) => {
+                            info!(network = %network, "removed the docker network of an egress network this node no longer implements")
+                        }
+                        Err(e) => {
+                            debug!(network = %network, error = %e, "cannot remove the docker network yet, keeping its bridge and kill-switch");
+                            wanted.bridges.insert(egress_bridge_name(network));
+                        }
+                    }
+                } else if let Some(network) = name.strip_prefix("nat_") {
+                    let still_nat = cfg
+                        .networks
+                        .get(network)
+                        .is_some_and(|net| net.kind == NetworkKind::Nat);
+                    if !still_nat {
+                        if let Err(e) = docker.remove_network(&name).await {
+                            debug!(network = %network, error = %e, "cannot remove the nat docker network yet");
+                        } else {
+                            info!(network = %network, "removed the docker network of a nat network that no longer exists");
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // Without the list there is no way to tell which bridges are still
+            // pinned by a docker network, so sweep nothing this tick.
+            debug!(error = %e, "cannot list cluster docker networks, skipping the orphan sweep");
+            return;
+        }
+    }
+
+    let swept = tokio::task::spawn_blocking(move || {
+        let host = cl_net::egress::scan_host()?;
+        let actions = cl_net::egress::plan_sweep(&host, &wanted);
+        Ok::<_, cl_net::NetError>(cl_net::egress::run_sweep(&actions))
+    })
+    .await;
+    match swept {
+        Ok(Ok(report)) => {
+            for removed in &report.removed {
+                info!(%removed, "removed a leftover of a network this node no longer implements");
+            }
+            for failed in &report.failed {
+                warn!(%failed, "cannot remove a leftover of a removed network, will retry");
+            }
+        }
+        Ok(Err(e)) => warn!(error = %e, "cannot scan the host for leftover network objects"),
+        Err(e) => warn!(error = %e, "orphan sweep task panicked"),
+    }
 }
 
 /// Open this node's sealed config for `network` and bring the tunnel
@@ -288,11 +408,12 @@ async fn ensure_tunnel(
 
 async fn apply_ingress(
     iface: &str,
-    addr: IpAddr,
+    addr: Option<IpAddr>,
     network: &str,
+    iface_addr: &InterfaceAddress,
     store: &WireguardIngressStore,
 ) -> Result<()> {
-    let rules: Vec<IngressRule> = store
+    let mut rules: Vec<IngressRule> = store
         .rules
         .iter()
         .filter(|r| r.network == network)
@@ -302,8 +423,16 @@ async fn apply_ingress(
             target_port: r.target_port,
         })
         .collect();
+    // Ports the node's config marks open on this tunnel (a VPN provider's port
+    // forwarding, say) arrive unrewritten at a published port; they are as
+    // open as an explicit ingress rule, or the default deny would eat them.
+    rules.extend(iface_addr.open_ports.iter().map(|open| IngressRule {
+        port: open.port,
+        protocol: open.protocol,
+        target_port: open.port,
+    }));
     let plan = wireguard_ingress_iptables_plan(iface, addr, &rules);
-    tokio::task::spawn_blocking(move || apply_wireguard_ingress_iptables(&plan))
+    tokio::task::spawn_blocking(move || apply_plan(&plan))
         .await
         .context("iptables task panicked")??;
     Ok(())
@@ -327,6 +456,14 @@ async fn ensure_one(
 
     let iface_owned = iface.to_string();
     let bridge_owned = bridge.clone();
+    // Loose reverse-path filtering (2) rather than strict (1): a reply can
+    // arrive on the tunnel while the policy route for the bridge, not the main
+    // table, is what would route its source, and strict mode drops that
+    // asymmetric path. The last write sets the host-wide `all` value too, and
+    // the kernel applies the larger of `all` and the per-interface value, so
+    // this is a deliberate host-wide change: strict becomes loose (and off
+    // becomes loose) on every interface. Left as is; it is the documented
+    // price of policy routing here.
     tokio::task::spawn_blocking(move || -> Result<()> {
         std::fs::write(
             format!("/proc/sys/net/ipv4/conf/{bridge_owned}/rp_filter"),
@@ -343,15 +480,14 @@ async fn ensure_one(
     .context("rp_filter task panicked")?
     .context("writing rp_filter sysctls")?;
 
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    network.hash(&mut hasher);
-    let table_id = 5000 + (hasher.finish() % 1000) as u32;
+    // Shared with config validation, which refuses two networks that land on
+    // the same table.
+    let table_id = cl_config::egress_table_id(network);
 
     let iface_for_route = iface.to_string();
     let bridge_for_rule = bridge.clone();
     let network_owned = network.to_string();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let routed = tokio::task::spawn_blocking(move || -> Result<bool> {
         let table_str = table_id.to_string();
         let rule_pattern = format!("iif {bridge_for_rule} lookup {table_str}");
         let existing_rules = String::from_utf8_lossy(
@@ -430,7 +566,11 @@ async fn ensure_one(
                     network = %network_owned, iface = %iface_for_route,
                     "no default route found on this interface, egress is blocked until it has one",
                 );
-                return Ok(());
+                // Not an error, but not routed either: the caller locks the
+                // bridge down with a plain drop. Without the policy rule the
+                // bridge's traffic would take the main routing table out some
+                // other interface.
+                return Ok(false);
             };
 
             let status = std::process::Command::new("ip")
@@ -468,14 +608,16 @@ async fn ensure_one(
                 anyhow::bail!("ip rule add failed");
             }
         }
-        Ok(())
+        Ok(true)
     })
     .await
     .context("policy routing task panicked")??;
 
-    let plan = egress_iptables_plan(&bridge, subnet, iface);
+    // With no route out the plan has no accept at all, only the bridge-wide
+    // drop; see `egress_iptables_plan`.
+    let plan = egress_iptables_plan(&bridge, subnet, routed.then_some(iface));
     let bridge_for_blocking = bridge.clone();
-    tokio::task::spawn_blocking(move || apply_egress_iptables(&plan))
+    tokio::task::spawn_blocking(move || apply_plan(&plan))
         .await
         .context("iptables task panicked")?
         .with_context(|| format!("applying the kill-switch for {bridge_for_blocking}"))?;

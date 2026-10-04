@@ -132,7 +132,8 @@ pub fn plan(
     let mut mem_used: BTreeMap<String, u64> = BTreeMap::new();
     for (id, assignment) in &state.assignments {
         if let Some(&bytes) = memory_bytes.get(id) {
-            *mem_used.entry(assignment.node.clone()).or_insert(0) += bytes;
+            let used = mem_used.entry(assignment.node.clone()).or_insert(0);
+            *used = used.saturating_add(bytes);
         }
     }
 
@@ -214,7 +215,11 @@ pub fn plan(
             .unwrap_or(0);
         let to_after = NodeLoad {
             mem_permille: mem_permille(
-                mem_used.get(&to).copied().unwrap_or(0) + moved_bytes,
+                mem_used
+                    .get(&to)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(moved_bytes),
                 to_total,
             ),
             count: to_load.count + 1,
@@ -232,7 +237,8 @@ pub fn plan(
         if moved_bytes > 0 {
             let from_used = mem_used.entry(from.clone()).or_insert(0);
             *from_used = from_used.saturating_sub(moved_bytes);
-            *mem_used.entry(to.clone()).or_insert(0) += moved_bytes;
+            let to_used = mem_used.entry(to.clone()).or_insert(0);
+            *to_used = to_used.saturating_add(moved_bytes);
         }
         moves.push(Move {
             instance: m.item.id.clone(),

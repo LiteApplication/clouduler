@@ -65,19 +65,37 @@ pub fn remote_repo(destination: &BackupDestination) -> ResolvedRepo {
 /// the default 22 - restic's `sftp:` shorthand has no port syntax, so a
 /// non-default port has to be routed through `-o sftp.command`.
 pub fn ssh_command_args(destination: &BackupDestination) -> Vec<String> {
+    ssh_command_args_with_key(destination, None)
+}
+
+/// Like `ssh_command_args`, additionally pointing ssh at the private key
+/// `identity` (a `0600` file staged from the destination's sealed
+/// credentials) with `-i`. Without an identity and on the default port the
+/// shorthand needs nothing, so the result is empty.
+///
+/// `user` and `host` land in a command line restic splits on whitespace, so
+/// they must already have passed `cl_raft::backup_validate` (no leading dash,
+/// no whitespace) - `credentials::build_repo` enforces that before calling
+/// this.
+pub fn ssh_command_args_with_key(
+    destination: &BackupDestination,
+    identity: Option<&Path>,
+) -> Vec<String> {
     let BackupDestinationKind::Ssh {
         host, port, user, ..
     } = &destination.kind
     else {
         return Vec::new();
     };
-    if *port == 22 {
+    if *port == 22 && identity.is_none() {
         return Vec::new();
     }
-    vec![
-        "-o".to_string(),
-        format!("sftp.command=ssh {user}@{host} -p {port} -s sftp"),
-    ]
+    let mut command = format!("ssh {user}@{host} -p {port}");
+    if let Some(identity) = identity {
+        command.push_str(&format!(" -i {}", identity.display()));
+    }
+    command.push_str(" -s sftp");
+    vec!["-o".to_string(), format!("sftp.command={command}")]
 }
 
 #[cfg(test)]
@@ -117,6 +135,19 @@ mod tests {
             vec![
                 "-o".to_string(),
                 "sftp.command=ssh clouduler@backup.example.com -p 2222 -s sftp".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_identity_adds_a_dash_i_even_on_the_default_port() {
+        let args = ssh_command_args_with_key(&ssh(22), Some(Path::new("/k/ssh_key")));
+        assert_eq!(
+            args,
+            vec![
+                "-o".to_string(),
+                "sftp.command=ssh clouduler@backup.example.com -p 22 -i /k/ssh_key -s sftp"
+                    .to_string()
             ]
         );
     }

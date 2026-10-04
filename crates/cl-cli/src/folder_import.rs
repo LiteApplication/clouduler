@@ -192,6 +192,9 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
 
     let id = VolumeId::new(drive.clone(), volume.clone());
     let client = client_for(cfg, args.via.as_deref())?;
+    // Loaded before anything is stopped or moved: the push at the end needs it,
+    // and failing there would leave the instances down.
+    let keys = cl_drive::transport::key_watch_from_config(cfg)?;
     debug!(
         via = args.via.as_deref().unwrap_or("<any manager>"),
         "submitting through"
@@ -274,6 +277,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
         volume_root: &volume_root,
         generation,
         progress: &progress,
+        keys: &keys,
     })
     .await;
     progress.finish();
@@ -419,6 +423,7 @@ struct PushArgs<'a> {
     volume_root: &'a Path,
     generation: u64,
     progress: &'a Progress,
+    keys: &'a cl_raft::KeyWatch,
 }
 
 /// Push the volume straight to every other node holding a copy, instead of
@@ -434,6 +439,7 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
         volume_root,
         generation,
         progress,
+        keys,
     } = args;
 
     let targets: Vec<(String, SocketAddr)> = if registry.is_served(drive) {
@@ -456,7 +462,7 @@ async fn push_now(args: PushArgs<'_>) -> PushResult {
         targets = %targets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
         "pushing to"
     );
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(keys.clone());
     let mut failed = Vec::new();
     for (i, (name, addr)) in targets.iter().enumerate() {
         let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));

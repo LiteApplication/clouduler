@@ -14,6 +14,7 @@ pub mod internal_auth;
 mod key;
 mod keypair;
 mod seal;
+pub mod stream_auth;
 mod wrap;
 
 pub use error::{Result, SecretError};

@@ -12,7 +12,13 @@
 //!
 //! The OIDC dance itself (redirect to the provider, exchange the code) is
 //! synthesized here rather than forwarded to a backend, the same way
-//! `redirect_regex` and static routes never touch a container. It reuses the
+//! `redirect_regex` and static routes never touch a container. The in-flight
+//! login state (csrf state, nonce, pkce verifier, return target) is likewise
+//! kept out of any per-node map: it travels in a short-lived `cl_proxy_login`
+//! cookie sealed under the cluster key, so the callback can land on a
+//! different node than the redirect did, and the state is bound to the browser
+//! that started the login (a forged callback link carries no matching cookie).
+//! It reuses the
 //! same `auth.oidc` cluster config and client secret as the web ui's own
 //! login (`_clouduler_oidc_client_secret`), so there is one identity
 //! provider client, not one per protected app — only its list of allowed
@@ -21,7 +27,10 @@
 //! Deliberately does not attempt cross-app single sign-on: the cookie is
 //! host-only (no `Domain=` attribute), so each protected hostname's session
 //! is independent. Simpler and smaller blast radius than a zone-wide cookie,
-//! at the cost of a separate login per app.
+//! at the cost of a separate login per app. The signed session label includes
+//! the host, so a cookie minted for one app does not verify on another, and
+//! the proxy strips its own cookies from requests before forwarding them so a
+//! backend never sees a replayable session.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,13 +43,15 @@ use cl_secret::{internal_auth, ClusterKey, Sealed};
 use http::{HeaderValue, Uri};
 use hyper::body::Incoming;
 use hyper::header::{COOKIE, HOST, LOCATION, SET_COOKIE};
+use hyper::HeaderMap;
 use hyper::{Request, Response, StatusCode};
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
-use tokio::sync::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tracing::warn;
 
 use crate::server::{empty_body, text_body, ProxyBody};
@@ -59,6 +70,17 @@ pub const LOGIN_PATH: &str = "/.clouduler/oidc/login";
 pub const CALLBACK_PATH: &str = "/.clouduler/oidc/callback";
 /// Cookie carrying the signed session.
 pub const COOKIE_NAME: &str = "cl_proxy_auth";
+/// Cookie carrying the sealed in-flight login state between the redirect to
+/// the provider and its callback.
+pub const LOGIN_COOKIE_NAME: &str = "cl_proxy_login";
+/// Path scope of the login cookie: only the callback needs it.
+const LOGIN_COOKIE_PATH: &str = "/.clouduler/oidc/";
+/// Context (aad) the login cookie is sealed under, so a sealed value of any
+/// other kind cannot be replayed as a login cookie.
+const LOGIN_SEAL_CONTEXT: &str = "proxy-login";
+/// How long cached provider discovery (including its JWKS) is trusted before
+/// being refetched, so a rotated signing key does not break logins forever.
+const METADATA_TTL: Duration = Duration::from_secs(3600);
 
 /// How long an in-flight login may sit between redirect and callback.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -68,11 +90,14 @@ const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 /// value the cluster key might back (see `cl_secret::internal_auth`).
 const LABEL_PREFIX: &str = "proxyauth";
 
+/// In-flight login state, sealed into the `cl_proxy_login` cookie.
+#[derive(Serialize, Deserialize)]
 struct PendingLogin {
-    nonce: Nonce,
-    pkce_verifier: PkceCodeVerifier,
+    state: String,
+    nonce: String,
+    pkce_verifier: String,
     return_to: String,
-    started_at: Instant,
+    started_at_unix: u64,
 }
 
 /// What a request should get in response to the `authenticated` middleware.
@@ -93,9 +118,9 @@ pub struct AuthGate {
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     cluster: Arc<ClusterNode>,
     http: openidconnect::reqwest::Client,
-    /// Cached discovery, invalidated whenever the configured issuer changes.
-    metadata: RwLock<Option<(String, CoreProviderMetadata)>>,
-    pending: Mutex<HashMap<String, PendingLogin>>,
+    /// Cached discovery, invalidated whenever the configured issuer changes
+    /// or the entry is older than `METADATA_TTL`.
+    metadata: RwLock<Option<(String, Instant, CoreProviderMetadata)>>,
 }
 
 impl AuthGate {
@@ -114,7 +139,6 @@ impl AuthGate {
             cluster,
             http,
             metadata: RwLock::new(None),
-            pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -140,23 +164,24 @@ impl AuthGate {
     }
 
     async fn metadata(&self, issuer: &str) -> Result<CoreProviderMetadata, String> {
-        if let Some((cached_issuer, cached)) = self.metadata.read().await.as_ref() {
-            if cached_issuer == issuer {
+        if let Some((cached_issuer, fetched_at, cached)) = self.metadata.read().await.as_ref() {
+            if cached_issuer == issuer && fetched_at.elapsed() < METADATA_TTL {
                 return Ok(cached.clone());
             }
         }
+        self.refresh_metadata(issuer).await
+    }
+
+    /// Fetch discovery unconditionally and cache it.
+    async fn refresh_metadata(&self, issuer: &str) -> Result<CoreProviderMetadata, String> {
         let issuer_url =
             IssuerUrl::new(issuer.to_string()).map_err(|e| format!("bad issuer url: {e}"))?;
         let discovered = CoreProviderMetadata::discover_async(issuer_url, &self.http)
             .await
             .map_err(|e| format!("oidc discovery failed: {e}"))?;
-        *self.metadata.write().await = Some((issuer.to_string(), discovered.clone()));
+        *self.metadata.write().await =
+            Some((issuer.to_string(), Instant::now(), discovered.clone()));
         Ok(discovered)
-    }
-
-    async fn gc_expired(&self) {
-        let mut pending = self.pending.lock().await;
-        pending.retain(|_, login| login.started_at.elapsed() <= LOGIN_TIMEOUT);
     }
 
     /// Decide what a request to an `authenticated` route should get: the
@@ -181,8 +206,7 @@ impl AuthGate {
         if path == CALLBACK_PATH {
             return self.finish_login(req, scheme, &host, &settings).await;
         }
-        if let Some(subject) = self.valid_session(req) {
-            let _ = subject;
+        if self.valid_session(req, &host).is_some() {
             return GateOutcome::Allow;
         }
         if path == LOGIN_PATH {
@@ -191,10 +215,10 @@ impl AuthGate {
         GateOutcome::Respond(redirect_to_login(scheme, &host, req.uri()))
     }
 
-    fn valid_session(&self, req: &Request<Incoming>) -> Option<String> {
+    fn valid_session(&self, req: &Request<Incoming>, host: &str) -> Option<String> {
         let key = self.key()?;
-        let cookie = extract_cookie(req, COOKIE_NAME)?;
-        verify_cookie(&key, &cookie)
+        let cookie = extract_cookie(req.headers(), COOKIE_NAME)?;
+        verify_cookie(&key, host, &cookie)
     }
 
     async fn start_login(
@@ -204,9 +228,18 @@ impl AuthGate {
         host: &str,
         settings: &cl_config::OidcConfig,
     ) -> GateOutcome {
+        let Some(key) = self.key() else {
+            return GateOutcome::Respond(status_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this node holds no cluster key",
+            ));
+        };
         let metadata = match self.metadata(&settings.issuer).await {
             Ok(m) => m,
-            Err(e) => return GateOutcome::Respond(bad_gateway(format!("oidc discovery: {e}"))),
+            Err(e) => {
+                warn!(error = %e, "oidc discovery failed while starting a login");
+                return GateOutcome::Respond(bad_gateway("oidc discovery failed"));
+            }
         };
         let redirect_url = format!("{scheme}://{host}{CALLBACK_PATH}");
         let Ok(redirect) = RedirectUrl::new(redirect_url) else {
@@ -230,19 +263,26 @@ impl AuthGate {
         }
         let (auth_url, csrf_token, nonce) = request.set_pkce_challenge(pkce_challenge).url();
 
-        let return_to = return_target(req.uri());
-        self.gc_expired().await;
-        self.pending.lock().await.insert(
-            csrf_token.secret().clone(),
-            PendingLogin {
-                nonce,
-                pkce_verifier,
-                return_to,
-                started_at: Instant::now(),
-            },
-        );
+        let return_to = login_return_param(req.uri());
+        let pending = PendingLogin {
+            state: csrf_token.secret().clone(),
+            nonce: nonce.secret().clone(),
+            pkce_verifier: pkce_verifier.secret().clone(),
+            return_to,
+            started_at_unix: now_unix(),
+        };
+        let Some(sealed) = seal_login(&key, &pending) else {
+            return GateOutcome::Respond(bad_gateway("cannot seal login state"));
+        };
 
-        GateOutcome::Respond(redirect_response(auth_url.as_str()))
+        let mut resp = redirect_response(auth_url.as_str());
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "{LOGIN_COOKIE_NAME}={sealed}; Path={LOGIN_COOKIE_PATH}; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
+            LOGIN_TIMEOUT.as_secs()
+        )) {
+            resp.headers_mut().append(SET_COOKIE, v);
+        }
+        GateOutcome::Respond(resp)
     }
 
     async fn finish_login(
@@ -268,13 +308,21 @@ impl AuthGate {
             ));
         };
 
-        let Some(pending) = self.pending.lock().await.remove(&state) else {
+        let Some(pending) =
+            extract_cookie(req.headers(), LOGIN_COOKIE_NAME).and_then(|v| open_login(&key, &v))
+        else {
             return GateOutcome::Respond(status_response(
                 StatusCode::UNAUTHORIZED,
                 "unknown or expired login",
             ));
         };
-        if pending.started_at.elapsed() > LOGIN_TIMEOUT {
+        if !constant_time_eq(pending.state.as_bytes(), state.as_bytes()) {
+            return GateOutcome::Respond(status_response(
+                StatusCode::UNAUTHORIZED,
+                "unknown or expired login",
+            ));
+        }
+        if now_unix().saturating_sub(pending.started_at_unix) > LOGIN_TIMEOUT.as_secs() {
             return GateOutcome::Respond(status_response(
                 StatusCode::UNAUTHORIZED,
                 "login took too long",
@@ -283,37 +331,43 @@ impl AuthGate {
 
         let metadata = match self.metadata(&settings.issuer).await {
             Ok(m) => m,
-            Err(e) => return GateOutcome::Respond(bad_gateway(format!("oidc discovery: {e}"))),
+            Err(e) => {
+                warn!(error = %e, "oidc discovery failed while finishing a login");
+                return GateOutcome::Respond(bad_gateway("oidc discovery failed"));
+            }
         };
         let redirect_url = format!("{scheme}://{host}{CALLBACK_PATH}");
         let Ok(redirect) = RedirectUrl::new(redirect_url) else {
             return GateOutcome::Respond(bad_gateway("invalid redirect url"));
         };
+        let client_secret = self.client_secret().await;
         let client = CoreClient::from_provider_metadata(
             metadata,
             ClientId::new(settings.client_id.clone()),
-            self.client_secret().await.map(ClientSecret::new),
+            client_secret.clone().map(ClientSecret::new),
         )
-        .set_redirect_uri(redirect);
+        .set_redirect_uri(redirect.clone());
 
-        let token_response = match client
-            .exchange_code(AuthorizationCode::new(code))
-            .map_err(|e| format!("token endpoint not configured: {e}"))
+        let token_request = match client.exchange_code(AuthorizationCode::new(code)) {
+            Ok(req) => req,
+            Err(e) => {
+                warn!(error = %e, "oidc token endpoint not configured");
+                return GateOutcome::Respond(bad_gateway("token endpoint not configured"));
+            }
+        };
+        let token_response = match token_request
+            .set_pkce_verifier(PkceCodeVerifier::new(pending.pkce_verifier.clone()))
+            .request_async(&self.http)
+            .await
         {
-            Ok(req) => match req
-                .set_pkce_verifier(pending.pkce_verifier)
-                .request_async(&self.http)
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    return GateOutcome::Respond(status_response(
-                        StatusCode::UNAUTHORIZED,
-                        &format!("token exchange failed: {e}"),
-                    ))
-                }
-            },
-            Err(e) => return GateOutcome::Respond(bad_gateway(e)),
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(error = %e, "oidc token exchange failed");
+                return GateOutcome::Respond(status_response(
+                    StatusCode::UNAUTHORIZED,
+                    "token exchange failed",
+                ));
+            }
         };
 
         let Some(id_token) = token_response.id_token() else {
@@ -322,30 +376,61 @@ impl AuthGate {
                 "provider did not return an id token",
             ));
         };
-        let verifier = client.id_token_verifier();
-        let claims = match id_token.claims(&verifier, &pending.nonce) {
-            Ok(c) => c,
-            Err(e) => {
-                return GateOutcome::Respond(status_response(
-                    StatusCode::UNAUTHORIZED,
-                    &format!("id token verification failed: {e}"),
-                ))
+        let nonce = Nonce::new(pending.nonce.clone());
+        let subject = match id_token
+            .claims(&client.id_token_verifier(), &nonce)
+            .map(|c| c.subject().as_str().to_string())
+        {
+            Ok(s) => s,
+            Err(first) => {
+                // A rotated signing key looks exactly like a bad signature
+                // against the cached jwks, so refetch discovery once and
+                // retry before giving up.
+                let retried = match self.refresh_metadata(&settings.issuer).await {
+                    Ok(fresh) => {
+                        let client = CoreClient::from_provider_metadata(
+                            fresh,
+                            ClientId::new(settings.client_id.clone()),
+                            client_secret.map(ClientSecret::new),
+                        )
+                        .set_redirect_uri(redirect);
+                        let verifier = client.id_token_verifier();
+                        let result = id_token
+                            .claims(&verifier, &nonce)
+                            .map(|c| c.subject().as_str().to_string())
+                            .map_err(|e| e.to_string());
+                        result
+                    }
+                    Err(e) => Err(e),
+                };
+                match retried {
+                    Ok(s) => s,
+                    Err(second) => {
+                        warn!(first = %first, second = %second, "oidc id token verification failed");
+                        return GateOutcome::Respond(status_response(
+                            StatusCode::UNAUTHORIZED,
+                            "id token verification failed",
+                        ));
+                    }
+                }
             }
         };
-        let subject = claims.subject().as_str().to_string();
 
-        let expires_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            + SESSION_TTL.as_secs();
-        let cookie_value = sign_cookie(&key, &subject, expires_at);
+        let expires_at = now_unix() + SESSION_TTL.as_secs();
+        let cookie_value = sign_cookie(&key, host, &subject, expires_at);
         let mut resp = redirect_response(&pending.return_to);
         if let Ok(v) = HeaderValue::from_str(&format!(
             "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
             SESSION_TTL.as_secs()
         )) {
-            resp.headers_mut().insert(SET_COOKIE, v);
+            resp.headers_mut().append(SET_COOKIE, v);
+        }
+        // The login state is single-use; drop it so the browser does not keep
+        // a sealed copy around until it times out.
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "{LOGIN_COOKIE_NAME}=; Path={LOGIN_COOKIE_PATH}; Max-Age=0; Secure; HttpOnly; SameSite=Lax"
+        )) {
+            resp.headers_mut().append(SET_COOKIE, v);
         }
         GateOutcome::Respond(resp)
     }
@@ -361,6 +446,27 @@ fn return_target(uri: &Uri) -> String {
     } else {
         candidate.to_string()
     }
+}
+
+/// The post-login target carried in the login request's `return` query
+/// parameter, or `/` when it is absent or not a safe same-site path.
+fn login_return_param(uri: &Uri) -> String {
+    let params = form_urlencoded_parse(uri.query().unwrap_or(""));
+    match params.get("return") {
+        Some(r) if is_safe_return(r) => r.clone(),
+        _ => "/".to_string(),
+    }
+}
+
+/// Accepts only a single-slash absolute path, since the value ends up in a
+/// `Location` header and anything else (`//evil`, `/\evil`, header
+/// injection, our own reserved paths) is an open redirect or a loop.
+fn is_safe_return(r: &str) -> bool {
+    r.starts_with('/')
+        && !r.starts_with("//")
+        && !r.starts_with("/\\")
+        && !r.contains(['\\', '\r', '\n'])
+        && !r.starts_with("/.clouduler/")
 }
 
 fn redirect_to_login(scheme: &str, host: &str, original: &Uri) -> Response<ProxyBody> {
@@ -388,13 +494,45 @@ fn bad_gateway(reason: impl std::fmt::Display) -> Response<ProxyBody> {
     status_response(StatusCode::BAD_GATEWAY, &format!("authenticated: {reason}"))
 }
 
-fn extract_cookie(req: &Request<Incoming>, name: &str) -> Option<String> {
-    let raw = req.headers().get(COOKIE)?.to_str().ok()?;
-    raw.split(';').find_map(|kv| {
-        let kv = kv.trim();
-        let (k, v) = kv.split_once('=')?;
-        (k == name).then(|| v.to_string())
-    })
+fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(';'))
+        .find_map(|kv| {
+            let (k, v) = kv.trim().split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
+}
+
+/// Removes the gate's own cookies from the `Cookie` header(s) before the
+/// request is forwarded, so a backend cannot capture a session and replay it.
+/// Other cookies are kept; the header is dropped if nothing is left.
+pub fn strip_gate_cookies(headers: &mut HeaderMap) {
+    if !headers.contains_key(COOKIE) {
+        return;
+    }
+    let kept: Vec<String> = headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(';'))
+        .map(str::trim)
+        .filter(|kv| !kv.is_empty())
+        .filter(|kv| {
+            let name = kv.split_once('=').map_or(*kv, |(k, _)| k);
+            name != COOKIE_NAME && name != LOGIN_COOKIE_NAME
+        })
+        .map(str::to_string)
+        .collect();
+    headers.remove(COOKIE);
+    if kept.is_empty() {
+        return;
+    }
+    if let Ok(v) = HeaderValue::from_str(&kept.join("; ")) {
+        headers.insert(COOKIE, v);
+    }
 }
 
 fn urlencode(s: &str) -> String {
@@ -411,58 +549,71 @@ fn urlencode(s: &str) -> String {
 }
 
 fn form_urlencoded_parse(query: &str) -> HashMap<String, String> {
-    query
-        .split('&')
-        .filter_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            let decode = |s: &str| -> String {
-                let bytes = s.as_bytes();
-                let mut out = Vec::with_capacity(bytes.len());
-                let mut i = 0;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'+' => {
-                            out.push(b' ');
-                            i += 1;
-                        }
-                        b'%' if i + 2 < bytes.len() => {
-                            if let Ok(byte) = u8::from_str_radix(
-                                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                                16,
-                            ) {
-                                out.push(byte);
-                                i += 3;
-                            } else {
-                                out.push(bytes[i]);
-                                i += 1;
-                            }
-                        }
-                        b => {
-                            out.push(b);
-                            i += 1;
-                        }
-                    }
-                }
-                String::from_utf8_lossy(&out).into_owned()
-            };
-            Some((decode(k), decode(v)))
-        })
-        .collect()
+    serde_urlencoded::from_str(query).unwrap_or_default()
 }
 
-/// Signs `subject` and `expires_at` (unix seconds) into a cookie value that
-/// any node holding `key` can verify without asking anyone else, since the
-/// signature is the only state the session carries.
-fn sign_cookie(key: &ClusterKey, subject: &str, expires_at: u64) -> String {
-    let label = format!("{LABEL_PREFIX}:{subject}:{expires_at}");
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Length-aware constant-time byte comparison, for the csrf state.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Seals the login state into a cookie-safe (URL-safe base64) string.
+fn seal_login(key: &ClusterKey, pending: &PendingLogin) -> Option<String> {
+    let json = serde_json::to_vec(pending).ok()?;
+    let sealed = Sealed::seal(key, LOGIN_SEAL_CONTEXT, &json).ok()?;
+    // `Sealed` blobs are standard base64, whose `+`, `/` and `=` are not safe
+    // in a cookie value, so re-encode the raw bytes.
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(sealed.blob)
+        .ok()?;
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))
+}
+
+fn open_login(key: &ClusterKey, value: &str) -> Option<PendingLogin> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()?;
+    let blob = base64::engine::general_purpose::STANDARD.encode(raw);
+    let plaintext = Sealed::from_blob(blob).open(key, LOGIN_SEAL_CONTEXT).ok()?;
+    serde_json::from_slice(&plaintext).ok()
+}
+
+/// Lowercases the host and strips any port, so the signed label is the same
+/// however the browser spelled the authority.
+fn normalize_host(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+    if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed ipv6 literal: keep everything up to the closing bracket.
+        return rest.split(']').next().unwrap_or(rest).to_string();
+    }
+    host.split(':').next().unwrap_or("").to_string()
+}
+
+/// Signs `host`, `subject` and `expires_at` (unix seconds) into a cookie
+/// value that any node holding `key` can verify without asking anyone else,
+/// since the signature is the only state the session carries. The host is in
+/// the signed label so a cookie minted for one app is useless on another.
+fn sign_cookie(key: &ClusterKey, host: &str, subject: &str, expires_at: u64) -> String {
+    let host = normalize_host(host);
+    let label = format!("{LABEL_PREFIX}:{host}:{subject}:{expires_at}");
     let sig = internal_auth::sign(key, &label);
     let subject_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(subject.as_bytes());
     format!("{subject_b64}.{expires_at}.{sig}")
 }
 
-/// Verifies a cookie value produced by `sign_cookie`, returning the subject
-/// if the signature checks out and it has not expired.
-fn verify_cookie(key: &ClusterKey, value: &str) -> Option<String> {
+/// Verifies a cookie value produced by `sign_cookie` for `host`, returning the
+/// subject if the signature checks out and it has not expired.
+fn verify_cookie(key: &ClusterKey, host: &str, value: &str) -> Option<String> {
     let mut parts = value.splitn(3, '.');
     let subject_b64 = parts.next()?;
     let expires_at: u64 = parts.next()?.parse().ok()?;
@@ -477,13 +628,18 @@ fn verify_cookie(key: &ClusterKey, value: &str) -> Option<String> {
         .decode(subject_b64)
         .ok()?;
     let subject = String::from_utf8(subject_bytes).ok()?;
-    let label = format!("{LABEL_PREFIX}:{subject}:{expires_at}");
+    let label = format!(
+        "{LABEL_PREFIX}:{}:{subject}:{expires_at}",
+        normalize_host(host)
+    );
     internal_auth::verify(key, &label, sig).then_some(subject)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOST_A: &str = "a.example.com";
 
     #[test]
     fn a_cookie_verifies_against_the_key_that_signed_it() {
@@ -492,9 +648,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let cookie = sign_cookie(&key, "alice@example.com", now + 3600);
+        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now + 3600);
         assert_eq!(
-            verify_cookie(&key, &cookie),
+            verify_cookie(&key, HOST_A, &cookie),
             Some("alice@example.com".to_string())
         );
     }
@@ -506,8 +662,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let cookie = sign_cookie(&key, "alice@example.com", now.saturating_sub(1));
-        assert_eq!(verify_cookie(&key, &cookie), None);
+        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now.saturating_sub(1));
+        assert_eq!(verify_cookie(&key, HOST_A, &cookie), None);
     }
 
     #[test]
@@ -518,8 +674,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let cookie = sign_cookie(&key, "alice@example.com", now + 3600);
-        assert_eq!(verify_cookie(&other, &cookie), None);
+        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now + 3600);
+        assert_eq!(verify_cookie(&other, HOST_A, &cookie), None);
     }
 
     #[test]
@@ -529,21 +685,21 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let cookie = sign_cookie(&key, "alice@example.com", now + 3600);
+        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now + 3600);
         let (_, rest) = cookie.split_once('.').unwrap();
         let forged = format!(
             "{}.{rest}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mallory@example.com")
         );
-        assert_eq!(verify_cookie(&key, &forged), None);
+        assert_eq!(verify_cookie(&key, HOST_A, &forged), None);
     }
 
     #[test]
     fn garbage_cookie_values_do_not_panic_or_verify() {
         let key = ClusterKey::generate();
-        assert_eq!(verify_cookie(&key, "not-a-cookie"), None);
-        assert_eq!(verify_cookie(&key, ""), None);
-        assert_eq!(verify_cookie(&key, "a.b.c"), None);
+        assert_eq!(verify_cookie(&key, HOST_A, "not-a-cookie"), None);
+        assert_eq!(verify_cookie(&key, HOST_A, ""), None);
+        assert_eq!(verify_cookie(&key, HOST_A, "a.b.c"), None);
     }
 
     #[test]
@@ -563,5 +719,97 @@ mod tests {
         let params = form_urlencoded_parse("code=abc&state=x%2Fy+z");
         assert_eq!(params.get("code").map(String::as_str), Some("abc"));
         assert_eq!(params.get("state").map(String::as_str), Some("x/y z"));
+    }
+
+    #[test]
+    fn form_urlencoded_parse_decodes_a_trailing_percent_escape() {
+        let params = form_urlencoded_parse("a=x%2F&b=%41");
+        assert_eq!(params.get("a").map(String::as_str), Some("x/"));
+        assert_eq!(params.get("b").map(String::as_str), Some("A"));
+    }
+
+    #[test]
+    fn a_cookie_does_not_verify_on_another_host() {
+        let key = ClusterKey::generate();
+        let cookie = sign_cookie(&key, HOST_A, "alice", now_unix() + 3600);
+        assert_eq!(verify_cookie(&key, "b.example.com", &cookie), None);
+    }
+
+    #[test]
+    fn host_case_and_port_do_not_matter() {
+        let key = ClusterKey::generate();
+        let cookie = sign_cookie(&key, "A.Example.com:8443", "alice", now_unix() + 3600);
+        assert_eq!(
+            verify_cookie(&key, "a.example.com", &cookie),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn login_state_round_trips_and_is_cookie_safe() {
+        let key = ClusterKey::generate();
+        let pending = PendingLogin {
+            state: "s".into(),
+            nonce: "n".into(),
+            pkce_verifier: "v".into(),
+            return_to: "/x?y=1".into(),
+            started_at_unix: 5,
+        };
+        let sealed = seal_login(&key, &pending).unwrap();
+        assert!(sealed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        let back = open_login(&key, &sealed).unwrap();
+        assert_eq!(back.state, "s");
+        assert_eq!(back.return_to, "/x?y=1");
+        assert!(open_login(&ClusterKey::generate(), &sealed).is_none());
+        assert!(open_login(&key, "garbage").is_none());
+    }
+
+    #[test]
+    fn constant_time_eq_compares_content_and_length() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn login_return_param_accepts_local_paths_only() {
+        let ok = |q: &str| {
+            login_return_param(
+                &format!("/.clouduler/oidc/login?return={q}")
+                    .parse()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(ok("%2Flibrary%3Fx%3D1"), "/library?x=1");
+        assert_eq!(ok("%2F%2Fevil.com"), "/");
+        assert_eq!(ok("%2F%5Cevil.com"), "/");
+        assert_eq!(ok("https%3A%2F%2Fevil.com"), "/");
+        assert_eq!(ok("%2Fa%5Cb"), "/");
+        assert_eq!(ok("%2Fa%0D%0Ab"), "/");
+        assert_eq!(ok("%2F.clouduler%2Foidc%2Fcallback"), "/");
+        assert_eq!(ok("evil"), "/");
+        let none: Uri = "/.clouduler/oidc/login".parse().unwrap();
+        assert_eq!(login_return_param(&none), "/");
+    }
+
+    #[test]
+    fn strip_gate_cookies_keeps_other_cookies() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            COOKIE,
+            HeaderValue::from_static("a=1; cl_proxy_auth=zzz; cl_proxy_login=q; b=2"),
+        );
+        strip_gate_cookies(&mut h);
+        assert_eq!(h.get(COOKIE).unwrap(), "a=1; b=2");
+    }
+
+    #[test]
+    fn strip_gate_cookies_drops_an_emptied_header() {
+        let mut h = HeaderMap::new();
+        h.insert(COOKIE, HeaderValue::from_static("cl_proxy_auth=zzz"));
+        strip_gate_cookies(&mut h);
+        assert!(h.get(COOKIE).is_none());
     }
 }

@@ -115,11 +115,23 @@ the one that exists, and a second key produces nothing but a node that thinks it
 can open them.
 
 So init writes `generate_secret_key: false` into the joining node's entry, which
-overrides the cluster wide `secrets.generate_if_missing`, and then offers to
-install the real key from a copy you provide. Skipping that is a perfectly good
-answer: the node replicates sealed secrets like any other and simply will not
-run a container that needs one, which is what you want on a worker you would
-rather not trust with everything.
+overrides the cluster wide `secrets.generate_if_missing`, and then installs the
+real key.
+
+The key also authenticates the node to node channel (raft, forwarded writes and
+the cli): every connection proves it holds the cluster key before a single
+request is read, so a node without it is refused by every peer and could never
+be told the key through raft. It therefore has to be on disk before the joining
+node's daemon first starts, and init takes care of that over the same https
+connection and admin api key it already used to join. It generates this node's
+own keypair (`secrets.node_key_file`), sends the public half to
+`POST /api/secrets/key/wrap`, and the cluster answers with the key wrapped for
+that public key. Only this node's private key opens it, and the plaintext key
+never crosses the wire. With `--yes` this is what happens. Interactively you can
+instead point at a copy of the key you already have, or skip and put the file in
+place yourself; `--key-file PATH` does the same without the prompt. If the fetch
+fails (the node you joined through holds no key, say) init says so and carries
+on, and you place the file before starting the daemon.
 
 ## The systemd unit
 

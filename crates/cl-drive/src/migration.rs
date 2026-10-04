@@ -76,6 +76,9 @@ pub struct MigrationJob<'a> {
     /// on every poll and the migration sits in `Stopping` forever.
     pub registry: Option<&'a DriveRegistry>,
     pub engine: &'a dyn SyncEngine,
+    /// The cluster key, for the verify step's own connection to the target's
+    /// drive listener (the engine carries its own for the sync).
+    pub keys: cl_raft::KeyWatch,
     pub control: &'a dyn InstanceControl,
     /// Where to publish live sync progress for `job.instance`, if anyone is
     /// watching. `None` in every test and in any caller that doesn't care.
@@ -331,7 +334,7 @@ async fn verify_all(job: &MigrationJob<'_>) -> Result<()> {
         // `true` here means hashing every byte of the volume, the single most
         // expensive thing this crate does — never on a runtime thread.
         let source = scan::scan_off_runtime(src_path, true).await?;
-        let target = transport::request_manifest(job.target_addr, volume, true).await?;
+        let target = transport::request_manifest(job.target_addr, volume, true, &job.keys).await?;
 
         let diff = source.diff(&target);
         if !diff.added.is_empty() || !diff.changed.is_empty() || !diff.removed.is_empty() {
@@ -482,6 +485,7 @@ mod tests {
             volumes: Vec::new(),
             registry: None,
             engine: Box::leak(Box::new(UnusedEngine)),
+            keys: cl_raft::throwaway_key(),
             control: Box::leak(Box::new(AlwaysOk)),
             sync_progress: Some(tracker),
             transfer_gate: Arc::new(Semaphore::new(1)),

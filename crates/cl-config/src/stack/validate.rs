@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::cluster::ClusterConfig;
 use crate::error::{ConfigError, Result};
 
+use super::deploy::{parse_memory_bytes, MAX_REPLICAS};
 use super::port::Protocol;
 use super::StackFile;
 
@@ -20,6 +21,50 @@ impl StackFile {
         self.validate_stop_signals()?;
         self.validate_colocate()?;
         self.validate_writable_secrets()?;
+        self.validate_replicas()?;
+        self.validate_memory_sizes()?;
+        Ok(())
+    }
+
+    /// Replica counts are capped at `MAX_REPLICAS`: the scheduler materializes
+    /// one record per replica every pass, so a typo like `replicas: 4000000000`
+    /// would otherwise take down whichever node is leader.
+    fn validate_replicas(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            let replicas = svc.deploy.as_ref().and_then(|d| d.replicas);
+            if let Some(n) = replicas.filter(|n| *n > MAX_REPLICAS) {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}.deploy.replicas"),
+                    format!("{n} is more than the maximum of {MAX_REPLICAS}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A memory size whose digits parse but overflow a u64 once the unit is
+    /// applied is rejected. (Other unparseable sizes are still ignored, as
+    /// they always were.)
+    fn validate_memory_sizes(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(resources) = svc.deploy.as_ref().and_then(|d| d.resources.as_ref()) else {
+                continue;
+            };
+            for (kind, spec) in [
+                ("limits", &resources.limits),
+                ("reservations", &resources.reservations),
+            ] {
+                let Some(raw) = spec.as_ref().and_then(|s| s.memory.as_deref()) else {
+                    continue;
+                };
+                if parse_memory_bytes(raw).is_none() && memory_overflows(raw) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.deploy.resources.{kind}.memory"),
+                        format!("\"{raw}\" is too large to be a byte count"),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -517,6 +562,17 @@ fn drive_root_holders(cluster: &ClusterConfig, drive_name: &str) -> BTreeSet<Str
     }
 }
 
+/// Whether `raw` is all digits (plus an optional unit letter) but too big for
+/// a u64 - the one way `parse_memory_bytes` fails that is worth an error.
+fn memory_overflows(raw: &str) -> bool {
+    let raw = raw.trim();
+    let digits = raw.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let unit = &raw[digits.len()..];
+    unit.len() <= 1
+        && !digits.trim().is_empty()
+        && digits.trim().chars().all(|c| c.is_ascii_digit())
+}
+
 fn is_dns_label(s: &str) -> bool {
     if s.is_empty() || s.len() > 63 {
         return false;
@@ -551,6 +607,34 @@ mod tests {
         assert!(!is_dns_label("-gitlab"));
         assert!(!is_dns_label("gitlab-"));
         assert!(!is_dns_label("gitlab_ce"));
+    }
+
+    #[test]
+    fn absurd_replica_counts_are_rejected() {
+        let err = StackFile::parse(
+            "services:\n  web:\n    image: x\n    deploy:\n      replicas: 4000000000\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("services.web.deploy.replicas"));
+        assert!(err.to_string().contains("maximum"));
+        assert!(StackFile::parse(&format!(
+            "services:\n  web:\n    image: x\n    deploy:\n      replicas: {MAX_REPLICAS}\n"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn an_overflowing_memory_limit_is_rejected() {
+        let err = StackFile::parse(
+            "services:\n  web:\n    image: x\n    deploy:\n      resources:\n        limits:\n          memory: 99999999999999999999g\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("deploy.resources.limits.memory"));
+        let err = StackFile::parse(
+            "services:\n  web:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          memory: 17179869184g\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("too large"));
     }
 
     #[test]

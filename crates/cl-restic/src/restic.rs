@@ -169,20 +169,30 @@ impl ResticRepo {
         run(self.command(&arg_refs))
     }
 
-    /// `include` scopes the restore to one path within the snapshot (a
-    /// volume subdirectory); `None` restores everything, for a whole-drive
-    /// restore.
-    pub fn restore(&self, snapshot: &str, target_dir: &Path, include: Option<&str>) -> Result<()> {
-        let mut args: Vec<String> = vec![
-            "restore".into(),
-            snapshot.into(),
-            "--target".into(),
-            target_dir.display().to_string(),
-        ];
-        if let Some(include) = include {
-            args.push("--include".into());
-            args.push(include.into());
-        }
+    /// Restores `snapshot` into `target_dir`, treating `source_dir` - the
+    /// absolute path the snapshot was taken of - as the root of what is
+    /// restored.
+    ///
+    /// restic stores the absolute paths it backed up and, by default,
+    /// recreates them under `--target`: restoring the snapshot of
+    /// `/srv/drives/fast` into `/srv/drives/fast` would land everything in
+    /// `/srv/drives/fast/srv/drives/fast`, and an `--include /vol` filter
+    /// would match nothing at all. The `snapshot:subfolder` form roots the
+    /// restore at `source_dir` instead, so its contents (`<volume>/...`) land
+    /// directly in `target_dir` and `include` is relative to it.
+    ///
+    /// `include` scopes the restore to one path under `source_dir` (a volume
+    /// subdirectory, with a leading `/`); `None` restores everything, for a
+    /// whole-drive restore. Files in `target_dir` that the snapshot does not
+    /// contain are left alone.
+    pub fn restore(
+        &self,
+        snapshot: &str,
+        source_dir: &str,
+        target_dir: &Path,
+        include: Option<&str>,
+    ) -> Result<()> {
+        let args = restore_args(snapshot, source_dir, target_dir, include)?;
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         run(self.command(&arg_refs))
     }
@@ -199,6 +209,35 @@ impl ResticRepo {
         }
         serde_json::from_slice(&output.stdout).map_err(|e| ResticError::Parse(e.to_string()))
     }
+}
+
+/// The `restic restore` argument vector for `ResticRepo::restore`, separated
+/// out so its exact shape is unit-testable without a restic binary.
+pub fn restore_args(
+    snapshot: &str,
+    source_dir: &str,
+    target_dir: &Path,
+    include: Option<&str>,
+) -> Result<Vec<String>> {
+    crate::restore::validate_snapshot_id(snapshot).map_err(ResticError::Failed)?;
+    if !source_dir.starts_with('/') {
+        return Err(ResticError::Failed(format!(
+            "the snapshot's source path {source_dir:?} is not absolute"
+        )));
+    }
+    let mut args: Vec<String> = vec![
+        "restore".into(),
+        "--target".into(),
+        target_dir.display().to_string(),
+    ];
+    if let Some(include) = include {
+        args.push("--include".into());
+        args.push(include.into());
+    }
+    // `--` so nothing positional can ever be read as a flag.
+    args.push("--".into());
+    args.push(format!("{snapshot}:{source_dir}"));
+    Ok(args)
 }
 
 fn run(mut cmd: Command) -> Result<()> {
@@ -263,6 +302,10 @@ pub struct SnapshotInfo {
     pub time: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The absolute paths the snapshot was taken of - what `restore` needs
+    /// as its subfolder root. Not part of the api's snapshot listing.
+    #[serde(default, skip_serializing)]
+    pub paths: Vec<String>,
 }
 
 #[cfg(test)]
@@ -305,6 +348,38 @@ mod tests {
             Some(BackupLine::Summary(Err(_))) => {}
             _ => panic!("expected a summary parse error"),
         }
+    }
+
+    #[test]
+    fn restore_roots_the_snapshot_at_its_source_path() {
+        let args = restore_args(
+            "abcd1234",
+            "/var/lib/clouduler/drives/fast",
+            Path::new("/var/lib/clouduler/drives/fast"),
+            Some("/gitlab-data"),
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "restore",
+                "--target",
+                "/var/lib/clouduler/drives/fast",
+                "--include",
+                "/gitlab-data",
+                "--",
+                "abcd1234:/var/lib/clouduler/drives/fast",
+            ]
+        );
+        let whole = restore_args("latest", "/a", Path::new("/t"), None).unwrap();
+        assert_eq!(whole, vec!["restore", "--target", "/t", "--", "latest:/a"]);
+    }
+
+    #[test]
+    fn restore_refuses_a_flag_shaped_snapshot_or_a_relative_source() {
+        assert!(restore_args("--help", "/a", Path::new("/t"), None).is_err());
+        assert!(restore_args("abcd:/x", "/a", Path::new("/t"), None).is_err());
+        assert!(restore_args("abcd1234", "relative", Path::new("/t"), None).is_err());
     }
 
     #[test]

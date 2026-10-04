@@ -1006,6 +1006,7 @@ dependencies = [
  "bytes",
  "cl-config",
  "cl-raft",
+ "cl-secret",
  "fast_rsync",
  "filetime",
  "futures",
@@ -1100,6 +1101,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
@@ -1117,6 +1119,7 @@ dependencies = [
  "bincode",
  "bytes",
  "cl-config",
+ "cl-secret",
  "futures",
  "openraft",
  "redb",
@@ -1137,6 +1140,7 @@ name = "cl-restic"
 version = "0.5.28"
 dependencies = [
  "cl-raft",
+ "cl-secret",
  "serde",
  "serde_json",
  "tempfile",
@@ -1176,6 +1180,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "x25519-dalek 3.0.0",
  "zeroize",
 ]

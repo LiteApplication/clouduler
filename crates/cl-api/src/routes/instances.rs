@@ -47,6 +47,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/internal/{id}/logs", get(internal_logs))
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
         .route("/api/instances/internal/{id}/update", post(internal_update))
+        .route(
+            "/api/instances/internal/{id}/remove-container",
+            post(internal_remove_container),
+        )
         // Node-to-node only, same as above: the cli resolves which node an
         // instance runs on itself (see `clouduler exec`) and connects to
         // that node directly, so there is no public forwarding counterpart
@@ -215,7 +219,14 @@ async fn summarize_local(
             Some(c) => run_state_to_summary(c.status, assignment.desired),
             // Assigned here but no container yet: either the image is still
             // being fetched, or it is about to be created.
-            None if state.pulling.read().await.contains(&assignment.instance) => STATE_PULLING,
+            None if state
+                .pulling
+                .read()
+                .await
+                .contains_key(&assignment.instance) =>
+            {
+                STATE_PULLING
+            }
             None => STATE_STOPPED,
         }
     };
@@ -817,7 +828,75 @@ async fn update(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let instance = parse_id(&id)?;
+    // A second update on top of one in progress would pull again and remove
+    // the container the first one is waiting on. The bulk path
+    // (`updates::apply_selection`) queues its own record first, so it does
+    // not come through here.
+    let in_flight = state
+        .cluster
+        .state()
+        .await
+        .instance_updates
+        .get(&instance)
+        .is_some_and(|u| !u.phase.is_terminal());
+    if in_flight {
+        return Err(ApiError::Conflict(format!(
+            "an update of {instance} is already in progress"
+        )));
+    }
     update_instance(&state, instance).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Re-pins `digest` for `instance` and removes its container so reconcile
+/// rebuilds it on that digest: how a failed rolling update undoes itself.
+/// Wherever the instance runs.
+pub(crate) async fn roll_back_instance(
+    state: &AppState,
+    instance: &InstanceId,
+    digest: String,
+) -> Result<(), ApiError> {
+    state
+        .cluster
+        .submit(ClusterRequest::SetImageDigest {
+            instance: instance.clone(),
+            digest,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    let node = state
+        .cluster
+        .state()
+        .await
+        .assignments
+        .get(instance)
+        .map(|a| a.node.clone())
+        .ok_or_else(|| ApiError::NotFound(format!("no instance {instance}")))?;
+    if node != state.node_name {
+        let path = format!("/api/instances/internal/{instance}/remove-container");
+        return internal_peer::post_empty(state, &node, &path).await;
+    }
+    remove_container(state, instance).await
+}
+
+async fn remove_container(state: &AppState, instance: &InstanceId) -> Result<(), ApiError> {
+    let name = instance.container_name();
+    let docker = state.docker().await?;
+    docker.stop(&name, STOP_GRACE).await.ok();
+    docker
+        .remove(&name, true)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+/// Node-to-node half of `roll_back_instance`.
+async fn internal_remove_container(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    remove_container(&state, &parse_id(&id)?).await?;
     Ok(StatusCode::OK)
 }
 
@@ -885,7 +964,7 @@ async fn update_local_steps(
     use cl_raft::UpdatePhase;
     let name = instance.container_name();
     let docker = state.docker().await?;
-    docker
+    let running = docker
         .inspect(&name)
         .await
         .map_err(ApiError::internal)?
@@ -919,10 +998,39 @@ async fn update_local_steps(
     // created", so without this the instance reads as plain `stopped` for
     // however long the download takes. `apply` returns before the pull
     // finishes, so this is the only thing the ui has to watch.
-    state.pulling.write().await.insert(instance.clone());
+    cl_sched::pull_started(&state.pulling, instance).await;
     let pulled = docker.pull_as(&image, registries.for_image(&image)).await;
-    state.pulling.write().await.remove(instance);
+    cl_sched::pull_finished(&state.pulling, instance).await;
     let digest = pulled.map_err(ApiError::internal)?;
+
+    // Remember what is running now, so a failed update can put it back. An
+    // already-pinned instance has it recorded as the pin; an unpinned one
+    // does not, and the pull above has just moved its tag, so resolve the
+    // running image's registry digest (by local image id, which the pull did
+    // not touch) and pin that first. The pin the next request writes then
+    // becomes the "previous" one.
+    let pinned_before = state
+        .cluster
+        .state()
+        .await
+        .assignments
+        .get(instance)
+        .and_then(|a| a.image_digest.clone());
+    if pinned_before.is_none() {
+        let repository = cl_docker::ImageRef::parse(&running.image).repository;
+        if let Some(image_id) = running.image_digest.as_deref() {
+            if let Ok(Some(old)) = docker.digest_of_image(image_id, &repository).await {
+                state
+                    .cluster
+                    .submit(ClusterRequest::SetImageDigest {
+                        instance: instance.clone(),
+                        digest: old,
+                    })
+                    .await
+                    .map_err(ApiError::not_leader)?;
+            }
+        }
+    }
     state
         .cluster
         .submit(ClusterRequest::SetImageDigest {

@@ -1,6 +1,7 @@
 //! Cluster consensus: the replicated state, its raft storage, the node RPC
 //! transport and the quorum gate the rest of the daemon consults.
 
+pub mod backup_validate;
 pub mod client;
 pub mod contact;
 pub mod error;
@@ -21,6 +22,7 @@ pub use contact::Contact;
 pub use error::{ClusterError, Result};
 pub use ids::{node_id, InstanceId, NodeId, VolumeId};
 pub use liveness::{Fence, FenceAction, LivenessTracker};
+pub use network::{fixed_key, throwaway_key, KeyWatch};
 pub use node::{ClusterNode, Options};
 pub use quorum::{QuorumStatus, QuorumWatch};
 pub use state::{

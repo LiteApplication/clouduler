@@ -3,17 +3,16 @@
 //! Controlling clouduler is, in practice, being able to run the cli against a
 //! running daemon: `stack.rs`'s `client_for` connects over the same plain-TCP
 //! node-to-node rpc channel raft itself uses (`cl_raft::client::Client` /
-//! `cl_raft::network::Peer`), and that channel has no authentication of its
-//! own — `cl-raft/src/server.rs::dispatch` answers `Forward`/`Query`/raft
-//! requests from any caller who can open the socket. So there is no separate
-//! credential gating cli access; a non-root operator's cli invocation can do
-//! exactly what root's can, provided it can read the two files that make that
-//! connection possible:
+//! `cl_raft::network::Peer`). That channel is authenticated by proof of the
+//! cluster key (`cl_secret::stream_auth`), not by a per-user credential, so
+//! there is no separate credential gating cli access; a non-root operator's
+//! cli invocation can do exactly what root's can, provided it can read the two
+//! files that make that connection possible:
 //!
 //! - the config file, to find the daemon's rpc address (`cfg.rpc_addr`), and
-//! - `cfg.secrets.key_file`, which several cli commands
-//!   (`stack.rs::deploy`, `secret.rs`) load directly and locally to
-//!   seal/unseal secrets before/after they cross the wire.
+//! - `cfg.secrets.key_file`, which `client_for` loads to authenticate the
+//!   connection and several cli commands (`stack.rs::deploy`, `secret.rs`)
+//!   load to seal/unseal secrets before/after they cross the wire.
 //!
 //! `cfg.secrets.node_key_file` and `data_dir` are not on that path — nothing
 //! in the cli reads either — but are chowned to the group too, per the

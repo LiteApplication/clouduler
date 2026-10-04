@@ -16,9 +16,12 @@ use cl_docker::Docker;
 use cl_net::Allocations;
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{base64_encode, ClusterState, DesiredState, Request, UpdatePhase};
+use cl_raft::state::{
+    base64_encode, ClusterState, DesiredState, NodeState, Request, UpdatePhase,
+    CRASH_MOVE_RETENTION_SECS,
+};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::materialize::Materializer;
 use crate::place;
@@ -44,6 +47,21 @@ const CRASH_LOOP_THRESHOLD: usize = 3;
 /// The window `CRASH_LOOP_THRESHOLD` is counted over.
 const CRASH_LOOP_WINDOW: Duration = Duration::from_secs(120);
 
+/// First delay between in-place restarts once an instance has crash-looped
+/// everywhere it can run (see `try_reschedule_away`), doubled for each further
+/// loop up to `CRASH_BACKOFF_MAX`. Without it such an instance is restarted
+/// every sweep forever, which for a container that dies on start is a busy
+/// loop of docker calls, pulls and log noise.
+const CRASH_BACKOFF_BASE: Duration = Duration::from_secs(30);
+
+/// Cap on the in-place restart delay.
+const CRASH_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
+
+/// An in-place restart backoff is forgotten once this long has passed after
+/// it expired without the instance needing another restart, i.e. it has
+/// stayed up long enough to be considered healthy again.
+const CRASH_BACKOFF_FORGET_AFTER: Duration = Duration::from_secs(10 * 60);
+
 /// How long a finished (started or failed) update stays in the replicated
 /// record, so whoever started it can still see how it ended.
 const FINISHED_UPDATE_TTL_SECS: i64 = 15 * 60;
@@ -52,6 +70,12 @@ const FINISHED_UPDATE_TTL_SECS: i64 = 15 * 60;
 /// abandoned: queued by a node that went away before getting to it, or
 /// waiting on a container the reconciler never got to create.
 const STALLED_UPDATE_TTL_SECS: i64 = 60 * 60;
+
+/// How long an update may sit `Queued`. A rolling batch queues everything
+/// before starting, so a long batch legitimately waits, but 15 minutes is
+/// beyond what one instance's turn takes (`UPDATE_FINISH_TIMEOUT` in the api
+/// bounds each earlier one).
+const QUEUED_UPDATE_TTL_SECS: i64 = 15 * 60;
 
 pub struct Scheduler {
     node: String,
@@ -80,6 +104,10 @@ pub struct Scheduler {
     /// (an OOM kill, a crash on start) without needing a raft round trip just
     /// to count it. See `note_restart_and_check_crash_loop`.
     restarts: Arc<RwLock<BTreeMap<InstanceId, VecDeque<Instant>>>>,
+    /// In-place restart delays for instances that crash-looped on every node
+    /// they could be moved to. Node-local like `restarts`; losing it on a
+    /// daemon restart merely restarts the backoff from its first step.
+    backoffs: Arc<RwLock<BTreeMap<InstanceId, RestartBackoff>>>,
     /// Unix seconds this scheduler was built, i.e. roughly when this daemon
     /// started. An in-flight update on this node older than that was being
     /// driven by a process that no longer exists.
@@ -104,6 +132,7 @@ impl Scheduler {
             boot_config,
             pulling,
             restarts: Arc::new(RwLock::new(BTreeMap::new())),
+            backoffs: Arc::new(RwLock::new(BTreeMap::new())),
             booted_at: unix_now(),
         }
     }
@@ -150,6 +179,7 @@ impl Scheduler {
                 if let Err(e) = self.schedule(&state).await {
                     warn!(error = %e, "scheduling pass failed");
                 }
+                self.expire_orphaned_updates(&state).await;
             }
 
             if let Err(e) = self.reconcile(&state, fenced_now).await {
@@ -175,6 +205,13 @@ impl Scheduler {
         }
 
         for decision in outcome.decisions {
+            // `submit` forwards to whichever node is leader, so a pass that
+            // outlives this node's leadership would otherwise keep writing
+            // decisions computed from its own, now stale, view of the state.
+            if !self.cluster.is_leader() {
+                warn!("lost leadership mid-pass, abandoning the scheduling pass");
+                return Ok(());
+            }
             let drives = desired
                 .iter()
                 .find(|d| &d.id == decision.instance())
@@ -199,6 +236,10 @@ impl Scheduler {
         // time round.
         let state = &self.cluster.state().await;
         for request in volume_requests(state, &live) {
+            if !self.cluster.is_leader() {
+                warn!("lost leadership mid-pass, abandoning the scheduling pass");
+                return Ok(());
+            }
             let response = self
                 .cluster
                 .submit(request.clone())
@@ -249,9 +290,26 @@ impl Scheduler {
                 updates,
             );
 
-        let (targets, config_edits) = self.targets(state)?;
+        let (targets, config_edits, refused) = self.targets(state)?;
+        self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
-        let actions = reconcile::diff(&targets, &actual, fenced);
+        let mut actions = reconcile::diff(&targets, &actual, fenced);
+
+        // An instance that crash-looped everywhere it can run is restarted in
+        // place on a growing delay instead of every sweep. Dropped before the
+        // crash-loop bookkeeping below so a deferred start is not counted as a
+        // restart that never happened.
+        {
+            let now = Instant::now();
+            let keep: BTreeSet<&InstanceId> =
+                targets.iter().map(|t| &t.assignment.instance).collect();
+            let mut backoffs = self.backoffs.write().await;
+            backoffs.retain(|id, b| keep.contains(id) && !b.is_forgettable(now));
+            actions.retain(|action| match action {
+                Action::Start(id) => backoffs.get(id).is_none_or(|b| now >= b.next_start),
+                _ => true,
+            });
+        }
 
         if actions.is_empty() {
             debug!("nothing to reconcile");
@@ -274,8 +332,16 @@ impl Scheduler {
         }
         for action in &actions {
             let Action::Start(id) = action else { continue };
-            if self.note_restart_and_check_crash_loop(id).await {
-                self.try_reschedule_away(state, id).await;
+            if self.note_restart_and_check_crash_loop(id).await
+                && !self.try_reschedule_away(state, id).await
+            {
+                // Nowhere better to go: restart in place, but less eagerly
+                // each time round.
+                let mut backoffs = self.backoffs.write().await;
+                backoffs
+                    .entry(id.clone())
+                    .or_insert_with(|| RestartBackoff::new(Instant::now()))
+                    .record_loop(Instant::now());
             }
         }
 
@@ -317,6 +383,26 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+
+    /// Show the operator why an instance was not started: a failed update
+    /// record carrying the reason, the one per-instance error channel the UI
+    /// already renders. Skipped when the same failure is already recorded, so
+    /// a steady refusal costs one raft write rather than one per sweep.
+    async fn report_refused(&self, state: &ClusterState, refused: &[(InstanceId, String)]) {
+        let reporter = UpdateReporter::new(self.cluster.clone(), self.node.clone());
+        for (instance, error) in refused {
+            let already = state.instance_updates.get(instance).is_some_and(|u| {
+                u.node == self.node
+                    && u.phase == UpdatePhase::Failed
+                    && u.error.as_deref() == Some(error.as_str())
+            });
+            if !already {
+                reporter
+                    .report(instance, UpdatePhase::Failed, Some(error.clone()))
+                    .await;
+            }
+        }
     }
 
     /// Self-report this node's running/stopped state for every instance
@@ -386,20 +472,38 @@ impl Scheduler {
     /// running one is the new one.
     async fn expire_updates(&self, state: &ClusterState, actual: &[cl_docker::ContainerState]) {
         let now = unix_now();
-        let running: BTreeSet<InstanceId> = actual
+        let running: BTreeMap<InstanceId, Option<cl_docker::HealthState>> = actual
             .iter()
             .filter(|c| c.running)
-            .filter_map(|c| c.labels.get(cl_docker::LABEL_INSTANCE)?.parse().ok())
+            .filter_map(|c| {
+                Some((
+                    c.labels.get(cl_docker::LABEL_INSTANCE)?.parse().ok()?,
+                    c.health,
+                ))
+            })
             .collect();
         for (instance, update) in &state.instance_updates {
             if update.node != self.node {
                 continue;
             }
-            if update.phase == UpdatePhase::Starting && running.contains(instance) {
-                UpdateReporter::new(self.cluster.clone(), self.node.clone())
-                    .report(instance, UpdatePhase::Started, None)
-                    .await;
-                continue;
+            if update.phase == UpdatePhase::Starting {
+                if let Some(health) = running.get(instance) {
+                    // Up is not the same as working: with a healthcheck the
+                    // update is only a success once docker says healthy.
+                    let reporter = UpdateReporter::new(self.cluster.clone(), self.node.clone());
+                    match reconcile::health_gate(*health, now - update.at) {
+                        reconcile::HealthGate::Ready => {
+                            reporter.report(instance, UpdatePhase::Started, None).await;
+                        }
+                        reconcile::HealthGate::Wait => {}
+                        reconcile::HealthGate::Failed(why) => {
+                            reporter
+                                .report(instance, UpdatePhase::Failed, Some(why.to_string()))
+                                .await;
+                        }
+                    }
+                    continue;
+                }
             }
             let request = match expire_verdict(update, now, self.booted_at) {
                 Some(None) => Request::ClearInstanceUpdate {
@@ -416,6 +520,37 @@ impl Scheduler {
             };
             if let Err(e) = self.cluster.submit(request).await {
                 warn!(%instance, error = %e, "could not expire an update record");
+            }
+        }
+    }
+
+    /// Leader only: settle update records no live process is driving. The
+    /// owning node's own sweep handles its records, but that cannot help when
+    /// the owner is gone, unreachable, or no longer the instance's node (the
+    /// instance moved), nor a `Queued` record whose driving api node
+    /// restarted. Left alone they stay non-terminal for an hour and
+    /// `apply_selection` refuses to start another update on the instance.
+    async fn expire_orphaned_updates(&self, state: &ClusterState) {
+        let now = unix_now();
+        for (instance, update) in &state.instance_updates {
+            if update.node == self.node {
+                continue;
+            }
+            let request = match orphan_verdict(state, instance, update, now) {
+                Some(None) => Request::ClearInstanceUpdate {
+                    instance: instance.clone(),
+                },
+                Some(Some(why)) => Request::SetInstanceUpdate {
+                    instance: instance.clone(),
+                    node: update.node.clone(),
+                    phase: UpdatePhase::Failed,
+                    error: Some(why.to_string()),
+                    at: now,
+                },
+                None => continue,
+            };
+            if let Err(e) = self.cluster.submit(request).await {
+                warn!(%instance, error = %e, "could not expire an orphaned update record");
             }
         }
     }
@@ -441,19 +576,26 @@ impl Scheduler {
     /// other eligible node on their own. Also skipped if a migration is
     /// already under way, so a slow move in progress is not raced by a
     /// second one.
-    async fn try_reschedule_away(&self, state: &ClusterState, id: &InstanceId) {
+    ///
+    /// Nodes this instance was already moved away from within
+    /// `CRASH_MOVE_RETENTION_SECS` (`ClusterState::crash_moves`) are not
+    /// candidates, so a service that crashes everywhere tries each node once
+    /// and then stays put instead of hopping between them forever. Returns
+    /// whether a move was submitted; `false` means the caller restarts in
+    /// place.
+    async fn try_reschedule_away(&self, state: &ClusterState, id: &InstanceId) -> bool {
         let Some(assignment) = state.assignments.get(id) else {
-            return;
+            return false;
         };
         if assignment.node != self.node {
-            return;
+            return false;
         }
         if assignment
             .migration
             .as_ref()
             .is_some_and(|m| !m.phase.is_terminal())
         {
-            return;
+            return false;
         }
 
         let live = self.live_config(state);
@@ -465,26 +607,29 @@ impl Scheduler {
             colocate_proxy_hosts,
         );
         let Some(item) = desired.iter().find(|d| &d.id == id) else {
-            return;
+            return false;
         };
 
         if item.global || item.pinned_node.is_some() || item.anchor_keys().next().is_some() {
             warn!(instance = %id, "keeps restarting here but cannot be safely moved (pinned, global, or anchored), restarting in place");
-            return;
+            return false;
         }
 
         let Ok((eligible, _)) =
             place::candidates(state, item, &live.served_drives(), &live.nat_networks())
         else {
-            return;
+            return false;
         };
-        let Some(target) = eligible
-            .iter()
-            .filter(|n| n.name != self.node)
-            .min_by_key(|n| state.assignments_on(&n.name).count())
-        else {
-            warn!(instance = %id, "keeps restarting here but no other node can run it, restarting in place");
-            return;
+        let now = unix_now().max(0) as u64;
+        let Some(target) = pick_crash_move_target(
+            eligible.iter().copied(),
+            &self.node,
+            state.crash_moves.get(id),
+            now,
+            |node| state.assignments_on(node).count(),
+        ) else {
+            warn!(instance = %id, "keeps restarting here and every other node that can run it has already been tried, restarting in place");
+            return false;
         };
 
         warn!(instance = %id, from = %self.node, to = %target.name, "instance keeps restarting here, moving it to another node");
@@ -502,22 +647,33 @@ impl Scheduler {
                     warn!(instance = %id, %error, "could not move a crash-looping instance away");
                 } else {
                     self.restarts.write().await.remove(id);
+                    // Remember where it crashed so the next owner does not
+                    // send it straight back. Submitted after the move so a
+                    // rejected move leaves no history; losing this write only
+                    // loses the memory, never the move.
+                    let record = Request::RecordCrashMove {
+                        instance: id.clone(),
+                        from: self.node.clone(),
+                        at: now,
+                    };
+                    if let Err(e) = self.cluster.submit(record).await {
+                        warn!(instance = %id, error = %e, "could not record a crash-loop move");
+                    }
+                    return true;
                 }
             }
             Err(e) => {
                 warn!(instance = %id, error = %e, "could not submit a move for a crash-looping instance")
             }
         }
+        false
     }
 
     /// Build what this node should be running, materializing each instance's
     /// configs and secrets on the way. Also returns any edit a container
     /// made to one of its writable config mounts, for the caller to feed
     /// back into the cluster.
-    fn targets(
-        &self,
-        state: &ClusterState,
-    ) -> crate::Result<(Vec<Target>, Vec<crate::materialize::ConfigEdit>)> {
+    fn targets(&self, state: &ClusterState) -> crate::Result<Targets> {
         let live = self.live_config(state);
         let (drive_roots, dynamic_mounts) = self.drive_roots(state, &live);
 
@@ -528,6 +684,7 @@ impl Scheduler {
 
         let mut targets = Vec::new();
         let mut config_edits = Vec::new();
+        let mut refused = Vec::new();
 
         for assignment in state.assignments_on(&self.node) {
             let instance = &assignment.instance;
@@ -659,7 +816,7 @@ impl Scheduler {
             let revision =
                 revision_with_mounts(stack.revision, service, &dynamic_mounts, placement.ip);
 
-            let spec = spec::build(
+            let spec = match spec::build(
                 instance,
                 service,
                 spec::Materialization {
@@ -670,7 +827,19 @@ impl Scheduler {
                 placement,
                 assignment.image_digest.as_deref(),
                 revision,
-            );
+            ) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    // Deterministic, so left out of `targets` entirely: no
+                    // `Start` is planned, which keeps it out of the
+                    // crash-loop counter and away from `try_reschedule_away`
+                    // (another node would refuse the same mount). The
+                    // operator sees it through `refused`.
+                    error!(instance = %instance, error = %e, "refusing to start an instance whose spec is invalid");
+                    refused.push((instance.clone(), e.to_string()));
+                    continue;
+                }
+            };
 
             targets.push(Target {
                 assignment,
@@ -680,7 +849,7 @@ impl Scheduler {
             });
         }
 
-        Ok((targets, config_edits))
+        Ok((targets, config_edits, refused))
     }
 
     /// Where this node resolves each drive's root for mounting purposes, and
@@ -944,6 +1113,66 @@ fn record_restart(deque: &mut VecDeque<Instant>, now: Instant) -> bool {
     deque.len() >= CRASH_LOOP_THRESHOLD
 }
 
+/// Picks the least-loaded node to move a crash-looping instance to: not the
+/// node it is on, and not one it was moved away from within the retention
+/// window. `None` once every eligible node has been tried.
+fn pick_crash_move_target<'a>(
+    eligible: impl Iterator<Item = &'a NodeState>,
+    current: &str,
+    history: Option<&BTreeMap<String, u64>>,
+    now: u64,
+    load: impl Fn(&str) -> usize,
+) -> Option<&'a NodeState> {
+    eligible
+        .filter(|n| n.name != current)
+        .filter(|n| {
+            history
+                .and_then(|h| h.get(&n.name))
+                .is_none_or(|at| now.saturating_sub(*at) > CRASH_MOVE_RETENTION_SECS)
+        })
+        .min_by_key(|n| load(&n.name))
+}
+
+/// In-place restart delay for an instance that crash-loops on every node.
+#[derive(Debug, Clone, Copy)]
+struct RestartBackoff {
+    loops: u32,
+    next_start: Instant,
+}
+
+impl RestartBackoff {
+    fn new(now: Instant) -> Self {
+        Self {
+            loops: 0,
+            next_start: now,
+        }
+    }
+
+    /// Another crash loop was detected: double the delay (capped) before the
+    /// next in-place restart.
+    fn record_loop(&mut self, now: Instant) {
+        let delay = CRASH_BACKOFF_BASE
+            .saturating_mul(1u32.checked_shl(self.loops).unwrap_or(u32::MAX))
+            .min(CRASH_BACKOFF_MAX);
+        self.loops = self.loops.saturating_add(1);
+        self.next_start = now + delay;
+    }
+
+    /// Whether the instance has stayed up long enough since the backoff
+    /// expired that it should start from the first step again.
+    fn is_forgettable(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.next_start) > CRASH_BACKOFF_FORGET_AFTER
+    }
+}
+
+/// What one pass of `Reconciler::targets` decided: what to run, the config
+/// edits containers made, and the instances refused (with why).
+type Targets = (
+    Vec<Target>,
+    Vec<crate::materialize::ConfigEdit>,
+    Vec<(InstanceId, String)>,
+);
+
 /// Docker network name for a stack's declared network.
 pub fn overlay_name(stack: &str, network: &str) -> String {
     format!("{stack}_{network}")
@@ -1078,6 +1307,46 @@ pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
         .collect())
 }
 
+/// What the leader does with an update record owned by another node: same
+/// shape as `expire_verdict`. A record is orphaned when its node left the
+/// cluster, is unreachable, or is no longer where the instance is assigned,
+/// and a `Queued` one is also given up on after `QUEUED_UPDATE_TTL_SECS`
+/// whatever the owner is doing.
+fn orphan_verdict(
+    state: &ClusterState,
+    instance: &InstanceId,
+    update: &cl_raft::state::InstanceUpdate,
+    now: i64,
+) -> Option<Option<&'static str>> {
+    let moved = state
+        .assignments
+        .get(instance)
+        .is_none_or(|a| a.node != update.node);
+    let orphaned = !state.nodes.contains_key(&update.node)
+        || state.unreachable.contains(&update.node)
+        || moved;
+    if update.phase.is_terminal() {
+        return (orphaned && now - update.at >= FINISHED_UPDATE_TTL_SECS).then_some(None);
+    }
+    if !state.nodes.contains_key(&update.node) {
+        return Some(Some(
+            "interrupted: the node running this update left the cluster",
+        ));
+    }
+    if state.unreachable.contains(&update.node) {
+        return Some(Some(
+            "interrupted: the node running this update is unreachable",
+        ));
+    }
+    if moved {
+        return Some(Some("interrupted: the instance moved to another node"));
+    }
+    if update.phase == UpdatePhase::Queued && now - update.at >= QUEUED_UPDATE_TTL_SECS {
+        return Some(Some("stalled: queued but never started"));
+    }
+    None
+}
+
 /// What to do with one of this node's update records: `None` keep it,
 /// `Some(None)` clear it, `Some(Some(why))` mark it failed.
 fn expire_verdict(
@@ -1093,8 +1362,10 @@ fn expire_verdict(
             Some(Some("stalled: no progress for an hour"))
         }
         // Queued is written by whichever node took the request, so its
-        // timestamp says nothing about this process.
-        UpdatePhase::Queued => None,
+        // timestamp says nothing about this process - only its age does. The
+        // driver that would start it may be gone (the api node restarted).
+        UpdatePhase::Queued => (now - update.at >= QUEUED_UPDATE_TTL_SECS)
+            .then_some(Some("stalled: queued but never started")),
         // Pulling, stopping, starting: only ever written on this node, so
         // one from before this process started has lost its driver.
         _ => {
@@ -1106,7 +1377,7 @@ fn expire_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cl_raft::state::{Availability, InstanceUpdate, NodeState, Role};
+    use cl_raft::state::{Assignment, Availability, DesiredState, InstanceUpdate, NodeState, Role};
 
     fn update(phase: UpdatePhase, at: i64) -> InstanceUpdate {
         InstanceUpdate {
@@ -1124,6 +1395,79 @@ mod tests {
         assert_eq!(expire_verdict(&done, 1010, 0), None);
         assert_eq!(
             expire_verdict(&done, 1000 + FINISHED_UPDATE_TTL_SECS, 0),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn a_queued_update_is_given_up_on_after_fifteen_minutes() {
+        let queued = update(UpdatePhase::Queued, 1000);
+        assert_eq!(
+            expire_verdict(&queued, 1000 + QUEUED_UPDATE_TTL_SECS - 1, 0),
+            None
+        );
+        assert!(matches!(
+            expire_verdict(&queued, 1000 + QUEUED_UPDATE_TTL_SECS, 0),
+            Some(Some(_))
+        ));
+    }
+
+    #[test]
+    fn the_leader_expires_updates_whose_owner_is_gone_unreachable_or_no_longer_the_node() {
+        let instance = InstanceId::new("s", "web", 0);
+        let mut state = ClusterState::default();
+        state.nodes.insert("n1".into(), node("n1", &[]));
+        state.assignments.insert(
+            instance.clone(),
+            Assignment {
+                instance: instance.clone(),
+                node: "n1".into(),
+                desired: DesiredState::Running,
+                image_digest: None,
+                migration: None,
+            },
+        );
+        let pulling = update(UpdatePhase::Pulling, 1000);
+
+        // Healthy owner, in progress: leave it to that node.
+        assert_eq!(orphan_verdict(&state, &instance, &pulling, 1010), None);
+
+        // Unreachable.
+        state.unreachable.insert("n1".into());
+        assert!(matches!(
+            orphan_verdict(&state, &instance, &pulling, 1010),
+            Some(Some(_))
+        ));
+        state.unreachable.clear();
+
+        // The instance moved on.
+        state
+            .assignments
+            .get_mut(&instance)
+            .expect("assignment")
+            .node = "n2".into();
+        assert!(matches!(
+            orphan_verdict(&state, &instance, &pulling, 1010),
+            Some(Some(_))
+        ));
+        state
+            .assignments
+            .get_mut(&instance)
+            .expect("assignment")
+            .node = "n1".into();
+
+        // Owner left the cluster.
+        state.nodes.clear();
+        assert!(matches!(
+            orphan_verdict(&state, &instance, &pulling, 1010),
+            Some(Some(_))
+        ));
+
+        // A finished orphan is cleared once old enough, not failed.
+        let done = update(UpdatePhase::Failed, 1000);
+        assert_eq!(orphan_verdict(&state, &instance, &done, 1010), None);
+        assert_eq!(
+            orphan_verdict(&state, &instance, &done, 1000 + FINISHED_UPDATE_TTL_SECS),
             Some(None)
         );
     }
@@ -1554,6 +1898,71 @@ web: { address: cloud, network: tailscale }
         assert!(!record_restart(&mut deque, base));
         assert!(!record_restart(&mut deque, base + Duration::from_secs(10)));
         assert!(record_restart(&mut deque, base + Duration::from_secs(20)));
+    }
+
+    fn plain_node(name: &str) -> NodeState {
+        NodeState {
+            name: name.to_string(),
+            id: uuid::Uuid::new_v4(),
+            role: cl_raft::state::Role::Worker,
+            rpc_addr: "10.10.0.1:7373".parse().expect("addr"),
+            drives: Default::default(),
+            availability: cl_raft::state::Availability::Active,
+            labels: Default::default(),
+            last_resort: false,
+            egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
+            node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn crash_move_targets_skip_recently_tried_nodes_until_all_are_exhausted() {
+        let nodes = [plain_node("a"), plain_node("b"), plain_node("c")];
+        let load = |_: &str| 0usize;
+        let now = 10_000;
+
+        // On `a`, nothing tried yet: `b` (first least-loaded) is picked.
+        let target = pick_crash_move_target(nodes.iter(), "a", None, now, load).unwrap();
+        assert_eq!(target.name, "b");
+
+        // Now on `b`, having left `a`: only `c` remains.
+        let history = BTreeMap::from([("a".to_string(), now - 10)]);
+        let target = pick_crash_move_target(nodes.iter(), "b", Some(&history), now, load).unwrap();
+        assert_eq!(target.name, "c");
+
+        // On `c`, having left `a` and `b`: exhausted, stay put.
+        let history = BTreeMap::from([("a".to_string(), now - 20), ("b".to_string(), now - 10)]);
+        assert!(pick_crash_move_target(nodes.iter(), "c", Some(&history), now, load).is_none());
+
+        // Entries older than the window are forgiven.
+        let later = now + CRASH_MOVE_RETENTION_SECS + 1;
+        let target =
+            pick_crash_move_target(nodes.iter(), "c", Some(&history), later, load).unwrap();
+        assert_eq!(target.name, "a");
+    }
+
+    #[test]
+    fn restart_backoff_doubles_up_to_the_cap_and_is_eventually_forgotten() {
+        let base = Instant::now();
+        let mut backoff = RestartBackoff::new(base);
+        backoff.record_loop(base);
+        assert_eq!(backoff.next_start, base + CRASH_BACKOFF_BASE);
+        backoff.record_loop(base);
+        assert_eq!(backoff.next_start, base + CRASH_BACKOFF_BASE * 2);
+        for _ in 0..100 {
+            backoff.record_loop(base);
+        }
+        assert_eq!(backoff.next_start, base + CRASH_BACKOFF_MAX);
+
+        assert!(!backoff.is_forgettable(backoff.next_start + CRASH_BACKOFF_FORGET_AFTER));
+        assert!(backoff.is_forgettable(
+            backoff.next_start + CRASH_BACKOFF_FORGET_AFTER + Duration::from_secs(1)
+        ));
     }
 
     #[test]

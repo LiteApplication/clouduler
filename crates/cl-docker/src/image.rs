@@ -80,12 +80,22 @@ const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis
 
 /// A registry login. Mirrors the subset of bollard's `DockerCredentials` that
 /// clouduler stores, so nothing outside this crate has to depend on bollard.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RegistryCredentials {
     pub username: String,
     pub password: String,
     /// Registry host, as `ImageRef::registry` spells it.
     pub server: String,
+}
+
+impl std::fmt::Debug for RegistryCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("server", &self.server)
+            .finish()
+    }
 }
 
 impl From<&RegistryCredentials> for bollard::auth::DockerCredentials {

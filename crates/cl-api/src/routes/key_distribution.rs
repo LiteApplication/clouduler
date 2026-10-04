@@ -1,21 +1,96 @@
-//! Automatic delivery of the cluster secret key to a newly joined node.
+//! Delivery of the cluster secret key to a newly joined node.
 //!
-//! A joining node has no way to receive the plaintext key over the network --
-//! that would defeat the point of keeping it out of the database. Instead
-//! every node has its own X25519 keypair (`cl_secret::NodeKeypair`); a node
-//! publishes its public half into its `NodeState` (`daemon::report_self`),
-//! and any node that already holds the plaintext key wraps a copy for it
-//! (`spawn_wrap_for_new_nodes`) and stores only that ciphertext in raft. The
-//! recipient then unwraps its own copy locally with its private key
-//! (`spawn_unwrap_own_key`) and never has to be told the key by a person.
+//! A joining node never receives the plaintext key over the network. Every
+//! node has its own X25519 keypair (`cl_secret::NodeKeypair`) and the key
+//! travels wrapped for the recipient's public half, so only that node can open
+//! it.
+//!
+//! There are two routes, because the node-to-node channel (raft included) is
+//! itself authenticated with the cluster key, which a keyless node cannot
+//! satisfy:
+//!
+//! - `POST /api/secrets/key/wrap` ([`wrap_for_node`]): the route a brand new
+//!   node uses. `clouduler init` calls it over the admin-authenticated https
+//!   api before the daemon ever starts, so the key is on disk when raft first
+//!   needs it.
+//! - The raft route (`spawn_wrap_for_new_nodes` / `spawn_unwrap_own_key`): a
+//!   node publishes its public half into its `NodeState`, any key holder
+//!   stores a wrapped copy in raft, and the recipient unwraps it locally. It
+//!   only works for a node that can already speak raft, so it is a fallback
+//!   for a node that lost or has not yet loaded its key file while its peers
+//!   still trust it, not a way to bootstrap a new one.
 
 use std::time::Duration;
 
+use axum::extract::State;
+use axum::routing::post;
+use axum::{Json, Router};
 use cl_raft::state::{Request as ClusterRequest, WrappedKeyEntry};
 use cl_secret::{NodeKeypair, WrappedKey};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::auth::RequireAdmin;
+use crate::error::ApiError;
 use crate::server::AppState;
+
+pub fn router() -> Router<AppState> {
+    Router::new().route("/api/secrets/key/wrap", post(wrap_for_node))
+}
+
+#[derive(Deserialize)]
+struct WrapRequest {
+    /// Name of the node the key is for. Folded into the wrap, so the result
+    /// only opens for a node claiming the same name.
+    node: String,
+    /// The recipient's `NodeKeypair` public half, base64 (the same encoding
+    /// `NodeState::node_pubkey` carries).
+    public_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct WrapResponse {
+    pub ephemeral_public: String,
+    pub sealed: String,
+    pub key_fingerprint: String,
+}
+
+/// Hand the cluster key to a joining node, wrapped for its public key.
+///
+/// Admin only, and served by whichever node the caller reached as long as it
+/// holds the key (no leader needed: nothing is written to raft). The plaintext
+/// key never appears in the response, only a copy only the holder of the
+/// matching private key can open. Whoever holds an admin key can already
+/// replace the whole config and deploy arbitrary containers, so this does not
+/// widen what an admin can do.
+async fn wrap_for_node(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<WrapRequest>,
+) -> Result<Json<WrapResponse>, ApiError> {
+    let node = body.node.trim();
+    if node.is_empty() {
+        return Err(ApiError::BadRequest("node must not be empty".into()));
+    }
+    let recipient = decode_pubkey(&body.public_key)
+        .map_err(|e| ApiError::BadRequest(format!("public_key is malformed: {e}")))?;
+
+    let guard = state.key.read().await;
+    let Some(cluster_key) = guard.as_ref() else {
+        return Err(ApiError::Conflict(
+            "this node holds no cluster key, so it cannot hand one out. Ask a node that does"
+                .into(),
+        ));
+    };
+    let wrapped =
+        WrappedKey::wrap_for(cluster_key, node, &recipient).map_err(ApiError::internal)?;
+    info!(node = %node, "wrapped the cluster key for a joining node");
+    Ok(Json(WrapResponse {
+        ephemeral_public: wrapped.ephemeral_public,
+        sealed: wrapped.sealed.blob,
+        key_fingerprint: cluster_key.fingerprint(),
+    }))
+}
 
 const WRAP_RETRY: Duration = Duration::from_secs(5);
 const UNWRAP_RETRY: Duration = Duration::from_secs(5);

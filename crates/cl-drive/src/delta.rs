@@ -20,7 +20,6 @@ use std::path::Path;
 use std::pin::Pin;
 
 use fast_rsync::{diff as rsync_diff, Signature};
-use tokio::net::TcpStream;
 
 use cl_raft::VolumeId;
 
@@ -94,12 +93,17 @@ pub trait SyncEngine: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct DeltaEngine {
     whole_file_threshold: u64,
+    /// The cluster key every connection authenticates with. A watch, not a
+    /// snapshot, so a long-lived scheduler follows a key that arrives or
+    /// rotates after it was built.
+    keys: cl_raft::KeyWatch,
 }
 
-impl Default for DeltaEngine {
-    fn default() -> Self {
+impl DeltaEngine {
+    pub fn new(keys: cl_raft::KeyWatch) -> Self {
         Self {
             whole_file_threshold: WHOLE_FILE_THRESHOLD,
+            keys,
         }
     }
 }
@@ -169,13 +173,7 @@ impl DeltaEngine {
         staging: Option<String>,
         progress: crate::progress::ProgressSink,
     ) -> Result<SyncStats> {
-        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
-            .await
-            .map_err(|_| DriveError::Transfer {
-                message: format!("connecting to {peer} timed out"),
-            })?
-            .map_err(transfer_err)?;
-        let mut conn = transport::frame(stream);
+        let mut conn = transport::connect_authenticated(peer, &self.keys).await?;
 
         transport::send(
             &mut conn,
@@ -664,7 +662,7 @@ mod tests {
 
     #[test]
     fn default_engine_is_named_delta() {
-        assert_eq!(DeltaEngine::default().name(), "delta");
+        assert_eq!(DeltaEngine::new(cl_raft::throwaway_key()).name(), "delta");
     }
 
     /// The delta path costs `2 x filesize` resident on the receiver and

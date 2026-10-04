@@ -67,6 +67,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
         rpc_addr,
         data_dir: dir.path().join("raft"),
         cluster_name: config.cluster.name.clone(),
+        keys: cl_raft::throwaway_key(),
     })
     .await
     .expect("start node");
@@ -371,4 +372,92 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
     }
     let delivered = cl_secret::ClusterKey::load(&n2_key_path).expect("n2 wrote a key file");
     assert_eq!(delivered.encode(), expected);
+}
+
+#[tokio::test]
+async fn a_keyless_node_fetches_the_cluster_key_wrapped_for_its_own_keypair() {
+    let cluster_key = cl_secret::ClusterKey::generate();
+    let expected = cluster_key.encode();
+    let server = serve(&founding_config(), Some(cluster_key)).await;
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
+
+    let keypair = cl_secret::NodeKeypair::generate();
+    let fetched = peer
+        .fetch_cluster_key("n2", &keypair)
+        .await
+        .expect("fetch the key");
+    assert_eq!(fetched.encode(), expected);
+}
+
+#[tokio::test]
+async fn fetching_the_key_from_a_node_that_holds_none_is_an_error() {
+    let server = serve(&founding_config(), None).await;
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
+
+    let error = peer
+        .fetch_cluster_key("n2", &cl_secret::NodeKeypair::generate())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no cluster key"), "{error}");
+}
+
+/// What `clouduler init --yes --join` does for the key: nothing to answer, the
+/// key ends up on disk, and the node keypair it was wrapped for sits where the
+/// daemon will load the same one.
+#[tokio::test]
+async fn init_installs_the_fetched_key_without_a_prompt() {
+    let cluster_key = cl_secret::ClusterKey::generate();
+    let expected = cluster_key.encode();
+    let server = serve(&founding_config(), Some(cluster_key)).await;
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
+
+    let dir = TempDir::new().expect("tempdir");
+    let mut config = founding_config();
+    config.secrets.key_file = dir.path().join("secrets.key");
+    config.secrets.node_key_file = dir.path().join("node.key");
+    let mut joining = NodePlan::new("n2", NodeRole::Worker, ip("10.10.0.2"));
+    joining.generate_secret_key = Some(false);
+    let config = plan::add_node(&config, &joining, false).expect("amended");
+
+    let args = super::InitArgs::parse_from_yes();
+    let mut prompt = super::prompt::Prompt::new(std::io::empty(), Vec::new(), false);
+    super::setup_secret_key(&mut prompt, &args, &config, "n2", Some(&peer))
+        .await
+        .expect("setup");
+
+    let installed = cl_secret::ClusterKey::load(&config.secrets.key_file).expect("key installed");
+    assert_eq!(installed.encode(), expected);
+    assert!(config.secrets.node_key_file.exists());
+}
+
+#[tokio::test]
+async fn a_provided_key_file_is_installed_instead_of_fetching() {
+    let server = serve(&founding_config(), None).await;
+    let peer =
+        super::join::Peer::connect(&server.address, server.token.clone(), None).expect("client");
+
+    let dir = TempDir::new().expect("tempdir");
+    let copy = cl_secret::ClusterKey::generate();
+    let copy_path = dir.path().join("copy.key");
+    copy.save(&copy_path).expect("write copy");
+    let mut config = founding_config();
+    config.secrets.key_file = dir.path().join("secrets.key");
+    config.secrets.node_key_file = dir.path().join("node.key");
+    let mut joining = NodePlan::new("n2", NodeRole::Worker, ip("10.10.0.2"));
+    joining.generate_secret_key = Some(false);
+    let config = plan::add_node(&config, &joining, false).expect("amended");
+
+    let mut args = super::InitArgs::parse_from_yes();
+    args.key_file = Some(copy_path);
+    let mut prompt = super::prompt::Prompt::new(std::io::empty(), Vec::new(), false);
+    super::setup_secret_key(&mut prompt, &args, &config, "n2", Some(&peer))
+        .await
+        .expect("setup");
+
+    let installed = cl_secret::ClusterKey::load(&config.secrets.key_file).expect("key installed");
+    assert_eq!(installed.encode(), copy.encode());
 }

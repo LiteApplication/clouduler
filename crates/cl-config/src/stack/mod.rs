@@ -16,6 +16,7 @@ mod volume;
 pub use bytesize::ByteSize;
 pub use deploy::{
     Deploy, DeployMode, DeployRestartPolicy, Placement, ResourceSpec, Resources, UpdateConfig,
+    MAX_REPLICAS,
 };
 pub use extensions::{
     CorsPolicy, DockerSocket, ExposePort, ForwardAuth, Middleware, ProxyRoute, RedirectRegex,

@@ -13,7 +13,7 @@ use reqwest::StatusCode;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// A brand new cluster serves a self signed certificate, so there is no chain
@@ -199,6 +199,58 @@ impl Peer {
         check(response).await?;
         Ok(())
     }
+
+    /// Ask the cluster for its secret key, wrapped for `public_key` so only
+    /// this node's own keypair can open it, and open it.
+    ///
+    /// The raft channel authenticates with this very key, so a brand new node
+    /// has to get it over this https api before its daemon first starts. The
+    /// plaintext key never crosses the wire, only a copy wrapped to us.
+    pub async fn fetch_cluster_key(
+        &self,
+        node_name: &str,
+        keypair: &cl_secret::NodeKeypair,
+    ) -> Result<cl_secret::ClusterKey> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            node: &'a str,
+            public_key: String,
+        }
+        #[derive(Deserialize)]
+        struct Wrapped {
+            ephemeral_public: String,
+            sealed: String,
+            key_fingerprint: String,
+        }
+
+        let response = self
+            .client
+            .post(format!("{}/api/secrets/key/wrap", self.base))
+            .bearer_auth(&self.token)
+            .json(&Body {
+                node: node_name,
+                public_key: keypair.public_key_encoded(),
+            })
+            .send()
+            .await
+            .context("asking the cluster for its secret key")?;
+        let wrapped: Wrapped = check(response)
+            .await?
+            .json()
+            .await
+            .context("the wrapped key the peer returned does not parse")?;
+
+        let key = cl_secret::WrappedKey {
+            ephemeral_public: wrapped.ephemeral_public,
+            sealed: cl_secret::Sealed::from_blob(wrapped.sealed),
+        }
+        .unwrap_with(keypair, node_name)
+        .context("the key the peer returned does not open with this node's keypair")?;
+        if key.fingerprint() != wrapped.key_fingerprint {
+            bail!("the unwrapped cluster key does not match the fingerprint the peer reported");
+        }
+        Ok(key)
+    }
 }
 
 /// Turn a response into an error carrying what the api actually said, which is
@@ -221,7 +273,7 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
             bail!("the cluster rejected the api key. Pass a valid one with --token or --token-file")
         }
         StatusCode::FORBIDDEN => {
-            bail!("that api key is not an admin key, so it cannot edit the config")
+            bail!("that api key is not an admin key, so it cannot join a node or fetch the cluster key")
         }
         StatusCode::SERVICE_UNAVAILABLE => bail!(
             "the cluster has no leader right now, so it cannot accept the join. {}",

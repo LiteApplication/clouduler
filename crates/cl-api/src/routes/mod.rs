@@ -38,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .merge(objects::router())
         .merge(drives::router())
         .merge(git_backup::router())
+        .merge(key_distribution::router())
         .merge(config::router())
         .merge(cloudflare::router())
         .merge(oidc::router())

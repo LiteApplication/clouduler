@@ -317,7 +317,13 @@ pub async fn history(cfg: &ClusterConfig, target_id: Option<&str>, via: Option<&
         let outcome = match &run.outcome {
             BackupRunOutcome::Running { percent: Some(p) } => format!("running ({:.0}%)", p * 100.0),
             BackupRunOutcome::Running { percent: None } => "running".to_string(),
-            BackupRunOutcome::Succeeded { snapshot_id, bytes } => format!("succeeded snapshot={snapshot_id} bytes={bytes}"),
+            BackupRunOutcome::Succeeded { snapshot_id, bytes, warning } => format!(
+                "succeeded snapshot={snapshot_id} bytes={bytes}{}",
+                warning
+                    .as_ref()
+                    .map(|w| format!(" warning={w}"))
+                    .unwrap_or_default()
+            ),,
             BackupRunOutcome::Failed { error } => format!("failed: {error}"),
         };
         println!("{}\ttarget={}\tdrive={}\tstarted={}\t{outcome}", run.id, run.target_id, run.drive, run.started_at);

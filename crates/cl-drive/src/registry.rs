@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 use cl_config::ClusterConfig;
 use cl_raft::VolumeId;
@@ -39,6 +40,13 @@ pub struct DriveRegistry {
     /// serving from mounting without every caller having to carry the
     /// cluster config around.
     served_by: BTreeMap<String, Vec<String>>,
+    /// The `NodeLocal` backup destination paths that live on this node: the
+    /// only locations a peer may ask this node to stage a volume next to.
+    /// Behind a lock because the destinations live in raft state, not in the
+    /// config this registry is built from, so the daemon refreshes them as
+    /// the cluster changes. Empty until it does, which refuses every staging
+    /// push rather than accepting an unvetted one.
+    staging_destinations: RwLock<Vec<PathBuf>>,
 }
 
 impl DriveRegistry {
@@ -76,6 +84,7 @@ impl DriveRegistry {
             node: node.to_string(),
             drives,
             served_by,
+            staging_destinations: RwLock::default(),
         })
     }
 
@@ -87,6 +96,7 @@ impl DriveRegistry {
             node: node.into(),
             drives,
             served_by: BTreeMap::new(),
+            staging_destinations: RwLock::default(),
         }
     }
 
@@ -96,6 +106,53 @@ impl DriveRegistry {
     pub fn with_served_by(mut self, served_by: BTreeMap<String, Vec<String>>) -> Self {
         self.served_by = served_by;
         self
+    }
+
+    /// Replace the set of backup destination paths this node may stage
+    /// volumes next to. See `check_staging_destination`.
+    pub fn set_staging_destinations(&self, paths: Vec<PathBuf>) {
+        *self
+            .staging_destinations
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = paths;
+    }
+
+    /// Accept a peer-supplied staging path only if it is exactly a backup
+    /// destination configured for this node. The path arrives in the `Hello`
+    /// frame and is used to pick a directory to create and write into, so an
+    /// unchecked one lets any peer that can reach the port write under an
+    /// arbitrary absolute location. Anything but a normalized absolute path
+    /// (no `.`/`..`) is refused before the allowlist is even consulted, so a
+    /// lexically different spelling can never slip past the comparison.
+    pub fn check_staging_destination(&self, destination_path: &Path) -> Result<()> {
+        // Checked on the raw string: `Path::components` silently drops an
+        // interior `.` and a trailing slash, which would hide them.
+        let raw = destination_path.to_string_lossy();
+        let normalized = destination_path.is_absolute()
+            && !raw.contains('\0')
+            && raw
+                .trim_end_matches('/')
+                .split('/')
+                .skip(1)
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        let allowed = normalized
+            && self
+                .staging_destinations
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == destination_path);
+        if allowed {
+            Ok(())
+        } else {
+            Err(DriveError::Transfer {
+                message: format!(
+                    "staging path {} is not a backup destination configured for node {}",
+                    destination_path.display(),
+                    self.node
+                ),
+            })
+        }
     }
 
     /// The candidate serving nodes for a served drive, in priority order. An
@@ -217,6 +274,7 @@ impl DriveRegistry {
     /// `staging` handling). Mirrors `ensure_volume`, rooted next to the
     /// destination instead of under `drives`.
     pub fn ensure_staging_volume(&self, destination_path: &Path, id: &VolumeId) -> Result<PathBuf> {
+        self.check_staging_destination(destination_path)?;
         let root = self.staging_root_for(destination_path, &id.drive);
         let path = resolve_relative(&root, &id.volume)?;
         std::fs::create_dir_all(&path).map_err(|source| DriveError::Io {
@@ -252,6 +310,48 @@ pub fn resolve_relative(root: &Path, rel: &str) -> Result<PathBuf> {
         path.push(part);
     }
     Ok(path)
+}
+
+/// Resolve `rel` under `root` like `resolve_relative`, and additionally
+/// refuse to pass through a symlink on the way to the final component.
+///
+/// Replication carries symlinks as ordinary content with arbitrary targets,
+/// and a container can plant one in a volume too, so a received path like
+/// `a/etc/cron.d/x` must not be allowed to walk through a link `a` that
+/// points at `/`. Every ancestor below `root` that exists must be a real
+/// directory (or a non-link of any kind, which later fails on its own with
+/// ENOTDIR); the first one that doesn't exist ends the walk, since nothing
+/// below it can be a link. The final component is deliberately not checked:
+/// it may be a symlink when the operation replaces or removes the link
+/// itself, and callers that would write *through* it must handle that
+/// themselves. `root` itself is trusted, as a drive directory may legitimately
+/// be a symlink to another disk.
+pub fn resolve_no_follow(root: &Path, rel: &str) -> Result<PathBuf> {
+    let resolved = resolve_relative(root, rel)?;
+    let Ok(below_root) = resolved.strip_prefix(root) else {
+        return Ok(resolved);
+    };
+    let parts: Vec<_> = below_root.components().collect();
+    let mut walked = root.to_path_buf();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        walked.push(part);
+        match std::fs::symlink_metadata(&walked) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(DriveError::PathEscape {
+                    path: rel.to_string(),
+                })
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(DriveError::Io {
+                    path: walked,
+                    source,
+                })
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// Resolve `rel` under `root` the way `resolve_relative` does, then guard
@@ -375,6 +475,7 @@ mod tests {
         assert!(!reg.implements("cold"));
 
         let destination_path = tmp.path().join("backups");
+        reg.set_staging_destinations(vec![destination_path.clone()]);
         let id = VolumeId::new("cold", "data");
         let path = reg.ensure_staging_volume(&destination_path, &id).unwrap();
         assert!(path.is_dir());
@@ -558,6 +659,64 @@ mod tests {
 
         let err = resolve_in_root(&root, "link").unwrap_err();
         assert!(matches!(err, DriveError::PathEscape { .. }));
+    }
+
+    #[test]
+    fn staging_is_refused_unless_the_path_is_a_configured_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = DriveRegistry::from_drives("n1", BTreeMap::new());
+        let id = VolumeId::new("cold", "data");
+        let dest = tmp.path().join("backups");
+
+        // Nothing configured yet: everything is refused.
+        assert!(reg.ensure_staging_volume(&dest, &id).is_err());
+
+        reg.set_staging_destinations(vec![dest.clone()]);
+        assert!(reg.ensure_staging_volume(&dest, &id).is_ok());
+
+        // Not on the list, relative, or spelled with `..`/`.`.
+        for bad in [
+            PathBuf::from("/etc/cron.d"),
+            PathBuf::from("backups"),
+            tmp.path().join("other"),
+            tmp.path().join("backups/../backups"),
+            tmp.path().join("./backups"),
+        ] {
+            let err = reg.ensure_staging_volume(&bad, &id).unwrap_err();
+            assert!(
+                matches!(err, DriveError::Transfer { .. }),
+                "{} should be refused",
+                bad.display()
+            );
+        }
+        assert!(!tmp.path().join("other").exists());
+    }
+
+    #[test]
+    fn resolve_no_follow_rejects_a_symlinked_intermediate_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("real/deeper")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("real/deeper/b")).unwrap();
+
+        for rel in ["a/x", "a/y/z", "real/deeper/b/x"] {
+            assert!(
+                matches!(
+                    resolve_no_follow(&root, rel),
+                    Err(DriveError::PathEscape { .. })
+                ),
+                "{rel} should be rejected"
+            );
+        }
+        // The final component may be a link: callers replace or remove it.
+        assert!(resolve_no_follow(&root, "a").is_ok());
+        assert!(resolve_no_follow(&root, "real/deeper/b").is_ok());
+        // Missing ancestors are fine; nothing there can be a link.
+        assert!(resolve_no_follow(&root, "new/dir/file").is_ok());
     }
 
     fn fs_write(path: impl AsRef<Path>, data: &[u8]) {

@@ -407,6 +407,21 @@ impl Context_ {
         // every node computes the same one without another round of
         // consensus. Meaningless off a vxlan device, so only computed - and
         // logged - when one is actually being built.
+        //
+        // No node can resolve a collision by perturbing the hash (see
+        // `allocate_vni`): that needs a taken set all nodes agree on, and
+        // renumbering a running network would cut its tunnel. Two stacks on
+        // one VNI would instead be a single flooded L2 segment, so the one
+        // that sorts later is refused until its stack is renamed.
+        if needs_vxlan {
+            if let Some(other) = cl_net::vxlan::vni_collides(overlay, allocations.network_names()) {
+                anyhow::bail!(
+                    "overlay network {overlay} derives the same VXLAN VNI as {other}, and two \
+                     networks on one VNI would share a layer 2 segment; not bringing {overlay} \
+                     up, rename its stack or network"
+                );
+            }
+        }
         let vni = needs_vxlan.then(|| allocate_vni(overlay, &BTreeSet::new()));
 
         let mtu = if needs_vxlan {

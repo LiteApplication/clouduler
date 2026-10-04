@@ -1,7 +1,7 @@
 //! Turning a stack service into the container spec docker is given.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cl_config::{Command, RestartPolicy as StackRestart, Service};
 use cl_docker::{
@@ -46,6 +46,28 @@ pub struct Materialization<'a> {
     pub drive_roots: &'a BTreeMap<String, PathBuf>,
 }
 
+/// The host directory a `drive/volume` mount binds. Defense in depth behind
+/// stack validation (the same rules as `cl_drive::registry::resolve_relative`,
+/// which this crate can't depend on): the volume must be a single plain path
+/// component, or `.` for the whole drive, and an existing volume directory
+/// must not itself be a symlink - a container with write access to a
+/// whole-drive mount can plant one, and docker would resolve it on the host.
+fn volume_host_path(root: &Path, volume: &str) -> Result<PathBuf, String> {
+    if volume == "." {
+        return Ok(root.to_path_buf());
+    }
+    if volume.is_empty() || volume.contains(['/', '\0']) || volume.chars().all(|c| c == '.') {
+        return Err(format!("{volume:?} is not a plain volume name"));
+    }
+    let path = root.join(volume);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(format!("{} is a symlink", path.display()))
+        }
+        _ => Ok(path),
+    }
+}
+
 pub fn build(
     instance: &InstanceId,
     service: &Service,
@@ -53,7 +75,7 @@ pub fn build(
     placement: Placement,
     digest: Option<&str>,
     revision: u64,
-) -> ContainerSpec {
+) -> crate::Result<ContainerSpec> {
     let Materialization {
         objects,
         env: object_env,
@@ -67,21 +89,32 @@ pub fn build(
         .collect();
     labels.insert(LABEL_REVISION.to_string(), revision.to_string());
 
-    let mut mounts: Vec<BindMount> = service
-        .volumes
-        .iter()
-        .filter_map(|v| {
-            // A volume binds to the node's local directory for its drive.
-            // Anonymous mounts name no drive, so there is nothing to bind.
-            let (drive, volume) = (v.drive.as_ref()?, v.volume.as_ref()?);
-            let root = drive_roots.get(drive)?;
-            Some(BindMount {
-                host_path: root.join(volume).display().to_string(),
-                container_path: v.target.display().to_string(),
-                read_only: v.read_only,
-            })
-        })
-        .collect();
+    // A refused mount fails the whole spec rather than being dropped: a
+    // container started without its volume (a database on its ephemeral
+    // filesystem, say) would initialise empty and look healthy.
+    let mut mounts: Vec<BindMount> = Vec::new();
+    for v in &service.volumes {
+        // A volume binds to the node's local directory for its drive.
+        // Anonymous mounts name no drive, so there is nothing to bind.
+        let (Some(drive), Some(volume)) = (v.drive.as_ref(), v.volume.as_ref()) else {
+            continue;
+        };
+        let Some(root) = drive_roots.get(drive) else {
+            continue;
+        };
+        let host_path =
+            volume_host_path(root, volume).map_err(|reason| crate::SchedError::BadVolume {
+                instance: instance.to_string(),
+                drive: drive.clone(),
+                volume: volume.clone(),
+                reason,
+            })?;
+        mounts.push(BindMount {
+            host_path: host_path.display().to_string(),
+            container_path: v.target.display().to_string(),
+            read_only: v.read_only,
+        });
+    }
     mounts.extend(objects.iter().map(|o| o.mount()));
     if let Some(docker_socket) = service
         .x_clouduler
@@ -114,7 +147,7 @@ pub fn build(
     let mut env: BTreeMap<String, String> = service.environment.clone();
     env.extend(object_env.iter().cloned());
 
-    ContainerSpec {
+    Ok(ContainerSpec {
         name: instance.container_name(),
         // A pinned digest wins, so a restart cannot silently pull something new.
         image: match digest {
@@ -171,7 +204,7 @@ pub fn build(
             .map(|_| placement.proxy_addresses.clone())
             .unwrap_or_default(),
         egress_network: placement.egress_network,
-    }
+    })
 }
 
 /// Replace the tag with a digest, keeping the repository.
@@ -293,6 +326,59 @@ fn test_words(test: &cl_config::HealthcheckTest) -> Vec<String> {
 mod tests {
     use super::*;
     use cl_config::StackFile;
+
+    /// Most tests only care about the spec, and use a service whose volumes
+    /// are all acceptable.
+    fn build(
+        instance: &InstanceId,
+        service: &Service,
+        materialized: Materialization<'_>,
+        placement: Placement,
+        digest: Option<&str>,
+        revision: u64,
+    ) -> ContainerSpec {
+        super::build(instance, service, materialized, placement, digest, revision).unwrap()
+    }
+
+    #[test]
+    fn a_refused_volume_fails_the_build_instead_of_dropping_the_mount() {
+        let s = service(
+            "services:\n  db:\n    image: postgres\n    volumes:\n      - fast/data:/var/lib/postgresql/data\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/", tmp.path().join("data")).unwrap();
+        let roots = BTreeMap::from([("fast".to_string(), tmp.path().to_path_buf())]);
+        let err = super::build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots,
+            },
+            Placement::default(),
+            None,
+            1,
+        )
+        .expect_err("a symlinked volume must be refused");
+        let message = err.to_string();
+        assert!(message.contains("fast/data"), "{message}");
+        assert!(message.contains("symlink"), "{message}");
+    }
+
+    #[test]
+    fn volume_host_path_refuses_escapes_and_symlinks() {
+        use super::volume_host_path;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(volume_host_path(root, ".").unwrap(), root);
+        assert_eq!(volume_host_path(root, "data").unwrap(), root.join("data"));
+        for bad in ["..", "...", "", "a/b", "a\0b"] {
+            assert!(volume_host_path(root, bad).is_err(), "{bad:?}");
+        }
+        std::os::unix::fs::symlink("/", root.join("planted")).unwrap();
+        assert!(volume_host_path(root, "planted").is_err());
+    }
 
     fn service(yaml: &str) -> Service {
         let file: StackFile = StackFile::parse(yaml).expect("valid stack");

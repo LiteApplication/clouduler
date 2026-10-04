@@ -47,6 +47,7 @@ use cl_drive::{
 };
 use cl_raft::ids::VolumeId;
 use cl_raft::node::ClusterNode;
+use cl_raft::state::BackupDestinationKind;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -160,6 +161,7 @@ pub fn start(
     node_name: &str,
     cluster: &Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    keys: cl_raft::KeyWatch,
 ) -> Drives {
     let boot_cfg = cfg.clone();
     let node_name = node_name.to_string();
@@ -170,16 +172,18 @@ pub fn start(
     let supervisor = {
         let registry = registry.clone();
         let mut config_rx = config_rx;
+        let keys = keys;
         tokio::spawn(async move {
             let mut cfg = boot_cfg;
             let mut topology = topology_of(&cfg, &node_name);
-            let mut running = match build(&cfg, &node_name, &cluster, &registry, &config_rx).await {
-                Ok(running) => running,
-                Err(e) => {
-                    warn!(error = %e, "drive subsystem did not start");
-                    Running::default()
-                }
-            };
+            let mut running =
+                match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys).await {
+                    Ok(running) => running,
+                    Err(e) => {
+                        warn!(error = %e, "drive subsystem did not start");
+                        Running::default()
+                    }
+                };
 
             let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL);
             loop {
@@ -206,14 +210,15 @@ pub fn start(
                 info!("drive topology changed, rebuilding the drive subsystem");
                 topology = live_topology;
                 running.teardown();
-                running = match build(&cfg, &node_name, &cluster, &registry, &config_rx).await {
-                    Ok(running) => running,
-                    Err(e) => {
-                        warn!(error = %e, "drive subsystem did not restart");
-                        *registry.write().await = None;
-                        Running::default()
-                    }
-                };
+                running =
+                    match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys).await {
+                        Ok(running) => running,
+                        Err(e) => {
+                            warn!(error = %e, "drive subsystem did not restart");
+                            *registry.write().await = None;
+                            Running::default()
+                        }
+                    };
             }
         })
     };
@@ -222,6 +227,36 @@ pub fn start(
         supervisor,
         shutdown_tx,
         registry,
+    }
+}
+
+/// Keep the registry's staging allowlist equal to the `NodeLocal` backup
+/// destinations that point at this node. The transport only stages a peer's
+/// volume next to a path on this list, so a peer cannot pick an arbitrary
+/// directory to write into. Destinations live in raft state rather than in
+/// `cluster.yaml`, so this polls the state the way the other drive watchers
+/// do. A destination created a moment ago is rejected until the next tick,
+/// which only delays a backup push that its sender retries anyway.
+async fn keep_staging_destinations_current(
+    cluster: Arc<ClusterNode>,
+    registry: Arc<DriveRegistry>,
+    node_name: String,
+) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        ticker.tick().await;
+        let state = cluster.state().await;
+        let paths = state
+            .restic_destinations
+            .values()
+            .filter_map(|d| match &d.kind {
+                BackupDestinationKind::NodeLocal { node, path } if node == &node_name => {
+                    Some(PathBuf::from(path))
+                }
+                _ => None,
+            })
+            .collect();
+        registry.set_staging_destinations(paths);
     }
 }
 
@@ -234,6 +269,7 @@ async fn build(
     cluster: &Arc<ClusterNode>,
     live_registry: &Arc<RwLock<Option<Arc<DriveRegistry>>>>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    keys: &cl_raft::KeyWatch,
 ) -> Result<Running> {
     let mut running = Running::default();
 
@@ -250,6 +286,13 @@ async fn build(
             DriveRegistry::new(cfg, node_name).context("building this node's drive registry")?,
         );
         *live_registry.write().await = Some(registry.clone());
+        running
+            .tasks
+            .push(tokio::spawn(keep_staging_destinations_current(
+                cluster.clone(),
+                registry.clone(),
+                node_name.to_string(),
+            )));
         let internal_ip = cfg
             .internal_ip(node)
             .context("node has no address on the internal network")?;
@@ -287,10 +330,13 @@ async fn build(
         if !local_copy.is_empty() {
             let addr = SocketAddr::new(internal_ip, drive_port(node.rpc_port));
             let serving = registry.clone();
+            let serve_keys = keys.clone();
             info!(%addr, drives = local_copy.len(), "drive transport listening");
             running.tasks.push(tokio::spawn(async move {
                 loop {
-                    if let Err(e) = transport::serve(addr, serving.clone()).await {
+                    if let Err(e) =
+                        transport::serve(addr, serving.clone(), serve_keys.clone()).await
+                    {
                         warn!(error = %e, "drive transport stopped, retrying");
                     }
                     tokio::time::sleep(BIND_RETRY).await;
@@ -300,7 +346,7 @@ async fn build(
             let scheduler = SyncScheduler::new(
                 cluster.clone(),
                 registry.clone(),
-                Arc::new(DeltaEngine::default()),
+                Arc::new(DeltaEngine::new(keys.clone())),
             );
             let intervals = DriveIntervals {
                 config_rx: config_rx.clone(),

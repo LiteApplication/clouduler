@@ -39,6 +39,19 @@ impl Plan {
 /// specific conflicts are deleted regardless of ownership; see
 /// `delete_conflicting_live_records`.
 pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
+    // DNS names are case-insensitive and Cloudflare always returns them
+    // lowercased, so compare everything lowercased: otherwise a mixed-case
+    // desired host never matches its own live record and gets re-created
+    // forever.
+    let live: Vec<Record> = live
+        .iter()
+        .cloned()
+        .map(|mut r| {
+            r.name = r.name.to_ascii_lowercase();
+            r
+        })
+        .collect();
+    let live = live.as_slice();
     let desired = normalize_desired(desired);
     let owned_keys = owned_keys(cluster, live);
 
@@ -79,6 +92,15 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
                     }
                 }
                 None => {
+                    // An identical record that isn't ours already exists: a
+                    // human made it. Creating it would be swallowed as a
+                    // duplicate, but the ownership tag would not, and a tag
+                    // over a record we never created gets that record deleted
+                    // the day it stops being desired. Leave it unclaimed.
+                    if !tag_exists && has_identical_live(live, want) {
+                        note_unclaimed(key);
+                        continue;
+                    }
                     out.create.push(to_input(cluster, want));
                     if !tag_exists {
                         out.create.push(tag_input(cluster, key, &want.fqdn));
@@ -115,6 +137,30 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
     out
 }
 
+/// Whether a live non-tag record already holds exactly `want`'s name, type
+/// and content (names are expected lowercased already).
+fn has_identical_live(live: &[Record], want: &DesiredRecord) -> bool {
+    live.iter().any(|r| {
+        !is_tag_record(r) && r.kind == want.kind && r.name == want.fqdn && r.content == want.content
+    })
+}
+
+/// Logs, once per key for the life of the process, that an existing
+/// unowned record is being used as-is instead of adopted.
+fn note_unclaimed(key: &str) {
+    static SEEN: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen
+        .get_or_insert_with(HashSet::new)
+        .insert(key.to_string())
+    {
+        tracing::info!(
+            %key,
+            "an identical dns record already exists and isn't owned by clouduler; using it as-is without claiming ownership"
+        );
+    }
+}
+
 /// Collapses a desired set down to something DNS can actually represent
 /// before anything gets diffed against live records: a CNAME can't share a
 /// name with any other record, and can only ever point at one target.
@@ -129,6 +175,15 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
 /// callers build that order deterministically - sorted node names - so this
 /// picks the same target every pass instead of flapping).
 fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
+    let lowered: Vec<DesiredRecord> = desired
+        .iter()
+        .cloned()
+        .map(|mut d| {
+            d.fqdn = d.fqdn.to_ascii_lowercase();
+            d
+        })
+        .collect();
+    let desired = lowered.as_slice();
     let mut has_address: HashSet<&str> = HashSet::new();
     for d in desired {
         if d.kind != RecordType::CNAME {
@@ -177,6 +232,11 @@ fn delete_conflicting_live_records(desired: &[DesiredRecord], live: &[Record], o
             continue;
         };
         if kinds.contains(&r.kind) {
+            continue;
+        }
+        // Only A/AAAA/CNAME can actually conflict; MX, TXT, CAA and the like
+        // are a human's, never ours.
+        if !matches!(r.kind, RecordType::A | RecordType::AAAA | RecordType::CNAME) {
             continue;
         }
         if r.kind != RecordType::CNAME && !kinds.contains(&RecordType::CNAME) {
@@ -648,6 +708,44 @@ mod tests {
         assert!(msg.contains("human.example.com"), "{msg}");
         assert!(msg.contains("1.2.3.4"), "{msg}");
         assert!(msg.contains("81053"), "{msg}");
+    }
+
+    #[test]
+    fn leaves_human_mx_txt_and_caa_alone_next_to_a_desired_cname() {
+        let want = vec![desired(
+            RecordType::CNAME,
+            "auth.example.com",
+            "osny.example.com",
+        )];
+        let live_records = vec![
+            live("r1", RecordType::TXT, "auth.example.com", "v=spf1 -all"),
+            live("r2", RecordType::Other, "auth.example.com", "0 issue x"),
+            live("r3", RecordType::A, "auth.example.com", "1.2.3.4"),
+        ];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert_eq!(p.delete, vec!["r3".to_string()], "{p:?}");
+    }
+
+    #[test]
+    fn does_not_adopt_an_identical_human_record() {
+        let want = vec![desired(RecordType::A, "human.example.com", "9.9.9.9")];
+        let live_records = vec![live("r1", RecordType::A, "human.example.com", "9.9.9.9")];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert!(p.is_empty(), "no tag, no create: {p:?}");
+        // and once it's no longer desired, nothing is ever deleted
+        let p = plan(CLUSTER, &[], &live_records);
+        assert!(p.delete.is_empty());
+    }
+
+    #[test]
+    fn mixed_case_hosts_match_their_lowercase_live_records() {
+        let want = vec![desired(RecordType::A, "Svc.Example.com", "1.2.3.4")];
+        let live_records = vec![
+            live("r1", RecordType::A, "svc.example.com", "1.2.3.4"),
+            tag("t1", "svc.example.com", "A:svc.example.com"),
+        ];
+        let p = plan(CLUSTER, &want, &live_records);
+        assert!(p.is_empty(), "{p:?}");
     }
 
     #[test]

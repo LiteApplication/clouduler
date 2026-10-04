@@ -48,8 +48,19 @@ pub fn parse_memory_bytes(raw: &str) -> Option<u64> {
         'g' | 'G' => (&raw[..raw.len() - 1], 1024 * 1024 * 1024),
         _ => (raw, 1),
     };
-    digits.trim().parse::<u64>().ok().map(|n| n * multiplier)
+    // Checked: a size like `99999999999g` must read as invalid, not panic in a
+    // debug build or silently wrap to a tiny limit in a release one.
+    digits
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
 }
+
+/// The most replicas a single service may ask for. `plan::expand` builds one
+/// `Desired` per replica on every leader pass, so an unbounded count is a way
+/// to exhaust a leader's memory with one line of yaml.
+pub const MAX_REPLICAS: u32 = 1000;
 
 /// `deploy.resources`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -172,5 +183,12 @@ update_config:
         assert_eq!(parse_memory_bytes("2g"), Some(2 * 1024 * 1024 * 1024));
         assert_eq!(parse_memory_bytes("512M"), Some(512 * 1024 * 1024));
         assert_eq!(parse_memory_bytes("nonsense"), None);
+    }
+
+    #[test]
+    fn a_byte_size_that_overflows_u64_is_rejected() {
+        assert_eq!(parse_memory_bytes("18446744073709551615"), Some(u64::MAX));
+        assert_eq!(parse_memory_bytes("18446744073709551615g"), None);
+        assert_eq!(parse_memory_bytes("17179869184g"), None);
     }
 }

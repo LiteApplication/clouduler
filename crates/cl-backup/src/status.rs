@@ -92,6 +92,14 @@ pub fn last_known_good_commit(state: &ClusterState) -> Option<String> {
     }
 }
 
+/// The commit a `LastExport` should carry after an export attempt that
+/// succeeded: the one it just pushed, or - for a no-op attempt that pushed
+/// nothing - the last known good commit already on record, so a no-op never
+/// erases the baseline later pulls diff against.
+pub fn commit_to_record(pushed: Option<String>, state: &ClusterState) -> Option<String> {
+    pushed.or_else(|| last_known_good_commit(state))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +202,36 @@ mod tests {
             last_known_good_commit(&state),
             Some("commit_pull".to_string())
         );
+    }
+
+    #[test]
+    fn a_no_op_export_keeps_the_last_known_good_commit() {
+        let export = LastExport {
+            at: 1,
+            summary: "add stack web".to_string(),
+            commit: Some("deadbeef".to_string()),
+            error: None,
+        };
+        let mut state = ClusterState::default();
+        state.configs.insert(
+            LAST_EXPORT_CONFIG.to_string(),
+            cl_raft::state::ConfigEntry {
+                name: LAST_EXPORT_CONFIG.to_string(),
+                content: cl_raft::base64_encode(&serde_json::to_vec(&export).expect("encode")),
+                revision: 1,
+                owner: None,
+            },
+        );
+
+        assert_eq!(
+            commit_to_record(None, &state).as_deref(),
+            Some("deadbeef"),
+            "a no-op export must not erase the last good commit"
+        );
+        assert_eq!(
+            commit_to_record(Some("cafe".into()), &state).as_deref(),
+            Some("cafe")
+        );
+        assert_eq!(commit_to_record(None, &ClusterState::default()), None);
     }
 }

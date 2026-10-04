@@ -70,10 +70,17 @@ use crate::backup_secrets;
 const DUE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// How often every node checks for `Running` runs that are its job.
 const RUN_POLL_INTERVAL: Duration = Duration::from_secs(15);
-/// A `Running` run older than `frequency_secs * this`, capped below, is
-/// presumed abandoned (the node that claimed it crashed or partitioned) and
-/// failed so the target is eligible to be picked up again on schedule.
+/// A `Running` run whose progress has not moved for `frequency_secs * this`
+/// (bounded below by `STALE_RUN_FLOOR_SECS` and above by
+/// `STALE_RUN_CAP_SECS`) is presumed abandoned (the node that claimed it
+/// crashed or partitioned) and failed so the target is eligible to be picked
+/// up again on schedule. Failing a run that is in fact still going would let a
+/// second restic start against the same repository, so the clock restarts
+/// every time the run's reported progress changes, and the floor keeps a
+/// frequent schedule (a 5 minute target would otherwise give up after 15)
+/// from condemning a legitimately long first backup.
 const STALE_RUN_MULTIPLIER: i64 = 3;
+const STALE_RUN_FLOOR_SECS: i64 = 12 * 3600;
 const STALE_RUN_CAP_SECS: i64 = 72 * 3600;
 /// How long a `NodeLocal`-elsewhere destination waits, once a run starts,
 /// before running restic against whatever the source's one-off push has
@@ -83,14 +90,15 @@ const SYNC_GRACE_SECS: i64 = 120;
 /// its primary before a backup runs against it anyway.
 const DRIVE_SYNC_GRACE_SECS: i64 = 120;
 /// On top of the affected services' own `stop_grace_period`, how long to
-/// wait for local containers to actually stop before giving up and running
-/// the backup anyway - mirrors `folder_import`'s margin.
+/// wait for local containers to actually stop before giving up and failing
+/// the run (restarting what was stopped) - mirrors `folder_import`'s margin.
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 
 /// Leader-side: turn due targets into `Running` runs, and fail stale ones.
 pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(DUE_POLL_INTERVAL);
+        let mut tracker = ProgressTracker::default();
         loop {
             ticker.tick().await;
             if !cluster.is_leader() {
@@ -134,28 +142,79 @@ pub fn start_due_checker(cluster: Arc<ClusterNode>) -> JoinHandle<()> {
                 let _ = cluster.submit(Request::RecordBackupRun(run)).await;
             }
 
+            tracker.retain_running(&state);
             for run in state.restic_runs.values() {
                 if !matches!(run.outcome, BackupRunOutcome::Running { .. }) {
                     continue;
                 }
-                let max_age = state
-                    .restic_targets
-                    .get(&run.target_id)
-                    .map(|t| {
-                        (t.frequency_secs as i64 * STALE_RUN_MULTIPLIER).min(STALE_RUN_CAP_SECS)
-                    })
-                    .unwrap_or(STALE_RUN_CAP_SECS);
-                if now - run.started_at >= max_age {
+                let max_age = stale_after_secs(
+                    state
+                        .restic_targets
+                        .get(&run.target_id)
+                        .map(|t| t.frequency_secs),
+                );
+                let last_progress = tracker.last_progress(run, now);
+                if now - last_progress >= max_age {
                     let mut stale = run.clone();
                     stale.finished_at = Some(now);
                     stale.outcome = BackupRunOutcome::Failed {
-                        error: "interrupted: no node finished this run in time".to_string(),
+                        error: format!(
+                            "interrupted: no progress for {} hours and no node finished this run",
+                            (now - last_progress) / 3600
+                        ),
                     };
                     let _ = cluster.submit(Request::RecordBackupRun(stale)).await;
                 }
             }
         }
     })
+}
+
+/// How long without progress before a `Running` run of a target with this
+/// `frequency_secs` is presumed abandoned.
+fn stale_after_secs(frequency_secs: Option<u64>) -> i64 {
+    match frequency_secs {
+        Some(freq) => (freq.min(i64::MAX as u64 / 4) as i64 * STALE_RUN_MULTIPLIER)
+            .clamp(STALE_RUN_FLOOR_SECS, STALE_RUN_CAP_SECS),
+        None => STALE_RUN_CAP_SECS,
+    }
+}
+
+/// Leader-local memory of when each `Running` run last made progress. The
+/// raft record only carries restic's `percent_done`, not when it changed, so
+/// the leader watches it move. A run seen for the first time (including after
+/// a leader change) is credited with progress "now": that can only delay
+/// failing a dead run, never fail a live one early.
+#[derive(Default)]
+struct ProgressTracker {
+    seen: std::collections::HashMap<String, (Option<u64>, i64)>,
+}
+
+impl ProgressTracker {
+    fn last_progress(&mut self, run: &BackupRun, now: i64) -> i64 {
+        let percent_bits = match run.outcome {
+            BackupRunOutcome::Running { percent } => percent.map(f64::to_bits),
+            _ => None,
+        };
+        let entry = self
+            .seen
+            .entry(run.id.clone())
+            .or_insert((percent_bits, now));
+        if entry.0 != percent_bits {
+            *entry = (percent_bits, now);
+        }
+        entry.1
+    }
+
+    /// Forget runs that are no longer `Running`.
+    fn retain_running(&mut self, state: &ClusterState) {
+        self.seen.retain(|id, _| {
+            state
+                .restic_runs
+                .get(id)
+                .is_some_and(|r| matches!(r.outcome, BackupRunOutcome::Running { .. }))
+        });
+    }
 }
 
 /// Per-node: claim and execute the `Running` runs that are this node's job.
@@ -249,7 +308,8 @@ pub fn start_runner(
                             continue;
                         }
                         if let Err(e) =
-                            push_drive_once(&state, &registry, &run.drive, node, path).await
+                            push_drive_once(&state, &registry, &run.drive, node, path, &key_rx)
+                                .await
                         {
                             warn!(run = %run.id, drive = %run.drive, destination = %node, error = %e, "one-off backup sync failed");
                             // The destination can't run restic against data
@@ -355,20 +415,66 @@ async fn execute(
     let instances = instances_using_drive(state, &run.drive);
     let should_stop = resolve_stop_containers(target, state, &instances);
 
+    // Only instances that are supposed to be running are stopped, and only
+    // those are started again: one an operator already stopped on purpose
+    // must not be resurrected by a backup.
     let mut stopped: Vec<InstanceId> = Vec::new();
-    if should_stop && !instances.is_empty() {
-        // Stopped one at a time - each instance's own deadline elapses
-        // before the next is even asked to stop - rather than firing every
-        // `SetDesiredState` at once and waiting on the slowest, so a single
-        // node doesn't have to shut down every affected container in the
-        // same instant.
-        for instance in &instances {
-            let one = std::slice::from_ref(instance);
-            set_desired(cluster, one, DesiredState::Stopped).await?;
-            let deadline = max_stop_grace(state, one) + STOP_POLL_MARGIN;
-            wait_for_stopped(cluster, node_name, one, docker, deadline).await;
-        }
-        stopped = instances;
+    let result = stop_and_back_up(
+        cluster,
+        registry,
+        docker,
+        key,
+        data_dir,
+        node_name,
+        state,
+        run,
+        target,
+        destination,
+        if should_stop { &instances } else { &[] },
+        &mut stopped,
+    )
+    .await;
+
+    // Always bring back what this run stopped, whatever the backup did.
+    let restart = restart_instances(cluster, &stopped).await;
+    combine_with_restart(result, restart)
+}
+
+/// The part of a backup run that happens while containers are down. Every
+/// instance it takes down is pushed onto `stopped` *before* the stop is
+/// requested, so a failure anywhere in here - including halfway through
+/// stopping - still leaves the caller a complete list to restart.
+#[allow(clippy::too_many_arguments)]
+async fn stop_and_back_up(
+    cluster: &Arc<ClusterNode>,
+    registry: &DriveRegistry,
+    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    key: &ClusterKey,
+    data_dir: &Path,
+    node_name: &str,
+    state: &ClusterState,
+    run: &BackupRun,
+    target: &DriveBackupTarget,
+    destination: &BackupDestination,
+    to_stop: &[InstanceId],
+    stopped: &mut Vec<InstanceId>,
+) -> Result<BackupRunOutcome> {
+    let running = currently_running(state, to_stop);
+    // Stopped one at a time - each instance's own deadline elapses
+    // before the next is even asked to stop - rather than firing every
+    // `SetDesiredState` at once and waiting on the slowest, so a single
+    // node doesn't have to shut down every affected container in the
+    // same instant.
+    for instance in &running {
+        let one = std::slice::from_ref(instance);
+        stopped.push(instance.clone());
+        set_desired(cluster, one, DesiredState::Stopped).await?;
+        let deadline = max_stop_grace(state, one) + STOP_POLL_MARGIN;
+        // A backup of a database that is still running is a crash-consistent
+        // copy at best, which is exactly what stopping first is meant to
+        // avoid - so a container that cannot be confirmed down aborts the
+        // run (the caller restarts everything) instead of backing up anyway.
+        wait_for_stopped(cluster, node_name, one, docker, deadline).await?;
     }
 
     // A `NodeLocal`-elsewhere destination doesn't implement the drive at
@@ -409,7 +515,7 @@ async fn execute(
         };
         registry.ensure_staging_root(Path::new(path), &run.drive)?
     };
-    let result = run_restic_backup(
+    run_restic_backup(
         cluster,
         key,
         data_dir,
@@ -419,12 +525,84 @@ async fn execute(
         destination,
         &source_path,
     )
-    .await;
+    .await
+}
 
-    if !stopped.is_empty() {
-        set_desired(cluster, &stopped, DesiredState::Running).await?;
+/// The subset of `instances` whose assignment currently wants them running.
+pub fn currently_running(state: &ClusterState, instances: &[InstanceId]) -> Vec<InstanceId> {
+    instances
+        .iter()
+        .filter(|instance| {
+            state
+                .assignments
+                .get(*instance)
+                .is_some_and(|a| a.desired == DesiredState::Running)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Sets every instance in `stopped` back to `Running`, attempting all of
+/// them even if one submit fails (a single stuck one must not leave the rest
+/// down), and reporting every failure.
+async fn restart_instances(
+    cluster: &Arc<ClusterNode>,
+    stopped: &[InstanceId],
+) -> std::result::Result<(), String> {
+    let mut failures = Vec::new();
+    for instance in stopped {
+        if let Err(e) = set_desired(
+            cluster,
+            std::slice::from_ref(instance),
+            DesiredState::Running,
+        )
+        .await
+        {
+            warn!(%instance, error = %e, "could not restart an instance stopped for a backup");
+            failures.push(e.to_string());
+        }
     }
-    result
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// Folds the result of restarting into the backup's own: the backup's error
+/// always wins (restart trouble is appended), and a restart failure after a
+/// good snapshot downgrades to a warning on the success rather than hiding
+/// that the snapshot exists.
+fn combine_with_restart(
+    result: Result<BackupRunOutcome>,
+    restart: std::result::Result<(), String>,
+) -> Result<BackupRunOutcome> {
+    match (result, restart) {
+        (result, Ok(())) => result,
+        (
+            Ok(BackupRunOutcome::Succeeded {
+                snapshot_id,
+                bytes,
+                warning,
+            }),
+            Err(restart_error),
+        ) => {
+            let restart_warning =
+                format!("the stopped containers could not be restarted: {restart_error}");
+            Ok(BackupRunOutcome::Succeeded {
+                snapshot_id,
+                bytes,
+                warning: Some(match warning {
+                    Some(existing) => format!("{existing}; {restart_warning}"),
+                    None => restart_warning,
+                }),
+            })
+        }
+        (Ok(other), Err(_)) => Ok(other),
+        (Err(e), Err(restart_error)) => Err(anyhow!(
+            "{e}; additionally the stopped containers could not be restarted: {restart_error}"
+        )),
+    }
 }
 
 /// Instances whose stack mounts a volume on `drive` - `folder_import`'s
@@ -517,20 +695,20 @@ async fn set_desired(
 /// node actually confirms its container is down, rather than always waiting
 /// the worst case. An instance with no report yet (an older peer, or one
 /// that hasn't swept since this run started) is treated as still running,
-/// falling back to the old blind wait for exactly that instance.
+/// falling back to waiting for exactly that instance.
+///
+/// Returns an error naming the instances still not confirmed stopped once
+/// `deadline` passes - an unconfirmed stop must never read as a stop. A
+/// container docker cannot be asked about counts as unconfirmed too.
 async fn wait_for_stopped(
     cluster: &Arc<ClusterNode>,
     node_name: &str,
     instances: &[InstanceId],
     docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
     deadline: Duration,
-) {
+) -> Result<()> {
     let start = tokio::time::Instant::now();
     loop {
-        let elapsed = start.elapsed();
-        if elapsed >= deadline {
-            return;
-        }
         let state = cluster.state().await;
         let local: Vec<String> = state
             .assignments
@@ -539,16 +717,18 @@ async fn wait_for_stopped(
             .map(|a| a.instance.container_name())
             .collect();
 
-        let mut all_stopped = true;
-        if let Some(docker) = docker.read().await.clone() {
-            for name in &local {
-                match docker.inspect(name).await {
-                    Ok(Some(s)) if s.running => all_stopped = false,
-                    _ => {}
+        let mut not_stopped: Vec<String> = Vec::new();
+        match docker.read().await.clone() {
+            Some(docker) => {
+                for name in &local {
+                    match docker.inspect(name).await {
+                        Ok(Some(s)) if s.running => not_stopped.push(name.clone()),
+                        Ok(_) => {}
+                        Err(_) => not_stopped.push(name.clone()),
+                    }
                 }
             }
-        } else if !local.is_empty() {
-            all_stopped = false;
+            None => not_stopped.extend(local.iter().cloned()),
         }
 
         for instance in instances {
@@ -556,14 +736,21 @@ async fn wait_for_stopped(
                 continue;
             }
             match state.container_status.get(instance) {
-                Some(status) if status.running => all_stopped = false,
-                Some(_) => {}
-                None => all_stopped = false,
+                Some(status) if !status.running => {}
+                _ => not_stopped.push(instance.container_name()),
             }
         }
 
-        if all_stopped {
-            return;
+        if not_stopped.is_empty() {
+            return Ok(());
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= deadline {
+            bail!(
+                "could not confirm {} stopped within {}s",
+                not_stopped.join(", "),
+                deadline.as_secs()
+            );
         }
         tokio::time::sleep(Duration::from_secs(1).min(deadline - elapsed)).await;
     }
@@ -641,6 +828,7 @@ async fn push_drive_once(
     drive: &str,
     target_node: &str,
     destination_path: &str,
+    keys: &cl_raft::KeyWatch,
 ) -> Result<()> {
     let addr = state
         .nodes
@@ -648,7 +836,7 @@ async fn push_drive_once(
         .map(|ns| ns.rpc_addr)
         .ok_or_else(|| anyhow!("node {target_node} is not in the cluster"))?;
     let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(keys.clone());
     for (id, vstate) in state.volumes.iter().filter(|(id, _)| id.drive == drive) {
         let src = registry.volume_path(id)?;
         engine
@@ -733,14 +921,23 @@ async fn run_restic_backup(
                 }
             })
             .map_err(|e| anyhow!("restic backup: {e}"))?;
-        if let Err(e) = repo.forget(&forget) {
-            // A prune/forget error (e.g. transient lock or network issue) shouldn't
-            // invalidate a successful snapshot of large data.
-            warn!("restic forget/prune warning (snapshot was preserved): {e}");
-        }
+        // A prune/forget error (e.g. transient lock or network issue) shouldn't
+        // invalidate a successful snapshot of large data - but it must not
+        // vanish into a log line either: until it succeeds the repository
+        // grows without bound, so it is recorded on the run itself.
+        let warning = match repo.forget(&forget) {
+            Ok(()) => None,
+            Err(e) => {
+                warn!("restic forget/prune warning (snapshot was preserved): {e}");
+                Some(format!(
+                    "snapshot saved, but applying the retention policy (forget --prune) failed: {e}"
+                ))
+            }
+        };
         Ok(BackupRunOutcome::Succeeded {
             snapshot_id: outcome.snapshot_id,
             bytes: outcome.bytes,
+            warning,
         })
     })
     .await
@@ -879,5 +1076,107 @@ mod tests {
             .insert(i2.clone(), assignment(i2.clone(), "n1"));
 
         assert!(resolve_stop_containers(&target(None), &state, &[i1, i2]));
+    }
+
+    fn running(id: &str, percent: Option<f64>) -> BackupRun {
+        BackupRun {
+            id: id.into(),
+            target_id: "t1".into(),
+            drive: "fast".into(),
+            destination_id: "d1".into(),
+            started_at: 0,
+            finished_at: None,
+            outcome: BackupRunOutcome::Running { percent },
+            triggered_by: BackupTrigger::Schedule,
+        }
+    }
+
+    #[test]
+    fn a_frequent_target_is_not_condemned_after_a_few_multiples_of_its_period() {
+        // 5 minutes * 3 would be 15 minutes - far too short for a big first backup.
+        assert_eq!(stale_after_secs(Some(300)), STALE_RUN_FLOOR_SECS);
+        assert_eq!(stale_after_secs(Some(86_400)), 72 * 3600);
+        assert_eq!(stale_after_secs(Some(86_400 * 30)), STALE_RUN_CAP_SECS);
+        assert_eq!(stale_after_secs(None), STALE_RUN_CAP_SECS);
+        // Garbage frequencies cannot overflow.
+        assert_eq!(stale_after_secs(Some(u64::MAX)), STALE_RUN_CAP_SECS);
+    }
+
+    #[test]
+    fn progress_resets_the_staleness_clock() {
+        let mut tracker = ProgressTracker::default();
+        // First sight (e.g. right after a leader change) is credited as progress.
+        assert_eq!(tracker.last_progress(&running("r", None), 1_000), 1_000);
+        // No change: the clock does not move.
+        assert_eq!(tracker.last_progress(&running("r", None), 5_000), 1_000);
+        // Percent moved: it restarts.
+        assert_eq!(
+            tracker.last_progress(&running("r", Some(0.1)), 6_000),
+            6_000
+        );
+        assert_eq!(
+            tracker.last_progress(&running("r", Some(0.1)), 9_000),
+            6_000
+        );
+        assert_eq!(
+            tracker.last_progress(&running("r", Some(0.2)), 9_500),
+            9_500
+        );
+    }
+
+    #[test]
+    fn only_instances_that_want_to_run_are_restarted_later() {
+        let mut state = ClusterState::default();
+        let up = InstanceId::new("app", "web", 0);
+        let down = InstanceId::new("app", "web", 1);
+        state
+            .assignments
+            .insert(up.clone(), assignment(up.clone(), "n1"));
+        let mut already_stopped = assignment(down.clone(), "n1");
+        already_stopped.desired = DesiredState::Stopped;
+        state.assignments.insert(down.clone(), already_stopped);
+
+        assert_eq!(
+            currently_running(&state, &[up.clone(), down.clone()]),
+            vec![up]
+        );
+        assert!(currently_running(&state, &[down]).is_empty());
+    }
+
+    fn succeeded() -> BackupRunOutcome {
+        BackupRunOutcome::Succeeded {
+            snapshot_id: "abc".into(),
+            bytes: 1,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn restart_trouble_never_hides_the_backups_own_error() {
+        let err = combine_with_restart(Err(anyhow!("restic exploded")), Err("raft down".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("restic exploded") && err.contains("raft down"),
+            "{err}"
+        );
+        let err = combine_with_restart(Err(anyhow!("restic exploded")), Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "restic exploded");
+    }
+
+    #[test]
+    fn a_failed_restart_after_a_good_snapshot_becomes_a_warning_not_a_failure() {
+        match combine_with_restart(Ok(succeeded()), Err("raft down".into())).unwrap() {
+            BackupRunOutcome::Succeeded { warning, .. } => {
+                assert!(warning.unwrap().contains("raft down"))
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+        assert_eq!(
+            combine_with_restart(Ok(succeeded()), Ok(())).unwrap(),
+            succeeded()
+        );
     }
 }

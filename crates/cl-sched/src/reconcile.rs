@@ -21,7 +21,29 @@ use crate::registries::Registries;
 /// with the api so `GET /api/instances` can report "pulling" instead of
 /// guessing from the absence of a container — nothing in a docker inspect
 /// distinguishes "about to be created" from "still fetching the image".
-pub type PullTracker = Arc<RwLock<BTreeSet<InstanceId>>>;
+///
+/// A count per instance, not a set: the api's update path and this reconciler
+/// can both be pulling for one instance at once, and with a plain set the
+/// first to finish would clear the mark while the other is still downloading.
+/// Go through `pull_started` / `pull_finished`.
+pub type PullTracker = Arc<RwLock<BTreeMap<InstanceId, usize>>>;
+
+/// Marks one more pull in flight for `id`.
+pub async fn pull_started(tracker: &PullTracker, id: &InstanceId) {
+    *tracker.write().await.entry(id.clone()).or_default() += 1;
+}
+
+/// Marks one pull for `id` done; the instance stops reading as pulling only
+/// when the last one is.
+pub async fn pull_finished(tracker: &PullTracker, id: &InstanceId) {
+    let mut pulls = tracker.write().await;
+    if let Some(count) = pulls.get_mut(id) {
+        *count -= 1;
+        if *count == 0 {
+            pulls.remove(id);
+        }
+    }
+}
 
 /// What has to happen to one container to bring it in line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +238,12 @@ impl Reconciler {
                 warn!(instance = %id, error = %e, "reconcile step failed");
             }
             if tracked {
+                // A container with a healthcheck is only started, not yet
+                // known good: the sweep promotes it to `Started` once docker
+                // reports it healthy (`health_gate`), or fails the update.
+                let has_healthcheck = specs.get(id).is_some_and(|t| t.spec.healthcheck.is_some());
                 match result {
+                    Ok(()) if has_healthcheck => self.report(id, UpdatePhase::Starting, None).await,
                     Ok(()) => self.report(id, UpdatePhase::Started, None).await,
                     Err(e) => {
                         self.report(id, UpdatePhase::Failed, Some(e.to_string()))
@@ -300,12 +327,12 @@ impl Reconciler {
             return Ok(());
         }
         info!(%image, "pulling");
-        self.pulling.write().await.insert(id.clone());
+        pull_started(&self.pulling, id).await;
         let result = self
             .docker
             .pull_as(image, self.registries.for_image(image))
             .await;
-        self.pulling.write().await.remove(id);
+        pull_finished(&self.pulling, id).await;
         result?;
         Ok(())
     }
@@ -438,6 +465,37 @@ impl Reconciler {
     }
 }
 
+/// How long a container with a healthcheck gets to turn healthy, counted from
+/// the update reaching `Starting`, before the update is failed.
+pub const HEALTH_TIMEOUT_SECS: i64 = 5 * 60;
+
+/// What a freshly started container's health says about the update that
+/// started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthGate {
+    /// No healthcheck, or it passed: the update succeeded.
+    Ready,
+    /// The healthcheck has not passed yet.
+    Wait,
+    /// It never will: docker marked the container unhealthy, or it is still
+    /// not healthy after `HEALTH_TIMEOUT_SECS`.
+    Failed(&'static str),
+}
+
+/// Decides an update's fate from its new container's health and how long it
+/// has been `Starting`.
+pub fn health_gate(health: Option<cl_docker::HealthState>, waited_secs: i64) -> HealthGate {
+    use cl_docker::HealthState as H;
+    match health {
+        Option::None | Some(H::None) | Some(H::Healthy) => HealthGate::Ready,
+        Some(H::Unhealthy) => HealthGate::Failed("the new container is unhealthy"),
+        Some(H::Starting) if waited_secs >= HEALTH_TIMEOUT_SECS => {
+            HealthGate::Failed("the new container did not become healthy in time")
+        }
+        Some(H::Starting) => HealthGate::Wait,
+    }
+}
+
 /// Whether applying `action` brings up the new container of an update that
 /// is at `phase`. A missing container mid-update is the one the update took
 /// away (queued is excluded: that update has not touched anything yet). A
@@ -475,6 +533,37 @@ fn stop_timeout(target: Option<&Target>) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn concurrent_pulls_of_one_instance_keep_it_marked_until_the_last_finishes() {
+        let tracker = PullTracker::default();
+        let id = InstanceId::new("s", "web", 0);
+        pull_started(&tracker, &id).await;
+        pull_started(&tracker, &id).await;
+        pull_finished(&tracker, &id).await;
+        assert!(tracker.read().await.contains_key(&id));
+        pull_finished(&tracker, &id).await;
+        assert!(tracker.read().await.is_empty());
+        // A stray extra finish is harmless.
+        pull_finished(&tracker, &id).await;
+    }
+
+    #[test]
+    fn health_gate_waits_then_fails_but_passes_without_a_check() {
+        use cl_docker::HealthState as H;
+        assert_eq!(health_gate(None, 0), HealthGate::Ready);
+        assert_eq!(health_gate(Some(H::None), 0), HealthGate::Ready);
+        assert_eq!(health_gate(Some(H::Healthy), 0), HealthGate::Ready);
+        assert_eq!(health_gate(Some(H::Starting), 10), HealthGate::Wait);
+        assert!(matches!(
+            health_gate(Some(H::Starting), HEALTH_TIMEOUT_SECS),
+            HealthGate::Failed(_)
+        ));
+        assert!(matches!(
+            health_gate(Some(H::Unhealthy), 1),
+            HealthGate::Failed(_)
+        ));
+    }
+
     use super::*;
     use cl_docker::{RunState, LABEL_MANAGED, MANAGED_VALUE};
     use cl_raft::state::Assignment;

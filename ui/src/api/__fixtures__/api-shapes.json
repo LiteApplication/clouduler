@@ -130,6 +130,7 @@
       }
     },
     "container_status": {},
+    "crash_moves": {},
     "dns_records": {
       "example.test|A|127.0.0.1": {
         "content": "<volatile>",
@@ -164,6 +165,7 @@
       }
     },
     "overlay": null,
+    "previous_image_digests": {},
     "removed": [],
     "restic_destinations": {},
     "restic_runs": {},

@@ -1048,6 +1048,16 @@ async fn reconcile_dns(
             .push(record);
     }
 
+    // A zone whose desired set became empty (its last host was removed) must
+    // still be reconciled, or its A record, ownership TXT and `dns_records`
+    // entries would never be cleaned up. `plan` only ever deletes records
+    // carrying our ownership tag, so visiting an unrelated zone is harmless.
+    for (zone_name, zone_id) in &zones.zones {
+        by_zone
+            .entry((zone_id.clone(), zone_name.clone()))
+            .or_default();
+    }
+
     for ((zone_id, zone_name), desired) in by_zone {
         // Mark anything not live yet as pending before the round trip, so the
         // ui has something to show while cloudflare is being talked to.
@@ -1129,7 +1139,7 @@ async fn reconcile_zone(
         let provider_id = live
             .iter()
             .find(|r| {
-                r.name == record.fqdn
+                r.name.eq_ignore_ascii_case(&record.fqdn)
                     && format!("{:?}", r.kind) == record_type
                     && r.content == record.content
             })

@@ -14,6 +14,7 @@ pub mod egress;
 pub mod error;
 pub mod expose;
 pub mod ipam;
+pub mod iptables;
 pub mod vxlan;
 pub mod wireguard;
 

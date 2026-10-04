@@ -20,6 +20,7 @@
 //! invoking restic - lives in `clouduler`'s own daemon code, which has the
 //! docker and raft access this crate deliberately doesn't.
 
+pub mod credentials;
 pub mod dependency;
 pub mod destination;
 pub mod error;

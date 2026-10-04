@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use std::time::Duration;
 
+use cl_secret::stream_auth;
+use cl_secret::ClusterKey;
 use futures::{SinkExt, StreamExt};
 use openraft::error::{NetworkError, RPCError, RaftError, Unreachable};
 use openraft::network::{Backoff, RPCOption, RaftNetwork, RaftNetworkFactory};
@@ -16,32 +18,60 @@ use openraft::raft::{
 };
 use openraft::{AnyError, BasicNode};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 use crate::ids::NodeId;
 use crate::rpc::{decode, encode, frame, Connection, RpcRequest, RpcResponse};
 use crate::state::{Request as StateRequest, Response as StateResponse};
 use crate::types::TypeConfig;
 
+/// The label both ends of the raft channel authenticate under, so a handshake
+/// captured here cannot be used to open any other node-to-node channel.
+pub const AUTH_LABEL: &str = "raft";
+
+/// A live view of this process's cluster key. The key can arrive after the node
+/// starts (another node delivers it), so connections read it when they are made
+/// rather than capturing it at boot.
+pub type KeyWatch = watch::Receiver<Option<Arc<ClusterKey>>>;
+
+/// A `KeyWatch` that always holds `key`, for callers with a key in hand and no
+/// need for it to change, like the cli.
+pub fn fixed_key(key: Arc<ClusterKey>) -> KeyWatch {
+    // The sender is dropped straight away; a receiver keeps serving the last
+    // value it saw, which is all a fixed key needs.
+    watch::channel(Some(key)).1
+}
+
+/// A `KeyWatch` holding a fresh random key, for tests that stand up nodes and
+/// have no key file to load. Nodes only talk to each other when they share one,
+/// so a test cluster clones the receiver it gets from here into every node.
+pub fn throwaway_key() -> KeyWatch {
+    fixed_key(Arc::new(ClusterKey::generate()))
+}
+
 type NetError<E = RaftError<NodeId>> = RPCError<NodeId, BasicNode, E>;
 
 /// Hands raft a client per peer. Connections are cached and reopened lazily,
 /// since heartbeats would otherwise pay a TCP handshake every tick.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Network {
     peers: Arc<Mutex<BTreeMap<NodeId, Arc<Peer>>>>,
+    keys: KeyWatch,
 }
 
 impl Network {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(keys: KeyWatch) -> Self {
+        Self {
+            peers: Arc::default(),
+            keys,
+        }
     }
 
     async fn peer(&self, id: NodeId, node: &BasicNode) -> Arc<Peer> {
         let mut peers = self.peers.lock().await;
         peers
             .entry(id)
-            .or_insert_with(|| Arc::new(Peer::new(node.addr.clone())))
+            .or_insert_with(|| Arc::new(Peer::new(node.addr.clone(), self.keys.clone())))
             .clone()
     }
 }
@@ -61,20 +91,22 @@ impl RaftNetworkFactory<TypeConfig> for Network {
 /// the single socket needs anyway since responses are not tagged.
 pub struct Peer {
     addr: String,
+    keys: KeyWatch,
     conn: Mutex<Option<Connection>>,
 }
 
 impl Peer {
-    fn new(addr: String) -> Self {
+    fn new(addr: String, keys: KeyWatch) -> Self {
         Self {
             addr,
+            keys,
             conn: Mutex::new(None),
         }
     }
 
     /// A one off peer, for callers outside raft's own replication paths.
-    pub fn connect(addr: &str) -> Self {
-        Self::new(addr.to_string())
+    pub fn connect(addr: &str, keys: KeyWatch) -> Self {
+        Self::new(addr.to_string(), keys)
     }
 
     /// Drop the cached connection, if any, without waiting on whatever
@@ -106,7 +138,26 @@ impl Peer {
             }
         }
 
-        let stream = TcpStream::connect(&self.addr).await?;
+        // No key means we cannot prove membership, and the listener would
+        // refuse us anyway; failing here says why instead of a bare reset.
+        let key = self.keys.borrow().clone().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "this node holds no cluster key, so it cannot authenticate to its peers",
+            )
+        })?;
+        let mut stream = TcpStream::connect(&self.addr).await?;
+        // Mutual proof of the cluster key before any frame is exchanged, so
+        // we never ship a write or a snapshot to something that is not a
+        // member.
+        stream_auth::connect(&mut stream, &key, AUTH_LABEL)
+            .await
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("authenticating to {}: {e}", self.addr),
+                )
+            })?;
         let mut conn = frame(stream);
         let response = Self::exchange(&mut conn, request).await?;
         *guard = Some(conn);

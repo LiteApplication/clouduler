@@ -974,13 +974,17 @@ impl Node {
 /// HTTP-01 fallback, say) check `name.ends_with('.')` on the raw input
 /// themselves; this function only normalizes the name.
 pub fn qualify(name: &str, domain: Option<&str>) -> String {
-    if let Some(stripped) = name.strip_suffix('.') {
-        return stripped.to_string();
-    }
-    match domain {
-        Some(domain) if !name.contains('.') => format!("{name}.{domain}"),
-        _ => name.to_string(),
-    }
+    // DNS names are case-insensitive and resolvers/Cloudflare hand them back
+    // lowercased, so normalize here to keep every comparison downstream exact.
+    let qualified = if let Some(stripped) = name.strip_suffix('.') {
+        stripped.to_string()
+    } else {
+        match domain {
+            Some(domain) if !name.contains('.') => format!("{name}.{domain}"),
+            _ => name.to_string(),
+        }
+    };
+    qualified.to_ascii_lowercase()
 }
 
 impl fmt::Display for NodeRole {
@@ -1020,6 +1024,8 @@ mod tests {
     #[test]
     fn a_trailing_dot_wins_over_a_bare_label() {
         assert_eq!(qualify("blog.", Some("cluster.lan")), "blog");
+        assert_eq!(qualify("Blog", Some("Cluster.LAN")), "blog.cluster.lan");
+        assert_eq!(qualify("App.Example.NET.", None), "app.example.net");
     }
 
     #[test]

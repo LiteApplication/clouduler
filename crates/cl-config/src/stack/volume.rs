@@ -156,7 +156,15 @@ fn split_source(source: &str) -> Result<(String, String), String> {
     }
     match source.split_once('/') {
         Some((drive, volume))
-            if !drive.is_empty() && !volume.is_empty() && !volume.contains('/') =>
+            if !drive.is_empty()
+                && !volume.is_empty()
+                && !volume.contains('/')
+                && !drive.contains('\0')
+                && !volume.contains('\0')
+                && !matches!(drive, "." | "..")
+                // `.` alone is the whole-drive mount; every other all-dots
+                // name (`..`, `...`) is a traversal or a lookalike of one.
+                && (volume == "." || !volume.chars().all(|c| c == '.')) =>
         {
             Ok((drive.to_string(), volume.to_string()))
         }
@@ -228,6 +236,21 @@ mod tests {
 
     fn parse(s: &str) -> Result<VolumeMount, serde_yaml::Error> {
         serde_yaml::from_str::<VolumeMount>(&format!("\"{s}\""))
+    }
+
+    #[test]
+    fn rejects_traversal_and_lookalike_volume_names() {
+        for bad in [
+            "fast/..:/x",
+            "fast/...:/x",
+            "../data:/x",
+            "./data:/x",
+            "fast/a\\u0000b:/x",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let whole = parse("fast/.:/x").unwrap();
+        assert_eq!(whole.volume.as_deref(), Some("."));
     }
 
     #[test]

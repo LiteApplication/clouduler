@@ -46,6 +46,9 @@ pub struct Options {
     /// Directory holding the raft database.
     pub data_dir: PathBuf,
     pub cluster_name: String,
+    /// The cluster key, live. Gates every rpc connection in both directions;
+    /// a node with no key at all can talk to no one until one arrives.
+    pub keys: crate::network::KeyWatch,
 }
 
 /// A running cluster member.
@@ -54,6 +57,7 @@ pub struct ClusterNode {
     pub name: String,
     raft: Arc<Raft>,
     network: Network,
+    keys: crate::network::KeyWatch,
     shared: Arc<RwLock<StateMachine>>,
     quorum: QuorumWatch,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -142,7 +146,7 @@ impl ClusterNode {
         };
         let config = Arc::new(config.validate()?);
 
-        let network = Network::new();
+        let network = Network::new(options.keys.clone());
         let raft = Raft::new(
             id,
             config,
@@ -168,6 +172,7 @@ impl ClusterNode {
             shared: shared.clone(),
             quorum: quorum.clone(),
             contact: contact.clone(),
+            keys: options.keys.clone(),
         };
         tasks.push(tokio::spawn(async move {
             if let Err(e) = server::serve(addr, ctx).await {
@@ -215,6 +220,7 @@ impl ClusterNode {
             name: options.name,
             raft,
             network,
+            keys: options.keys,
             shared,
             quorum,
             tasks: Mutex::new(tasks),
@@ -272,7 +278,7 @@ impl ClusterNode {
                 // refuses, so an unbounded connect sits there for the OS TCP
                 // timeout, minutes long, and stalls this whole loop. A probe
                 // that has not answered within the probe interval is a miss.
-                let peer = Peer::connect(&node.rpc_addr.to_string());
+                let peer = Peer::connect(&node.rpc_addr.to_string(), self.keys.clone());
                 if matches!(
                     timeout(probe_interval, network::ping(&peer)).await,
                     Ok(true)
@@ -340,7 +346,7 @@ impl ClusterNode {
             .await
             .map_err(ClusterError::membership)?;
 
-        let peer = Peer::connect(&addr.to_string());
+        let peer = Peer::connect(&addr.to_string(), self.keys.clone());
         if !matches!(
             timeout(CONNECT_PROBE_TIMEOUT, network::ping(&peer)).await,
             Ok(true)
@@ -437,7 +443,7 @@ impl ClusterNode {
             .await
             .ok_or(ClusterError::NoLeader)?;
 
-        let peer = Peer::connect(&addr);
+        let peer = Peer::connect(&addr, self.keys.clone());
         forward(&peer, request)
             .await
             .map_err(|msg| ClusterError::Forward { leader, msg })

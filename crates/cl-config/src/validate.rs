@@ -1,7 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cluster::{ClusterConfig, NetworkKind, NodeAddress};
 use crate::error::{ConfigError, Result};
+use crate::netalloc::{
+    check_interface_name, egress_table_id, subnet_octet, EGRESS_POOL_BASE, NAT_POOL_BASE,
+};
 
 impl ClusterConfig {
     /// Structural checks the rest of the daemon then relies on. Anything that
@@ -114,6 +117,8 @@ impl ClusterConfig {
             }
         }
 
+        self.validate_derived_allocations()?;
+
         match internal.len() {
             1 => Ok(()),
             0 => Err(ConfigError::invalid(
@@ -128,6 +133,61 @@ impl ClusterConfig {
                 ),
             )),
         }
+    }
+
+    /// Egress, wireguard and nat networks get their bridge subnet and (for the
+    /// first two) policy routing table from a hash of their name, so every node
+    /// agrees without coordinating. Two names that hash alike would silently
+    /// share a subnet or a routing table, each network rewriting the other's
+    /// default route every reconcile tick, so refuse the config instead. The
+    /// allocation itself cannot be changed to dodge this: it would renumber the
+    /// networks that already exist on live nodes.
+    fn validate_derived_allocations(&self) -> Result<()> {
+        let mut egress_octets: BTreeMap<u8, &str> = BTreeMap::new();
+        let mut nat_octets: BTreeMap<u8, &str> = BTreeMap::new();
+        let mut tables: BTreeMap<u32, &str> = BTreeMap::new();
+
+        for (name, net) in &self.networks {
+            let at = format!("networks.{name}");
+            match net.kind {
+                NetworkKind::Egress | NetworkKind::Wireguard => {
+                    let octet = subnet_octet(name);
+                    if let Some(other) = egress_octets.insert(octet, name) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "networks {other} and {name} both derive the bridge subnet 10.{EGRESS_POOL_BASE}.{octet}.0/24 \
+                                 from their names; rename one of them"
+                            ),
+                        ));
+                    }
+                    let table = egress_table_id(name);
+                    if let Some(other) = tables.insert(table, name) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "networks {other} and {name} both derive the policy routing table {table} \
+                                 from their names; rename one of them"
+                            ),
+                        ));
+                    }
+                }
+                NetworkKind::Nat => {
+                    let octet = subnet_octet(name);
+                    if let Some(other) = nat_octets.insert(octet, name) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "networks {other} and {name} both derive the bridge subnet 10.{NAT_POOL_BASE}.{octet}.0/24 \
+                                 from their names; rename one of them"
+                            ),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn validate_nodes(&self) -> Result<()> {
@@ -205,12 +265,18 @@ impl ClusterConfig {
                                 "must name a non-empty host interface",
                             ));
                         }
+                        if let Err(why) = check_interface_name(&addr.interface) {
+                            return Err(ConfigError::invalid(at, why));
+                        }
                         if let Some(fallback) = &addr.fallback {
                             if fallback.interface.trim().is_empty() {
                                 return Err(ConfigError::invalid(
                                     format!("{at}.fallback"),
                                     "must name a non-empty host interface",
                                 ));
+                            }
+                            if let Err(why) = check_interface_name(&fallback.interface) {
+                                return Err(ConfigError::invalid(format!("{at}.fallback"), why));
                             }
                             if fallback.interface == addr.interface {
                                 return Err(ConfigError::invalid(
@@ -717,6 +783,105 @@ cloudflare:
         ])
         .unwrap_err();
         assert!(err.to_string().contains("takes a bare host interface name"));
+    }
+
+    /// Two distinct names whose derived value (octet or table id) collides,
+    /// found by search so the test does not hard-code a hash.
+    fn colliding_names<K: PartialEq + Ord>(key: impl Fn(&str) -> K) -> (String, String) {
+        let mut seen: std::collections::BTreeMap<K, String> = Default::default();
+        for i in 0.. {
+            let name = format!("net{i}");
+            let k = key(&name);
+            if let Some(other) = seen.get(&k) {
+                return (other.clone(), name);
+            }
+            seen.insert(k, name);
+        }
+        unreachable!()
+    }
+
+    fn with_networks(kind: &str, names: &[&str]) -> Result<ClusterConfig> {
+        let extra: String = names
+            .iter()
+            .map(|n| format!("\n  {n}: {{ type: {kind} }}"))
+            .collect();
+        parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            &format!("  wan:       {{ type: public,   domain: example.com }}{extra}"),
+        )])
+    }
+
+    #[test]
+    fn two_egress_networks_may_not_share_a_derived_subnet() {
+        let (a, b) = colliding_names(crate::netalloc::subnet_octet);
+        let err = with_networks("egress", &[&a, &b]).unwrap_err().to_string();
+        assert!(err.contains(&a) && err.contains(&b), "{err}");
+        assert!(err.contains("subnet"), "{err}");
+    }
+
+    #[test]
+    fn two_nat_networks_may_not_share_a_derived_subnet() {
+        let (a, b) = colliding_names(crate::netalloc::subnet_octet);
+        let err = with_networks("nat", &[&a, &b]).unwrap_err().to_string();
+        assert!(err.contains(&a) && err.contains(&b), "{err}");
+    }
+
+    #[test]
+    fn an_egress_and_a_nat_network_never_collide_on_subnet() {
+        let (a, b) = colliding_names(crate::netalloc::subnet_octet);
+        let extra = format!("\n  {a}: {{ type: egress }}\n  {b}: {{ type: nat }}");
+        parse(&[(
+            "  wan:       { type: public,   domain: example.com }",
+            &format!("  wan:       {{ type: public,   domain: example.com }}{extra}"),
+        )])
+        .expect("separate pools");
+    }
+
+    #[test]
+    fn two_egress_networks_may_not_share_a_routing_table() {
+        // Table collisions are far likelier than subnet ones to also be
+        // subnet-distinct, so search for names that only collide on the table.
+        let mut seen: std::collections::BTreeMap<u32, String> = Default::default();
+        let mut pair = None;
+        for i in 0.. {
+            let name = format!("t{i}");
+            let id = crate::netalloc::egress_table_id(&name);
+            if let Some(other) = seen.get(&id) {
+                if crate::netalloc::subnet_octet(other) != crate::netalloc::subnet_octet(&name) {
+                    pair = Some((other.clone(), name));
+                    break;
+                }
+            } else {
+                seen.insert(id, name);
+            }
+        }
+        let (a, b) = pair.unwrap();
+        let err = with_networks("wireguard", &[&a, &b])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&a) && err.contains(&b), "{err}");
+        assert!(err.contains("routing table"), "{err}");
+    }
+
+    #[test]
+    fn host_interface_names_are_validated() {
+        for bad in ["a/b", "has space", "abcdefghijklmnop", "../x"] {
+            let err = parse(&[
+                (
+                    "  wan:       { type: public,   domain: example.com }",
+                    "  wan:       { type: public,   domain: example.com }\n  vpn: { type: egress }",
+                ),
+                (
+                    "      tailscale: 10.10.0.1",
+                    &format!("      tailscale: 10.10.0.1\n      vpn: \"{bad}\""),
+                ),
+            ])
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("interface") || err.to_string().contains(bad),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 cl-config.workspace = true
 cl-raft.workspace = true
+cl-secret.workspace = true
 
 bincode.workspace = true
 blake3.workspace = true

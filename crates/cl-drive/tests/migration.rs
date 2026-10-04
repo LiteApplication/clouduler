@@ -18,6 +18,13 @@ use cl_raft::InstanceId;
 use openraft::BasicNode;
 use tempfile::TempDir;
 
+/// One cluster key for the whole file: the target's listener and the sender's
+/// engine and verify step must share it or the handshake refuses them.
+fn test_keys() -> cl_raft::KeyWatch {
+    static KEYS: std::sync::OnceLock<cl_raft::KeyWatch> = std::sync::OnceLock::new();
+    KEYS.get_or_init(cl_raft::throwaway_key).clone()
+}
+
 fn free_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr")
@@ -114,6 +121,7 @@ impl Harness {
             rpc_addr: addr,
             data_dir: dir.path().join("n1"),
             cluster_name: "test".into(),
+            keys: cl_raft::throwaway_key(),
         })
         .await
         .unwrap();
@@ -143,15 +151,8 @@ impl Harness {
         ));
         let listener = tokio::net::TcpListener::bind(target_addr).await.unwrap();
         tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let registry = target_registry.clone();
-                tokio::spawn(async move {
-                    let _ = cl_drive::transport::receive(stream, &registry).await;
-                });
-            }
+            let _ =
+                cl_drive::transport::serve_listener(listener, target_registry, test_keys()).await;
         });
 
         node.submit(Request::UpsertNode(NodeState {
@@ -263,9 +264,10 @@ async fn migration_runs_every_phase_in_order_and_moves_the_data() {
     begin_migration(&harness.node).await;
 
     let control = RecordingControl::default();
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let registry = harness.source_registry();
     let job = MigrationJob {
+        keys: test_keys(),
         instance: instance(),
         source_node: "source".into(),
         target_node: "target".into(),
@@ -313,9 +315,10 @@ async fn a_failure_before_switching_leaves_the_source_authoritative() {
 
     let control = RecordingControl::default();
     control.fail_stop.store(1, Ordering::SeqCst);
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let registry = harness.source_registry();
     let job = MigrationJob {
+        keys: test_keys(),
         instance: instance(),
         source_node: "source".into(),
         target_node: "target".into(),
@@ -377,8 +380,9 @@ async fn a_volumeless_instance_migrates_off_a_node_with_no_drives() {
         .unwrap();
 
     let control = RecordingControl::default();
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let job = MigrationJob {
+        keys: test_keys(),
         instance: instance(),
         source_node: "source".into(),
         target_node: "target".into(),
@@ -427,9 +431,10 @@ async fn a_source_container_that_will_not_go_away_does_not_fail_the_move() {
 
     let control = RecordingControl::default();
     control.fail_remove.store(1, Ordering::SeqCst);
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let registry = harness.source_registry();
     let job = MigrationJob {
+        keys: test_keys(),
         instance: instance(),
         source_node: "source".into(),
         target_node: "target".into(),
@@ -537,7 +542,7 @@ async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishi
     begin_migration_for(&harness.node, instance(), volume()).await;
     begin_migration_for(&harness.node, instance2(), volume2()).await;
 
-    let engine = DeltaEngine::default();
+    let engine = DeltaEngine::new(test_keys());
     let registry = harness.source_registry();
     let transfer_gate = Arc::new(tokio::sync::Semaphore::new(1));
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -557,6 +562,7 @@ async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishi
     };
 
     let job1 = MigrationJob {
+        keys: test_keys(),
         instance: instance(),
         source_node: "source".into(),
         target_node: "target".into(),
@@ -569,6 +575,7 @@ async fn a_second_migration_stops_and_transfers_while_the_first_is_still_finishi
         transfer_gate: transfer_gate.clone(),
     };
     let job2 = MigrationJob {
+        keys: test_keys(),
         instance: instance2(),
         source_node: "source".into(),
         target_node: "target".into(),

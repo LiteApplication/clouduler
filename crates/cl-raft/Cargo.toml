@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 cl-config.workspace = true
+cl-secret.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true

@@ -273,6 +273,7 @@ holds no key, the request fails with `409` and a message saying so.
 ```
 GET    /api/secrets/key                 read    fingerprint and whether we hold it
 POST   /api/secrets/key                 { "key": "<base64>" } upload after an outage
+POST   /api/secrets/key/wrap            admin; { "node", "public_key" } the key wrapped for that X25519 key
 ```
 
 Uploading writes the key to `secrets.key_file` on this node. It is refused if a

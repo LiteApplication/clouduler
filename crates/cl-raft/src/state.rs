@@ -519,6 +519,12 @@ pub enum BackupRunOutcome {
     Succeeded {
         snapshot_id: String,
         bytes: u64,
+        /// Set when the snapshot itself was taken but something after it
+        /// went wrong (retention `forget --prune` failed, the containers
+        /// could not be restarted...). The run is a success - the data is
+        /// safe - but an operator should see the message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
     },
     Failed {
         error: String,
@@ -547,6 +553,8 @@ impl<'de> Deserialize<'de> for BackupRunOutcome {
             Succeeded {
                 snapshot_id: String,
                 bytes: u64,
+                #[serde(default)]
+                warning: Option<String>,
             },
             Failed {
                 error: String,
@@ -559,9 +567,15 @@ impl<'de> Deserialize<'de> for BackupRunOutcome {
         }
         match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
             Current::Running { percent } => Ok(BackupRunOutcome::Running { percent }),
-            Current::Succeeded { snapshot_id, bytes } => {
-                Ok(BackupRunOutcome::Succeeded { snapshot_id, bytes })
-            }
+            Current::Succeeded {
+                snapshot_id,
+                bytes,
+                warning,
+            } => Ok(BackupRunOutcome::Succeeded {
+                snapshot_id,
+                bytes,
+                warning,
+            }),
             Current::Failed { error } => Ok(BackupRunOutcome::Failed { error }),
         }
     }
@@ -632,6 +646,11 @@ pub const MAX_RESTORE_REQUESTS: usize = 50;
 /// for a node behind this version to have installed - see `store.rs`'s use
 /// of this alongside `StateMachine::schema_version`.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// How long `RecordCrashMove` keeps a node on an instance's crash-move list
+/// before the next record prunes it. Also the window the scheduler avoids a
+/// node for, so a pruned entry is never one that still mattered.
+pub const CRASH_MOVE_RETENTION_SECS: u64 = 30 * 60;
 
 /// Everything the cluster agrees on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -721,6 +740,21 @@ pub struct ClusterState {
     /// `InstanceUpdate`.
     #[serde(default)]
     pub instance_updates: BTreeMap<InstanceId, InstanceUpdate>,
+    /// Nodes a crash-looping instance was recently moved away from, mapped to
+    /// the unix second of the move. Lives in raft rather than on the node that
+    /// noticed the loop because the instance changes owner with every move: a
+    /// node-local memory would start empty on each new owner and let a service
+    /// that crashes everywhere bounce between nodes forever. Written by
+    /// `Request::RecordCrashMove`, cleared when the stack's spec changes or the
+    /// instance goes away; individual entries age out via the scheduler's window.
+    #[serde(default)]
+    pub crash_moves: BTreeMap<InstanceId, BTreeMap<String, u64>>,
+    /// The digest an instance was pinned to before its current pin, kept by
+    /// `Request::SetImageDigest` so a rolling update that produces a broken
+    /// container can re-pin what worked. Absent for an instance that has only
+    /// ever had one pin.
+    #[serde(default)]
+    pub previous_image_digests: BTreeMap<InstanceId, String>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -912,6 +946,18 @@ pub enum Request {
         #[serde(default)]
         owner: Option<String>,
     },
+    /// `PutConfig`, applied only if the object's current revision is still
+    /// `expect_revision` (0 meaning "does not exist yet"). For a read-modify-
+    /// write of an object that more than one writer touches: the loser gets
+    /// an error and re-reads instead of silently overwriting the other.
+    PutConfigCas {
+        name: String,
+        /// Base64 content.
+        content: String,
+        #[serde(default)]
+        owner: Option<String>,
+        expect_revision: u64,
+    },
     RemoveConfig {
         name: String,
     },
@@ -999,6 +1045,15 @@ pub enum Request {
     ClearInstanceUpdate {
         instance: InstanceId,
     },
+    /// Remember that `instance` was moved off `from` because it kept crashing
+    /// there. `at` is unix seconds supplied by the caller so `apply` stays
+    /// pure; entries older than `CRASH_MOVE_RETENTION_SECS` before `at` are
+    /// dropped at the same time so the map cannot grow without bound.
+    RecordCrashMove {
+        instance: InstanceId,
+        from: String,
+        at: u64,
+    },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
     /// Ends emergency mode: clears `ClusterState::emergency_stack`, letting
@@ -1008,13 +1063,76 @@ pub enum Request {
     ClearEmergency,
     /// Stand-in for a variant this node's binary doesn't recognize - a
     /// command a newer node submitted that this (older) node hasn't been
-    /// upgraded to understand yet. `dispatch` treats it as a no-op; the
-    /// command's real effect lands once this node is upgraded and either
-    /// replays a snapshot the (by-then-migrated) leader sends, or is itself
-    /// upgraded before this entry is compacted. Never constructed directly -
-    /// only ever produced by `Deserialize` below.
-    Unknown,
+    /// upgraded to understand yet. `dispatch` treats it as a no-op (and does
+    /// not bump `version`, see `ClusterState::apply`); the command's real
+    /// effect lands once this node is upgraded and either replays a snapshot
+    /// the (by-then-migrated) leader sends, or is itself upgraded before this
+    /// entry is compacted. Never constructed directly - only ever produced
+    /// by `Deserialize` below, and only for a tag that is genuinely not a
+    /// known variant name.
+    ///
+    /// Holds the raw JSON exactly as received and is `untagged` on the wire,
+    /// so re-serializing it (an old node that is leader re-replicating the
+    /// entry to others, or writing it to its log) reproduces the original
+    /// payload verbatim instead of losing it. Old logs that wrote the unit
+    /// variant as the bare string `"Unknown"` still deserialize (as
+    /// `Unknown("Unknown")`) and serialize back to that same string.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
+
+/// Every externally-tagged variant name `Request` has except `Unknown`.
+/// `Deserialize` uses this to tell "tag this build has never heard of"
+/// (falls back to `Unknown`) from "known tag, malformed body" (hard error).
+/// Must be extended with each new variant, alongside `request_mirror` -
+/// `every_current_request_variant_round_trips_and_is_not_unknown` checks it.
+const KNOWN_REQUEST_VARIANTS: &[&str] = &[
+    "PutClusterConfig",
+    "UpsertNode",
+    "SetAvailability",
+    "SetReachable",
+    "RemoveNode",
+    "RetireNodeId",
+    "DeployStack",
+    "RemoveStack",
+    "SetStackObjects",
+    "Assign",
+    "Unassign",
+    "SetDesiredState",
+    "SetImageDigest",
+    "BeginMigration",
+    "AdvanceMigration",
+    "UpsertVolume",
+    "SetVolumeReplica",
+    "TouchVolume",
+    "StoreCertificate",
+    "RemoveCertificate",
+    "SetCertStatus",
+    "UpsertDnsRecord",
+    "RemoveDnsRecord",
+    "SetDnsStatus",
+    "PutConfig",
+    "PutConfigCas",
+    "RemoveConfig",
+    "PutSecret",
+    "RemoveSecret",
+    "PutWrappedKey",
+    "SetOverlayAllocations",
+    "PutBackupDestination",
+    "RemoveBackupDestination",
+    "PutBackupTarget",
+    "RemoveBackupTarget",
+    "SetBackupTargetLastRun",
+    "RecordBackupRun",
+    "PutRestoreRequest",
+    "SetRestoreStatus",
+    "ReportContainerStatus",
+    "SetInstanceUpdate",
+    "ClearInstanceUpdate",
+    "RecordCrashMove",
+    "NoOp",
+    "ClearEmergency",
+];
 
 // Mirrors `Request` field-for-field purely so `#[derive(Deserialize)]` can
 // generate the normal per-variant parsing logic under a different entry
@@ -1126,6 +1244,13 @@ mod request_mirror {
             #[serde(default)]
             owner: Option<String>,
         },
+        PutConfigCas {
+            name: String,
+            content: String,
+            #[serde(default)]
+            owner: Option<String>,
+            expect_revision: u64,
+        },
         RemoveConfig {
             name: String,
         },
@@ -1180,6 +1305,11 @@ mod request_mirror {
         ClearInstanceUpdate {
             instance: InstanceId,
         },
+        RecordCrashMove {
+            instance: InstanceId,
+            from: String,
+            at: u64,
+        },
         NoOp,
         ClearEmergency,
         // `Unknown` is deliberately absent: there is no wire shape a sender
@@ -1196,7 +1326,7 @@ mod request_mirror {
 // copy of `Request` under `#[serde(remote = "Request")]`, the standard serde
 // idiom for "derive normally, but let me override the public impl") and
 // falls back to `Request::Unknown` - rather than an error - when the tag
-// doesn't match any variant that mirror knows. `dispatch` treats `Unknown`
+// isn't in `KNOWN_REQUEST_VARIANTS` (a known tag with a bad body is an error). `dispatch` treats `Unknown`
 // as a no-op: the sending node is newer, this one just hasn't caught up yet.
 // This also covers raft replication itself, not just local log/snapshot
 // reads: openraft's `Entry<TypeConfig>` embeds `Request` directly, so this
@@ -1208,9 +1338,28 @@ impl<'de> Deserialize<'de> for Request {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        match request_mirror::RequestMirror::deserialize(&value) {
-            Ok(req) => Ok(req),
-            Err(_) => Ok(Request::Unknown),
+        // The externally-tagged variant name: the bare string for a unit
+        // variant, or the sole key of a one-entry object.
+        let tag = match &value {
+            serde_json::Value::String(s) => Some(s.as_str()),
+            serde_json::Value::Object(map) if map.len() == 1 => {
+                map.keys().next().map(|k| k.as_str())
+            }
+            _ => None,
+        };
+        match tag {
+            // Only a tag this build has genuinely never heard of is "from a
+            // newer node". Old logs wrote the unit variant as "Unknown".
+            Some(tag) if tag == "Unknown" || !KNOWN_REQUEST_VARIANTS.contains(&tag) => {
+                Ok(Request::Unknown(value))
+            }
+            // A known tag with a body that doesn't parse (or a payload that
+            // isn't even tag-shaped) is a bug or corruption, not version
+            // skew: failing loudly beats applying a silent no-op on this
+            // node while every other node applies the real command.
+            _ => {
+                request_mirror::RequestMirror::deserialize(&value).map_err(serde::de::Error::custom)
+            }
         }
     }
 }
@@ -1247,6 +1396,15 @@ impl ClusterState {
     /// Apply one command. Must stay deterministic, so no clocks, no randomness
     /// and no IO.
     pub fn apply(&mut self, req: &Request) -> Response {
+        // An `Unknown` command changes nothing here, so it must not look like
+        // a state change: `version` drives the SSE state stream, the
+        // "how far behind" readings and snapshot ids, and a no-op that moved
+        // it would make this node's version run ahead of what its state
+        // reflects. It still succeeds so the entry counts as applied.
+        if matches!(req, Request::Unknown(_)) {
+            let _ = self.dispatch(req);
+            return Response::ok(self.version);
+        }
         let result = self.dispatch(req);
         match result {
             Ok(()) => {
@@ -1262,7 +1420,7 @@ impl ClusterState {
         match req {
             Request::NoOp => Ok(()),
 
-            Request::Unknown => {
+            Request::Unknown(_) => {
                 tracing::warn!(
                     "received a Request variant this node's binary doesn't recognize (from an upgraded peer) - ignoring until this node is updated"
                 );
@@ -1313,6 +1471,25 @@ impl ClusterState {
                 }
                 self.configs.insert(name.clone(), entry);
                 Ok(())
+            }
+
+            Request::PutConfigCas {
+                name,
+                content,
+                owner,
+                expect_revision,
+            } => {
+                let current = self.configs.get(name).map(|c| c.revision).unwrap_or(0);
+                if current != *expect_revision {
+                    return Err(format!(
+                        "config {name} changed (revision {current}, expected {expect_revision})"
+                    ));
+                }
+                self.dispatch(&Request::PutConfig {
+                    name: name.clone(),
+                    content: content.clone(),
+                    owner: owner.clone(),
+                })
             }
 
             Request::RemoveConfig { name } => {
@@ -1421,7 +1598,27 @@ impl ClusterState {
                 }
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
+                    // A removed node must not stay a volume's primary. Hand it
+                    // to the remaining replica that is furthest along
+                    // (highest generation, ties broken by BTree order, so
+                    // every node picks the same one). Removal is never
+                    // refused over this - that would wedge removing a dead
+                    // node. With no replica left the primary is left as is,
+                    // which health reports as "primary not a member".
+                    if volume.primary == *node {
+                        let mut best: Option<(&String, u64)> = None;
+                        for (candidate, generation) in &volume.replicas {
+                            if best.is_none_or(|(_, g)| *generation > g) {
+                                best = Some((candidate, *generation));
+                            }
+                        }
+                        if let Some((candidate, _)) = best {
+                            volume.primary = candidate.clone();
+                        }
+                    }
                 }
+                self.container_status
+                    .retain(|_, status| &status.node != node);
                 Ok(())
             }
 
@@ -1433,6 +1630,12 @@ impl ClusterState {
             Request::DeployStack { name, spec } => {
                 let revision = self.stacks.get(name).map(|s| s.revision + 1).unwrap_or(1);
                 let previous = self.stacks.get(name);
+                // A changed spec (new image, new limits) may well have fixed
+                // whatever made an instance crash, so every node is worth
+                // trying again.
+                if previous.is_some_and(|p| p.spec != *spec) {
+                    self.crash_moves.retain(|id, _| &id.stack != name);
+                }
                 let configs = previous.map(|s| s.configs.clone()).unwrap_or_default();
                 let secrets = previous.map(|s| s.secrets.clone()).unwrap_or_default();
                 let used_configs = previous.map(|s| s.used_configs.clone()).unwrap_or_default();
@@ -1457,6 +1660,7 @@ impl ClusterState {
                 let removed = self.stacks.remove(name);
                 self.assignments.retain(|id, _| &id.stack != name);
                 self.instance_updates.retain(|id, _| &id.stack != name);
+                self.crash_moves.retain(|id, _| &id.stack != name);
                 if let Some(stack) = removed {
                     for config in &stack.configs {
                         if self.config_in_use(config).is_none() {
@@ -1503,18 +1707,33 @@ impl ClusterState {
                 // pinned image - only where it runs changed - so losing the
                 // pin here would let it silently drift back to whatever tag
                 // it deploys from now resolves to the next time it restarts.
-                let image_digest = self
-                    .assignments
-                    .get(instance)
-                    .and_then(|a| a.image_digest.clone());
+                //
+                // The same holds for `desired`: re-placing an instance an
+                // operator stopped must not silently start it elsewhere. A
+                // brand-new assignment starts Running.
+                //
+                // `migration` is kept only when the node is unchanged. A
+                // re-Assign to a different node supersedes any move in flight
+                // (its from/to and phase no longer describe where the
+                // instance is), and leaving it would let a migration driver
+                // keep advancing a stale move - `Switching` would even
+                // repoint the assignment back at the old target. When the
+                // node is the same the placement didn't change, so an active
+                // migration is none of this command's business.
+                let previous = self.assignments.get(instance);
+                let image_digest = previous.and_then(|a| a.image_digest.clone());
+                let desired = previous.map(|a| a.desired).unwrap_or(DesiredState::Running);
+                let migration = previous
+                    .filter(|a| a.node == *node)
+                    .and_then(|a| a.migration.clone());
                 self.assignments.insert(
                     instance.clone(),
                     Assignment {
                         instance: instance.clone(),
                         node: node.clone(),
-                        desired: DesiredState::Running,
+                        desired,
                         image_digest,
-                        migration: None,
+                        migration,
                     },
                 );
                 Ok(())
@@ -1522,7 +1741,9 @@ impl ClusterState {
 
             Request::Unassign { instance } => {
                 self.assignments.remove(instance);
+                self.crash_moves.remove(instance);
                 self.instance_updates.remove(instance);
+                self.previous_image_digests.remove(instance);
                 Ok(())
             }
 
@@ -1532,7 +1753,13 @@ impl ClusterState {
             }
 
             Request::SetImageDigest { instance, digest } => {
-                self.assignment_mut(instance)?.image_digest = Some(digest.clone());
+                let assignment = self.assignment_mut(instance)?;
+                let old = assignment.image_digest.replace(digest.clone());
+                // Re-pinning the same digest must not erase what the last
+                // real change replaced.
+                if let Some(old) = old.filter(|old| old != digest) {
+                    self.previous_image_digests.insert(instance.clone(), old);
+                }
                 Ok(())
             }
 
@@ -1654,6 +1881,7 @@ impl ClusterState {
 
             Request::PutBackupDestination(destination) => {
                 validate_object_name(&destination.id)?;
+                crate::backup_validate::validate_destination(destination)?;
                 if let BackupDestinationKind::NodeLocal { node, .. } = &destination.kind {
                     if !self.nodes.contains_key(node) {
                         return Err(format!("unknown node {node}"));
@@ -1674,6 +1902,11 @@ impl ClusterState {
 
             Request::PutBackupTarget(target) => {
                 validate_object_name(&target.id)?;
+                if target.frequency_secs == 0 {
+                    // Would be due again on every scheduler poll, starting a
+                    // new run the instant the previous one finished.
+                    return Err("frequency_secs must be at least 1".to_string());
+                }
                 if !self.drive_known(&target.drive) {
                     return Err(format!("unknown drive {}", target.drive));
                 }
@@ -1741,8 +1974,18 @@ impl ClusterState {
                     .filter(|r| r.drive == run.drive && r.destination_id == run.destination_id)
                     .collect();
                 if same_target.len() > MAX_BACKUP_RUNS_PER_TARGET {
-                    same_target.sort_by_key(|r| r.started_at);
-                    let drop_count = same_target.len() - MAX_BACKUP_RUNS_PER_TARGET;
+                    // Oldest first, but never the run just recorded (it may
+                    // carry an old timestamp) and drop finished runs before
+                    // any still Running.
+                    same_target.retain(|r| r.id != run.id);
+                    same_target.sort_by_key(|r| {
+                        (
+                            matches!(r.outcome, BackupRunOutcome::Running { .. }),
+                            r.started_at,
+                        )
+                    });
+                    let drop_count =
+                        (same_target.len() + 1 - MAX_BACKUP_RUNS_PER_TARGET).min(same_target.len());
                     let to_drop: Vec<String> = same_target
                         .iter()
                         .take(drop_count)
@@ -1780,12 +2023,24 @@ impl ClusterState {
                 let mut request = request.clone();
                 request.status = RestoreStatus::Pending;
                 request.finished_at = None;
-                self.restore_requests.insert(request.id.clone(), request);
+                let request_id = request.id.clone();
+                self.restore_requests.insert(request_id.clone(), request);
 
                 if self.restore_requests.len() > MAX_RESTORE_REQUESTS {
-                    let mut all: Vec<&RestoreRequest> = self.restore_requests.values().collect();
-                    all.sort_by_key(|r| r.requested_at);
-                    let drop_count = all.len() - MAX_RESTORE_REQUESTS;
+                    // Never the request just inserted (it may carry an old
+                    // timestamp); finished ones go before Pending/Running.
+                    let mut all: Vec<&RestoreRequest> = self
+                        .restore_requests
+                        .values()
+                        .filter(|r| r.id != request_id)
+                        .collect();
+                    all.sort_by_key(|r| {
+                        (
+                            matches!(r.status, RestoreStatus::Pending | RestoreStatus::Running),
+                            r.requested_at,
+                        )
+                    });
+                    let drop_count = (all.len() + 1 - MAX_RESTORE_REQUESTS).min(all.len());
                     let to_drop: Vec<String> =
                         all.iter().take(drop_count).map(|r| r.id.clone()).collect();
                     for id in to_drop {
@@ -1869,6 +2124,16 @@ impl ClusterState {
 
             Request::ClearInstanceUpdate { instance } => {
                 self.instance_updates.remove(instance);
+                Ok(())
+            }
+
+            Request::RecordCrashMove { instance, from, at } => {
+                if !self.assignments.contains_key(instance) {
+                    return Err(format!("unknown instance {instance}"));
+                }
+                let moves = self.crash_moves.entry(instance.clone()).or_default();
+                moves.retain(|_, t| at.saturating_sub(*t) <= CRASH_MOVE_RETENTION_SECS);
+                moves.insert(from.clone(), *at);
                 Ok(())
             }
 
@@ -2122,6 +2387,7 @@ mod tests {
             BackupRunOutcome::Succeeded {
                 snapshot_id: "abc".into(),
                 bytes: 7,
+                warning: None,
             },
             BackupRunOutcome::Failed {
                 error: "boom".into(),
@@ -2138,12 +2404,36 @@ mod tests {
         let from_a_newer_node = serde_json::json!({
             "SomeFutureVariant": { "field": "value" }
         });
-        let req: Request = serde_json::from_value(from_a_newer_node).unwrap();
-        assert_eq!(req, Request::Unknown);
+        let req: Request = serde_json::from_value(from_a_newer_node.clone()).unwrap();
+        assert_eq!(req, Request::Unknown(from_a_newer_node.clone()));
+        // Re-serializing reproduces the payload verbatim, so an old leader
+        // re-replicates it losslessly.
+        assert_eq!(serde_json::to_value(&req).unwrap(), from_a_newer_node);
 
         let mut state = ClusterState::default();
+        let before = state.version;
         let response = state.apply(&req);
         assert!(response.is_ok(), "{:?}", response.error);
+        assert_eq!(state.version, before, "Unknown must not bump version");
+    }
+
+    #[test]
+    fn a_known_request_tag_with_a_bad_body_is_a_hard_error() {
+        let bad = serde_json::json!({ "PutClusterConfig": { "yaml": 5 } });
+        assert!(serde_json::from_value::<Request>(bad).is_err());
+        // Unit variant tag used as an object, and non-tag-shaped payloads.
+        assert!(serde_json::from_value::<Request>(serde_json::json!({"NoOp": {"x": 1}})).is_err());
+        assert!(serde_json::from_value::<Request>(serde_json::json!(7)).is_err());
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({"NoOp": null, "b": 1})).is_err()
+        );
+    }
+
+    #[test]
+    fn a_legacy_unit_unknown_string_still_deserializes_and_round_trips() {
+        let req: Request = serde_json::from_str("\"Unknown\"").unwrap();
+        assert_eq!(req, Request::Unknown(serde_json::json!("Unknown")));
+        assert_eq!(serde_json::to_string(&req).unwrap(), "\"Unknown\"");
     }
 
     #[test]
@@ -2248,6 +2538,12 @@ mod tests {
                 fqdn: "example.com".into(),
                 status: ReconcileStatus::Pending,
             },
+            Request::PutConfigCas {
+                name: "c".into(),
+                content: base64_encode(b"x"),
+                owner: None,
+                expect_revision: 1,
+            },
             Request::PutConfig {
                 name: "c1".into(),
                 content: "aGk=".into(),
@@ -2344,6 +2640,11 @@ mod tests {
             Request::ClearInstanceUpdate {
                 instance: InstanceId::new("gitlab", "web", 0),
             },
+            Request::RecordCrashMove {
+                instance: InstanceId::new("gitlab", "web", 0),
+                from: "n1".into(),
+                at: 5,
+            },
             Request::NoOp,
             Request::ClearEmergency,
         ];
@@ -2351,10 +2652,19 @@ mod tests {
         for req in requests {
             let json = serde_json::to_string(&req).unwrap();
             let back: Request = serde_json::from_str(&json).unwrap();
-            assert_ne!(
-                back,
-                Request::Unknown,
+            assert!(
+                !matches!(back, Request::Unknown(_)),
                 "variant round-tripped as Unknown: {json}"
+            );
+            let value = serde_json::to_value(&req).unwrap();
+            let tag = match &value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Object(m) => m.keys().next().unwrap().clone(),
+                other => panic!("untagged request shape {other}"),
+            };
+            assert!(
+                KNOWN_REQUEST_VARIANTS.contains(&tag.as_str()),
+                "{tag} missing from KNOWN_REQUEST_VARIANTS"
             );
             assert_eq!(back, req);
         }
@@ -2470,6 +2780,51 @@ mod tests {
         let accepted = assign(&mut state, "n1", &[]);
         assert!(accepted.is_ok());
         assert_eq!(state.version, before + 1);
+    }
+
+    #[test]
+    fn put_config_cas_rejects_a_stale_revision() {
+        let mut state = cluster();
+        let put = |state: &mut ClusterState, body: &[u8], expect: u64| {
+            state.apply(&Request::PutConfigCas {
+                name: "run".into(),
+                content: base64_encode(body),
+                owner: None,
+                expect_revision: expect,
+            })
+        };
+        assert!(put(&mut state, b"one", 0).is_ok());
+        assert_eq!(state.configs["run"].revision, 1);
+        // A writer that read revision 1 wins; one that also read 1 loses.
+        assert!(put(&mut state, b"two", 1).is_ok());
+        let stale = put(&mut state, b"three", 1);
+        assert!(!stale.is_ok());
+        assert_eq!(state.configs["run"].decode().expect("decode"), b"two");
+        // Creating over an existing object is a conflict too.
+        assert!(!put(&mut state, b"four", 0).is_ok());
+    }
+
+    #[test]
+    fn repinning_remembers_the_previous_digest_unless_it_is_unchanged() {
+        let mut state = cluster();
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+        let instance = InstanceId::new("gitlab", "web", 0);
+        let pin = |state: &mut ClusterState, digest: &str| {
+            state.apply(&Request::SetImageDigest {
+                instance: instance.clone(),
+                digest: digest.to_string(),
+            })
+        };
+        pin(&mut state, "sha256:a");
+        assert!(!state.previous_image_digests.contains_key(&instance));
+        pin(&mut state, "sha256:b");
+        assert_eq!(state.previous_image_digests[&instance], "sha256:a");
+        pin(&mut state, "sha256:b");
+        assert_eq!(state.previous_image_digests[&instance], "sha256:a");
+        state.apply(&Request::Unassign {
+            instance: instance.clone(),
+        });
+        assert!(state.previous_image_digests.is_empty());
     }
 
     #[test]
@@ -3285,6 +3640,38 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_frequency_target_is_rejected() {
+        let mut state = cluster_with_known_drive();
+        state.apply(&Request::PutBackupDestination(node_local_destination(
+            "d1", "n1",
+        )));
+        let mut target = backup_target("t1", "fast", "d1", true);
+        target.frequency_secs = 0;
+        let rejected = state.apply(&Request::PutBackupTarget(target));
+        assert!(rejected.error.unwrap().contains("frequency_secs"));
+        assert!(!state.restic_targets.contains_key("t1"));
+    }
+
+    #[test]
+    fn an_ssh_destination_with_an_option_injecting_host_is_rejected() {
+        let mut state = cluster();
+        let rejected = state.apply(&Request::PutBackupDestination(BackupDestination {
+            id: "d1".into(),
+            name: "d1".into(),
+            kind: BackupDestinationKind::Ssh {
+                host: "-oProxyCommand=touch".into(),
+                port: 22,
+                user: "u".into(),
+                path: "/p".into(),
+            },
+            password_secret: "_clouduler_restic_password_d1".into(),
+            credentials_secret: None,
+        }));
+        assert!(rejected.error.unwrap().contains("ssh host"));
+        assert!(state.restic_destinations.is_empty());
+    }
+
+    #[test]
     fn two_enabled_targets_cannot_share_a_drive_and_destination() {
         let mut state = cluster_with_known_drive();
         state.apply(&Request::PutBackupDestination(node_local_destination(
@@ -3396,6 +3783,7 @@ mod tests {
         finished.outcome = BackupRunOutcome::Succeeded {
             snapshot_id: "abc".into(),
             bytes: 0,
+            warning: None,
         };
         assert!(state.apply(&Request::RecordBackupRun(finished)).is_ok());
         let third = BackupRun {
@@ -3425,6 +3813,7 @@ mod tests {
                 outcome: BackupRunOutcome::Succeeded {
                     snapshot_id: "abc".into(),
                     bytes: 0,
+                    warning: None,
                 },
                 triggered_by: BackupTrigger::Schedule,
             }));
@@ -3555,6 +3944,62 @@ mod tests {
     }
 
     #[test]
+    fn crash_moves_accumulate_prune_and_clear() {
+        let mut state = cluster();
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+        let instance = InstanceId::new("gitlab", "web", 0);
+        let record = |state: &mut ClusterState, from: &str, at: u64| {
+            state.apply(&Request::RecordCrashMove {
+                instance: instance.clone(),
+                from: from.into(),
+                at,
+            })
+        };
+
+        assert!(record(&mut state, "n1", 100).is_ok());
+        assert!(record(&mut state, "n2", 200).is_ok());
+        assert_eq!(state.crash_moves[&instance].len(), 2);
+
+        // A record far enough later drops the stale entries.
+        assert!(record(&mut state, "n3", 200 + CRASH_MOVE_RETENTION_SECS + 1).is_ok());
+        assert_eq!(
+            state.crash_moves[&instance].keys().collect::<Vec<_>>(),
+            vec!["n3"]
+        );
+
+        // An instance with no assignment cannot leave an entry behind.
+        let rejected = state.apply(&Request::RecordCrashMove {
+            instance: InstanceId::new("gitlab", "ghost", 0),
+            from: "n1".into(),
+            at: 1,
+        });
+        assert!(rejected.error.is_some());
+
+        // A changed spec forgives every node; an identical redeploy does not.
+        state.apply(&Request::DeployStack {
+            name: "gitlab".into(),
+            spec: "a".into(),
+        });
+        assert!(record(&mut state, "n1", 5).is_ok());
+        state.apply(&Request::DeployStack {
+            name: "gitlab".into(),
+            spec: "a".into(),
+        });
+        assert!(state.crash_moves.contains_key(&instance));
+        state.apply(&Request::DeployStack {
+            name: "gitlab".into(),
+            spec: "b".into(),
+        });
+        assert!(state.crash_moves.is_empty());
+
+        assert!(record(&mut state, "n1", 5).is_ok());
+        state.apply(&Request::Unassign {
+            instance: instance.clone(),
+        });
+        assert!(state.crash_moves.is_empty());
+    }
+
+    #[test]
     fn update_entries_go_away_with_their_instance() {
         let mut state = cluster();
         assert!(!set_update(&mut state, UpdatePhase::Pulling, 1).is_ok());
@@ -3566,5 +4011,135 @@ mod tests {
             instance: InstanceId::new("gitlab", "web", 0),
         });
         assert!(state.instance_updates.is_empty());
+    }
+
+    fn running_run(id: &str, started_at: i64) -> BackupRun {
+        BackupRun {
+            id: id.into(),
+            target_id: format!("t-{id}"),
+            drive: "fast".into(),
+            destination_id: "d1".into(),
+            started_at,
+            finished_at: None,
+            outcome: BackupRunOutcome::Running { percent: None },
+            triggered_by: BackupTrigger::Schedule,
+        }
+    }
+
+    #[test]
+    fn run_pruning_never_drops_the_new_entry_or_a_running_one() {
+        let mut state = cluster_with_known_drive();
+        // An old Running run, then a full set of finished runs newer than it.
+        assert!(state
+            .apply(&Request::RecordBackupRun(running_run("old-running", 0)))
+            .is_ok());
+        for i in 0..MAX_BACKUP_RUNS_PER_TARGET {
+            let mut r = running_run(&format!("done{i}"), 100 + i as i64);
+            r.outcome = BackupRunOutcome::Succeeded {
+                snapshot_id: "s".into(),
+                bytes: 0,
+                warning: None,
+            };
+            assert!(state.apply(&Request::RecordBackupRun(r)).is_ok());
+        }
+        // A new entry with the oldest timestamp of all.
+        let mut ancient = running_run("ancient", -5);
+        ancient.outcome = BackupRunOutcome::Succeeded {
+            snapshot_id: "s".into(),
+            bytes: 0,
+            warning: None,
+        };
+        assert!(state.apply(&Request::RecordBackupRun(ancient)).is_ok());
+        assert!(state.restic_runs.contains_key("ancient"));
+        assert!(state.restic_runs.contains_key("old-running"));
+        assert_eq!(state.restic_runs.len(), MAX_BACKUP_RUNS_PER_TARGET);
+        assert!(!state.restic_runs.contains_key("done0"));
+    }
+
+    #[test]
+    fn restore_pruning_never_drops_the_new_entry() {
+        let mut state = cluster_with_known_drive();
+        for i in 0..MAX_RESTORE_REQUESTS {
+            let mut r = restore_request(&format!("r{i}"), "fast");
+            r.requested_at = 100 + i as i64;
+            assert!(state.apply(&Request::PutRestoreRequest(r)).is_ok());
+        }
+        let mut ancient = restore_request("ancient", "fast");
+        ancient.requested_at = -1;
+        assert!(state.apply(&Request::PutRestoreRequest(ancient)).is_ok());
+        assert!(state.restore_requests.contains_key("ancient"));
+        assert_eq!(state.restore_requests.len(), MAX_RESTORE_REQUESTS);
+    }
+
+    #[test]
+    fn remove_node_reassigns_volume_primary_and_purges_container_status() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        assert!(state
+            .apply(&Request::UpsertVolume {
+                id: id.clone(),
+                primary: "n1".into(),
+            })
+            .is_ok());
+        assert!(state
+            .apply(&Request::SetVolumeReplica {
+                id: id.clone(),
+                node: "n2".into(),
+                generation: 1,
+            })
+            .is_ok());
+        state.apply(&Request::ReportContainerStatus {
+            node: "n1".into(),
+            running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
+        });
+        assert!(!state.container_status.is_empty());
+
+        assert!(state
+            .apply(&Request::RemoveNode { node: "n1".into() })
+            .is_ok());
+        assert_eq!(state.volumes[&id].primary, "n2");
+        assert!(!state.volumes[&id].replicas.contains_key("n1"));
+        assert!(state.container_status.is_empty());
+    }
+
+    #[test]
+    fn remove_node_with_no_other_replica_still_succeeds() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        assert!(state
+            .apply(&Request::RemoveNode { node: "n1".into() })
+            .is_ok());
+        assert!(state.volumes[&id].replicas.is_empty());
+    }
+
+    #[test]
+    fn reassigning_keeps_an_operator_stop_and_drops_a_stale_migration() {
+        let mut state = cluster();
+        let instance = InstanceId::new("gitlab", "web", 0);
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+        state.apply(&Request::SetDesiredState {
+            instance: instance.clone(),
+            desired: DesiredState::Stopped,
+        });
+        assert!(assign(&mut state, "n2", &[]).is_ok());
+        assert_eq!(state.assignments[&instance].node, "n2");
+        assert_eq!(state.assignments[&instance].desired, DesiredState::Stopped);
+
+        // A migration in flight survives a same-node re-Assign but not a move.
+        assert!(state
+            .apply(&Request::BeginMigration {
+                instance: instance.clone(),
+                to: "n1".into(),
+                drives: Default::default(),
+            })
+            .is_ok());
+        assert!(assign(&mut state, "n2", &[]).is_ok());
+        assert!(state.assignments[&instance].migration.is_some());
+        assert!(assign(&mut state, "n3", &[]).is_ok());
+        assert!(state.assignments[&instance].migration.is_none());
     }
 }

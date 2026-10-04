@@ -90,6 +90,11 @@ pub struct InitArgs {
     #[arg(long)]
     pub token_file: Option<PathBuf>,
 
+    /// A copy of the cluster's secret key to install, instead of fetching it
+    /// from the node being joined. Joining only.
+    #[arg(long)]
+    pub key_file: Option<PathBuf>,
+
     /// SHA-256 fingerprint of the certificate the joined node should present.
     /// A new cluster serves a self signed one, so without this the certificate
     /// is accepted unchecked and its fingerprint printed for you to compare.
@@ -184,13 +189,17 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
         }
     };
 
-    let config = match &args.join {
-        Some(address) => join_cluster(&mut prompt, &args, &node_name, address).await?,
+    let (config, peer) = match &args.join {
+        Some(address) => {
+            let (config, peer) = join_cluster(&mut prompt, &args, &node_name, address).await?;
+            (config, Some(peer))
+        }
         None => match choose_mode(&mut prompt)? {
-            Mode::Create => create_cluster(&mut prompt, &args, &node_name)?,
+            Mode::Create => (create_cluster(&mut prompt, &args, &node_name)?, None),
             Mode::Join => {
                 let address = prompt.ask("address of a node already in the cluster", None)?;
-                join_cluster(&mut prompt, &args, &node_name, &address).await?
+                let (config, peer) = join_cluster(&mut prompt, &args, &node_name, &address).await?;
+                (config, Some(peer))
             }
         },
     };
@@ -204,7 +213,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     check_nfs_availability(&mut prompt, &config, &node_name)?;
     check_ethtool_availability(&mut prompt)?;
     check_restic_availability(&mut prompt)?;
-    setup_secret_key(&mut prompt, &config, &node_name)?;
+    setup_secret_key(&mut prompt, &args, &config, &node_name, peer.as_ref()).await?;
     setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
     Ok(())
@@ -324,7 +333,7 @@ async fn join_cluster<R: BufRead, W: Write>(
     args: &InitArgs,
     node_name: &str,
     address: &str,
-) -> Result<ClusterConfig> {
+) -> Result<(ClusterConfig, join::Peer)> {
     prompt.heading("joining")?;
 
     let token = read_token(prompt, args)?;
@@ -394,8 +403,9 @@ async fn join_cluster<R: BufRead, W: Write>(
         node.drives = ask_drives(prompt, &known)?;
     }
 
-    // A node joining an existing cluster never invents its own key. Whether it
-    // gets the real one is a separate question, answered further down.
+    // A node joining an existing cluster never invents its own key. It gets
+    // the real one further down, from the cluster over this same connection or
+    // from a copy the operator provides.
     node.generate_secret_key = Some(false);
 
     let amended = plan::add_node(&existing, &node, args.force)?;
@@ -403,7 +413,7 @@ async fn join_cluster<R: BufRead, W: Write>(
         .await
         .context("the cluster refused the join")?;
     prompt.say("the cluster accepted this node")?;
-    Ok(amended)
+    Ok((amended, peer))
 }
 
 fn read_token<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>, args: &InitArgs) -> Result<String> {
@@ -636,16 +646,23 @@ fn check_restic_availability<R: BufRead, W: Write>(prompt: &mut Prompt<R, W>) ->
     Ok(())
 }
 
-/// Put the cluster key in place, which is the one thing a joining node cannot
-/// work out for itself.
+/// Put the cluster key in place before the daemon first starts.
 ///
-/// Without it this node replicates sealed secrets like any other but cannot
-/// start a container that uses one. That is a fine state for a worker you do not
-/// want holding the keys to everything, so it is offered rather than pushed.
-fn setup_secret_key<R: BufRead, W: Write>(
+/// Every node to node connection (raft, forwarded writes, the cli) proves it
+/// holds the cluster key, so a joining node without it is refused by every
+/// peer and could never be told the key through raft. The key therefore
+/// arrives here, over the admin-authenticated https api that already accepted
+/// this node's join: the cluster wraps it for this node's own keypair
+/// (`join::Peer::fetch_cluster_key`) and only that wrapped copy crosses the
+/// wire. A copy the operator already holds (`--key-file`, or the prompt) works
+/// too. The founding node of a new cluster has neither, the daemon generates
+/// the key there.
+async fn setup_secret_key<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
+    args: &InitArgs,
     config: &ClusterConfig,
     node_name: &str,
+    peer: Option<&join::Peer>,
 ) -> Result<()> {
     let path = &config.secrets.key_file;
     let node = config
@@ -675,18 +692,74 @@ fn setup_secret_key<R: BufRead, W: Write>(
 
     prompt.heading("secrets")?;
     prompt.say(
-        "this cluster's secrets are sealed with a key held on another node. Copy that file here to\n\
-         let this node run containers that use secrets, or skip and it simply will not run those.",
+        "this cluster's secrets are sealed with a key every node holds, and every node to node\n\
+         connection is authenticated with it, so this node needs it before its daemon starts.",
     )?;
-    let Some(source) =
-        prompt.ask_optional("path to a copy of the cluster key, blank to skip", None)?
-    else {
-        prompt.say("skipped, this node will not be able to open secrets")?;
-        return Ok(());
+
+    let source = match (&args.key_file, peer) {
+        (Some(file), _) => Some(path_string(file.clone())),
+        (None, Some(_)) => {
+            let options = [
+                "fetch it from the cluster, wrapped so only this node can open it",
+                "copy it from a file I already have",
+                "skip, I will put it in place myself",
+            ];
+            match prompt.choose("how should this node get the cluster key?", &options, 0)? {
+                0 => None,
+                1 => Some(prompt.ask("path to a copy of the cluster key", None)?),
+                _ => {
+                    prompt.say(&format!(
+                        "skipped. Put the cluster key at {} before starting the daemon, or every peer will refuse it",
+                        path.display()
+                    ))?;
+                    return Ok(());
+                }
+            }
+        }
+        (None, None) => {
+            let Some(source) =
+                prompt.ask_optional("path to a copy of the cluster key, blank to skip", None)?
+            else {
+                prompt.say(&format!(
+                    "skipped. Put the cluster key at {} before starting the daemon, or every peer will refuse it",
+                    path.display()
+                ))?;
+                return Ok(());
+            };
+            Some(source)
+        }
     };
 
-    let key =
-        ClusterKey::load(&source).with_context(|| format!("reading the key from {source}"))?;
+    let key = match (source, peer) {
+        (Some(source), _) => {
+            ClusterKey::load(&source).with_context(|| format!("reading the key from {source}"))?
+        }
+        (None, Some(peer)) => {
+            let (keypair, _) =
+                cl_secret::NodeKeypair::load_or_create(&config.secrets.node_key_file)
+                    .with_context(|| {
+                        format!(
+                            "preparing this node's keypair at {}",
+                            config.secrets.node_key_file.display()
+                        )
+                    })?;
+            match peer.fetch_cluster_key(node_name, &keypair).await {
+                Ok(key) => key,
+                Err(e) => {
+                    // The cluster has already accepted this node, so failing
+                    // outright would strand it half set up. Say what to do.
+                    prompt.say(&format!(
+                        "could not fetch the cluster key: {e:#}\n\
+                         Put a copy at {} (or re-run init with --key-file) before starting the daemon",
+                        path.display()
+                    ))?;
+                    return Ok(());
+                }
+            }
+        }
+        (None, None) => return Ok(()),
+    };
+
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -903,5 +976,19 @@ fn drive_mode(mode: DriveModeArg) -> DriveMode {
     match mode {
         DriveModeArg::Replicated => DriveMode::Replicated,
         DriveModeArg::Served => DriveMode::Served,
+    }
+}
+
+#[cfg(test)]
+impl InitArgs {
+    /// `init --yes`, every other argument left out.
+    pub(crate) fn parse_from_yes() -> Self {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: InitArgs,
+        }
+        Wrapper::parse_from(["init", "--yes"]).args
     }
 }

@@ -4,11 +4,14 @@
 //! submitted to whichever node is asked and forwarded from there to the leader,
 //! so the caller does not have to know who leads.
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result as AnyResult};
 use cl_config::ClusterConfig;
+use cl_secret::ClusterKey;
 use tracing::debug;
 
-use crate::network::Peer;
+use crate::network::{fixed_key, KeyWatch, Peer};
 use crate::rpc::{Query, QueryResult, RpcRequest, RpcResponse, StatusReport};
 use crate::state::{ClusterState, Request, Response};
 
@@ -34,7 +37,16 @@ pub fn client_for(cfg: &ClusterConfig, via: Option<&str>) -> AnyResult<Client> {
         .rpc_addr(node)
         .ok_or_else(|| anyhow!("node {name} has no address on the internal network"))?;
     debug!(node = name, %addr, "submitting through");
-    Ok(Client::connect(addr.to_string()))
+
+    // The rpc channel is gated on the cluster key, so the cli needs it just
+    // as it already does to seal and unseal secrets locally.
+    let key = ClusterKey::load(&cfg.secrets.key_file).map_err(|e| {
+        anyhow!(
+            "the node channel needs the cluster key, and {} cannot be read: {e}. Run this from a node that holds the key",
+            cfg.secrets.key_file.display()
+        )
+    })?;
+    Ok(Client::connect(addr.to_string(), fixed_key(Arc::new(key))))
 }
 
 pub struct Client {
@@ -43,10 +55,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn connect(addr: impl Into<String>) -> Self {
+    pub fn connect(addr: impl Into<String>, keys: KeyWatch) -> Self {
         let addr = addr.into();
         Self {
-            peer: Peer::connect(&addr),
+            peer: Peer::connect(&addr, keys),
             addr,
         }
     }

@@ -355,6 +355,30 @@ impl Docker {
             .collect())
     }
 
+    /// Names of the networks labelled as belonging to `stack` (`LABEL_STACK`).
+    /// The counterpart of `list_managed_networks` for the reconcilers that own
+    /// a label of their own (egress and nat use `_cluster`) and need to find
+    /// their own leftovers.
+    pub async fn list_networks_of_stack(&self, stack: &str) -> Result<Vec<String>> {
+        let mut filters = HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec![
+                format!("{LABEL_MANAGED}={MANAGED_VALUE}"),
+                format!("{LABEL_STACK}={stack}"),
+            ],
+        );
+        let options = bollard::query_parameters::ListNetworksOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        let networks = self
+            .inner
+            .list_networks(Some(options))
+            .await
+            .map_err(classify)?;
+        Ok(networks.into_iter().filter_map(|n| n.name).collect())
+    }
+
     /// Remove a network. A missing one is success, and one still in use is
     /// reported so a caller sweeping after a stack removal can wait rather than
     /// tear a running container's network out from under it.

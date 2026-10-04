@@ -152,7 +152,9 @@ async fn start_run(
     drop(config);
 
     let cluster_state = state.cluster.state().await;
-    if let Some(existing) = load_run(&cluster_state) {
+    let existing = cl_update::orchestrator::load_run_revision(&cluster_state);
+    let revision = existing.as_ref().map(|(_, r)| *r).unwrap_or(0);
+    if let Some((existing, _)) = existing {
         if existing.in_progress() {
             return Err(ApiError::Conflict(
                 "a self-update run is already in progress".into(),
@@ -162,7 +164,7 @@ async fn start_run(
 
     let id = format!("run-{}", now());
     let run = UpdateRunState::new(id, cluster_state.nodes.keys().cloned(), now());
-    submit_run(&state, &run).await?;
+    submit_run(&state, &run, revision).await?;
     Ok(Json(run))
 }
 
@@ -179,29 +181,29 @@ async fn cancel_run(
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
     let cluster_state = state.cluster.state().await;
-    let mut run = load_run(&cluster_state)
+    let (mut run, revision) = cl_update::orchestrator::load_run_revision(&cluster_state)
         .ok_or_else(|| ApiError::Conflict("no self-update run is on record".into()))?;
     if !run.in_progress() {
         return Err(ApiError::Conflict("this run has already finished".into()));
     }
     run.fail("cancelled by operator", now());
-    submit_run(&state, &run).await?;
+    submit_run(&state, &run, revision).await?;
     Ok(StatusCode::OK)
 }
 
-async fn submit_run(state: &AppState, run: &UpdateRunState) -> Result<(), ApiError> {
-    let content = cl_raft::base64_encode(&serde_json::to_vec(run).map_err(ApiError::internal)?);
+/// Stores `run` if the object is still at `revision`; the orchestrator and
+/// workers write it too, and a stale copy must not clobber theirs. A lost
+/// race is a 409 the caller can simply retry.
+async fn submit_run(state: &AppState, run: &UpdateRunState, revision: u64) -> Result<(), ApiError> {
+    let request = cl_update::orchestrator::put_run_request(run, revision)
+        .map_err(|e| ApiError::internal(std::io::Error::other(e)))?;
     let response = state
         .cluster
-        .submit(ClusterRequest::PutConfig {
-            name: RUN_CONFIG.to_string(),
-            content,
-            owner: None,
-        })
+        .submit(request)
         .await
         .map_err(ApiError::not_leader)?;
     if let Some(msg) = response.error {
-        return Err(ApiError::BadRequest(msg));
+        return Err(ApiError::Conflict(msg));
     }
     Ok(())
 }

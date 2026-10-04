@@ -22,6 +22,8 @@ use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVxlan};
 
+use tracing::warn;
+
 use crate::error::{NetError, Result};
 
 /// UDP port VXLAN traffic is sent on. The IANA-assigned port; Linux defaults
@@ -54,18 +56,10 @@ pub fn vxlan_name(network: &str) -> String {
     short_name("clvx-", network)
 }
 
-/// Build a `<= 15` char interface name from a prefix and a network name. Short
-/// names pass through unchanged; long ones get truncated and a hash suffix is
-/// appended so two networks that truncate to the same prefix don't collide.
+/// Build a `<= 15` byte interface name from a prefix and a network name. See
+/// `egress::short_name`, which every interface and chain name shares.
 fn short_name(prefix: &str, name: &str) -> String {
-    let full = format!("{prefix}{name}");
-    if full.len() <= IFNAMSIZ_USABLE {
-        return full;
-    }
-    let suffix = format!("{:04x}", (fnv1a(name.as_bytes()) & 0xffff) as u16);
-    let budget = IFNAMSIZ_USABLE - prefix.len() - suffix.len();
-    let truncated: String = name.chars().take(budget).collect();
-    format!("{prefix}{truncated}{suffix}")
+    crate::egress::short_name(prefix, name, IFNAMSIZ_USABLE)
 }
 
 /// FNV-1a. Used for both the interface name suffix and the VNI derivation;
@@ -79,13 +73,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// VXLAN VNIs are 24 bit. Derive one deterministically from the network name
-/// so every node computes the same VNI without coordination, then check it
-/// against the VNIs already taken in this cluster; on a collision (two
-/// network names hashing to the same VNI, or landing on the reserved 0),
-/// perturb the input with a counter and rehash until a free one is found.
-/// With 2^24 VNIs and a handful of stack networks this never happens in
-/// practice, but the reconcile loop must still behave when it does.
 /// The MAC every node gives this network's bridge.
 ///
 /// The bridge is an *anycast* gateway: every node holds the same address
@@ -116,6 +103,15 @@ pub fn gateway_mac(name: &str) -> [u8; 6] {
     [0x02, hash[1], hash[2], hash[3], hash[4], hash[5]]
 }
 
+/// VXLAN VNIs are 24 bit. Derive one deterministically from the network name
+/// so every node computes the same VNI without coordination; on a collision
+/// with `taken` (or the reserved 0), perturb the input with a counter and
+/// rehash until a free one is found.
+///
+/// Only as good as `taken`: every node has to pass the same set or they
+/// disagree about the VNI. Nothing replicates such a set today, so the daemon
+/// passes none and instead refuses a network whose plain VNI collides with
+/// another's (`vni_collides`) rather than renumbering a live tunnel.
 pub fn allocate_vni(name: &str, taken: &BTreeSet<u32>) -> u32 {
     const VNI_SPACE: u64 = 1 << 24;
     let mut attempt = 0u32;
@@ -132,6 +128,32 @@ pub fn allocate_vni(name: &str, taken: &BTreeSet<u32>) -> u32 {
         }
         attempt += 1;
     }
+}
+
+/// True when `network` and some *other* name in `others` derive the same VNI
+/// and `network` is not the one that should keep it. Two stacks sharing a VNI
+/// would be one flooded L2 segment, so the loser must not be brought up. The
+/// winner is the lexicographically smallest name: every node orders the same
+/// way, so they all pick the same loser, and a name that was already running
+/// is only displaced by a newcomer that sorts before it.
+pub fn vni_collides<'a>(
+    network: &str,
+    others: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    vni_collides_with(network, others, |n| allocate_vni(n, &BTreeSet::new()))
+}
+
+fn vni_collides_with<'a>(
+    network: &str,
+    others: impl IntoIterator<Item = &'a str>,
+    vni_of: impl Fn(&str) -> u32,
+) -> Option<String> {
+    let mine = vni_of(network);
+    others
+        .into_iter()
+        .filter(|other| *other < network && vni_of(other) == mine)
+        .min()
+        .map(str::to_string)
 }
 
 /// Overlay device MTU: the underlay link's MTU minus VXLAN encapsulation
@@ -172,10 +194,6 @@ pub fn diff_fdb(desired: &BTreeSet<Ipv4Addr>, actual: &BTreeSet<Ipv4Addr>) -> Fd
 /// The wildcard MAC used for every point to point FDB entry.
 const WILDCARD_MAC: [u8; 6] = [0; 6];
 
-/// Netlink side of the overlay: creating the bridge and VXLAN device,
-/// enslaving one to the other, and keeping the FDB in sync. Every method is
-/// idempotent, since the reconcile loop calls these on every pass regardless
-/// of whether anything actually changed.
 /// The interface the overlay rides on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Underlay {
@@ -184,6 +202,17 @@ pub struct Underlay {
     pub mtu: u16,
 }
 
+#[derive(Debug, Default)]
+struct VxlanParams {
+    vni: u32,
+    local: Option<Ipv4Addr>,
+    link: Option<u32>,
+}
+
+/// Netlink side of the overlay: creating the bridge and VXLAN device,
+/// enslaving one to the other, and keeping the FDB in sync. Every method is
+/// idempotent, since the reconcile loop calls these on every pass regardless
+/// of whether anything actually changed.
 pub struct Overlay {
     handle: Handle,
 }
@@ -301,6 +330,43 @@ impl Overlay {
         Ok(index)
     }
 
+    /// The VNI, local address and underlay link a VXLAN device was created
+    /// with, or `None` if `index` is not a vxlan device (or the kernel did
+    /// not report its settings).
+    async fn vxlan_params(&self, index: u32) -> Result<Option<VxlanParams>> {
+        use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo};
+        let mut links = self.handle.link().get().match_index(index).execute();
+        let Some(link) = links
+            .try_next()
+            .await
+            .map_err(|e| NetError::from_netlink("link", e))?
+        else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for attr in &link.attributes {
+            let LinkAttribute::LinkInfo(infos) = attr else {
+                continue;
+            };
+            for info in infos {
+                let LinkInfo::Data(InfoData::Vxlan(settings)) = info else {
+                    continue;
+                };
+                let mut params = VxlanParams::default();
+                for setting in settings {
+                    match setting {
+                        InfoVxlan::Id(id) => params.vni = *id,
+                        InfoVxlan::Local(ip) => params.local = Some(*ip),
+                        InfoVxlan::Link(l) => params.link = Some(*l),
+                        _ => {}
+                    }
+                }
+                found = Some(params);
+            }
+        }
+        Ok(found)
+    }
+
     /// Ensure the VXLAN device exists over `underlay_index`, enslaved to
     /// `bridge_index`, with the given VNI, local address and MTU. Returns its
     /// link index.
@@ -314,7 +380,34 @@ impl Overlay {
         bridge_index: u32,
         mtu: u16,
     ) -> Result<u32> {
-        let index = match self.find_link(name).await? {
+        let mut existing = self.find_link(name).await?;
+        if let Some(index) = existing {
+            // `learning` and the rest are fixed at creation, but the VNI and
+            // the local address are what put this segment on the right wire:
+            // a device left over from another config (a renumbered node, a
+            // different VNI) silently joins the wrong segment, and the kernel
+            // cannot change either in place. Replace it.
+            if let Some(found) = self.vxlan_params(index).await? {
+                if found.vni != vni
+                    || found.local != Some(underlay_ip)
+                    || found.link.is_some_and(|l| l != underlay_index)
+                {
+                    warn!(
+                        device = name, found_vni = found.vni, wanted_vni = vni,
+                        found_local = ?found.local, wanted_local = %underlay_ip,
+                        "vxlan device does not match the config, recreating it",
+                    );
+                    self.handle
+                        .link()
+                        .del(index)
+                        .execute()
+                        .await
+                        .map_err(|e| NetError::from_netlink(format!("{name} (replace)"), e))?;
+                    existing = None;
+                }
+            }
+        }
+        let index = match existing {
             Some(index) => index,
             None => {
                 // Created down and brought up afterwards, the same order the
@@ -706,6 +799,24 @@ mod tests {
         // and check the allocator picks a different one instead of failing.
         let second = allocate_vni("gitlab", &taken);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_vni_collision_is_detected_and_only_the_later_name_loses() {
+        let same = |_: &str| 7u32;
+        // The smaller name keeps the VNI, the larger one is refused, on every
+        // node alike.
+        assert_eq!(
+            vni_collides_with("web_default", ["db_default"], same),
+            Some("db_default".to_string())
+        );
+        assert_eq!(vni_collides_with("db_default", ["web_default"], same), None);
+        // A network never collides with itself, and a different VNI is fine.
+        assert_eq!(vni_collides_with("a", ["a"], same), None);
+        assert_eq!(
+            vni_collides_with("b", ["a"], |n| if n == "a" { 1 } else { 2 }),
+            None
+        );
     }
 
     #[test]

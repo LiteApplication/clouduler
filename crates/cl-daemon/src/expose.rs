@@ -114,6 +114,16 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
     }
 }
 
+/// Every port this node's forwarders listen on, with its protocol. The host
+/// firewall uses it to let containers reach exactly these and no other host
+/// listener (`cl_net::egress::container_input_plan`).
+pub(crate) fn published_ports(state: &ClusterState, cfg: &ClusterConfig) -> Vec<(Protocol, u16)> {
+    desired(state, cfg)
+        .keys()
+        .map(|(port, protocol)| (*protocol, *port))
+        .collect()
+}
+
 /// One published port: where it forwards, and how it announces the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Publish {

@@ -48,12 +48,13 @@ pub fn start(
     docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
     registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
     sync_progress: cl_drive::MigrationSyncTracker,
+    keys: cl_raft::KeyWatch,
 ) -> JoinHandle<()> {
     let node_name = node_name.to_string();
     let cluster = cluster.clone();
 
     tokio::spawn(async move {
-        let engine = Arc::new(DeltaEngine::default());
+        let engine = Arc::new(DeltaEngine::new(keys.clone()));
         // A migration outlives many polls, so the loop has to know which ones
         // it already handed off or it would start a second run of each on
         // every tick.
@@ -126,6 +127,7 @@ pub fn start(
                 let engine = engine.clone();
                 let transfer_gate = transfer_gate.clone();
                 let sync_progress = sync_progress.clone();
+                let keys = keys.clone();
                 let node_name = node_name.clone();
                 let instance = job.instance.clone();
                 tokio::spawn(async move {
@@ -141,6 +143,7 @@ pub fn start(
                         volumes: job.volumes,
                         registry: live_registry.as_deref(),
                         engine: &*engine,
+                        keys,
                         control: &control,
                         sync_progress: Some(sync_progress),
                         transfer_gate,

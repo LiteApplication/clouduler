@@ -562,7 +562,10 @@ async fn proxy(
             );
         };
         match gate.evaluate(&req, scheme).await {
-            GateOutcome::Allow => {}
+            GateOutcome::Allow => {
+                // The backend has no business holding a replayable session.
+                crate::auth_gate::strip_gate_cookies(req.headers_mut());
+            }
             GateOutcome::Respond(resp) => return resp,
         }
     }

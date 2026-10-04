@@ -80,13 +80,66 @@ treated as a collision. Every node computes the same VNI for the same
 network name independently — no coordination or allocation round trip
 needed.
 
-Collisions (two network names hashing to the same VNI, or landing on 0) are
-resolved by perturbing the hash input with a counter (`<name>#1`,
-`<name>#2`, ...) and rehashing until a VNI outside the cluster's currently
-taken set is found. With 2^24 VNIs and a handful of stack networks per
-cluster this never happens in practice, but the reconcile loop has to behave
-correctly if it ever does, so the collision path is implemented and tested
-rather than assumed away.
+Collisions are detected, not resolved. `cl_net::vxlan::allocate_vni` can
+perturb the hash (`<name>#1`, `<name>#2`, ...) past a set of taken VNIs, but
+that only works if every node passes the *same* set, and nothing replicates
+one: the overlay loop derives each VNI from the name alone. Renumbering a
+running network is not an option either, since it would cut its tunnel. So the
+overlay loop instead checks every network's plain VNI against the other
+allocated networks (`vni_collides`) and refuses to bring up the one whose name
+sorts later, with an error naming both. Two stacks on one VNI would otherwise
+be a single flooded layer 2 segment. Every node sorts the same way, so they all
+pick the same loser; rename its stack or network to clear it. With 2^24 VNIs
+and a handful of stack networks this should never happen in practice.
+
+A VXLAN device that already exists with a different VNI, local address or
+underlay link than the config now implies (a renumbered node, a changed VNI) is
+deleted and recreated on the next pass, since the kernel cannot change those in
+place.
+
+## Name-derived egress and nat allocations
+
+An `egress`, `wireguard` or `nat` network's bridge subnet is a `/24` whose
+third octet is a hash of the network's name (`10.245.x.0/24` for egress and
+wireguard, `10.246.x.0/24` for nat), and an egress or wireguard network's
+policy routing table is `5000 + hash % 1000`. These are derived so every node
+agrees without coordinating, but two names can collide and would then silently
+share a subnet or a routing table. Cluster config validation refuses such a
+config with an error naming both networks; rename one. The allocation is not
+changed to avoid collisions, because that would renumber networks that already
+exist. Host interface names in a node's `network` map are validated as real
+interface names (letters, digits, `_`, `.`, `-`; at most 15 bytes).
+
+## Host firewall
+
+All rules are installed with `iptables -w`, re-checked every reconcile tick (so
+they survive a docker restart), and chain contents are replaced with one atomic
+`iptables-restore --noflush`, never flush-then-append.
+
+* `CLDR-IN`, jumped to from the top of `INPUT`: containers (any source in
+  `10.244.0.0/16`, `10.245.0.0/16`, `10.246.0.0/16`) may reach established
+  replies, DNS on the overlay gateways, the reverse proxy's http/https ports,
+  clouduler's own `x-clouduler.expose` ports and ICMP echo. Every other packet
+  from those pools to the host is dropped. Docker `-p` published ports are
+  unaffected: they are DNAT-ed in `PREROUTING` and forwarded, never input.
+* `CLDR-OVL-SNAT` (nat, `POSTROUTING`): the overlay pool is masqueraded only
+  for TCP to the proxy ports of the *other* nodes' internal addresses.
+* `CLDR-FWD-<bridge>` (kill-switch) and `CLDR-NAT-<bridge>` per egress bridge.
+  The kill-switch is jumped to from the top of `DOCKER-USER` (or of `FORWARD`
+  when docker has none), ahead of docker's own accept rules. A bridge whose
+  interface has no default route is locked down with a plain drop.
+* `CLDR-WGIN-<iface>` per wireguard tunnel: opened ports (ingress rules and the
+  interface's `open_ports`) are accepted on their original destination port,
+  everything else new from the tunnel is dropped, in both `INPUT` and
+  `DOCKER-USER`.
+
+When an egress, nat or wireguard network is removed (or this node stops
+implementing it), the next tick removes its docker network, chains and their
+jumps, ip rule and routing table, bridge and, for wireguard, the tunnel link.
+Only objects with clouduler's own names are touched, and a wireguard link is
+removed only if clouduler created it (it stamps `ifalias`
+`clouduler:wireguard`). A network whose docker network still has containers
+attached keeps its bridge and kill-switch until they are gone.
 
 ## MTU
 

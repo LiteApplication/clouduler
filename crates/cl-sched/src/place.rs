@@ -365,10 +365,37 @@ pub fn place(
         };
 
         if item.global {
-            // One copy per eligible node, numbered by position so the ids are
-            // stable as long as the node set is.
-            for (index, node) in eligible.iter().enumerate() {
-                let id = InstanceId::new(&item.id.stack, &item.id.service, index as u32);
+            // One copy per eligible node. Ids are not derived from the node's
+            // position in the eligible list: a node dropping out of (or
+            // rejoining) the list would shift every later node's id, tearing
+            // down and recreating healthy containers under new names. Instead
+            // a node keeps the id it already has, and only a node with none
+            // gets the lowest index nothing currently holds.
+            let existing: BTreeMap<u32, &str> = state
+                .assignments
+                .iter()
+                .filter(|(id, _)| id.stack == item.id.stack && id.service == item.id.service)
+                .map(|(id, a)| (id.index, a.node.as_str()))
+                .collect();
+            let mut taken: BTreeSet<u32> = existing.keys().copied().collect();
+            let mut kept: BTreeMap<&str, u32> = BTreeMap::new();
+            for (index, node) in &existing {
+                // Lowest index first, so a node somehow holding two copies
+                // keeps one and the other falls out of `wanted`.
+                if eligible.iter().any(|n| n.name == *node) {
+                    kept.entry(node).or_insert(*index);
+                }
+            }
+            for node in &eligible {
+                let index = match kept.get(node.name.as_str()) {
+                    Some(index) => *index,
+                    None => {
+                        let index = (0u32..).find(|i| !taken.contains(i)).unwrap_or(u32::MAX);
+                        taken.insert(index);
+                        index
+                    }
+                };
+                let id = InstanceId::new(&item.id.stack, &item.id.service, index);
                 wanted.insert(id.clone());
                 if state.assignments.get(&id).map(|a| a.node.as_str()) != Some(&node.name) {
                     decisions.push(Decision::Place {
@@ -1037,6 +1064,76 @@ mod tests {
 
         let decisions = place(&state, &[item], &no_served(), &no_everywhere()).decisions;
         assert_eq!(decisions.len(), 3);
+    }
+
+    fn global_ids(state: &ClusterState) -> BTreeMap<String, u32> {
+        state
+            .assignments
+            .values()
+            .filter(|a| a.instance.service == "agent")
+            .map(|a| (a.node.clone(), a.instance.index))
+            .collect()
+    }
+
+    /// Run placement to a fixed point against `state`, applying each decision.
+    fn settle(state: &mut ClusterState, item: &Desired) {
+        let outcome = place(
+            state,
+            std::slice::from_ref(item),
+            &no_served(),
+            &no_everywhere(),
+        );
+        for decision in outcome.decisions {
+            let request = decision.into_request(item.drives.clone());
+            let response = state.apply(&request);
+            assert!(response.error.is_none(), "{:?}", response.error);
+        }
+    }
+
+    #[test]
+    fn a_global_service_keeps_every_other_nodes_id_when_one_node_flaps() {
+        let mut state = cluster();
+        let mut item = desired("agent", 0);
+        item.global = true;
+        settle(&mut state, &item);
+        let before = global_ids(&state);
+        assert_eq!(before.len(), 3);
+        let middle = before.iter().find(|(_, i)| **i == 1).unwrap().0.clone();
+
+        // The node holding index 1 becomes ineligible.
+        state.apply(&Request::SetAvailability {
+            node: middle.clone(),
+            availability: cl_raft::state::Availability::Drain,
+        });
+        settle(&mut state, &item);
+        let during = global_ids(&state);
+        assert!(!during.contains_key(&middle));
+        for (node, index) in &before {
+            if *node != middle {
+                assert_eq!(during[node], *index, "{node} was renumbered");
+            }
+        }
+
+        // And it returns: the others still keep their ids.
+        state.apply(&Request::SetAvailability {
+            node: middle.clone(),
+            availability: cl_raft::state::Availability::Active,
+        });
+        settle(&mut state, &item);
+        assert_eq!(global_ids(&state), before);
+    }
+
+    #[test]
+    fn a_global_service_gives_a_new_node_the_lowest_unused_index() {
+        let mut state = cluster();
+        let mut item = desired("agent", 0);
+        item.global = true;
+        settle(&mut state, &item);
+        state.apply(&Request::UpsertNode(node("n4", Role::Worker, &[])));
+        settle(&mut state, &item);
+        let ids = global_ids(&state);
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids["n4"], 3);
     }
 
     #[test]

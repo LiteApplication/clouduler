@@ -116,7 +116,11 @@ impl Cloudflare {
     /// Client pointed at an arbitrary base url, for tests and the qemu harness.
     pub fn with_base_url(token: impl Into<String>, base_url: impl Into<String>) -> Self {
         Cloudflare {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into(),
             token: token.into(),
             zone_cache: Mutex::new(HashMap::new()),
@@ -271,10 +275,22 @@ impl Cloudflare {
                 req = req.json(body);
             }
 
-            let resp = req.send().await.map_err(|source| DnsError::Transport {
-                url: url.to_string(),
-                source,
-            })?;
+            let resp = match req.send().await {
+                Ok(resp) => resp,
+                Err(source)
+                    if (source.is_timeout() || source.is_connect()) && attempt < MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                    continue;
+                }
+                Err(source) => {
+                    return Err(DnsError::Transport {
+                        url: url.to_string(),
+                        source,
+                    })
+                }
+            };
 
             let status = resp.status();
             if (status.as_u16() == 429 || status.is_server_error()) && attempt < MAX_ATTEMPTS {

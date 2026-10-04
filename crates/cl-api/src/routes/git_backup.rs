@@ -325,6 +325,7 @@ async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
 
     let dir = state.data_dir.join("git-backup");
     let commit_oid = tokio::task::spawn_blocking(move || {
+        let _repo_guard = cl_backup::git::lock_repo();
         let backup = cl_backup::git::GitBackup::open_or_init(
             &dir,
             &backup_cfg.repo_url,
@@ -437,6 +438,7 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             )
         })?;
     let existing_secrets: BTreeSet<String> = cluster_state.secrets.keys().cloned().collect();
+    let existing_stacks = cluster_state.stacks.len();
     let last_good_oid =
         last_known_good_commit(&cluster_state).and_then(|s| git2::Oid::from_str(&s).ok());
 
@@ -447,6 +449,7 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             &backup_cfg,
             &private_key_pem,
             &existing_secrets,
+            existing_stacks,
             last_good_oid,
         )
     })
@@ -535,8 +538,11 @@ fn pull_and_decide(
     cfg: &cl_config::GitBackupConfig,
     private_key_pem: &str,
     existing_secrets: &BTreeSet<String>,
+    existing_stacks: usize,
     last_good_oid: Option<git2::Oid>,
 ) -> cl_backup::Result<PullDecision> {
+    // One on-disk repo, shared with the export loop and manual reconcile.
+    let _repo_guard = cl_backup::git::lock_repo();
     let backup = cl_backup::git::GitBackup::open_or_init(dir, &cfg.repo_url, &cfg.branch)?;
 
     let Some(candidate) = backup.fetch_remote_tip(private_key_pem)? else {
@@ -575,7 +581,7 @@ fn pull_and_decide(
     let candidate_tree = candidate_commit.tree()?.id();
     let parsed = parse_tree(backup.repo(), candidate_tree)?;
 
-    match validate_parsed(&parsed, existing_secrets) {
+    match validate_parsed(&parsed, existing_secrets, existing_stacks) {
         Ok(cluster_config) => Ok(PullDecision::Accepted {
             candidate,
             cluster_config: Box::new(cluster_config),
@@ -605,11 +611,24 @@ fn pull_and_decide(
 fn validate_parsed(
     parsed: &ParsedTree,
     existing_secrets: &BTreeSet<String>,
+    existing_stacks: usize,
 ) -> Result<ClusterConfig, String> {
     let Some(yaml) = &parsed.cluster_yaml else {
         return Err("no cluster.yaml in the pulled tree".to_string());
     };
     let cluster_config = ClusterConfig::parse(yaml).map_err(|e| format!("cluster.yaml: {e}"))?;
+
+    // `apply_pulled_tree` removes every cluster stack the tree does not
+    // name, so a tree with no stacks at all (an accidental `git rm -r
+    // stacks/`, a bad merge, a force-push of an unrelated repo that happens
+    // to hold a cluster.yaml) would tear down the whole cluster's workloads.
+    // Deliberately emptying a cluster goes through the api, not git.
+    if parsed.stacks.is_empty() && existing_stacks > 0 {
+        return Err(format!(
+            "the pulled tree has no stacks/ at all, which would remove all {existing_stacks} stack(s) \
+             this cluster runs - remove stacks through the api, not by emptying the repo"
+        ));
+    }
 
     for (name, spec) in &parsed.stacks {
         let stack = StackFile::parse(spec).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
@@ -783,6 +802,23 @@ mod tests {
             after.stacks["site"].revision, 1,
             "an unchanged spec must not bump the stack's revision"
         );
+    }
+
+    const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
+
+    /// A pulled tree with no stacks would make `apply_pulled_tree` remove
+    /// every stack the cluster runs.
+    #[test]
+    fn a_tree_with_no_stacks_is_rejected_when_the_cluster_has_some() {
+        let mut parsed = tree(&[]);
+        parsed.cluster_yaml = Some(CLUSTER_YAML.to_string());
+
+        let reason = validate_parsed(&parsed, &BTreeSet::new(), 3)
+            .expect_err("an empty-stacks tree must be rejected");
+        assert!(reason.contains("no stacks"), "unexpected reason: {reason}");
+
+        // A cluster with nothing deployed yet may legitimately pull an empty tree.
+        assert!(validate_parsed(&parsed, &BTreeSet::new(), 0).is_ok());
     }
 
     /// The other half: a stack whose spec really did change must still be

@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use cl_secret::stream_auth;
 use tokio::sync::RwLock;
 
 use futures::{SinkExt, StreamExt};
@@ -12,7 +13,7 @@ use tracing::{debug, warn};
 
 use crate::contact::Contact;
 use crate::ids::NodeId;
-use crate::network::Peer;
+use crate::network::{KeyWatch, Peer, AUTH_LABEL};
 use crate::quorum::QuorumWatch;
 use crate::rpc::{
     decode, encode, frame, Query, QueryResult, RpcRequest, RpcResponse, StatusReport,
@@ -31,6 +32,9 @@ pub struct Context {
     pub shared: Arc<RwLock<StateMachine>>,
     pub quorum: QuorumWatch,
     pub contact: Contact,
+    /// This node's cluster key, read per connection. Every connection must
+    /// prove it holds the same key before a single frame is read.
+    pub keys: KeyWatch,
 }
 
 /// Accept connections until the task is dropped. Each connection handles
@@ -51,7 +55,21 @@ pub async fn serve(addr: SocketAddr, ctx: Context) -> std::io::Result<()> {
     }
 }
 
-async fn handle(stream: TcpStream, ctx: Context) -> std::io::Result<()> {
+async fn handle(mut stream: TcpStream, ctx: Context) -> std::io::Result<()> {
+    // The listener is reachable by anything that can route to the internal
+    // address, and the requests below can rewrite cluster state or hijack
+    // leadership, so nothing is decoded until the peer has proven it holds the
+    // cluster key. A node with no key cannot verify anyone and refuses all.
+    let key = ctx.keys.borrow().clone();
+    let Some(key) = key else {
+        debug!("refusing rpc connection, this node holds no cluster key");
+        return Ok(());
+    };
+    if let Err(e) = stream_auth::accept(&mut stream, &key, AUTH_LABEL).await {
+        warn!(error = %e, "rpc peer failed authentication, dropping the connection");
+        return Ok(());
+    }
+
     let mut conn = frame(stream);
 
     while let Some(raw) = conn.next().await {
@@ -132,7 +150,7 @@ async fn write(ctx: &Context, request: StateRequest) -> Result<StateResponse, St
         .map(|node| node.addr.clone())
         .ok_or_else(|| format!("leader {leader} has no known address"))?;
 
-    match Peer::connect(&addr)
+    match Peer::connect(&addr, ctx.keys.clone())
         .call(&RpcRequest::Forward(request))
         .await
     {

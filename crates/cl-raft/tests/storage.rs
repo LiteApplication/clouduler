@@ -385,3 +385,81 @@ async fn restore_state_replaces_content_but_never_membership() {
     assert_eq!(guard.data.stacks, stacks);
     assert_eq!(guard.membership, membership_before);
 }
+
+/// Builds a snapshot of a store with one applied entry, to tamper with.
+async fn one_entry_snapshot() -> (TempDir, openraft::storage::Snapshot<TypeConfig>) {
+    use openraft::RaftSnapshotBuilder;
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(dir.path().join("raft.redb")).expect("open");
+    let mut sm = store.state_machine();
+    sm.apply([entry(1, Request::UpsertNode(node("n1")))])
+        .await
+        .expect("apply");
+    let snapshot = sm
+        .get_snapshot_builder()
+        .await
+        .build_snapshot()
+        .await
+        .expect("build");
+    (dir, snapshot)
+}
+
+async fn install_expecting_failure(
+    data: Vec<u8>,
+    meta: &openraft::SnapshotMeta<cl_raft::ids::NodeId, openraft::BasicNode>,
+) {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(dir.path().join("raft.redb")).expect("open");
+    let mut sm = store.state_machine();
+    let result = sm
+        .install_snapshot(meta, Box::new(std::io::Cursor::new(data)))
+        .await;
+    assert!(result.is_err(), "install must fail, not silently succeed");
+    // State must be untouched.
+    let (last_applied, _) = sm.applied_state().await.expect("applied");
+    assert!(last_applied.is_none());
+}
+
+#[tokio::test]
+async fn installing_a_too_new_snapshot_fails_instead_of_silently_succeeding() {
+    let (_d, snapshot) = one_entry_snapshot().await;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&snapshot.snapshot.into_inner()).unwrap();
+    value["schema_version"] = serde_json::json!(9999);
+    install_expecting_failure(serde_json::to_vec(&value).unwrap(), &snapshot.meta).await;
+}
+
+#[tokio::test]
+async fn installing_an_undecodable_snapshot_fails() {
+    let (_d, snapshot) = one_entry_snapshot().await;
+    install_expecting_failure(b"not json".to_vec(), &snapshot.meta).await;
+}
+
+#[tokio::test]
+async fn installing_a_snapshot_whose_data_disagrees_with_its_meta_fails() {
+    let (_d, snapshot) = one_entry_snapshot().await;
+    let mut meta = snapshot.meta.clone();
+    meta.last_log_id = None;
+    install_expecting_failure(snapshot.snapshot.into_inner(), &meta).await;
+}
+
+#[tokio::test]
+async fn a_fresh_state_machine_and_an_installed_one_carry_the_current_schema_version() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(dir.path().join("raft.redb")).expect("open");
+    assert_eq!(
+        store.shared_state().read().await.schema_version,
+        cl_raft::state::CURRENT_SCHEMA_VERSION
+    );
+
+    // An installed snapshot also persists the snapshot itself atomically.
+    let (_d, snapshot) = one_entry_snapshot().await;
+    let mut sm = store.state_machine();
+    sm.install_snapshot(&snapshot.meta, snapshot.snapshot)
+        .await
+        .expect("install");
+    let stored = sm.get_current_snapshot().await.expect("get").expect("some");
+    assert_eq!(stored.meta, snapshot.meta);
+    drop(sm);
+    drop(store);
+}

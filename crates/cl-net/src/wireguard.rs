@@ -14,16 +14,17 @@
 //! `egress`'s choice to shell out to `iptables` rather than hand-roll it over
 //! netlink, key and peer configuration here shells out to `ip` and `wg` too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::net::IpAddr;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use cl_config::Protocol;
 use ipnet::IpNet;
 
-use crate::egress::{short_name, CHAIN_USABLE, IFNAMSIZ_USABLE};
+use crate::egress::{short_name, CHAIN_USABLE, IFNAMSIZ_USABLE, WIREGUARD_LINK_ALIAS};
 use crate::error::{NetError, Result};
+use crate::iptables::{ChainSpec, IptablesPlan, Jump};
 
 /// Deterministic interface name for a wireguard network's tunnel.
 pub fn wireguard_iface_name(network: &str) -> String {
@@ -181,17 +182,12 @@ pub fn ensure_wireguard_interface(name: &str, cfg: &WireguardConfig) -> Result<(
         return Err(cmd_err("ip link add", &add.stderr));
     }
 
-    let tmp = write_tempfile(&wg_setconf_body(cfg))?;
-    let result = run_ok(
-        "wg",
-        &[
-            "setconf",
-            name,
-            tmp.to_str().expect("temp path is always utf8"),
-        ],
-    );
-    let _ = std::fs::remove_file(&tmp);
-    result?;
+    tag_as_managed(name)?;
+
+    // The key goes to `wg` over a pipe. A file would need a name in a
+    // world-writable directory (a symlink target for any local user) and would
+    // leave the private key on disk if the daemon died mid-call.
+    wg_setconf(name, &wg_setconf_body(cfg))?;
 
     run_ok(
         "ip",
@@ -243,22 +239,45 @@ fn wg_setconf_body(cfg: &WireguardConfig) -> String {
     out
 }
 
-/// A private-key-bearing config never touches disk anywhere but here, and
-/// only for the moment `wg setconf` needs to read it; the file is
-/// user-readable-only and the caller removes it immediately after use.
-fn write_tempfile(content: &str) -> Result<std::path::PathBuf> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let path = std::env::temp_dir().join(format!("cl-wg-{}.conf", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| io_err("creating wireguard temp file".to_string(), e))?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| io_err("writing wireguard temp file".to_string(), e))?;
-    Ok(path)
+/// Feed `body` to `wg setconf <name> /dev/stdin`.
+fn wg_setconf(name: &str, body: &str) -> Result<()> {
+    let mut child = Command::new("wg")
+        .args(["setconf", name, "/dev/stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| io_err(format!("wg setconf {name}"), e))?;
+    let write = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(body.as_bytes()));
+    let out = child
+        .wait_with_output()
+        .map_err(|e| io_err(format!("wg setconf {name}"), e))?;
+    if let Some(Err(e)) = write {
+        return Err(io_err("writing the wireguard config to wg".to_string(), e));
+    }
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(cmd_err("wg setconf", &out.stderr))
+    }
+}
+
+/// Stamp the link so a later sweep can tell a tunnel clouduler made from an
+/// operator's own `wg-*` interface. Idempotent, and also tags tunnels created
+/// before this existed the first time they are reconciled.
+fn tag_as_managed(name: &str) -> Result<()> {
+    let current =
+        std::fs::read_to_string(format!("/sys/class/net/{name}/ifalias")).unwrap_or_default();
+    if current.trim() == WIREGUARD_LINK_ALIAS {
+        return Ok(());
+    }
+    run_ok(
+        "ip",
+        &["link", "set", "dev", name, "alias", WIREGUARD_LINK_ALIAS],
+    )
 }
 
 fn run_ok(bin: &str, args: &[&str]) -> Result<()> {
@@ -294,39 +313,83 @@ pub struct IngressRule {
     pub target_port: u16,
 }
 
-/// The `iptables` invocations that let specific ports in through `iface` and
-/// on to `target_addr` -- the node's own address, so an already-published
-/// docker `-p` bind (which listens on `0.0.0.0`) answers there too, with no
-/// need for `route_localnet` the way a loopback target would.
+/// Chains `wireguard_ingress_iptables_plan` creates are named with this
+/// prefix, in both the filter and nat tables.
+pub(crate) const INGRESS_CHAIN_PREFIX: &str = "CLDR-WGIN-";
+
+/// The ingress chain of a tunnel interface (same name in filter and nat).
+pub fn wireguard_ingress_chain(iface: &str) -> String {
+    short_name(INGRESS_CHAIN_PREFIX, iface, CHAIN_USABLE)
+}
+
+/// The rules that let specific ports in through `iface`, and refuse
+/// everything else new that arrives on it.
+///
+/// A tunnel's far end is not trusted the way the internal network is, and
+/// docker publishes container ports on every address of the host, the tunnel's
+/// included, so without a default deny every `-p` port is reachable from the
+/// VPN whatever was configured. The filter chain therefore ends in `DROP` for
+/// anything from `iface` that is not a reply or an explicitly opened port, and
+/// is jumped to from both places such a packet is judged: `INPUT` (a local
+/// listener, this daemon's own expose forwarders included) and `DOCKER-USER`
+/// (docker's DNAT-ed published ports, which are forwarded, never input).
+///
+/// An opened port is matched on its *original* destination port
+/// (`--ctorigdstport`), which survives both our own `PREROUTING` DNAT below
+/// and docker's. Matching on `--dport` instead would see the post-DNAT port,
+/// so a rule that renumbers (2222 -> 22) would never be accepted.
+///
+/// `target_addr`, when known, is the node's own address, so an already
+/// published docker `-p` bind (which listens on `0.0.0.0`) answers there too,
+/// with no need for `route_localnet` the way a loopback target would. Without
+/// it only the default deny is installed.
 ///
 /// Scoped to `-i <iface>` throughout: never opens these ports on the bridge,
 /// the internal network, or anywhere else.
 pub fn wireguard_ingress_iptables_plan(
     iface: &str,
-    target_addr: IpAddr,
+    target_addr: Option<IpAddr>,
     rules: &[IngressRule],
-) -> IngressIptablesPlan {
-    let chain = short_name("CLDR-WGIN-", iface, CHAIN_USABLE);
-    let mut setup = vec![
-        argv(&["-N", &chain]),
-        argv(&["-t", "nat", "-N", &chain]),
-        argv(&["-F", &chain]),
-        argv(&["-t", "nat", "-F", &chain]),
-    ];
+) -> IptablesPlan {
+    let name = wireguard_ingress_chain(iface);
+    let mut filter = ChainSpec::new("filter", &name);
+    let mut nat = ChainSpec::new("nat", &name);
 
+    filter.push(&[
+        "-i",
+        iface,
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "ESTABLISHED,RELATED",
+        "-j",
+        "ACCEPT",
+    ]);
+
+    let mut opened = BTreeSet::new();
     for rule in rules {
         let proto = rule.protocol.to_string();
         let port = rule.port.to_string();
-        setup.push(argv(&[
-            "-A", &chain, "-i", iface, "-p", &proto, "--dport", &port, "-j", "ACCEPT",
-        ]));
-        if rule.target_port != rule.port {
-            let dest = format!("{target_addr}:{}", rule.target_port);
-            setup.push(argv(&[
-                "-t",
-                "nat",
-                "-A",
-                &chain,
+        if opened.insert((proto.clone(), rule.port)) {
+            filter.push(&[
+                "-i",
+                iface,
+                "-p",
+                &proto,
+                "-m",
+                "conntrack",
+                "--ctorigdstport",
+                &port,
+                "-j",
+                "ACCEPT",
+            ]);
+        }
+        if let (Some(target), true) = (target_addr, rule.target_port != rule.port) {
+            let dest = match target {
+                IpAddr::V4(v4) => format!("{v4}:{}", rule.target_port),
+                IpAddr::V6(v6) => format!("[{v6}]:{}", rule.target_port),
+            };
+            nat.push(&[
                 "-i",
                 iface,
                 "-p",
@@ -337,64 +400,18 @@ pub fn wireguard_ingress_iptables_plan(
                 "DNAT",
                 "--to-destination",
                 &dest,
-            ]));
+            ]);
         }
     }
+    filter.push(&["-i", iface, "-j", "DROP"]);
 
-    IngressIptablesPlan {
-        chain: chain.clone(),
-        setup,
+    IptablesPlan {
+        chains: vec![filter, nat],
         jumps: vec![
-            (
-                argv(&["-C", "INPUT", "-j", &chain]),
-                argv(&["-A", "INPUT", "-j", &chain]),
-            ),
-            (
-                argv(&["-t", "nat", "-C", "PREROUTING", "-j", &chain]),
-                argv(&["-t", "nat", "-A", "PREROUTING", "-j", &chain]),
-            ),
+            Jump::new("filter", &["INPUT"], &name, true),
+            Jump::new("filter", &["DOCKER-USER", "FORWARD"], &name, true),
+            Jump::new("nat", &["PREROUTING"], &name, false),
         ],
-    }
-}
-
-pub struct IngressIptablesPlan {
-    pub chain: String,
-    pub setup: Vec<Vec<String>>,
-    pub jumps: Vec<(Vec<String>, Vec<String>)>,
-}
-
-fn argv(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|s| s.to_string()).collect()
-}
-
-/// Apply an ingress ruleset the same way `egress::apply_egress_iptables`
-/// applies its kill-switch: `-N` on an existing chain is the normal
-/// steady-state, everything else is expected to succeed.
-pub fn apply_wireguard_ingress_iptables(plan: &IngressIptablesPlan) -> Result<()> {
-    for args in &plan.setup {
-        let result = run_iptables(args);
-        if result.is_err() && args.iter().any(|a| a == "-N") {
-            continue;
-        }
-        result?;
-    }
-    for (check, add) in &plan.jumps {
-        if run_iptables(check).is_err() {
-            run_iptables(add)?;
-        }
-    }
-    Ok(())
-}
-
-fn run_iptables(args: &[String]) -> Result<()> {
-    let output = Command::new("iptables")
-        .args(args)
-        .output()
-        .map_err(|e| io_err(format!("iptables {}", args.join(" ")), e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(cmd_err("iptables", &output.stderr))
     }
 }
 
@@ -469,36 +486,117 @@ PersistentKeepalive = 25
         assert_eq!(wireguard_iface_name("vpn"), "wg-vpn");
     }
 
+    fn plan(rules: &[IngressRule]) -> IptablesPlan {
+        wireguard_ingress_iptables_plan("wg-vpn", Some("10.10.0.5".parse().unwrap()), rules)
+    }
+
+    fn filter_rules(plan: &IptablesPlan) -> Vec<String> {
+        plan.chains
+            .iter()
+            .find(|c| c.table == "filter")
+            .unwrap()
+            .rules
+            .clone()
+    }
+
+    fn nat_rules(plan: &IptablesPlan) -> Vec<String> {
+        plan.chains
+            .iter()
+            .find(|c| c.table == "nat")
+            .unwrap()
+            .rules
+            .clone()
+    }
+
     #[test]
-    fn ingress_plan_scopes_rules_to_the_tunnel_interface() {
-        let rules = [IngressRule {
+    fn ingress_plan_scopes_every_rule_to_the_tunnel_interface() {
+        let plan = plan(&[IngressRule {
             port: 2222,
             protocol: Protocol::Tcp,
             target_port: 22,
-        }];
-        let plan = wireguard_ingress_iptables_plan("wg-vpn", "10.10.0.5".parse().unwrap(), &rules);
-        let accept = plan
-            .setup
+        }]);
+        for rule in filter_rules(&plan).iter().chain(nat_rules(&plan).iter()) {
+            assert!(rule.starts_with("-i wg-vpn "), "{rule}");
+        }
+        assert_eq!(
+            nat_rules(&plan),
+            vec!["-i wg-vpn -p tcp --dport 2222 -j DNAT --to-destination 10.10.0.5:22"]
+        );
+    }
+
+    #[test]
+    fn an_opened_port_is_matched_on_its_original_destination_port() {
+        // After the DNAT to 22 the packet's own dport is 22, which no rule
+        // opens; only the original 2222 does.
+        let rules = filter_rules(&plan(&[IngressRule {
+            port: 2222,
+            protocol: Protocol::Tcp,
+            target_port: 22,
+        }]));
+        assert!(rules
+            .contains(&"-i wg-vpn -p tcp -m conntrack --ctorigdstport 2222 -j ACCEPT".to_string()));
+        assert!(!rules.iter().any(|r| r.contains("--dport")));
+    }
+
+    #[test]
+    fn everything_else_new_from_the_tunnel_is_dropped_even_with_no_rules() {
+        let rules = filter_rules(&plan(&[]));
+        assert_eq!(
+            rules,
+            vec![
+                "-i wg-vpn -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+                "-i wg-vpn -j DROP"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_deny_covers_both_local_and_forwarded_traffic() {
+        let plan = plan(&[]);
+        let parents: Vec<&[String]> = plan
+            .jumps
             .iter()
-            .find(|a| a.contains(&"ACCEPT".to_string()))
-            .expect("an accept rule");
-        assert!(accept.windows(2).any(|w| w == ["-i", "wg-vpn"]));
-        let dnat = plan
-            .setup
+            .filter(|j| j.table == "filter")
+            .map(|j| j.parents.as_slice())
+            .collect();
+        assert!(parents.iter().any(|p| p == &["INPUT"]));
+        assert!(parents.iter().any(|p| p == &["DOCKER-USER", "FORWARD"]));
+        assert!(plan
+            .jumps
             .iter()
-            .find(|a| a.contains(&"DNAT".to_string()))
-            .expect("a dnat rule");
-        assert!(dnat.iter().any(|a| a == "10.10.0.5:22"));
+            .filter(|j| j.table == "filter")
+            .all(|j| j.first));
     }
 
     #[test]
     fn ingress_plan_skips_dnat_when_ports_match() {
-        let rules = [IngressRule {
+        let plan = plan(&[IngressRule {
             port: 22,
             protocol: Protocol::Tcp,
             target_port: 22,
-        }];
-        let plan = wireguard_ingress_iptables_plan("wg-vpn", "10.10.0.5".parse().unwrap(), &rules);
-        assert!(!plan.setup.iter().any(|a| a.contains(&"DNAT".to_string())));
+        }]);
+        assert!(nat_rules(&plan).is_empty());
+        assert_eq!(filter_rules(&plan).len(), 3);
+    }
+
+    #[test]
+    fn without_a_node_address_only_the_default_deny_and_accepts_are_installed() {
+        let plan = wireguard_ingress_iptables_plan(
+            "wg-vpn",
+            None,
+            &[IngressRule {
+                port: 2222,
+                protocol: Protocol::Tcp,
+                target_port: 22,
+            }],
+        );
+        assert!(nat_rules(&plan).is_empty());
+    }
+
+    #[test]
+    fn the_ingress_chain_name_fits_and_is_swept_by_prefix() {
+        let chain = wireguard_ingress_chain("wg-a-very-long-wireguard-network-name");
+        assert!(chain.len() <= CHAIN_USABLE);
+        assert!(chain.starts_with(INGRESS_CHAIN_PREFIX));
     }
 }

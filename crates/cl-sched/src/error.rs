@@ -25,6 +25,17 @@ pub enum SchedError {
         instance: String,
     },
 
+    /// A volume mount the spec builder refuses. Deterministic: retrying, or
+    /// moving to another node, cannot change the answer, so the reconciler
+    /// reports it instead of starting the container without the volume.
+    #[error("{instance}: refusing volume {drive}/{volume}: {reason}")]
+    BadVolume {
+        instance: String,
+        drive: String,
+        volume: String,
+        reason: String,
+    },
+
     #[error("{name} is unusable: {reason}")]
     BadObject { name: String, reason: String },
 

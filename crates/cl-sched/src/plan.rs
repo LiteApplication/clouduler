@@ -2,9 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use cl_config::{DeployMode, Protocol, Service, StackFile};
+use cl_config::{DeployMode, Protocol, Service, StackFile, MAX_REPLICAS};
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::state::PortProtocol;
+use tracing::warn;
 
 fn to_port_protocol(protocol: Protocol) -> PortProtocol {
     match protocol {
@@ -104,11 +105,18 @@ pub fn expand(
         let replicas = if global {
             1
         } else {
-            service
+            let asked = service
                 .deploy
                 .as_ref()
                 .and_then(|d| d.replicas)
-                .unwrap_or(1)
+                .unwrap_or(1);
+            // Validation rejects this on the way in, but a stack stored before
+            // that check existed would otherwise be expanded in full on every
+            // leader pass, and crash every leader that tries.
+            if asked > MAX_REPLICAS {
+                warn!(%stack, service = %service_name, asked, max = MAX_REPLICAS, "replica count is above the maximum, clamping");
+            }
+            asked.min(MAX_REPLICAS)
         };
 
         let proxy_hosts: BTreeSet<String> = if colocate_proxy_hosts {
@@ -214,6 +222,18 @@ services:
             desired.iter().map(|d| d.id.index).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+    }
+
+    #[test]
+    fn an_absurd_replica_count_in_a_stored_stack_is_clamped() {
+        let mut file = parse("services:\n  web:\n    image: nginx\n");
+        // Bypasses validation, like a stack stored before the cap existed.
+        file.services.get_mut("web").unwrap().deploy = Some(cl_config::Deploy {
+            replicas: Some(4_000_000_000),
+            ..Default::default()
+        });
+        let desired = expand("site", &file, &BTreeSet::new(), &BTreeSet::new(), false);
+        assert_eq!(desired.len(), MAX_REPLICAS as usize);
     }
 
     #[test]

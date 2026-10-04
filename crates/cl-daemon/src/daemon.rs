@@ -17,7 +17,7 @@ use cl_sched::Scheduler;
 use cl_secret::ClusterKey;
 use openraft::BasicNode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// How long to wait for dockerd at startup before carrying on without it.
 /// Generous because this is a boot race: on a host bringing several machines
@@ -82,6 +82,15 @@ pub async fn run(
     // wrapped in an `Arc` the moment it is loaded: every subsystem that needs
     // it shares the one allocation instead of each holding its own copy.
     let key = load_cluster_key(&cfg, node).map(Arc::new);
+    if key.is_none() {
+        // Raft rpc is authenticated with the cluster key, so without one this
+        // node refuses every peer and cannot reach any of them. It is not
+        // fatal because the key can still be installed while we run.
+        warn!(
+            path = %cfg.secrets.key_file.display(),
+            "no cluster key: this node cannot authenticate to its peers until one is installed (re-run `clouduler init --force --join ...` or copy the file here)"
+        );
+    }
     let node_keypair = load_node_keypair(&cfg);
     let node_pubkey = node_keypair
         .as_ref()
@@ -103,6 +112,7 @@ pub async fn run(
         rpc_addr,
         data_dir: data_dir.join("raft"),
         cluster_name: cfg.cluster.name.clone(),
+        keys: key_rx.clone(),
     })
     .await?;
 
@@ -189,7 +199,13 @@ pub async fn run(
     })
     .await;
 
-    let drives = crate::drives::start(&cfg, &node_name, &cluster, config_rx.clone());
+    let drives = crate::drives::start(
+        &cfg,
+        &node_name,
+        &cluster,
+        config_rx.clone(),
+        key_rx.clone(),
+    );
 
     // Containers resolve each other through this, so it comes up alongside the
     // overlay rather than waiting for anything to be scheduled.
@@ -250,6 +266,7 @@ pub async fn run(
         docker.clone(),
         drives.registry(),
         migration_sync.clone(),
+        key_rx.clone(),
     );
 
     let config_writer = tokio::spawn(watch_cluster_config(
@@ -780,7 +797,7 @@ async fn watch_git_backup(
         let state = cluster.state().await;
 
         let (result, updated_cache) = run_git_export_blocking(
-            state,
+            state.clone(),
             key,
             backup_cfg.clone(),
             dir.clone(),
@@ -795,7 +812,13 @@ async fn watch_git_backup(
                 cl_backup::status::LastExport {
                     at: unix_now(),
                     summary: message,
-                    commit: commit.clone(),
+                    // A no-op export (nothing differed from the remote tip)
+                    // produced no new commit, but that must not erase the
+                    // last-known-good one: `last_known_good_commit` is the
+                    // baseline a later pull diffs against, and without it
+                    // that pull falsely sees the whole `secrets/` subtree as
+                    // changed and force-pushes over the remote.
+                    commit: cl_backup::status::commit_to_record(commit.clone(), &state),
                     error: None,
                 }
             }
@@ -844,6 +867,8 @@ fn run_git_export(
     let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)?;
     let private_key_pem = cl_backup::deploy_key::load_private(state, key)
         .context("this node's cluster key cannot open the git deploy key")?;
+    // Pulls and reconciles open the same on-disk repo from other tasks.
+    let _repo_guard = cl_backup::git::lock_repo();
 
     let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
     let repo =
@@ -1110,6 +1135,19 @@ async fn bail_if_removed(
     data_dir: &Path,
 ) -> Result<()> {
     let own_id = this_node.id;
+
+    // Peers only answer a caller that proves it holds the cluster key, so a
+    // node with no readable key cannot ask. That is not evidence of removal
+    // either way, and such a node could not have been serving raft traffic
+    // before it went down, so skipping the check loses nothing.
+    let key = match ClusterKey::load(&cfg.secrets.key_file) {
+        Ok(key) => Arc::new(key),
+        Err(e) => {
+            debug!(error = %e, "no usable cluster key, cannot ask peers whether this node was removed");
+            return Ok(());
+        }
+    };
+
     for (name, node) in &cfg.nodes {
         if name == node_name {
             continue;
@@ -1118,7 +1156,7 @@ async fn bail_if_removed(
             continue;
         };
 
-        let client = cl_raft::Client::connect(addr.to_string());
+        let client = cl_raft::Client::connect(addr.to_string(), cl_raft::fixed_key(key.clone()));
         let state = match tokio::time::timeout(Duration::from_secs(5), client.state()).await {
             Ok(Ok(state)) => state,
             _ => continue,

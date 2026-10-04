@@ -361,7 +361,7 @@ export interface DriveBackupTarget {
  *  place while the run is in flight; null until the first status line lands. */
 export type BackupRunOutcome =
   | { Running: { percent: number | null } }
-  | { Succeeded: { snapshot_id: string; bytes: number } }
+  | { Succeeded: { snapshot_id: string; bytes: number; warning?: string } }
   | { Failed: { error: string } };
 
 export type BackupTrigger = 'Schedule' | { Manual: { by: string } };

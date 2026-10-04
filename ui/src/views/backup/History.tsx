@@ -104,12 +104,22 @@ export function History() {
                   <td>{fmt(r.finished_at)}</td>
                   <td>{r.triggered_by === 'Schedule' ? 'schedule' : `manual (${r.triggered_by.Manual.by})`}</td>
                   <td>
-                    <Badge tone={runTone(r)} title={'Failed' in r.outcome ? r.outcome.Failed.error : undefined}>
+                    <Badge
+                      tone={runTone(r)}
+                      title={
+                        'Failed' in r.outcome
+                          ? r.outcome.Failed.error
+                          : 'Succeeded' in r.outcome
+                            ? r.outcome.Succeeded.warning
+                            : undefined
+                      }
+                    >
                       {runLabel(r)}
                     </Badge>
                     {'Succeeded' in r.outcome && (
                       <span className="mono" style={{ fontSize: 12, marginLeft: 6 }}>
                         {r.outcome.Succeeded.snapshot_id.slice(0, 8)} · {(r.outcome.Succeeded.bytes / 1e6).toFixed(1)} MB
+                        {r.outcome.Succeeded.warning ? ` · warning: ${r.outcome.Succeeded.warning}` : ''}
                       </span>
                     )}
                     {'Running' in r.outcome && r.outcome.Running.percent != null && (
