@@ -69,11 +69,41 @@ pub async fn check(
         .iter()
         .filter_map(|name| {
             let header_name: HeaderName = name.parse().ok()?;
-            let value = response.headers().get(&header_name)?.clone();
-            Some((header_name, value))
+            let values: Vec<_> = response
+                .headers()
+                .get_all(&header_name)
+                .iter()
+                .cloned()
+                .collect();
+            Some(
+                values
+                    .into_iter()
+                    .map(move |value| (header_name.clone(), value)),
+            )
         })
+        .flatten()
         .collect();
     Outcome::Allow(allowed)
+}
+
+/// Replaces every header named in `cfg.auth_response_headers` on the request
+/// with what the auth endpoint returned. The client's own copies are dropped
+/// even when the endpoint set none: otherwise a forged `X-User` would reach
+/// the backend as an authenticated identity whenever auth passes without
+/// naming a user (bypass policies, public paths).
+pub fn apply_auth_response_headers(
+    headers: &mut HeaderMap,
+    cfg: &ForwardAuth,
+    allowed: Vec<(HeaderName, HeaderValue)>,
+) {
+    for name in &cfg.auth_response_headers {
+        if let Ok(name) = name.parse::<HeaderName>() {
+            headers.remove(name);
+        }
+    }
+    for (name, value) in allowed {
+        headers.append(name, value);
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +186,32 @@ mod tests {
             }
             Outcome::Deny(..) => panic!("expected allow"),
         }
+    }
+
+    #[test]
+    fn client_copies_of_auth_response_headers_never_survive() {
+        let cfg = cfg("http://unused".to_string());
+        let mut headers = HeaderMap::new();
+        headers.append("x-user", HeaderValue::from_static("admin"));
+        headers.append("X-User", HeaderValue::from_static("root"));
+        headers.insert("x-other", HeaderValue::from_static("kept"));
+
+        // Auth passed without naming a user: the forged value must vanish.
+        apply_auth_response_headers(&mut headers, &cfg, Vec::new());
+        assert!(headers.get("x-user").is_none());
+        assert_eq!(headers.get("x-other").unwrap(), "kept");
+    }
+
+    #[test]
+    fn auth_response_headers_replace_the_clients_value() {
+        let cfg = cfg("http://unused".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user", HeaderValue::from_static("admin"));
+
+        let allowed = vec![("x-user".parse().unwrap(), HeaderValue::from_static("alice"))];
+        apply_auth_response_headers(&mut headers, &cfg, allowed);
+        let values: Vec<_> = headers.get_all("x-user").iter().collect();
+        assert_eq!(values, ["alice"]);
     }
 
     #[tokio::test]

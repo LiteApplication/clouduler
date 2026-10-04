@@ -584,9 +584,7 @@ async fn proxy(
                 return deny_response(status, headers, body)
             }
             forward_auth::Outcome::Allow(allowed) => {
-                for (name, value) in allowed {
-                    req.headers_mut().insert(name, value);
-                }
+                forward_auth::apply_auth_response_headers(req.headers_mut(), cfg, allowed);
             }
         }
     }
