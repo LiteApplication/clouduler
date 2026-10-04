@@ -1154,6 +1154,43 @@ async fn deploy(h: &Harness, name: &str, body: &str) -> StatusCode {
         .status()
 }
 
+const PLAIN_SPEC: &str = r#"{"spec":"services:\n  web:\n    image: nginx\n"}"#;
+
+/// Axum percent-decodes the path, so `a%2Fb` arrives as `a/b`, which the git
+/// export would flatten onto stack `b`.
+#[tokio::test]
+async fn deploying_a_stack_with_an_unsafe_name_is_rejected() {
+    let h = harness().await;
+    assert_eq!(
+        deploy(&h, "a%2Fb", PLAIN_SPEC).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(deploy(&h, "Web", PLAIN_SPEC).await, StatusCode::BAD_REQUEST);
+    assert_eq!(deploy(&h, "web", PLAIN_SPEC).await, StatusCode::OK);
+}
+
+/// A stack that predates name validation must stay redeployable.
+#[tokio::test]
+async fn an_existing_stack_with_a_now_invalid_name_can_still_be_redeployed() {
+    let h = harness().await;
+    h.state
+        .cluster
+        .submit(cl_raft::Request::DeployStack {
+            name: "Old Stack".into(),
+            spec: "services:\n  web:\n    image: nginx:1\n".into(),
+        })
+        .await
+        .expect("seed stack");
+
+    assert_eq!(deploy(&h, "Old%20Stack", PLAIN_SPEC).await, StatusCode::OK);
+    let state = h.state.cluster.state().await;
+    assert_eq!(state.stacks["Old Stack"].revision, 2);
+    assert_eq!(
+        deploy(&h, "New%20Stack", PLAIN_SPEC).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 /// `<stack>_<network>` is ambiguous when both halves hold an underscore:
 /// stack `a_b` on `internal` and stack `a` on `b_internal` would share one
 /// overlay (subnet, bridge, docker network), so the second deploy is refused.

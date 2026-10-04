@@ -37,7 +37,7 @@ use cl_backup::status::{
     RejectedPull, LAST_EXPORT_CONFIG, LAST_PULL_CONFIG,
 };
 use cl_backup::tree::ParsedTree;
-use cl_config::{ClusterConfig, StackFile};
+use cl_config::{validate_stack_name, ClusterConfig, StackFile};
 use cl_raft::Request as ClusterRequest;
 use cl_secret::Sealed;
 use serde::{Deserialize, Serialize};
@@ -438,7 +438,7 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             )
         })?;
     let existing_secrets: BTreeSet<String> = cluster_state.secrets.keys().cloned().collect();
-    let existing_stacks = cluster_state.stacks.len();
+    let existing_stacks: BTreeSet<String> = cluster_state.stacks.keys().cloned().collect();
     let last_good_oid =
         last_known_good_commit(&cluster_state).and_then(|s| git2::Oid::from_str(&s).ok());
 
@@ -449,7 +449,7 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             &backup_cfg,
             &private_key_pem,
             &existing_secrets,
-            existing_stacks,
+            &existing_stacks,
             last_good_oid,
         )
     })
@@ -538,7 +538,7 @@ fn pull_and_decide(
     cfg: &cl_config::GitBackupConfig,
     private_key_pem: &str,
     existing_secrets: &BTreeSet<String>,
-    existing_stacks: usize,
+    existing_stacks: &BTreeSet<String>,
     last_good_oid: Option<git2::Oid>,
 ) -> cl_backup::Result<PullDecision> {
     // One on-disk repo, shared with the export loop and manual reconcile.
@@ -611,7 +611,7 @@ fn pull_and_decide(
 fn validate_parsed(
     parsed: &ParsedTree,
     existing_secrets: &BTreeSet<String>,
-    existing_stacks: usize,
+    existing_stacks: &BTreeSet<String>,
 ) -> Result<ClusterConfig, String> {
     let Some(yaml) = &parsed.cluster_yaml else {
         return Err("no cluster.yaml in the pulled tree".to_string());
@@ -623,14 +623,20 @@ fn validate_parsed(
     // stacks/`, a bad merge, a force-push of an unrelated repo that happens
     // to hold a cluster.yaml) would tear down the whole cluster's workloads.
     // Deliberately emptying a cluster goes through the api, not git.
-    if parsed.stacks.is_empty() && existing_stacks > 0 {
+    if parsed.stacks.is_empty() && !existing_stacks.is_empty() {
         return Err(format!(
-            "the pulled tree has no stacks/ at all, which would remove all {existing_stacks} stack(s) \
-             this cluster runs - remove stacks through the api, not by emptying the repo"
+            "the pulled tree has no stacks/ at all, which would remove all {} stack(s) \
+             this cluster runs - remove stacks through the api, not by emptying the repo",
+            existing_stacks.len()
         ));
     }
 
     for (name, spec) in &parsed.stacks {
+        // A stack the cluster already runs under this exact name stays
+        // pullable, same grandfathering as `deploy_from_files`.
+        if !existing_stacks.contains(name) {
+            validate_stack_name(name).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
+        }
         let stack = StackFile::parse(spec).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
         stack
             .validate(&cluster_config)
@@ -813,12 +819,16 @@ mod tests {
         let mut parsed = tree(&[]);
         parsed.cluster_yaml = Some(CLUSTER_YAML.to_string());
 
-        let reason = validate_parsed(&parsed, &BTreeSet::new(), 3)
-            .expect_err("an empty-stacks tree must be rejected");
+        let reason = validate_parsed(
+            &parsed,
+            &BTreeSet::new(),
+            &["a", "b", "c"].map(String::from).into(),
+        )
+        .expect_err("an empty-stacks tree must be rejected");
         assert!(reason.contains("no stacks"), "unexpected reason: {reason}");
 
         // A cluster with nothing deployed yet may legitimately pull an empty tree.
-        assert!(validate_parsed(&parsed, &BTreeSet::new(), 0).is_ok());
+        assert!(validate_parsed(&parsed, &BTreeSet::new(), &BTreeSet::new()).is_ok());
     }
 
     /// The other half: a stack whose spec really did change must still be

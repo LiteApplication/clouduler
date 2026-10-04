@@ -26,6 +26,7 @@ pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};
 pub use port::{PortMapping, PortRange, Protocol, PublishMode};
 pub use requirements::{BoundPort, StackRequirements};
+pub use validate::validate_stack_name;
 pub use volume::{TmpfsOptions, VolumeMount};
 
 use std::collections::BTreeMap;

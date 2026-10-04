@@ -573,6 +573,27 @@ fn memory_overflows(raw: &str) -> bool {
         && digits.trim().chars().all(|c| c.is_ascii_digit())
 }
 
+/// A stack name ends up in container names (`<stack>_<service>_<index>`), in
+/// overlay network names and in the git backup's `stacks/<name>.yaml`, so it
+/// has to be safe in all of them: lowercase letters, digits, `-` and `_`,
+/// starting and ending with a letter or digit, at most 63 bytes. `_` is
+/// allowed because existing stacks use it; the ambiguity it creates in
+/// `<stack>_<network>` is handled by `cl_sched::run::overlay_collision`.
+pub fn validate_stack_name(name: &str) -> std::result::Result<(), String> {
+    let invalid = |why: &str| Err(format!("invalid stack name {name:?}: {why}"));
+    if name.is_empty() || name.len() > 63 {
+        return invalid("must be 1 to 63 bytes long");
+    }
+    let edge_ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    if !name.starts_with(edge_ok) || !name.ends_with(edge_ok) {
+        return invalid("must start and end with a lowercase letter or digit");
+    }
+    if !name.chars().all(|c| edge_ok(c) || c == '-' || c == '_') {
+        return invalid("only lowercase letters, digits, `-` and `_` are allowed");
+    }
+    Ok(())
+}
+
 fn is_dns_label(s: &str) -> bool {
     if s.is_empty() || s.len() > 63 {
         return false;
@@ -597,6 +618,42 @@ mod tests {
 
     fn stack(raw: &str) -> StackFile {
         StackFile::parse(raw).expect("stack parses")
+    }
+
+    #[test]
+    fn stack_name_check() {
+        for ok in [
+            "a",
+            "web",
+            "my-stack",
+            "my_stack",
+            "a1",
+            "0day",
+            &"a".repeat(63),
+        ] {
+            assert!(validate_stack_name(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            "a/b",
+            "/a",
+            "..",
+            "../x",
+            "a b",
+            "Web",
+            "-web",
+            "web-",
+            "_web",
+            "web_",
+            "a:b",
+            "a.b",
+            &"a".repeat(64),
+        ] {
+            assert!(
+                validate_stack_name(bad).is_err(),
+                "{bad:?} should be invalid"
+            );
+        }
     }
 
     #[test]

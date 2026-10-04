@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{ConfigError, Result};
-use crate::stack::StackFile;
+use crate::stack::{validate_stack_name, StackFile};
 
 /// A stack plus the contents of every file it referenced.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +53,8 @@ impl StackBundle {
                 )
             })?
             .to_string();
+        validate_stack_name(&name)
+            .map_err(|reason| ConfigError::invalid(path.display().to_string(), reason))?;
 
         let base = path.parent().unwrap_or(Path::new("."));
         Self::from_spec(&name, &spec, base)
@@ -128,6 +130,13 @@ secrets:
   db_password:
     file: ./db.secret
 "#;
+
+    #[test]
+    fn rejects_a_filename_that_is_not_a_valid_stack_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write(dir.path(), "My Stack.yaml", SPEC);
+        assert!(StackBundle::load(&path).is_err());
+    }
 
     #[test]
     fn bundles_configs_and_secrets() {

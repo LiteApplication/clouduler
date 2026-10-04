@@ -75,6 +75,13 @@ pub fn build(
     }
 
     for (name, stack) in &state.stacks {
+        // `stacks/a/b.yaml` is not part of the flat layout; exporting it any
+        // other way would land on another stack's file. Skipped, not fatal:
+        // one oddly named stack must not block every other change.
+        if name.contains('/') {
+            tracing::error!(stack = %name, "git backup: skipping stack whose name contains '/'");
+            continue;
+        }
         files.push(TreeFile {
             path: format!("stacks/{name}.yaml"),
             contents: stack.spec.clone().into_bytes(),
@@ -281,6 +288,38 @@ mod tests {
             },
         );
         state
+    }
+
+    /// A stack named `a/b` used to be exported as `stacks/b.yaml`, silently
+    /// overwriting the real stack `b`.
+    #[test]
+    fn a_nested_stack_name_does_not_overwrite_a_sibling() {
+        let key = ClusterKey::generate();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let mut state = state_with_everything(&key);
+        let mut real = state.stacks["web"].clone();
+        real.name = "b".to_string();
+        real.spec = "services: {real: {image: a}}\n".to_string();
+        state.stacks.insert("b".to_string(), real);
+        let mut nested = state.stacks["web"].clone();
+        nested.name = "a/b".to_string();
+        nested.spec = "services: {nested: {image: a}}\n".to_string();
+        state.stacks.insert("a/b".to_string(), nested);
+
+        let files = build(&state, &key, &recipient, &mut SecretCache::new());
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.contains(&"stacks/web.yaml"),
+            "other stacks still export"
+        );
+        assert!(!paths.iter().any(|p| p.starts_with("stacks/a")));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init");
+        let oid = crate::git::build_git_tree(&repo, &files).expect("build tree");
+        let parsed = crate::git::parse_tree(&repo, oid).expect("parse tree");
+        assert!(parsed.stacks["b"].contains("real"));
     }
 
     #[test]

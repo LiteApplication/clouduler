@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cl_config::{StackFile, StackRequirements};
+use cl_config::{validate_stack_name, StackFile, StackRequirements};
 use cl_raft::Request as ClusterRequest;
 use cl_secret::Sealed;
 use serde::{Deserialize, Serialize};
@@ -131,12 +131,29 @@ async fn check_overlay_collision(
     }
 }
 
+/// Refuse a stack name that is unsafe in container names, overlay networks
+/// and the git export (see `validate_stack_name`). A stack already in the
+/// cluster under exactly this name is let through, with a warning: it was
+/// accepted before names were checked, and must stay redeployable. Done here
+/// rather than in raft apply, which must keep replaying existing logs.
+async fn check_stack_name(state: &AppState, name: &str) -> Result<(), ApiError> {
+    let Err(reason) = validate_stack_name(name) else {
+        return Ok(());
+    };
+    if state.cluster.state().await.stacks.contains_key(name) {
+        tracing::warn!(stack = %name, %reason, "redeploying a stack whose name would no longer be accepted");
+        return Ok(());
+    }
+    Err(ApiError::BadRequest(reason))
+}
+
 async fn deploy(
     _admin: RequireAdmin,
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(body): Json<DeployRequest>,
 ) -> Result<StatusCode, ApiError> {
+    check_stack_name(&state, &name).await?;
     let secrets_to_write = {
         let parsed =
             StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -217,6 +234,7 @@ pub(crate) async fn deploy_from_files(
     spec: String,
     configs: BTreeMap<String, Vec<u8>>,
 ) -> Result<(), ApiError> {
+    check_stack_name(state, name).await?;
     let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     check_overlay_collision(state, name, &parsed).await?;
     let requirements = parsed.requirements();
@@ -323,8 +341,20 @@ struct ValidateResponse {
 async fn validate(
     _identity: Identity,
     State(state): State<AppState>,
+    Path(name): Path<String>,
     Json(body): Json<ValidateRequest>,
 ) -> Json<ValidateResponse> {
+    if let Err(e) = check_stack_name(&state, &name).await {
+        return Json(ValidateResponse {
+            valid: false,
+            errors: vec![ValidationError {
+                path: String::new(),
+                message: e.to_string(),
+            }],
+            requirements: None,
+            per_service: BTreeMap::new(),
+        });
+    }
     match StackFile::parse(&body.spec) {
         Ok(parsed) => {
             let mut requirements = parsed.requirements();

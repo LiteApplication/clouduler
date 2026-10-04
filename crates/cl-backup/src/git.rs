@@ -547,6 +547,14 @@ pub fn build_git_tree_on_parent(
 
     for file in files {
         let parts: Vec<&str> = file.path.split('/').collect();
+        // The layout is at most one directory deep. Anything deeper used to
+        // keep only its last component, silently overwriting a sibling.
+        if parts.len() > 2 || parts.iter().any(|p| p.is_empty()) {
+            return Err(BackupError::Malformed {
+                what: format!("tree path {:?}", file.path),
+                reason: "expected `<name>` or `<dir>/<name>`".to_string(),
+            });
+        }
         let blob_oid = repo.blob(&file.contents)?;
 
         if parts.len() == 1 {
@@ -555,13 +563,12 @@ pub fn build_git_tree_on_parent(
         } else {
             // Nested path: ensure each parent tree exists.
             let dir_name = parts[0];
-            let file_name = parts[parts.len() - 1];
+            let file_name = parts[1];
             let subtrees = subtrees
                 .entry(dir_name.to_string())
                 .or_insert_with(|| repo.treebuilder(None).expect("treebuilder"));
-            // For deeply nested paths (e.g. a/b/c.yaml), we'd need more
-            // levels, but our layout is flat one level deep (stacks/*.yaml,
-            // configs/*, secrets/*.age) — so one level of nesting is enough.
+            // Our layout is flat one level deep (stacks/*.yaml, configs/*,
+            // secrets/*.age), which the check above enforces.
             subtrees.insert(file_name, blob_oid, 0o100644)?;
         }
     }
@@ -1375,6 +1382,23 @@ mod tests {
         assert!(parsed.stacks.is_empty());
         assert!(parsed.configs.is_empty());
         assert!(parsed.secrets.is_empty());
+    }
+
+    #[test]
+    fn a_path_deeper_than_the_layout_is_an_error_not_flattened() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let files = [
+            TreeFile {
+                path: "stacks/b.yaml".to_string(),
+                contents: b"services: {}\n".to_vec(),
+            },
+            TreeFile {
+                path: "stacks/a/b.yaml".to_string(),
+                contents: b"services: {}\n".to_vec(),
+            },
+        ];
+        assert!(build_git_tree(&repo, &files).is_err());
     }
 
     #[test]
