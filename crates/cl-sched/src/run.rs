@@ -34,7 +34,7 @@ use crate::spec;
 /// How often to sweep, on top of reacting to state changes. A periodic pass
 /// catches drift docker never told us about, like a container someone stopped
 /// by hand.
-const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How many times a container needs restarting within `CRASH_LOOP_WINDOW`
 /// before this node gives up on running it in place and asks the leader to

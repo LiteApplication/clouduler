@@ -13,6 +13,7 @@
 //! background sync scheduler uses, rather than waiting for the volume's own
 //! sync interval.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -105,63 +106,127 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// Wait for `instances` to stop, returning as soon as that is confirmed or
-/// `deadline` elapses, whichever comes first.
+/// What one poll saw of a single instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Observed {
+    Running,
+    /// No answer we can trust: docker errored, or no status was ever reported.
+    Unknown,
+    /// This node's docker says the container is down or gone.
+    StoppedLocal,
+    /// The owning node's last `container_status` says it is down. That report
+    /// carries no timestamp, so it can predate the stop request.
+    StoppedRemote,
+}
+
+/// Outcome of one poll, see [`judge`].
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Every instance is positively confirmed stopped.
+    Done,
+    /// These are still running, of unknown status, or not yet confirmed.
+    Waiting(Vec<InstanceId>),
+}
+
+/// Decide whether every instance is confirmed stopped, given what this poll
+/// observed at `now` (time since the stop was requested).
+///
+/// A remote `running:false` is only trusted once it has held, unbroken, for a
+/// full scheduler sweep: the owning node only notices the desired change and
+/// reports `container_status` once per `SWEEP_INTERVAL`, so a shorter
+/// observation could be a report from before the stop was requested.
+/// `remote_stopped_since` carries that first-seen time between polls.
+fn judge(
+    observations: &[(InstanceId, Observed)],
+    remote_stopped_since: &mut BTreeMap<InstanceId, Duration>,
+    now: Duration,
+) -> Verdict {
+    let mut pending = Vec::new();
+    for (instance, observed) in observations {
+        if *observed != Observed::StoppedRemote {
+            remote_stopped_since.remove(instance);
+        }
+        let confirmed = match observed {
+            Observed::StoppedLocal => true,
+            Observed::StoppedRemote => {
+                let since = *remote_stopped_since.entry(instance.clone()).or_insert(now);
+                now.saturating_sub(since) >= cl_sched::run::SWEEP_INTERVAL
+            }
+            Observed::Running | Observed::Unknown => false,
+        };
+        if !confirmed {
+            pending.push(instance.clone());
+        }
+    }
+    if pending.is_empty() {
+        Verdict::Done
+    } else {
+        Verdict::Waiting(pending)
+    }
+}
+
+/// Wait for `instances` to stop. Returns `Ok` only once every one is
+/// positively confirmed stopped; a deadline, an unreachable docker or cluster,
+/// or an inconclusive status is an error, so the caller never touches a
+/// volume something might still be writing to.
 ///
 /// Instances assigned to `node_name` are checked against the local docker
 /// daemon directly; instances on other nodes are checked against the
 /// cluster's self-reported `container_status` (see
 /// `cl_sched::run::Scheduler::report_container_status`), so this returns as
 /// soon as the remote node actually confirms its container is down instead
-/// of always sleeping the full margin. An instance with no report yet falls
-/// back to sleeping out the deadline, same as if docker weren't reachable.
+/// of always sleeping the full margin. An instance with no report yet counts
+/// as running.
 async fn wait_for_stopped(
     client: &Client,
     node_name: &str,
     instances: &[InstanceId],
     deadline: Duration,
-) {
-    let Ok(docker) = cl_docker::Docker::connect() else {
-        tokio::time::sleep(deadline).await;
-        return;
-    };
+) -> Result<()> {
+    let docker = cl_docker::Docker::connect().map_err(|e| {
+        anyhow!("could not connect to docker to confirm the instances stopped: {e}")
+    })?;
 
     let start = tokio::time::Instant::now();
+    let mut remote_stopped_since = BTreeMap::new();
+    let mut pending: Vec<InstanceId> = instances.to_vec();
     loop {
         let elapsed = start.elapsed();
         if elapsed >= deadline {
-            return;
+            bail!(
+                "timed out after {deadline:?} waiting for {} to stop (still running or status unknown)",
+                pending.iter().map(InstanceId::to_string).collect::<Vec<_>>().join(", ")
+            );
         }
-        let Ok(state) = client.state().await else {
-            tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
-            continue;
-        };
-        let local: Vec<String> = state
-            .assignments
-            .values()
-            .filter(|a| a.node == node_name && instances.contains(&a.instance))
-            .map(|a| a.instance.container_name())
-            .collect();
-
-        let mut all_stopped = true;
-        for name in &local {
-            match docker.inspect(name).await {
-                Ok(Some(s)) if s.running => all_stopped = false,
-                _ => {}
+        // A failed state read leaves `pending` as it was: nothing new is confirmed.
+        if let Ok(state) = client.state().await {
+            let mut observations = Vec::with_capacity(instances.len());
+            for instance in instances {
+                let is_local = state
+                    .assignments
+                    .values()
+                    .any(|a| a.node == node_name && &a.instance == instance);
+                let observed = if is_local {
+                    // An inspect error says nothing about the container, so it
+                    // counts as running; only "no such container" is stopped.
+                    match docker.inspect(&instance.container_name()).await {
+                        Ok(Some(s)) if s.running => Observed::Running,
+                        Ok(_) => Observed::StoppedLocal,
+                        Err(_) => Observed::Unknown,
+                    }
+                } else {
+                    match state.container_status.get(instance) {
+                        Some(status) if status.running => Observed::Running,
+                        Some(_) => Observed::StoppedRemote,
+                        None => Observed::Unknown,
+                    }
+                };
+                observations.push((instance.clone(), observed));
             }
-        }
-        for instance in instances {
-            if local.contains(&instance.container_name()) {
-                continue;
+            match judge(&observations, &mut remote_stopped_since, elapsed) {
+                Verdict::Done => return Ok(()),
+                Verdict::Waiting(still) => pending = still,
             }
-            match state.container_status.get(instance) {
-                Some(status) if status.running => all_stopped = false,
-                Some(_) => {}
-                None => all_stopped = false,
-            }
-        }
-        if all_stopped {
-            return;
         }
         tokio::time::sleep(STOP_POLL_INTERVAL.min(deadline - elapsed)).await;
     }
@@ -218,7 +283,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
 
     let mut stopped: Vec<InstanceId> = Vec::new();
     if args.replace {
-        let using = instances_using(&state, &id);
+        let using = instances_using(&state, &id)?;
         if !using.is_empty() {
             if !args.force {
                 bail!(
@@ -227,14 +292,23 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
                 );
             }
             let grace = max_stop_grace(&state, &using);
-            let deadline = grace + STOP_POLL_MARGIN;
+            // The owning node only notices the Stopped request on its next sweep.
+            let deadline = grace + STOP_POLL_MARGIN + cl_sched::run::SWEEP_INTERVAL;
             debug!(
                 instances = %using.iter().map(InstanceId::to_string).collect::<Vec<_>>().join(", "),
                 deadline = ?deadline,
                 "stopping instances before replacing the volume"
             );
             set_desired(&client, &using, DesiredState::Stopped).await?;
-            wait_for_stopped(&client, node_name, &using, deadline).await;
+            wait_for_stopped(&client, node_name, &using, deadline)
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "{e:#}\nthe instances were left Stopped and the volume {id} was not touched; \
+                         retry the import, or bring them back with `clouduler stack start <stack>` ({})",
+                        using.iter().map(|i| i.stack.as_str()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>().join(", ")
+                    )
+                })?;
             stopped = using;
         }
         debug!("clearing the volume before replacing it");
@@ -320,16 +394,24 @@ fn parse_target(target: &str) -> Result<(String, String, Option<String>)> {
     Ok((drive.to_string(), volume.to_string(), path))
 }
 
-/// Instances whose stack mounts `id`.
-pub fn instances_using(state: &ClusterState, id: &VolumeId) -> Vec<InstanceId> {
+/// Instances whose stack mounts `id`. Errors if an assignment's stack is
+/// missing or its spec won't parse: whether that instance mounts the volume
+/// is then unknowable, and assuming it doesn't risks replacing data under it.
+pub fn instances_using(state: &ClusterState, id: &VolumeId) -> Result<Vec<InstanceId>> {
     let mut found = Vec::new();
+    let mut unknown = Vec::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;
         let Some(stack) = state.stacks.get(&instance.stack) else {
+            unknown.push(format!("{instance} (stack {} is missing)", instance.stack));
             continue;
         };
-        let Ok(file) = StackFile::parse(&stack.spec) else {
-            continue;
+        let file = match StackFile::parse(&stack.spec) {
+            Ok(file) => file,
+            Err(e) => {
+                unknown.push(format!("{instance} (stack spec does not parse: {e})"));
+                continue;
+            }
         };
         let Some(service) = file.services.get(&instance.service) else {
             continue;
@@ -342,7 +424,13 @@ pub fn instances_using(state: &ClusterState, id: &VolumeId) -> Vec<InstanceId> {
             found.push(instance.clone());
         }
     }
-    found
+    if !unknown.is_empty() {
+        bail!(
+            "cannot tell whether {id} is mounted by: {}; fix or remove those stacks first",
+            unknown.join(", ")
+        );
+    }
+    Ok(found)
 }
 
 fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
@@ -854,5 +942,109 @@ mod tests {
 
         assert!(root.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    fn inst(n: u32) -> InstanceId {
+        InstanceId::new("app", "web", n)
+    }
+
+    #[test]
+    fn judge_waits_on_running_and_unknown_instances() {
+        let mut since = BTreeMap::new();
+        let obs = vec![
+            (inst(0), Observed::StoppedLocal),
+            (inst(1), Observed::Running),
+            (inst(2), Observed::Unknown),
+        ];
+        assert_eq!(
+            judge(&obs, &mut since, Duration::ZERO),
+            Verdict::Waiting(vec![inst(1), inst(2)])
+        );
+    }
+
+    #[test]
+    fn judge_trusts_a_remote_stop_only_after_a_full_sweep() {
+        let mut since = BTreeMap::new();
+        let obs = vec![(inst(0), Observed::StoppedRemote)];
+        let sweep = cl_sched::run::SWEEP_INTERVAL;
+        let t0 = Duration::from_secs(2);
+        assert!(matches!(judge(&obs, &mut since, t0), Verdict::Waiting(_)));
+        assert!(matches!(
+            judge(&obs, &mut since, t0 + sweep - Duration::from_millis(1)),
+            Verdict::Waiting(_)
+        ));
+        assert_eq!(judge(&obs, &mut since, t0 + sweep), Verdict::Done);
+    }
+
+    #[test]
+    fn judge_restarts_the_remote_window_when_it_flips_back_to_running() {
+        let mut since = BTreeMap::new();
+        let sweep = cl_sched::run::SWEEP_INTERVAL;
+        let stopped = vec![(inst(0), Observed::StoppedRemote)];
+        let running = vec![(inst(0), Observed::Running)];
+        judge(&stopped, &mut since, Duration::ZERO);
+        judge(&running, &mut since, sweep / 2);
+        assert!(matches!(
+            judge(&stopped, &mut since, sweep),
+            Verdict::Waiting(_)
+        ));
+        assert_eq!(judge(&stopped, &mut since, sweep * 2), Verdict::Done);
+    }
+
+    fn stack_state(name: &str, spec: &str) -> cl_raft::state::StackState {
+        cl_raft::state::StackState {
+            name: name.into(),
+            spec: spec.into(),
+            revision: 1,
+            configs: Default::default(),
+            secrets: Default::default(),
+            used_configs: Default::default(),
+            used_secrets: Default::default(),
+        }
+    }
+
+    fn assign(state: &mut ClusterState, instance: InstanceId) {
+        state.assignments.insert(
+            instance.clone(),
+            cl_raft::state::Assignment {
+                instance,
+                node: "n1".into(),
+                desired: DesiredState::Running,
+                image_digest: None,
+                migration: None,
+            },
+        );
+    }
+
+    const SPEC: &str =
+        "services:\n  web:\n    image: nginx\n    volumes:\n      - fast/data:/data\n";
+
+    #[test]
+    fn instances_using_finds_mounting_instances() {
+        let mut state = ClusterState::default();
+        state.stacks.insert("app".into(), stack_state("app", SPEC));
+        assign(&mut state, inst(0));
+        let id = VolumeId::new("fast", "data");
+        assert_eq!(instances_using(&state, &id).unwrap(), vec![inst(0)]);
+        let other = VolumeId::new("fast", "other");
+        assert!(instances_using(&state, &other).unwrap().is_empty());
+    }
+
+    #[test]
+    fn instances_using_bails_on_a_missing_stack() {
+        let mut state = ClusterState::default();
+        assign(&mut state, inst(0));
+        let err = instances_using(&state, &VolumeId::new("fast", "data")).unwrap_err();
+        assert!(err.to_string().contains("app.web.0"), "{err}");
+    }
+
+    #[test]
+    fn instances_using_bails_on_an_unparsable_spec() {
+        let mut state = ClusterState::default();
+        state
+            .stacks
+            .insert("app".into(), stack_state("app", "services: [unterminated"));
+        assign(&mut state, inst(0));
+        assert!(instances_using(&state, &VolumeId::new("fast", "data")).is_err());
     }
 }
