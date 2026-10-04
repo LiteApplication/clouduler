@@ -11,7 +11,7 @@
 use anyhow::{anyhow, Context, Result};
 use cl_config::ClusterConfig;
 use cl_secret::ClusterKey;
-use cl_update::internal_client::AUTH_HEADER;
+use cl_update::internal_client;
 
 fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
     match via {
@@ -38,18 +38,16 @@ async fn trigger(cfg: &ClusterConfig, via: Option<&str>, path: &str) -> Result<(
             cfg.secrets.key_file.display()
         )
     })?;
-    let signature = cl_secret::internal_auth::sign(&key, path);
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
         .context("building the http client")?;
 
-    let resp = http
-        .post(format!("{base}{path}"))
-        .header(AUTH_HEADER, signature)
-        .send()
-        .await
-        .with_context(|| format!("asking {node}"))?;
+    let resp =
+        internal_client::authenticate(http.post(format!("{base}{path}")), &key, "POST", path, b"")
+            .send()
+            .await
+            .with_context(|| format!("asking {node}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

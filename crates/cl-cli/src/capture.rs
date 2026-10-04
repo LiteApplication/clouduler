@@ -13,7 +13,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_secret::ClusterKey;
-use cl_update::internal_client::AUTH_HEADER;
 use futures::StreamExt;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
@@ -77,12 +76,15 @@ pub async fn run(
         "/api/instances/internal/{}/capture?{qs}",
         assignment.instance
     );
-    let signature = cl_secret::internal_auth::sign(&key, &path);
 
     let uri: Uri = format!("{ws_base}{path}")
         .parse()
         .with_context(|| format!("building the capture url for {}", assignment.node))?;
-    let request = ClientRequestBuilder::new(uri).with_header(AUTH_HEADER, signature);
+    let request = cl_update::internal_client::auth_headers(&key, "GET", &path, b"")
+        .into_iter()
+        .fold(ClientRequestBuilder::new(uri), |request, (name, value)| {
+            request.with_header(name, value)
+        });
 
     let tls_config = crate::exec::insecure_tls_config();
     let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(

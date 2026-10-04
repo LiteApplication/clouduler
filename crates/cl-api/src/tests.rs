@@ -175,6 +175,7 @@ pub(crate) async fn harness() -> Harness {
             .expect("building the test http client"),
         tls_fingerprint: "test:fingerprint".to_string(),
         proxy_health: cl_proxy::HealthTable::default(),
+        internal_replay: Default::default(),
     };
 
     let router = build_router(state.clone());
@@ -1586,22 +1587,134 @@ async fn internal_instance_and_node_routes_reject_an_unsigned_request() {
     }
 }
 
-async fn signed_get(h: &Harness, path: &str) -> axum::response::Response {
+/// A request carrying every header an internal caller sends. `body_hash`
+/// is what gets signed and sent in the hash header; `body` is what is actually
+/// sent, so a test can make the two disagree.
+async fn internal_request(
+    h: &Harness,
+    method: &str,
+    path: &str,
+    ts: u64,
+    body_hash: &str,
+    body: Vec<u8>,
+) -> Request<Body> {
+    use cl_update::internal_client::*;
     let key_guard = h.state.key.read().await;
-    let signature =
-        cl_secret::internal_auth::sign(key_guard.as_ref().expect("test cluster holds a key"), path);
+    let key = key_guard.as_ref().expect("test cluster holds a key");
+    let v2 = cl_secret::internal_auth::sign_v2(key, method, path, ts, body_hash);
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header(AUTH_HEADER, cl_secret::internal_auth::sign(key, path))
+        .header(TIMESTAMP_HEADER, ts.to_string())
+        .header(BODY_SHA256_HEADER, body_hash)
+        .header(SIGNATURE_HEADER, v2)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn signed_get(h: &Harness, path: &str) -> axum::response::Response {
+    let empty = cl_secret::internal_auth::body_sha256_hex(b"");
+    let now = cl_secret::internal_auth::unix_now();
+    let req = internal_request(h, "GET", path, now, &empty, Vec::new()).await;
+    h.router.clone().oneshot(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn internal_routes_reject_a_legacy_only_request() {
+    let h = harness().await;
+    let path = "/api/nodes/internal/n0/usage";
+    let key_guard = h.state.key.read().await;
+    let legacy = cl_secret::internal_auth::sign(key_guard.as_ref().unwrap(), path);
     drop(key_guard);
-    h.router
+    let resp = h
+        .router
         .clone()
         .oneshot(
             Request::builder()
                 .uri(path)
-                .header(cl_update::internal_client::AUTH_HEADER, signature)
+                .header(cl_update::internal_client::AUTH_HEADER, legacy)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_routes_reject_a_replayed_signature() {
+    let h = harness().await;
+    let path = "/api/nodes/internal/n0/usage";
+    let empty = cl_secret::internal_auth::body_sha256_hex(b"");
+    let now = cl_secret::internal_auth::unix_now();
+    for expected in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
+        let req = internal_request(&h, "GET", path, now, &empty, Vec::new()).await;
+        let resp = h.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), expected);
+    }
+}
+
+#[tokio::test]
+async fn internal_routes_reject_stale_and_future_timestamps() {
+    let h = harness().await;
+    let path = "/api/nodes/internal/n0/usage";
+    let empty = cl_secret::internal_auth::body_sha256_hex(b"");
+    let now = cl_secret::internal_auth::unix_now();
+    for ts in [now - 120, now + 120] {
+        let req = internal_request(&h, "GET", path, ts, &empty, Vec::new()).await;
+        let resp = h.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "ts {ts}");
+    }
+}
+
+#[tokio::test]
+async fn internal_routes_reject_a_signature_for_another_method() {
+    let h = harness().await;
+    let path = "/api/nodes/internal/n0/usage";
+    let empty = cl_secret::internal_auth::body_sha256_hex(b"");
+    let now = cl_secret::internal_auth::unix_now();
+    let mut req = internal_request(&h, "POST", path, now, &empty, Vec::new()).await;
+    *req.method_mut() = axum::http::Method::GET;
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bodiless_internal_routes_reject_a_signed_nonempty_body_hash() {
+    let h = harness().await;
+    let path = "/api/nodes/internal/n0/usage";
+    let hash = cl_secret::internal_auth::body_sha256_hex(b"x");
+    let now = cl_secret::internal_auth::unix_now();
+    let req = internal_request(&h, "GET", path, now, &hash, b"x".to_vec()).await;
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_apply_rejects_a_body_that_does_not_match_the_signed_hash() {
+    let h = harness().await;
+    let path = "/api/updates/internal/apply";
+    let signed_body = br#"{"instances":["blog.web.0"]}"#;
+    let hash = cl_secret::internal_auth::body_sha256_hex(signed_body);
+    let now = cl_secret::internal_auth::unix_now();
+    // A replayer swaps in an empty selection, which would mean "everything".
+    let req = internal_request(
+        &h,
+        "POST",
+        path,
+        now,
+        &hash,
+        br#"{"instances":[]}"#.to_vec(),
+    )
+    .await;
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let now = cl_secret::internal_auth::unix_now();
+    let req = internal_request(&h, "POST", path, now + 1, &hash, signed_body.to_vec()).await;
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
 
 #[tokio::test]

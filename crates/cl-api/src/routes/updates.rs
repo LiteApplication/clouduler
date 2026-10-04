@@ -21,6 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -32,7 +33,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::auth::internal::InternalAuth;
+use crate::auth::internal::{InternalAuth, InternalBodyAuth};
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::internal_peer;
@@ -414,12 +415,21 @@ async fn apply(
 /// running daemon rather than a raft state change - there is nothing for
 /// `client.submit` to write.
 async fn apply_internal(
-    _auth: InternalAuth,
+    auth: InternalBodyAuth,
     State(state): State<AppState>,
-    body: Option<Json<InstanceSelection>>,
-) -> (StatusCode, Json<Accepted>) {
-    let selection = body.map(|Json(b)| b).unwrap_or_default();
-    apply_selection(&state, selection).await
+    body: Bytes,
+) -> Result<(StatusCode, Json<Accepted>), ApiError> {
+    // The signature covers a hash of the body, not the body itself, so the
+    // bytes read here must be checked against it or a replayer could swap in
+    // a different selection (an empty one means every instance).
+    auth.check(&body)?;
+    let selection = if body.is_empty() {
+        InstanceSelection::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid update selection: {e}")))?
+    };
+    Ok(apply_selection(&state, selection).await)
 }
 
 async fn apply_selection(

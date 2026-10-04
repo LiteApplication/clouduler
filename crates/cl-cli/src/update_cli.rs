@@ -11,7 +11,7 @@
 use anyhow::{anyhow, Context, Result};
 use cl_config::ClusterConfig;
 use cl_secret::ClusterKey;
-use cl_update::internal_client::AUTH_HEADER;
+use cl_update::internal_client;
 use serde::{Deserialize, Serialize};
 
 const APPLY_PATH: &str = "/api/updates/internal/apply";
@@ -58,19 +58,27 @@ pub async fn apply(cfg: &ClusterConfig, instances: Vec<String>, via: Option<&str
             cfg.secrets.key_file.display()
         )
     })?;
-    let signature = cl_secret::internal_auth::sign(&key, APPLY_PATH);
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
         .context("building the http client")?;
 
-    let resp = http
-        .post(format!("{base}{APPLY_PATH}"))
-        .header(AUTH_HEADER, signature)
-        .json(&InstanceSelection { instances })
-        .send()
-        .await
-        .with_context(|| format!("asking {node}"))?;
+    // Serialized by hand so the exact bytes sent are the bytes the signature
+    // commits to.
+    let body = serde_json::to_vec(&InstanceSelection { instances })
+        .context("encoding the update selection")?;
+    let resp = internal_client::authenticate(
+        http.post(format!("{base}{APPLY_PATH}")),
+        &key,
+        "POST",
+        APPLY_PATH,
+        &body,
+    )
+    .header(reqwest::header::CONTENT_TYPE, "application/json")
+    .body(body)
+    .send()
+    .await
+    .with_context(|| format!("asking {node}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

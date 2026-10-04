@@ -20,7 +20,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
 use cl_raft::{Assignment, ClusterState, InstanceId};
 use cl_secret::ClusterKey;
-use cl_update::internal_client::AUTH_HEADER;
+use cl_update::internal_client;
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -228,19 +228,17 @@ async fn fetch_events(
         "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
         assignment.instance
     );
-    let signature = cl_secret::internal_auth::sign(key, &path);
 
-    let resp = http
-        .get(format!("{base}{path}"))
-        .header(AUTH_HEADER, signature)
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "asking {} for {}'s logs",
-                assignment.node, assignment.instance
-            )
-        })?;
+    let resp =
+        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "asking {} for {}'s logs",
+                    assignment.node, assignment.instance
+                )
+            })?;
     if !resp.status().is_success() {
         bail!("{} answered {}", assignment.node, resp.status());
     }
@@ -339,19 +337,17 @@ async fn stream_one(
         "/api/instances/internal/{}/logs?follow={follow}&tail={tail}",
         assignment.instance
     );
-    let signature = cl_secret::internal_auth::sign(key, &path);
 
-    let resp = http
-        .get(format!("{base}{path}"))
-        .header(AUTH_HEADER, signature)
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "asking {} for {}'s logs",
-                assignment.node, assignment.instance
-            )
-        })?;
+    let resp =
+        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "asking {} for {}'s logs",
+                    assignment.node, assignment.instance
+                )
+            })?;
     if !resp.status().is_success() {
         bail!("{} answered {}", assignment.node, resp.status());
     }

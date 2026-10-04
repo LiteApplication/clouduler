@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::response::Response;
-use cl_secret::internal_auth;
+use cl_update::internal_client;
 use futures::TryStreamExt;
 use serde::de::DeserializeOwned;
 
@@ -76,12 +76,22 @@ async fn peer_base_url(state: &AppState, node: &str) -> Result<String, ApiError>
         .ok_or_else(|| ApiError::Unavailable(format!("no address on record for node {node}")))
 }
 
-async fn signature(state: &AppState, path: &str) -> Result<String, ApiError> {
+/// Sign `request` for `path`. Made per attempt rather than once up front: the
+/// peer accepts each signature a single time, so a retry reusing one would be
+/// refused as a replay.
+async fn signed(
+    state: &AppState,
+    request: reqwest::RequestBuilder,
+    method: &str,
+    path: &str,
+) -> Result<reqwest::RequestBuilder, ApiError> {
     let key_guard = state.key.read().await;
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Unavailable("this node holds no cluster key".to_string()))?;
-    Ok(internal_auth::sign(key, path))
+    Ok(internal_client::authenticate(
+        request, key, method, path, b"",
+    ))
 }
 
 /// `GET path` (query string included, if any) on `node`'s api, decoded as `T`.
@@ -91,12 +101,9 @@ pub async fn fetch_json<T: DeserializeOwned>(
     path: &str,
 ) -> Result<T, ApiError> {
     let base = peer_base_url(state, node).await?;
-    let signature = signature(state, path).await?;
     for attempt in 0.. {
-        let sent = state
-            .http
-            .get(format!("{base}{path}"))
-            .header(cl_update::internal_client::AUTH_HEADER, signature.clone())
+        let sent = signed(state, state.http.get(format!("{base}{path}")), "GET", path)
+            .await?
             .timeout(FETCH_TIMEOUT)
             .send()
             .await;
@@ -131,16 +138,18 @@ pub async fn fetch_json<T: DeserializeOwned>(
 /// forwards above.
 pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), ApiError> {
     let base = peer_base_url(state, node).await?;
-    let signature = signature(state, path).await?;
     for attempt in 0.. {
-        let resp = state
-            .http
-            .post(format!("{base}{path}"))
-            .header(cl_update::internal_client::AUTH_HEADER, signature.clone())
-            .timeout(WRITE_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+        let resp = signed(
+            state,
+            state.http.post(format!("{base}{path}")),
+            "POST",
+            path,
+        )
+        .await?
+        .timeout(WRITE_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             if retry_on_unavailable(attempt, status).await {
@@ -159,11 +168,8 @@ pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), 
 /// short, so none is set here.
 pub async fn proxy_stream(state: &AppState, node: &str, path: &str) -> Result<Response, ApiError> {
     let base = peer_base_url(state, node).await?;
-    let signature = signature(state, path).await?;
-    let resp = state
-        .http
-        .get(format!("{base}{path}"))
-        .header(cl_update::internal_client::AUTH_HEADER, signature)
+    let resp = signed(state, state.http.get(format!("{base}{path}")), "GET", path)
+        .await?
         .send()
         .await
         .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;

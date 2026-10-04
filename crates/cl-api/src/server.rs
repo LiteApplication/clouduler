@@ -100,6 +100,9 @@ pub struct AppState {
     /// loop's own, under `daemon::watch_git_backup`) to fetch and check out a
     /// candidate commit into before validating it.
     pub data_dir: PathBuf,
+    /// Internal-route signatures already accepted; see
+    /// `auth::internal::ReplayCache`.
+    pub internal_replay: Arc<crate::auth::internal::ReplayCache>,
 }
 
 impl AppState {
@@ -218,6 +221,7 @@ impl ApiServer {
             tls_fingerprint,
             proxy_health: options.proxy_health,
             data_dir: options.data_dir,
+            internal_replay: Default::default(),
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the

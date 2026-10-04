@@ -22,7 +22,7 @@ use cl_config::ClusterConfig;
 use cl_raft::state::ClusterState;
 use cl_raft::{Assignment, DesiredState};
 use cl_secret::ClusterKey;
-use cl_update::internal_client::AUTH_HEADER;
+use cl_update::internal_client;
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -426,14 +426,12 @@ async fn fetch_summary(
     let base = cl_update::peers::base_url(cfg, node)
         .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
     let path = internal_summary_path(instance);
-    let signature = cl_secret::internal_auth::sign(key, &path);
 
-    let resp = http
-        .get(format!("{base}{path}"))
-        .header(AUTH_HEADER, signature)
-        .send()
-        .await
-        .with_context(|| format!("asking {node} about {instance}"))?;
+    let resp =
+        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
+            .send()
+            .await
+            .with_context(|| format!("asking {node} about {instance}"))?;
     if !resp.status().is_success() {
         anyhow::bail!("{node} answered {}", resp.status());
     }
@@ -533,14 +531,12 @@ async fn fetch_log_tail(
     let base = cl_update::peers::base_url(cfg, node)
         .ok_or_else(|| anyhow!("node {node} has no address on the internal network"))?;
     let path = format!("{}?follow=false&tail={tail}", internal_logs_path(instance));
-    let signature = cl_secret::internal_auth::sign(key, &path);
 
-    let resp = http
-        .get(format!("{base}{path}"))
-        .header(AUTH_HEADER, signature)
-        .send()
-        .await
-        .with_context(|| format!("asking {node} for {instance}'s logs"))?;
+    let resp =
+        internal_client::authenticate(http.get(format!("{base}{path}")), key, "GET", &path, b"")
+            .send()
+            .await
+            .with_context(|| format!("asking {node} for {instance}'s logs"))?;
     if !resp.status().is_success() {
         anyhow::bail!("{node} answered {}", resp.status());
     }
