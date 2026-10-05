@@ -50,3 +50,43 @@ export function isValidHostname(value: string): boolean {
 export function isValidPort(value: number): boolean {
   return Number.isInteger(value) && value > 0 && value <= 65535;
 }
+
+const DURATION_UNIT_MS: Record<string, number> = {
+  ns: 1e-6, us: 1e-3, 'µs': 1e-3, ms: 1,
+  s: 1000, sec: 1000, secs: 1000,
+  m: 60_000, min: 60_000, mins: 60_000,
+  h: 3_600_000, hour: 3_600_000, hours: 3_600_000,
+  d: 86_400_000, day: 86_400_000, days: 86_400_000,
+  w: 604_800_000, week: 604_800_000, weeks: 604_800_000,
+};
+
+/** Milliseconds in a humantime string, or null if it does not parse. */
+export function durationToMs(value: string): number | null {
+  if (!isValidDuration(value)) return null;
+  let total = 0;
+  for (const [, n, unit] of value.matchAll(/(\d+)\s*([a-zµ]+)/gi)) {
+    total += Number(n) * DURATION_UNIT_MS[unit.toLowerCase()];
+  }
+  return total;
+}
+
+/**
+ * Mirrors `FailoverConfig::fence_margin_warning` in cl-config: null when the
+ * three durations are fine (or any of them does not parse yet).
+ */
+export function fenceMarginWarning(f: {
+  fence_timeout: string;
+  node_timeout: string;
+  stop_grace: string;
+}): string | null {
+  const fence = durationToMs(f.fence_timeout);
+  const node = durationToMs(f.node_timeout);
+  const grace = durationToMs(f.stop_grace);
+  if (fence === null || node === null || grace === null) return null;
+  if (fence + grace < node) return null;
+  return (
+    `Fence timeout (${f.fence_timeout.trim()}) plus the stop grace (${f.stop_grace.trim()}) reaches the node timeout (${f.node_timeout.trim()}). ` +
+    'A container that takes its full grace to stop may still be running when the leader reschedules it elsewhere, so a replicated volume could see two writers. ' +
+    'Raise the node timeout, or lower the fence timeout or the stop grace.'
+  );
+}

@@ -31,10 +31,6 @@ use tracing::{info, warn};
 /// looking more often than the scheduler sweeps.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How long a container gets to stop cleanly before the migration takes its
-/// volumes. The final sync cannot start until it has let go of them.
-const STOP_GRACE: Duration = Duration::from_secs(30);
-
 /// Watch for migrations this node owns and run them.
 ///
 /// Always spawned now, even for a node that implements no drives at boot:
@@ -129,11 +125,13 @@ pub fn start(
                 let sync_progress = sync_progress.clone();
                 let keys = keys.clone();
                 let node_name = node_name.clone();
+                let stop_grace = cfg.failover.stop_grace;
                 let instance = job.instance.clone();
                 tokio::spawn(async move {
                     let control = DockerControl {
                         node: node_name,
                         docker,
+                        stop_grace,
                     };
                     let migration = MigrationJob {
                         instance: job.instance,
@@ -228,6 +226,10 @@ fn target_addr(cfg: &ClusterConfig, target: &str) -> Option<SocketAddr> {
 struct DockerControl {
     node: String,
     docker: Docker,
+    /// How long a container gets to stop cleanly before the migration takes
+    /// its volumes (`failover.stop_grace`). The final sync cannot start until
+    /// it has let go of them.
+    stop_grace: Duration,
 }
 
 impl InstanceControl for DockerControl {
@@ -244,7 +246,7 @@ impl InstanceControl for DockerControl {
                 )));
             }
             self.docker
-                .stop(&instance.container_name(), STOP_GRACE)
+                .stop(&instance.container_name(), self.stop_grace)
                 .await
                 .map_err(|e| cl_drive::DriveError::Transfer {
                     message: format!("stopping {instance}: {e}"),

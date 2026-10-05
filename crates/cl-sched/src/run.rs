@@ -29,7 +29,7 @@ use crate::place;
 use crate::plan::{self, Desired};
 
 use crate::progress::{unix_now, UpdateReporter};
-use crate::reconcile::{self, Action, PullTracker, Reconciler, Target, DEFAULT_STOP_GRACE};
+use crate::reconcile::{self, Action, PullTracker, Reconciler, Target};
 use crate::spec;
 
 /// How often to sweep, on top of reacting to state changes. A periodic pass
@@ -297,6 +297,7 @@ impl Scheduler {
             .collect();
         let reconciler = Reconciler::new(docker.clone(), self.pulling.clone())
             .with_registries(registries)
+            .with_stop_grace(self.live_config(state).failover.stop_grace)
             .with_progress(
                 UpdateReporter::new(self.cluster.clone(), self.node.clone()),
                 updates,
@@ -861,7 +862,9 @@ impl Scheduler {
                 assignment,
                 spec,
                 revision,
-                stop_grace: service.stop_grace_period.unwrap_or(DEFAULT_STOP_GRACE),
+                stop_grace: service
+                    .stop_grace_period
+                    .unwrap_or(live.failover.stop_grace),
             });
         }
 
@@ -1319,6 +1322,18 @@ fn served_drives(state: &ClusterState) -> BTreeSet<String> {
         .and_then(|entry| ClusterConfig::parse(&entry.yaml).ok())
         .map(|cfg| cfg.served_drives())
         .unwrap_or_default()
+}
+
+/// `failover.stop_grace` from the replicated cluster config: how long a
+/// container without its own `stop_grace_period` gets to stop. The built-in
+/// default if no config has been published yet or it fails to parse.
+pub fn configured_stop_grace(state: &ClusterState) -> std::time::Duration {
+    state
+        .cluster_config
+        .as_ref()
+        .and_then(|entry| ClusterConfig::parse(&entry.yaml).ok())
+        .map(|cfg| cfg.failover.stop_grace)
+        .unwrap_or(cl_config::DEFAULT_STOP_GRACE)
 }
 
 /// Nat-kind network names, read from the replicated cluster config the same

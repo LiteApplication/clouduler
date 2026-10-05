@@ -1,7 +1,5 @@
 //! `/api/instances`.
 
-use std::time::Duration;
-
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -882,7 +880,10 @@ pub(crate) async fn roll_back_instance(
 async fn remove_container(state: &AppState, instance: &InstanceId) -> Result<(), ApiError> {
     let name = instance.container_name();
     let docker = state.docker().await?;
-    docker.stop(&name, STOP_GRACE).await.ok();
+    // The reconcile loop's own fallback (`failover.stop_grace`) rather than
+    // docker's 10 seconds, which is short for a database.
+    let stop_grace = state.cluster_config.read().await.failover.stop_grace;
+    docker.stop(&name, stop_grace).await.ok();
     docker
         .remove(&name, true)
         .await
@@ -1041,7 +1042,10 @@ async fn update_local_steps(
         .map_err(ApiError::not_leader)?;
 
     progress.report(instance, UpdatePhase::Stopping, None).await;
-    docker.stop(&name, STOP_GRACE).await.ok();
+    // The reconcile loop's own fallback (`failover.stop_grace`) rather than
+    // docker's 10 seconds, which is short for a database.
+    let stop_grace = state.cluster_config.read().await.failover.stop_grace;
+    docker.stop(&name, stop_grace).await.ok();
     docker
         .remove(&name, true)
         .await
@@ -1049,11 +1053,6 @@ async fn update_local_steps(
     progress.report(instance, UpdatePhase::Starting, None).await;
     Ok(())
 }
-
-/// How long the container being updated gets to stop cleanly. Matches the
-/// reconcile loop's own default rather than docker's 10 seconds, which is
-/// short for a database.
-const STOP_GRACE: Duration = cl_sched::reconcile::DEFAULT_STOP_GRACE;
 
 /// Node-to-node: updates this node's own container. The caller already
 /// checked the assignment and the caller's own admin auth before forwarding

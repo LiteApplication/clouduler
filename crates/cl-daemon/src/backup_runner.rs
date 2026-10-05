@@ -658,6 +658,7 @@ fn resolve_stop_containers(
 }
 
 fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
+    let default = cl_sched::run::configured_stop_grace(state);
     instances
         .iter()
         .filter_map(|i| {
@@ -666,7 +667,7 @@ fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
             file.services.get(&i.service)?.stop_grace_period
         })
         .max()
-        .unwrap_or(cl_sched::reconcile::DEFAULT_STOP_GRACE)
+        .unwrap_or(default)
 }
 
 async fn set_desired(

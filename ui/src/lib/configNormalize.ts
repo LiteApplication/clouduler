@@ -45,6 +45,7 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
       through_proxy: cfg.web.through_proxy ?? true,
       backend_port: cfg.web.backend_port ?? 8444,
     },
+    failover: { ...cfg.failover, stop_grace: cfg.failover.stop_grace ?? '30s' },
     networks: mapValues(cfg.networks, (net) => ({
       ...net,
       subnet: nullable(net.subnet),

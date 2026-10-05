@@ -112,8 +112,8 @@ async fn stop_while_fenced<'a, F, Fut>(
     .await;
 }
 
-/// Docker's own default is 10 seconds, which is short for a database.
-pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
+/// The built-in stop grace; the configured one is `failover.stop_grace`.
+pub const DEFAULT_STOP_GRACE: Duration = cl_config::DEFAULT_STOP_GRACE;
 
 /// Label carrying the spec revision, so drift is detectable without inspecting
 /// every field docker may have normalised.
@@ -210,6 +210,8 @@ pub struct Reconciler {
     /// through the api takes effect on the next sweep instead of at the next
     /// daemon restart — and so no password outlives the pass that needed it.
     registries: Registries,
+    /// Stop grace for a container with no target to read one from.
+    stop_grace: Duration,
 }
 
 impl Reconciler {
@@ -220,7 +222,15 @@ impl Reconciler {
             progress: None,
             updates: BTreeMap::new(),
             registries: Registries::default(),
+            stop_grace: DEFAULT_STOP_GRACE,
         }
+    }
+
+    /// The cluster's `failover.stop_grace`, for stopping a container that has
+    /// no target (one being removed).
+    pub fn with_stop_grace(mut self, stop_grace: Duration) -> Self {
+        self.stop_grace = stop_grace;
+        self
     }
 
     /// Record every redeploy's steps, and the end of `updates`, through
@@ -428,11 +438,16 @@ impl Reconciler {
             }
             Action::Stop(id) => {
                 info!(instance = %id, "stopping");
-                self.docker.stop(&name, stop_timeout(target)).await?;
+                self.docker
+                    .stop(&name, stop_timeout(target, self.stop_grace))
+                    .await?;
             }
             Action::Remove(id) => {
                 info!(instance = %id, "removing");
-                self.docker.stop(&name, stop_timeout(target)).await.ok();
+                self.docker
+                    .stop(&name, stop_timeout(target, self.stop_grace))
+                    .await
+                    .ok();
                 self.docker.remove(&name, true).await?;
             }
             Action::Recreate(id) => {
@@ -475,7 +490,7 @@ impl Reconciler {
 
         self.report(id, UpdatePhase::Stopping, None).await;
         self.docker
-            .stop(name, stop_timeout(Some(target)))
+            .stop(name, stop_timeout(Some(target), self.stop_grace))
             .await
             .ok();
         self.docker.remove(name, true).await.ok();
@@ -580,8 +595,8 @@ fn is_stale_network_error(e: &DockerError) -> bool {
     e.to_string().contains("Could not attach to network")
 }
 
-fn stop_timeout(target: Option<&Target>) -> Duration {
-    target.map(|t| t.stop_grace).unwrap_or(DEFAULT_STOP_GRACE)
+fn stop_timeout(target: Option<&Target>, fallback: Duration) -> Duration {
+    target.map(|t| t.stop_grace).unwrap_or(fallback)
 }
 
 #[cfg(test)]

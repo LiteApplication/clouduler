@@ -126,9 +126,9 @@ pub async fn run(
             .run_failure_detector(failover.probe_interval, failover.node_timeout),
     );
 
-    if let Some(warning) = failover.fence_margin_warning(cl_sched::reconcile::DEFAULT_STOP_GRACE) {
-        warn!("{warning}");
-    }
+    // Re-checked whenever the replicated config changes, and against the
+    // longest per-service `stop_grace_period` as well as the default.
+    tokio::spawn(warn_fence_margin(cluster.clone(), config_rx.clone()));
 
     // Closed to begin with unless this is a quick restart: see `Fence::new`
     // and `Fence::resume`. The scheduler's first sweep lands about a second
@@ -1526,6 +1526,43 @@ fn current_binary_hash() -> String {
         return String::new();
     };
     blake3::hash(&bytes).to_hex().to_string()
+}
+
+/// Log the fence-margin warnings for the current config, and again each time
+/// the config changes. Services with their own `stop_grace_period` are checked
+/// too, since one longer than the default is the same trap.
+async fn warn_fence_margin(
+    cluster: Arc<ClusterNode>,
+    mut config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+) {
+    let mut last: Vec<String> = Vec::new();
+    loop {
+        let cfg = config_rx.borrow_and_update().clone();
+        let state = cluster.state().await;
+        let mut warnings: Vec<String> = cfg.failover.fence_margin_warning().into_iter().collect();
+        let longest = state
+            .stacks
+            .values()
+            .filter_map(|s| cl_config::StackFile::parse(&s.spec).ok())
+            .flat_map(|f| f.services.into_values())
+            .filter_map(|svc| svc.stop_grace_period)
+            .max();
+        if let Some(longest) = longest.filter(|g| *g > cfg.failover.stop_grace) {
+            warnings.extend(
+                cfg.failover
+                    .fence_margin_warning_for(longest, "longest service stop_grace_period"),
+            );
+        }
+        if warnings != last {
+            for w in &warnings {
+                warn!("{w}");
+            }
+            last = warnings;
+        }
+        if config_rx.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

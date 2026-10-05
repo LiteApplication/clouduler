@@ -597,6 +597,7 @@ export interface FailoverConfig {
   node_timeout: string;
   fence_timeout: string;
   probe_interval: string;
+  stop_grace: string;
 }
 
 export interface SecretsConfig {

@@ -186,9 +186,6 @@ fn unix_now() -> i64 {
 
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Generous outer bound on top of a service's own `stop_grace_period` -
-/// mirrors `folder_import`'s hardcoded fallback.
-const DEFAULT_STOP_GRACE: Duration = cl_sched::reconcile::DEFAULT_STOP_GRACE;
 
 /// What one restore touches, per drive: either the whole drive or specific
 /// volumes. Drives that this restore reaches are in `drives`.
@@ -875,6 +872,7 @@ async fn set_desired(
 }
 
 fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
+    let default = cl_sched::run::configured_stop_grace(state);
     instances
         .iter()
         .filter_map(|i| {
@@ -883,7 +881,7 @@ fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
             file.services.get(&i.service)?.stop_grace_period
         })
         .max()
-        .unwrap_or(DEFAULT_STOP_GRACE)
+        .unwrap_or(default)
 }
 
 /// Same shape as `folder_import`'s helper of the same name: polls local

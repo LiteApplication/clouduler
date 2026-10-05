@@ -23,7 +23,8 @@
     "failover": {
       "fence_timeout": "15s",
       "node_timeout": "30s",
-      "probe_interval": "5s"
+      "probe_interval": "5s",
+      "stop_grace": "30s"
     },
     "networks": {
       "internal": {

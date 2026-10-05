@@ -53,6 +53,18 @@ impl ClusterConfig {
                 "must not be zero",
             ));
         }
+        if f.stop_grace.is_zero() {
+            return Err(ConfigError::invalid(
+                "failover.stop_grace",
+                "must not be zero",
+            ));
+        }
+        if f.stop_grace > crate::cluster::MAX_STOP_GRACE {
+            return Err(ConfigError::invalid(
+                "failover.stop_grace",
+                format!("must be at most {:?}", crate::cluster::MAX_STOP_GRACE),
+            ));
+        }
         Ok(())
     }
 
@@ -1005,18 +1017,46 @@ cloudflare:
     fn a_fence_that_may_outlast_node_timeout_is_warned_about() {
         use crate::cluster::FailoverConfig;
         use std::time::Duration;
-        let grace = Duration::from_secs(30);
-        let f = |fence, node| FailoverConfig {
+        let f = |fence, node, grace| FailoverConfig {
             fence_timeout: Duration::from_secs(fence),
             node_timeout: Duration::from_secs(node),
             probe_interval: Duration::from_secs(5),
+            stop_grace: Duration::from_secs(grace),
         };
-        assert!(f(30, 60).fence_margin_warning(grace).is_some());
-        assert!(f(29, 60).fence_margin_warning(grace).is_none());
-        // The defaults (15s / 30s) are the same trap, and say so.
-        assert!(FailoverConfig::default()
-            .fence_margin_warning(grace)
+        assert!(f(30, 60, 30).fence_margin_warning().is_some());
+        assert!(f(29, 60, 30).fence_margin_warning().is_none());
+        // The configured grace is what counts, not a fixed default.
+        assert!(f(29, 60, 31).fence_margin_warning().is_some());
+        assert!(f(29, 60, 10).fence_margin_warning().is_none());
+        // The defaults (15s / 30s / 30s) are the same trap, and say so.
+        assert!(FailoverConfig::default().fence_margin_warning().is_some());
+        assert!(f(10, 60, 10)
+            .fence_margin_warning_for(Duration::from_secs(50), "service")
             .is_some());
+    }
+
+    #[test]
+    fn stop_grace_defaults_and_is_configurable() {
+        let cfg = ClusterConfig::parse(BASE).expect("valid");
+        assert_eq!(cfg.failover.stop_grace, std::time::Duration::from_secs(30));
+        let cfg = parse(&[(
+            "web: { address: cloud, network: tailscale }",
+            "failover: { stop_grace: 2m }\nweb: { address: cloud, network: tailscale }",
+        )])
+        .expect("valid");
+        assert_eq!(cfg.failover.stop_grace, std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn stop_grace_must_be_sane() {
+        for bad in ["0s", "11m"] {
+            let err = parse(&[(
+                "web: { address: cloud, network: tailscale }",
+                &format!("failover: {{ stop_grace: {bad} }}\nweb: {{ address: cloud, network: tailscale }}"),
+            )])
+            .unwrap_err();
+            assert!(err.to_string().contains("failover.stop_grace"), "{bad}");
+        }
     }
 
     #[test]

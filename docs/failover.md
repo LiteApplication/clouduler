@@ -58,9 +58,19 @@ failover:
   node_timeout: 30s    # unreachable for this long, work is rescheduled
   fence_timeout: 15s   # no quorum for this long, local containers stop
   probe_interval: 5s   # how often the leader probes
+  stop_grace: 30s      # default time a container gets to stop cleanly
 ```
 
-The config is rejected unless `probe_interval < fence_timeout < node_timeout`.
+The config is rejected unless `probe_interval < fence_timeout < node_timeout`,
+and `stop_grace` is between 1ms and 10m.
+
+`stop_grace` is the fallback for services without their own
+`stop_grace_period`. A fence can take that long to finish stopping a container
+*after* `fence_timeout` has run out, so `fence_timeout + stop_grace` should stay
+below `node_timeout`; otherwise a container may still be running when the leader
+reschedules it, and a replicated volume could see two writers. The daemon logs a
+warning (also for services with a longer `stop_grace_period`) and the web UI
+shows one on the Failover page. It is applied live, without a restart.
 
 The gap between `fence_timeout` and `node_timeout` is the safety margin: it must
 cover the time a failing node needs to actually stop its containers. Fifteen

@@ -200,6 +200,22 @@ pub struct FailoverConfig {
     /// How often the leader probes the other nodes.
     #[serde(with = "humantime_serde", default = "default_probe_interval")]
     pub probe_interval: Duration,
+
+    /// How long a container gets to stop cleanly before it is killed, for
+    /// services that do not set their own `stop_grace_period`. Counts against
+    /// the margin between `fence_timeout` and `node_timeout`.
+    #[serde(with = "humantime_serde", default = "default_stop_grace")]
+    pub stop_grace: Duration,
+}
+
+/// Docker's own default is 10 seconds, which is short for a database.
+pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
+
+/// Longest `failover.stop_grace` accepted.
+pub const MAX_STOP_GRACE: Duration = Duration::from_secs(600);
+
+fn default_stop_grace() -> Duration {
+    DEFAULT_STOP_GRACE
 }
 
 fn default_node_timeout() -> Duration {
@@ -220,22 +236,31 @@ impl Default for FailoverConfig {
             node_timeout: default_node_timeout(),
             fence_timeout: default_fence_timeout(),
             probe_interval: default_probe_interval(),
+            stop_grace: default_stop_grace(),
         }
     }
 }
 
 impl FailoverConfig {
     /// A warning, not an error, when a fence may not finish before the leader
-    /// reschedules: stopping a container takes up to `stop_grace` after
+    /// reschedules: stopping a container takes up to its stop grace after
     /// `fence_timeout` has already run out, and that has to land inside
-    /// `node_timeout`. Containers with a longer `stop_grace_period` are
-    /// beyond what this can know.
-    pub fn fence_margin_warning(&self, stop_grace: Duration) -> Option<String> {
+    /// `node_timeout`. Checked against the configured `stop_grace`; pass the
+    /// longest per-service `stop_grace_period` to `fence_margin_warning_for`
+    /// to check that too.
+    pub fn fence_margin_warning(&self) -> Option<String> {
+        self.fence_margin_warning_for(self.stop_grace, "default stop grace")
+    }
+
+    /// As `fence_margin_warning`, for an arbitrary `stop_grace` described by
+    /// `what` (e.g. a service's own `stop_grace_period`).
+    pub fn fence_margin_warning_for(&self, stop_grace: Duration, what: &str) -> Option<String> {
         (self.fence_timeout + stop_grace >= self.node_timeout).then(|| {
             format!(
-                "failover.fence_timeout ({:?}) plus the default stop grace ({:?}) reaches \
+                "failover.fence_timeout ({:?}) plus the {what} ({:?}) reaches \
                  node_timeout ({:?}): a fence may still be stopping containers when the leader \
-                 reschedules them, giving one volume two writers",
+                 reschedules them, giving one volume two writers. Raise node_timeout or lower \
+                 fence_timeout or the stop grace",
                 self.fence_timeout, stop_grace, self.node_timeout
             )
         })

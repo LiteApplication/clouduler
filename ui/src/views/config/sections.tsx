@@ -33,6 +33,7 @@ import {
   SelectField,
   TextField,
 } from '../../components/FormFields';
+import { fenceMarginWarning } from '../../lib/validate';
 
 export interface SectionProps {
   draft: ClusterConfig;
@@ -1241,6 +1242,7 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
 export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
   const f = draft.failover;
   const set = (patch: Partial<ClusterConfig['failover']>) => setDraft({ ...draft, failover: { ...f, ...patch } });
+  const marginWarning = fenceMarginWarning(f);
   return (
     <div className="card">
       <DurationField
@@ -1267,6 +1269,19 @@ export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
         hint="How often the leader probes every node's reachability, e.g. 5s. Must be shorter than the fence timeout, so a node cannot be declared dead before it has had the chance to fence itself."
         disabled={disabled}
       />
+      <DurationField
+        id="fo-grace"
+        label="Stop grace"
+        value={f.stop_grace}
+        onChange={(stop_grace) => set({ stop_grace })}
+        hint="How long a container gets to stop cleanly before it is killed, e.g. 30s, for services that do not set their own stop_grace_period. Counts against the gap between the fence timeout and the node timeout. Applies live."
+        disabled={disabled}
+      />
+      {marginWarning && (
+        <div className="banner banner-warn" role="alert">
+          <Icon name="alert-circle" /> {marginWarning}
+        </div>
+      )}
     </div>
   );
 }
