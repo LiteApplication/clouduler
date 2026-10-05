@@ -254,6 +254,36 @@ async fn a_good_api_key_reaches_the_handler() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// The callback must reject a login this browser did not start before it
+/// does anything else, and clear the state cookie either way.
+#[tokio::test]
+async fn an_oidc_callback_without_the_matching_state_cookie_is_rejected() {
+    let h = harness().await;
+    for cookie in [None, Some("cl_oidc_state=other")] {
+        let mut req = Request::builder().uri("/auth/oidc/callback?code=c&state=abc");
+        if let Some(cookie) = cookie {
+            req = req.header("cookie", cookie);
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Nothing to clear when the browser sent no state cookie.
+        if cookie.is_some() {
+            let cleared = resp
+                .headers()
+                .get("set-cookie")
+                .expect("the state cookie is cleared")
+                .to_str()
+                .unwrap();
+            assert!(cleared.starts_with("cl_oidc_state=;"), "got {cleared}");
+        }
+    }
+}
+
 /// The ui logs in with a key and then opens SSE streams, which `EventSource`
 /// cannot put a bearer token on. So the key has to come back as a cookie the
 /// browser will attach by itself.

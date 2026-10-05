@@ -249,6 +249,10 @@ impl ApiServer {
         // forever.
         spawn_sync_cluster_config(state.clone());
 
+        // Neither store evicts on its own: sessions only when presented
+        // again, pending logins only when the cap is hit.
+        spawn_prune_expired(state.clone());
+
         Ok(Self {
             router: build_router(state.clone()),
             listen_addr: options.listen_addr,
@@ -266,6 +270,28 @@ impl ApiServer {
     pub fn state(&self) -> AppState {
         self.state.clone()
     }
+}
+
+/// How often expired sessions and unfinished OIDC logins are swept.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Periodically drops expired sessions and abandoned OIDC logins, until the
+/// daemon shuts down.
+fn spawn_prune_expired(state: AppState) {
+    let mut shutdown = state.shutdown.subscribe();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(PRUNE_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => return,
+            }
+            state.sessions.prune_expired().await;
+            if let Some(oidc) = state.oidc.read().await.as_ref() {
+                oidc.prune_expired().await;
+            }
+        }
+    });
 }
 
 /// Build the OIDC authenticator this config's `auth.oidc` section describes,

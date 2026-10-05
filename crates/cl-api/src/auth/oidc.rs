@@ -30,7 +30,16 @@ use crate::oidc::OIDC_CLIENT_SECRET;
 use super::{Identity, Role};
 
 /// How long an in-flight login may sit between redirect and callback.
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Most logins that may be in flight at once. `/auth/oidc/login` is
+/// unauthenticated, so without a cap a flood grows `pending` without bound.
+const MAX_PENDING_LOGINS: usize = 1024;
+/// Name of the cookie that ties a login's `state` to the browser that started
+/// it. Without it the callback url alone completes a login, so an attacker
+/// could start one with their own account and hand the url to a victim.
+pub const STATE_COOKIE_NAME: &str = "cl_oidc_state";
+/// Path scope of the state cookie: only the callback needs it.
+pub const STATE_COOKIE_PATH: &str = "/auth/oidc/callback";
 
 pub struct OidcSettings {
     pub issuer: String,
@@ -48,6 +57,46 @@ struct PendingLogin {
     started_at: Instant,
 }
 
+/// The in-flight logins, keyed by `state`, bounded by `MAX_PENDING_LOGINS`.
+#[derive(Default)]
+struct PendingLogins {
+    logins: Mutex<HashMap<String, PendingLogin>>,
+}
+
+impl PendingLogins {
+    /// Record a login, or reject it with 429 when the map is full of
+    /// unexpired entries. Rejecting rather than evicting the oldest is
+    /// deliberate: eviction would let a flood of throwaway logins push real
+    /// users' in-flight ones out, while rejecting only costs the flooder's own
+    /// new attempts until old entries expire. Expired entries are only swept
+    /// when the cap is hit, so the common path stays O(1).
+    async fn insert(&self, state: String, login: PendingLogin) -> Result<(), ApiError> {
+        let mut logins = self.logins.lock().await;
+        if logins.len() >= MAX_PENDING_LOGINS {
+            logins.retain(|_, login| login.started_at.elapsed() <= LOGIN_TIMEOUT);
+            if logins.len() >= MAX_PENDING_LOGINS {
+                return Err(ApiError::TooManyRequests(
+                    "too many logins in progress, try again shortly".into(),
+                ));
+            }
+        }
+        logins.insert(state, login);
+        Ok(())
+    }
+
+    async fn take(&self, state: &str) -> Option<PendingLogin> {
+        self.logins.lock().await.remove(state)
+    }
+
+    /// Drop every login that outlived `LOGIN_TIMEOUT`.
+    async fn prune_expired(&self) {
+        self.logins
+            .lock()
+            .await
+            .retain(|_, login| login.started_at.elapsed() <= LOGIN_TIMEOUT);
+    }
+}
+
 pub struct OidcAuthenticator {
     settings: OidcSettings,
     http: openidconnect::reqwest::Client,
@@ -58,7 +107,7 @@ pub struct OidcAuthenticator {
     /// struct field without redeclaring that whole generic signature. Cheap
     /// to rebuild since it does no IO, unlike discovery itself.
     metadata: OnceCell<CoreProviderMetadata>,
-    pending: Mutex<HashMap<String, PendingLogin>>,
+    pending: PendingLogins,
     /// Where the client secret actually lives: a sealed cluster secret,
     /// opened fresh on every login rather than resolved once at startup, so
     /// it can be set or rotated from the web ui while the api is already
@@ -84,7 +133,7 @@ impl OidcAuthenticator {
             settings,
             http,
             metadata: OnceCell::new(),
-            pending: Mutex::new(HashMap::new()),
+            pending: PendingLogins::default(),
             cluster,
             key,
         })
@@ -135,8 +184,9 @@ impl OidcAuthenticator {
             .await
     }
 
-    /// Start a login: returns the url to redirect the browser to.
-    pub async fn start_login(&self) -> Result<String, ApiError> {
+    /// Start a login: returns the url to redirect the browser to and the
+    /// `state`, which the caller must also bind to the browser in a cookie.
+    pub async fn start_login(&self) -> Result<(String, String), ApiError> {
         let metadata = self.metadata().await?;
         let redirect = RedirectUrl::new(self.settings.redirect_url.clone())
             .map_err(|e| ApiError::Internal(format!("bad redirect url: {e}")))?;
@@ -158,23 +208,25 @@ impl OidcAuthenticator {
         }
         let (auth_url, csrf_token, nonce) = request.set_pkce_challenge(pkce_challenge).url();
 
-        self.gc_expired().await;
-        self.pending.lock().await.insert(
-            csrf_token.secret().clone(),
-            PendingLogin {
-                nonce,
-                pkce_verifier,
-                started_at: Instant::now(),
-            },
-        );
+        let state = csrf_token.secret().clone();
+        self.pending
+            .insert(
+                state.clone(),
+                PendingLogin {
+                    nonce,
+                    pkce_verifier,
+                    started_at: Instant::now(),
+                },
+            )
+            .await?;
 
-        Ok(auth_url.to_string())
+        Ok((auth_url.to_string(), state))
     }
 
     /// Finish a login from the callback's `code` and `state`.
     pub async fn finish_login(&self, code: String, state: String) -> Result<Identity, ApiError> {
         let pending =
-            self.pending.lock().await.remove(&state).ok_or_else(|| {
+            self.pending.take(&state).await.ok_or_else(|| {
                 ApiError::Unauthenticated("unknown or expired login state".into())
             })?;
         if pending.started_at.elapsed() > LOGIN_TIMEOUT {
@@ -260,10 +312,30 @@ impl OidcAuthenticator {
             .map(str::to_string)
     }
 
-    async fn gc_expired(&self) {
-        let mut pending = self.pending.lock().await;
-        pending.retain(|_, login| login.started_at.elapsed() <= LOGIN_TIMEOUT);
+    /// Drop in-flight logins nobody came back for.
+    pub async fn prune_expired(&self) {
+        self.pending.prune_expired().await;
     }
+}
+
+/// Check the callback's `state` against the cookie set when the login began.
+/// Runs before any token exchange: a missing or different cookie means this
+/// browser did not start the login.
+pub fn check_state_cookie(cookie: Option<&str>, state: &str) -> Result<(), ApiError> {
+    match cookie {
+        Some(cookie) if constant_time_eq(cookie.as_bytes(), state.as_bytes()) => Ok(()),
+        _ => Err(ApiError::Unauthenticated(
+            "login state does not match this browser, start the login again".into(),
+        )),
+    }
+}
+
+/// Length-aware constant-time byte comparison, for the csrf state.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn decode_jwt_payload(compact: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -287,6 +359,77 @@ mod tests {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{}");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json);
         format!("{header}.{payload}.sig")
+    }
+
+    fn login(age: Duration) -> PendingLogin {
+        PendingLogin {
+            nonce: Nonce::new("n".into()),
+            pkce_verifier: PkceCodeVerifier::new("v".into()),
+            started_at: Instant::now().checked_sub(age).expect("monotonic clock"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_pending_map_rejects_with_429() {
+        let pending = PendingLogins::default();
+        for i in 0..MAX_PENDING_LOGINS {
+            pending
+                .insert(format!("s{i}"), login(Duration::ZERO))
+                .await
+                .expect("room left");
+        }
+        let err = pending
+            .insert("extra".into(), login(Duration::ZERO))
+            .await
+            .expect_err("full");
+        assert!(matches!(err, ApiError::TooManyRequests(_)));
+        use axum::response::IntoResponse;
+        assert_eq!(
+            err.into_response().status(),
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        // The real entries were not evicted to make room.
+        assert!(pending.take("s0").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_full_map_of_expired_logins_makes_room() {
+        let pending = PendingLogins::default();
+        for i in 0..MAX_PENDING_LOGINS {
+            pending
+                .insert(format!("s{i}"), login(LOGIN_TIMEOUT * 2))
+                .await
+                .unwrap();
+        }
+        pending
+            .insert("fresh".into(), login(Duration::ZERO))
+            .await
+            .expect("expired entries are swept at the cap");
+        assert!(pending.take("fresh").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn pruning_drops_only_expired_logins() {
+        let pending = PendingLogins::default();
+        pending
+            .insert("old".into(), login(LOGIN_TIMEOUT * 2))
+            .await
+            .unwrap();
+        pending
+            .insert("new".into(), login(Duration::ZERO))
+            .await
+            .unwrap();
+        pending.prune_expired().await;
+        assert!(pending.take("old").await.is_none());
+        assert!(pending.take("new").await.is_some());
+    }
+
+    #[test]
+    fn the_state_cookie_must_be_present_and_equal() {
+        assert!(check_state_cookie(Some("abc"), "abc").is_ok());
+        assert!(check_state_cookie(None, "abc").is_err());
+        assert!(check_state_cookie(Some("abd"), "abc").is_err());
+        assert!(check_state_cookie(Some("ab"), "abc").is_err());
     }
 
     #[test]

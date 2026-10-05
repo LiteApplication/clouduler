@@ -9,6 +9,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 
 use crate::auth::keys::{self, ApiKeyStore};
+use crate::auth::oidc::{check_state_cookie, LOGIN_TIMEOUT, STATE_COOKIE_NAME, STATE_COOKIE_PATH};
 use crate::auth::session::COOKIE_NAME;
 use crate::auth::{Identity, Role};
 use crate::error::ApiError;
@@ -31,7 +32,12 @@ async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespo
     if let Some(cookie) = jar.get(COOKIE_NAME) {
         state.sessions.remove(cookie.value()).await;
     }
-    let cleared = Cookie::build((COOKIE_NAME, "")).path("/").build();
+    let cleared = Cookie::build((COOKIE_NAME, ""))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .build();
     (jar.remove(cleared), StatusCode::OK)
 }
 
@@ -84,13 +90,32 @@ fn session_cookie(session_id: String, ttl: std::time::Duration) -> Cookie<'stati
         .build()
 }
 
-async fn login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+/// The cookie that binds a login's `state` to the browser that started it.
+/// `Lax` is enough: the provider's redirect back is a top-level GET, which
+/// carries it. The state is random and only meaningful server side, so the
+/// cookie holds it as is.
+fn state_cookie(state: String) -> Cookie<'static> {
+    Cookie::build((STATE_COOKIE_NAME, state))
+        .path(STATE_COOKIE_PATH)
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(::cookie::time::Duration::seconds(
+            LOGIN_TIMEOUT.as_secs() as i64
+        ))
+        .build()
+}
+
+async fn login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, ApiError> {
     let oidc_guard = state.oidc.read().await;
     let oidc = oidc_guard
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("oidc is not configured".into()))?;
-    let url = oidc.start_login().await?;
-    Ok(Redirect::to(&url))
+    let (url, login_state) = oidc.start_login().await?;
+    Ok((jar.add(state_cookie(login_state)), Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
@@ -103,7 +128,22 @@ async fn callback(
     State(state): State<AppState>,
     Query(params): Query<CallbackParams>,
     jar: CookieJar,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<(CookieJar, Redirect), (CookieJar, ApiError)> {
+    // One shot either way: a state cookie is never reused.
+    let cookie_state = jar.get(STATE_COOKIE_NAME).map(|c| c.value().to_string());
+    let jar = jar.remove(state_cookie(String::new()));
+    match finish(&state, params, cookie_state).await {
+        Ok(session) => Ok((jar.add(session), Redirect::to("/"))),
+        Err(e) => Err((jar, e)),
+    }
+}
+
+async fn finish(
+    state: &AppState,
+    params: CallbackParams,
+    cookie_state: Option<String>,
+) -> Result<Cookie<'static>, ApiError> {
+    check_state_cookie(cookie_state.as_deref(), &params.state)?;
     let oidc_guard = state.oidc.read().await;
     let oidc = oidc_guard
         .as_ref()
@@ -112,6 +152,5 @@ async fn callback(
     drop(oidc_guard);
     let session_ttl = state.cluster_config.read().await.auth.session_ttl;
     let session_id = state.sessions.create(identity, session_ttl).await;
-    let cookie = session_cookie(session_id, session_ttl);
-    Ok((jar.add(cookie), Redirect::to("/")))
+    Ok(session_cookie(session_id, session_ttl))
 }

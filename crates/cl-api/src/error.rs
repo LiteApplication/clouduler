@@ -21,6 +21,8 @@ pub enum ApiError {
     /// may be later. Docker being down is the case that matters: the rest of
     /// the api keeps working, container detail does not.
     Unavailable(String),
+    /// Too much of something is already in flight; try again shortly.
+    TooManyRequests(String),
     /// This node is not the leader. Carries the leader's address so the
     /// caller can retry there directly.
     NotLeader {
@@ -45,6 +47,7 @@ impl ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::NotLeader { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -58,6 +61,7 @@ impl ApiError {
             ApiError::NotFound(m) => m.clone(),
             ApiError::Conflict(m) => m.clone(),
             ApiError::Unavailable(m) => m.clone(),
+            ApiError::TooManyRequests(m) => m.clone(),
             ApiError::NotLeader { .. } => "not the leader".to_string(),
             ApiError::Internal(m) => m.clone(),
         }

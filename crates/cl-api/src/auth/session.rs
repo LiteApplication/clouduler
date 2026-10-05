@@ -53,6 +53,16 @@ impl SessionStore {
         }
     }
 
+    /// Drop every expired session. `get` only evicts a session when it is
+    /// presented again, so one never seen again would otherwise stay forever.
+    pub async fn prune_expired(&self) {
+        let now = Instant::now();
+        self.sessions
+            .lock()
+            .await
+            .retain(|_, session| session.expires_at > now);
+    }
+
     pub async fn remove(&self, id: &str) {
         self.sessions.lock().await.remove(id);
     }
@@ -111,5 +121,17 @@ mod tests {
         let id = store.create(identity(), Duration::from_secs(60)).await;
         store.remove(&id).await;
         assert!(store.get(&id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pruning_drops_only_expired_sessions() {
+        let store = SessionStore::new();
+        let old = store.create(identity(), Duration::from_millis(1)).await;
+        let live = store.create(identity(), Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        store.prune_expired().await;
+        let sessions = store.sessions.lock().await;
+        assert!(!sessions.contains_key(&old));
+        assert!(sessions.contains_key(&live));
     }
 }
