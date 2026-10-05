@@ -1002,6 +1002,24 @@ cloudflare:
     }
 
     #[test]
+    fn a_fence_that_may_outlast_node_timeout_is_warned_about() {
+        use crate::cluster::FailoverConfig;
+        use std::time::Duration;
+        let grace = Duration::from_secs(30);
+        let f = |fence, node| FailoverConfig {
+            fence_timeout: Duration::from_secs(fence),
+            node_timeout: Duration::from_secs(node),
+            probe_interval: Duration::from_secs(5),
+        };
+        assert!(f(30, 60).fence_margin_warning(grace).is_some());
+        assert!(f(29, 60).fence_margin_warning(grace).is_none());
+        // The defaults (15s / 30s) are the same trap, and say so.
+        assert!(FailoverConfig::default()
+            .fence_margin_warning(grace)
+            .is_some());
+    }
+
+    #[test]
     fn failover_defaults_are_ordered_correctly() {
         let cfg = ClusterConfig::parse(BASE).expect("valid");
         let f = &cfg.failover;

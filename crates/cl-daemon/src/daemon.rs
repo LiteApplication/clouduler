@@ -9,14 +9,14 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, FailoverConfig, Node, NodeRole};
 use cl_raft::ids::node_id;
-use cl_raft::liveness::{Fence, FenceAction};
+use cl_raft::liveness::{Fence, FenceAction, FenceState};
 use cl_raft::node::{ClusterNode, Options};
 use cl_raft::state::{Availability, NodeState, Request, Role};
 use cl_sched::materialize::Materializer;
 use cl_sched::Scheduler;
 use cl_secret::ClusterKey;
 use openraft::BasicNode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tracing::{debug, info, warn};
 
 /// How long to wait for dockerd at startup before carrying on without it.
@@ -126,13 +126,33 @@ pub async fn run(
             .run_failure_detector(failover.probe_interval, failover.node_timeout),
     );
 
+    if let Some(warning) = failover.fence_margin_warning(cl_sched::reconcile::DEFAULT_STOP_GRACE) {
+        warn!("{warning}");
+    }
+
+    // Closed to begin with unless this is a quick restart: see `Fence::new`
+    // and `Fence::resume`. The scheduler's first sweep lands about a second
+    // into the process, long before raft has caught up, and until then this
+    // node's idea of what runs here is whatever was true when it died.
+    let stamp_path = crate::quorum_stamp::path(&data_dir);
+    let fence = match crate::quorum_stamp::recent_age(
+        crate::quorum_stamp::read(&stamp_path),
+        crate::quorum_stamp::unix_now(),
+        failover.node_timeout,
+    ) {
+        Some(age) => {
+            info!(
+                ?age,
+                "restarted soon after last having a quorum, holding containers as they are"
+            );
+            Fence::resume(Instant::now(), age)
+        }
+        None => Fence::new(),
+    };
     // Shared between the fence watcher and the scheduler, which consults it
-    // before starting anything. Closed to begin with, matching `Fence::new`:
-    // the scheduler's first sweep lands about a second into the process, long
-    // before raft has caught up, and until then this node's idea of what runs
-    // here is whatever was true when it died.
-    let fenced = Arc::new(AtomicBool::new(true));
-    // Separate from `fenced` itself: `fenced` starts `true` purely as a
+    // before doing anything, as a `FenceState`.
+    let fenced = Arc::new(AtomicU8::new(fence.state().as_u8()));
+    // Separate from `fenced` itself: it starts `Closed` purely as a
     // starting default, not because quorum was checked and found missing.
     // The scheduler needs to tell those apart — see the gate closure below —
     // or its first sweep, which can easily land before `run_fence`'s first
@@ -142,6 +162,8 @@ pub async fn run(
     let fencing = tokio::spawn(run_fence(
         cluster.clone(),
         failover.clone(),
+        fence,
+        stamp_path,
         fenced.clone(),
         observed.clone(),
     ));
@@ -238,7 +260,7 @@ pub async fn run(
     let scheduler = tokio::spawn(scheduler.run(move || {
         gate_observed
             .load(Ordering::Relaxed)
-            .then(|| gate.load(Ordering::Relaxed))
+            .then(|| FenceState::from_u8(gate.load(Ordering::Relaxed)))
     }));
 
     // Built before the scheduler needs it, but idempotent and on a loop, so
@@ -647,28 +669,40 @@ pub fn load_node_keypair(cfg: &ClusterConfig) -> Option<cl_secret::NodeKeypair> 
 async fn run_fence(
     cluster: Arc<ClusterNode>,
     failover: FailoverConfig,
-    fenced: Arc<AtomicBool>,
+    mut fence: Fence,
+    stamp_path: PathBuf,
+    fenced: Arc<AtomicU8>,
     observed: Arc<AtomicBool>,
 ) {
     let quorum = cluster.quorum();
-    let mut fence = Fence::new();
     let mut ticker = tokio::time::interval(failover.probe_interval);
+    let mut last_stamp: Option<Instant> = None;
 
     loop {
         ticker.tick().await;
-        match fence.observe(quorum.has_quorum(), Instant::now(), failover.fence_timeout) {
+        let has_quorum = quorum.has_quorum();
+        // What a restart reads to decide whether to hold (see `quorum_stamp`),
+        // so a failed write only costs the next restart its closed start.
+        if has_quorum && last_stamp.is_none_or(|at| at.elapsed() >= failover.probe_interval) {
+            last_stamp = Some(Instant::now());
+            if let Err(e) = crate::quorum_stamp::write(&stamp_path, crate::quorum_stamp::unix_now())
+            {
+                warn!(error = %e, path = %stamp_path.display(), "cannot record the last quorum time");
+            }
+        }
+        match fence.observe(has_quorum, Instant::now(), failover.fence_timeout) {
             FenceAction::Fence => {
                 warn!(
                     timeout = ?failover.fence_timeout,
                     "no quorum, stopping local containers"
                 );
-                fenced.store(true, Ordering::Relaxed);
+                fenced.store(fence.state().as_u8(), Ordering::Relaxed);
             }
             FenceAction::Release => {
                 // Also the normal path on a healthy start: the fence opens on
                 // the first tick that sees a quorum.
                 info!("quorum confirmed, containers may start");
-                fenced.store(false, Ordering::Relaxed);
+                fenced.store(fence.state().as_u8(), Ordering::Relaxed);
             }
             FenceAction::None => {}
         }

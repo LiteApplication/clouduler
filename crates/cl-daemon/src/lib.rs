@@ -12,3 +12,4 @@ pub mod migration;
 pub mod overlay;
 pub mod placement;
 pub mod proxy;
+pub mod quorum_stamp;

@@ -224,6 +224,24 @@ impl Default for FailoverConfig {
     }
 }
 
+impl FailoverConfig {
+    /// A warning, not an error, when a fence may not finish before the leader
+    /// reschedules: stopping a container takes up to `stop_grace` after
+    /// `fence_timeout` has already run out, and that has to land inside
+    /// `node_timeout`. Containers with a longer `stop_grace_period` are
+    /// beyond what this can know.
+    pub fn fence_margin_warning(&self, stop_grace: Duration) -> Option<String> {
+        (self.fence_timeout + stop_grace >= self.node_timeout).then(|| {
+            format!(
+                "failover.fence_timeout ({:?}) plus the default stop grace ({:?}) reaches \
+                 node_timeout ({:?}): a fence may still be stopping containers when the leader \
+                 reschedules them, giving one volume two writers",
+                self.fence_timeout, stop_grace, self.node_timeout
+            )
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterMeta {

@@ -10,8 +10,9 @@ use std::time::Duration;
 use cl_docker::{ContainerSpec, ContainerState, Docker, DockerError, LABEL_INSTANCE};
 use cl_raft::ids::InstanceId;
 use cl_raft::state::{Assignment, DesiredState, UpdatePhase};
+use cl_raft::FenceState;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::progress::UpdateReporter;
@@ -83,6 +84,34 @@ pub struct Target {
     pub stop_grace: Duration,
 }
 
+/// Run a fence's stops all at once, skipping any not yet begun once
+/// `still_fenced` says the fence is gone. Other actions in `actions` are left
+/// alone: a fence batch is only ever stops.
+///
+/// `stop` is the real thing in `Reconciler::apply`, and a stand-in in tests.
+async fn stop_while_fenced<'a, F, Fut>(
+    actions: &'a [Action],
+    still_fenced: &(dyn Fn() -> bool + Sync),
+    stop: F,
+) where
+    F: Fn(&'a Action) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    futures::future::join_all(actions.iter().filter(|a| matches!(a, Action::Stop(_))).map(
+        |action| {
+            let stop = &stop;
+            async move {
+                if !still_fenced() {
+                    debug!(instance = %action.instance(), "fence released, not stopping");
+                    return;
+                }
+                stop(action).await;
+            }
+        },
+    ))
+    .await;
+}
+
 /// Docker's own default is 10 seconds, which is short for a database.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
 
@@ -92,10 +121,11 @@ pub const LABEL_REVISION: &str = "clouduler.revision";
 
 /// Work out what to do, given what the cluster wants and what docker has.
 ///
-/// `fenced` short circuits everything: a node that has lost quorum stops what
+/// `Closed` short circuits everything: a node that has lost quorum stops what
 /// it runs and starts nothing, because the rest of the cluster is about to hand
-/// its work to somebody else.
-pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<Action> {
+/// its work to somebody else. `Hold` changes nothing at all, since this node
+/// cannot yet tell whether its view of what it owns is still current.
+pub fn diff(targets: &[Target], actual: &[ContainerState], gate: FenceState) -> Vec<Action> {
     let running: BTreeMap<InstanceId, &ContainerState> = actual
         .iter()
         .filter_map(|c| {
@@ -104,7 +134,11 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], fenced: bool) -> Vec<
         })
         .collect();
 
-    if fenced {
+    if gate == FenceState::Hold {
+        return Vec::new();
+    }
+
+    if gate == FenceState::Closed {
         return running
             .iter()
             .filter(|(_, c)| c.running)
@@ -217,16 +251,35 @@ impl Reconciler {
 
     /// Apply the actions. One failure does not abort the rest: a single broken
     /// container must not stop the node reconciling everything else.
+    ///
+    /// `fencing` is set when `actions` is a fence's batch of stops, with a
+    /// check for whether the fence still stands. Those run concurrently, each
+    /// with its own grace period, so the fence takes as long as the slowest
+    /// container rather than all of them added up, and a release part way
+    /// through drops the stops not yet begun.
     pub async fn apply(
         &self,
         actions: &[Action],
         targets: &[Target],
         actual: &[ContainerState],
+        fencing: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<()> {
         let specs: BTreeMap<&InstanceId, &Target> = targets
             .iter()
             .map(|t| (&t.assignment.instance, t))
             .collect();
+
+        if let Some(still_fenced) = fencing {
+            stop_while_fenced(actions, still_fenced, |action| async {
+                let id = action.instance();
+                if let Err(e) = self.apply_one(action, specs.get(id).copied()).await {
+                    warn!(instance = %id, error = %e, "reconcile step failed");
+                }
+            })
+            .await;
+            self.reconcile_egress_attachments(targets, actual).await;
+            return Ok(());
+        }
 
         for action in actions {
             let id = action.instance();
@@ -637,7 +690,7 @@ mod tests {
     #[test]
     fn a_missing_container_is_created() {
         let targets = vec![target("web", 0, DesiredState::Running, 1)];
-        let actions = diff(&targets, &[], false);
+        let actions = diff(&targets, &[], FenceState::Open);
         assert_eq!(
             actions,
             vec![Action::Create(InstanceId::new("site", "web", 0))]
@@ -647,7 +700,7 @@ mod tests {
     #[test]
     fn a_stopped_assignment_creates_nothing() {
         let targets = vec![target("web", 0, DesiredState::Stopped, 1)];
-        assert!(diff(&targets, &[], false).is_empty());
+        assert!(diff(&targets, &[], FenceState::Open).is_empty());
     }
 
     #[test]
@@ -655,7 +708,7 @@ mod tests {
         let targets = vec![target("web", 0, DesiredState::Running, 1)];
         let actual = vec![container("web", 0, false, 1)];
         assert_eq!(
-            diff(&targets, &actual, false),
+            diff(&targets, &actual, FenceState::Open),
             vec![Action::Start(InstanceId::new("site", "web", 0))]
         );
     }
@@ -665,7 +718,7 @@ mod tests {
         let targets = vec![target("web", 0, DesiredState::Stopped, 1)];
         let actual = vec![container("web", 0, true, 1)];
         assert_eq!(
-            diff(&targets, &actual, false),
+            diff(&targets, &actual, FenceState::Open),
             vec![Action::Stop(InstanceId::new("site", "web", 0))]
         );
     }
@@ -674,7 +727,7 @@ mod tests {
     fn a_correct_container_needs_nothing() {
         let targets = vec![target("web", 0, DesiredState::Running, 1)];
         let actual = vec![container("web", 0, true, 1)];
-        assert!(diff(&targets, &actual, false).is_empty());
+        assert!(diff(&targets, &actual, FenceState::Open).is_empty());
     }
 
     #[test]
@@ -682,7 +735,7 @@ mod tests {
         let targets = vec![target("web", 0, DesiredState::Running, 2)];
         let actual = vec![container("web", 0, true, 1)];
         assert_eq!(
-            diff(&targets, &actual, false),
+            diff(&targets, &actual, FenceState::Open),
             vec![Action::Recreate(InstanceId::new("site", "web", 0))]
         );
     }
@@ -694,7 +747,7 @@ mod tests {
         let targets = vec![target("web", 0, DesiredState::Stopped, 2)];
         let actual = vec![container("web", 0, true, 1)];
         assert_eq!(
-            diff(&targets, &actual, false),
+            diff(&targets, &actual, FenceState::Open),
             vec![Action::Stop(InstanceId::new("site", "web", 0))]
         );
     }
@@ -705,7 +758,7 @@ mod tests {
         let mut actual = vec![container("web", 0, true, 1)];
         actual[0].labels.remove(LABEL_REVISION);
         assert_eq!(
-            diff(&targets, &actual, false),
+            diff(&targets, &actual, FenceState::Open),
             vec![Action::Recreate(InstanceId::new("site", "web", 0))]
         );
     }
@@ -714,7 +767,7 @@ mod tests {
     fn an_unassigned_container_is_removed() {
         let actual = vec![container("old", 0, true, 1)];
         assert_eq!(
-            diff(&[], &actual, false),
+            diff(&[], &actual, FenceState::Open),
             vec![Action::Remove(InstanceId::new("site", "old", 0))]
         );
     }
@@ -727,7 +780,7 @@ mod tests {
         ];
         let actual = vec![container("web", 0, true, 1), container("db", 0, false, 1)];
 
-        let actions = diff(&targets, &actual, true);
+        let actions = diff(&targets, &actual, FenceState::Closed);
         // Only the running one needs stopping, and nothing gets created.
         assert_eq!(
             actions,
@@ -745,8 +798,75 @@ mod tests {
 
         // The bad container is invisible to us, so the real one gets created.
         assert_eq!(
-            diff(&targets, &actual, false),
+            diff(&targets, &actual, FenceState::Open),
             vec![Action::Create(InstanceId::new("site", "web", 0))]
         );
+    }
+
+    #[test]
+    fn a_hold_changes_nothing() {
+        // A running container that is wanted, one that is not, a missing one
+        // and a stale one: a fence on hold touches none of them.
+        let targets = vec![
+            target("web", 0, DesiredState::Running, 1),
+            target("db", 0, DesiredState::Running, 1),
+        ];
+        let actual = vec![
+            container("web", 0, true, 1),
+            container("old", 0, true, 1),
+            container("cache", 0, false, 1),
+        ];
+        assert!(diff(&targets, &actual, FenceState::Hold).is_empty());
+    }
+
+    #[tokio::test]
+    async fn fence_stops_run_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let actions: Vec<Action> = (0..4)
+            .map(|i| Action::Stop(InstanceId::new("site", "web", i)))
+            .collect();
+        let done = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+
+        stop_while_fenced(&actions, &|| true, |_| async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            done.fetch_add(1, Ordering::Relaxed);
+        })
+        .await;
+
+        assert_eq!(done.load(Ordering::Relaxed), 4);
+        // Run one after another these would take 400ms.
+        assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
+    #[tokio::test]
+    async fn fence_stops_not_yet_begun_are_dropped_once_released() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let actions: Vec<Action> = (0..3)
+            .map(|i| Action::Stop(InstanceId::new("site", "web", i)))
+            .collect();
+        let checks = AtomicUsize::new(0);
+        let stopped = AtomicUsize::new(0);
+
+        // Released after the first stop has been allowed.
+        stop_while_fenced(
+            &actions,
+            &|| checks.fetch_add(1, Ordering::Relaxed) < 1,
+            |_| async {
+                stopped.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await;
+
+        assert_eq!(stopped.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_released_fence_stops_nothing() {
+        let actions = vec![Action::Stop(InstanceId::new("site", "web", 0))];
+        stop_while_fenced(&actions, &|| false, |_| async {
+            panic!("stopped under a released fence")
+        })
+        .await;
     }
 }

@@ -20,6 +20,7 @@ use cl_raft::state::{
     base64_encode, ClusterState, DesiredState, NodeState, Request, UpdatePhase,
     CRASH_MOVE_RETENTION_SECS,
 };
+use cl_raft::FenceState;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -158,31 +159,36 @@ impl Scheduler {
         }
     }
 
-    /// Run until cancelled. `fenced` reports whether this node has lost quorum
+    /// Run until cancelled. `fence` reports whether this node has lost quorum
     /// long enough to give up its containers — `None` when that has not been
     /// determined yet (e.g. the first sweep after this node's own restart,
     /// which can easily land before the fence's own first tick). A pass that
     /// lands during `None` does nothing at all: guessing "fenced" would stop
     /// every container this node already correctly owns, only for the next
-    /// sweep to start them all back up once the fence catches up.
-    pub async fn run(self, fenced: impl Fn() -> Option<bool> + Send + 'static) {
+    /// sweep to start them all back up once the fence catches up. A pass
+    /// during `Hold` does nothing either, for the leader side as well.
+    pub async fn run(self, fence: impl Fn() -> Option<FenceState> + Send + Sync + 'static) {
         let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
         loop {
             ticker.tick().await;
 
-            let Some(fenced_now) = fenced() else {
+            let Some(gate) = fence() else {
                 continue;
             };
+            if gate == FenceState::Hold {
+                continue;
+            }
             let state = self.cluster.state().await;
 
-            if self.cluster.is_leader() && !fenced_now {
+            if self.cluster.is_leader() && gate == FenceState::Open {
                 if let Err(e) = self.schedule(&state).await {
                     warn!(error = %e, "scheduling pass failed");
                 }
                 self.expire_orphaned_updates(&state).await;
             }
 
-            if let Err(e) = self.reconcile(&state, fenced_now).await {
+            let still_fenced = || fence() == Some(FenceState::Closed);
+            if let Err(e) = self.reconcile(&state, gate, &still_fenced).await {
                 warn!(error = %e, "reconcile pass failed");
             }
         }
@@ -263,7 +269,13 @@ impl Scheduler {
     }
 
     /// Node side: make docker match the assignments naming this node.
-    async fn reconcile(&self, state: &ClusterState, fenced: bool) -> crate::Result<()> {
+    async fn reconcile(
+        &self,
+        state: &ClusterState,
+        gate: FenceState,
+        still_fenced: &(dyn Fn() -> bool + Sync),
+    ) -> crate::Result<()> {
+        let fenced = gate == FenceState::Closed;
         // No docker to reconcile against yet (or right now) is not an error:
         // this pass is simply skipped, and the next one tries again once
         // `docker` is reconnected.
@@ -293,7 +305,7 @@ impl Scheduler {
         let (targets, config_edits, refused) = self.targets(state)?;
         self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
-        let mut actions = reconcile::diff(&targets, &actual, fenced);
+        let mut actions = reconcile::diff(&targets, &actual, gate);
 
         // An instance that crash-looped everywhere it can run is restarted in
         // place on a growing delay instead of every sweep. Dropped before the
@@ -345,7 +357,11 @@ impl Scheduler {
             }
         }
 
-        reconciler.apply(&actions, &targets, &actual).await?;
+        // A fence's stops are the only batch that can be cut short by a release.
+        let fencing = fenced.then_some(still_fenced);
+        reconciler
+            .apply(&actions, &targets, &actual, fencing)
+            .await?;
         self.report_container_status(state, &actual).await;
         self.expire_updates(state, &actual).await;
 

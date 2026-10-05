@@ -21,7 +21,7 @@ pub use client::{client_for, Client};
 pub use contact::Contact;
 pub use error::{ClusterError, Result};
 pub use ids::{node_id, InstanceId, NodeId, VolumeId};
-pub use liveness::{Fence, FenceAction, LivenessTracker};
+pub use liveness::{Fence, FenceAction, FenceState, LivenessTracker};
 pub use network::{fixed_key, throwaway_key, KeyWatch};
 pub use node::{ClusterNode, Options};
 pub use quorum::{QuorumStatus, QuorumWatch};

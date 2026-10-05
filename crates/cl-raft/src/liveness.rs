@@ -63,12 +63,47 @@ impl LivenessTracker {
     }
 }
 
+/// What this node may do with containers right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceState {
+    /// Quorum is held: reconcile normally.
+    Open,
+    /// The daemon restarted shortly after last having a quorum, so the leader
+    /// cannot have moved this node's work yet. Whatever runs keeps running,
+    /// but nothing is created, started, stopped or removed until quorum is
+    /// confirmed, or `fence_timeout` runs out and this becomes `Closed`.
+    Hold,
+    /// No quorum, or none confirmed yet: running containers are stopped and
+    /// nothing is started.
+    Closed,
+}
+
+impl FenceState {
+    /// For sharing the state through an `AtomicU8`.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Hold => 1,
+            Self::Closed => 2,
+        }
+    }
+
+    /// Anything unrecognised reads as `Closed`, the safe answer.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Open,
+            1 => Self::Hold,
+            _ => Self::Closed,
+        }
+    }
+}
+
 /// Tracks how long this node has been without a quorum.
 #[derive(Debug)]
 pub struct Fence {
     /// When quorum was lost, or None while it is held.
     lost_at: Option<Instant>,
-    fenced: bool,
+    state: FenceState,
     /// Whether `observe` has run at least once. A caller needs this to tell
     /// "genuinely fenced" apart from "still closed because nobody has asked
     /// yet" — see `is_observed`.
@@ -82,7 +117,8 @@ pub enum FenceAction {
     None,
     /// Quorum has been gone too long: stop the containers running here.
     Fence,
-    /// Quorum is back: the reconcile loop may start containers again.
+    /// Quorum is back (from `Closed` or `Hold`): the reconcile loop may act
+    /// again.
     Release,
 }
 
@@ -105,7 +141,24 @@ impl Fence {
     pub fn new() -> Self {
         Self {
             lost_at: None,
-            fenced: true,
+            state: FenceState::Closed,
+            observed: false,
+        }
+    }
+
+    /// A fence for a daemon restarting `since_quorum` after this node last
+    /// had a quorum, which the caller has already checked is shorter than
+    /// `node_timeout`: the leader cannot have rescheduled this node's work
+    /// yet, so stopping it all would only cause an outage.
+    ///
+    /// The loss clock starts at that last quorum rather than at the restart.
+    /// The leader's `node_timeout` runs from the same moment, so a fence
+    /// counted from the restart could land after the leader has already moved
+    /// the work.
+    pub fn resume(now: Instant, since_quorum: Duration) -> Self {
+        Self {
+            lost_at: Some(now.checked_sub(since_quorum).unwrap_or(now)),
+            state: FenceState::Hold,
             observed: false,
         }
     }
@@ -119,23 +172,27 @@ impl Fence {
         self.observed = true;
         if has_quorum {
             self.lost_at = None;
-            if self.fenced {
-                self.fenced = false;
+            if self.state != FenceState::Open {
+                self.state = FenceState::Open;
                 return FenceAction::Release;
             }
             return FenceAction::None;
         }
 
         let lost_at = *self.lost_at.get_or_insert(now);
-        if !self.fenced && now.duration_since(lost_at) >= timeout {
-            self.fenced = true;
+        if self.state != FenceState::Closed && now.duration_since(lost_at) >= timeout {
+            self.state = FenceState::Closed;
             return FenceAction::Fence;
         }
         FenceAction::None
     }
 
+    pub fn state(&self) -> FenceState {
+        self.state
+    }
+
     pub fn is_fenced(&self) -> bool {
-        self.fenced
+        self.state == FenceState::Closed
     }
 
     /// Whether `observe` has been called yet. A fresh fence is closed
@@ -325,5 +382,82 @@ mod tests {
             fence.observe(false, at(base, 27), timeout),
             FenceAction::Fence
         );
+    }
+
+    #[test]
+    fn a_resumed_fence_holds_and_releases_on_quorum() {
+        let base = Instant::now();
+        let timeout = Duration::from_secs(30);
+        let mut fence = Fence::resume(base, Duration::from_secs(5));
+
+        // Not fenced, so nothing running is stopped, but not open either.
+        assert_eq!(fence.state(), FenceState::Hold);
+        assert!(!fence.is_fenced());
+        assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
+        assert_eq!(fence.state(), FenceState::Hold);
+
+        assert_eq!(
+            fence.observe(true, at(base, 3), timeout),
+            FenceAction::Release
+        );
+        assert_eq!(fence.state(), FenceState::Open);
+    }
+
+    #[test]
+    fn a_resumed_fence_closes_when_quorum_never_comes() {
+        let base = Instant::now();
+        let timeout = Duration::from_secs(30);
+        let mut fence = Fence::resume(base, Duration::ZERO);
+
+        assert_eq!(
+            fence.observe(false, at(base, 29), timeout),
+            FenceAction::None
+        );
+        assert_eq!(fence.state(), FenceState::Hold);
+        assert_eq!(
+            fence.observe(false, at(base, 30), timeout),
+            FenceAction::Fence
+        );
+        assert!(fence.is_fenced());
+        // and then stays closed like any other fence.
+        assert_eq!(
+            fence.observe(false, at(base, 40), timeout),
+            FenceAction::None
+        );
+    }
+
+    #[test]
+    fn a_resumed_fence_counts_from_the_last_quorum_not_the_restart() {
+        let base = Instant::now();
+        let timeout = Duration::from_secs(30);
+        // Quorum was last seen 20s before this restart, so only 10s remain.
+        let mut fence = Fence::resume(base, Duration::from_secs(20));
+
+        assert_eq!(
+            fence.observe(false, at(base, 9), timeout),
+            FenceAction::None
+        );
+        assert_eq!(
+            fence.observe(false, at(base, 10), timeout),
+            FenceAction::Fence
+        );
+    }
+
+    #[test]
+    fn a_fresh_fence_never_holds() {
+        // The closed start a stale or missing quorum record gets is unchanged.
+        let base = Instant::now();
+        let mut fence = Fence::new();
+        assert_eq!(fence.state(), FenceState::Closed);
+        fence.observe(false, base, Duration::from_secs(30));
+        assert_eq!(fence.state(), FenceState::Closed);
+    }
+
+    #[test]
+    fn the_state_survives_a_round_trip_through_a_byte() {
+        for s in [FenceState::Open, FenceState::Hold, FenceState::Closed] {
+            assert_eq!(FenceState::from_u8(s.as_u8()), s);
+        }
+        assert_eq!(FenceState::from_u8(200), FenceState::Closed);
     }
 }
