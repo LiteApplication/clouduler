@@ -307,7 +307,7 @@ service attached to it gets its outbound traffic forced out a named host
 interface, and nowhere else, instead of the node's normal route.
 
 Unlike most of this daemon's other subsystems, which only see a config
-change once restarted (`watch_cluster_config`, `crates/clouduler/src/daemon.rs`,
+change once restarted (`watch_cluster_config`, `crates/cl-daemon/src/daemon.rs`,
 literally logs "restart the daemon to apply it" when it writes a changed
 config to disk), the egress reconcile loop re-reads the config from raft
 every tick (`RECONCILE_INTERVAL`, currently 10s). Add a new `egress`
@@ -433,7 +433,7 @@ nodes:
           health_check_ip: 1.1.1.1
 ```
 
-Every reconcile tick (`crates/clouduler/src/egress.rs::effective_interface`),
+Every reconcile tick (`crates/cl-daemon/src/egress.rs::effective_interface`),
 clouduler sends a single ICMP echo to `health_check_ip` out `interface`
 (`cl_net::egress::probe_reachable`, which shells out to `ping -I`, the same
 "shell out to a real network tool" convention `iptables` and `ip` use
@@ -489,7 +489,7 @@ docker to build and own an ordinary bridge network
 docker's own MASQUERADE rule — which doesn't pin to one interface, unlike
 `egress`'s — does the rest. Brought up the same way `egress` networks are,
 on the same 10 second reconcile loop
-(`crates/clouduler/src/egress.rs::RECONCILE_INTERVAL`), so adding one or
+(`crates/cl-daemon/src/egress.rs::RECONCILE_INTERVAL`), so adding one or
 attaching a service to it needs no daemon restart.
 
 Unlike `egress`, the subnet is not left to docker's own IPAM: it is derived

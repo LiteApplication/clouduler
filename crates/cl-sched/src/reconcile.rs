@@ -259,7 +259,7 @@ impl Reconciler {
 
     /// Catches a container that should be attached to an egress network but
     /// isn't yet — almost always one that was already running before the
-    /// network existed to attach it to (`crates/clouduler/src/egress.rs` can
+    /// network existed to attach it to (`crates/cl-daemon/src/egress.rs` can
     /// bring a new `egress`/`wireguard` network up without a restart, but
     /// that alone does nothing for a container already running without it).
     /// `Action::Create`/`Action::Recreate` above are the only other place

@@ -1267,7 +1267,6 @@ dependencies = [
  "cl-daemon",
  "cl-init",
  "cl-raft",
- "cl-secret",
  "clap",
  "clap_complete",
  "rustls",
