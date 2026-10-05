@@ -91,6 +91,66 @@ pub fn verify_v2(
     )
 }
 
+/// Length of a v3 nonce in hex characters (16 random bytes).
+pub const NONCE_HEX_LEN: usize = 32;
+
+/// A fresh random v3 nonce: 16 random bytes, hex encoded. Make one per
+/// request and per retry.
+pub fn new_nonce() -> String {
+    let mut bytes = [0u8; NONCE_HEX_LEN / 2];
+    rand::fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Whether `nonce` is shaped like one from [`new_nonce`].
+pub fn valid_nonce(nonce: &str) -> bool {
+    nonce.len() == NONCE_HEX_LEN && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn v3_label(method: &str, path_and_query: &str, ts: u64, nonce: &str, body_sha256: &str) -> String {
+    format!("v3\n{method}\n{path_and_query}\n{ts}\n{nonce}\n{body_sha256}")
+}
+
+/// v3 signature: as [`sign_v2`] plus a per-request nonce, so two identical
+/// requests made in the same second still sign differently and the server's
+/// replay cache does not mistake the second for a replay of the first.
+pub fn sign_v3(
+    key: &ClusterKey,
+    method: &str,
+    path_and_query: &str,
+    ts: u64,
+    nonce: &str,
+    body_sha256: &str,
+) -> String {
+    sign(
+        key,
+        &v3_label(method, path_and_query, ts, nonce, body_sha256),
+    )
+}
+
+/// Verify a v3 signature, that `nonce` is well formed, and that `ts` is
+/// within [`SKEW_SECS`] of `now`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_v3(
+    key: &ClusterKey,
+    method: &str,
+    path_and_query: &str,
+    ts: u64,
+    nonce: &str,
+    body_sha256: &str,
+    presented: &str,
+    now: u64,
+) -> bool {
+    if ts.abs_diff(now) > SKEW_SECS || !valid_nonce(nonce) {
+        return false;
+    }
+    verify(
+        key,
+        &v3_label(method, path_and_query, ts, nonce, body_sha256),
+        presented,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +219,37 @@ mod tests {
         let h = body_sha256_hex(b"");
         let legacy = sign(&key, "/a");
         assert!(!verify_v2(&key, "GET", "/a", 1000, &h, &legacy, 1000));
+    }
+
+    #[test]
+    fn v3_roundtrips_and_binds_the_nonce() {
+        let key = ClusterKey::generate();
+        let h = body_sha256_hex(b"");
+        let (n1, n2) = (new_nonce(), new_nonce());
+        assert!(valid_nonce(&n1));
+        assert_ne!(n1, n2);
+        let sig = sign_v3(&key, "GET", "/a", 1000, &n1, &h);
+        assert!(verify_v3(&key, "GET", "/a", 1000, &n1, &h, &sig, 1000));
+        assert!(!verify_v3(&key, "GET", "/a", 1000, &n2, &h, &sig, 1000));
+        assert!(!verify_v3(&key, "GET", "/a", 1000, &n1, &h, &sig, 1061));
+    }
+
+    #[test]
+    fn v3_rejects_a_malformed_nonce() {
+        let key = ClusterKey::generate();
+        let h = body_sha256_hex(b"");
+        for bad in ["", "abc", &"g".repeat(32), &"a".repeat(33)] {
+            let sig = sign_v3(&key, "GET", "/a", 1000, bad, &h);
+            assert!(!verify_v3(&key, "GET", "/a", 1000, bad, &h, &sig, 1000));
+        }
+    }
+
+    #[test]
+    fn a_v2_signature_is_not_a_v3_signature() {
+        let key = ClusterKey::generate();
+        let h = body_sha256_hex(b"");
+        let n = new_nonce();
+        let v2 = sign_v2(&key, "GET", "/a", 1000, &h);
+        assert!(!verify_v3(&key, "GET", "/a", 1000, &n, &h, &v2, 1000));
     }
 }

@@ -7,8 +7,8 @@
 //! decrypt secrets or run containers that need them, so requiring it here is
 //! a consistent trust boundary, not a new one.
 //!
-//! The signature binds method, path and query, a timestamp and a body hash,
-//! and a given signature is accepted once. The legacy path-only header is
+//! The signature binds method, path and query, a timestamp, a per-request
+//! nonce and a body hash, and a given signature is accepted once. The legacy path-only header is
 //! ignored: it never expires, so honouring it would leave every captured
 //! request replayable forever.
 
@@ -18,7 +18,9 @@ use std::sync::Mutex;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use cl_secret::internal_auth::{self, SKEW_SECS};
-use cl_update::internal_client::{BODY_SHA256_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
+use cl_update::internal_client::{
+    BODY_SHA256_HEADER, NONCE_HEADER, SIGNATURE_HEADER, SIGNATURE_V3_HEADER, TIMESTAMP_HEADER,
+};
 
 use crate::error::ApiError;
 use crate::server::AppState;
@@ -38,6 +40,11 @@ impl ReplayCache {
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         seen.retain(|_, expires| *expires >= now);
         seen.insert(signature.to_string(), ts + SKEW_SECS).is_none()
+    }
+
+    /// Record `signature` without caring whether it was seen before.
+    fn mark(&self, signature: &str, ts: u64, now: u64) {
+        self.first_use(signature, ts, now);
     }
 }
 
@@ -69,13 +76,39 @@ fn header<'a>(parts: &'a Parts, name: &str) -> Result<&'a str, ApiError> {
         .ok_or_else(|| ApiError::Unauthenticated(format!("missing {name} header")))
 }
 
-/// Verify the v2 signature and burn it, returning the body hash it commits to.
+fn optional_header<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
+    parts.headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Log why an internal auth check failed, then build the 401. A signature
+/// that was already used is routine (a retry racing its first attempt), so it
+/// stays at debug; anything else is worth a warning.
+fn reject(parts: &Parts, scheme: &str, reason: &str, routine: bool) -> ApiError {
+    if routine {
+        tracing::debug!(scheme, method = %parts.method, uri = %parts.uri, "internal auth: {reason}");
+    } else {
+        tracing::warn!(scheme, method = %parts.method, uri = %parts.uri, "internal auth: {reason}");
+    }
+    ApiError::Unauthenticated(reason.into())
+}
+
+/// Verify the signature and burn it, returning the body hash it commits to.
+///
+/// v3 (nonce) is checked whenever its nonce and signature headers are
+/// present; only otherwise does this fall back to v2, which older clients
+/// still send. The v2 fallback can be removed once every node runs a
+/// v3-capable build. Both schemes are replay protected: v3 is keyed on its
+/// signature (which commits to the nonce), v2 on its own.
 async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiError> {
-    let signature = header(parts, SIGNATURE_HEADER)?;
     let body_sha256 = header(parts, BODY_SHA256_HEADER)?;
     let ts: u64 = header(parts, TIMESTAMP_HEADER)?
         .parse()
-        .map_err(|_| ApiError::Unauthenticated("bad internal timestamp".into()))?;
+        .map_err(|_| reject(parts, "-", "bad internal timestamp", false))?;
+    let v3 = optional_header(parts, NONCE_HEADER).zip(optional_header(parts, SIGNATURE_V3_HEADER));
+    let v2 = match v3 {
+        Some(_) => None,
+        None => Some(header(parts, SIGNATURE_HEADER)?),
+    };
 
     let key_guard = state.key.read().await;
     let key = key_guard
@@ -92,21 +125,56 @@ async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiErro
         .map(|pq| pq.as_str())
         .unwrap_or_else(|| parts.uri.path());
     let now = internal_auth::unix_now();
-    if !internal_auth::verify_v2(
-        key,
-        parts.method.as_str(),
-        path_and_query,
-        ts,
-        body_sha256,
-        signature,
-        now,
-    ) {
-        return Err(ApiError::Unauthenticated("bad internal signature".into()));
-    }
-    if !state.internal_replay.first_use(signature, ts, now) {
-        return Err(ApiError::Unauthenticated(
-            "internal signature already used".into(),
+    let method = parts.method.as_str();
+    let (scheme, replay_key) = match (v3, v2) {
+        (Some((nonce, signature)), _) => {
+            if !internal_auth::verify_v3(
+                key,
+                method,
+                path_and_query,
+                ts,
+                nonce,
+                body_sha256,
+                signature,
+                now,
+            ) {
+                return Err(reject(parts, "v3", "bad internal signature", false));
+            }
+            ("v3", format!("v3:{signature}"))
+        }
+        (None, Some(signature)) => {
+            if !internal_auth::verify_v2(
+                key,
+                method,
+                path_and_query,
+                ts,
+                body_sha256,
+                signature,
+                now,
+            ) {
+                return Err(reject(parts, "v2", "bad internal signature", false));
+            }
+            ("v2", format!("v2:{signature}"))
+        }
+        (None, None) => unreachable!("v2 header is required when v3 is absent"),
+    };
+    if !state.internal_replay.first_use(&replay_key, ts, now) {
+        return Err(reject(
+            parts,
+            scheme,
+            "internal signature already used",
+            true,
         ));
+    }
+    // A v3 client also sends a v2 signature for old servers. Burn it too, or
+    // a captured request could be replayed by stripping the v3 headers. Two
+    // legitimate v3 requests in one second share a v2 signature, so this only
+    // marks and never rejects. Reached only after v3 verified, so an
+    // unauthenticated caller cannot grow the cache.
+    if scheme == "v3" {
+        if let Some(v2_sig) = optional_header(parts, SIGNATURE_HEADER) {
+            state.internal_replay.mark(&format!("v2:{v2_sig}"), ts, now);
+        }
     }
     Ok(body_sha256.to_string())
 }

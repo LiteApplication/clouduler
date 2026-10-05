@@ -20,9 +20,19 @@ pub const BODY_SHA256_HEADER: &str = "X-Clouduler-Internal-Body-Sha256";
 /// v2 signature over method, path and query, timestamp and body hash.
 pub const SIGNATURE_HEADER: &str = "X-Clouduler-Internal-Signature-V2";
 
+/// Per-request random nonce the v3 signature commits to.
+pub const NONCE_HEADER: &str = "X-Clouduler-Internal-Nonce";
+/// v3 signature over method, path and query, timestamp, nonce and body hash.
+/// Unlike v2 it is unique per request even within one second.
+pub const SIGNATURE_V3_HEADER: &str = "X-Clouduler-Internal-Signature-V3";
+
 /// Every header an internal request carries, freshly signed. Each call makes a
-/// new timestamp, so a retry must call this again rather than reuse headers:
-/// the server rejects a signature it has already seen.
+/// new timestamp and nonce, so a retry must call this again rather than reuse
+/// headers: the server rejects a signature it has already seen.
+///
+/// The v2 signature is sent alongside v3 so a not-yet-upgraded server mid
+/// rollout still accepts the request. Drop it once every node runs a
+/// v3-capable build.
 pub fn auth_headers(
     key: &ClusterKey,
     method: &str,
@@ -31,7 +41,10 @@ pub fn auth_headers(
 ) -> Vec<(&'static str, String)> {
     let ts = cl_secret::internal_auth::unix_now();
     let body_sha256 = cl_secret::internal_auth::body_sha256_hex(body);
+    let nonce = cl_secret::internal_auth::new_nonce();
     let v2 = cl_secret::internal_auth::sign_v2(key, method, path_and_query, ts, &body_sha256);
+    let v3 =
+        cl_secret::internal_auth::sign_v3(key, method, path_and_query, ts, &nonce, &body_sha256);
     vec![
         (
             AUTH_HEADER,
@@ -40,6 +53,8 @@ pub fn auth_headers(
         (TIMESTAMP_HEADER, ts.to_string()),
         (BODY_SHA256_HEADER, body_sha256),
         (SIGNATURE_HEADER, v2),
+        (NONCE_HEADER, nonce),
+        (SIGNATURE_V3_HEADER, v3),
     ]
 }
 
@@ -87,4 +102,55 @@ pub async fn trigger_restart(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get<'a>(headers: &'a [(&'static str, String)], name: &str) -> &'a str {
+        headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("missing {name}"))
+    }
+
+    #[test]
+    fn auth_headers_carry_both_v2_and_v3_signatures() {
+        let key = ClusterKey::generate();
+        let h = auth_headers(&key, "GET", "/a?b=1", b"");
+        let ts: u64 = get(&h, TIMESTAMP_HEADER).parse().unwrap();
+        let body = get(&h, BODY_SHA256_HEADER);
+        let nonce = get(&h, NONCE_HEADER);
+        let now = ts;
+        assert!(cl_secret::internal_auth::verify_v2(
+            &key,
+            "GET",
+            "/a?b=1",
+            ts,
+            body,
+            get(&h, SIGNATURE_HEADER),
+            now
+        ));
+        assert!(cl_secret::internal_auth::verify_v3(
+            &key,
+            "GET",
+            "/a?b=1",
+            ts,
+            nonce,
+            body,
+            get(&h, SIGNATURE_V3_HEADER),
+            now
+        ));
+    }
+
+    #[test]
+    fn every_call_uses_a_fresh_nonce() {
+        let key = ClusterKey::generate();
+        let a = auth_headers(&key, "GET", "/a", b"");
+        let b = auth_headers(&key, "GET", "/a", b"");
+        assert_ne!(get(&a, NONCE_HEADER), get(&b, NONCE_HEADER));
+        assert_ne!(get(&a, SIGNATURE_V3_HEADER), get(&b, SIGNATURE_V3_HEADER));
+    }
 }
