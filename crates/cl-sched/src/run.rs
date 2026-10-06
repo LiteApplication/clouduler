@@ -113,6 +113,9 @@ pub struct Scheduler {
     /// started. An in-flight update on this node older than that was being
     /// driven by a process that no longer exists.
     booted_at: i64,
+    /// Rung when the fence releases, so a node that just regained quorum
+    /// starts its containers now instead of waiting out the sweep interval.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl Scheduler {
@@ -135,7 +138,14 @@ impl Scheduler {
             restarts: Arc::new(RwLock::new(BTreeMap::new())),
             backoffs: Arc::new(RwLock::new(BTreeMap::new())),
             booted_at: unix_now(),
+            wake: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Share the handle that cuts the wait for the next sweep short.
+    pub fn with_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
+        self.wake = wake;
+        self
     }
 
     /// Set the internal DNS zone containers search, so `web.blog` resolves
@@ -170,7 +180,10 @@ impl Scheduler {
     pub async fn run(self, fence: impl Fn() -> Option<FenceState> + Send + Sync + 'static) {
         let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = self.wake.notified() => {}
+            }
 
             let Some(gate) = fence() else {
                 continue;

@@ -159,6 +159,7 @@ pub async fn run(
     // tick, reads "fenced" and stops every container this node already owns,
     // only to start them all back up a sweep later once the fence catches up.
     let observed = Arc::new(AtomicBool::new(false));
+    let wake = Arc::new(tokio::sync::Notify::new());
     let fencing = tokio::spawn(run_fence(
         cluster.clone(),
         failover.clone(),
@@ -166,6 +167,7 @@ pub async fn run(
         stamp_path,
         fenced.clone(),
         observed.clone(),
+        wake.clone(),
     ));
 
     // The api comes up before docker does, and picks the client up whenever it
@@ -254,7 +256,8 @@ pub async fn run(
         cfg.clone(),
         pulling.clone(),
     )
-    .with_zone(cl_net::dns::zone_origin(&cfg));
+    .with_zone(cl_net::dns::zone_origin(&cfg))
+    .with_wake(wake);
     let gate = fenced.clone();
     let gate_observed = observed.clone();
     let scheduler = tokio::spawn(scheduler.run(move || {
@@ -673,8 +676,10 @@ async fn run_fence(
     stamp_path: PathBuf,
     fenced: Arc<AtomicU8>,
     observed: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
 ) {
     let quorum = cluster.quorum();
+    let mut lost_since: Option<Instant> = None;
     let mut ticker = tokio::time::interval(failover.probe_interval);
     let mut last_stamp: Option<Instant> = None;
 
@@ -690,6 +695,19 @@ async fn run_fence(
                 warn!(error = %e, path = %stamp_path.display(), "cannot record the last quorum time");
             }
         }
+        // The countdown starts at the first miss, so say when that was: the
+        // fence warning only appears once the whole timeout has passed.
+        match (has_quorum, lost_since) {
+            (false, None) => {
+                lost_since = Some(Instant::now());
+                warn!(timeout = ?failover.fence_timeout, "quorum lost, fencing if it stays gone");
+            }
+            (true, Some(at)) => {
+                lost_since = None;
+                info!(after = ?at.elapsed(), "quorum regained");
+            }
+            _ => {}
+        }
         match fence.observe(has_quorum, Instant::now(), failover.fence_timeout) {
             FenceAction::Fence => {
                 warn!(
@@ -703,6 +721,7 @@ async fn run_fence(
                 // the first tick that sees a quorum.
                 info!("quorum confirmed, containers may start");
                 fenced.store(fence.state().as_u8(), Ordering::Relaxed);
+                wake.notify_one();
             }
             FenceAction::None => {}
         }

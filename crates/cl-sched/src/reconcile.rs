@@ -112,6 +112,10 @@ async fn stop_while_fenced<'a, F, Fut>(
     .await;
 }
 
+/// Allowed on top of a container's stop grace before a fence's stop is
+/// abandoned, for docker itself to answer.
+const FENCE_STOP_SLACK: Duration = Duration::from_secs(10);
+
 /// The built-in stop grace; the configured one is `failover.stop_grace`.
 pub const DEFAULT_STOP_GRACE: Duration = cl_config::DEFAULT_STOP_GRACE;
 
@@ -282,8 +286,14 @@ impl Reconciler {
         if let Some(still_fenced) = fencing {
             stop_while_fenced(actions, still_fenced, |action| async {
                 let id = action.instance();
-                if let Err(e) = self.apply_one(action, specs.get(id).copied()).await {
-                    warn!(instance = %id, error = %e, "reconcile step failed");
+                let target = specs.get(id).copied();
+                // One hung docker call must not hold the whole pass, and with
+                // it the start of everything else once the fence lifts.
+                let deadline = stop_timeout(target, self.stop_grace) + FENCE_STOP_SLACK;
+                match tokio::time::timeout(deadline, self.apply_one(action, target)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!(instance = %id, error = %e, "reconcile step failed"),
+                    Err(_) => warn!(instance = %id, ?deadline, "stop timed out, moving on"),
                 }
             })
             .await;
