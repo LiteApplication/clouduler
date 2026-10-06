@@ -137,6 +137,27 @@ pub async fn fetch_json<T: DeserializeOwned>(
 /// `RequireAdmin` check the same way it trusts it for the read-only
 /// forwards above.
 pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), ApiError> {
+    post_response(state, node, path).await.map(|_| ())
+}
+
+/// `post_empty`, decoding the answer as `T`.
+pub async fn post_json<T: DeserializeOwned>(
+    state: &AppState,
+    node: &str,
+    path: &str,
+) -> Result<T, ApiError> {
+    post_response(state, node, path)
+        .await?
+        .json::<T>()
+        .await
+        .map_err(|e| ApiError::Internal(format!("decoding {node}'s response: {e}")))
+}
+
+async fn post_response(
+    state: &AppState,
+    node: &str,
+    path: &str,
+) -> Result<reqwest::Response, ApiError> {
     let base = peer_base_url(state, node).await?;
     for attempt in 0.. {
         let resp = signed(
@@ -157,7 +178,7 @@ pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), 
             }
             return Err(ApiError::Unavailable(format!("{node} answered {status}")));
         }
-        return Ok(());
+        return Ok(resp);
     }
     unreachable!("retry_on_unavailable eventually returns false")
 }

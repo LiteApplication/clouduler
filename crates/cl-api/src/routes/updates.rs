@@ -20,6 +20,7 @@
 //! registry calls, not forty.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -395,11 +396,10 @@ struct Accepted {
 /// arrives over the ordinary `/api/events` state stream, and reads the same
 /// from whichever node the browser is talking to.
 ///
-/// The updates themselves run sequentially inside the spawned task, each
-/// waiting for the previous one's new container to be up. Each one takes its
-/// container down and lets the reconcile loop build a new one, so doing the
-/// whole cluster at once would stop every replica of a service
-/// simultaneously — the one thing a rolling update exists to avoid.
+/// The updates run inside the spawned task, one download and one restart at a
+/// time per node (see `roll_batch`). Each restart takes its container down and
+/// lets the reconcile loop build a new one, so replicas of one service never
+/// restart together — the one thing a rolling update exists to avoid.
 async fn apply(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -500,77 +500,116 @@ async fn apply_selection(
 /// and what it was pinned to before the update touched anything.
 type QueuedUpdate = (InstanceId, String, Option<String>);
 
-/// Runs the batch one instance at a time and stops at the first that goes
-/// wrong.
+/// Rolls the batch: each node works through its own instances in parallel
+/// with the others, and within a node one image downloads while one instance
+/// restarts. The next image is fetched while the previous instance comes up,
+/// but never two downloads or two restarts at once on the same node.
 ///
-/// A bad image would otherwise take down every replica in turn, which is the
-/// opposite of what rolling is for. On a failure or timeout the failed
-/// instance is put back on its previous digest (`rollback_target`), and every
-/// instance still queued is marked failed as cancelled, so nothing further is
-/// touched and the operator sees exactly where it stopped.
+/// Two instances of the same service never restart together, wherever they
+/// run: taking every replica down at once is what a rolling update exists to
+/// avoid.
+///
+/// The first failure stops the batch. A bad image would otherwise take down
+/// every replica in turn. The failed instance is put back on its previous
+/// digest (`rollback_target`) and every instance that has not started
+/// restarting is marked failed as cancelled, so nothing further is touched
+/// and the operator sees exactly where it stopped. Restarts already underway
+/// on other nodes finish (or fail and roll back) on their own.
 async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
-    let mut remaining: std::collections::VecDeque<QueuedUpdate> = queued.into();
-    while let Some((instance, node, pin_before)) = remaining.pop_front() {
-        let failure = match super::instances::update_instance(&worker, instance.clone()).await {
-            // `update_instance` returns once the old container is gone; the
-            // new one is the reconciler's to bring up (and, with a
-            // healthcheck, to see healthy). Wait for that before touching the
-            // next instance, so a service's replicas really do go down one at
-            // a time.
-            Ok(()) => match wait_for_update(&worker, &instance).await {
-                Some((UpdatePhase::Started, _)) => {
-                    info!(%instance, "updated");
-                    None
-                }
-                Some((_, error)) => Some(error.unwrap_or_else(|| "the update failed".into())),
-                None => Some("gave up waiting for the update to finish".to_string()),
-            },
-            // The instance was removed after being queued: nothing to roll
-            // back and nothing wrong with the image.
-            Err(ApiError::NotFound(why)) => {
-                warn!(%instance, %why, "instance disappeared before its update");
-                continue;
-            }
-            Err(e) => Some(e.to_string()),
-        };
+    let mut lanes: std::collections::BTreeMap<String, Vec<QueuedUpdate>> = Default::default();
+    let mut pending = std::collections::HashMap::new();
+    for item in queued {
+        pending.insert(item.0.clone(), item.1.clone());
+        lanes.entry(item.1.clone()).or_default().push(item);
+    }
+    let batch = Arc::new(Batch {
+        worker,
+        inner: std::sync::Mutex::new(BatchState {
+            failed_by: None,
+            pending,
+        }),
+        services: Default::default(),
+    });
 
-        let Some(reason) = failure else {
-            // Keep the instances still waiting from looking abandoned
-            // (`Scheduler` fails a record queued for too long).
-            for (waiting, waiting_node, _) in &remaining {
-                let still_queued = worker
-                    .cluster
-                    .state()
-                    .await
-                    .instance_updates
-                    .get(waiting)
-                    .is_some_and(|u| u.phase == UpdatePhase::Queued);
-                if still_queued {
-                    cl_sched::progress::submit(
-                        &worker.cluster,
-                        waiting,
-                        waiting_node,
-                        UpdatePhase::Queued,
-                        None,
-                    )
-                    .await;
-                }
-            }
-            continue;
+    let keepalive = tokio::spawn(keep_queued_alive(batch.clone()));
+    let lanes: Vec<_> = lanes
+        .into_values()
+        .map(|items| roll_node(batch.clone(), items))
+        .collect();
+    futures::future::join_all(lanes).await;
+    keepalive.abort();
+}
+
+/// State shared by every node's lane of one `roll_batch`.
+struct Batch {
+    worker: AppState,
+    inner: std::sync::Mutex<BatchState>,
+    /// One lock per (stack, service), held from an instance's restart until
+    /// it is up.
+    services: std::sync::Mutex<ServiceLocks>,
+}
+
+type ServiceLocks = std::collections::HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>;
+
+struct BatchState {
+    /// The instance whose failure halted the batch.
+    failed_by: Option<InstanceId>,
+    /// Instances that have not started restarting, and their nodes.
+    pending: std::collections::HashMap<InstanceId, String>,
+}
+
+impl Batch {
+    fn halted(&self) -> bool {
+        self.inner.lock().expect("batch lock").failed_by.is_some()
+    }
+
+    /// Takes `instance` off the waiting list; false when the batch already
+    /// cancelled it.
+    fn claim(&self, instance: &InstanceId) -> bool {
+        self.inner
+            .lock()
+            .expect("batch lock")
+            .pending
+            .remove(instance)
+            .is_some()
+    }
+
+    fn service_lock(&self, instance: &InstanceId) -> Arc<tokio::sync::Mutex<()>> {
+        self.services
+            .lock()
+            .expect("batch lock")
+            .entry((instance.stack.clone(), instance.service.clone()))
+            .or_default()
+            .clone()
+    }
+
+    /// Rolls `instance` back as far as the update got, records the failure,
+    /// and cancels everything that has not started restarting.
+    async fn fail(
+        &self,
+        instance: &InstanceId,
+        node: &str,
+        pin_before: Option<&str>,
+        reason: &str,
+    ) {
+        let cancelled: Vec<(InstanceId, String)> = {
+            let mut inner = self.inner.lock().expect("batch lock");
+            inner.failed_by.get_or_insert_with(|| instance.clone());
+            inner.pending.drain().collect()
         };
 
         warn!(%instance, %reason, "update failed, halting the rolling update");
+        let worker = &self.worker;
         let cluster_state = worker.cluster.state().await;
         let pin_now = cluster_state
             .assignments
-            .get(&instance)
+            .get(instance)
             .and_then(|a| a.image_digest.clone());
-        let previous = cluster_state.previous_image_digests.get(&instance).cloned();
+        let previous = cluster_state.previous_image_digests.get(instance).cloned();
         drop(cluster_state);
-        let note = match rollback_target(pin_before.as_deref(), pin_now.as_deref(), previous) {
+        let note = match rollback_target(pin_before, pin_now.as_deref(), previous) {
             Some(digest) => {
-                match super::instances::roll_back_instance(&worker, &instance, digest.clone()).await
-                {
+                match super::instances::roll_back_instance(worker, instance, digest.clone()).await {
                     Ok(()) => format!("rolled back to {digest}"),
                     Err(e) => format!("could not roll back to {digest}: {e}"),
                 }
@@ -579,14 +618,14 @@ async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
         };
         cl_sched::progress::submit(
             &worker.cluster,
-            &instance,
-            &node,
+            instance,
+            node,
             UpdatePhase::Failed,
             Some(format!("{reason} ({note})")),
         )
         .await;
 
-        for (cancelled, cancelled_node, _) in remaining.drain(..) {
+        for (cancelled, cancelled_node) in cancelled {
             cl_sched::progress::submit(
                 &worker.cluster,
                 &cancelled,
@@ -597,6 +636,128 @@ async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
                 )),
             )
             .await;
+        }
+    }
+}
+
+/// One node's share of the batch: a downloader and a restarter joined by a
+/// one-slot channel, so the next image is fetched while the previous
+/// instance restarts and at most one finished download waits its turn.
+async fn roll_node(batch: Arc<Batch>, items: Vec<QueuedUpdate>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(QueuedUpdate, String)>(1);
+
+    let downloader = async {
+        for item in items {
+            if batch.halted() {
+                break;
+            }
+            let (instance, node, pin_before) = &item;
+            match super::instances::pull_instance(&batch.worker, instance).await {
+                Ok(digest) => {
+                    // Downloaded, waiting for the restart slot: the old
+                    // container is still serving, and the record should say
+                    // it is waiting, not downloading.
+                    cl_sched::progress::submit(
+                        &batch.worker.cluster,
+                        instance,
+                        node,
+                        UpdatePhase::Queued,
+                        None,
+                    )
+                    .await;
+                    if tx.send((item, digest)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // The instance was removed after being queued: nothing
+                    // to roll back and nothing wrong with the image.
+                    if let ApiError::NotFound(why) = &e {
+                        warn!(%instance, %why, "instance disappeared before its update");
+                        batch.claim(instance);
+                        continue;
+                    }
+                    if batch.claim(instance) {
+                        batch
+                            .fail(instance, node, pin_before.as_deref(), &e.to_string())
+                            .await;
+                    }
+                    break;
+                }
+            }
+        }
+        drop(tx);
+    };
+
+    let restarter = async {
+        while let Some(((instance, node, pin_before), digest)) = rx.recv().await {
+            let lock = batch.service_lock(&instance);
+            let _service = lock.lock().await;
+            // Claimed only now: until here the batch may still cancel it.
+            if !batch.claim(&instance) {
+                continue;
+            }
+            let failure = match super::instances::replace_instance(&batch.worker, &instance, digest)
+                .await
+            {
+                // `replace_instance` returns once the old container is gone;
+                // the new one is the reconciler's to bring up (and, with a
+                // healthcheck, to see healthy). Hold the node's restart slot
+                // and the service until that has happened.
+                Ok(()) => match wait_for_update(&batch.worker, &instance).await {
+                    Some((UpdatePhase::Started, _)) => {
+                        info!(%instance, "updated");
+                        None
+                    }
+                    Some((_, error)) => Some(error.unwrap_or_else(|| "the update failed".into())),
+                    None => Some("gave up waiting for the update to finish".to_string()),
+                },
+                Err(ApiError::NotFound(why)) => {
+                    warn!(%instance, %why, "instance disappeared before its update");
+                    continue;
+                }
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(reason) = failure {
+                batch
+                    .fail(&instance, &node, pin_before.as_deref(), &reason)
+                    .await;
+            }
+        }
+    };
+
+    tokio::join!(downloader, restarter);
+}
+
+/// Keeps instances still waiting from looking abandoned (`Scheduler` fails a
+/// record queued for too long) while earlier ones take their time.
+async fn keep_queued_alive(batch: Arc<Batch>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let waiting: Vec<(InstanceId, String)> = batch
+            .inner
+            .lock()
+            .expect("batch lock")
+            .pending
+            .iter()
+            .map(|(i, n)| (i.clone(), n.clone()))
+            .collect();
+        let cluster_state = batch.worker.cluster.state().await;
+        for (instance, node) in waiting {
+            let still_queued = cluster_state
+                .instance_updates
+                .get(&instance)
+                .is_some_and(|u| u.phase == UpdatePhase::Queued);
+            if still_queued {
+                cl_sched::progress::submit(
+                    &batch.worker.cluster,
+                    &instance,
+                    &node,
+                    UpdatePhase::Queued,
+                    None,
+                )
+                .await;
+            }
         }
     }
 }

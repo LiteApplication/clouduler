@@ -45,6 +45,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/internal/{id}/logs", get(internal_logs))
         .route("/api/instances/internal/{id}/stats", get(internal_stats))
         .route("/api/instances/internal/{id}/update", post(internal_update))
+        .route("/api/instances/internal/{id}/pull", post(internal_pull))
+        .route(
+            "/api/instances/internal/{id}/replace",
+            post(internal_replace),
+        )
         .route(
             "/api/instances/internal/{id}/remove-container",
             post(internal_remove_container),
@@ -909,17 +914,61 @@ pub(crate) async fn update_instance(
     state: &AppState,
     instance: InstanceId,
 ) -> Result<(), ApiError> {
-    let cluster_state = state.cluster.state().await;
-    let assignment = cluster_state
-        .assignments
-        .get(&instance)
-        .ok_or_else(|| ApiError::NotFound(format!("no instance {instance}")))?;
-    if assignment.node != state.node_name {
-        let node = assignment.node.clone();
+    let node = owning_node(state, &instance).await?;
+    if node != state.node_name {
         return internal_peer::post_empty(state, &node, &internal_update_path(&instance)).await;
     }
-    drop(cluster_state);
     update_local(state, instance).await
+}
+
+/// The first half of an update, wherever the instance runs: downloads its
+/// image and returns the registry digest to pin. The old container keeps
+/// serving. `replace_instance` is the second half.
+///
+/// Split so a rolling update can download the next instance on a node while
+/// the previous one is restarting.
+pub(crate) async fn pull_instance(
+    state: &AppState,
+    instance: &InstanceId,
+) -> Result<String, ApiError> {
+    let node = owning_node(state, instance).await?;
+    if node != state.node_name {
+        let path = format!("/api/instances/internal/{instance}/pull");
+        let pulled: Pulled = internal_peer::post_json(state, &node, &path).await?;
+        return Ok(pulled.digest);
+    }
+    pull_local(state, instance).await
+}
+
+/// The second half of an update: pins `digest` and swaps the container.
+pub(crate) async fn replace_instance(
+    state: &AppState,
+    instance: &InstanceId,
+    digest: String,
+) -> Result<(), ApiError> {
+    let node = owning_node(state, instance).await?;
+    if node != state.node_name {
+        let query = serde_urlencoded::to_string(Pulled { digest }).unwrap_or_default();
+        let path = format!("/api/instances/internal/{instance}/replace?{query}");
+        return internal_peer::post_empty(state, &node, &path).await;
+    }
+    replace_local(state, instance, digest).await
+}
+
+async fn owning_node(state: &AppState, instance: &InstanceId) -> Result<String, ApiError> {
+    state
+        .cluster
+        .state()
+        .await
+        .assignments
+        .get(instance)
+        .map(|a| a.node.clone())
+        .ok_or_else(|| ApiError::NotFound(format!("no instance {instance}")))
+}
+
+#[derive(Deserialize, Serialize)]
+struct Pulled {
+    digest: String,
 }
 
 /// Pulls the instance's current image on this node, records the new digest
@@ -962,10 +1011,49 @@ async fn update_local_steps(
     instance: &InstanceId,
     progress: &cl_sched::UpdateReporter,
 ) -> Result<(), ApiError> {
+    let digest = pull_steps(state, instance, progress).await?;
+    replace_steps(state, instance, digest, progress).await
+}
+
+/// `pull_instance` on this node, recording a failure the way `update_local`
+/// does.
+async fn pull_local(state: &AppState, instance: &InstanceId) -> Result<String, ApiError> {
+    let progress = cl_sched::UpdateReporter::new(state.cluster.clone(), state.node_name.clone());
+    let result = pull_steps(state, instance, &progress).await;
+    if let Err(e) = &result {
+        progress
+            .report(instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
+            .await;
+    }
+    result
+}
+
+/// `replace_instance` on this node, recording a failure the way
+/// `update_local` does.
+async fn replace_local(
+    state: &AppState,
+    instance: &InstanceId,
+    digest: String,
+) -> Result<(), ApiError> {
+    let progress = cl_sched::UpdateReporter::new(state.cluster.clone(), state.node_name.clone());
+    let result = replace_steps(state, instance, digest, &progress).await;
+    if let Err(e) = &result {
+        progress
+            .report(instance, cl_raft::UpdatePhase::Failed, Some(e.to_string()))
+            .await;
+    }
+    result
+}
+
+async fn pull_steps(
+    state: &AppState,
+    instance: &InstanceId,
+    progress: &cl_sched::UpdateReporter,
+) -> Result<String, ApiError> {
     use cl_raft::UpdatePhase;
     let name = instance.container_name();
     let docker = state.docker().await?;
-    let running = docker
+    docker
         .inspect(&name)
         .await
         .map_err(ApiError::internal)?
@@ -1002,11 +1090,29 @@ async fn update_local_steps(
     cl_sched::pull_started(&state.pulling, instance).await;
     let pulled = docker.pull_as(&image, registries.for_image(&image)).await;
     cl_sched::pull_finished(&state.pulling, instance).await;
-    let digest = pulled.map_err(ApiError::internal)?;
+    pulled.map_err(ApiError::internal)
+}
+
+async fn replace_steps(
+    state: &AppState,
+    instance: &InstanceId,
+    digest: String,
+    progress: &cl_sched::UpdateReporter,
+) -> Result<(), ApiError> {
+    use cl_raft::UpdatePhase;
+    let name = instance.container_name();
+    let docker = state.docker().await?;
+    let running = docker
+        .inspect(&name)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("container {name} does not exist on this node"))
+        })?;
 
     // Remember what is running now, so a failed update can put it back. An
     // already-pinned instance has it recorded as the pin; an unpinned one
-    // does not, and the pull above has just moved its tag, so resolve the
+    // does not, and the pull has just moved its tag, so resolve the
     // running image's registry digest (by local image id, which the pull did
     // not touch) and pin that first. The pin the next request writes then
     // becomes the "previous" one.
@@ -1052,6 +1158,27 @@ async fn update_local_steps(
         .map_err(ApiError::internal)?;
     progress.report(instance, UpdatePhase::Starting, None).await;
     Ok(())
+}
+
+/// Node-to-node: downloads this node's own instance's image.
+async fn internal_pull(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Pulled>, ApiError> {
+    let digest = pull_local(&state, &parse_id(&id)?).await?;
+    Ok(Json(Pulled { digest }))
+}
+
+/// Node-to-node: pins the pulled digest and swaps this node's own container.
+async fn internal_replace(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(pulled): Query<Pulled>,
+) -> Result<StatusCode, ApiError> {
+    replace_local(&state, &parse_id(&id)?, pulled.digest).await?;
+    Ok(StatusCode::OK)
 }
 
 /// Node-to-node: updates this node's own container. The caller already

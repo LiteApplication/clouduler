@@ -250,8 +250,8 @@ export function Updates() {
 
   /**
    * Start updates. The server answers once every instance is queued in the
-   * replicated update record, and rolls through them one at a time from
-   * there; each step arrives here over the cluster state stream. The ids are
+   * replicated update record, and rolls through them from there (one download and
+   * one restart at a time per node); each step arrives here over the cluster state stream. The ids are
    * always sent explicitly — this view is looking at the answer already, and
    * letting the server recompute it would make it re-scan every registry
    * first.
@@ -325,7 +325,7 @@ export function Updates() {
 
       {inFlight.size > 0 && (
         <p className="banner banner-warn">
-          <span className="spinner" /> Updating {inFlight.size} instance(s), one at a time
+          <span className="spinner" /> Updating {inFlight.size} instance(s), one download and one restart at a time per node
           {active.length > 0 &&
             ` (${Object.entries(phaseCounts)
               .map(([phase, n]) => `${n} ${UPDATE_PHASE_LABEL[phase as keyof typeof UPDATE_PHASE_LABEL]}`)

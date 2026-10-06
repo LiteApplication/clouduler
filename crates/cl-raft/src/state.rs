@@ -794,7 +794,7 @@ pub struct InstanceUpdate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePhase {
-    /// Accepted, waiting for its turn: updates roll one instance at a time.
+    /// Accepted, waiting for its turn: per node, one image downloads and one instance restarts at a time.
     Queued,
     /// Downloading the new image while the old container keeps running.
     Pulling,
