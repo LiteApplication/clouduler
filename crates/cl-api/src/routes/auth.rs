@@ -2,7 +2,7 @@
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Redirect};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -128,13 +128,13 @@ async fn callback(
     State(state): State<AppState>,
     Query(params): Query<CallbackParams>,
     jar: CookieJar,
-) -> Result<(CookieJar, Redirect), (CookieJar, ApiError)> {
+) -> Response {
     // One shot either way: a state cookie is never reused.
     let cookie_state = jar.get(STATE_COOKIE_NAME).map(|c| c.value().to_string());
     let jar = jar.remove(state_cookie(String::new()));
     match finish(&state, params, cookie_state).await {
-        Ok(session) => Ok((jar.add(session), Redirect::to("/"))),
-        Err(e) => Err((jar, e)),
+        Ok(session) => (jar.add(session), Redirect::to("/")).into_response(),
+        Err(e) => (jar, e).into_response(),
     }
 }
 
