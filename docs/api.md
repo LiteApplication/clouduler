@@ -211,9 +211,18 @@ asking.
 
 The listing costs one registry round trip per *distinct image* across the
 cluster — the fan-out is per node, not per instance — so it is not something
-to poll. `apply` runs its updates sequentially on purpose: each one takes its
-container down and lets the reconcile loop build a new one, so running them
-concurrently would stop every replica of a service at once.
+to poll. `apply` rolls its updates rather than firing them all at once. Each
+node works through its own instances in parallel with the others, and within a
+node one image downloads while one instance restarts, so the next image is
+fetched while the previous container comes up. Two instances of the same service
+never restart together, wherever they run, because each restart takes the
+container down and lets the reconcile loop build a new one. The first failure
+rolls that instance back and cancels every instance that has not started
+restarting; restarts already underway on other nodes finish on their own.
+Instances waiting their turn show as `queued`.
+
+Node-to-node, the two halves of an update are
+`POST /api/instances/internal/:id/pull` and `.../replace`, with internal auth.
 
 `pin` only ever pins instances that have none. An instance already pinned had
 that decision made deliberately, and repointing it at whatever happens to be
@@ -295,7 +304,9 @@ through the normal `/api/config` flow, same as any other config section.
 `webhook/:token` authenticates by the token in the path rather than a header -
 see `docs/git-backup.md` for why - while `pull` authenticates the same
 HMAC-over-cluster-key way every other node-to-node call does, since the cli
-already holds that key. See `docs/git-backup.md`.
+already holds that key. Each such request carries a fresh random nonce that is
+part of the signature, so two identical requests made in the same second are not
+mistaken for a replay; a given signature is still accepted only once. See `docs/git-backup.md`.
 
 ## Restic backups
 

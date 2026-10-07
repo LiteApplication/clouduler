@@ -243,10 +243,7 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Rebalance { via, yes } => cl_cli::rebalance::run(&cfg, via.as_deref(), yes).await,
-        Command::Status => {
-            cl_cli::report::summary(&cfg);
-            Ok(())
-        }
+        Command::Status { via } => cl_cli::status::run(&cfg, via.as_deref()).await,
         Command::Logs {
             target,
             follow,

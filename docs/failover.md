@@ -24,7 +24,9 @@ right after an election are when probe results are least trustworthy.
 
 Every node watches its own quorum. Once it has been without one for longer than
 `fence_timeout`, it stops the containers it is running. When quorum returns, the
-reconcile loop starts them again.
+reconcile loop starts them again, immediately rather than at the next periodic
+sweep. Each stop made by a fence gives up after the container's stop grace plus
+10 seconds, so one hung docker call cannot hold up restarting everything else.
 
 A node needs this because it cannot tell a partition from a cluster that has
 moved on without it. If it kept running containers while the rest of the cluster

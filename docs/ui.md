@@ -56,7 +56,9 @@ Routes are declared in `src/App.tsx`:
   viewer with follow/tail/search and a live stats panel, both opened
   on-demand SSE subscriptions independent of the main state stream.
 - `/updates` — every container's running image digest against what its
-  registry currently serves, with per-row and bulk update actions, a "pin
+  registry currently serves, with filters, multi-select, per-row and bulk update
+  actions (instances queue and roll as described under Updates in the API
+  docs, and failed ones can be retried), a "pin
   running" action for instances that carry no pin, and a dialog for registry
   accounts (added, tested against the registry, and removed; passwords are
   write-only). Deliberately **not** polled: each load costs one registry

@@ -18,4 +18,5 @@ pub mod report;
 pub mod restore;
 pub mod secret;
 pub mod stack;
+pub mod status;
 pub mod update_cli;

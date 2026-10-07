@@ -218,8 +218,19 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Show cluster status.
-    Status,
+    /// Live overview of the cluster, meant to be the only command needed to
+    /// find out what is wrong: raft leader and quorum, every node (reachable,
+    /// availability, instance count), then everything that is off - unhealthy
+    /// instances with node, uptime, reason and the last log lines, stuck or
+    /// failed updates and migrations, failed backups and restores, failing
+    /// certificates or DNS records, unreachable nodes and lagging volumes.
+    /// Prints "all clear" when there is nothing to report.
+    Status {
+        /// Node to ask for the cluster's current state. Defaults to any
+        /// manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
     /// Stream a container's output, or every container in a stack.
     ///
     /// The target is either an instance id (`stack.service.index`, as shown

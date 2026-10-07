@@ -121,6 +121,19 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Re
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
 
+    if !print_problems(cfg, &state, &flags).await? {
+        println!("no unhealthy instances");
+    }
+    Ok(())
+}
+
+/// Prints every unhealthy instance and cluster-wide warning, returning whether
+/// anything was printed. Shared with `clouduler status`.
+pub(crate) async fn print_problems(
+    cfg: &ClusterConfig,
+    state: &ClusterState,
+    flags: &ShowFlags,
+) -> Result<bool> {
     let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
         format!(
             "loading the cluster key from {} to authenticate to the node(s) running this",
@@ -138,14 +151,14 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Re
         state
             .assignments
             .values()
-            .map(|a| row_for_assignment(cfg, &http, &key, &state, a)),
+            .map(|a| row_for_assignment(cfg, &http, &key, state, a)),
     )
     .await;
     for (stack, row) in fetched {
         rows.entry(stack).or_default().push(row);
     }
 
-    for (stack, row) in pending_rows(cfg, &state) {
+    for (stack, row) in pending_rows(cfg, state) {
         rows.entry(stack).or_default().push(row);
     }
 
@@ -159,7 +172,7 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Re
         instances.sort_by(|a, b| a.instance.cmp(&b.instance));
         println!("{stack}\t{} unhealthy instance(s)", instances.len());
         for row in &instances {
-            print_row(row, &flags);
+            print_row(row, flags);
             if let Some(n) = flags.logs {
                 if n > 0 {
                     if let Some(node) = &row.node {
@@ -170,7 +183,7 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Re
         }
     }
 
-    let warnings = cluster_warnings(&state);
+    let warnings = cluster_warnings(state);
     if !warnings.is_empty() {
         any = true;
         println!("cluster\t{} warning(s)", warnings.len());
@@ -179,10 +192,7 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, flags: ShowFlags) -> Re
         }
     }
 
-    if !any {
-        println!("no unhealthy instances");
-    }
-    Ok(())
+    Ok(any)
 }
 
 /// Faults that belong to no single instance, and so had nowhere to be

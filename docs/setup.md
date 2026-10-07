@@ -173,9 +173,29 @@ operator's back, so it is not done at all.
 
 ```
 clouduler check                 # parse the config and print what it means
+clouduler status                # live overview: what is wrong right now
 systemctl status clouduler
 journalctl -u clouduler -f
 ```
+
+`clouduler status` is meant to be the one command to run when something looks
+off. It asks a manager (`--via <node>` to pick which) and prints, in order:
+
+- the raft leader, whether quorum holds, voters reachable, and emergency mode
+  if it is active;
+- every node: role, reachable or not, availability and instance count;
+- every unhealthy instance with its node, uptime, the reason it is unhealthy
+  (crashed, restart-looping, stuck mid-migration, unplaceable, running an
+  image other than the pinned one, stopped) and the last 10 lines of its log;
+- unreachable nodes and volumes whose primary is gone or whose replicas lag;
+- image updates that failed or have made no progress for 15 minutes;
+- the latest failed or warning backup per target, and failed or pending
+  restores;
+- certificates and DNS records that are failing or still pending.
+
+Sections with nothing to report are omitted, and a healthy cluster ends with
+`all clear`. `clouduler stack unhealthy` is the instance part of this on its
+own, with flags to choose the detail.
 
 The first launch of a fresh cluster logs the generated api key and the cluster
 key fingerprint. Both are logged once and never again.
