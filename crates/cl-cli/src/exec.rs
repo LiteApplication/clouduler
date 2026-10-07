@@ -167,7 +167,13 @@ where
                 }
             }
         }
-        let _ = write.send(Message::Close(None)).await;
+        // Not `Message::Close`: a websocket close starts the close handshake,
+        // after which the server can no longer send, so a command run without
+        // a terminal (`ssh host clouduler exec ...`, stdin at EOF at once)
+        // would lose all of its output. An empty frame - which a real read
+        // never produces - means "stdin is done" instead, and the server ends
+        // the session once the command does.
+        let _ = write.send(Message::Binary(Vec::new().into())).await;
     });
 
     let mut stdout = tokio::io::stdout();

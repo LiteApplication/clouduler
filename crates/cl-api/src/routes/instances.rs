@@ -1366,12 +1366,19 @@ async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, s
         tokio::select! {
             incoming = socket.recv(), if input.is_some() => {
                 match incoming {
+                    // An empty frame is the client's stdin EOF (see `cl-cli`'s
+                    // `exec::bridge`): half-close the container's stdin, but
+                    // keep relaying its output.
+                    Some(Ok(Message::Binary(data))) if data.is_empty() => {
+                        let _ = input.as_mut().unwrap().shutdown().await;
+                        input = None;
+                    }
                     Some(Ok(Message::Binary(data))) => {
                         if input.as_mut().unwrap().write_all(&data).await.is_err() {
                             input = None;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => input = None,
+                    Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
                     Some(Err(_)) => input = None,
                 }
