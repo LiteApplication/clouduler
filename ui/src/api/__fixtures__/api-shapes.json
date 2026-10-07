@@ -230,7 +230,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.6.7",
+    "version": "0.6.8",
     "voters": 1
   },
   "updates": [
