@@ -1361,7 +1361,9 @@ async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, s
     // terminal hanging up) is the correct reaction, not tearing down the
     // whole session and discarding output the command hasn't gotten to write
     // yet.
+    let exec_id = session.id.clone();
     let mut input = Some(session.input);
+    let mut finished = false;
     loop {
         tokio::select! {
             incoming = socket.recv(), if input.is_some() => {
@@ -1396,9 +1398,21 @@ async fn bridge_exec(mut socket: WebSocket, docker: Docker, container: String, s
                         let _ = socket.send(Message::Text(format!("exec: {e}").into())).await;
                         break;
                     }
-                    None => break,
+                    None => {
+                        finished = true;
+                        break;
+                    }
                 }
             }
+        }
+    }
+    // Tell the client how the command ended, so it can exit with the same
+    // code (`exit:<n>`; every other text frame is an error message).
+    if finished {
+        if let Ok(Some(code)) = docker.exec_exit_code(&exec_id).await {
+            let _ = socket
+                .send(Message::Text(format!("exit:{code}").into()))
+                .await;
         }
     }
     let _ = socket.send(Message::Close(None)).await;

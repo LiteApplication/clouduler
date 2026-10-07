@@ -41,6 +41,8 @@ pub struct ExecChunk {
 /// A running exec: its output as it arrives, and a sink for stdin. Dropping
 /// `input` closes the container's stdin, same as a real terminal hanging up.
 pub struct ExecSession {
+    /// Docker's id for this exec, for `Docker::exec_exit_code` once `output` ends.
+    pub id: String,
     pub output: Pin<Box<dyn Stream<Item = Result<ExecChunk>> + Send>>,
     pub input: Pin<Box<dyn AsyncWrite + Send>>,
 }
@@ -79,6 +81,7 @@ impl Docker {
 
         match started {
             StartExecResults::Attached { output, input } => Ok(ExecSession {
+                id: created.id,
                 output: Box::pin(output.map(|item| item.map(from_log_output).map_err(classify))),
                 input,
             }),
@@ -87,6 +90,15 @@ impl Docker {
                 "docker detached an attached exec".to_string(),
             )),
         }
+    }
+}
+
+impl Docker {
+    /// The command's exit code, once its output has ended. `None` if docker
+    /// hasn't recorded one yet.
+    pub async fn exec_exit_code(&self, exec_id: &str) -> Result<Option<i64>> {
+        let inspected = self.inner.inspect_exec(exec_id).await.map_err(classify)?;
+        Ok(inspected.exit_code)
     }
 }
 

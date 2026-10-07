@@ -129,7 +129,7 @@ pub async fn run(
     // key. Exit directly instead, once this exec session is over, so the
     // stuck thread can't hold the process open.
     match result {
-        Ok(()) => std::process::exit(0),
+        Ok(code) => std::process::exit(code.unwrap_or(0)),
         Err(e) => {
             eprintln!("Error: {e:?}");
             std::process::exit(1);
@@ -144,7 +144,8 @@ struct ExecQuery {
     user: Option<String>,
 }
 
-async fn bridge<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>) -> Result<()>
+/// Returns the command's exit code when the server reported one.
+async fn bridge<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>) -> Result<Option<i32>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -178,6 +179,7 @@ where
 
     let mut stdout = tokio::io::stdout();
     let mut server_error = None;
+    let mut exit_code = None;
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Binary(data)) => {
@@ -185,8 +187,16 @@ where
                 stdout.flush().await.context("flushing stdout")?;
             }
             Ok(Message::Text(text)) => {
-                server_error = Some(text.to_string());
-                break;
+                match text
+                    .strip_prefix("exit:")
+                    .and_then(|c| c.parse::<i32>().ok())
+                {
+                    Some(code) => exit_code = Some(code),
+                    None => {
+                        server_error = Some(text.to_string());
+                        break;
+                    }
+                }
             }
             Ok(Message::Close(_)) | Err(_) => break,
             Ok(_) => {}
@@ -196,7 +206,7 @@ where
 
     match server_error {
         Some(msg) => bail!("{msg}"),
-        None => Ok(()),
+        None => Ok(exit_code),
     }
 }
 
