@@ -14,6 +14,7 @@ import { instanceStateTone } from '../lib/format';
 import { collectImages, emptyKnownNames, type KnownNames } from '../lib/stackSchema';
 import { SecretForm } from './SecretForm';
 import { statusBadge } from './Certificates';
+import { LogMessage } from '../lib/ansi';
 
 /** Everything this cluster already knows the name of, for the spec editor's
  *  live-data autocomplete and ctrl+click navigation — all of it already
@@ -649,7 +650,9 @@ function InlineInstanceLogs({ id }: { id: string }) {
       {items.map((line, i) => (
         <div key={i}>
           <span className="faint">{line.timestamp} </span>
-          <span className={line.stream === 'stderr' ? 'diff-remove' : undefined}>{line.message}</span>
+          <span className={line.stream === 'stderr' ? 'diff-remove' : undefined}>
+            <LogMessage text={line.message} />
+          </span>
         </div>
       ))}
       {items.length === 0 && (

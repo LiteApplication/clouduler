@@ -12,6 +12,7 @@ import { Meter } from '../components/Meter';
 import { useConfigApply, useConfigDraft } from './config/draft';
 import { PendingBanner } from './config/PendingBanner';
 import { NodeCard } from './config/sections';
+import { LogMessage } from '../lib/ansi';
 
 export function NodeDetail() {
   const { name = '' } = useParams();
@@ -442,7 +443,7 @@ function NodeLogs({ name }: { name: string }) {
         {items.map((line, i) => (
           <div key={i}>
             <span className="faint">{line.timestamp} </span>
-            {line.message}
+            <LogMessage text={line.message} />
           </div>
         ))}
       </div>

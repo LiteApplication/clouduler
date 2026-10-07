@@ -10,6 +10,7 @@ import { ConstraintTable } from '../components/ConstraintTable';
 import { useEventSource } from '../hooks/useEventSource';
 import { formatBytes, instanceStateTone } from '../lib/format';
 import { Icon } from '../components/Icon';
+import { LogMessage } from '../lib/ansi';
 
 /** `InstanceId` serializes as `stack.service.index`; splitting from the right
  *  mirrors the server's own `InstanceId::from_str` (`rsplitn(3, '.')`), since
@@ -413,7 +414,9 @@ function InstanceLogs({ id }: { id: string }) {
         {visible.map((line, i) => (
           <div key={i}>
             <span className="faint">{line.timestamp} </span>
-            <span className={line.stream === 'stderr' ? 'diff-remove' : undefined}>{line.message}</span>
+            <span className={line.stream === 'stderr' ? 'diff-remove' : undefined}>
+              <LogMessage text={line.message} />
+            </span>
           </div>
         ))}
       </div>

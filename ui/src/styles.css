@@ -2104,3 +2104,14 @@ kbd {
 .dialog .section-head {
   margin-top: 0;
 }
+
+.log-view .ansi-bold { font-weight: 700; }
+.log-view .ansi-dim { opacity: 0.6; }
+.log-view .ansi-black { color: #6b7280; }
+.log-view .ansi-red { color: var(--bad); }
+.log-view .ansi-green { color: var(--good); }
+.log-view .ansi-yellow { color: var(--warn); }
+.log-view .ansi-blue { color: #4f8ff7; }
+.log-view .ansi-magenta { color: #c06be0; }
+.log-view .ansi-cyan { color: #22b8cf; }
+.log-view .ansi-white { color: var(--log-text); }
