@@ -53,6 +53,10 @@ pub async fn run(
     // the process with half of it set up.
     let mut signals = crate::systemd::Signals::install().context("installing signal handlers")?;
 
+    // Claimed before anything else so a restart never leaves the proxy ports
+    // refusing connections while raft and the rest come up.
+    crate::proxy::prebind(&cfg);
+
     let Some(node) = cfg.node(&node_name) else {
         bail!(
             "node {node_name} is not declared in the config (known: {})",
@@ -425,11 +429,14 @@ pub async fn run(
         internal_dns.abort();
     }
     exposed.abort();
-    proxy.shutdown().await;
     // Before the raft shutdown, so the mounts are gone while the runtime that
     // serves their requests is still alive.
     drives.shutdown().await;
-    cluster.shutdown().await?;
+    let stopped = cluster.shutdown().await;
+    // Last, so the proxy keeps answering for as long as the process lives: the
+    // port is only free for the next start once we exit anyway.
+    proxy.shutdown().await;
+    stopped?;
     Ok(())
 }
 
@@ -727,13 +734,26 @@ async fn run_fence(
     observed: Arc<AtomicBool>,
     wake: Arc<tokio::sync::Notify>,
 ) {
-    let quorum = cluster.quorum();
+    let mut quorum = cluster.quorum();
     let mut lost_since: Option<Instant> = None;
     let mut ticker = tokio::time::interval(failover.probe_interval);
     let mut last_stamp: Option<Instant> = None;
 
     loop {
-        ticker.tick().await;
+        // Also wakes when quorum changes, not only every `probe_interval`:
+        // the first tick lands before raft has caught up, and waiting a whole
+        // interval after that to notice quorum is back holds every container
+        // for no reason on a restart. The fence timeout is measured with
+        // `Instant`s, so observing more often does not shorten it.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            changed = quorum.changed() => {
+                if !changed {
+                    // The sender is gone: fall back to the plain interval.
+                    ticker.tick().await;
+                }
+            }
+        }
         let has_quorum = quorum.has_quorum();
         // What a restart reads to decide whether to hold (see `quorum_stamp`),
         // so a failed write only costs the next restart its closed start.

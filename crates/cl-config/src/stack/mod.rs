@@ -253,12 +253,39 @@ impl StackFile {
 
     /// Parse without any cluster cross-checks, so a stack file can be linted
     /// on its own. Use `validate` for the full check against a cluster.
+    ///
+    /// Successful parses are memoised by the exact text: the daemon's
+    /// reconcile loops each re-parse every stored stack on every pass, which
+    /// on a small board costs far more than cloning the result (and delayed
+    /// the proxy's first routes after a restart). Failures are not cached.
     pub fn parse(raw: &str) -> Result<Self> {
+        static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, StackFile>>> =
+            std::sync::Mutex::new(None);
+        const CAPACITY: usize = 256;
+
+        if let Some(hit) = CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|cache| cache.get(raw))
+        {
+            return Ok(hit.clone());
+        }
+
         let stack: StackFile = serde_yaml::from_str(raw).map_err(|source| ConfigError::Parse {
             path: PathBuf::from("<stack>"),
             source,
         })?;
         stack.validate_syntax()?;
+
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = guard.get_or_insert_with(Default::default);
+        if cache.len() >= CAPACITY {
+            // Stale specs are never revisited, so wholesale clearing is
+            // enough to keep this bounded.
+            cache.clear();
+        }
+        cache.insert(raw.to_string(), stack.clone());
         Ok(stack)
     }
 }

@@ -154,6 +154,44 @@ impl Group {
     }
 }
 
+/// Proxy ports bound at the very start of the daemon, before raft is up, so a
+/// restart leaves clients queued in the listen backlog instead of refused.
+/// Taken by `build_listen`; a port that was not pre-bound is bound there.
+static PREBOUND: std::sync::Mutex<BTreeMap<u16, std::net::TcpListener>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Bind the proxy's ports now. Failures are ignored: `build_listen` binds
+/// again and reports the error where it always did.
+pub fn prebind(cfg: &ClusterConfig) {
+    let Some((http_port, https_port)) = desired_of(cfg).listen else {
+        return;
+    };
+    let mut bound = PREBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    for port in [http_port, https_port] {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        if let Ok(listener) = std::net::TcpListener::bind(addr) {
+            if listener.set_nonblocking(true).is_ok() {
+                bound.insert(port, listener);
+            }
+        }
+    }
+}
+
+fn take_listener(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    let prebound = PREBOUND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&port);
+    match prebound {
+        Some(listener) => tokio::net::TcpListener::from_std(listener),
+        None => {
+            let std = std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
+            std.set_nonblocking(true)?;
+            tokio::net::TcpListener::from_std(std)
+        }
+    }
+}
+
 pub fn start(
     cfg: &ClusterConfig,
     cluster: &Arc<ClusterNode>,
@@ -268,15 +306,24 @@ fn build_listen(
         http01.clone(),
     ));
     let mut tasks = Vec::new();
+    // Flipped by `reconcile_loop` once the first full route set is in place.
+    let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
 
     for (port, tls) in [(http_port, false), (https_port, true)] {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let server = server.clone();
+        let mut ready = ready_rx.clone();
+        // Bound here, synchronously, so the port is held from now on.
+        let listener = take_listener(port);
         tasks.push(tokio::spawn(async move {
-            let served = if tls {
-                server.serve_https(addr).await
-            } else {
-                server.serve_http(addr).await
+            // Connections made before the routes load wait in the backlog
+            // rather than being answered 404 for every host. Bounded, so a
+            // reconcile that never finishes cannot keep the proxy dark.
+            let _ = tokio::time::timeout(Duration::from_secs(3), ready.wait_for(|r| *r)).await;
+            let served = match listener {
+                Ok(listener) if tls => server.serve_https_on(listener).await,
+                Ok(listener) => server.serve_http_on(listener).await,
+                Err(e) => Err(e.into()),
             };
             if let Err(e) = served {
                 // Ports below 1024 need root, and that is the usual reason.
@@ -291,6 +338,7 @@ fn build_listen(
         cluster.clone(),
         routes.clone(),
         certs,
+        ready_tx,
     )));
     tasks.push(tokio::spawn(cl_proxy::run_health_checks(
         routes,
@@ -351,6 +399,7 @@ async fn reconcile_loop(
     cluster: Arc<ClusterNode>,
     routes: Arc<RouteTable>,
     certs: Arc<CertStore>,
+    ready: tokio::sync::watch::Sender<bool>,
 ) {
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     let mut published = 0;
@@ -360,6 +409,12 @@ async fn reconcile_loop(
         let cfg = config_rx.borrow().clone();
         let state = cluster.state().await;
 
+        // Static backends need a dns lookup each. On the first pass publish
+        // what is already known rather than leaving every hostname unrouted
+        // until those resolve.
+        if published == 0 {
+            routes.reload(routes_for(&cfg, &state));
+        }
         let mut built = routes_for(&cfg, &state);
         built.extend(static_backend_routes(&cfg, &state).await);
         if built.len() != published {
@@ -370,6 +425,7 @@ async fn reconcile_loop(
 
         let stored: Vec<CertificateState> = state.certificates.values().cloned().collect();
         certs.load(&stored);
+        ready.send_replace(true);
     }
 }
 
@@ -507,18 +563,36 @@ fn dashboard_route(cfg: &ClusterConfig) -> Option<Route> {
 /// without touching any config; a plain IP resolves to itself immediately.
 async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
     let entries = StaticRouteStore::load(state).routes;
+    // Resolved concurrently: one slow or unreachable resolver answer should
+    // not delay every other route, and a restart waits on all of them.
+    let mut lookups = tokio::task::JoinSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let backend = entry.backend.clone();
+        lookups.spawn(async move {
+            let found = tokio::net::lookup_host(backend)
+                .await
+                .map(|addrs| addrs.collect::<Vec<_>>());
+            (index, found)
+        });
+    }
+    let mut resolved = BTreeMap::new();
+    while let Some(Ok((index, found))) = lookups.join_next().await {
+        resolved.insert(index, found);
+    }
+
     let mut routes = Vec::with_capacity(entries.len());
-    for entry in &entries {
+    for (index, entry) in entries.iter().enumerate() {
         let domain = cfg
             .networks
             .get(&entry.network)
             .and_then(|n| n.domain.as_deref());
-        let backends = match tokio::net::lookup_host(&entry.backend).await {
-            Ok(addrs) => addrs.collect(),
-            Err(e) => {
+        let backends = match resolved.remove(&index) {
+            Some(Ok(addrs)) => addrs,
+            Some(Err(e)) => {
                 warn!(host = %entry.host, backend = %entry.backend, error = %e, "could not resolve static backend");
                 Vec::new()
             }
+            None => Vec::new(),
         };
         routes.push(
             Route::new(

@@ -153,7 +153,14 @@ impl ProxyServer {
     /// everything else directly.
     pub async fn serve_http(&self, addr: SocketAddr) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
-        debug!(%addr, "http listener started");
+        self.serve_http_on(listener).await
+    }
+
+    /// Like `serve_http`, on a listener the caller already bound. Lets a
+    /// restarting daemon claim its port before it is ready to answer: clients
+    /// queue in the backlog instead of being refused.
+    pub async fn serve_http_on(&self, listener: TcpListener) -> Result<()> {
+        debug!(addr = ?listener.local_addr().ok(), "http listener started");
         loop {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
@@ -184,6 +191,12 @@ impl ProxyServer {
     /// self-signed fallback cache for it, since `ResolvesServerCert::resolve`
     /// is synchronous and can't generate one itself on a first connection.
     pub async fn serve_https(&self, addr: SocketAddr) -> Result<()> {
+        let listener = TcpListener::bind(addr).await?;
+        self.serve_https_on(listener).await
+    }
+
+    /// Like `serve_https`, on a listener the caller already bound.
+    pub async fn serve_https_on(&self, listener: TcpListener) -> Result<()> {
         ensure_crypto_provider();
         let resolver = Arc::new(CertResolver::new(self.certs.clone()));
         let mut config = ServerConfig::builder()
@@ -192,8 +205,7 @@ impl ProxyServer {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let config = Arc::new(config);
 
-        let listener = TcpListener::bind(addr).await?;
-        debug!(%addr, "https listener started");
+        debug!(addr = ?listener.local_addr().ok(), "https listener started");
         loop {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
