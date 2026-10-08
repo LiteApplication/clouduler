@@ -44,7 +44,13 @@ async fn main() -> Result<()> {
                 None => hostname()?,
             };
             let cfg = ClusterConfig::load(&cli.config)?;
-            return cl_daemon::daemon::run(cfg, node, cli.data_dir, cli.config).await;
+            return match cl_daemon::daemon::run(cfg, node, cli.data_dir, cli.config).await {
+                Err(e) if e.is::<cl_daemon::daemon::Removed>() => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(i32::from(cl_daemon::daemon::REMOVED_EXIT_CODE));
+                }
+                result => result,
+            };
         }
         _ => {}
     }
@@ -362,10 +368,15 @@ fn init_tracing(log: &str, verbose: bool) -> Result<()> {
     } else {
         log.to_string()
     };
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(filter))
-        .with_target(false)
-        .init();
+        .with_target(false);
+    // journald already stamps every line and does not render colour codes.
+    if std::env::var_os("JOURNAL_STREAM").is_some() {
+        builder.with_ansi(false).without_time().init();
+    } else {
+        builder.init();
+    }
     Ok(())
 }
 

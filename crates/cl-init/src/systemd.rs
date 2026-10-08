@@ -6,6 +6,11 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 pub const UNIT_NAME: &str = "clouduler.service";
+/// Exit status of a daemon that found it was removed from the cluster. The unit
+/// must not restart it: it has wiped its key and raft state, so a restart would
+/// only fail the same way every five seconds, forever. Same value as
+/// `cl_daemon::daemon::REMOVED_EXIT_CODE` (`EX_CONFIG`).
+pub const REMOVED_EXIT_CODE: u8 = 78;
 pub const UNIT_DIR: &str = "/etc/systemd/system";
 
 /// What the unit needs to know about this node.
@@ -37,12 +42,19 @@ impl Unit {
              After=network-online.target docker.service\n\
              \n\
              [Service]\n\
-             Type=simple\n\
+             Type=notify\n\
+             NotifyAccess=main\n\
              Group=clouduler\n\
              ExecStart={binary} --config {config} daemon --node {node}\n\
+             ExecReload=/bin/kill -HUP $MAINPID\n\
              Restart=always\n\
              RestartSec=5\n\
+             RestartPreventExitStatus={removed}\n\
+             TimeoutStartSec=300\n\
              TimeoutStopSec=30\n\
+             WatchdogSec=120\n\
+             KillMode=mixed\n\
+             SyslogIdentifier=clouduler\n\
              LimitNOFILE=65536\n\
              \n\
              [Install]\n\
@@ -50,6 +62,7 @@ impl Unit {
             binary = self.binary.display(),
             config = self.config.display(),
             node = self.node,
+            removed = REMOVED_EXIT_CODE,
         )
     }
 }
@@ -139,6 +152,25 @@ mod tests {
         let text = unit().render();
         assert!(text.contains("Restart=always"));
         assert!(text.contains("WantedBy=multi-user.target"));
+    }
+
+    /// The daemon reports readiness itself, answers SIGHUP as a reload, pings
+    /// a watchdog, and only its main process gets the stop signal so that
+    /// restic/fuse children can finish before being killed.
+    #[test]
+    fn the_unit_speaks_the_service_manager_protocol() {
+        let text = unit().render();
+        assert!(text.contains("Type=notify\n"));
+        assert!(text.contains("NotifyAccess=main"));
+        assert!(text.contains("ExecReload=/bin/kill -HUP $MAINPID"));
+        assert!(text.contains("WatchdogSec="));
+        assert!(text.contains("KillMode=mixed"));
+    }
+
+    /// A removed node wipes its key; restarting it would loop forever.
+    #[test]
+    fn a_removed_node_is_not_restarted() {
+        assert!(unit().render().contains("RestartPreventExitStatus=78"));
     }
 
     #[test]

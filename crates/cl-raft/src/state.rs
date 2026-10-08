@@ -939,6 +939,13 @@ pub enum Request {
         fqdn: String,
         status: ReconcileStatus,
     },
+    /// Drops any cert/dns reconcile status for a hostname. Statuses are only
+    /// superseded by a successful store/upsert, so one for a hostname that
+    /// left the config (or whose record is already live) would otherwise
+    /// linger in `clouduler status` forever.
+    ClearReconcileStatus {
+        fqdn: String,
+    },
     PutConfig {
         name: String,
         /// Base64 content.
@@ -1111,6 +1118,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "UpsertDnsRecord",
     "RemoveDnsRecord",
     "SetDnsStatus",
+    "ClearReconcileStatus",
     "PutConfig",
     "PutConfigCas",
     "RemoveConfig",
@@ -1237,6 +1245,9 @@ mod request_mirror {
         SetDnsStatus {
             fqdn: String,
             status: ReconcileStatus,
+        },
+        ClearReconcileStatus {
+            fqdn: String,
         },
         PutConfig {
             name: String,
@@ -2169,6 +2180,12 @@ impl ClusterState {
                 self.dns_status.insert(fqdn.clone(), status.clone());
                 Ok(())
             }
+
+            Request::ClearReconcileStatus { fqdn } => {
+                self.cert_status.remove(fqdn);
+                self.dns_status.remove(fqdn);
+                Ok(())
+            }
         }
     }
 
@@ -2537,6 +2554,9 @@ mod tests {
             Request::SetDnsStatus {
                 fqdn: "example.com".into(),
                 status: ReconcileStatus::Pending,
+            },
+            Request::ClearReconcileStatus {
+                fqdn: "example.com".into(),
             },
             Request::PutConfigCas {
                 name: "c".into(),
@@ -3525,6 +3545,28 @@ mod tests {
 
         assert!(state.certificates.contains_key("app.example.com"));
         assert!(!state.cert_status.contains_key("app.example.com"));
+    }
+
+    #[test]
+    fn clearing_reconcile_status_drops_cert_and_dns_entries() {
+        let mut state = ClusterState::default();
+        let err = ReconcileStatus::Error {
+            message: "no zone".into(),
+            at: 0,
+        };
+        state.apply(&Request::SetCertStatus {
+            fqdn: "typo.example.com".into(),
+            status: err.clone(),
+        });
+        state.apply(&Request::SetDnsStatus {
+            fqdn: "typo.example.com".into(),
+            status: err,
+        });
+        state.apply(&Request::ClearReconcileStatus {
+            fqdn: "typo.example.com".into(),
+        });
+        assert!(state.cert_status.is_empty());
+        assert!(state.dns_status.is_empty());
     }
 
     #[test]

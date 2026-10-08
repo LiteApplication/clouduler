@@ -697,6 +697,7 @@ async fn run_acme(
         }
         let cfg = config_rx.borrow().clone();
         let key = key_rx.borrow().clone();
+        prune_stale_status(&cluster, &cfg, &cluster.state().await, true, false).await;
         let Some((cloudflare, zone_names)) =
             cloudflare_setup(&cfg, &cluster, key.as_deref(), "certificate issuance").await
         else {
@@ -885,6 +886,7 @@ async fn run_dns_reconcile(
         let state = cluster.state().await;
         let cfg = config_rx.borrow().clone();
         let key = key_rx.borrow().clone();
+        prune_stale_status(&cluster, &cfg, &state, false, true).await;
         let Some((cf, zone_names)) =
             cloudflare_setup(&cfg, &cluster, key.as_deref(), "dns record publishing").await
         else {
@@ -1125,6 +1127,52 @@ async fn reconcile_dns(
                 )
                 .await;
             }
+        }
+    }
+}
+
+/// Clears cert/dns statuses that no longer describe anything: the hostname is
+/// not wanted any more (removed or typo'd in the config), or its cert/record is
+/// already live (a stale `pending`). Statuses are otherwise only replaced by a
+/// successful store/upsert, so these would linger in `clouduler status`.
+async fn prune_stale_status(
+    cluster: &Arc<ClusterNode>,
+    cfg: &ClusterConfig,
+    state: &ClusterState,
+    check_certs: bool,
+    check_dns: bool,
+) {
+    let mut stale = BTreeSet::new();
+    if check_certs {
+        let wanted = tls_hosts(cfg, state);
+        for fqdn in state.cert_status.keys() {
+            if !wanted.contains_key(fqdn) || state.certificates.contains_key(fqdn) {
+                stale.insert(fqdn.clone());
+            }
+        }
+    }
+    if check_dns {
+        let desired = desired_records(cfg, cluster.quorum().leader(), state);
+        for fqdn in state.dns_status.keys() {
+            let mine: Vec<_> = desired.iter().filter(|r| &r.fqdn == fqdn).collect();
+            let all_live = mine.iter().all(|r| {
+                state.dns_records.contains_key(&dns_key(
+                    &r.fqdn,
+                    &format!("{:?}", r.kind),
+                    &r.content,
+                ))
+            });
+            if all_live {
+                stale.insert(fqdn.clone());
+            }
+        }
+    }
+    for fqdn in stale {
+        if let Err(e) = cluster
+            .submit(Request::ClearReconcileStatus { fqdn: fqdn.clone() })
+            .await
+        {
+            warn!(%fqdn, error = %e, "could not clear a stale reconcile status");
         }
     }
 }

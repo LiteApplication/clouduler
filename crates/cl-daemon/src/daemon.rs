@@ -19,6 +19,24 @@ use openraft::BasicNode;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tracing::{debug, info, warn};
 
+/// Process exit status for a node that was removed from the cluster (`EX_CONFIG`).
+/// The systemd unit lists it in `RestartPreventExitStatus`; keep the two in step.
+pub const REMOVED_EXIT_CODE: u8 = 78;
+
+/// The error `run` returns when this node was removed while it was down.
+#[derive(Debug)]
+pub struct Removed;
+
+impl std::fmt::Display for Removed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "removed from the cluster while down; local secrets wiped, re-provision to rejoin",
+        )
+    }
+}
+
+impl std::error::Error for Removed {}
+
 /// How long to wait for dockerd at startup before carrying on without it.
 /// Generous because this is a boot race: on a host bringing several machines
 /// up at once, dockerd can take a minute to answer its own socket.
@@ -30,6 +48,11 @@ pub async fn run(
     data_dir_override: Option<PathBuf>,
     config_path: PathBuf,
 ) -> Result<()> {
+    // Before anything slow: a stop from the service manager that lands while
+    // we are still starting is held until startup is done, not left to kill
+    // the process with half of it set up.
+    let mut signals = crate::systemd::Signals::install().context("installing signal handlers")?;
+
     let Some(node) = cfg.node(&node_name) else {
         bail!(
             "node {node_name} is not declared in the config (known: {})",
@@ -105,6 +128,12 @@ pub async fn run(
     // another node delivers it.
     let (config_tx, config_rx) = tokio::sync::watch::channel(Arc::new(cfg.clone()));
     let (key_tx, key_rx) = tokio::sync::watch::channel(key.clone());
+    // Kept for SIGHUP, which re-reads the key file; `key_tx` itself goes to the api.
+    let reload_key_tx = key_tx.clone();
+    let key_file = cfg.secrets.key_file.clone();
+    // Tells `watch_cluster_config` to rebroadcast the replicated config and
+    // rewrite the local file, on SIGHUP.
+    let reload_config = Arc::new(tokio::sync::Notify::new());
 
     let cluster = ClusterNode::start(Options {
         name: node_name.clone(),
@@ -239,6 +268,7 @@ pub async fn run(
     // Worth waiting for: on a node that has just booted, dockerd is often a
     // second or two behind us, and a node that gave up on docker for the life
     // of the process would vote but run nothing until someone restarted it.
+    crate::systemd::extend_timeout(DOCKER_WAIT + Duration::from_secs(30));
     *docker.write().await = connect_docker().await;
     // Keeps retrying afterwards: a node whose dockerd was not up yet during
     // the wait above, or whose dockerd is later bounced independently of this
@@ -299,6 +329,7 @@ pub async fn run(
         config_path.clone(),
         failover.probe_interval,
         config_tx,
+        reload_config.clone(),
     ));
 
     let cfg_for_restore = cfg.clone();
@@ -345,11 +376,29 @@ pub async fn run(
         node_name.clone(),
     );
 
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => { result?; }
-        _ = shutdown_rx.changed() => {}
+    let watchdog = crate::systemd::spawn_watchdog();
+    crate::systemd::ready(&format!("node {node_name} running"));
+
+    loop {
+        tokio::select! {
+            request = signals.next() => match request {
+                crate::systemd::Request::Stop => break,
+                crate::systemd::Request::Reload => {
+                    crate::systemd::reloading();
+                    info!("reloading");
+                    reload_cluster_key(&key_file, &reload_key_tx);
+                    reload_config.notify_one();
+                    crate::systemd::ready(&format!("node {node_name} running"));
+                }
+            },
+            _ = shutdown_rx.changed() => break,
+        }
     }
+    crate::systemd::stopping();
     info!("shutting down");
+    if let Some(watchdog) = watchdog {
+        watchdog.abort();
+    }
     watcher.abort();
     self_report.abort();
     reaper.abort();
@@ -1023,6 +1072,7 @@ async fn watch_cluster_config(
     config_path: PathBuf,
     interval: std::time::Duration,
     config_tx: tokio::sync::watch::Sender<Arc<ClusterConfig>>,
+    reload: Arc<tokio::sync::Notify>,
 ) {
     // Whatever is on disk right now is taken as already applied, so a restart
     // does not rewrite an identical file and log a change that did not happen.
@@ -1030,7 +1080,13 @@ async fn watch_cluster_config(
     let mut ticker = tokio::time::interval(interval);
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            // Forget what was applied, so the replicated config is
+            // broadcast again and the local file restored from it if
+            // someone edited it by hand.
+            _ = reload.notified() => written = 0,
+        }
         let Some(entry) = cluster.state().await.cluster_config else {
             continue;
         };
@@ -1066,6 +1122,32 @@ async fn watch_cluster_config(
                 warn!(error = %e, path = %config_path.display(), "cannot write the config file")
             }
         }
+    }
+}
+
+/// Re-read the cluster key file and hand it to every subsystem if it changed
+/// on disk (restored from backup, rotated by hand). A missing or unreadable
+/// file keeps the key already loaded: a reload must never leave the node
+/// worse off than it was.
+fn reload_cluster_key(
+    path: &Path,
+    key_tx: &tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
+) {
+    match ClusterKey::load(path) {
+        Ok(key) => {
+            let fingerprint = key.fingerprint();
+            let changed = key_tx.send_if_modified(|current| {
+                if current.as_ref().map(|k| k.fingerprint()) == Some(fingerprint.clone()) {
+                    return false;
+                }
+                *current = Some(Arc::new(key));
+                true
+            });
+            if changed {
+                info!(%fingerprint, "cluster key reloaded");
+            }
+        }
+        Err(e) => warn!(error = %e, path = %path.display(), "cannot reload the cluster key, keeping the current one"),
     }
 }
 
@@ -1222,9 +1304,7 @@ async fn bail_if_removed(
                 "this node was removed from the cluster while it was down; wiping local secrets"
             );
             wipe_local_secrets(cfg, data_dir);
-            bail!(
-                "removed from the cluster while down; local secrets wiped, re-provision to rejoin"
-            );
+            return Err(Removed.into());
         }
         return Ok(());
     }

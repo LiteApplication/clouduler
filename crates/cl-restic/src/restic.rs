@@ -42,6 +42,24 @@ impl ResticRepo {
         for (key, value) in credentials {
             env.insert(key.clone(), value.clone());
         }
+        // Under a service manager the daemon can run with neither $HOME nor
+        // $XDG_CACHE_HOME, and restic then refuses to open its cache ("unable
+        // to locate cache directory") - which makes `forget --prune` fail and
+        // also keeps it from judging a lock stale. Give it a directory.
+        let has_cache_home = |var: &str| std::env::var_os(var).is_some_and(|v| !v.is_empty());
+        if !env.contains_key("RESTIC_CACHE_DIR")
+            && !has_cache_home("RESTIC_CACHE_DIR")
+            && !has_cache_home("XDG_CACHE_HOME")
+            && !has_cache_home("HOME")
+        {
+            env.insert(
+                "RESTIC_CACHE_DIR".to_string(),
+                std::env::temp_dir()
+                    .join("clouduler-restic-cache")
+                    .display()
+                    .to_string(),
+            );
+        }
         env.insert(
             "RESTIC_PASSWORD_FILE".to_string(),
             password_file.display().to_string(),
@@ -163,6 +181,11 @@ impl ResticRepo {
         if retention_args.is_empty() {
             return Ok(());
         }
+        // A crashed earlier run leaves its lock behind and `prune` needs an
+        // exclusive one, so it would fail forever. Plain `unlock` only removes
+        // locks restic itself deems stale (dead process / not refreshed), never
+        // a live run's. Best effort: if it fails, forget reports the real error.
+        let _ = run(self.command(&["unlock"]));
         let mut args: Vec<String> = vec!["forget".into(), "--prune".into()];
         args.extend(retention_args.iter().cloned());
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
