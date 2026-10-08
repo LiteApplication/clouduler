@@ -28,6 +28,10 @@ pub struct StaticRouteRule {
     pub host: String,
     /// Declared network this route is published on.
     pub network: String,
+    /// Node whose address DNS publishes for this host, so requests are routed
+    /// through it. `None` publishes every node, like any other static route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
     /// `host:port` of the backend. A hostname is resolved fresh on every
     /// reconcile pass; every address it resolves to becomes a backend, round
     /// robined like a multi replica service.
@@ -85,6 +89,7 @@ mod tests {
             id: id.to_string(),
             host: "printer".to_string(),
             network: "lan".to_string(),
+            node: None,
             backend: "192.168.1.50:9100".to_string(),
             path_prefix: None,
             tls: true,

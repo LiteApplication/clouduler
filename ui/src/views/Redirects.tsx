@@ -280,6 +280,7 @@ type StaticRouteDraft = Omit<StaticRouteRule, 'id'>;
 const emptyStaticRouteDraft = (network: string): StaticRouteDraft => ({
   host: '',
   network,
+  node: null,
   backend: '',
   path_prefix: null,
   tls: true,
@@ -292,6 +293,13 @@ const emptyStaticRouteDraft = (network: string): StaticRouteDraft => ({
 function StaticBackendsSection() {
   const { isAdmin } = useAuth();
   const networkNames = useNetworkNames();
+  const [nodeNames, setNodeNames] = useState<string[]>([]);
+  useEffect(() => {
+    api
+      .getConfiguration()
+      .then((cfg) => setNodeNames(Object.keys(cfg.nodes)))
+      .catch(() => setNodeNames([]));
+  }, []);
   const [routes, setRoutes] = useState<StaticRouteRule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -318,6 +326,7 @@ function StaticBackendsSection() {
     setDraft({
       host: route.host,
       network: route.network,
+      node: route.node,
       backend: route.backend,
       path_prefix: route.path_prefix,
       tls: route.tls,
@@ -404,6 +413,13 @@ function StaticBackendsSection() {
             value={draft.network}
             onChange={(network) => setDraft({ ...draft, network })}
             options={networkNames.map((n) => ({ value: n, label: n }))}
+          />
+          <SelectField
+            id="static-route-node"
+            label="Node (optional)"
+            value={draft.node ?? ''}
+            onChange={(node) => setDraft({ ...draft, node: node || null })}
+            options={[{ value: '', label: 'Any node' }, ...nodeNames.map((n) => ({ value: n, label: n }))]}
           />
           <div className="field">
             <label htmlFor="static-route-backend">Backend</label>
@@ -492,6 +508,7 @@ function StaticBackendsSection() {
             <tr>
               <th>Host</th>
               <th>Network</th>
+              <th>Node</th>
               <th>Backend</th>
               <th>TLS</th>
               {isAdmin && <th>Actions</th>}
@@ -505,6 +522,7 @@ function StaticBackendsSection() {
                   {r.path_prefix ? r.path_prefix : ''}
                 </td>
                 <td>{r.network}</td>
+                <td>{r.node ?? 'any'}</td>
                 <td className="mono">{r.backend}</td>
                 <td>{r.tls ? 'yes' : 'no'}</td>
                 {isAdmin && (

@@ -126,7 +126,9 @@ write).
 A rule is a `host` (optionally with a `path_prefix`) on a given `network`, and
 a `backend` (`host:port`); `tls`, `middlewares`, `max_body_size`,
 `websockets`, `preserve_host` and `response_timeout` all work the same as on
-a stack's proxy route.
+a stack's proxy route. An optional `node` pins the host's DNS records to that
+one node's address, so requests are routed through it (useful when only that
+node can reach the backend); left unset, every node is published.
 
 `backend`'s host is resolved fresh on every reconcile pass (every 5s), so a
 DNS change on the backend takes effect without editing anything, and every

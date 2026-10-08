@@ -1030,10 +1030,14 @@ pub fn desired_dns_hosts(
         }
     }
     for entry in StaticRouteStore::load(state).routes {
+        let nodes = match entry.node {
+            Some(node) => BTreeSet::from([node]),
+            None => all_nodes.clone(),
+        };
         hosts
             .entry((entry.host, entry.network))
             .or_default()
-            .extend(all_nodes.clone());
+            .extend(nodes);
     }
     for rule in RedirectStore::load(state).rules {
         hosts
@@ -1747,6 +1751,7 @@ services:
             id: "s1".into(),
             host: host.into(),
             network: network.into(),
+            node: None,
             backend: backend.into(),
             path_prefix: None,
             tls: true,
@@ -1847,6 +1852,19 @@ services:
         let hosts = desired_dns_hosts(&cfg(), &state);
         assert!(hosts.contains_key(&("printer".to_string(), "lan".to_string())));
         assert!(hosts.contains_key(&("old".to_string(), "wan".to_string())));
+    }
+
+    #[test]
+    fn a_pinned_static_route_publishes_only_its_node() {
+        let cfg = cfg();
+        let node = cfg.nodes.keys().next().unwrap().clone();
+        let mut route = static_route("printer", "lan", "192.168.1.50:9100");
+        route.node = Some(node.clone());
+        let state = with_static_routes(state_with(SPEC, 0), vec![route]);
+
+        let hosts = desired_dns_hosts(&cfg, &state);
+        let nodes = &hosts[&("printer".to_string(), "lan".to_string())];
+        assert_eq!(nodes, &BTreeSet::from([node]));
     }
 
     /// `blog` is a proxy route on `wan`, forwarded internally by every node,

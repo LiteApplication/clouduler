@@ -673,6 +673,8 @@ export interface StaticRouteRule {
   id: string;
   host: string;
   network: string;
+  /** Node DNS publishes for this host; unset publishes every node. */
+  node?: string | null;
   /** `host:port`, resolved fresh on every reconcile pass. */
   backend: string;
   path_prefix?: string | null;

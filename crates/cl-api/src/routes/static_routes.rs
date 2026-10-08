@@ -34,6 +34,8 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<St
 struct StaticRouteBody {
     host: String,
     network: String,
+    #[serde(default)]
+    node: Option<String>,
     backend: String,
     #[serde(default)]
     path_prefix: Option<String>,
@@ -68,6 +70,7 @@ async fn create(
         id: new_id(),
         host: body.host,
         network: body.network,
+        node: body.node,
         backend: body.backend,
         path_prefix: body.path_prefix,
         tls: body.tls,
@@ -97,6 +100,7 @@ async fn update(
     };
     existing.host = body.host;
     existing.network = body.network;
+    existing.node = body.node;
     existing.backend = body.backend;
     existing.path_prefix = body.path_prefix;
     existing.tls = body.tls;
@@ -147,6 +151,11 @@ async fn validate(state: &AppState, body: &StaticRouteBody) -> Result<(), ApiErr
             "no network named {}",
             body.network
         )));
+    }
+    if let Some(node) = &body.node {
+        if !cluster_config.nodes.contains_key(node) {
+            return Err(ApiError::BadRequest(format!("no node named {node}")));
+        }
     }
     Ok(())
 }
