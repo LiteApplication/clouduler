@@ -214,7 +214,7 @@ pub async fn run(args: InitArgs, config_path: PathBuf) -> Result<()> {
     check_ethtool_availability(&mut prompt)?;
     check_restic_availability(&mut prompt)?;
     setup_secret_key(&mut prompt, &args, &config, &node_name, peer.as_ref()).await?;
-    setup_systemd(&mut prompt, &args, &config_path, &node_name)?;
+    setup_systemd(&mut prompt, &args, &config, &config_path, &node_name)?;
     summarize(&mut prompt, &config, &node_name)?;
     Ok(())
 }
@@ -775,6 +775,7 @@ async fn setup_secret_key<R: BufRead, W: Write>(
 fn setup_systemd<R: BufRead, W: Write>(
     prompt: &mut Prompt<R, W>,
     args: &InitArgs,
+    config: &ClusterConfig,
     config_path: &Path,
     node_name: &str,
 ) -> Result<()> {
@@ -829,10 +830,20 @@ fn setup_systemd<R: BufRead, W: Write>(
         binary,
         config: config_path.to_path_buf(),
         node: node_name.to_string(),
+        proxy_ports: config
+            .proxy
+            .enabled
+            .then_some((config.proxy.http_port, config.proxy.https_port)),
     };
 
     let path = systemd::install(&unit)?;
     prompt.say(&format!("wrote {}", path.display()))?;
+    if unit.render_socket().is_some() {
+        prompt.say(&format!(
+            "wrote {} (holds the proxy ports across restarts)",
+            systemd::socket_path().display()
+        ))?;
+    }
 
     if args.no_start {
         prompt.say(&format!(
@@ -849,7 +860,7 @@ fn setup_systemd<R: BufRead, W: Write>(
         return Ok(());
     }
 
-    systemd::enable_and_start()?;
+    systemd::enable_and_start(&unit)?;
     prompt.say("the daemon is running")?;
     Ok(())
 }

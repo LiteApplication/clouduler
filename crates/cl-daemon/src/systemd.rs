@@ -37,6 +37,53 @@ fn send(path: &std::ffi::OsStr, message: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// TCP listeners systemd opened for us (socket activation), in order.
+///
+/// The `sd_listen_fds` protocol: `LISTEN_PID` names the process the sockets
+/// were meant for and `LISTEN_FDS` how many there are, starting at fd 3.
+/// Because the socket unit outlives the service, these stay bound, and keep
+/// queueing connections, while the daemon restarts. Empty when not socket
+/// activated. Taken once: the variables are cleared so children do not see
+/// them, and the descriptors are marked close-on-exec.
+pub fn take_listen_fds() -> Vec<std::net::TcpListener> {
+    use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
+
+    const FIRST_FD: RawFd = 3;
+    let mine = std::env::var("LISTEN_PID")
+        .ok()
+        .and_then(|pid| pid.parse::<u32>().ok())
+        == Some(std::process::id());
+    let count = std::env::var("LISTEN_FDS")
+        .ok()
+        .and_then(|n| n.parse::<RawFd>().ok())
+        .unwrap_or(0);
+    for var in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+        std::env::remove_var(var);
+    }
+    if !mine || count <= 0 {
+        return Vec::new();
+    }
+
+    let mut listeners = Vec::new();
+    for fd in FIRST_FD..FIRST_FD + count {
+        let _ = nix::fcntl::fcntl(
+            // Borrowed only for this call; ownership is taken just below.
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) },
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        );
+        // SAFETY: systemd handed us this descriptor and, per the protocol,
+        // nothing else in the process owns it.
+        let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+        if listener.local_addr().is_ok() && listener.set_nonblocking(true).is_ok() {
+            listeners.push(listener);
+        } else {
+            // Not a TCP socket we can use: leave it open for whoever it is for.
+            let _ = listener.into_raw_fd();
+        }
+    }
+    listeners
+}
+
 /// The daemon is up and serving. `STATUS` is what `systemctl status` shows.
 pub fn ready(status: &str) {
     notify(&format!("READY=1\nSTATUS={status}"));

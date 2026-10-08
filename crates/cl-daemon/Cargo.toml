@@ -26,7 +26,7 @@ blake3.workspace = true
 hickory-proto.workspace = true
 instant-acme.workspace = true
 ipnet.workspace = true
-nix = { workspace = true, features = ["time"] }
+nix = { workspace = true, features = ["time", "fs"] }
 openraft.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true

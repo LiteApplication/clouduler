@@ -167,7 +167,17 @@ pub fn prebind(cfg: &ClusterConfig) {
         return;
     };
     let mut bound = PREBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    // Sockets systemd already holds for us (see `clouduler.socket`) are the
+    // best case: they were bound before this process existed.
+    for listener in crate::systemd::take_listen_fds() {
+        if let Ok(addr) = listener.local_addr() {
+            bound.insert(addr.port(), listener);
+        }
+    }
     for port in [http_port, https_port] {
+        if bound.contains_key(&port) {
+            continue;
+        }
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         if let Ok(listener) = std::net::TcpListener::bind(addr) {
             if listener.set_nonblocking(true).is_ok() {
