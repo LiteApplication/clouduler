@@ -60,7 +60,6 @@ services:
     entrypoint: /bin/sh
     environment:
       FOO: bar
-    env_file: .env
     labels:
       team: infra
     volumes:
@@ -98,7 +97,8 @@ overlay hostname.
   instead of quietly accumulating state nothing backs up.
 - `command`/`entrypoint` accept either a shell string or an exec array.
 - `environment` accepts a mapping or a `KEY=value` list.
-- `env_file` accepts a single path or a list of paths.
+- `env_file` is not supported yet: a stack that sets it is rejected. Move
+  its entries into `environment` instead.
 - `labels` accepts a mapping or a `key=value` list.
 - `networks` entries must be declared in the stack's own top-level
   `networks:` section.
@@ -460,6 +460,7 @@ rather than silently splitting it across nodes.
 
 - service names are valid DNS labels
 - `depends_on` targets exist in the same stack
+- `env_file` is rejected while unsupported
 - `networks` referenced by a service are declared in the stack's own
   `networks:` section
 - no two services publish the same `protocol`/port, across both `ports:`
