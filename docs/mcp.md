@@ -4,16 +4,21 @@ Every node serves a [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint at `https://<web fqdn>/mcp` (Streamable HTTP), so an AI client such as
 Claude Code, claude.ai, Cursor or VS Code can inspect the cluster, build and fix
 stacks, and debug inside containers. It is part of the API server, so there is
-nothing extra to deploy, and it is on by default.
+nothing extra to deploy.
 
-## Turning it off
+## Turning it on and off
 
 ```yaml
 mcp:
-  enabled: false
+  enabled: true
 ```
 
-The setting is read live, so it takes effect without a restart. When it is off,
+`clouduler init` writes `enabled: false` into a new cluster's config, so
+letting an AI client in is an explicit opt-in. A config with no `mcp:` key at
+all counts as enabled, so clusters created before the setting existed keep
+the access they already had.
+
+The setting is read live (and can be flipped from Configuration → AI access in the ui), so it takes effect without a restart. When it is off,
 `/mcp`, the OAuth discovery documents, `/oauth/*` and `/api/oauth/*` all answer
 404, and the "AI access" page disappears from the ui. `/api/mcp/clients` keeps
 working so an admin can still see and revoke previously connected clients.

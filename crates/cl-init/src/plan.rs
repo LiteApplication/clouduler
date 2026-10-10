@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use cl_config::{
-    ClusterConfig, ClusterMeta, Drive, DriveMode, Network, NetworkKind, Node, NodeAddress,
-    NodeRole, WebConfig, DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,
+    ClusterConfig, ClusterMeta, Drive, DriveMode, McpConfig, Network, NetworkKind, Node,
+    NodeAddress, NodeRole, WebConfig, DEFAULT_RPC_PORT, DEFAULT_WEB_BACKEND_PORT,
 };
 use ipnet::IpNet;
 
@@ -133,7 +133,11 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         proxy: Default::default(),
         self_update: None,
         backup: None,
-        mcp: Default::default(),
+        // Off in a new cluster: letting an AI client run commands in containers
+        // is an explicit opt-in. Written out rather than left to the serde
+        // default, which stays `true` so clusters that predate the setting keep
+        // the access they already had.
+        mcp: McpConfig { enabled: false },
     };
 
     config
@@ -264,6 +268,22 @@ mod tests {
             Some(ip("10.10.0.1"))
         );
         assert_eq!(config.web_fqdn(), "cloud.int.example.com");
+    }
+
+    /// The written file has to carry `enabled: false` itself: a file without
+    /// the key parses as enabled, which is what keeps older clusters' access.
+    #[test]
+    fn a_new_cluster_starts_with_mcp_off_and_says_so_in_the_file() {
+        let config = new_cluster(&plan()).expect("valid");
+        assert!(!config.mcp.enabled);
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let reparsed: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(!reparsed.mcp.enabled);
+
+        let without_key: ClusterConfig =
+            serde_yaml::from_str(&yaml.replace("mcp:\n  enabled: false\n", "")).unwrap();
+        assert!(without_key.mcp.enabled);
     }
 
     #[test]

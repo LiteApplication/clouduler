@@ -92,6 +92,10 @@ export function AiAccess() {
         </p>
         <CopyRow label="MCP URL" text={mcpUrl} />
         <CopyRow label="Claude Code" text={`claude mcp add --transport http ${SERVER_NAME} ${mcpUrl}`} />
+        <p className="muted">
+          The command only registers the server. Then start <code>claude</code>, run <code>/mcp</code>, pick{' '}
+          {SERVER_NAME} and choose Authenticate to open the approval page.
+        </p>
         <div className="flex-row">
           <a href="https://claude.ai/settings/connectors" target="_blank" rel="noreferrer">
             <button type="button">
