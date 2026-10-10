@@ -814,6 +814,7 @@ dependencies = [
 name = "cl-api"
 version = "0.6.8"
 dependencies = [
+ "aho-corasick",
  "async-stream",
  "axum",
  "axum-extra",
@@ -856,6 +857,7 @@ dependencies = [
  "tower-http 0.7.0",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
