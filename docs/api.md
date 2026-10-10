@@ -390,3 +390,26 @@ Neither `renew` nor `reconcile` has a direct channel into `cl-dns`, which owns
 the ACME account and the reconcile loop: `renew` removes the stored
 certificate so the next pass reissues it, and `reconcile` currently just
 accepts the request (`202`) without a way to force a pass early.
+
+## MCP and OAuth
+
+The MCP endpoint and the OAuth server that lets AI clients connect to it. See
+[mcp.md](mcp.md) for the tools, focus and secret redaction. Everything here
+answers 404 while `mcp.enabled` is false, except `/api/mcp/clients`.
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `POST`, `GET`, `DELETE` | `/mcp` | OAuth access token or api key | MCP Streamable HTTP; 401 carries `WWW-Authenticate: Bearer resource_metadata=…` |
+| `GET` | `/.well-known/oauth-protected-resource[/mcp]` | none | RFC 9728 resource metadata |
+| `GET` | `/.well-known/oauth-authorization-server[/mcp]` | none | RFC 8414 server metadata |
+| `POST` | `/oauth/register` | none | RFC 7591 registration, public clients only |
+| `GET` | `/oauth/authorize` | none | validates the request, then redirects to the ui consent page |
+| `POST` | `/oauth/token` | none | `authorization_code` (PKCE S256 required) and `refresh_token` |
+| `GET` | `/api/oauth/requests/{id}` | any user | a pending consent request |
+| `POST` | `/api/oauth/requests/{id}/approve`, `/deny` | any user (admin grant needs admin) | answer it; returns the client redirect |
+| `GET` | `/api/mcp/clients` | any user | approved clients |
+| `DELETE` | `/api/mcp/clients/{id}` | admin | revoke a client; its tokens stop working immediately |
+
+Followers relay `/mcp`, `/oauth/token` and `/oauth/register` to the leader and
+redirect `/oauth/authorize` there, because sessions, consent requests and codes
+are held in the leader's memory.
