@@ -875,9 +875,7 @@ impl Scheduler {
                 assignment,
                 spec,
                 revision,
-                stop_grace: service
-                    .stop_grace_period
-                    .unwrap_or(live.failover.stop_grace),
+                stop_grace: effective_stop_grace(service, live.failover.stop_grace),
             });
         }
 
@@ -1337,6 +1335,14 @@ fn served_drives(state: &ClusterState) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+/// A service's own `stop_grace_period` when set, else the cluster default.
+fn effective_stop_grace(
+    service: &cl_config::Service,
+    default: std::time::Duration,
+) -> std::time::Duration {
+    service.stop_grace_period.unwrap_or(default)
+}
+
 /// `failover.stop_grace` from the replicated cluster config: how long a
 /// container without its own `stop_grace_period` gets to stop. The built-in
 /// default if no config has been published yet or it fails to parse.
@@ -1454,6 +1460,18 @@ mod tests {
 
     fn mounts_service() -> cl_config::Service {
         service_with_volumes("      - fast/data:/data\n")
+    }
+
+    #[test]
+    fn a_services_stop_grace_period_overrides_the_cluster_default() {
+        let default = Duration::from_secs(30);
+        let mut service = mounts_service();
+        assert_eq!(effective_stop_grace(&service, default), default);
+        service.stop_grace_period = Some(Duration::from_secs(90));
+        assert_eq!(
+            effective_stop_grace(&service, default),
+            Duration::from_secs(90)
+        );
     }
 
     // Guards the move off `DefaultHasher` on the current toolchain. If a future

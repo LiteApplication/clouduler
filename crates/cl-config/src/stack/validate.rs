@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cluster::ClusterConfig;
+use crate::cluster::{ClusterConfig, MAX_STOP_GRACE};
 use crate::error::{ConfigError, Result};
 
 use super::deploy::{parse_memory_bytes, MAX_REPLICAS};
@@ -19,6 +19,7 @@ impl StackFile {
         self.validate_service_networks_declared()?;
         self.validate_no_duplicate_ports()?;
         self.validate_stop_signals()?;
+        self.validate_stop_grace_periods()?;
         self.validate_colocate()?;
         self.validate_writable_secrets()?;
         self.validate_replicas()?;
@@ -121,6 +122,27 @@ impl StackFile {
                 return Err(ConfigError::invalid(
                     format!("services.{name}.stop_signal"),
                     format!("\"{signal}\" is not a signal name (e.g. SIGINT) or number"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A service's `stop_grace_period` overrides `failover.stop_grace`, so it
+    /// gets the same bounds: non-zero and at most `MAX_STOP_GRACE`.
+    fn validate_stop_grace_periods(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(grace) = svc.stop_grace_period else {
+                continue;
+            };
+            let field = format!("services.{name}.stop_grace_period");
+            if grace.is_zero() {
+                return Err(ConfigError::invalid(field, "must be greater than zero"));
+            }
+            if grace > MAX_STOP_GRACE {
+                return Err(ConfigError::invalid(
+                    field,
+                    format!("must be at most {MAX_STOP_GRACE:?}"),
                 ));
             }
         }
@@ -664,6 +686,24 @@ mod tests {
         assert!(!is_dns_label("-gitlab"));
         assert!(!is_dns_label("gitlab-"));
         assert!(!is_dns_label("gitlab_ce"));
+    }
+
+    #[test]
+    fn stop_grace_period_must_be_nonzero_and_bounded() {
+        let with = |g: &str| {
+            StackFile::parse(&format!(
+                "services:\n  web:\n    image: x\n    stop_grace_period: {g}\n"
+            ))
+        };
+        for bad in ["0s", "11m"] {
+            let err = with(bad).unwrap_err();
+            assert!(
+                err.to_string().contains("services.web.stop_grace_period"),
+                "{bad}"
+            );
+        }
+        assert!(with("1s").is_ok());
+        assert!(with("10m").is_ok());
     }
 
     #[test]
