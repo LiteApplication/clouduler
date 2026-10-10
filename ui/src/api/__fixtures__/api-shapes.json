@@ -208,6 +208,7 @@
     "version": 12,
     "volumes": {
       "fast/v0": {
+        "frozen": null,
         "generation": 1,
         "id": "<volatile>",
         "primary": "n0",

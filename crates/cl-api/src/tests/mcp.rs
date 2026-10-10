@@ -208,12 +208,14 @@ async fn an_admin_sees_the_full_tool_list_and_a_reader_only_the_read_tools() {
         "update_instance",
         "put_config",
         "generate_secret",
+        "freeze_volume",
+        "unfreeze_volume",
         "exec",
         "read_file",
     ] {
         assert!(admin_tools.contains(&t.to_string()), "missing {t}");
     }
-    assert_eq!(admin_tools.len(), 25, "{admin_tools:?}");
+    assert_eq!(admin_tools.len(), 27, "{admin_tools:?}");
 
     let token = read_token(&h).await;
     let mut reader = Mcp::connect(&h, &token).await;
@@ -225,6 +227,8 @@ async fn an_admin_sees_the_full_tool_list_and_a_reader_only_the_read_tools() {
         "generate_secret",
         "read_file",
         "put_config",
+        "freeze_volume",
+        "unfreeze_volume",
     ] {
         assert!(!tools.contains(&t.to_string()), "{t} listed for a reader");
     }

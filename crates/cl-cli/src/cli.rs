@@ -96,6 +96,11 @@ pub enum Command {
         #[command(subcommand)]
         command: RegistryCommand,
     },
+    /// Freeze a volume so it can be edited by hand, or unfreeze it again.
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommand,
+    },
     /// Inspect drives.
     Drive {
         #[command(subcommand)]
@@ -737,6 +742,34 @@ pub enum RegistryCommand {
         /// Registry host the login was stored under.
         #[arg(add = ArgValueCompleter::new(completion::registry_servers))]
         server: String,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VolumeCommand {
+    /// Pause replication of a volume so it can be edited on this node
+    /// without being overwritten. Fails if containers on other nodes use it,
+    /// unless `--force` stops them.
+    Freeze {
+        /// Volume, as `drive/volume`.
+        #[arg(add = ArgValueCompleter::new(completion::volume_ids))]
+        volume: VolumeId,
+        /// Stop containers using the volume on other nodes instead of failing.
+        #[arg(long)]
+        force: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Resume replication, pushing this node's copy to the others right away.
+    Unfreeze {
+        /// Volume, as `drive/volume`.
+        #[arg(add = ArgValueCompleter::new(completion::volume_ids))]
+        volume: VolumeId,
+        /// Leave the containers `freeze --force` stopped stopped.
+        #[arg(long)]
+        no_start: bool,
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },

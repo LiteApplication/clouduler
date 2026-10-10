@@ -118,6 +118,9 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         let mut next_due: std::collections::BTreeMap<VolumeId, Instant> =
             std::collections::BTreeMap::new();
         let mut ticker = tokio::time::interval(self.tick);
+        // Volumes last seen frozen: when one unfreezes it is pushed at once,
+        // not at the end of its (possibly long) interval.
+        let mut was_frozen: BTreeSet<VolumeId> = BTreeSet::new();
 
         loop {
             ticker.tick().await;
@@ -133,6 +136,15 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             for (id, volume) in &state.volumes {
                 if !self.registry.implements(&id.drive) {
                     continue;
+                }
+                // Frozen for hand edits: nothing may sync out of, or over,
+                // this volume until it is unfrozen.
+                if volume.frozen.is_some() {
+                    was_frozen.insert(id.clone());
+                    continue;
+                }
+                if was_frozen.remove(id) {
+                    next_due.insert(id.clone(), now);
                 }
                 let is_served = self.registry.is_served(&id.drive);
                 let is_source = if is_served {
@@ -203,6 +215,19 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         };
 
         for target in targets {
+            // A freeze can land while earlier targets of this run were
+            // syncing; stop pushing the moment it does.
+            if self
+                .node
+                .state()
+                .await
+                .volumes
+                .get(&id)
+                .is_some_and(|v| v.frozen.is_some())
+            {
+                debug!(%id, "volume was frozen mid-run, stopping");
+                break;
+            }
             let drive_addr = crate::transport::drive_port(target.addr.port());
             let peer = std::net::SocketAddr::new(target.addr.ip(), drive_addr);
 

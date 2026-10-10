@@ -24,6 +24,7 @@ mod exec;
 mod read;
 mod secrets;
 mod stack;
+mod volume;
 
 /// Everything a tool call needs.
 pub struct Ctx {
@@ -322,6 +323,21 @@ pub fn catalog() -> &'static [ToolSpec] {
                  Refuses to replace an existing secret unless overwrite=true, because rotating a \
                  live database password breaks the service using it.",
             ),
+            spec::<volume::FreezeVolumeArgs>(
+                "freeze_volume",
+                true,
+                "Pause replication of a volume (`drive/volume`) so it can be edited on one node \
+                 without a sync from another node overwriting or deleting the edits. Fails if \
+                 containers on other nodes use the volume, unless force=true stops them. Call \
+                 unfreeze_volume when done.",
+            ),
+            spec::<volume::UnfreezeVolumeArgs>(
+                "unfreeze_volume",
+                true,
+                "Resume replication of a frozen volume: the edited copy becomes the primary and is \
+                 pushed to the other nodes right away, then the containers freeze_volume stopped \
+                 are started again (unless start_containers=false).",
+            ),
             spec::<exec::ExecArgs>(
                 "exec",
                 true,
@@ -389,6 +405,8 @@ pub async fn call(ctx: &Ctx, name: &str, args: JsonObject) -> ToolResult {
         "update_instance" => stack::update_instance(ctx, parse(args)?).await,
         "put_config" => secrets::put_config(ctx, parse(args)?).await,
         "generate_secret" => secrets::generate_secret(ctx, parse(args)?).await,
+        "freeze_volume" => volume::freeze_volume(ctx, parse(args)?).await,
+        "unfreeze_volume" => volume::unfreeze_volume(ctx, parse(args)?).await,
         "exec" => exec::exec(ctx, parse(args)?).await,
         "read_file" => exec::read_file(ctx, parse(args)?).await,
         other => Err(format!("unknown tool {other:?}")),
@@ -399,7 +417,7 @@ pub async fn call(ctx: &Ctx, name: &str, args: JsonObject) -> ToolResult {
 /// log. Redacted by the caller before logging.
 pub fn audit_target(name: &str, args: &JsonObject) -> String {
     let text = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    let mut target = ["target", "id", "name", "stack", "confirm"]
+    let mut target = ["target", "id", "name", "volume", "stack", "confirm"]
         .iter()
         .find_map(|k| text(k))
         .unwrap_or_default();

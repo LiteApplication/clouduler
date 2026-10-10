@@ -367,6 +367,19 @@ pub struct VolumeState {
     pub primary: String,
     /// Generation each node has caught up to.
     pub replicas: BTreeMap<String, u64>,
+    /// Set while an operator is editing the volume by hand: replication of
+    /// it is paused so nothing syncs over (or deletes) the edits.
+    #[serde(default)]
+    pub frozen: Option<FrozenVolume>,
+}
+
+/// Why and where a volume's replication is paused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenVolume {
+    /// Node being edited; it becomes the primary again on unfreeze.
+    pub node: String,
+    /// Instances the freeze stopped, so unfreeze can start exactly those.
+    pub stopped: Vec<InstanceId>,
 }
 
 impl VolumeState {
@@ -919,6 +932,17 @@ pub enum Request {
         id: VolumeId,
         primary: String,
     },
+    /// Pauses replication of the volume while `node` is edited by hand.
+    FreezeVolume {
+        id: VolumeId,
+        node: String,
+        stopped: Vec<InstanceId>,
+    },
+    /// Resumes replication, making the frozen node's copy the new generation
+    /// every replica re-pulls.
+    UnfreezeVolume {
+        id: VolumeId,
+    },
     StoreCertificate(CertificateState),
     RemoveCertificate {
         fqdn: String,
@@ -1112,6 +1136,8 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "UpsertVolume",
     "SetVolumeReplica",
     "TouchVolume",
+    "FreezeVolume",
+    "UnfreezeVolume",
     "StoreCertificate",
     "RemoveCertificate",
     "SetCertStatus",
@@ -1229,6 +1255,14 @@ mod request_mirror {
         TouchVolume {
             id: VolumeId,
             primary: String,
+        },
+        FreezeVolume {
+            id: VolumeId,
+            node: String,
+            stopped: Vec<InstanceId>,
+        },
+        UnfreezeVolume {
+            id: VolumeId,
         },
         StoreCertificate(CertificateState),
         RemoveCertificate {
@@ -1848,6 +1882,7 @@ impl ClusterState {
                         generation: 1,
                         primary: primary.clone(),
                         replicas: BTreeMap::from([(primary.clone(), 1)]),
+                        frozen: None,
                     });
                 Ok(())
             }
@@ -1887,6 +1922,39 @@ impl ClusterState {
                 volume.generation += 1;
                 volume.primary = primary.clone();
                 volume.replicas.insert(primary.clone(), volume.generation);
+                Ok(())
+            }
+
+            Request::FreezeVolume { id, node, stopped } => {
+                if !self.node_implements(node, &id.drive) {
+                    return Err(format!("node {node} does not implement drive {}", id.drive));
+                }
+                let volume = self
+                    .volumes
+                    .get_mut(id)
+                    .ok_or_else(|| format!("unknown volume {id}"))?;
+                if let Some(frozen) = &volume.frozen {
+                    return Err(format!("{id} is already frozen on {}", frozen.node));
+                }
+                volume.frozen = Some(FrozenVolume {
+                    node: node.clone(),
+                    stopped: stopped.clone(),
+                });
+                Ok(())
+            }
+
+            Request::UnfreezeVolume { id } => {
+                let volume = self
+                    .volumes
+                    .get_mut(id)
+                    .ok_or_else(|| format!("unknown volume {id}"))?;
+                let frozen = volume
+                    .frozen
+                    .take()
+                    .ok_or_else(|| format!("{id} is not frozen"))?;
+                volume.generation += 1;
+                volume.primary = frozen.node.clone();
+                volume.replicas.insert(frozen.node, volume.generation);
                 Ok(())
             }
 
@@ -2385,6 +2453,60 @@ pub fn instances_using_volume(
     found
 }
 
+/// Instances that must be down while `volumes` is overwritten or edited: those
+/// mounting one of them, plus those mounting the whole drive root (`.`) of the
+/// same drive, which contains every volume on it.
+pub fn instances_touching_volumes(
+    state: &ClusterState,
+    volumes: &[crate::ids::VolumeId],
+) -> Vec<crate::ids::InstanceId> {
+    let mut found: BTreeSet<crate::ids::InstanceId> = BTreeSet::new();
+    for volume in volumes {
+        found.extend(instances_using_volume(state, volume));
+        if volume.volume != "." {
+            found.extend(instances_using_volume(
+                state,
+                &crate::ids::VolumeId::new(volume.drive.clone(), ".".to_string()),
+            ));
+        }
+    }
+    found.into_iter().collect()
+}
+
+impl ClusterState {
+    /// Running instances on nodes other than `node` that use `volume`
+    /// (directly or through a whole-drive mount): what a freeze on `node`
+    /// has to stop.
+    pub fn running_elsewhere(
+        &self,
+        node: &str,
+        volume: &crate::ids::VolumeId,
+    ) -> Vec<crate::ids::InstanceId> {
+        instances_touching_volumes(self, std::slice::from_ref(volume))
+            .into_iter()
+            .filter(|i| {
+                self.assignments
+                    .get(i)
+                    .is_some_and(|a| a.desired == DesiredState::Running && a.node != node)
+            })
+            .collect()
+    }
+
+    /// Reachable nodes implementing the volume's drive whose copy is not yet
+    /// at the volume's current generation.
+    pub fn replicas_behind(&self, volume: &crate::ids::VolumeId) -> Vec<String> {
+        let Some(v) = self.volumes.get(volume) else {
+            return Vec::new();
+        };
+        self.nodes
+            .iter()
+            .filter(|(name, n)| n.implements(&volume.drive) && !self.unreachable.contains(*name))
+            .filter(|(name, _)| v.replicas.get(*name).copied().unwrap_or(0) < v.generation)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2527,6 +2649,14 @@ mod tests {
             Request::TouchVolume {
                 id: VolumeId::new("fast", "v1"),
                 primary: "n1".into(),
+            },
+            Request::FreezeVolume {
+                id: VolumeId::new("fast", "v1"),
+                node: "n1".into(),
+                stopped: vec![],
+            },
+            Request::UnfreezeVolume {
+                id: VolumeId::new("fast", "v1"),
             },
             Request::StoreCertificate(CertificateState {
                 fqdn: "example.com".into(),
@@ -3292,6 +3422,52 @@ mod tests {
         });
         assert_eq!(state.volumes[&id].in_sync(), ["n1"].into());
         assert_eq!(state.volumes[&id].generation, 2);
+    }
+
+    #[test]
+    fn freezing_a_volume_blocks_a_second_freeze_and_unfreeze_makes_the_node_primary() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        state.apply(&Request::SetVolumeReplica {
+            id: id.clone(),
+            node: "n2".into(),
+            generation: 1,
+        });
+
+        assert!(state
+            .apply(&Request::FreezeVolume {
+                id: id.clone(),
+                node: "n2".into(),
+                stopped: vec![],
+            })
+            .is_ok());
+        assert!(state
+            .apply(&Request::FreezeVolume {
+                id: id.clone(),
+                node: "n1".into(),
+                stopped: vec![],
+            })
+            .error
+            .unwrap()
+            .contains("already frozen"));
+
+        assert!(state
+            .apply(&Request::UnfreezeVolume { id: id.clone() })
+            .is_ok());
+        let volume = &state.volumes[&id];
+        assert!(volume.frozen.is_none());
+        assert_eq!(volume.primary, "n2");
+        assert_eq!(volume.generation, 2);
+        assert_eq!(state.replicas_behind(&id), ["n1"]);
+        assert!(state
+            .apply(&Request::UnfreezeVolume { id })
+            .error
+            .unwrap()
+            .contains("not frozen"));
     }
 
     #[test]

@@ -232,6 +232,7 @@ impl Store {
                                 this_name.to_string(),
                                 1,
                             )]),
+                            frozen: None,
                         },
                     );
                 }

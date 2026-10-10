@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cl_cli::cli::{
     BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, GitBackupCommand,
-    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand,
+    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand, VolumeCommand,
 };
 use cl_config::ClusterConfig;
 use cl_init::detect;
@@ -204,6 +204,26 @@ async fn main() -> Result<()> {
             }
             RegistryCommand::Remove { server, via } => {
                 cl_cli::registry::remove(&cfg, &server, via.as_deref()).await
+            }
+        },
+        Command::Volume { command } => match command {
+            VolumeCommand::Freeze { volume, force, via } => {
+                cl_daemon::volume_freeze::freeze(&cfg, &hostname()?, &volume, force, via.as_deref())
+                    .await
+            }
+            VolumeCommand::Unfreeze {
+                volume,
+                no_start,
+                via,
+            } => {
+                cl_daemon::volume_freeze::unfreeze(
+                    &cfg,
+                    &hostname()?,
+                    &volume,
+                    !no_start,
+                    via.as_deref(),
+                )
+                .await
             }
         },
         Command::Drive { command } => match command {

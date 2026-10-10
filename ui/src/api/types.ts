@@ -256,6 +256,8 @@ export interface VolumeState {
   generation: number;
   primary: string;
   replicas: Record<string, number>;
+  /** Set while the volume is being edited by hand and not replicating. */
+  frozen: { node: string; stopped: string[] } | null;
 }
 
 export interface ClusterState {

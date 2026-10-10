@@ -18,3 +18,4 @@ pub mod placement;
 pub mod proxy;
 pub mod quorum_stamp;
 pub mod systemd;
+pub mod volume_freeze;

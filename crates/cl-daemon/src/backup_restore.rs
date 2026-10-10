@@ -68,7 +68,7 @@ use tracing::{debug, warn};
 use crate::backup_runner::{currently_running, instances_using_drive};
 use crate::backup_secrets::{self, TempFileGuard};
 use cl_raft::client::client_for;
-use cl_raft::state::instances_using_volume;
+use cl_raft::state::instances_touching_volumes;
 
 /// How often every node checks for `Pending` restore requests it can serve.
 const RESTORE_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -402,23 +402,6 @@ pub async fn restore_service(
         .await?;
     println!("restored {stack}/{service}");
     Ok(())
-}
-
-/// Instances that must be down while any of `volumes` is overwritten: those
-/// mounting one of them, plus those mounting the whole drive root (`.`) of
-/// the same drive, which contains every volume on it.
-fn instances_touching_volumes(state: &ClusterState, volumes: &[VolumeId]) -> Vec<InstanceId> {
-    let mut found: BTreeSet<InstanceId> = BTreeSet::new();
-    for volume in volumes {
-        found.extend(instances_using_volume(state, volume));
-        if volume.volume != "." {
-            found.extend(instances_using_volume(
-                state,
-                &VolumeId::new(volume.drive.clone(), ".".to_string()),
-            ));
-        }
-    }
-    found.into_iter().collect()
 }
 
 /// The destination to restore `drive` from: the caller's explicit choice if
@@ -851,7 +834,7 @@ fn latest_of<'a>(snapshots: &[&'a SnapshotInfo]) -> Option<&'a SnapshotInfo> {
     snapshots.iter().copied().max_by(|a, b| a.time.cmp(&b.time))
 }
 
-async fn set_desired(
+pub(crate) async fn set_desired(
     client: &cl_raft::client::Client,
     instances: &[InstanceId],
     desired: DesiredState,
@@ -871,7 +854,7 @@ async fn set_desired(
     Ok(())
 }
 
-fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
+pub(crate) fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
     let default = cl_sched::run::configured_stop_grace(state);
     instances
         .iter()
@@ -893,7 +876,7 @@ fn max_stop_grace(state: &ClusterState, instances: &[InstanceId]) -> Duration {
 /// Fails - rather than returning quietly - if docker cannot be reached for a
 /// local container or anything is still not confirmed stopped at `deadline`:
 /// restoring under a running container corrupts it.
-async fn wait_for_stopped(
+pub(crate) async fn wait_for_stopped(
     client: &cl_raft::client::Client,
     node_name: &str,
     instances: &[InstanceId],

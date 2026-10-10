@@ -674,6 +674,7 @@ mod tests {
                 generation,
                 primary: primary.to_string(),
                 replicas,
+                frozen: None,
             },
         );
         state
