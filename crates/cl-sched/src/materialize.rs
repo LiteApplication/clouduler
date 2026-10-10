@@ -323,6 +323,7 @@ impl Materializer {
             source,
         })?;
 
+        set_owner(&host_path, reference)?;
         set_mode(&host_path, reference.mode_or_default())?;
 
         Ok(Materialized {
@@ -400,6 +401,33 @@ fn write_private(path: &Path, content: &[u8], secret: bool) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Apply the reference's `uid`/`gid` to the host file, which a bind mount
+/// shows to the container unchanged. Only numeric ids can be honoured: the
+/// host has no idea what the image's `/etc/passwd` calls anyone.
+fn set_owner(path: &Path, reference: &ObjectRef) -> Result<()> {
+    let id = |field: &str, value: &Option<String>| -> Result<Option<u32>> {
+        value
+            .as_deref()
+            .map(|v| {
+                v.trim().parse::<u32>().map_err(|_| SchedError::BadObject {
+                    name: reference.source.clone(),
+                    reason: format!("{field} {v:?} must be a numeric id"),
+                })
+            })
+            .transpose()
+    };
+    let (uid, gid) = (id("uid", &reference.uid)?, id("gid", &reference.gid)?);
+    if uid.is_none() && gid.is_none() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::chown(path, uid, gid).map_err(|source| SchedError::ObjectIo {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
@@ -578,6 +606,24 @@ mod tests {
                 .mode();
             assert_eq!(dir_mode & 0o077, 0);
         }
+    }
+
+    #[test]
+    fn a_non_numeric_owner_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let state = state_with_objects(&key);
+        let m = Materializer::new(
+            dir.path(),
+            tokio::sync::watch::channel(Some(Arc::new(
+                ClusterKey::parse(&key.encode()).expect("key"),
+            )))
+            .1,
+        );
+        let mut r = ObjectRef::new("db_password");
+        r.uid = Some("hermes".into());
+        let err = m.prepare(&state, &instance(), &[], &[r]).unwrap_err();
+        assert!(matches!(err, SchedError::BadObject { .. }));
     }
 
     #[test]
