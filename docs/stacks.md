@@ -103,7 +103,17 @@ overlay hostname.
 - `networks` entries must be declared in the stack's own top-level
   `networks:` section.
 - `depends_on` accepts a list of service names; every name must be another
-  service in the same stack.
+  service in the same stack, and a service cannot depend on itself, directly
+  or through a cycle. It has compose's `service_started` meaning: an instance
+  is not created until every service it depends on has at least one instance
+  running (on any node). Until then it shows as `waiting` with the reason
+  `waiting for <service>`, which is not an error and not a problem. The gate
+  applies only to the first creation of a container: one that already exists
+  is never stopped, and is restarted normally, if a dependency goes down
+  later, and an image update of a running instance is not held back. A
+  dependency that is intentionally stopped, or has no instances (for example
+  `replicas: 0`), still blocks, so remove the `depends_on` or start the
+  dependency. It waits for "running", not "healthy".
 - `sysctls` accepts a mapping or a `key=value` list.
 - `stop_grace_period` and all `deploy:` durations use humantime syntax
   (`30s`, `2m`, `1h30m`).

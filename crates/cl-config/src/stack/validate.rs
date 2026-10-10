@@ -163,6 +163,47 @@ impl StackFile {
                         format!("no service named {dep} in this stack"),
                     ));
                 }
+                if dep == name {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.depends_on"),
+                        "a service cannot depend on itself",
+                    ));
+                }
+            }
+        }
+        // A cycle would leave every service in it waiting for the others forever.
+        // Depth first, tracking the path so the message can name the loop.
+        fn visit<'a>(
+            file: &'a StackFile,
+            name: &'a str,
+            path: &mut Vec<&'a str>,
+            done: &mut std::collections::BTreeSet<&'a str>,
+        ) -> Option<String> {
+            if let Some(at) = path.iter().position(|n| *n == name) {
+                let mut cycle: Vec<&str> = path[at..].to_vec();
+                cycle.push(name);
+                return Some(cycle.join(" -> "));
+            }
+            if done.contains(name) {
+                return None;
+            }
+            path.push(name);
+            for dep in &file.services[name].depends_on {
+                if let Some(found) = visit(file, dep, path, done) {
+                    return Some(found);
+                }
+            }
+            path.pop();
+            done.insert(name);
+            None
+        }
+        let mut done = std::collections::BTreeSet::new();
+        for name in self.services.keys() {
+            if let Some(cycle) = visit(self, name, &mut Vec::new(), &mut done) {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}.depends_on"),
+                    format!("dependency cycle: {cycle}"),
+                ));
             }
         }
         Ok(())
@@ -708,6 +749,29 @@ mod tests {
         let err = StackFile::parse(raw).unwrap_err();
         assert!(err.to_string().contains("services.a.depends_on"));
         assert!(err.to_string().contains("no service named b"));
+    }
+
+    #[test]
+    fn depends_on_self_rejected() {
+        let raw = "services:\n  a:\n    image: x\n    depends_on: [a]\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.a.depends_on"));
+        assert!(err.to_string().contains("cannot depend on itself"));
+    }
+
+    #[test]
+    fn depends_on_cycle_rejected() {
+        let raw = "services:\n  a:\n    image: x\n    depends_on: [b]\n  b:\n    image: x\n    depends_on: [c]\n  c:\n    image: x\n    depends_on: [a]\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("dependency cycle: a -> b -> c -> a"));
+    }
+
+    #[test]
+    fn depends_on_diamond_is_not_a_cycle() {
+        let raw = "services:\n  a:\n    image: x\n    depends_on: [b, c]\n  b:\n    image: x\n    depends_on: [d]\n  c:\n    image: x\n    depends_on: [d]\n  d:\n    image: x\n";
+        StackFile::parse(raw).unwrap();
     }
 
     #[test]
