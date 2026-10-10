@@ -660,6 +660,13 @@ pub(crate) async fn restart_instance(
             ApiError::Conflict("no node in the cluster can run this instance right now".to_string())
         })?;
 
+    // Unassign then Assign back to the same node leaves the replicated state
+    // exactly as it was, so the node would see nothing to do and the container
+    // would keep running. Removing it makes reconcile rebuild it in place.
+    if target == assignment.node {
+        return remove_container_on(state, &instance, &assignment.node).await;
+    }
+
     let response = state
         .cluster
         .submit(ClusterRequest::Unassign {
@@ -911,9 +918,18 @@ pub(crate) async fn roll_back_instance(
         .get(instance)
         .map(|a| a.node.clone())
         .ok_or_else(|| ApiError::NotFound(format!("no instance {instance}")))?;
+    remove_container_on(state, instance, &node).await
+}
+
+/// Removes `instance`'s container on `node`, here or via that node.
+async fn remove_container_on(
+    state: &AppState,
+    instance: &InstanceId,
+    node: &str,
+) -> Result<(), ApiError> {
     if node != state.node_name {
         let path = format!("/api/instances/internal/{instance}/remove-container");
-        return internal_peer::post_empty(state, &node, &path).await;
+        return internal_peer::post_empty(state, node, &path).await;
     }
     remove_container(state, instance).await
 }
