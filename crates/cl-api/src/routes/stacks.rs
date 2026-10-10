@@ -142,7 +142,7 @@ async fn check_overlay_collision(
 /// cluster under exactly this name is let through, with a warning: it was
 /// accepted before names were checked, and must stay redeployable. Done here
 /// rather than in raft apply, which must keep replaying existing logs.
-async fn check_stack_name(state: &AppState, name: &str) -> Result<(), ApiError> {
+pub(crate) async fn check_stack_name(state: &AppState, name: &str) -> Result<(), ApiError> {
     let Err(reason) = validate_stack_name(name) else {
         return Ok(());
     };

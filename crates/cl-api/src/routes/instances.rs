@@ -1815,7 +1815,6 @@ fn internal_exec_run_path(instance: &InstanceId) -> String {
 /// Run a command in an instance's container wherever it runs: here, or on
 /// the owning node via `exec-run`. See `exec_run_local` for the timeout
 /// caveat.
-#[allow(dead_code)] // called by `crate::mcp`
 pub(crate) async fn exec_run(
     state: &AppState,
     instance: &InstanceId,
@@ -1944,7 +1943,6 @@ fn internal_file_path(instance: &InstanceId, query: &FileQuery) -> String {
 
 /// Read a file (or list a directory) in an instance's container wherever it
 /// runs. `max` defaults to 256 KiB and is capped at 1 MiB.
-#[allow(dead_code)] // called by `crate::mcp`
 pub(crate) async fn read_file(
     state: &AppState,
     instance: &InstanceId,
@@ -2038,7 +2036,6 @@ fn parse_sse_logs(body: &str) -> Result<Vec<LogLine>, String> {
 /// docker directly; remote ones go through the owning node's existing
 /// `internal_logs` route with `follow=false` and the SSE body is parsed back
 /// into lines.
-#[allow(dead_code)] // called by `crate::mcp`
 pub(crate) async fn fetch_logs(
     state: &AppState,
     instance: &InstanceId,

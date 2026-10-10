@@ -43,6 +43,7 @@ pub fn router() -> Router<AppState> {
         .merge(config::router())
         .merge(cloudflare::router())
         .merge(oauth::router())
+        .merge(crate::mcp::router())
         .merge(oidc::router())
         .merge(certs::router())
         .merge(redirects::router())

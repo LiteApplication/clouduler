@@ -106,6 +106,8 @@ pub struct AppState {
     /// Pending oauth authorization requests and codes, leader-local; see
     /// `auth::oauth`.
     pub oauth: Arc<crate::auth::oauth::OAuthMemory>,
+    /// The `/mcp` protocol service and its sessions; see `mcp`.
+    pub mcp: Arc<crate::mcp::McpHub>,
 }
 
 impl AppState {
@@ -226,6 +228,7 @@ impl ApiServer {
             data_dir: options.data_dir,
             internal_replay: Default::default(),
             oauth: Default::default(),
+            mcp: Default::default(),
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the
@@ -538,6 +541,13 @@ async fn redirect_non_leader(
         && (path == "/oauth/token" || path == "/oauth/register")
     {
         return Ok(routes::oauth::forward_to_leader(&state, request).await);
+    }
+
+    // MCP sessions and focus live in the serving node's memory, so every
+    // method of `/mcp` (POST calls, the GET event stream, DELETE) is relayed
+    // to the leader; a client will not follow a redirect.
+    if path == "/mcp" {
+        return Ok(crate::mcp::forward_to_leader(&state, request).await);
     }
 
     // Writes go to the leader, reads answer anywhere.

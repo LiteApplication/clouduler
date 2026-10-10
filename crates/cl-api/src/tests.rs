@@ -178,6 +178,7 @@ pub(crate) async fn harness() -> Harness {
         proxy_health: cl_proxy::HealthTable::default(),
         internal_replay: Default::default(),
         oauth: Default::default(),
+        mcp: Default::default(),
     };
 
     let router = build_router(state.clone());
@@ -2465,4 +2466,5 @@ async fn a_node_without_the_key_refuses_to_wrap_one() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+mod mcp;
 mod oauth_flow;

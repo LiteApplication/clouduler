@@ -5,11 +5,11 @@ use crate::auth::oauth::{self, pkce_challenge, McpGrant};
 use http_body_util::BodyExt;
 
 const REDIRECT: &str = "http://localhost:4567/cb";
-const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+pub(super) const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-type Headers = Vec<(&'static str, String)>;
+pub(super) type Headers = Vec<(&'static str, String)>;
 
-async fn call(
+pub(super) async fn call(
     h: &Harness,
     method: &str,
     uri: &str,
@@ -33,16 +33,16 @@ async fn call(
     (status, headers, json)
 }
 
-fn admin(h: &Harness) -> Headers {
+pub(super) fn admin(h: &Harness) -> Headers {
     vec![("authorization", format!("Bearer {}", h.admin_key))]
 }
 
-fn json_headers(mut base: Headers) -> Headers {
+pub(super) fn json_headers(mut base: Headers) -> Headers {
     base.push(("content-type", "application/json".into()));
     base
 }
 
-async fn register(h: &Harness) -> String {
+pub(super) async fn register(h: &Harness) -> String {
     let (status, _, body) = call(
         h,
         "POST",
@@ -59,7 +59,7 @@ async fn register(h: &Harness) -> String {
 }
 
 /// Run /oauth/authorize and return the pending request id.
-async fn authorize(h: &Harness, client_id: &str) -> String {
+pub(super) async fn authorize(h: &Harness, client_id: &str) -> String {
     let query = serde_urlencoded::to_string([
         ("client_id", client_id),
         ("redirect_uri", REDIRECT),
@@ -87,7 +87,7 @@ async fn authorize(h: &Harness, client_id: &str) -> String {
         .to_string()
 }
 
-async fn approve(
+pub(super) async fn approve(
     h: &Harness,
     auth: &Headers,
     req: &str,
@@ -104,7 +104,7 @@ async fn approve(
     (status, body)
 }
 
-fn code_of(redirect: &serde_json::Value) -> String {
+pub(super) fn code_of(redirect: &serde_json::Value) -> String {
     let uri = redirect["redirect"].as_str().unwrap();
     assert!(uri.starts_with(REDIRECT), "{uri}");
     assert!(uri.contains("state=xyz"));
@@ -126,7 +126,7 @@ async fn token(h: &Harness, params: &[(&str, &str)]) -> (StatusCode, serde_json:
     (status, body)
 }
 
-async fn code_exchange(
+pub(super) async fn code_exchange(
     h: &Harness,
     client_id: &str,
     code: &str,

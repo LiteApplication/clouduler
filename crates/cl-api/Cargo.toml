@@ -39,6 +39,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip"] }
 tracing.workspace = true
 uuid.workspace = true
+# MCP server for AI clients: tool/resource protocol plus the streamable-http
+# transport, mounted into the axum router by `mcp`.
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
 
 # Not in the pre-wired list; added here since only cl-api needs them.
 async-stream = "0.3"

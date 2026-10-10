@@ -36,7 +36,7 @@ pub(crate) fn is_reserved(name: &str) -> bool {
 
 /// Secret names clouduler itself owns and never shows through the generic
 /// secret listing route.
-fn is_reserved_secret(name: &str) -> bool {
+pub(crate) fn is_reserved_secret(name: &str) -> bool {
     super::self_update::is_reserved_secret(name)
         || cl_sched::registries::is_registry_secret(name)
         || is_reserved_wireguard_secret(name)
