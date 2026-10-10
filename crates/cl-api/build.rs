@@ -32,7 +32,15 @@ fn main() {
         println!("cargo:rerun-if-changed={}", ui_dir.join(watched).display());
     }
 
-    let embed_dir = if ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
+    println!("cargo:rerun-if-env-changed=CL_API_PREBUILT_UI");
+
+    // A cross-build drives one cargo per target, which would otherwise run the
+    // whole tsc + vite build once each. `CL_API_PREBUILT_UI=1` says the caller
+    // already built `ui/dist` once and wants it embedded as-is.
+    let prebuilt = std::env::var_os("CL_API_PREBUILT_UI").is_some()
+        && real_dist.join("index.html").is_file();
+
+    let embed_dir = if !prebuilt && ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
         // Built into this build's own OUT_DIR, never the shared `ui/dist`:
         // vite empties its output directory first, so two cargo builds running
         // at once (one per target in a cross-build) used to wipe `ui/dist`
