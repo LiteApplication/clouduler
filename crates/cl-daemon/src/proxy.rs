@@ -1090,7 +1090,10 @@ fn desired_records(
             push_new(&mut out, &mut seen, records);
         }
     }
-    out
+    // Same collapse the planner applies: a CNAME a node's address record
+    // shadows can never go live, so keeping it here left its hostname
+    // "pending" forever even though the A/AAAA records were published.
+    cl_dns::normalize_desired(&out)
 }
 
 /// Appends `records` to `out`, skipping any already seen by (type, fqdn,
@@ -1876,7 +1879,10 @@ services:
             .iter()
             .filter(|r| r.fqdn == "blog.example.com")
             .collect();
-        assert_eq!(blog.len(), cfg().nodes.len(), "{blog:?}");
+        // n2 only offers a cname, which its sibling's address records shadow
+        // and so never reaches the desired set.
+        assert_eq!(blog.len(), 2, "{blog:?}");
+        assert!(blog.iter().all(|r| r.kind != cl_dns::RecordType::CNAME));
     }
 
     /// Under `DnsPublishMode::OwningNode`, only the node actually running
@@ -1918,7 +1924,8 @@ services:
             .iter()
             .filter(|r| r.fqdn == "printer.example.com")
             .collect();
-        assert_eq!(printer.len(), cfg.nodes.len(), "{printer:?}");
+        assert_eq!(printer.len(), 2, "{printer:?}");
+        assert!(printer.iter().all(|r| r.kind != cl_dns::RecordType::CNAME));
     }
 
     /// The dashboard only works on the leader (writes 503 elsewhere), so only

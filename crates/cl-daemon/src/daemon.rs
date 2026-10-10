@@ -1149,10 +1149,7 @@ async fn watch_cluster_config(
 /// on disk (restored from backup, rotated by hand). A missing or unreadable
 /// file keeps the key already loaded: a reload must never leave the node
 /// worse off than it was.
-fn reload_cluster_key(
-    path: &Path,
-    key_tx: &tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>,
-) {
+fn reload_cluster_key(path: &Path, key_tx: &tokio::sync::watch::Sender<Option<Arc<ClusterKey>>>) {
     match ClusterKey::load(path) {
         Ok(key) => {
             let fingerprint = key.fingerprint();
@@ -1167,7 +1164,9 @@ fn reload_cluster_key(
                 info!(%fingerprint, "cluster key reloaded");
             }
         }
-        Err(e) => warn!(error = %e, path = %path.display(), "cannot reload the cluster key, keeping the current one"),
+        Err(e) => {
+            warn!(error = %e, path = %path.display(), "cannot reload the cluster key, keeping the current one")
+        }
     }
 }
 

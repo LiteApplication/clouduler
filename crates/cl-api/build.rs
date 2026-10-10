@@ -37,8 +37,8 @@ fn main() {
     // A cross-build drives one cargo per target, which would otherwise run the
     // whole tsc + vite build once each. `CL_API_PREBUILT_UI=1` says the caller
     // already built `ui/dist` once and wants it embedded as-is.
-    let prebuilt = std::env::var_os("CL_API_PREBUILT_UI").is_some()
-        && real_dist.join("index.html").is_file();
+    let prebuilt =
+        std::env::var_os("CL_API_PREBUILT_UI").is_some() && real_dist.join("index.html").is_file();
 
     let embed_dir = if !prebuilt && ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
         // Built into this build's own OUT_DIR, never the shared `ui/dist`:

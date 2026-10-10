@@ -174,7 +174,7 @@ fn note_unclaimed(key: &str) {
 /// the same name, the first one in `desired`'s order survives (`desired`'s
 /// callers build that order deterministically - sorted node names - so this
 /// picks the same target every pass instead of flapping).
-fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
+pub fn normalize_desired(desired: &[DesiredRecord]) -> Vec<DesiredRecord> {
     let lowered: Vec<DesiredRecord> = desired
         .iter()
         .cloned()
