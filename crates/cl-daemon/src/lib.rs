@@ -1,5 +1,9 @@
 //! Daemon subsystems: the bootstrap loop and every background job it spawns.
 
+// The scheduler future's `Send` proof recurses through `join_all`'s nested
+// future types and overruns the default limit of 128.
+#![recursion_limit = "256"]
+
 pub mod backup_restore;
 pub mod backup_runner;
 pub mod backup_secrets;
