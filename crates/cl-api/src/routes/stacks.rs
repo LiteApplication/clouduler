@@ -43,15 +43,15 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<St
 }
 
 #[derive(Serialize)]
-struct StackDetail {
-    name: String,
-    spec: String,
-    revision: u64,
-    configs: Vec<String>,
-    secrets: Vec<String>,
-    used_configs: Vec<String>,
-    used_secrets: Vec<String>,
-    requirements: StackRequirements,
+pub(crate) struct StackDetail {
+    pub(crate) name: String,
+    pub(crate) spec: String,
+    pub(crate) revision: u64,
+    pub(crate) configs: Vec<String>,
+    pub(crate) secrets: Vec<String>,
+    pub(crate) used_configs: Vec<String>,
+    pub(crate) used_secrets: Vec<String>,
+    pub(crate) requirements: StackRequirements,
 }
 
 async fn detail(
@@ -59,10 +59,16 @@ async fn detail(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<StackDetail>, ApiError> {
+    Ok(Json(stack_detail(&state, &name).await?))
+}
+
+/// What `GET /api/stacks/{name}` returns, callable in-process. The spec is
+/// returned verbatim; it holds secret *names* only, never their content.
+pub(crate) async fn stack_detail(state: &AppState, name: &str) -> Result<StackDetail, ApiError> {
     let cluster_state = state.cluster.state().await;
     let stack = cluster_state
         .stacks
-        .get(&name)
+        .get(name)
         .ok_or_else(|| ApiError::NotFound(format!("no stack {name}")))?;
     // The spec was already validated at deploy time, so a parse failure here
     // would mean corrupted state, not a bad request.
@@ -75,7 +81,7 @@ async fn detail(
         }
         Err(_) => StackRequirements::default(),
     };
-    Ok(Json(StackDetail {
+    Ok(StackDetail {
         name: stack.name.clone(),
         spec: stack.spec.clone(),
         revision: stack.revision,
@@ -84,7 +90,7 @@ async fn detail(
         used_configs: stack.used_configs.iter().cloned().collect(),
         used_secrets: stack.used_secrets.iter().cloned().collect(),
         requirements,
-    }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -153,15 +159,37 @@ async fn deploy(
     Path(name): Path<String>,
     Json(body): Json<DeployRequest>,
 ) -> Result<StatusCode, ApiError> {
-    check_stack_name(&state, &name).await?;
+    let decode = |m: BTreeMap<String, String>| -> Result<BTreeMap<String, Vec<u8>>, ApiError> {
+        m.into_iter()
+            .map(|(k, v)| Ok((k, cl_raft::base64_decode(&v).map_err(ApiError::BadRequest)?)))
+            .collect()
+    };
+    let configs = decode(body.configs)?;
+    let secrets = decode(body.secrets)?;
+    deploy_stack(&state, &name, body.spec, configs, secrets).await?;
+    Ok(StatusCode::OK)
+}
+
+/// The body of `deploy`, callable in-process: validates the spec against what
+/// the cluster already holds, seals and stores the plaintext `secrets` the
+/// spec owns, then hands the rest to `deploy_from_files`. `configs` and
+/// `secrets` are plaintext bytes, already decoded from the wire's base64.
+/// Secrets the spec does not reference are ignored, never written.
+pub(crate) async fn deploy_stack(
+    state: &AppState,
+    name: &str,
+    spec: String,
+    configs: BTreeMap<String, Vec<u8>>,
+    secrets: BTreeMap<String, Vec<u8>>,
+) -> Result<(), ApiError> {
+    check_stack_name(state, name).await?;
     let secrets_to_write = {
-        let parsed =
-            StackFile::parse(&body.spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-        check_overlay_collision(&state, &name, &parsed).await?;
+        let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        check_overlay_collision(state, name, &parsed).await?;
         let requirements = parsed.requirements();
         let cluster_state = state.cluster.state().await;
         for config_name in &requirements.file_configs {
-            if !body.configs.contains_key(config_name)
+            if !configs.contains_key(config_name)
                 && !cluster_state.configs.contains_key(config_name)
             {
                 return Err(ApiError::BadRequest(format!(
@@ -170,7 +198,7 @@ async fn deploy(
             }
         }
         for secret_name in &requirements.file_secrets {
-            if !body.secrets.contains_key(secret_name)
+            if !secrets.contains_key(secret_name)
                 && !cluster_state.secrets.contains_key(secret_name)
             {
                 return Err(ApiError::BadRequest(format!(
@@ -178,7 +206,7 @@ async fn deploy(
                 )));
             }
         }
-        body.secrets
+        secrets
             .into_iter()
             .filter(|(k, _)| requirements.file_secrets.contains(k))
             .collect::<BTreeMap<_, _>>()
@@ -189,16 +217,15 @@ async fn deploy(
         let key = key_guard
             .as_ref()
             .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-        for (secret_name, content) in &secrets_to_write {
-            let plaintext = cl_raft::base64_decode(content).map_err(ApiError::BadRequest)?;
-            let sealed = Sealed::seal(key, secret_name, &plaintext).map_err(ApiError::internal)?;
+        for (secret_name, plaintext) in &secrets_to_write {
+            let sealed = Sealed::seal(key, secret_name, plaintext).map_err(ApiError::internal)?;
             let response = state
                 .cluster
                 .submit(ClusterRequest::PutSecret {
                     name: secret_name.clone(),
                     sealed: sealed.blob,
                     key_fingerprint: key.fingerprint(),
-                    owner: Some(name.clone()),
+                    owner: Some(name.to_string()),
                 })
                 .await
                 .map_err(ApiError::not_leader)?;
@@ -208,18 +235,7 @@ async fn deploy(
         }
     }
 
-    let configs: BTreeMap<String, Vec<u8>> = body
-        .configs
-        .into_iter()
-        .map(|(name, content)| {
-            Ok((
-                name,
-                cl_raft::base64_decode(&content).map_err(ApiError::BadRequest)?,
-            ))
-        })
-        .collect::<Result<_, ApiError>>()?;
-    deploy_from_files(&state, &name, body.spec, configs).await?;
-    Ok(StatusCode::OK)
+    deploy_from_files(state, name, spec, configs).await
 }
 
 /// The reusable core of `deploy`: parses+validates the spec, submits it, then
@@ -305,6 +321,12 @@ async fn remove(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    remove_stack(&state, name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The body of `DELETE /api/stacks/{name}`, callable in-process.
+pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), ApiError> {
     let response = state
         .cluster
         .submit(ClusterRequest::RemoveStack { name })
@@ -313,7 +335,7 @@ async fn remove(
     if let Some(msg) = response.error {
         return Err(ApiError::Conflict(msg));
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -322,20 +344,20 @@ struct ValidateRequest {
 }
 
 #[derive(Serialize)]
-struct ValidationError {
-    path: String,
-    message: String,
+pub(crate) struct ValidationError {
+    pub(crate) path: String,
+    pub(crate) message: String,
 }
 
 #[derive(Serialize)]
-struct ValidateResponse {
-    valid: bool,
-    errors: Vec<ValidationError>,
-    requirements: Option<StackRequirements>,
+pub(crate) struct ValidateResponse {
+    pub(crate) valid: bool,
+    pub(crate) errors: Vec<ValidationError>,
+    pub(crate) requirements: Option<StackRequirements>,
     /// The same breakdown as `requirements`, one entry per service: what the
     /// ui shows as a separate placement table per container instead of one
     /// table that can't say which constraint belongs to which service.
-    per_service: BTreeMap<String, StackRequirements>,
+    pub(crate) per_service: BTreeMap<String, StackRequirements>,
 }
 
 async fn validate(
@@ -344,8 +366,14 @@ async fn validate(
     Path(name): Path<String>,
     Json(body): Json<ValidateRequest>,
 ) -> Json<ValidateResponse> {
-    if let Err(e) = check_stack_name(&state, &name).await {
-        return Json(ValidateResponse {
+    Json(validate_stack(&state, &name, &body.spec).await)
+}
+
+/// What `POST /api/stacks/{name}/validate` returns, callable in-process.
+/// Never fails: a bad spec or name is reported in the body.
+pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> ValidateResponse {
+    if let Err(e) = check_stack_name(state, name).await {
+        return ValidateResponse {
             valid: false,
             errors: vec![ValidationError {
                 path: String::new(),
@@ -353,21 +381,21 @@ async fn validate(
             }],
             requirements: None,
             per_service: BTreeMap::new(),
-        });
+        };
     }
-    match StackFile::parse(&body.spec) {
+    match StackFile::parse(spec) {
         Ok(parsed) => {
             let mut requirements = parsed.requirements();
             let cfg = state.cluster_config.read().await;
             requirements.hosts = parsed.hosts(&cfg);
-            Json(ValidateResponse {
+            ValidateResponse {
                 valid: true,
                 errors: Vec::new(),
                 requirements: Some(requirements),
                 per_service: parsed.service_requirements(),
-            })
+            }
         }
-        Err(e) => Json(ValidateResponse {
+        Err(e) => ValidateResponse {
             valid: false,
             errors: vec![ValidationError {
                 path: String::new(),
@@ -375,6 +403,6 @@ async fn validate(
             }],
             requirements: None,
             per_service: BTreeMap::new(),
-        }),
+        },
     }
 }
