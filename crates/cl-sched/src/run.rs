@@ -321,6 +321,22 @@ impl Scheduler {
         let actual = docker.list_managed().await?;
         let mut actions = reconcile::diff(&targets, &actual, gate);
 
+        // `depends_on`: hold back the first creation of an instance until the
+        // services it depends on are up. Only `Create` is gated, so an existing
+        // container is never stopped or blocked by a dependency going down.
+        actions.retain(|action| {
+            let Action::Create(id) = action else {
+                return true;
+            };
+            match crate::deps::unmet_dependency(state, id) {
+                Some(dep) => {
+                    debug!(instance = %id, %dep, "waiting for a dependency before creating");
+                    false
+                }
+                None => true,
+            }
+        });
+
         // An instance that crash-looped everywhere it can run is restarted in
         // place on a growing delay instead of every sweep. Dropped before the
         // crash-loop bookkeeping below so a deferred start is not counted as a

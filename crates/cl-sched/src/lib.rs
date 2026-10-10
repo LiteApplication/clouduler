@@ -1,5 +1,6 @@
 //! Placement and the per-node reconcile loop.
 
+pub mod deps;
 pub mod error;
 pub mod materialize;
 pub mod place;

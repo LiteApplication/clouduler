@@ -148,6 +148,8 @@ const STATE_STOPPING: &str = "stopping";
 const STATE_RESTARTING: &str = "restarting";
 const STATE_EXITED: &str = "exited";
 const STATE_PULLING: &str = "pulling";
+/// Not created yet because a `depends_on` service has nothing running.
+const STATE_WAITING: &str = "waiting";
 const STATE_PENDING_PLACEMENT: &str = "pending_placement";
 const STATE_UNKNOWN: &str = "unknown";
 
@@ -225,6 +227,11 @@ async fn summarize_local(
         _ => None,
     };
     let proxy = proxy_health_of(state, assignment);
+    let waiting_for = if local && container.is_none() {
+        cl_sched::deps::unmet_dependency(cluster_state, &assignment.instance)
+    } else {
+        None
+    };
     let instance_state = if !local {
         STATE_UNKNOWN
     } else {
@@ -240,6 +247,9 @@ async fn summarize_local(
             {
                 STATE_PULLING
             }
+            None if assignment.desired == DesiredState::Running && waiting_for.is_some() => {
+                STATE_WAITING
+            }
             None => STATE_STOPPED,
         }
     };
@@ -254,13 +264,17 @@ async fn summarize_local(
     });
     // Replicated, so this is the real answer even for an instance whose node
     // could not be asked just now.
-    let (reason, step) = compose_progress(
+    let (mut reason, step) = compose_progress(
         cluster_state.instance_updates.get(&assignment.instance),
         assignment
             .migration
             .as_ref()
             .map(|m| (&m.phase, migration_sync)),
     );
+
+    if instance_state == STATE_WAITING {
+        reason = waiting_for.map(|dep| format!("waiting for {dep}"));
+    }
 
     InstanceSummary {
         id: assignment.instance.to_string(),
