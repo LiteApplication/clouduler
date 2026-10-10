@@ -29,8 +29,17 @@ use crate::status::{LAST_EXPORT_CONFIG, LAST_PULL_CONFIG};
 /// (git -> cluster) sync in `cl-api::routes::git_backup` since they are never
 /// mirrored into the repo in the first place.
 pub fn is_bookkeeping_config(name: &str) -> bool {
-    name == LAST_EXPORT_CONFIG || name == DEPLOY_KEY_PUBLIC_CONFIG || name == LAST_PULL_CONFIG
+    name == LAST_EXPORT_CONFIG
+        || name == DEPLOY_KEY_PUBLIC_CONFIG
+        || name == LAST_PULL_CONFIG
+        || name == MCP_CLIENTS_CONFIG
 }
+
+/// The MCP oauth client store (`cl-api::auth::oauth::MCP_CLIENTS_CONFIG`).
+/// Kept out of git because every token refresh rewrites it, which would turn
+/// the export into a commit per client per hour; clients simply re-approve
+/// after a restore.
+const MCP_CLIENTS_CONFIG: &str = "_clouduler_mcp_clients";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Snapshot {

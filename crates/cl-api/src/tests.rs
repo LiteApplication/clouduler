@@ -147,6 +147,7 @@ pub(crate) async fn harness() -> Harness {
         proxy: Default::default(),
         self_update: None,
         backup: None,
+        mcp: Default::default(),
     };
 
     let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(());
@@ -176,6 +177,7 @@ pub(crate) async fn harness() -> Harness {
         tls_fingerprint: "test:fingerprint".to_string(),
         proxy_health: cl_proxy::HealthTable::default(),
         internal_replay: Default::default(),
+        oauth: Default::default(),
     };
 
     let router = build_router(state.clone());
@@ -2462,3 +2464,5 @@ async fn a_node_without_the_key_refuses_to_wrap_one() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+mod oauth_flow;

@@ -25,6 +25,8 @@ import { Destinations } from './views/backup/Destinations';
 import { Schedules } from './views/backup/Schedules';
 import { History } from './views/backup/History';
 import { RestoreWizard } from './views/backup/RestoreWizard';
+import { AiAccess } from './views/AiAccess';
+import { OAuthConsent } from './views/OAuthConsent';
 
 export function App() {
   const { identity, loading } = useAuth();
@@ -38,6 +40,17 @@ export function App() {
   }
   if (!identity) return <Login />;
 
+  // The consent page is a standalone approval screen reached from an MCP
+  // client's browser redirect, so it renders without the app shell.
+  return (
+    <Routes>
+      <Route path="/oauth/consent" element={<OAuthConsent />} />
+      <Route path="*" element={<Shell mcpEnabled={identity.mcp_enabled !== false} />} />
+    </Routes>
+  );
+}
+
+function Shell({ mcpEnabled }: { mcpEnabled: boolean }) {
   return (
     <ClusterStoreProvider>
       <InstanceProgressProvider>
@@ -65,6 +78,7 @@ export function App() {
               <Route path="/backup/history" element={<History />} />
               <Route path="/backup/restore" element={<RestoreWizard />} />
               <Route path="/self-update" element={<SelfUpdate />} />
+              {mcpEnabled && <Route path="/ai-access" element={<AiAccess />} />}
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Layout>

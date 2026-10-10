@@ -53,6 +53,7 @@ export type IconName =
   | 'dice'
   | 'copy'
   | 'sync'
+  | 'sparkle'
   | 'cloud';
 
 // Every path is drawn on a 24x24 grid with round caps and no fill, so they
@@ -305,6 +306,12 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M21 12a9 9 0 0 1-14.5 7.1" />
       <path d="M3 12A9 9 0 0 1 17.5 4.9" />
       <path d="M17 2v4h-4M7 22v-4h4" />
+    </>
+  ),
+  sparkle: (
+    <>
+      <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z" />
+      <path d="M19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7L19 16Z" />
     </>
   ),
   cloud: <path d="M7 19a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.7 9.2 4 4 0 0 1 17 19H7Z" />,

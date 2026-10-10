@@ -103,6 +103,9 @@ pub struct AppState {
     /// Internal-route signatures already accepted; see
     /// `auth::internal::ReplayCache`.
     pub internal_replay: Arc<crate::auth::internal::ReplayCache>,
+    /// Pending oauth authorization requests and codes, leader-local; see
+    /// `auth::oauth`.
+    pub oauth: Arc<crate::auth::oauth::OAuthMemory>,
 }
 
 impl AppState {
@@ -222,6 +225,7 @@ impl ApiServer {
             proxy_health: options.proxy_health,
             data_dir: options.data_dir,
             internal_replay: Default::default(),
+            oauth: Default::default(),
         };
 
         // First launch of a fresh cluster: mint an api key, since it is the
@@ -287,6 +291,7 @@ fn spawn_prune_expired(state: AppState) {
                 _ = shutdown.changed() => return,
             }
             state.sessions.prune_expired().await;
+            state.oauth.prune_expired();
             if let Some(oidc) = state.oidc.read().await.as_ref() {
                 oidc.prune_expired().await;
             }
@@ -510,6 +515,31 @@ async fn redirect_non_leader(
         return Ok(next.run(request).await);
     }
 
+    // The oauth flow keeps its pending requests and codes in the leader's
+    // memory, so unlike other reads, authorize has to land there. A browser
+    // follows the redirect; token and registration are relayed, since an MCP
+    // client will not follow a 503.
+    let path = request.uri().path();
+    if path == "/oauth/authorize" {
+        return Ok(match leader_location(&state).await {
+            Some(leader) => {
+                let pq = request
+                    .uri()
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or(path);
+                Redirect::temporary(&format!("{}{}", leader.trim_end_matches('/'), pq))
+                    .into_response()
+            }
+            None => ApiError::NotLeader { leader: None }.into_response(),
+        });
+    }
+    if request.method() == axum::http::Method::POST
+        && (path == "/oauth/token" || path == "/oauth/register")
+    {
+        return Ok(routes::oauth::forward_to_leader(&state, request).await);
+    }
+
     // Writes go to the leader, reads answer anywhere.
     //
     // A write has to be ordered against every other write, so it belongs on the
@@ -571,7 +601,7 @@ async fn redirect_non_leader(
 /// lag behind on a follower, and briefly disagree entirely about a leader's
 /// id after it gets re-provisioned, which used to make a perfectly healthy
 /// leader lookup fail and this node answer with a 503 instead of a redirect.
-async fn leader_location(state: &AppState) -> Option<String> {
+pub(crate) async fn leader_location(state: &AppState) -> Option<String> {
     let addr = state.cluster.leader_rpc_addr().await?;
     let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&addr);
     let port = state.cluster_config.read().await.web.port;

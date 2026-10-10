@@ -133,6 +133,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         proxy: Default::default(),
         self_update: None,
         backup: None,
+        mcp: Default::default(),
     };
 
     config

@@ -35,6 +35,7 @@ const cluster: ClusterState = {
 const clusterConfig: ClusterConfig = {
   auth: { api_keys: true, session_ttl: '12h', oidc: null },
   backup: null,
+  mcp: { enabled: true },
   cluster: { name: 'test' },
   data_dir: '/var/lib/clouduler',
   drives: { fast: { sync_interval: '5m', mode: 'replicated', served_by: [] } },

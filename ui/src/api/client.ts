@@ -23,6 +23,9 @@ import type {
   GitBackupStatus,
   GitBackupWebhookSecretStatus,
   Identity,
+  McpClient,
+  McpGrant,
+  OAuthRequestInfo,
   InstanceState,
   OidcClientSecretStatus,
   PendingConfig,
@@ -188,6 +191,15 @@ export const api = {
   listKeys: () => get<ApiKey[]>('/api/keys'),
   createKey: (name: string) => post<ApiKeyCreated>('/api/keys', { name }),
   deleteKey: (id: string) => del<void>(`/api/keys/${encodeURIComponent(id)}`),
+
+  // mcp / oauth
+  listMcpClients: () => get<McpClient[]>('/api/mcp/clients'),
+  revokeMcpClient: (id: string) => del<void>(`/api/mcp/clients/${encodeURIComponent(id)}`),
+  getOAuthRequest: (id: string) => get<OAuthRequestInfo>(`/api/oauth/requests/${encodeURIComponent(id)}`),
+  approveOAuthRequest: (id: string, grant: McpGrant) =>
+    post<{ redirect: string }>(`/api/oauth/requests/${encodeURIComponent(id)}/approve`, { grant }),
+  denyOAuthRequest: (id: string) =>
+    post<{ redirect: string }>(`/api/oauth/requests/${encodeURIComponent(id)}/deny`),
 
   // cluster
   status: () => get<ClusterStatus>('/api/status'),

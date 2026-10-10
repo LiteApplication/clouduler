@@ -448,6 +448,30 @@ export interface Identity {
   subject: string;
   username: string;
   role: UserRole;
+  /** From /auth/me only: readable by every user, unlike /api/config, so the
+   *  nav can hide the AI access page when the operator switched MCP off. */
+  mcp_enabled?: boolean;
+}
+
+export type McpGrant = 'read' | 'admin';
+
+/** An MCP client (Claude Code, Cursor, ...) an admin or viewer has approved. */
+export interface McpClient {
+  client_id: string;
+  client_name: string;
+  grant: McpGrant;
+  approved_by: string;
+  /** Unix seconds. */
+  created_at: number;
+}
+
+/** GET /api/oauth/requests/{id}: what the consent page asks the user to approve. */
+export interface OAuthRequestInfo {
+  client_name: string;
+  redirect_host: string;
+  scope: string;
+  requested_grant: McpGrant;
+  allowed_grants: McpGrant[];
 }
 
 export interface ApiKey {
@@ -715,6 +739,11 @@ export interface ClusterConfig {
   proxy: ProxyConfig;
   self_update: SelfUpdateConfig | null;
   backup: GitBackupConfig | null;
+  mcp: McpConfig;
+}
+
+export interface McpConfig {
+  enabled: boolean;
 }
 
 export interface PendingConfig {

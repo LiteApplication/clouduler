@@ -10,6 +10,7 @@ import {
   DrivesSection,
   FailoverSection,
   GitBackupSection,
+  McpSection,
   NetworksSection,
   ProxySection,
   SecretsSection,
@@ -114,6 +115,15 @@ export const CONFIG_PAGES: ConfigPage[] = [
     group: 'Security',
     keys: ['secrets'],
     Component: SecretsSection,
+  },
+  {
+    slug: 'mcp',
+    label: 'AI access',
+    icon: 'sparkle',
+    blurb: 'Whether AI clients may connect to the cluster over MCP.',
+    group: 'Security',
+    keys: ['mcp'],
+    Component: McpSection,
   },
   {
     slug: 'git-backup',
