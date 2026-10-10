@@ -24,8 +24,21 @@ pub fn router() -> Router<AppState> {
         .route("/auth/oidc/callback", get(callback))
 }
 
-async fn me(identity: Identity) -> impl IntoResponse {
-    Json(identity)
+#[derive(serde::Serialize)]
+struct MeResponse {
+    #[serde(flatten)]
+    identity: Identity,
+    /// Every logged-in user can read this, unlike `/api/config`, which the ui
+    /// would otherwise need to know whether to show the "AI access" page.
+    mcp_enabled: bool,
+}
+
+async fn me(identity: Identity, State(state): State<AppState>) -> impl IntoResponse {
+    let mcp_enabled = crate::auth::oauth::mcp_enabled(&*state.cluster_config.read().await);
+    Json(MeResponse {
+        identity,
+        mcp_enabled,
+    })
 }
 
 async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
@@ -106,8 +119,40 @@ fn state_cookie(state: String) -> Cookie<'static> {
         .build()
 }
 
+/// Where the browser was headed before login sent it away, so the oauth
+/// consent page survives the identity provider round trip.
+const RETURN_COOKIE_NAME: &str = "cl_oidc_return";
+
+/// Only same-origin paths: anything else would make login an open redirect.
+fn safe_return_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.len() <= 2048
+}
+
+fn return_cookie(path: String) -> Cookie<'static> {
+    Cookie::build((RETURN_COOKIE_NAME, path))
+        .path(STATE_COOKIE_PATH)
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(::cookie::time::Duration::seconds(
+            LOGIN_TIMEOUT.as_secs() as i64
+        ))
+        .build()
+}
+
+#[derive(Deserialize)]
+struct LoginQuery {
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
 async fn login(
     State(state): State<AppState>,
+    Query(query): Query<LoginQuery>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
     let oidc_guard = state.oidc.read().await;
@@ -115,7 +160,12 @@ async fn login(
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("oidc is not configured".into()))?;
     let (url, login_state) = oidc.start_login().await?;
-    Ok((jar.add(state_cookie(login_state)), Redirect::to(&url)))
+    let mut jar = jar.add(state_cookie(login_state));
+    match query.return_to.filter(|p| safe_return_path(p)) {
+        Some(path) => jar = jar.add(return_cookie(path)),
+        None => jar = jar.remove(return_cookie(String::new())),
+    }
+    Ok((jar, Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
@@ -131,9 +181,18 @@ async fn callback(
 ) -> Response {
     // One shot either way: a state cookie is never reused.
     let cookie_state = jar.get(STATE_COOKIE_NAME).map(|c| c.value().to_string());
-    let jar = jar.remove(state_cookie(String::new()));
+    let return_to = jar
+        .get(RETURN_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .filter(|p| safe_return_path(p))
+        .unwrap_or_else(|| "/".to_string());
+    let had_return = jar.get(RETURN_COOKIE_NAME).is_some();
+    let mut jar = jar.remove(state_cookie(String::new()));
+    if had_return {
+        jar = jar.remove(return_cookie(String::new()));
+    }
     match finish(&state, params, cookie_state).await {
-        Ok(session) => (jar.add(session), Redirect::to("/")).into_response(),
+        Ok(session) => (jar.add(session), Redirect::to(&return_to)).into_response(),
         Err(e) => (jar, e).into_response(),
     }
 }

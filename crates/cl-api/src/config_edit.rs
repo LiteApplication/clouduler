@@ -154,6 +154,7 @@ mod tests {
             proxy: Default::default(),
             self_update: None,
             backup: None,
+            mcp: Default::default(),
         }
     }
 

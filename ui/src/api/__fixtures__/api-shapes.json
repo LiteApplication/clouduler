@@ -26,6 +26,9 @@
       "probe_interval": "5s",
       "stop_grace": "30s"
     },
+    "mcp": {
+      "enabled": true
+    },
     "networks": {
       "internal": {
         "type": "internal"
@@ -86,6 +89,7 @@
     }
   ],
   "identity": {
+    "mcp_enabled": true,
     "role": "admin",
     "subject": "<volatile>",
     "username": "test"

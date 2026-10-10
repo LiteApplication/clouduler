@@ -62,6 +62,8 @@ export function Layout({ children }: { children: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [clusterName, setClusterName] = useState<string | null>(null);
   const location = useLocation();
+  // Absent on an older server, which has no MCP to switch off.
+  const mcpEnabled = identity?.mcp_enabled !== false;
 
   // The event stream carries raft state, not cluster.yaml, so the name shown
   // here needs its own one-shot fetch.
@@ -123,8 +125,9 @@ export function Layout({ children }: { children: ReactNode }) {
       { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
       { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },
       { to: '/self-update', label: 'Self-update', short: 'Update', icon: 'refresh' },
+      ...(mcpEnabled ? [{ to: '/ai-access', label: 'AI access', short: 'AI', icon: 'sparkle' as IconName }] : []),
     ],
-    [nodeNames],
+    [nodeNames, mcpEnabled],
   );
 
   const current = links.find((l) => (l.end ? location.pathname === l.to : location.pathname.startsWith(l.to)));

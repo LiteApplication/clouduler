@@ -46,6 +46,29 @@ pub struct ClusterConfig {
     /// off. Freely editable through the web ui, unlike `self_update`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<GitBackupConfig>,
+    /// The MCP endpoint and the OAuth server that fronts it.
+    #[serde(default)]
+    pub mcp: McpConfig,
+}
+
+/// Whether AI clients may connect over MCP.
+///
+/// On by default: every grant still needs an admin or viewer to click
+/// through an approval, and this switch exists for operators who want the
+/// whole surface (discovery, oauth, `/mcp`) gone rather than merely unused.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+}
+
+/// Deriving this would default `enabled` to false, contradicting the serde
+/// field default that existing cluster.yaml files get.
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 fn default_data_dir() -> PathBuf {
@@ -1069,6 +1092,16 @@ mod tests {
         assert_eq!(qualify("blog.", Some("cluster.lan")), "blog");
         assert_eq!(qualify("Blog", Some("Cluster.LAN")), "blog.cluster.lan");
         assert_eq!(qualify("App.Example.NET.", None), "app.example.net");
+    }
+
+    #[test]
+    fn mcp_is_on_unless_a_config_turns_it_off() {
+        assert!(McpConfig::default().enabled);
+        assert!(serde_yaml::from_str::<McpConfig>("{}").unwrap().enabled);
+        let off: McpConfig = serde_yaml::from_str("enabled: false").unwrap();
+        assert!(!off.enabled);
+        let round: McpConfig = serde_yaml::from_str(&serde_yaml::to_string(&off).unwrap()).unwrap();
+        assert_eq!(round, off);
     }
 
     #[test]

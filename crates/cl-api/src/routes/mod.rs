@@ -12,6 +12,7 @@ pub mod git_backup;
 pub mod instances;
 pub mod key_distribution;
 pub mod nodes;
+pub mod oauth;
 pub mod objects;
 pub mod oidc;
 pub mod redirects;
@@ -41,6 +42,7 @@ pub fn router() -> Router<AppState> {
         .merge(key_distribution::router())
         .merge(config::router())
         .merge(cloudflare::router())
+        .merge(oauth::router())
         .merge(oidc::router())
         .merge(certs::router())
         .merge(redirects::router())

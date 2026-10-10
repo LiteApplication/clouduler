@@ -3,6 +3,7 @@
 pub mod internal;
 pub mod keys;
 pub mod middleware;
+pub mod oauth;
 pub mod oidc;
 pub mod session;
 

@@ -11,10 +11,10 @@ mod validate;
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{
     qualify, AuthConfig, CloudflareConfig, ClusterConfig, ClusterMeta, DnsPublishMode, Drive,
-    DriveMode, EgressFallback, FailoverConfig, GitBackupConfig, InterfaceAddress, Network,
-    NetworkKind, Node, NodeAddress, NodeRole, OidcConfig, OpenPort, ProxyConfig, PublicAddress,
-    SecretsConfig, SelfUpdateConfig, WebConfig, DEFAULT_RPC_PORT, DEFAULT_STOP_GRACE,
-    DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE,
+    DriveMode, EgressFallback, FailoverConfig, GitBackupConfig, InterfaceAddress, McpConfig,
+    Network, NetworkKind, Node, NodeAddress, NodeRole, OidcConfig, OpenPort, ProxyConfig,
+    PublicAddress, SecretsConfig, SelfUpdateConfig, WebConfig, DEFAULT_RPC_PORT,
+    DEFAULT_STOP_GRACE, DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE,
 };
 pub use error::{ConfigError, Result};
 pub use netalloc::{

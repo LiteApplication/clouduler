@@ -86,7 +86,7 @@ pub fn generate(name: Option<String>, created_at: i64) -> NewKey {
     }
 }
 
-fn random_token(len: usize) -> String {
+pub(crate) fn random_token(len: usize) -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut out = String::with_capacity(len);
     while out.len() < len {

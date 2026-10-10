@@ -26,6 +26,7 @@ use crate::wireguard::{is_reserved_wireguard_secret, WIREGUARD_INGRESS_CONFIG};
 /// must never be overwritten by a plain `PutConfig` of raw git content.
 pub(crate) fn is_reserved(name: &str) -> bool {
     name == API_KEYS_CONFIG
+        || name == crate::auth::oauth::MCP_CLIENTS_CONFIG
         || name == REDIRECTS_CONFIG
         || name == STATIC_ROUTES_CONFIG
         || name == WIREGUARD_INGRESS_CONFIG

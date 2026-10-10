@@ -47,7 +47,10 @@ export function Login() {
           </div>
         </div>
 
-        <a href="/auth/oidc/login" className="block">
+        <a
+          href={`/auth/oidc/login?return_to=${encodeURIComponent(window.location.pathname + window.location.search)}`}
+          className="block"
+        >
           <button type="button" className="primary block">
             <Icon name="lock" /> Sign in with OIDC
           </button>

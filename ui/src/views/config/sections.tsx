@@ -1542,6 +1542,21 @@ function GitBackupDeployKey() {
   );
 }
 
+export function McpSection({ draft, setDraft, disabled }: SectionProps) {
+  return (
+    <div className="card">
+      <CheckboxField
+        id="mcp-enabled"
+        label="Allow AI clients over MCP"
+        value={draft.mcp.enabled}
+        onChange={(enabled) => setDraft({ ...draft, mcp: { ...draft.mcp, enabled } })}
+        hint="Serves the /mcp endpoint and the OAuth pages that let tools such as Claude Code, Cursor or claude.ai connect after a user approves them. Turning it off hides all of it at once; clients that were already approved can still be listed and revoked on the AI access page. Applies live."
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
 export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
   const a = draft.auth;
   const set = (patch: Partial<ClusterConfig['auth']>) => setDraft({ ...draft, auth: { ...a, ...patch } });
