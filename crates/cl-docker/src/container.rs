@@ -122,6 +122,15 @@ pub struct ContainerSpec {
     pub user: Option<String>,
     pub env: Vec<(String, String)>,
     pub command: Option<Vec<String>>,
+    /// Replaces the image's entrypoint. `None` keeps the image's own.
+    pub entrypoint: Option<Vec<String>>,
+    /// Replaces the image's working directory. `None` keeps the image's own.
+    pub working_dir: Option<String>,
+    /// Linux capabilities to add to, and drop from, docker's default set.
+    pub cap_add: Vec<String>,
+    pub cap_drop: Vec<String>,
+    /// Namespaced kernel parameters to set inside the container.
+    pub sysctls: std::collections::BTreeMap<String, String>,
     pub labels: HashMap<String, String>,
     pub mounts: Vec<BindMount>,
     pub tmpfs: Vec<TmpfsMount>,
@@ -257,6 +266,14 @@ impl ContainerSpec {
             memory: self.resources.memory_bytes,
             nano_cpus: self.resources.nano_cpus,
             readonly_rootfs: Some(self.read_only),
+            cap_add: (!self.cap_add.is_empty()).then(|| self.cap_add.clone()),
+            cap_drop: (!self.cap_drop.is_empty()).then(|| self.cap_drop.clone()),
+            sysctls: (!self.sysctls.is_empty()).then(|| {
+                self.sysctls
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            }),
             ..Default::default()
         }
     }
@@ -293,6 +310,8 @@ impl ContainerSpec {
             hostname: self.hostname.clone(),
             user: self.user.clone(),
             cmd: self.command.clone(),
+            entrypoint: self.entrypoint.clone(),
+            working_dir: self.working_dir.clone(),
             env: (!self.env.is_empty())
                 .then(|| self.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
             labels: Some(self.all_labels()),
@@ -826,6 +845,42 @@ mod tests {
         let mut spec = base_spec();
         spec.user = Some("1000:1000".to_string());
         assert_eq!(spec.to_create_body().user.as_deref(), Some("1000:1000"));
+    }
+
+    #[test]
+    fn entrypoint_workdir_caps_and_sysctls_are_passed_to_docker() {
+        let mut spec = base_spec();
+        spec.entrypoint = Some(vec!["/init".to_string(), "-v".to_string()]);
+        spec.working_dir = Some("/srv".to_string());
+        spec.cap_add = vec!["NET_ADMIN".to_string()];
+        spec.cap_drop = vec!["MKNOD".to_string()];
+        spec.sysctls
+            .insert("net.ipv4.ip_forward".to_string(), "1".to_string());
+
+        let body = spec.to_create_body();
+        assert_eq!(
+            body.entrypoint,
+            Some(vec!["/init".to_string(), "-v".to_string()])
+        );
+        assert_eq!(body.working_dir.as_deref(), Some("/srv"));
+        let host = body.host_config.expect("host config");
+        assert_eq!(host.cap_add, Some(vec!["NET_ADMIN".to_string()]));
+        assert_eq!(host.cap_drop, Some(vec!["MKNOD".to_string()]));
+        assert_eq!(
+            host.sysctls.expect("sysctls").get("net.ipv4.ip_forward"),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[test]
+    fn unset_entrypoint_caps_and_sysctls_leave_docker_defaults() {
+        let body = base_spec().to_create_body();
+        assert_eq!(body.entrypoint, None);
+        assert_eq!(body.working_dir, None);
+        let host = body.host_config.expect("host config");
+        assert_eq!(host.cap_add, None);
+        assert_eq!(host.cap_drop, None);
+        assert_eq!(host.sysctls, None);
     }
 
     #[test]
