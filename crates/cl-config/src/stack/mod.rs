@@ -416,12 +416,14 @@ web:
 
     #[test]
     fn env_file_accepts_single_and_list() {
+        // `parse` rejects env_file during validation, so check the shape
+        // through the raw deserializer.
         let raw = "services:\n  a:\n    image: x\n    env_file: .env\n";
-        let stack = StackFile::parse(raw).unwrap();
+        let stack: StackFile = serde_yaml::from_str(raw).unwrap();
         assert_eq!(stack.services["a"].env_file, vec![PathBuf::from(".env")]);
 
         let raw = "services:\n  a:\n    image: x\n    env_file: [.env, .env.local]\n";
-        let stack = StackFile::parse(raw).unwrap();
+        let stack: StackFile = serde_yaml::from_str(raw).unwrap();
         assert_eq!(stack.services["a"].env_file.len(), 2);
     }
 

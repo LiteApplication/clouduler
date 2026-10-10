@@ -16,6 +16,7 @@ impl StackFile {
     pub fn validate_syntax(&self) -> Result<()> {
         self.validate_service_names()?;
         self.validate_depends_on()?;
+        self.validate_env_file()?;
         self.validate_service_networks_declared()?;
         self.validate_no_duplicate_ports()?;
         self.validate_stop_signals()?;
@@ -185,6 +186,20 @@ impl StackFile {
                         format!("no service named {dep} in this stack"),
                     ));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// `env_file` is parsed but its variables are never injected into the
+    /// container, so a service relying on it would start without them.
+    fn validate_env_file(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            if !svc.env_file.is_empty() {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}.env_file"),
+                    "env_file is not supported yet, move its entries into environment",
+                ));
             }
         }
         Ok(())
@@ -748,6 +763,17 @@ mod tests {
         let err = StackFile::parse(raw).unwrap_err();
         assert!(err.to_string().contains("services.a.depends_on"));
         assert!(err.to_string().contains("no service named b"));
+    }
+
+    #[test]
+    fn env_file_is_rejected_until_supported() {
+        let raw = "services:\n  a:\n    image: x\n    env_file: .env\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.a.env_file"));
+        assert!(err.to_string().contains("not supported yet"));
+
+        let raw = "services:\n  a:\n    image: x\n    env_file: [.env, .env.local]\n";
+        assert!(StackFile::parse(raw).is_err());
     }
 
     #[test]
