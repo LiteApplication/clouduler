@@ -161,6 +161,11 @@ pub fn build(
         user: service.user.clone(),
         env: env.into_iter().collect(),
         command: service.command.as_ref().map(command_words),
+        entrypoint: service.entrypoint.as_ref().map(command_words),
+        working_dir: service.working_dir.clone(),
+        cap_add: service.cap_add.clone(),
+        cap_drop: service.cap_drop.clone(),
+        sysctls: service.sysctls.clone(),
         labels,
         mounts,
         tmpfs,
@@ -652,6 +657,36 @@ mod tests {
         );
         assert_eq!(spec.hostname.as_deref(), Some("custom-host"));
         assert!(spec.read_only);
+    }
+
+    #[test]
+    fn entrypoint_workdir_caps_and_sysctls_carry_over() {
+        let s = service(
+            "services:\n  web:\n    image: nginx\n    entrypoint: /init --flag 'a b'\n    working_dir: /srv\n    cap_add: [NET_ADMIN]\n    cap_drop: [MKNOD]\n    sysctls:\n      net.ipv4.ip_forward: \"1\"\n",
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+            },
+            Placement::default(),
+            None,
+            1,
+        );
+        assert_eq!(
+            spec.entrypoint,
+            Some(vec!["/init".into(), "--flag".into(), "a b".into()])
+        );
+        assert_eq!(spec.working_dir.as_deref(), Some("/srv"));
+        assert_eq!(spec.cap_add, vec!["NET_ADMIN".to_string()]);
+        assert_eq!(spec.cap_drop, vec!["MKNOD".to_string()]);
+        assert_eq!(
+            spec.sysctls.get("net.ipv4.ip_forward").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
