@@ -37,12 +37,12 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Serialize)]
-struct NodeSummary {
-    name: String,
-    role: String,
-    availability: String,
-    reachable: bool,
-    container_count: usize,
+pub(crate) struct NodeSummary {
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) availability: String,
+    pub(crate) reachable: bool,
+    pub(crate) container_count: usize,
 }
 
 /// Every node declared in the config, not just the ones the roster has
@@ -53,6 +53,11 @@ struct NodeSummary {
 /// configured at all, which is exactly the state an operator needs to see to
 /// tell "still joining" apart from "safe to add".
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<NodeSummary>> {
+    Json(list_nodes(&state).await)
+}
+
+/// The body of `list`, callable in-process.
+pub(crate) async fn list_nodes(state: &AppState) -> Vec<NodeSummary> {
     let cluster_state = state.cluster.state().await;
     let config = state.cluster_config.read().await;
 
@@ -76,31 +81,31 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<No
             },
         })
         .collect();
-    Json(nodes)
+    nodes
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct ResourceUsage {
-    cpu_count: usize,
+pub(crate) struct ResourceUsage {
+    pub(crate) cpu_count: usize,
     load_1m: f64,
-    memory_total_bytes: u64,
-    memory_used_bytes: u64,
-    uptime_seconds: u64,
+    pub(crate) memory_total_bytes: u64,
+    pub(crate) memory_used_bytes: u64,
+    pub(crate) uptime_seconds: u64,
     /// True once this reflects a real reading rather than the zeroed
     /// default returned when neither a local read nor forwarding to the
     /// owning node succeeded.
-    local: bool,
+    pub(crate) local: bool,
 }
 
 #[derive(Serialize)]
-struct NodeDetail {
-    name: String,
-    role: String,
-    availability: String,
-    reachable: bool,
-    drives: Vec<String>,
-    container_count: usize,
-    usage: ResourceUsage,
+pub(crate) struct NodeDetail {
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) availability: String,
+    pub(crate) reachable: bool,
+    pub(crate) drives: Vec<String>,
+    pub(crate) container_count: usize,
+    pub(crate) usage: ResourceUsage,
 }
 
 async fn detail(
@@ -108,6 +113,12 @@ async fn detail(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<NodeDetail>, ApiError> {
+    Ok(Json(node_detail(&state, name).await?))
+}
+
+/// The body of `detail`, callable in-process: asks the node itself for its
+/// resource usage when it is not this one.
+pub(crate) async fn node_detail(state: &AppState, name: String) -> Result<NodeDetail, ApiError> {
     let cluster_state = state.cluster.state().await;
     let node = cluster_state.nodes.get(&name);
 
@@ -119,7 +130,7 @@ async fn detail(
             .nodes
             .get(&name)
             .ok_or_else(|| ApiError::NotFound(format!("no node {name}")))?;
-        return Ok(Json(NodeDetail {
+        return Ok(NodeDetail {
             name,
             role: format!("{:?}", configured.role).to_lowercase(),
             availability: "pending".to_string(),
@@ -127,7 +138,7 @@ async fn detail(
             drives: Vec::new(),
             container_count: 0,
             usage: ResourceUsage::default(),
-        }));
+        });
     };
 
     let usage = if name == state.node_name {
@@ -137,7 +148,7 @@ async fn detail(
         // timeout on every poll of a node everyone already knows is gone.
         ResourceUsage::default()
     } else {
-        internal_peer::fetch_json(&state, &name, &internal_usage_path(&name))
+        internal_peer::fetch_json(state, &name, &internal_usage_path(&name))
             .await
             .unwrap_or_else(|e| {
                 warn!(node = %name, error = %e, "could not fetch resource usage from its node");
@@ -145,7 +156,7 @@ async fn detail(
             })
     };
 
-    Ok(Json(NodeDetail {
+    Ok(NodeDetail {
         name: node.name.clone(),
         role: format!("{:?}", node.role).to_lowercase(),
         availability: format!("{:?}", node.availability).to_lowercase(),
@@ -153,7 +164,7 @@ async fn detail(
         drives: node.drives.keys().cloned().collect(),
         container_count: cluster_state.assignments_on(&name).count(),
         usage,
-    }))
+    })
 }
 
 fn internal_usage_path(name: &str) -> String {
@@ -362,16 +373,37 @@ async fn logs(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if name != state.node_name {
-        return Err(ApiError::NotFound(format!(
-            "node {name} logs are only available by connecting to that node directly"
-        )));
-    }
+    ensure_local_logs(&state, &name)?;
     // No in-process log ring buffer is wired up yet; an empty stream is a
     // truthful placeholder until one exists.
     let empty =
         futures::stream::empty::<Result<axum::response::sse::Event, std::convert::Infallible>>();
     Ok(axum::response::sse::Sse::new(empty))
+}
+
+fn ensure_local_logs(state: &AppState, name: &str) -> Result<(), ApiError> {
+    if name != state.node_name {
+        return Err(ApiError::NotFound(format!(
+            "node {name} logs are only available by connecting to that node directly"
+        )));
+    }
+    Ok(())
+}
+
+/// The last `tail` daemon log lines of `node`, for the MCP layer. Mirrors
+/// `logs` exactly, limitation included: there is no in-process log buffer and
+/// no node-to-node route for one, so this is empty for the node answering and
+/// `NotFound` for any other. The shape (lines, oldest first) is what a real
+/// buffer will fill in without changing callers. Redaction is the caller's
+/// job.
+#[allow(dead_code)] // called by `crate::mcp`
+pub(crate) async fn fetch_node_logs(
+    state: &AppState,
+    node: &str,
+    _tail: u32,
+) -> Result<Vec<String>, ApiError> {
+    ensure_local_logs(state, node)?;
+    Ok(Vec::new())
 }
 
 async fn submit(state: &AppState, request: ClusterRequest) -> Result<(), ApiError> {

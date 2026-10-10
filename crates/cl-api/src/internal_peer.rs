@@ -15,6 +15,7 @@ use axum::response::Response;
 use cl_update::internal_client;
 use futures::TryStreamExt;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::error::ApiError;
 use crate::server::AppState;
@@ -84,13 +85,14 @@ async fn signed(
     request: reqwest::RequestBuilder,
     method: &str,
     path: &str,
+    body: &[u8],
 ) -> Result<reqwest::RequestBuilder, ApiError> {
     let key_guard = state.key.read().await;
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Unavailable("this node holds no cluster key".to_string()))?;
     Ok(internal_client::authenticate(
-        request, key, method, path, b"",
+        request, key, method, path, body,
     ))
 }
 
@@ -102,11 +104,17 @@ pub async fn fetch_json<T: DeserializeOwned>(
 ) -> Result<T, ApiError> {
     let base = peer_base_url(state, node).await?;
     for attempt in 0.. {
-        let sent = signed(state, state.http.get(format!("{base}{path}")), "GET", path)
-            .await?
-            .timeout(FETCH_TIMEOUT)
-            .send()
-            .await;
+        let sent = signed(
+            state,
+            state.http.get(format!("{base}{path}")),
+            "GET",
+            path,
+            b"",
+        )
+        .await?
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await;
         let resp = match sent {
             Ok(resp) => resp,
             Err(e) => {
@@ -165,6 +173,7 @@ async fn post_response(
             state.http.post(format!("{base}{path}")),
             "POST",
             path,
+            b"",
         )
         .await?
         .timeout(WRITE_TIMEOUT)
@@ -183,17 +192,101 @@ async fn post_response(
     unreachable!("retry_on_unavailable eventually returns false")
 }
 
+/// Longest a forwarded plain-text read (buffered logs) may take. Between a
+/// quick status read and a docker write: the peer streams its answer, but a
+/// large `tail` off a slow disk is not instant.
+const TEXT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `GET path` on `node`'s api, returned as the raw body text. For the SSE log
+/// route with `follow=false`, which ends on its own and so can be read whole.
+pub async fn fetch_text(state: &AppState, node: &str, path: &str) -> Result<String, ApiError> {
+    let base = peer_base_url(state, node).await?;
+    for attempt in 0.. {
+        let resp = signed(
+            state,
+            state.http.get(format!("{base}{path}")),
+            "GET",
+            path,
+            b"",
+        )
+        .await?
+        .timeout(TEXT_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            if retry_on_unavailable(attempt, status).await {
+                continue;
+            }
+            return Err(ApiError::Unavailable(format!("{node} answered {status}")));
+        }
+        return resp
+            .text()
+            .await
+            .map_err(|e| ApiError::Internal(format!("reading {node}'s response: {e}")));
+    }
+    unreachable!("retry_on_unavailable eventually returns false")
+}
+
+/// `POST path` on `node`'s api with `body` as JSON, decoding the answer as
+/// `T`. The signature commits to a hash of the body, so the receiving route
+/// must take `InternalBodyAuth` and check the bytes it read against it. Uses
+/// the long write timeout: a forwarded command may legitimately run for
+/// minutes (`exec-run` caps itself at 300s).
+pub async fn post_json_body<B: Serialize, T: DeserializeOwned>(
+    state: &AppState,
+    node: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, ApiError> {
+    let bytes = serde_json::to_vec(body)
+        .map_err(|e| ApiError::Internal(format!("encoding the request for {node}: {e}")))?;
+    let base = peer_base_url(state, node).await?;
+    for attempt in 0.. {
+        let request = state
+            .http
+            .post(format!("{base}{path}"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(bytes.clone());
+        let resp = signed(state, request, "POST", path, &bytes)
+            .await?
+            .timeout(WRITE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            if retry_on_unavailable(attempt, status).await {
+                continue;
+            }
+            return Err(ApiError::Unavailable(format!("{node} answered {status}")));
+        }
+        return resp
+            .json::<T>()
+            .await
+            .map_err(|e| ApiError::Internal(format!("decoding {node}'s response: {e}")));
+    }
+    unreachable!("retry_on_unavailable eventually returns false")
+}
+
 /// `GET path` on `node`'s api, proxied straight through as the response body.
 /// Used for the SSE log and stats streams: neither side needs to parse the
 /// events to relay them, and a fixed timeout would cut a `follow=true` stream
 /// short, so none is set here.
 pub async fn proxy_stream(state: &AppState, node: &str, path: &str) -> Result<Response, ApiError> {
     let base = peer_base_url(state, node).await?;
-    let resp = signed(state, state.http.get(format!("{base}{path}")), "GET", path)
-        .await?
-        .send()
-        .await
-        .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
+    let resp = signed(
+        state,
+        state.http.get(format!("{base}{path}")),
+        "GET",
+        path,
+        b"",
+    )
+    .await?
+    .send()
+    .await
+    .map_err(|e| ApiError::Unavailable(format!("asking {node}: {e}")))?;
     if !resp.status().is_success() {
         return Err(ApiError::Unavailable(format!(
             "{node} answered {}",

@@ -483,6 +483,166 @@ fn untar_single_file(archive: &[u8], container_path: &str) -> Result<Vec<u8>> {
     Ok(contents)
 }
 
+/// What a path inside a container turned out to be, and as much of it as was
+/// asked for. See `Docker::read_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathRead {
+    pub kind: PathKind,
+    /// The entry's size in bytes as the archive header states it. For a
+    /// directory this is whatever the filesystem reports for the inode, not
+    /// the size of its contents.
+    pub size: u64,
+    /// At most `max_bytes` of a regular file's content. Empty for everything
+    /// else.
+    pub data: Vec<u8>,
+    /// More content (or more entries) exists than was returned.
+    pub truncated: bool,
+    /// A directory's immediate children, sorted, at most `max_entries`.
+    pub entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// How much of a directory's recursive archive is read before giving up on
+/// listing the rest. Docker archives a directory's whole subtree and there is
+/// no api for "just the top level", so a huge tree has to be cut off.
+const DIR_ARCHIVE_CAP: usize = 8 * 1024 * 1024;
+
+/// Slack above `max_bytes` kept when reading a file's archive, for the tar
+/// header(s) in front of the content (a long path adds a PAX or GNU header).
+const TAR_HEADER_SLACK: usize = 64 * 1024;
+
+/// Interpret the (possibly cut-off) tar archive docker returns for a path.
+///
+/// `archive` may end mid-entry because the caller stopped reading the download
+/// early to bound memory; that is expected and reported through `truncated`
+/// rather than as an error. Only a missing first entry is an error.
+fn parse_path_archive(
+    archive: &[u8],
+    container_path: &str,
+    max_bytes: usize,
+    max_entries: usize,
+    archive_was_cut: bool,
+) -> Result<PathRead> {
+    let io = |e| DockerError::Api(bollard::errors::Error::IOError { err: e });
+    let mut tar = tar::Archive::new(archive);
+    let mut entries = tar.entries().map_err(io)?;
+    let mut first = entries
+        .next()
+        .ok_or_else(|| DockerError::NotFound(container_path.to_string()))?
+        .map_err(io)?;
+
+    let size = first.header().size().unwrap_or(0);
+    let kind = match first.header().entry_type() {
+        tar::EntryType::Regular | tar::EntryType::Continuous => PathKind::File,
+        tar::EntryType::Directory => PathKind::Dir,
+        tar::EntryType::Symlink | tar::EntryType::Link => PathKind::Symlink,
+        _ => PathKind::Other,
+    };
+    let root = first
+        .path()
+        .map(|p| p.to_string_lossy().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+
+    match kind {
+        PathKind::File => {
+            let mut data = Vec::new();
+            // A short read (archive cut off) is fine: keep what arrived.
+            let mut limited = std::io::Read::take(&mut first, max_bytes as u64);
+            let _ = std::io::Read::read_to_end(&mut limited, &mut data);
+            let truncated = size > data.len() as u64;
+            Ok(PathRead {
+                kind,
+                size,
+                data,
+                truncated,
+                entries: Vec::new(),
+            })
+        }
+        PathKind::Dir => {
+            drop(first);
+            let mut names = std::collections::BTreeSet::new();
+            for entry in entries {
+                // A cut-off archive ends in an error; what came before it is
+                // still a valid prefix of the listing.
+                let Ok(entry) = entry else { break };
+                let Ok(path) = entry.path() else { continue };
+                let full = path.to_string_lossy();
+                let rel = full
+                    .strip_prefix(root.as_str())
+                    .unwrap_or(&full)
+                    .trim_start_matches('/');
+                if let Some(child) = rel.split('/').next().filter(|c| !c.is_empty()) {
+                    names.insert(child.to_string());
+                }
+            }
+            let truncated = archive_was_cut || names.len() > max_entries;
+            Ok(PathRead {
+                kind,
+                size,
+                data: Vec::new(),
+                truncated,
+                entries: names.into_iter().take(max_entries).collect(),
+            })
+        }
+        _ => Ok(PathRead {
+            kind,
+            size,
+            data: Vec::new(),
+            truncated: false,
+            entries: Vec::new(),
+        }),
+    }
+}
+
+impl Docker {
+    /// Read a file's first `max_bytes`, or list a directory's immediate
+    /// children (at most `max_entries`), without a shell in the container.
+    ///
+    /// Uses docker's archive endpoint rather than `exec cat`/`ls`, so it works
+    /// in distroless and scratch images. The download is abandoned once enough
+    /// bytes have arrived, so a multi-gigabyte file costs about `max_bytes` of
+    /// memory, not its size.
+    pub async fn read_path(
+        &self,
+        name: &str,
+        container_path: &str,
+        max_bytes: usize,
+        max_entries: usize,
+    ) -> Result<PathRead> {
+        let options = DownloadFromContainerOptionsBuilder::default()
+            .path(container_path)
+            .build();
+        let mut stream = Box::pin(self.inner.download_from_container(name, Some(options)));
+        let mut archive = Vec::new();
+        let mut cut = false;
+        while let Some(chunk) = stream.next().await {
+            archive.extend_from_slice(&chunk.map_err(classify)?);
+            // The tar type flag sits at byte 156 of the first header: '0' (or
+            // NUL, the old spelling) is a regular file, which needs only
+            // `max_bytes` plus the headers; anything else may be a directory
+            // whose listing needs more.
+            let is_file = archive.len() >= 512 && matches!(archive[156], b'0' | 0);
+            let cap = if is_file {
+                max_bytes + TAR_HEADER_SLACK
+            } else {
+                DIR_ARCHIVE_CAP
+            };
+            if archive.len() >= cap {
+                cut = true;
+                break;
+            }
+        }
+        parse_path_archive(&archive, container_path, max_bytes, max_entries, cut)
+    }
+}
+
 impl Docker {
     /// Create a container from `spec`. Does not start it.
     pub async fn create(&self, spec: &ContainerSpec) -> Result<String> {
@@ -882,6 +1042,52 @@ mod tests {
         let archive = build_test_tar("clouduler", b"pretend-binary-bytes");
         let out = untar_single_file(&archive, "/usr/local/bin/clouduler").expect("untar");
         assert_eq!(out, b"pretend-binary-bytes");
+    }
+
+    #[test]
+    fn path_archive_file_is_cut_to_max_bytes() {
+        let archive = build_test_tar("hosts", b"0123456789");
+        let read = parse_path_archive(&archive, "/etc/hosts", 4, 10, false).expect("parse");
+        assert_eq!(read.kind, PathKind::File);
+        assert_eq!(read.size, 10);
+        assert_eq!(read.data, b"0123");
+        assert!(read.truncated);
+    }
+
+    #[test]
+    fn path_archive_file_that_fits_is_not_truncated() {
+        let archive = build_test_tar("hosts", b"abc");
+        let read = parse_path_archive(&archive, "/etc/hosts", 100, 10, false).expect("parse");
+        assert_eq!(read.data, b"abc");
+        assert!(!read.truncated);
+    }
+
+    #[test]
+    fn path_archive_directory_lists_immediate_children_only() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_size(0);
+        dir.set_mode(0o755);
+        dir.set_cksum();
+        builder.append_data(&mut dir, "etc/", &b""[..]).unwrap();
+        for path in ["etc/hosts", "etc/apt/sources.list", "etc/apt/keys/a"] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(1);
+            h.set_mode(0o644);
+            h.set_cksum();
+            builder.append_data(&mut h, path, &b"x"[..]).unwrap();
+        }
+        let archive = builder.into_inner().unwrap();
+
+        let read = parse_path_archive(&archive, "/etc", 100, 10, false).expect("parse");
+        assert_eq!(read.kind, PathKind::Dir);
+        assert_eq!(read.entries, vec!["apt", "hosts"]);
+        assert!(!read.truncated);
+
+        let limited = parse_path_archive(&archive, "/etc", 100, 1, false).expect("parse");
+        assert_eq!(limited.entries, vec!["apt"]);
+        assert!(limited.truncated);
     }
 
     #[test]

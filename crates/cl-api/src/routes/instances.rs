@@ -1,6 +1,9 @@
 //! `/api/instances`.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use std::time::Duration;
+
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -17,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::warn;
 
-use crate::auth::internal::InternalAuth;
+use crate::auth::internal::{InternalAuth, InternalBodyAuth};
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::internal_peer;
@@ -65,20 +68,27 @@ pub fn router() -> Router<AppState> {
             "/api/instances/internal/{id}/capture",
             get(internal_capture),
         )
+        // Node-to-node only: the buffered counterparts of `exec`/`logs` that
+        // the MCP layer calls through `exec_run` and `read_file`.
+        .route(
+            "/api/instances/internal/{id}/exec-run",
+            post(internal_exec_run),
+        )
+        .route("/api/instances/internal/{id}/file", get(internal_file))
 }
 
 #[derive(Serialize, Deserialize)]
-struct InstanceSummary {
-    id: String,
-    node: String,
+pub(crate) struct InstanceSummary {
+    pub(crate) id: String,
+    pub(crate) node: String,
     /// What the cluster wants: "running" or "stopped".
-    desired: String,
+    pub(crate) desired: String,
     /// What the container is actually doing.
-    state: String,
-    running: Option<bool>,
-    health: String,
-    image: Option<String>,
-    image_digest: Option<String>,
+    pub(crate) state: String,
+    pub(crate) running: Option<bool>,
+    pub(crate) health: String,
+    pub(crate) image: Option<String>,
+    pub(crate) image_digest: Option<String>,
     /// Registry content digest of the bits the container is *actually*
     /// running, as opposed to `image_digest`, which is what the cluster has
     /// pinned. The two differ whenever a pin was recorded but the container
@@ -86,47 +96,47 @@ struct InstanceSummary {
     /// elsewhere, has no container, or runs a locally built image that was
     /// never pulled from a registry and so has no digest at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    running_digest: Option<String>,
-    started_at: Option<String>,
-    migration: Option<MigrationSummary>,
+    pub(crate) running_digest: Option<String>,
+    pub(crate) started_at: Option<String>,
+    pub(crate) migration: Option<MigrationSummary>,
     /// What is actively happening to this instance right now — a redeploy
     /// sub-step or a migration phase — or `None` when it is steady-state.
     /// `state`/`migration` above are the raw facts; this is the same
     /// information composed into one string plus a `(step, total)` pair for
     /// a progress bar. See `compose_progress`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
+    pub(crate) reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    step: Option<(u8, u8)>,
+    pub(crate) step: Option<(u8, u8)>,
     /// Why this instance has no assignment at all, set only when `state` is
     /// `"pending_placement"`: no node in the cluster currently satisfies
     /// what its service needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    placement_error: Option<String>,
+    pub(crate) placement_error: Option<String>,
     /// The reverse proxy's own most recent active health check of this
     /// instance's service, when it publishes a route at all. `None` means
     /// either nothing is published for it or no check has landed yet, not
     /// that it's healthy — distinct from an empty `error` on a `Some`, which
     /// does mean healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    proxy: Option<ProxyHealthSummary>,
+    pub(crate) proxy: Option<ProxyHealthSummary>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ProxyHealthSummary {
-    host: String,
-    checked_at: String,
+pub(crate) struct ProxyHealthSummary {
+    pub(crate) host: String,
+    pub(crate) checked_at: String,
     /// `None` when the last check reached the backend; `Some(reason)` in the
     /// same shape the proxy's own "bad gateway" response would have shown a
     /// real client, e.g. `"10.244.1.2:8080 unreachable: client error (SendRequest)"`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct MigrationSummary {
-    to: String,
-    phase: String,
+pub(crate) struct MigrationSummary {
+    pub(crate) to: String,
+    pub(crate) phase: String,
 }
 
 /// The state names the ui and the test harness both match on. Kept as strings
@@ -151,7 +161,7 @@ fn internal_summary_path(instance: &InstanceId) -> String {
 /// back to `summarize_local`'s unknown/none answer rather than failing the
 /// whole list — the same degrade a caller already saw before cross-node
 /// forwarding existed.
-async fn summarize(
+pub(crate) async fn summarize(
     state: &AppState,
     cluster_state: &cl_raft::ClusterState,
     assignment: &cl_raft::Assignment,
@@ -470,6 +480,13 @@ async fn instance_events(_identity: Identity, State(state): State<AppState>) -> 
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<InstanceSummary>> {
+    Json(list_all(&state).await)
+}
+
+/// Every instance with a live summary, plus the ones no node can currently
+/// host. What `GET /api/instances` returns, callable in-process (the MCP
+/// layer) without going through axum.
+pub(crate) async fn list_all(state: &AppState) -> Vec<InstanceSummary> {
     let cluster_state = state.cluster.state().await;
     // Concurrent rather than one at a time: a single unreachable node whose
     // instances sit behind `FETCH_TIMEOUT` must not serialize onto the whole
@@ -478,11 +495,11 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<In
         cluster_state
             .assignments
             .values()
-            .map(|a| summarize(&state, &cluster_state, a)),
+            .map(|a| summarize(state, &cluster_state, a)),
     )
     .await;
-    out.extend(pending_placements(&state, &cluster_state).await);
-    Json(out)
+    out.extend(pending_placements(state, &cluster_state).await);
+    out
 }
 
 /// Instances every deployed stack wants but that have no assignment at all,
@@ -586,7 +603,17 @@ async fn restart(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let instance = parse_id(&id)?;
+    restart_instance(&state, parse_id(&id)?).await?;
+    Ok(StatusCode::OK)
+}
+
+/// The body of `restart`, callable in-process. See there for why this
+/// rerolls placement rather than restarting in place.
+pub(crate) async fn restart_instance(
+    state: &AppState,
+    instance: InstanceId,
+) -> Result<(), ApiError> {
+    let id = instance.to_string();
     let cluster_state = state.cluster.state().await;
     let assignment = cluster_state
         .assignments
@@ -668,7 +695,7 @@ async fn restart(
         }
     }
 
-    Ok(StatusCode::OK)
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -830,7 +857,17 @@ async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let instance = parse_id(&id)?;
+    update_instance_guarded(&state, parse_id(&id)?).await?;
+    Ok(StatusCode::OK)
+}
+
+/// `update_instance`, refusing with a conflict when an update of the same
+/// instance is already running. What `POST /api/instances/{id}/update` does,
+/// callable in-process.
+pub(crate) async fn update_instance_guarded(
+    state: &AppState,
+    instance: InstanceId,
+) -> Result<(), ApiError> {
     // A second update on top of one in progress would pull again and remove
     // the container the first one is waiting on. The bulk path
     // (`updates::apply_selection`) queues its own record first, so it does
@@ -847,8 +884,7 @@ async fn update(
             "an update of {instance} is already in progress"
         )));
     }
-    update_instance(&state, instance).await?;
-    Ok(StatusCode::OK)
+    update_instance(state, instance).await
 }
 
 /// Re-pins `digest` for `instance` and removes its container so reconcile
@@ -955,7 +991,10 @@ pub(crate) async fn replace_instance(
     replace_local(state, instance, digest).await
 }
 
-async fn owning_node(state: &AppState, instance: &InstanceId) -> Result<String, ApiError> {
+pub(crate) async fn owning_node(
+    state: &AppState,
+    instance: &InstanceId,
+) -> Result<String, ApiError> {
     state
         .cluster
         .state()
@@ -1576,4 +1615,598 @@ async fn bridge_capture(mut socket: WebSocket, iface: String, pcap: bool, filter
     }
     let _ = child.start_kill();
     let _ = socket.send(Message::Close(None)).await;
+}
+
+// ---------------------------------------------------------------------------
+// Buffered inspection for the MCP layer: run a command, read a file, fetch
+// logs, each returning plain values rather than a stream or a websocket.
+//
+// Every `*_local` half talks to this node's docker; the public half runs it
+// here or forwards to the owning node over the internal api (HMAC node-to-node
+// auth over the cluster key, see `internal_peer`). None of this redacts: what
+// comes back is raw container output, and scrubbing secrets out of it is the
+// MCP layer's job on the node that serves the MCP request.
+// ---------------------------------------------------------------------------
+
+/// Hard ceiling on one buffered command's runtime. The forwarding client's
+/// write timeout is 300s too, so a command at the cap still gets an answer.
+const EXEC_RUN_MAX_SECS: u64 = 300;
+const EXEC_RUN_DEFAULT_SECS: u64 = 30;
+/// Hard ceiling on bytes kept per stream (and on stdin accepted), and on a
+/// file read. A buffered answer travels as json and ends up in a model's
+/// context, so there is no use for more.
+const MAX_BUFFERED_BYTES: usize = 1024 * 1024;
+const EXEC_RUN_DEFAULT_OUTPUT: usize = 64 * 1024;
+const FILE_READ_DEFAULT: usize = 256 * 1024;
+/// Directory listings stop here; the rest is reported as `truncated`.
+const FILE_LIST_LIMIT: usize = 500;
+/// How much of a file is inspected when deciding text vs binary.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+/// Most log lines one buffered fetch returns.
+const LOG_TAIL_LIMIT: u32 = 10_000;
+
+fn default_exec_timeout() -> u64 {
+    EXEC_RUN_DEFAULT_SECS
+}
+
+fn default_exec_output() -> usize {
+    EXEC_RUN_DEFAULT_OUTPUT
+}
+
+/// Run a command in an instance's container and wait for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExecRunRequest {
+    pub(crate) cmd: Vec<String>,
+    #[serde(default)]
+    pub(crate) user: Option<String>,
+    /// Written to the command's stdin, which is then closed. Without it stdin
+    /// is closed immediately, so a command that reads it sees EOF.
+    #[serde(default)]
+    pub(crate) stdin: Option<String>,
+    /// Clamped to 1..=300.
+    #[serde(default = "default_exec_timeout")]
+    pub(crate) timeout_secs: u64,
+    /// Per stream, clamped to 1..=1 MiB.
+    #[serde(default = "default_exec_output")]
+    pub(crate) max_output: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExecRunResult {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    /// `None` when the command timed out, or docker had not recorded a code.
+    pub(crate) exit_code: Option<i64>,
+    pub(crate) timed_out: bool,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
+}
+
+/// Bytes kept up to a cap, remembering whether anything was dropped. Output
+/// past the cap is still read (and discarded) so the command is not blocked
+/// writing to a full pipe while it finishes.
+struct CappedBuf {
+    data: Vec<u8>,
+    cap: usize,
+    truncated: bool,
+}
+
+impl CappedBuf {
+    fn new(cap: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            cap,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let room = self.cap.saturating_sub(self.data.len());
+        if bytes.len() > room {
+            self.truncated = true;
+        }
+        self.data.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
+    fn into_text(self) -> (String, bool) {
+        (
+            String::from_utf8_lossy(&self.data).into_owned(),
+            self.truncated,
+        )
+    }
+}
+
+fn docker_error(e: cl_docker::DockerError) -> ApiError {
+    match e {
+        cl_docker::DockerError::NotFound(what) => ApiError::NotFound(what),
+        other => ApiError::internal(other),
+    }
+}
+
+/// `exec_run` on this node's docker.
+///
+/// Not a tty, so stdout and stderr stay separate. On timeout this stops
+/// reading and reports `timed_out`, but the command itself keeps running
+/// inside the container: the docker api has no way to kill an exec, only to
+/// stop listening to it. Callers should not assume a timed-out command did
+/// not finish its side effects.
+pub(crate) async fn exec_run_local(
+    state: &AppState,
+    instance: &InstanceId,
+    req: ExecRunRequest,
+) -> Result<ExecRunResult, ApiError> {
+    if req.cmd.is_empty() {
+        return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
+    }
+    let stdin = req.stdin.unwrap_or_default().into_bytes();
+    if stdin.len() > MAX_BUFFERED_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "stdin is limited to {MAX_BUFFERED_BYTES} bytes"
+        )));
+    }
+    let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
+    let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
+
+    let docker = state.docker().await?;
+    let session = docker
+        .exec(
+            &instance.container_name(),
+            ExecSpec {
+                cmd: req.cmd,
+                tty: false,
+                user: req.user,
+            },
+        )
+        .await
+        .map_err(docker_error)?;
+    let exec_id = session.id;
+    let mut output = session.output;
+
+    // Written from its own task: a command that fills its stdout before it
+    // has read all of stdin would otherwise deadlock against this loop.
+    let mut input = session.input;
+    tokio::spawn(async move {
+        if !stdin.is_empty() {
+            let _ = input.write_all(&stdin).await;
+        }
+        let _ = input.shutdown().await;
+    });
+
+    let mut out = CappedBuf::new(cap);
+    let mut err = CappedBuf::new(cap);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut timed_out = false;
+    loop {
+        match tokio::time::timeout_at(deadline, output.next()).await {
+            Err(_) => {
+                timed_out = true;
+                break;
+            }
+            Ok(None) => break,
+            Ok(Some(Err(e))) => return Err(docker_error(e)),
+            Ok(Some(Ok(chunk))) => match chunk.stream {
+                cl_docker::ExecStream::Stdout => out.push(&chunk.bytes),
+                cl_docker::ExecStream::Stderr => err.push(&chunk.bytes),
+            },
+        }
+    }
+
+    let exit_code = if timed_out {
+        None
+    } else {
+        docker.exec_exit_code(&exec_id).await.ok().flatten()
+    };
+    let (stdout, stdout_truncated) = out.into_text();
+    let (stderr, stderr_truncated) = err.into_text();
+    Ok(ExecRunResult {
+        stdout,
+        stderr,
+        exit_code,
+        timed_out,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn internal_exec_run_path(instance: &InstanceId) -> String {
+    format!("/api/instances/internal/{instance}/exec-run")
+}
+
+/// Run a command in an instance's container wherever it runs: here, or on
+/// the owning node via `exec-run`. See `exec_run_local` for the timeout
+/// caveat.
+#[allow(dead_code)] // called by `crate::mcp`
+pub(crate) async fn exec_run(
+    state: &AppState,
+    instance: &InstanceId,
+    req: ExecRunRequest,
+) -> Result<ExecRunResult, ApiError> {
+    let node = owning_node(state, instance).await?;
+    if node == state.node_name {
+        return exec_run_local(state, instance, req).await;
+    }
+    internal_peer::post_json_body(state, &node, &internal_exec_run_path(instance), &req).await
+}
+
+/// Node-to-node: buffered exec in this node's own container. Takes a body, so
+/// the signed body hash is checked against what was actually read.
+async fn internal_exec_run(
+    auth: InternalBodyAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ExecRunResult>, ApiError> {
+    auth.check(&body)?;
+    let req: ExecRunRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid exec-run request: {e}")))?;
+    Ok(Json(exec_run_local(&state, &parse_id(&id)?, req).await?))
+}
+
+/// A file or directory read out of a container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FileRead {
+    pub(crate) path: String,
+    /// Size of the whole file in bytes, not of what was returned.
+    pub(crate) size: u64,
+    /// More exists than was returned: file content cut at `max`, or a
+    /// directory with more than 500 entries.
+    pub(crate) truncated: bool,
+    pub(crate) is_binary: bool,
+    /// The file's text. `None` for a binary file, and for anything that is
+    /// not a regular file.
+    pub(crate) content: Option<String>,
+    /// "file", "dir", "symlink" or "other".
+    pub(crate) kind: String,
+    /// A directory's entry names (sorted, immediate children only); empty
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) entries: Vec<String>,
+}
+
+/// Whether `data` looks like binary rather than text: a NUL or invalid utf-8
+/// in its first 8 KiB. A multi-byte character merely cut by that 8 KiB
+/// boundary (or by the caller's own size cap) is not evidence of binary.
+fn looks_binary(data: &[u8]) -> bool {
+    let head = &data[..data.len().min(BINARY_SNIFF_BYTES)];
+    if head.contains(&0) {
+        return true;
+    }
+    match std::str::from_utf8(head) {
+        Ok(_) => false,
+        // `error_len() == None` means the input ended mid-character, which is
+        // only innocent when the sniff window really did cut the data short.
+        Err(e) => !(e.error_len().is_none() && data.len() > head.len()),
+    }
+}
+
+fn file_read_from(path: &str, read: cl_docker::PathRead) -> FileRead {
+    let kind = match read.kind {
+        cl_docker::PathKind::File => "file",
+        cl_docker::PathKind::Dir => "dir",
+        cl_docker::PathKind::Symlink => "symlink",
+        cl_docker::PathKind::Other => "other",
+    };
+    let (is_binary, content) = if read.kind == cl_docker::PathKind::File {
+        if looks_binary(&read.data) {
+            (true, None)
+        } else {
+            (
+                false,
+                Some(String::from_utf8_lossy(&read.data).into_owned()),
+            )
+        }
+    } else {
+        (false, None)
+    };
+    FileRead {
+        path: path.to_string(),
+        size: read.size,
+        truncated: read.truncated,
+        is_binary,
+        content,
+        kind: kind.to_string(),
+        entries: read.entries,
+    }
+}
+
+/// `read_file` on this node's docker. Uses docker's archive endpoint rather
+/// than `exec cat`, so it works in images with no shell (distroless).
+pub(crate) async fn read_file_local(
+    state: &AppState,
+    instance: &InstanceId,
+    path: &str,
+    max: usize,
+) -> Result<FileRead, ApiError> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err(ApiError::BadRequest(
+            "path must be absolute and must not contain NUL".to_string(),
+        ));
+    }
+    let max = max.clamp(1, MAX_BUFFERED_BYTES);
+    let docker = state.docker().await?;
+    let read = docker
+        .read_path(&instance.container_name(), path, max, FILE_LIST_LIMIT)
+        .await
+        .map_err(docker_error)?;
+    Ok(file_read_from(path, read))
+}
+
+#[derive(Deserialize, Serialize)]
+struct FileQuery {
+    path: String,
+    max: Option<usize>,
+}
+
+fn internal_file_path(instance: &InstanceId, query: &FileQuery) -> String {
+    let qs = serde_urlencoded::to_string(query).unwrap_or_default();
+    format!("/api/instances/internal/{instance}/file?{qs}")
+}
+
+/// Read a file (or list a directory) in an instance's container wherever it
+/// runs. `max` defaults to 256 KiB and is capped at 1 MiB.
+#[allow(dead_code)] // called by `crate::mcp`
+pub(crate) async fn read_file(
+    state: &AppState,
+    instance: &InstanceId,
+    path: &str,
+    max: Option<usize>,
+) -> Result<FileRead, ApiError> {
+    let node = owning_node(state, instance).await?;
+    let max = max.unwrap_or(FILE_READ_DEFAULT).min(MAX_BUFFERED_BYTES);
+    if node == state.node_name {
+        return read_file_local(state, instance, path, max).await;
+    }
+    let query = FileQuery {
+        path: path.to_string(),
+        max: Some(max),
+    };
+    internal_peer::fetch_json(state, &node, &internal_file_path(instance, &query)).await
+}
+
+/// Node-to-node: read a file from this node's own container.
+async fn internal_file(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<FileRead>, ApiError> {
+    let max = query.max.unwrap_or(FILE_READ_DEFAULT);
+    Ok(Json(
+        read_file_local(&state, &parse_id(&id)?, &query.path, max).await?,
+    ))
+}
+
+/// One buffered container log line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LogLine {
+    /// "stdout" or "stderr".
+    pub(crate) stream: String,
+    pub(crate) line: String,
+    pub(crate) timestamp: Option<String>,
+}
+
+/// Parse the body of a `follow=false` SSE log response (see
+/// `stream::container_log_events`): `event: stdout|stderr` with a json
+/// `{"timestamp", "text"}` payload per line. Keep-alive comments and unknown
+/// events are skipped; an `error` event fails the whole parse, since the log
+/// was cut short and a silently shortened tail would mislead.
+fn parse_sse_logs(body: &str) -> Result<Vec<LogLine>, String> {
+    let body = body.replace("\r\n", "\n");
+    let mut lines = Vec::new();
+    for block in body.split("\n\n") {
+        let mut event = "message";
+        let mut data: Vec<&str> = Vec::new();
+        for field in block.lines() {
+            if let Some(v) = field.strip_prefix("event:") {
+                event = v.trim();
+            } else if let Some(v) = field.strip_prefix("data:") {
+                data.push(v.strip_prefix(' ').unwrap_or(v));
+            }
+        }
+        if data.is_empty() {
+            continue;
+        }
+        let data = data.join("\n");
+        match event {
+            "stdout" | "stderr" => {
+                #[derive(Deserialize)]
+                struct Payload {
+                    timestamp: Option<String>,
+                    text: String,
+                }
+                // Falls back to the raw data for the plain-text shape
+                // `container_log_events` uses if it cannot encode a line.
+                let (timestamp, text) = match serde_json::from_str::<Payload>(&data) {
+                    Ok(p) => (p.timestamp, p.text),
+                    Err(_) => (None, data),
+                };
+                lines.push(LogLine {
+                    stream: event.to_string(),
+                    line: text.trim_end_matches(['\n', '\r']).to_string(),
+                    timestamp,
+                });
+            }
+            "error" => return Err(data),
+            _ => {}
+        }
+    }
+    Ok(lines)
+}
+
+/// The last `tail` lines (capped at 10,000) of an instance's container log,
+/// optionally only after unix time `since`, buffered. Local instances read
+/// docker directly; remote ones go through the owning node's existing
+/// `internal_logs` route with `follow=false` and the SSE body is parsed back
+/// into lines.
+#[allow(dead_code)] // called by `crate::mcp`
+pub(crate) async fn fetch_logs(
+    state: &AppState,
+    instance: &InstanceId,
+    tail: u32,
+    since: Option<i64>,
+) -> Result<Vec<LogLine>, ApiError> {
+    let tail = tail.min(LOG_TAIL_LIMIT);
+    let node = owning_node(state, instance).await?;
+    if node != state.node_name {
+        let qs = serde_urlencoded::to_string(LogsQuery {
+            follow: false,
+            tail: Some(tail),
+            since,
+        })
+        .unwrap_or_default();
+        let path = format!("{}?{qs}", internal_logs_path(instance));
+        let body = internal_peer::fetch_text(state, &node, &path).await?;
+        return parse_sse_logs(&body).map_err(ApiError::Internal);
+    }
+    let docker = state.docker().await?;
+    let opts = LogOptions {
+        follow: false,
+        tail: Tail::Lines(tail),
+        since,
+    };
+    let name = instance.container_name();
+    let stream = docker.logs(&name, opts);
+    futures::pin_mut!(stream);
+    let mut lines = Vec::new();
+    while let Some(item) = stream.next().await {
+        let line = item.map_err(docker_error)?;
+        lines.push(LogLine {
+            stream: match line.stream {
+                cl_docker::LogStream::Stdout => "stdout",
+                cl_docker::LogStream::Stderr => "stderr",
+            }
+            .to_string(),
+            line: line.text.trim_end_matches(['\n', '\r']).to_string(),
+            timestamp: line.timestamp,
+        });
+    }
+    Ok(lines)
+}
+
+#[cfg(test)]
+mod inspect_tests {
+    use super::*;
+
+    #[test]
+    fn sse_logs_parse_both_streams_with_timestamps() {
+        let body = "event: stdout\ndata: {\"timestamp\":\"2026-01-01T00:00:00Z\",\"text\":\"hello\\n\"}\n\n\
+                    event: stderr\ndata: {\"timestamp\":null,\"text\":\"oops\"}\n\n";
+        let lines = parse_sse_logs(body).unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                LogLine {
+                    stream: "stdout".into(),
+                    line: "hello".into(),
+                    timestamp: Some("2026-01-01T00:00:00Z".into()),
+                },
+                LogLine {
+                    stream: "stderr".into(),
+                    line: "oops".into(),
+                    timestamp: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_logs_skip_keepalives_and_accept_crlf() {
+        let body =
+            ": keep-alive\r\n\r\nevent: stdout\r\ndata: {\"timestamp\":null,\"text\":\"a\"}\r\n\r\n";
+        let lines = parse_sse_logs(body).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].line, "a");
+    }
+
+    #[test]
+    fn sse_logs_error_event_fails_the_parse() {
+        let body = "event: stdout\ndata: {\"timestamp\":null,\"text\":\"a\"}\n\nevent: error\ndata: docker went away\n\n";
+        assert_eq!(parse_sse_logs(body).unwrap_err(), "docker went away");
+    }
+
+    #[test]
+    fn sse_logs_empty_body_is_no_lines() {
+        assert!(parse_sse_logs("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn nul_means_binary() {
+        assert!(looks_binary(b"abc\0def"));
+    }
+
+    #[test]
+    fn plain_and_multibyte_text_is_not_binary() {
+        assert!(!looks_binary("héllo wörld ✓".as_bytes()));
+        assert!(!looks_binary(b""));
+    }
+
+    #[test]
+    fn invalid_utf8_means_binary() {
+        assert!(looks_binary(&[0x66, 0xff, 0xfe, 0x6f]));
+    }
+
+    #[test]
+    fn a_character_cut_by_the_sniff_window_is_not_binary() {
+        // 'é' is two bytes; put its first byte on the last sniffed byte.
+        let mut data = vec![b'a'; BINARY_SNIFF_BYTES - 1];
+        data.extend_from_slice("é".as_bytes());
+        data.extend_from_slice(b"tail");
+        assert!(!looks_binary(&data));
+    }
+
+    #[test]
+    fn a_character_cut_at_the_very_end_of_the_data_is_binary() {
+        // Nothing follows, so the window did not cut it; the data is just
+        // malformed.
+        assert!(looks_binary(&[b'a', 0xc3]));
+    }
+
+    #[test]
+    fn capped_buf_keeps_the_prefix_and_flags_the_rest() {
+        let mut buf = CappedBuf::new(5);
+        buf.push(b"abc");
+        assert!(!buf.truncated);
+        buf.push(b"defgh");
+        assert!(buf.truncated);
+        let (text, truncated) = buf.into_text();
+        assert_eq!(text, "abcde");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn capped_buf_exactly_at_the_cap_is_not_truncated() {
+        let mut buf = CappedBuf::new(3);
+        buf.push(b"abc");
+        assert!(!buf.truncated);
+        buf.push(b"");
+        assert!(!buf.truncated);
+    }
+
+    #[test]
+    fn file_read_reports_a_directory_without_content() {
+        let read = cl_docker::PathRead {
+            kind: cl_docker::PathKind::Dir,
+            size: 4096,
+            data: Vec::new(),
+            truncated: false,
+            entries: vec!["a".into(), "b".into()],
+        };
+        let out = file_read_from("/etc", read);
+        assert_eq!(out.kind, "dir");
+        assert!(out.content.is_none() && !out.is_binary);
+        assert_eq!(out.entries, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn file_read_withholds_binary_content() {
+        let read = cl_docker::PathRead {
+            kind: cl_docker::PathKind::File,
+            size: 3,
+            data: vec![0, 1, 2],
+            truncated: false,
+            entries: Vec::new(),
+        };
+        let out = file_read_from("/bin/x", read);
+        assert!(out.is_binary && out.content.is_none());
+    }
 }

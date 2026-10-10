@@ -18,25 +18,30 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Serialize)]
-struct StatusBody {
+pub(crate) struct StatusBody {
     /// The node answering this request, which is not necessarily the leader.
-    node: String,
-    is_leader: bool,
-    has_quorum: bool,
+    pub(crate) node: String,
+    pub(crate) is_leader: bool,
+    pub(crate) has_quorum: bool,
     /// Leader's node name, not its raft id. The id is an internal hash of the
     /// name and means nothing to anyone reading the ui or scripting the api.
-    leader: Option<String>,
-    voters: usize,
-    reachable: usize,
-    managers_total: usize,
-    managers_reachable: usize,
+    pub(crate) leader: Option<String>,
+    pub(crate) voters: usize,
+    pub(crate) reachable: usize,
+    pub(crate) managers_total: usize,
+    pub(crate) managers_reachable: usize,
     /// Build version of the daemon answering.
-    version: String,
+    pub(crate) version: String,
     /// Replicated state version, which moves on every applied command.
-    state_version: u64,
+    pub(crate) state_version: u64,
 }
 
 async fn status(_identity: Identity, State(state): State<AppState>) -> Json<StatusBody> {
+    Json(cluster_status(&state).await)
+}
+
+/// The body of `status`, callable in-process.
+pub(crate) async fn cluster_status(state: &AppState) -> StatusBody {
     let quorum = state.cluster.quorum().status();
     let cluster_state = state.cluster.state().await;
 
@@ -51,7 +56,7 @@ async fn status(_identity: Identity, State(state): State<AppState>) -> Json<Stat
         .filter(|name| !cluster_state.unreachable.contains(**name))
         .count();
 
-    Json(StatusBody {
+    StatusBody {
         node: state.node_name.clone(),
         is_leader: state.cluster.is_leader(),
         has_quorum: quorum.has_quorum,
@@ -64,7 +69,7 @@ async fn status(_identity: Identity, State(state): State<AppState>) -> Json<Stat
         managers_reachable,
         version: env!("CARGO_PKG_VERSION").to_string(),
         state_version: cluster_state.version,
-    })
+    }
 }
 
 /// Raft ids are a hash of the node's config-declared uuid, so the only way
