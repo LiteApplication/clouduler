@@ -482,7 +482,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
 
     routes.extend(redirect_routes_for(cfg, state));
 
-    if let Some(dashboard) = dashboard_route(cfg) {
+    if let Some(dashboard) = dashboard_route(cfg, state) {
         routes.push(dashboard);
     }
     routes
@@ -541,7 +541,7 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
 /// `preserve_host` is on because the api builds its OIDC redirect URL from the
 /// request, and `websockets` because `/api/events` and the log streams are
 /// server-sent events that must not be buffered or capped.
-fn dashboard_route(cfg: &ClusterConfig) -> Option<Route> {
+fn dashboard_route(cfg: &ClusterConfig, state: &ClusterState) -> Option<Route> {
     if !cfg.proxy.enabled || !cfg.web.through_proxy {
         return None;
     }
@@ -562,6 +562,10 @@ fn dashboard_route(cfg: &ClusterConfig) -> Option<Route> {
             // large, and the event stream never returns headers late but does
             // stay open indefinitely.
             allowed_subnet: allowed_subnet(cfg, &cfg.web.network),
+            // A client (e.g. an MCP client container) on the node serving the
+            // dashboard reaches the proxy with its raw overlay address, which
+            // is outside `allowed_subnet`; see `trusted_overlay_subnets`.
+            trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &cfg.web.network),
             ..RouteOptions::default()
         }),
     )
@@ -1466,7 +1470,7 @@ mod tests {
     #[test]
     fn the_dashboard_backend_is_this_nodes_own_api_over_loopback() {
         let cfg = cfg();
-        let route = dashboard_route(&cfg).expect("routed");
+        let route = dashboard_route(&cfg, &state_with(SPEC, 1)).expect("routed");
         let backend = route.backends()[0];
         assert!(backend.ip().is_loopback(), "{backend}");
         assert_eq!(backend.port(), cfg.web.backend_port);
@@ -1481,18 +1485,57 @@ mod tests {
     /// streams must not be capped or timed out.
     #[test]
     fn the_dashboard_route_preserves_host_and_allows_streams() {
-        let route = dashboard_route(&cfg()).expect("routed");
+        let route = dashboard_route(&cfg(), &state_with(SPEC, 1)).expect("routed");
         assert!(route.options.preserve_host);
         assert!(route.options.websockets);
         assert_eq!(route.options.max_body_size, None);
         assert_eq!(route.options.response_timeout, None);
     }
 
+    /// `/mcp` is served through the dashboard route. An MCP client running in
+    /// a stack on the node that hosts the dashboard (the leader) has its
+    /// request delivered locally, so the proxy sees its raw overlay address,
+    /// outside the web network's declared subnet. The dashboard route must
+    /// trust that peer exactly like a service route does.
+    #[test]
+    fn the_dashboard_route_trusts_a_same_node_overlay_peer() {
+        const LAN_SPEC: &str = "\
+networks:
+  lan: {}
+services:
+  web:
+    image: nginx
+    networks: [lan]
+";
+        let mut cfg = cfg();
+        cfg.web.network = "lan".to_string();
+        let mut state = state_with(LAN_SPEC, 1);
+        let mut allocations =
+            Allocations::decode(state.overlay.as_deref()).expect("state_with sets an overlay");
+        let overlay_subnet = allocations
+            .allocate_network("blog_lan", &[])
+            .expect("allocates a subnet for the stack's lan overlay");
+        state.overlay = Some(serde_json::to_string(&allocations).expect("encodes"));
+
+        let route = dashboard_route(&cfg, &state).expect("routed");
+        let container_peer = std::net::IpAddr::from(overlay_subnet.hosts().next().unwrap());
+
+        assert!(route
+            .options
+            .allowed_subnet
+            .is_some_and(|s| !s.contains(&container_peer)));
+        assert!(route
+            .options
+            .trusted_overlay_subnets
+            .iter()
+            .any(|s| s.contains(&container_peer)));
+    }
+
     #[test]
     fn turning_off_through_proxy_removes_the_dashboard_route() {
         let mut cfg = cfg();
         cfg.web.through_proxy = false;
-        assert!(dashboard_route(&cfg).is_none());
+        assert!(dashboard_route(&cfg, &state_with(SPEC, 1)).is_none());
         assert!(routes_for(&cfg, &state_with(SPEC, 1))
             .iter()
             .all(|r| r.instance != "clouduler.dashboard"));
@@ -1504,7 +1547,7 @@ mod tests {
     fn a_disabled_proxy_publishes_no_dashboard_route() {
         let mut cfg = cfg();
         cfg.proxy.enabled = false;
-        assert!(dashboard_route(&cfg).is_none());
+        assert!(dashboard_route(&cfg, &state_with(SPEC, 1)).is_none());
     }
 
     /// The dashboard's certificate used to be a special case bolted onto
