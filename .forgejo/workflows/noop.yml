@@ -1,0 +1,11 @@
+# Forgejo prefers .forgejo/workflows over .github/workflows, so this
+# placeholder stops the GitHub workflows from running on Forgejo.
+name: noop
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: host
+    steps:
+      - run: echo "no-op"
