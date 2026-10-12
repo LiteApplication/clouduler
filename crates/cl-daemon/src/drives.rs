@@ -33,7 +33,7 @@
 //! a drive never deletes the directory it backed, only stops
 //! mounting/exporting/transporting it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -544,32 +544,28 @@ fn start_volume_mounts(
         return Ok(());
     }
 
-    // A raw `mount(2)` call needs root (`CAP_SYS_ADMIN`). Refusing to start
-    // the whole daemon over it would take out a node that is otherwise
-    // healthy and still votes, so this is a warning and served drives are
-    // simply unavailable here. The scheduler will still place work needing
-    // one, since placement no longer requires this node to implement a
-    // served drive; those instances just never become ready (see
-    // `cl_sched::run::volumes_ready`) until they land somewhere that can
-    // mount it.
+    // A raw `mount(2)` call needs root (`CAP_SYS_ADMIN`), and for fstype
+    // "nfs4" the kernel's nfsv4 client module has to be loaded first —
+    // bypassing the `mount.nfs4` helper (see `served::mount`) means bypassing
+    // the autoload it would normally trigger too. Refusing to start the whole
+    // daemon over either would take out a node that is otherwise healthy and
+    // still votes, so this is only a warning. The watcher below starts anyway
+    // and `MountManager::mount_one` re-checks both on every attempt, so a
+    // `modprobe nfsv4` after boot takes effect without restarting the daemon.
+    // Until then the scheduler still places work needing a served drive here,
+    // since placement no longer requires this node to implement one, and
+    // those instances just never become ready (see
+    // `cl_sched::run::volumes_ready`).
     if let Err(e) = cl_drive::mount_permission() {
         warn!(
             error = %e,
-            "cannot mount served drive volumes on this node, containers needing one will not run here"
+            "cannot mount served drive volumes on this node yet, containers needing one will not run here until it can"
         );
-        return Ok(());
-    }
-    // `mount(2)` for fstype "nfs4" needs the kernel's nfsv4 client module
-    // loaded first — bypassing the `mount.nfs4` helper (see `served::mount`)
-    // means bypassing the autoload it would normally trigger too, so a host
-    // that never `modprobe nfsv4`d fails its very first mount outright.
-    // Checked once here rather than left to surface per volume.
-    if let Err(e) = cl_drive::client_available() {
+    } else if let Err(e) = cl_drive::client_available() {
         warn!(
             error = %e,
-            "cannot mount served drive volumes on this node, containers needing one will not run here"
+            "cannot mount served drive volumes on this node yet, containers needing one will not run here until it can"
         );
-        return Ok(());
     }
 
     let manager = Arc::new(MountManager::new());
@@ -612,6 +608,9 @@ async fn watch_volume_mounts(
     manager: Arc<MountManager>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
+    // Mounts whose last attempt failed, so a persistent failure is logged once
+    // rather than on every tick, and its recovery is logged too.
+    let mut failing: BTreeSet<String> = BTreeSet::new();
     loop {
         ticker.tick().await;
         let state = cluster.state().await;
@@ -672,6 +671,7 @@ async fn watch_volume_mounts(
                 }
             }
         }
+        failing.retain(|key| needed.contains_key(key));
         for (key, spec) in needed {
             if manager.is_mounted(&key) {
                 let server = spec.server;
@@ -679,9 +679,20 @@ async fn watch_volume_mounts(
                     warn!(%key, %server, error = %e, "could not fail a served drive mount over to its new server");
                 }
             } else {
-                info!(drive = %spec.drive, volume = ?spec.volume, server = %spec.server, "mounting served drive volume");
-                if let Err(e) = manager.mount_one(spec) {
-                    warn!(%key, error = %e, "could not mount a served drive volume");
+                if !failing.contains(&key) {
+                    info!(drive = %spec.drive, volume = ?spec.volume, server = %spec.server, "mounting served drive volume");
+                }
+                match manager.mount_one(spec) {
+                    Ok(()) => {
+                        if failing.remove(&key) {
+                            info!(%key, "mounted a served drive volume that had been failing");
+                        }
+                    }
+                    Err(e) => {
+                        if failing.insert(key.clone()) {
+                            warn!(%key, error = %e, "could not mount a served drive volume, will keep retrying");
+                        }
+                    }
                 }
             }
         }
