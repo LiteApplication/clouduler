@@ -44,8 +44,9 @@ pub enum Query {
     Status,
     /// The full applied state.
     State {
-        /// Secrets and private keys are blanked unless this is set. The cli
-        /// never sets it; only a restore path would.
+        /// Secrets and private keys are blanked unless this is set. Only the
+        /// cli's backup snapshot/restore paths set it, to open a
+        /// destination's sealed password locally.
         include_secrets: bool,
     },
 }

@@ -422,7 +422,7 @@ pub async fn history(
 
 pub async fn snapshots(cfg: &ClusterConfig, destination_id: &str, via: Option<&str>) -> Result<()> {
     let state = client_for(cfg, via)?
-        .state()
+        .state_with_secrets()
         .await
         .map_err(|e| anyhow!("{e}"))?;
     let destination = state

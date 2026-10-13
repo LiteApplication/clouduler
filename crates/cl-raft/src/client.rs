@@ -84,12 +84,18 @@ impl Client {
 
     /// The applied state, with secrets blanked.
     pub async fn state(&self) -> Result<ClusterState, String> {
-        match self
-            .query(Query::State {
-                include_secrets: false,
-            })
-            .await?
-        {
+        self.fetch_state(false).await
+    }
+
+    /// The applied state with sealed secrets intact, for the cli paths that
+    /// open them locally with the cluster key (listing and restoring from a
+    /// backup destination). The rpc channel is already gated on that key.
+    pub async fn state_with_secrets(&self) -> Result<ClusterState, String> {
+        self.fetch_state(true).await
+    }
+
+    async fn fetch_state(&self, include_secrets: bool) -> Result<ClusterState, String> {
+        match self.query(Query::State { include_secrets }).await? {
             QueryResult::State(state) => Ok(*state),
             other => Err(format!("unexpected query result {other:?}")),
         }

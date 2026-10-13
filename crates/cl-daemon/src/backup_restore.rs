@@ -312,7 +312,7 @@ pub async fn restore_drive(
     via: Option<&str>,
 ) -> Result<()> {
     let ctx = Ctx::new(cfg, node_name, via)?;
-    let state = ctx.client.state().await.map_err(|e| anyhow!("{e}"))?;
+    let state = ctx.client.state_with_secrets().await.map_err(|e| anyhow!("{e}"))?;
     let instances = instances_using_drive(&state, drive);
 
     println!("restoring {drive} from {destination_id}");
@@ -338,7 +338,7 @@ pub async fn restore_volume(
     via: Option<&str>,
 ) -> Result<()> {
     let ctx = Ctx::new(cfg, node_name, via)?;
-    let state = ctx.client.state().await.map_err(|e| anyhow!("{e}"))?;
+    let state = ctx.client.state_with_secrets().await.map_err(|e| anyhow!("{e}"))?;
     let instances = instances_touching_volumes(&state, std::slice::from_ref(volume));
 
     println!("restoring {volume} from {destination_id}");
@@ -368,7 +368,7 @@ pub async fn restore_service(
     via: Option<&str>,
 ) -> Result<()> {
     let ctx = Ctx::new(cfg, node_name, via)?;
-    let state = ctx.client.state().await.map_err(|e| anyhow!("{e}"))?;
+    let state = ctx.client.state_with_secrets().await.map_err(|e| anyhow!("{e}"))?;
 
     let volumes = service_volumes(&state, stack, service)?;
     if volumes.is_empty() {
