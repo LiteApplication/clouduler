@@ -245,12 +245,19 @@ impl InstanceControl for DockerControl {
                     self.node
                 )));
             }
-            self.docker
+            match self
+                .docker
                 .stop(&instance.container_name(), self.stop_grace)
                 .await
-                .map_err(|e| cl_drive::DriveError::Transfer {
+            {
+                // No container at all (never created here, or removed since
+                // the node was last reconciled): nothing holds the volumes,
+                // which is the state this step exists to reach.
+                Ok(()) | Err(cl_docker::DockerError::NotFound(_)) => Ok(()),
+                Err(e) => Err(cl_drive::DriveError::Transfer {
                     message: format!("stopping {instance}: {e}"),
-                })
+                }),
+            }
         })
     }
 

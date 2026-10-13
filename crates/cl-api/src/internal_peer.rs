@@ -102,6 +102,18 @@ pub async fn fetch_json<T: DeserializeOwned>(
     node: &str,
     path: &str,
 ) -> Result<T, ApiError> {
+    fetch_json_within(state, node, path, FETCH_TIMEOUT).await
+}
+
+/// `fetch_json` with a caller-chosen timeout, for reads that do real work on
+/// the peer (the image-update scan makes a registry round trip per image and
+/// takes several seconds on a node running a couple of dozen containers).
+pub async fn fetch_json_within<T: DeserializeOwned>(
+    state: &AppState,
+    node: &str,
+    path: &str,
+    timeout: Duration,
+) -> Result<T, ApiError> {
     let base = peer_base_url(state, node).await?;
     for attempt in 0.. {
         let sent = signed(
@@ -112,7 +124,7 @@ pub async fn fetch_json<T: DeserializeOwned>(
             b"",
         )
         .await?
-        .timeout(FETCH_TIMEOUT)
+        .timeout(timeout)
         .send()
         .await;
         let resp = match sent {

@@ -86,6 +86,11 @@ fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String>
 /// difference between four and one.
 const REGISTRY_LOOKUP_CONCURRENCY: usize = 4;
 
+/// How long the leader waits for one node's scan. The scan does a registry
+/// round trip per distinct image, which the default 5s peer read cannot cover;
+/// kept under the reverse proxy's 30s response timeout.
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// What one node can say about one of its containers without consulting raft.
 #[derive(Serialize, Deserialize, Clone)]
 struct ImageStatus {
@@ -202,7 +207,14 @@ async fn scan_node(state: &AppState, node: &str) -> Vec<ImageStatus> {
     if node == state.node_name {
         return scan_local(state).await;
     }
-    match internal_peer::fetch_json::<Vec<ImageStatus>>(state, node, INTERNAL_SCAN_PATH).await {
+    match internal_peer::fetch_json_within::<Vec<ImageStatus>>(
+        state,
+        node,
+        INTERNAL_SCAN_PATH,
+        SCAN_TIMEOUT,
+    )
+    .await
+    {
         Ok(statuses) => statuses,
         Err(e) => {
             warn!(%node, error = %e, "could not scan a node for image updates");
