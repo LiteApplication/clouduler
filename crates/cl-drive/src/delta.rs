@@ -54,6 +54,37 @@ const WHOLE_FILE_THRESHOLD: u64 = 8 * 1024;
 /// the right trade against an unbounded allocation that takes the node down.
 const MAX_DELTA_FILE: u64 = 256 * 1024 * 1024;
 
+/// Against a destination holding at least `DROP_CHECK_MIN_FILES` files, a
+/// source with under 1/`DROP_FRACTION` of that is lost data, not a clean-up.
+const DROP_CHECK_MIN_FILES: usize = 200;
+const DROP_FRACTION: usize = 20;
+
+/// Refuses a sync that would delete a destination's data because the source
+/// has lost its own: an empty (or nearly empty) tree pushed over a populated
+/// one. A volume deliberately emptied needs one file left in it, or its
+/// replicas cleared by hand; a replicated wipe is not recoverable.
+pub(crate) fn guard_against_data_loss(
+    volume: &VolumeId,
+    local: &scan::Manifest,
+    remote: &scan::Manifest,
+) -> Result<()> {
+    let (have, held) = (local.files.len(), remote.files.len());
+    let reason = if have == 0 && held > 0 {
+        format!("the source holds no files but the destination holds {held}")
+    } else if held >= DROP_CHECK_MIN_FILES && have * DROP_FRACTION < held {
+        format!("the source holds {have} files but the destination holds {held}")
+    } else {
+        return Ok(());
+    };
+    Err(DriveError::DestructiveSync {
+        volume: volume.clone(),
+        reason: format!(
+            "{reason}; the source copy looks lost, so the destination copy was kept. \
+             Restore the source, or clear the destination's copy if the loss is intended"
+        ),
+    })
+}
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What one sync did, for reporting and tests.
@@ -173,6 +204,14 @@ impl DeltaEngine {
         staging: Option<String>,
         progress: crate::progress::ProgressSink,
     ) -> Result<SyncStats> {
+        // A missing source scans as an empty manifest with a zeroed root, which
+        // would delete the peer's files and chmod its root to 000.
+        if !src.is_dir() {
+            return Err(DriveError::DestructiveSync {
+                volume: volume.clone(),
+                reason: format!("the source directory {} does not exist", src.display()),
+            });
+        }
         let mut conn = transport::connect_authenticated(peer, &self.keys).await?;
 
         transport::send(
@@ -201,6 +240,7 @@ impl DeltaEngine {
         };
 
         let local = scan::scan_off_runtime(src.to_path_buf(), false).await?;
+        guard_against_data_loss(volume, &local, &remote)?;
         let diff = local.diff(&remote);
         let total_files = (diff.added.len() + diff.changed.len()) as u64;
         let mut files_done: u64 = 0;
@@ -659,6 +699,48 @@ pub mod fast_path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest_of(files: usize) -> scan::Manifest {
+        let meta = FileMeta {
+            size: 1,
+            mtime_nanos: 0,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            is_symlink: false,
+            link_target: None,
+            hash: None,
+        };
+        scan::Manifest {
+            files: (0..files).map(|i| (format!("f{i}"), meta.clone())).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_empty_source_is_refused_over_a_populated_destination() {
+        let id = VolumeId::new("fast", "db");
+        let err = guard_against_data_loss(&id, &manifest_of(0), &manifest_of(3)).unwrap_err();
+        assert!(matches!(err, DriveError::DestructiveSync { .. }), "{err}");
+        assert!(err.to_string().contains("holds 3"), "{err}");
+    }
+
+    #[test]
+    fn empty_over_empty_and_ordinary_changes_are_allowed() {
+        let id = VolumeId::new("fast", "db");
+        assert!(guard_against_data_loss(&id, &manifest_of(0), &manifest_of(0)).is_ok());
+        assert!(guard_against_data_loss(&id, &manifest_of(5), &manifest_of(0)).is_ok());
+        assert!(guard_against_data_loss(&id, &manifest_of(2), &manifest_of(3)).is_ok());
+    }
+
+    #[test]
+    fn a_large_collapse_is_refused_but_only_against_a_big_destination() {
+        let id = VolumeId::new("fast", "db");
+        assert!(guard_against_data_loss(&id, &manifest_of(5), &manifest_of(400)).is_err());
+        assert!(guard_against_data_loss(&id, &manifest_of(30), &manifest_of(400)).is_ok());
+        // Small volumes can legitimately shrink a lot.
+        assert!(guard_against_data_loss(&id, &manifest_of(1), &manifest_of(50)).is_ok());
+    }
 
     #[test]
     fn default_engine_is_named_delta() {

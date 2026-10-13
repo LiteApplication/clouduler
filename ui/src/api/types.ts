@@ -258,6 +258,8 @@ export interface VolumeState {
   replicas: Record<string, number>;
   /** Set while the volume is being edited by hand and not replicating. */
   frozen: { node: string; stopped: string[] } | null;
+  /** Set while the source refuses to replicate because it would wipe a replica. */
+  sync_refused: { from: string; to: string; reason: string; at: number } | null;
 }
 
 export interface ClusterState {

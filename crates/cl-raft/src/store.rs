@@ -233,6 +233,7 @@ impl Store {
                                 1,
                             )]),
                             frozen: None,
+                            sync_refused: None,
                         },
                     );
                 }

@@ -260,6 +260,16 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
         );
     }
     for (id, volume) in &state.volumes {
+        if let Some(refusal) = &volume.sync_refused {
+            add(
+                "volume_sync_refused",
+                id.to_string(),
+                format!(
+                    "replication from {} to {} is stopped to protect {}'s copy: {}",
+                    refusal.from, refusal.to, refusal.to, refusal.reason
+                ),
+            );
+        }
         if !state.nodes.contains_key(&volume.primary) {
             add(
                 "volume",

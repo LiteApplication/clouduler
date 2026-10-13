@@ -204,6 +204,62 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
+    /// Surfaces a refused push as a cluster problem. Skipped when the same
+    /// refusal is already recorded, so a volume refused every pass does not
+    /// write to the raft log every pass.
+    async fn record_refusal(&self, id: &VolumeId, to: &str, reason: String) {
+        let current = self
+            .node
+            .state()
+            .await
+            .volumes
+            .get(id)
+            .and_then(|v| v.sync_refused.clone());
+        if current
+            .as_ref()
+            .is_some_and(|c| c.from == self.registry.node() && c.to == to && c.reason == reason)
+        {
+            return;
+        }
+        let refusal = cl_raft::SyncRefusal {
+            from: self.registry.node().to_string(),
+            to: to.to_string(),
+            reason,
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64),
+        };
+        if let Err(e) = self
+            .node
+            .submit(Request::SetVolumeSyncRefusal {
+                id: id.clone(),
+                refusal: Some(refusal),
+            })
+            .await
+        {
+            warn!(%id, error = %e, "failed to record the refused sync");
+        }
+    }
+
+    async fn clear_refusal(&self, id: &VolumeId) {
+        let recorded = self
+            .node
+            .state()
+            .await
+            .volumes
+            .get(id)
+            .is_some_and(|v| v.sync_refused.is_some());
+        if recorded {
+            let _ = self
+                .node
+                .submit(Request::SetVolumeSyncRefusal {
+                    id: id.clone(),
+                    refusal: None,
+                })
+                .await;
+        }
+    }
+
     async fn run_one(&self, id: VolumeId, generation: u64, targets: Vec<ReplicaTarget>) {
         let src = match self.registry.volume_path(&id) {
             Ok(path) => path,
@@ -245,6 +301,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             {
                 Ok(stats) => {
                     debug!(%id, node = %target.node, ?stats, "volume synced");
+                    self.clear_refusal(&id).await;
                     if let Err(e) = self
                         .node
                         .submit(Request::SetVolumeReplica {
@@ -257,7 +314,14 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                         warn!(%id, node = %target.node, error = %e, "failed to record replica progress");
                     }
                 }
-                Err(e) => warn!(%id, node = %target.node, error = %e, "volume sync failed"),
+                Err(e) => {
+                    warn!(%id, node = %target.node, error = %e, "volume sync failed");
+                    if let crate::error::DriveError::DestructiveSync { reason, .. } = &e {
+                        self.record_refusal(&id, &target.node, reason.clone()).await;
+                        // The source is bad for every target; do not try the rest.
+                        break;
+                    }
+                }
             }
         }
 

@@ -32,6 +32,11 @@ pub enum DriveError {
     #[error("transfer failed: {message}")]
     Transfer { message: String },
 
+    /// The sync would have wiped (most of) a replica's data from a source
+    /// that has little or nothing. Nothing was sent.
+    #[error("refusing to sync {volume}: {reason}")]
+    DestructiveSync { volume: VolumeId, reason: String },
+
     /// Post-transfer manifests did not match.
     #[error("verification failed: {message}")]
     Verify { message: String },

@@ -675,6 +675,7 @@ mod tests {
                 primary: primary.to_string(),
                 replicas,
                 frozen: None,
+                sync_refused: None,
             },
         );
         state

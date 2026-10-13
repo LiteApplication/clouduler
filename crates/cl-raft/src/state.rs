@@ -371,6 +371,23 @@ pub struct VolumeState {
     /// it is paused so nothing syncs over (or deletes) the edits.
     #[serde(default)]
     pub frozen: Option<FrozenVolume>,
+    /// Set while the source node is refusing to replicate this volume because
+    /// pushing it would wipe data off a replica. Cleared by the next sync that
+    /// goes through.
+    #[serde(default)]
+    pub sync_refused: Option<SyncRefusal>,
+}
+
+/// Why a volume's replication was stopped to protect a replica's data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncRefusal {
+    /// The node that refused to push.
+    pub from: String,
+    /// The replica it would have overwritten.
+    pub to: String,
+    pub reason: String,
+    /// Unix seconds, stamped by the refusing node so `apply` stays clock free.
+    pub at: i64,
 }
 
 /// Why and where a volume's replication is paused.
@@ -932,6 +949,12 @@ pub enum Request {
         id: VolumeId,
         primary: String,
     },
+    /// Records (or, with `None`, clears) that the source refused to replicate
+    /// the volume because it would have wiped a replica.
+    SetVolumeSyncRefusal {
+        id: VolumeId,
+        refusal: Option<SyncRefusal>,
+    },
     /// Pauses replication of the volume while `node` is edited by hand.
     FreezeVolume {
         id: VolumeId,
@@ -1136,6 +1159,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "UpsertVolume",
     "SetVolumeReplica",
     "TouchVolume",
+    "SetVolumeSyncRefusal",
     "FreezeVolume",
     "UnfreezeVolume",
     "StoreCertificate",
@@ -1255,6 +1279,10 @@ mod request_mirror {
         TouchVolume {
             id: VolumeId,
             primary: String,
+        },
+        SetVolumeSyncRefusal {
+            id: VolumeId,
+            refusal: Option<SyncRefusal>,
         },
         FreezeVolume {
             id: VolumeId,
@@ -1883,6 +1911,7 @@ impl ClusterState {
                         primary: primary.clone(),
                         replicas: BTreeMap::from([(primary.clone(), 1)]),
                         frozen: None,
+                        sync_refused: None,
                     });
                 Ok(())
             }
@@ -1922,6 +1951,15 @@ impl ClusterState {
                 volume.generation += 1;
                 volume.primary = primary.clone();
                 volume.replicas.insert(primary.clone(), volume.generation);
+                Ok(())
+            }
+
+            Request::SetVolumeSyncRefusal { id, refusal } => {
+                let volume = self
+                    .volumes
+                    .get_mut(id)
+                    .ok_or_else(|| format!("unknown volume {id}"))?;
+                volume.sync_refused = refusal.clone();
                 Ok(())
             }
 
@@ -2649,6 +2687,10 @@ mod tests {
             Request::TouchVolume {
                 id: VolumeId::new("fast", "v1"),
                 primary: "n1".into(),
+            },
+            Request::SetVolumeSyncRefusal {
+                id: VolumeId::new("fast", "v1"),
+                refusal: None,
             },
             Request::FreezeVolume {
                 id: VolumeId::new("fast", "v1"),
@@ -3422,6 +3464,41 @@ mod tests {
         });
         assert_eq!(state.volumes[&id].in_sync(), ["n1"].into());
         assert_eq!(state.volumes[&id].generation, 2);
+    }
+
+    #[test]
+    fn a_sync_refusal_is_recorded_and_cleared() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        let refusal = SyncRefusal {
+            from: "n1".into(),
+            to: "n2".into(),
+            reason: "source is empty".into(),
+            at: 100,
+        };
+        let set = Request::SetVolumeSyncRefusal {
+            id: id.clone(),
+            refusal: Some(refusal.clone()),
+        };
+        let first = state.apply(&set);
+        assert!(first.is_ok());
+        assert_eq!(state.volumes[&id].sync_refused, Some(refusal));
+
+        state.apply(&Request::SetVolumeSyncRefusal {
+            id: id.clone(),
+            refusal: None,
+        });
+        assert!(state.volumes[&id].sync_refused.is_none());
+
+        let rejected = state.apply(&Request::SetVolumeSyncRefusal {
+            id: VolumeId::new("fast", "nope"),
+            refusal: None,
+        });
+        assert!(rejected.error.unwrap().contains("unknown volume"));
     }
 
     #[test]
