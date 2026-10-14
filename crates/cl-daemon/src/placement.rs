@@ -6,10 +6,11 @@
 //! book), never from the local docker, so every node reaches the same
 //! conclusion about containers it is not running.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv4Addr;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use cl_config::{ClusterConfig, ServiceExtensions, StackFile};
+use cl_net::relay::relay_port;
 use cl_net::Allocations;
 use cl_raft::ids::InstanceId;
 use cl_raft::state::{ClusterState, DesiredState};
@@ -108,6 +109,33 @@ pub fn service_nodes(state: &ClusterState, stack: &str, service: &str) -> BTreeS
         .iter()
         .filter(|(id, _)| id.stack == stack && id.service == service && wants_running(state, id))
         .map(|(_, a)| a.node.clone())
+        .collect()
+}
+
+/// How `local_node` reaches every container another node runs: container
+/// address -> the relay endpoint (`cl_net::relay`) of the node running it,
+/// on that node's internal address. This host cannot open a connection to a
+/// container on another node over the overlay itself (every bridge holds the
+/// same anycast gateway), so the proxy, its health checks and the expose
+/// forwarders dial those through the relay. A container this node runs is
+/// left out and keeps the direct path, as is one on a node the config gives
+/// no internal address: nothing better than a direct dial exists for it.
+pub fn relay_routes(
+    state: &ClusterState,
+    cfg: &ClusterConfig,
+    local_node: &str,
+) -> HashMap<IpAddr, SocketAddr> {
+    instance_addresses(state, cfg)
+        .into_iter()
+        .filter_map(|(instance, ip)| {
+            let owner = &state.assignments.get(&instance)?.node;
+            if owner == local_node {
+                return None;
+            }
+            let node = cfg.node(owner)?;
+            let relay = SocketAddr::new(cfg.internal_ip(node)?, relay_port(node.rpc_port));
+            Some((IpAddr::V4(ip), relay))
+        })
         .collect()
 }
 
@@ -297,5 +325,87 @@ services:
         );
         let state = state_with(spec, 1);
         assert_eq!(instance_addresses(&state, &cfg).len(), 1);
+    }
+
+    fn two_node_config() -> ClusterConfig {
+        ClusterConfig::parse(
+            "\
+cluster: { name: test }
+networks:
+  default: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+  wan: { type: egress }
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: { default: 10.10.0.1, wan: eth0 }
+  n2:
+    id: 7d1e2f3a-4b5c-4d6e-8f70-81a2b3c4d5e6
+    role: worker
+    rpc_port: 8000
+    network: { default: 10.10.0.2, wan: eth0 }
+web: { address: cloud, network: default }
+",
+        )
+        .expect("valid cluster config")
+    }
+
+    fn move_to(state: &mut ClusterState, index: u32, node: &str) {
+        state
+            .assignments
+            .get_mut(&InstanceId::new(STACK, "web", index))
+            .expect("assigned")
+            .node = node.to_string();
+    }
+
+    /// The anycast gateway keeps a host from reaching another node's
+    /// container over the overlay, so those - and only those - go through
+    /// the owning node's relay, on its internal address.
+    #[test]
+    fn only_containers_on_other_nodes_go_through_their_nodes_relay() {
+        let cfg = two_node_config();
+        let mut state = state_with(SPEC, 2);
+        move_to(&mut state, 1, "n2");
+        let addresses: BTreeMap<InstanceId, Ipv4Addr> =
+            instance_addresses(&state, &cfg).into_iter().collect();
+        let local = IpAddr::V4(addresses[&InstanceId::new(STACK, "web", 0)]);
+        let remote = IpAddr::V4(addresses[&InstanceId::new(STACK, "web", 1)]);
+
+        let from_n1 = relay_routes(&state, &cfg, "n1");
+        assert_eq!(
+            from_n1,
+            HashMap::from([(remote, "10.10.0.2:8002".parse().unwrap())])
+        );
+
+        let from_n2 = relay_routes(&state, &cfg, "n2");
+        assert_eq!(from_n2.len(), 1);
+        assert_eq!(
+            from_n2[&local],
+            SocketAddr::new(
+                "10.10.0.1".parse().unwrap(),
+                relay_port(cfg.nodes["n1"].rpc_port)
+            )
+        );
+    }
+
+    /// No relay to go through for a node the config does not know: a
+    /// direct dial is the only thing left to try.
+    #[test]
+    fn a_container_on_an_unknown_node_is_dialed_directly() {
+        let mut state = state_with(SPEC, 1);
+        move_to(&mut state, 0, "gone");
+        assert!(relay_routes(&state, &two_node_config(), "n1").is_empty());
+    }
+
+    #[test]
+    fn a_stopped_container_on_another_node_needs_no_relay() {
+        let mut state = state_with(SPEC, 1);
+        move_to(&mut state, 0, "n2");
+        state
+            .assignments
+            .get_mut(&InstanceId::new(STACK, "web", 0))
+            .expect("assigned")
+            .desired = DesiredState::Stopped;
+        assert!(relay_routes(&state, &two_node_config(), "n1").is_empty());
     }
 }

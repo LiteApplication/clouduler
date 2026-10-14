@@ -12,6 +12,7 @@
 mod acme;
 mod auth_gate;
 mod certs;
+mod connector;
 mod error;
 mod forward_auth;
 mod health;

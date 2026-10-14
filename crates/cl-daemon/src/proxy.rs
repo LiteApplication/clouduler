@@ -2,7 +2,8 @@
 //!
 //! Every node runs the listeners and every node holds the whole routing table,
 //! because a route's hostname can resolve to any node and the backend it
-//! points at is reachable from all of them over the overlay. Certificates come
+//! points at is reachable from all of them: directly when the node runs it,
+//! through the owning node's relay (`crate::relay`) otherwise. Certificates come
 //! out of replicated state for the same reason: whichever node a client lands
 //! on has to be able to terminate TLS for the name it asked for.
 //!
@@ -22,6 +23,7 @@ use cl_api::static_routes::StaticRouteStore;
 use cl_config::{qualify, ClusterConfig, NetworkKind, StackFile};
 use cl_dns::{Cloudflare, DesiredRecord};
 use cl_net::egress::nat_subnet;
+use cl_net::relay::Dialer;
 use cl_net::Allocations;
 use cl_proxy::{
     ensure_crypto_provider, issue_certificate, issue_certificate_http01, AcmeConfig, CertStore,
@@ -208,6 +210,7 @@ pub fn start(
     data_dir: &Path,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    dialer: Dialer,
 ) -> Proxy {
     ensure_crypto_provider();
 
@@ -227,7 +230,9 @@ pub fn start(
         let health = task_health;
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
-        let mut listen = build_listen(&desired, &cluster, &config_rx, &key_rx, &health, &http01);
+        let mut listen = build_listen(
+            &desired, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
+        );
         let mut acme = build_acme(
             &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
         );
@@ -263,7 +268,9 @@ pub fn start(
                 if let Some(group) = listen.take() {
                     group.teardown();
                 }
-                listen = build_listen(&live, &cluster, &config_rx, &key_rx, &health, &http01);
+                listen = build_listen(
+                    &live, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
+                );
             }
             if live.acme != desired.acme {
                 if let Some(group) = acme.take() {
@@ -299,6 +306,7 @@ fn build_listen(
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     health: &cl_proxy::HealthTable,
     http01: &Arc<Http01Store>,
+    dialer: &Dialer,
 ) -> Option<Group> {
     let (http_port, https_port) = desired.listen?;
 
@@ -309,12 +317,15 @@ fn build_listen(
         key_rx.clone(),
         cluster.clone(),
     ));
-    let server = Arc::new(cl_proxy::ProxyServer::full(
-        routes.clone(),
-        certs.clone(),
-        Some(auth_gate),
-        http01.clone(),
-    ));
+    let server = Arc::new(
+        cl_proxy::ProxyServer::full(
+            routes.clone(),
+            certs.clone(),
+            Some(auth_gate),
+            http01.clone(),
+        )
+        .with_dialer(dialer.clone()),
+    );
     let mut tasks = Vec::new();
     // Flipped by `reconcile_loop` once the first full route set is in place.
     let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
@@ -354,6 +365,7 @@ fn build_listen(
         routes,
         health.clone(),
         cl_proxy::HEALTH_CHECK_INTERVAL,
+        dialer.clone(),
     )));
 
     Some(Group { tasks })

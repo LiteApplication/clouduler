@@ -232,10 +232,23 @@ pub async fn run(
         .build()
         .context("building the internal node-to-node http client")?;
 
+    // Every connection this host opens to a container goes through this: a
+    // container another node runs is out of the host's reach over the
+    // overlay (every node's bridge holds the same anycast gateway), so the
+    // proxy and the expose forwarders reach it through that node's relay.
+    let relay = crate::relay::start(&cfg, &node_name, &cluster, key_rx.clone());
+
     // Started before the api so the api can hand out `proxy.health`, the
     // reverse proxy's own active backend health checks, from the moment it
     // comes up rather than needing a second wiring pass later.
-    let proxy = crate::proxy::start(&cfg, &cluster, &data_dir, config_rx.clone(), key_rx.clone());
+    let proxy = crate::proxy::start(
+        &cfg,
+        &cluster,
+        &data_dir,
+        config_rx.clone(),
+        key_rx.clone(),
+        relay.dialer.clone(),
+    );
 
     let (api, api_state) = start_api(StartApiArgs {
         cfg: &cfg,
@@ -267,7 +280,7 @@ pub async fn run(
     // Containers resolve each other through this, so it comes up alongside the
     // overlay rather than waiting for anything to be scheduled.
     let internal_dns = crate::internal_dns::start(&cfg, &cluster);
-    let exposed = crate::expose::start(&cfg, &cluster);
+    let exposed = crate::expose::start(&cfg, &cluster, relay.dialer.clone());
 
     // Worth waiting for: on a node that has just booted, dockerd is often a
     // second or two behind us, and a node that gave up on docker for the life
@@ -429,6 +442,9 @@ pub async fn run(
         internal_dns.abort();
     }
     exposed.abort();
+    // Stops serving the other nodes and refreshing the table. The proxy,
+    // which keeps answering below, still dials through the last table.
+    relay.abort();
     // Before the raft shutdown, so the mounts are gone while the runtime that
     // serves their requests is still alive.
     drives.shutdown().await;

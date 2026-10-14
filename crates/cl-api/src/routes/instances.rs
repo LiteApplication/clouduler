@@ -128,7 +128,7 @@ pub(crate) struct ProxyHealthSummary {
     pub(crate) checked_at: String,
     /// `None` when the last check reached the backend; `Some(reason)` in the
     /// same shape the proxy's own "bad gateway" response would have shown a
-    /// real client, e.g. `"10.244.1.2:8080 unreachable: client error (SendRequest)"`.
+    /// real client, e.g. `"10.244.1.2:8080 unreachable: connect: Connection refused (os error 111)"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
 }

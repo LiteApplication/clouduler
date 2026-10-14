@@ -63,6 +63,36 @@ node. Without it, every other node's bridge sees its own MAC arriving on the
 tunnel and the kernel logs `received packet on clvx-... with own address as
 source address` for each one. Container frames carry their own MACs and pass.
 
+## Reaching a container on another node from a host
+
+The anycast gateway has a cost: a node's host cannot open a connection to a
+container on another node over the overlay. The host's packets leave with the
+shared gateway address as their source, the container answers that address,
+and its own node's bridge takes the answer and resets it (the `tc` filter
+above keeps the host's frames off the tunnel in the first place). So every
+connection the host itself makes to a container - the reverse proxy's
+requests and health probes, the `x-clouduler.expose` forwarders - goes
+through the node that runs the container instead (`cl-net::relay`):
+
+- each node listens on its internal address at its `rpc_port` + 2 (7375 with
+  the default 7373), next to the drive transport at + 1;
+- a node dialing a container another node runs (per replicated placement,
+  refreshed every five seconds) connects there, both sides prove they hold
+  the cluster key with the same handshake as the raft and drive channels
+  (label `relay`), and it names the container address and port;
+- the owning node dials the container locally, where the gateway is the
+  right one, and splices the two connections together. UDP travels as
+  length-prefixed datagrams over the same kind of stream.
+
+A container on the dialing node itself is dialed directly, as is anything
+outside the overlay. The listener only dials addresses in the overlay pool,
+and only directly, never onward through another relay, so two nodes briefly
+disagreeing about where a container runs costs one failed connection, never
+a loop. Containers cannot reach the relay port: `CLDR-IN` drops it like
+every other host port they are not given. Every node must run a build with
+the relay for a cross-node backend to be reachable, and the port must be
+open between nodes on the internal network.
+
 ## Single-node overlays
 
 A public network's per-node address is optional (a node just omits the
@@ -132,7 +162,8 @@ they survive a docker restart), and chain contents are replaced with one atomic
   `10.244.0.0/16`, `10.245.0.0/16`, `10.246.0.0/16`) may reach established
   replies, DNS on the overlay gateways, the reverse proxy's http/https ports,
   clouduler's own `x-clouduler.expose` ports and ICMP echo. Every other packet
-  from those pools to the host is dropped. Docker `-p` published ports are
+  from those pools to the host is dropped, the raft, drive and container
+  relay listeners included. Docker `-p` published ports are
   unaffected: they are DNAT-ed in `PREROUTING` and forwarded, never input.
 * `CLDR-OVL-SNAT` (nat, `POSTROUTING`): the overlay pool is masqueraded only
   for TCP to the proxy ports of the *other* nodes' internal addresses.
@@ -276,8 +307,10 @@ containers it is not running as readily as for its own.
 `x-clouduler.expose` (the motivating case is publishing gitlab's ssh on port
 22) is not proxied at the HTTP layer, since it isn't HTTP. Instead the
 published port is bound on **every** node, and `cl-net::expose` forwards
-accepted connections over the overlay to whichever node currently runs the
-owning instance:
+accepted connections to whichever node currently runs the owning instance:
+straight to the container when it runs on this node, through the owning
+node's relay otherwise (see "Reaching a container on another node from a
+host"):
 
 - TCP: a straightforward `tokio::io::copy_bidirectional` splice between the
   accepted connection and a connection dialed to the current backend.
@@ -286,7 +319,7 @@ owning instance:
   goes idle.
 
 Forwarding in userspace means the backend sees the connection coming from
-**this node's address on the container bridge**, not the client's. That is
+**its node's address on the container bridge**, not the client's. That is
 inherent to a relay: it terminates one connection and opens another. For a
 service that keys anything on the client address it is worse than a cosmetic
 problem — every client is indistinguishable, so a per-IP rate limit or

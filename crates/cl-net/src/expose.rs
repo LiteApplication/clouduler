@@ -1,11 +1,13 @@
 //! Non-HTTP published ports (`x-clouduler.expose`, e.g. gitlab's ssh on 22).
 //!
-//! A published port is bound on every node. Whichever node currently runs
-//! the instance is reached over the overlay by forwarding in userspace: a
-//! straightforward `copy_bidirectional` splice for TCP, and a small
-//! per-client session table for UDP. No extra kernel plumbing (no DNAT
-//! rules to keep in sync with placement) at the cost of one extra hop
-//! through this process's memory.
+//! A published port is bound on every node. The instance behind it is
+//! reached by forwarding in userspace: a straightforward `copy_bidirectional`
+//! splice for TCP, and a small per-client session table for UDP. When another
+//! node runs the instance, the forwarder goes through that node's relay
+//! (`crate::relay`), since this host cannot reach a remote container over the
+//! overlay itself. No extra kernel plumbing (no DNAT rules to keep in sync
+//! with placement) at the cost of one extra hop through this process's
+//! memory.
 //!
 //! Routing is driven by [`Routes`], a table the reconciler updates whenever
 //! placement changes. Forwarders watch their route rather than resolving it
@@ -23,6 +25,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::error::{NetError, Result};
+use crate::relay::{read_datagram, write_datagram, Dialer};
 
 /// How long a UDP session is kept alive with no traffic in either direction
 /// before its resources are reclaimed. UDP has no close handshake, so idle
@@ -118,11 +121,15 @@ impl Routes {
 /// for why that matters and why it is opt in.
 ///
 /// [`ExposePort::proxy_protocol`]: https://docs.rs/cl-config
+///
+/// `dialer` reaches the backend: directly when this node runs it, through
+/// its own node's relay otherwise.
 pub async fn serve_tcp(
     bind: SocketAddr,
     published: u16,
     routes: Routes,
     proxy_protocol: bool,
+    dialer: Dialer,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind)
         .await
@@ -160,11 +167,12 @@ pub async fn serve_tcp(
         // was destined for 0.0.0.0 is useless to the backend.
         let local = client.local_addr().ok();
         let mut route = routes.subscribe(published);
+        let dialer = dialer.clone();
         tokio::spawn(async move {
             let header = proxy_protocol
                 .then(|| local.map(|local| proxy_v2_header(peer, local)))
                 .flatten();
-            let _ = forward_tcp(client, &mut route, header).await;
+            let _ = forward_tcp(client, &mut route, header, &dialer).await;
             drop(permit);
         });
     }
@@ -172,7 +180,7 @@ pub async fn serve_tcp(
 
 /// Whether an `accept` error is a passing condition of this one connection or
 /// of the process, not a sign the listener is broken.
-fn is_transient_accept_error(error: &std::io::Error) -> bool {
+pub(crate) fn is_transient_accept_error(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     // EMFILE, ENFILE, ENOMEM, ENOBUFS: out of descriptors or memory. They
     // clear as other connections close.
@@ -193,10 +201,13 @@ fn is_transient_accept_error(error: &std::io::Error) -> bool {
 /// the route changes or there is no backend at all.
 ///
 /// `header`, when present, is written to the backend before any client bytes.
+/// Through a relay it still is: the relay passes the stream through untouched
+/// once the backend is connected, so the backend sees the real client.
 async fn forward_tcp(
     mut client: TcpStream,
     route: &mut watch::Receiver<Option<SocketAddr>>,
     header: Option<Vec<u8>>,
+    dialer: &Dialer,
 ) -> Result<()> {
     let Some(backend_addr) = *route.borrow_and_update() else {
         let _ = client.shutdown().await;
@@ -205,24 +216,19 @@ async fn forward_tcp(
         ));
     };
 
-    let mut backend =
-        match tokio::time::timeout(BACKEND_CONNECT_TIMEOUT, TcpStream::connect(backend_addr))
-            .await
-            .unwrap_or_else(|_| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "backend did not accept in time",
-                ))
-            }) {
-            Ok(stream) => stream,
-            Err(source) => {
-                let _ = client.shutdown().await;
-                return Err(NetError::Io {
-                    context: format!("connect backend {backend_addr}"),
-                    source,
-                });
-            }
-        };
+    let mut backend = match dialer
+        .connect_tcp(backend_addr, BACKEND_CONNECT_TIMEOUT)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(source) => {
+            let _ = client.shutdown().await;
+            return Err(NetError::Io {
+                context: format!("connect backend {backend_addr}"),
+                source,
+            });
+        }
+    };
 
     // Before anything the client sent: the backend parses this header off the
     // head of the stream, so a single byte of client data ahead of it would
@@ -309,8 +315,14 @@ fn proxy_v2_header(client: SocketAddr, local: SocketAddr) -> Vec<u8> {
 /// Serve a published UDP port. Each distinct client address gets its own
 /// session bound to the backend that was current when the session started;
 /// the session is torn down (and a new one started fresh) if the route
-/// changes or the session goes idle.
-pub async fn serve_udp(bind: SocketAddr, published: u16, routes: Routes) -> Result<()> {
+/// changes or the session goes idle. A backend on another node is reached
+/// through that node's relay, which `dialer` knows.
+pub async fn serve_udp(
+    bind: SocketAddr,
+    published: u16,
+    routes: Routes,
+    dialer: Dialer,
+) -> Result<()> {
     let socket =
         std::sync::Arc::new(UdpSocket::bind(bind).await.map_err(|source| NetError::Io {
             context: format!("bind udp {bind}"),
@@ -372,13 +384,25 @@ pub async fn serve_udp(bind: SocketAddr, published: u16, routes: Routes) -> Resu
         let _ = tx.try_send(datagram);
         sessions.insert(client_addr, tx);
 
-        tokio::spawn(run_udp_session(
-            socket.clone(),
-            client_addr,
-            backend_addr,
-            routes.subscribe(published),
-            rx,
-        ));
+        let session_route = routes.subscribe(published);
+        match dialer.relay_for(backend_addr.ip()) {
+            Some(relay) => tokio::spawn(run_relayed_udp_session(
+                socket.clone(),
+                client_addr,
+                backend_addr,
+                relay,
+                dialer.clone(),
+                session_route,
+                rx,
+            )),
+            None => tokio::spawn(run_udp_session(
+                socket.clone(),
+                client_addr,
+                backend_addr,
+                session_route,
+                rx,
+            )),
+        };
     }
 }
 
@@ -431,6 +455,66 @@ async fn run_udp_session(
             _ = tokio::time::sleep(UDP_SESSION_IDLE) => return,
         }
     }
+}
+
+/// `run_udp_session` for a backend another node runs: the session's
+/// datagrams travel as frames over one stream to that node's relay, which
+/// exchanges them with the backend from the node where the backend's gateway
+/// is its own. Ends the same ways a direct session does, and also when the
+/// relay closes the stream.
+async fn run_relayed_udp_session(
+    published: std::sync::Arc<UdpSocket>,
+    client_addr: SocketAddr,
+    backend_addr: SocketAddr,
+    relay: SocketAddr,
+    dialer: Dialer,
+    mut route: watch::Receiver<Option<SocketAddr>>,
+    mut inbound: mpsc::Receiver<Vec<u8>>,
+) {
+    let stream = match dialer
+        .connect_udp(relay, backend_addr, BACKEND_CONNECT_TIMEOUT)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::debug!(%backend_addr, %relay, error = %e, "cannot relay a udp session");
+            return;
+        }
+    };
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Frames are read on a task of their own: a frame half read when another
+    // `select!` branch below wins would be lost, and the stream with it.
+    let (from_backend_tx, mut from_backend) = mpsc::channel::<Vec<u8>>(UDP_SESSION_QUEUE);
+    let reader_task = tokio::spawn(async move {
+        while let Ok(Some(datagram)) = read_datagram(&mut reader).await {
+            if from_backend_tx.send(datagram).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            datagram = inbound.recv() => match datagram {
+                Some(datagram) => {
+                    if write_datagram(&mut writer, &datagram).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            datagram = from_backend.recv() => match datagram {
+                Some(datagram) => {
+                    let _ = published.send_to(&datagram, client_addr).await;
+                }
+                None => break, // the relay ended the flow
+            },
+            _ = route.changed() => break,
+            _ = tokio::time::sleep(UDP_SESSION_IDLE) => break,
+        }
+    }
+    reader_task.abort();
 }
 
 #[cfg(test)]
@@ -523,7 +607,13 @@ mod tests {
         routes.set(published.port(), Some(backend));
 
         let bind = published;
-        tokio::spawn(serve_tcp(bind, bind.port(), routes.clone(), false));
+        tokio::spawn(serve_tcp(
+            bind,
+            bind.port(),
+            routes.clone(),
+            false,
+            Dialer::direct(),
+        ));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(bind).await.unwrap();
@@ -538,7 +628,13 @@ mod tests {
         let published = free_addr().await;
         let routes = Routes::new(); // no backend set for this port
 
-        tokio::spawn(serve_tcp(published, published.port(), routes, false));
+        tokio::spawn(serve_tcp(
+            published,
+            published.port(),
+            routes,
+            false,
+            Dialer::direct(),
+        ));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(published).await.unwrap();
@@ -559,6 +655,7 @@ mod tests {
             published.port(),
             routes.clone(),
             false,
+            Dialer::direct(),
         ));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -649,7 +746,13 @@ mod tests {
         let routes = Routes::new();
         routes.set(published.port(), Some(backend));
 
-        tokio::spawn(serve_tcp(published, published.port(), routes, true));
+        tokio::spawn(serve_tcp(
+            published,
+            published.port(),
+            routes,
+            true,
+            Dialer::direct(),
+        ));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(published).await.unwrap();
@@ -678,7 +781,13 @@ mod tests {
         let routes = Routes::new();
         routes.set(published.port(), Some(backend));
 
-        tokio::spawn(serve_tcp(published, published.port(), routes, false));
+        tokio::spawn(serve_tcp(
+            published,
+            published.port(),
+            routes,
+            false,
+            Dialer::direct(),
+        ));
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut client = TcpStream::connect(published).await.unwrap();
@@ -698,5 +807,78 @@ mod tests {
         // Setting the same value again must not mark the channel changed.
         routes.set(2222, Some(backend));
         assert!(!rx.has_changed().unwrap());
+    }
+
+    /// A relay on loopback standing in for the node that runs the backend,
+    /// and a dialer that sends `backend`'s address through it.
+    async fn relayed_to(backend: std::net::IpAddr) -> Dialer {
+        let keys = cl_raft::fixed_key(std::sync::Arc::new(cl_secret::ClusterKey::generate()));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let relay = listener.local_addr().unwrap();
+        tokio::spawn(crate::relay::serve(
+            listener,
+            keys.clone(),
+            vec!["127.0.0.0/8".parse().unwrap()],
+        ));
+        let dialer = Dialer::new(keys);
+        dialer.set_relays(std::collections::HashMap::from([(backend, relay)]));
+        dialer
+    }
+
+    /// A backend on another node is reached through that node's relay, and
+    /// the PROXY header written ahead of the client's bytes still reaches it
+    /// first and still names the real client, not the relay.
+    #[tokio::test]
+    async fn a_backend_on_another_node_is_reached_through_its_relay() {
+        let (backend, seen) = recording_backend().await;
+        let published = free_addr().await;
+        let routes = Routes::new();
+        routes.set(published.port(), Some(backend));
+
+        let dialer = relayed_to(backend.ip()).await;
+        tokio::spawn(serve_tcp(published, published.port(), routes, true, dialer));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut client = TcpStream::connect(published).await.unwrap();
+        let client_port = client.local_addr().unwrap().port();
+        client.write_all(b"HELO").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(&seen[..12], &PROXY_V2_SIGNATURE, "header must come first");
+        assert_eq!(u16::from_be_bytes([seen[24], seen[25]]), client_port);
+        assert_eq!(&seen[28..32], b"HELO");
+    }
+
+    #[tokio::test]
+    async fn a_udp_backend_on_another_node_answers_through_its_relay() {
+        let backend = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            while let Ok((len, from)) = backend.recv_from(&mut buf).await {
+                let _ = backend.send_to(&buf[..len], from).await;
+            }
+        });
+        let published = {
+            let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            probe.local_addr().unwrap()
+        };
+        let routes = Routes::new();
+        routes.set(published.port(), Some(backend_addr));
+
+        let dialer = relayed_to(backend_addr.ip()).await;
+        tokio::spawn(serve_udp(published, published.port(), routes, dialer));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(b"ping", published).await.unwrap();
+        let mut buf = [0u8; 16];
+        let (len, from) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+            .await
+            .expect("the answer comes back through the relay")
+            .unwrap();
+        assert_eq!(&buf[..len], b"ping");
+        assert_eq!(from, published, "answered from the published port");
     }
 }

@@ -1,7 +1,8 @@
 //! Published non-HTTP ports (`x-clouduler.expose`).
 //!
 //! Every node listens on every published port, and forwards to whichever node
-//! currently runs the container, over the overlay. That means a published port
+//! currently runs the container: straight to it when this node runs it,
+//! through the owning node's relay (`crate::relay`) otherwise. That means a published port
 //! answers on any node's address, so the DNS record in front of it does not
 //! have to be rewritten every time a container moves.
 //!
@@ -16,6 +17,7 @@ use std::time::Duration;
 
 use cl_config::{ClusterConfig, Protocol};
 use cl_net::expose::{serve_tcp, serve_udp, Routes};
+use cl_net::relay::Dialer;
 use cl_raft::node::ClusterNode;
 use cl_raft::state::ClusterState;
 use tracing::{info, warn};
@@ -28,13 +30,18 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 /// stopped, usually because something else already holds the port.
 const BIND_RETRY: Duration = Duration::from_secs(30);
 
-pub fn start(cfg: &ClusterConfig, cluster: &Arc<ClusterNode>) -> tokio::task::JoinHandle<()> {
+/// `dialer` is how every forwarder reaches its backend.
+pub fn start(
+    cfg: &ClusterConfig,
+    cluster: &Arc<ClusterNode>,
+    dialer: Dialer,
+) -> tokio::task::JoinHandle<()> {
     let cfg = cfg.clone();
     let cluster = cluster.clone();
-    tokio::spawn(async move { run(cluster, cfg).await })
+    tokio::spawn(async move { run(cluster, cfg, dialer).await })
 }
 
-async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
+async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig, dialer: Dialer) {
     let routes = Routes::new();
     // Keyed by port, protocol *and* proxy-protocol setting: see the loop body.
     let mut listening: BTreeMap<(u16, Protocol, bool), tokio::task::JoinHandle<()>> =
@@ -63,6 +70,7 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
 
             let bind = SocketAddr::from(([0, 0, 0, 0], *published));
             let routes = routes.clone();
+            let dialer = dialer.clone();
             let published = *published;
             let protocol = *protocol;
             let proxy_protocol = publish.proxy_protocol;
@@ -75,9 +83,18 @@ async fn run(cluster: Arc<ClusterNode>, boot_cfg: ClusterConfig) {
                     loop {
                         let served = match protocol {
                             Protocol::Tcp => {
-                                serve_tcp(bind, published, routes.clone(), proxy_protocol).await
+                                serve_tcp(
+                                    bind,
+                                    published,
+                                    routes.clone(),
+                                    proxy_protocol,
+                                    dialer.clone(),
+                                )
+                                .await
                             }
-                            Protocol::Udp => serve_udp(bind, published, routes.clone()).await,
+                            Protocol::Udp => {
+                                serve_udp(bind, published, routes.clone(), dialer.clone()).await
+                            }
                         };
                         if let Err(e) = served {
                             warn!(%bind, %protocol, error = %e, "published port stopped");

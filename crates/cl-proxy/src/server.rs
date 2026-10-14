@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use cl_net::relay::Dialer;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::body::Incoming;
@@ -14,7 +15,6 @@ use hyper::header::{HeaderValue, HOST};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::server::Acceptor;
@@ -25,6 +25,7 @@ use tracing::{debug, warn};
 
 use crate::auth_gate::{AuthGate, GateOutcome};
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
+use crate::connector::BackendConnector;
 use crate::error::Result;
 use crate::forward_auth;
 use crate::http01::Http01Store;
@@ -61,7 +62,10 @@ fn incoming_to_proxy_body(b: Incoming) -> ProxyBody {
 /// argument instead of three.
 #[derive(Clone)]
 struct Backends {
-    client: Client<HttpConnector, ProxyBody>,
+    client: Client<BackendConnector, ProxyBody>,
+    /// What `client` dials through, for the websocket path, which opens its
+    /// own connection outside the pool.
+    dialer: Dialer,
     forward_auth_client: reqwest::Client,
     auth_gate: Option<Arc<AuthGate>>,
     http01: Arc<Http01Store>,
@@ -71,10 +75,13 @@ struct Backends {
 pub struct ProxyServer {
     routes: Arc<RouteTable>,
     certs: Arc<CertStore>,
-    client: Client<HttpConnector, ProxyBody>,
+    client: Client<BackendConnector, ProxyBody>,
+    /// How backends are dialed: directly, or through the relay of the node
+    /// running a container this node does not (see `with_dialer`).
+    dialer: Dialer,
     /// Separate from `client`: a `forward_auth` endpoint can be external and
-    /// speak TLS, unlike backends, which are always plain HTTP over the
-    /// overlay and reachable through the internal `HttpConnector`.
+    /// speak TLS, unlike backends, which are always plain HTTP to a
+    /// container and reached through `dialer`.
     forward_auth_client: reqwest::Client,
     /// `None` when nothing needs it yet: only built once a route actually
     /// carries the `authenticated` middleware.
@@ -85,10 +92,10 @@ pub struct ProxyServer {
 }
 
 /// How long a backend gets to accept a TCP connection before it's treated as
-/// unreachable. Without this, `HttpConnector` falls back to the OS's own SYN
-/// retry timeout (minutes, not seconds) on a backend that never sends a
-/// SYN-ACK or RST - a route on a node other than the one running its
-/// container relies on this to fail fast instead of hanging the request.
+/// unreachable, through its node's relay included. Without this, a dial
+/// falls back to the OS's own SYN retry timeout (minutes, not seconds) on a
+/// backend that never sends a SYN-ACK or RST, or on a relay whose node just
+/// died, instead of failing fast.
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Cap on how long a backend has to return response headers when the route
@@ -110,6 +117,14 @@ const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// completely healthy). Keeping the idle budget short bounds how long a
 /// connection can go stale in the pool before it's evicted.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The pooled client every proxied request goes out on.
+fn backend_client(dialer: Dialer) -> Client<BackendConnector, ProxyBody> {
+    Client::builder(TokioExecutor::new())
+        .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .build(BackendConnector::new(dialer, BACKEND_CONNECT_TIMEOUT))
+}
 
 impl ProxyServer {
     pub fn new(routes: Arc<RouteTable>, certs: Arc<CertStore>) -> Self {
@@ -133,19 +148,34 @@ impl ProxyServer {
         auth_gate: Option<Arc<AuthGate>>,
         http01: Arc<Http01Store>,
     ) -> Self {
-        let mut connector = HttpConnector::new();
-        connector.set_connect_timeout(Some(BACKEND_CONNECT_TIMEOUT));
-        let client = Client::builder(TokioExecutor::new())
-            .pool_timer(TokioTimer::new())
-            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-            .build(connector);
+        let dialer = Dialer::direct();
         Self {
             routes,
             certs,
-            client,
+            client: backend_client(dialer.clone()),
+            dialer,
             forward_auth_client: reqwest::Client::new(),
             auth_gate,
             http01,
+        }
+    }
+
+    /// Dial backends through `dialer`, so a container another node runs is
+    /// reached through that node's relay. Without it every backend is dialed
+    /// directly from this host, which only reaches containers running here.
+    pub fn with_dialer(mut self, dialer: Dialer) -> Self {
+        self.client = backend_client(dialer.clone());
+        self.dialer = dialer;
+        self
+    }
+
+    fn backends(&self) -> Backends {
+        Backends {
+            client: self.client.clone(),
+            dialer: self.dialer.clone(),
+            forward_auth_client: self.forward_auth_client.clone(),
+            auth_gate: self.auth_gate.clone(),
+            http01: self.http01.clone(),
         }
     }
 
@@ -164,12 +194,7 @@ impl ProxyServer {
         loop {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
-            let backends = Backends {
-                client: self.client.clone(),
-                forward_auth_client: self.forward_auth_client.clone(),
-                auth_gate: self.auth_gate.clone(),
-                http01: self.http01.clone(),
-            };
+            let backends = self.backends();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let svc =
@@ -209,12 +234,7 @@ impl ProxyServer {
         loop {
             let (stream, peer) = listener.accept().await?;
             let routes = self.routes.clone();
-            let backends = Backends {
-                client: self.client.clone(),
-                forward_auth_client: self.forward_auth_client.clone(),
-                auth_gate: self.auth_gate.clone(),
-                http01: self.http01.clone(),
-            };
+            let backends = self.backends();
             let certs = self.certs.clone();
             let config = config.clone();
             tokio::spawn(async move {
@@ -280,6 +300,20 @@ fn bad_gateway(reason: impl std::fmt::Display) -> Response<ProxyBody> {
         .status(StatusCode::BAD_GATEWAY)
         .body(text_body(format!("bad gateway: {reason}")))
         .unwrap_or_else(|_| Response::new(empty_body()))
+}
+
+/// `e` followed by every error under it. The pooled client's own message is
+/// only `client error (Connect)`; the why - connection refused, or which
+/// node's relay could not reach the container - is in its sources.
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
 }
 
 fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
@@ -650,7 +684,7 @@ async fn proxy(
                 "connection upgrades are not enabled for this route",
             );
         }
-        return match proxy_websocket(req, picked.addr, scheme, peer).await {
+        return match proxy_websocket(req, picked.addr, scheme, peer, &backends.dialer).await {
             Ok(resp) => resp,
             Err(e) => bad_gateway(e),
         };
@@ -695,7 +729,7 @@ async fn proxy(
             middleware::strip_hop_by_hop(&mut rparts.headers);
             Response::from_parts(rparts, incoming_to_proxy_body(rbody))
         }
-        Err(e) => return bad_gateway(format!("{} unreachable: {e}", picked.addr)),
+        Err(e) => return bad_gateway(format!("{} unreachable: {}", picked.addr, with_causes(&e))),
     };
 
     if let Some(value) = picked.set_cookie {
@@ -763,6 +797,7 @@ async fn proxy_websocket(
     backend: SocketAddr,
     scheme: &str,
     peer: SocketAddr,
+    dialer: &Dialer,
 ) -> Result<Response<ProxyBody>> {
     let client_upgrade = hyper::upgrade::on(&mut req);
 
@@ -793,12 +828,13 @@ async fn proxy_websocket(
 
     let backend_req = Request::from_parts(parts, Empty::<Bytes>::new());
 
-    let stream = TcpStream::connect(backend).await.map_err(|e| {
-        crate::error::ProxyError::BackendUnreachable {
+    let stream = dialer
+        .connect_tcp(backend, BACKEND_CONNECT_TIMEOUT)
+        .await
+        .map_err(|e| crate::error::ProxyError::BackendUnreachable {
             addr: backend,
             source: e,
-        }
-    })?;
+        })?;
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
         .await

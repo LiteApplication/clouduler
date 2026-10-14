@@ -2,8 +2,10 @@
 
 `cl-proxy` terminates HTTP and HTTPS for every route declared under a
 service's `x-clouduler.proxy` (see `docs/stacks.md`), forwards to the
-container backend over the overlay network, and issues/renews the
-certificates those routes need via ACME DNS-01 through `cl-dns`.
+container backend (directly when this node runs it, through the owning
+node's relay otherwise, see "Reaching a container on another node from a
+host" in `docs/networking.md`), and issues/renews the certificates those
+routes need via ACME DNS-01 through `cl-dns`.
 
 ## Ports and configuration
 

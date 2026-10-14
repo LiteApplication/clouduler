@@ -1,5 +1,6 @@
 //! Integration tests: real listeners, a real in-process backend, no network.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -131,6 +132,48 @@ async fn unreachable_backend_returns_502() {
 
     let resp = reqwest_like_get(http_addr, "app.test", "/").await;
     assert_eq!(resp.status, 502);
+}
+
+/// A node's relay listener, dialing anything on loopback for whoever holds
+/// the returned key.
+async fn spawn_relay() -> (SocketAddr, cl_raft::KeyWatch) {
+    let keys = cl_raft::fixed_key(Arc::new(cl_secret::ClusterKey::generate()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(cl_net::relay::serve(
+        listener,
+        keys.clone(),
+        vec!["127.0.0.0/8".parse().unwrap()],
+    ));
+    (addr, keys)
+}
+
+/// A container on another node is out of this host's reach over the overlay,
+/// so the proxy has to dial it through that node's relay - and only there.
+#[tokio::test]
+async fn a_backend_on_another_node_is_proxied_through_its_relay() {
+    let backend = spawn_echo_backend().await;
+    let (relay, keys) = spawn_relay().await;
+    let dialer = cl_net::relay::Dialer::new(keys);
+    // First a relay nobody runs: the backend itself listening must not help.
+    dialer.set_relays(HashMap::from([(backend.ip(), free_addr())]));
+
+    let route = Route::new("app.test", None, false, vec![], false, "svc", vec![backend]);
+    let routes = Arc::new(RouteTable::new(vec![route]));
+    let server =
+        Arc::new(ProxyServer::new(routes, Arc::new(CertStore::new())).with_dialer(dialer.clone()));
+    let http_addr = free_addr();
+    tokio::spawn(async move { server.serve_http(http_addr).await.unwrap() });
+    wait_for_port(http_addr).await;
+
+    let resp = reqwest_like_get(http_addr, "app.test", "/hello").await;
+    assert_eq!(resp.status, 502, "{}", resp.body);
+    assert!(resp.body.contains("relay"), "{}", resp.body);
+
+    dialer.set_relays(HashMap::from([(backend.ip(), relay)]));
+    let resp = reqwest_like_get(http_addr, "app.test", "/hello").await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    assert_eq!(resp.body, "GET /hello");
 }
 
 #[tokio::test]
@@ -485,6 +528,51 @@ async fn a_websocket_upgrade_is_forwarded_with_an_origin_form_request_target() {
         first_line,
         "GET /api/socket.io/?EIO=4&transport=websocket HTTP/1.1"
     );
+}
+
+/// An upgrade opens its own backend connection outside the pool; it has to
+/// go through the owning node's relay too.
+#[tokio::test]
+async fn a_websocket_upgrade_reaches_a_backend_on_another_node_through_its_relay() {
+    let (backend, mut lines) = spawn_line_capturing_backend().await;
+    let (relay, keys) = spawn_relay().await;
+    let dialer = cl_net::relay::Dialer::new(keys);
+    dialer.set_relays(HashMap::from([(backend.ip(), relay)]));
+
+    let route = plain_route(
+        backend,
+        cl_proxy::RouteOptions {
+            websockets: true,
+            ..cl_proxy::RouteOptions::default()
+        },
+    );
+    let routes = Arc::new(RouteTable::new(vec![route]));
+    let server = Arc::new(ProxyServer::new(routes, Arc::new(CertStore::new())).with_dialer(dialer));
+    let addr = free_addr();
+    tokio::spawn(async move { server.serve_http(addr).await.unwrap() });
+    wait_for_port(addr).await;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    {
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_all(
+                b"GET /ws HTTP/1.1\r\n\
+                  Host: app.test\r\n\
+                  Connection: Upgrade\r\n\
+                  Upgrade: websocket\r\n\
+                  Sec-WebSocket-Version: 13\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    }
+
+    let first_line = tokio::time::timeout(Duration::from_secs(5), lines.recv())
+        .await
+        .expect("backend never received a connection")
+        .expect("backend connection closed without sending a line");
+    assert_eq!(first_line, "GET /ws HTTP/1.1");
 }
 
 /// A slow backend must not hold the connection open forever when the route

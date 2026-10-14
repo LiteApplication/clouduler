@@ -494,9 +494,10 @@ impl Overlay {
     /// None of them is any use over there: a container only ever needs the
     /// gateway on its own node, and the host here cannot talk to a container
     /// on another node through the overlay anyway, since that container's
-    /// reply to the shared gateway address is taken by its own node's bridge.
-    /// Container-to-container frames carry the containers' own MACs and are
-    /// untouched.
+    /// reply to the shared gateway address is taken by its own node's bridge
+    /// (the host reaches such a container through its node's relay instead,
+    /// see `crate::relay`). Container-to-container frames carry the
+    /// containers' own MACs and are untouched.
     pub async fn keep_gateway_frames_local(&self, bridge: &str, vxlan: &str) -> Result<()> {
         if self.find_link(vxlan).await?.is_none() {
             return Ok(());

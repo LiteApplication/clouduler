@@ -77,7 +77,7 @@ nodes:
     role: worker
     network:
       tailscale: 10.10.0.3 # will use A
-    rpc_port: 7373
+    rpc_port: 7373 # raft; the drive transport listens on +1, the container relay on +2
     drives:
       bulk: /mnt/bulk
     # Where this node keeps its database and working files, overriding the

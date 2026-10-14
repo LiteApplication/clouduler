@@ -1068,6 +1068,7 @@ dependencies = [
  "async-trait",
  "cl-config",
  "cl-raft",
+ "cl-secret",
  "futures",
  "hickory-proto",
  "hickory-server",
@@ -1090,6 +1091,7 @@ dependencies = [
  "bytes",
  "cl-config",
  "cl-dns",
+ "cl-net",
  "cl-raft",
  "cl-secret",
  "futures",
@@ -1111,6 +1113,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tower-service",
  "tracing",
  "x509-parser",
 ]
