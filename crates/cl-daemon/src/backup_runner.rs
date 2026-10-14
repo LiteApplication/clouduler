@@ -287,7 +287,7 @@ pub fn start_runner(
                         .await;
                     }
                     BackupDestinationKind::NodeLocal { node, path }
-                        if is_source && node != &node_name =>
+                        if pushes_volumes(&registry, &state, &run.drive) && node != &node_name =>
                     {
                         // If the destination node already implements this
                         // drive (e.g. it's itself a replica), it has the
@@ -817,7 +817,36 @@ fn is_local_source(registry: &DriveRegistry, state: &ClusterState, drive: &str) 
     volumes.all(|(_, v)| v.primary == registry.node())
 }
 
-/// Pushes every volume of `drive` to `target_node`'s own copy of the same
+/// Whether this node is the one to push `id` to a backup staging area: the
+/// active server of a served drive, or the volume's own primary on a
+/// replicated one. A replicated drive's volumes can have different primaries,
+/// so each node pushes only the volumes it leads - requiring one node to lead
+/// them all (`is_local_source`) meant such a drive was never pushed at all and
+/// the destination kept backing up its first, stale staged copy.
+fn pushes_volume(
+    registry: &DriveRegistry,
+    state: &ClusterState,
+    id: &cl_raft::ids::VolumeId,
+    volume: &cl_raft::state::VolumeState,
+) -> bool {
+    if !registry.implements(&id.drive) {
+        return false;
+    }
+    if registry.is_served(&id.drive) {
+        return registry.active_server(&id.drive, &state.unreachable) == Some(registry.node());
+    }
+    volume.primary == registry.node()
+}
+
+/// Whether this node pushes at least one volume of `drive`.
+fn pushes_volumes(registry: &DriveRegistry, state: &ClusterState, drive: &str) -> bool {
+    state
+        .volumes
+        .iter()
+        .any(|(id, v)| id.drive == drive && pushes_volume(registry, state, id, v))
+}
+
+/// Pushes every volume of `drive` this node leads to `target_node`'s own copy of the same
 /// drive, once. Never followed by `SetVolumeReplica`: `target_node` is a
 /// backup destination's staging area, not a standing replica, so the
 /// cluster's replication bookkeeping must never learn about this write - see
@@ -838,7 +867,11 @@ async fn push_drive_once(
         .ok_or_else(|| anyhow!("node {target_node} is not in the cluster"))?;
     let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
     let engine = DeltaEngine::new(keys.clone());
-    for (id, vstate) in state.volumes.iter().filter(|(id, _)| id.drive == drive) {
+    for (id, vstate) in state
+        .volumes
+        .iter()
+        .filter(|(id, v)| id.drive == drive && pushes_volume(registry, state, id, v))
+    {
         let src = registry.volume_path(id)?;
         engine
             .sync(
@@ -957,6 +990,46 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    fn led_by(id: &cl_raft::ids::VolumeId, primary: &str) -> cl_raft::state::VolumeState {
+        cl_raft::state::VolumeState {
+            id: id.clone(),
+            generation: 1,
+            primary: primary.into(),
+            replicas: Default::default(),
+            frozen: None,
+            sync_refused: None,
+        }
+    }
+
+    #[test]
+    fn each_node_pushes_only_the_volumes_it_leads() {
+        use std::collections::BTreeMap;
+        let registry = DriveRegistry::from_drives(
+            "a",
+            BTreeMap::from([("fast".to_string(), PathBuf::from("/x"))]),
+        );
+        let mut state = ClusterState::default();
+        let mine = cl_raft::ids::VolumeId::new("fast", "one");
+        let theirs = cl_raft::ids::VolumeId::new("fast", "two");
+        state.volumes.insert(mine.clone(), led_by(&mine, "a"));
+        state.volumes.insert(theirs.clone(), led_by(&theirs, "b"));
+        assert!(pushes_volume(
+            &registry,
+            &state,
+            &mine,
+            &state.volumes[&mine]
+        ));
+        assert!(!pushes_volume(
+            &registry,
+            &state,
+            &theirs,
+            &state.volumes[&theirs]
+        ));
+        // Leading only some of a drive's volumes still makes this node a pusher.
+        assert!(pushes_volumes(&registry, &state, "fast"));
+        assert!(!is_local_source(&registry, &state, "fast"));
+    }
     use super::*;
     use cl_raft::ids::InstanceId;
     use cl_raft::state::{Assignment, DesiredState, StackState};
