@@ -241,6 +241,14 @@ pub async fn scan_off_runtime(root: PathBuf, hash_content: bool) -> Result<Manif
 /// is only worth paying for during verification or rename detection.
 ///
 /// Blocking. Inside an `async fn` use `scan_off_runtime`.
+///
+/// A file that disappears while the walk is under way is left out rather than
+/// failing the scan.
+/// Whether an io error just means the path no longer exists.
+pub fn vanished(err: Option<&std::io::Error>) -> bool {
+    err.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
     let mut files = BTreeMap::new();
     let mut dirs = BTreeMap::new();
@@ -255,10 +263,18 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
     })?;
 
     for entry in WalkDir::new(root).follow_links(false) {
-        let entry = entry.map_err(|e| DriveError::Io {
-            path: e.path().unwrap_or(root).to_path_buf(),
-            source: std::io::Error::other(e),
-        })?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            // Gone between the directory listing and the stat: a running
+            // database deletes and recreates files like this all the time.
+            Err(e) if vanished(e.io_error()) => continue,
+            Err(e) => {
+                return Err(DriveError::Io {
+                    path: e.path().unwrap_or(root).to_path_buf(),
+                    source: std::io::Error::other(e),
+                })
+            }
+        };
         let path = entry.path();
         if path == root {
             continue;
@@ -274,10 +290,16 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
 
-        let meta = std::fs::symlink_metadata(path).map_err(|source| DriveError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if vanished(Some(&e)) => continue,
+            Err(source) => {
+                return Err(DriveError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+        };
 
         if file_type.is_dir() {
             dirs.insert(rel, DirMeta::from_metadata(&meta));
@@ -285,10 +307,16 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         }
 
         if file_type.is_symlink() {
-            let target = std::fs::read_link(path).map_err(|source| DriveError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            let target = match std::fs::read_link(path) {
+                Ok(target) => target,
+                Err(e) if vanished(Some(&e)) => continue,
+                Err(source) => {
+                    return Err(DriveError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })
+                }
+            };
             files.insert(
                 rel,
                 FileMeta {
@@ -312,10 +340,16 @@ pub fn scan(root: &Path, hash_content: bool) -> Result<Manifest> {
         }
 
         let hash = if hash_content {
-            Some(hash_file(path).map_err(|source| DriveError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?)
+            match hash_file(path) {
+                Ok(hash) => Some(hash),
+                Err(e) if vanished(Some(&e)) => continue,
+                Err(source) => {
+                    return Err(DriveError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })
+                }
+            }
         } else {
             None
         };

@@ -487,11 +487,17 @@ impl DeltaEngine {
             let full = src.join(path);
             let data = off_runtime("reading a file to send", move || {
                 match std::fs::read(&full) {
-                    Ok(data) => Ok(data),
+                    Ok(data) => Ok(Some(data)),
+                    Err(e) if scan::vanished(Some(&e)) => Ok(None),
                     Err(source) => Err(DriveError::Io { path: full, source }),
                 }
             })
             .await?;
+            // Deleted since the scan (a database's scratch file): nothing to
+            // send, and the next pass sees it gone.
+            let Some(data) = data else {
+                return Ok(());
+            };
             return transport::send(
                 conn,
                 &Message::WholeFile {
@@ -513,6 +519,25 @@ impl DeltaEngine {
         // `WholeFileEnd` sequence instead of one giant frame. See
         // `WHOLE_FILE_CHUNK`'s doc comment for why a single frame can't be
         // trusted to hold an entire file past a few tens of megabytes.
+        let full_path = src.join(path);
+        let opened = full_path.clone();
+        let file = off_runtime(
+            "opening a file to send",
+            move || match std::fs::File::open(&opened) {
+                Ok(file) => Ok(Some(file)),
+                Err(e) if scan::vanished(Some(&e)) => Ok(None),
+                Err(source) => Err(DriveError::Io {
+                    path: opened,
+                    source,
+                }),
+            },
+        )
+        .await?;
+        // Deleted since the scan: nothing to send. Checked before `Begin` so
+        // the receiver is never left with a half-announced file.
+        let Some(mut file) = file else {
+            return Ok(());
+        };
         transport::send(
             conn,
             &Message::WholeFileBegin {
@@ -525,18 +550,6 @@ impl DeltaEngine {
         )
         .await
         .map_err(transfer_err)?;
-        let full_path = src.join(path);
-        let opened = full_path.clone();
-        let mut file = off_runtime("opening a file to send", move || match std::fs::File::open(
-            &opened,
-        ) {
-            Ok(file) => Ok(file),
-            Err(source) => Err(DriveError::Io {
-                path: opened,
-                source,
-            }),
-        })
-        .await?;
         // The handle and the buffer are handed to the blocking pool and back
         // once per chunk, so neither the read nor the allocation lands on a
         // runtime thread, and the buffer is reused instead of reallocated.
@@ -580,6 +593,11 @@ impl DeltaEngine {
         meta: &FileMeta,
         stats: &mut SyncStats,
     ) -> Result<()> {
+        // Deleted since the scan: skip it before asking the peer for a
+        // signature it would then wait on a delta for.
+        if !src.join(path).exists() {
+            return Ok(());
+        }
         transport::send(conn, &Message::SignatureRequest(path.to_string()))
             .await
             .map_err(transfer_err)?;
