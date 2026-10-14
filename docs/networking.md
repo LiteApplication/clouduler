@@ -51,6 +51,18 @@ collide (`clbr-` + 6 chars of the name + 4 hash chars = 15). The scheme is
 deterministic: every node computes the same interface names for the same
 network name without coordinating.
 
+## The anycast gateway
+
+Every node's bridge for a network holds the same gateway address (`.1`) and
+the same MAC (`cl_net::vxlan::gateway_mac`, derived from the bridge name), so
+a container's gateway is always its own node, whichever node answers its ARP.
+Because all those bridges share one flooded segment, each VXLAN device also
+gets a `tc` egress filter (`clsact` + `flower src_mac <gateway mac> action
+drop`) that keeps frames the host itself sends on the bridge from leaving the
+node. Without it, every other node's bridge sees its own MAC arriving on the
+tunnel and the kernel logs `received packet on clvx-... with own address as
+source address` for each one. Container frames carry their own MACs and pass.
+
 ## Single-node overlays
 
 A public network's per-node address is optional (a node just omits the

@@ -103,6 +103,26 @@ pub fn gateway_mac(name: &str) -> [u8; 6] {
     [0x02, hash[1], hash[2], hash[3], hash[4], hash[5]]
 }
 
+/// `tc` arguments for the VXLAN egress filter dropping every frame whose
+/// source is `mac`, the bridge's anycast gateway MAC (see
+/// `Overlay::keep_gateway_frames_local`). A fixed pref and handle make
+/// `replace` a no-op when the filter is already there, so the reconcile loop
+/// can re-apply it every pass.
+fn gateway_filter_args(vxlan: &str, mac: [u8; 6]) -> Vec<String> {
+    let mac = mac
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":");
+    [
+        "filter", "replace", "dev", vxlan, "egress", "pref", "1", "handle", "1", "protocol", "all",
+        "flower", "src_mac", &mac, "action", "drop",
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect()
+}
+
 /// VXLAN VNIs are 24 bit. Derive one deterministically from the network name
 /// so every node computes the same VNI without coordination; on a collision
 /// with `taken` (or the reserved 0), perturb the input with a counter and
@@ -459,6 +479,32 @@ impl Overlay {
         self.ensure_mac(name, index, gateway_mac(name)).await
     }
 
+    /// Drop every frame this node's own bridge sends before it leaves through
+    /// the network's VXLAN device. A no-op when the device does not exist.
+    ///
+    /// Every node's bridge carries the same anycast gateway address and MAC
+    /// (see `gateway_mac`) on one flooded segment, so whatever the host itself
+    /// puts on the bridge and the bridge floods or forwards over the tunnel -
+    /// its ARP requests, its answers to a remote container's ARP for the
+    /// gateway - reaches every other node's bridge with that bridge's *own*
+    /// MAC as the source. The kernel logs each one ("received packet on
+    /// clvx-... with own address as source address"), thousands an hour per
+    /// network.
+    ///
+    /// None of them is any use over there: a container only ever needs the
+    /// gateway on its own node, and the host here cannot talk to a container
+    /// on another node through the overlay anyway, since that container's
+    /// reply to the shared gateway address is taken by its own node's bridge.
+    /// Container-to-container frames carry the containers' own MACs and are
+    /// untouched.
+    pub async fn keep_gateway_frames_local(&self, bridge: &str, vxlan: &str) -> Result<()> {
+        if self.find_link(vxlan).await?.is_none() {
+            return Ok(());
+        }
+        run_tc(&["qdisc", "replace", "dev", vxlan, "clsact"].map(String::from))?;
+        run_tc(&gateway_filter_args(vxlan, gateway_mac(bridge)))
+    }
+
     async fn ensure_mac(&self, name: &str, index: u32, mac: [u8; 6]) -> Result<()> {
         self.handle
             .link()
@@ -666,6 +712,28 @@ fn disable_tx_checksum_offload(name: &str) -> Result<()> {
     }
 }
 
+fn run_tc(args: &[String]) -> Result<()> {
+    let output = std::process::Command::new("tc")
+        .args(args)
+        .output()
+        .map_err(|e| NetError::Io {
+            context: format!("tc {}", args.join(" ")),
+            source: e,
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(NetError::Io {
+            context: format!(
+                "tc {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            source: std::io::Error::other("tc exited non-zero"),
+        })
+    }
+}
+
 fn is_wildcard_entry(entry: &NeighbourMessage) -> bool {
     entry.attributes.iter().any(|attr| {
         matches!(attr, NeighbourAttribute::LinkLayerAddress(lla) if lla.as_slice() == WILDCARD_MAC)
@@ -772,6 +840,19 @@ mod tests {
             assert_eq!(mac[0] & 0x01, 0, "{name}: multicast bit set");
             assert_eq!(mac[0] & 0x02, 0x02, "{name}: not locally administered");
         }
+    }
+
+    /// The filter must name the gateway MAC in the zero-padded form `tc`
+    /// parses and drop on the tunnel's egress: anything else either matches
+    /// nothing or leaves every other node logging its own MAC coming back.
+    #[test]
+    fn the_gateway_filter_drops_the_gateway_mac_leaving_through_the_tunnel() {
+        let args = gateway_filter_args("clvx-mediasbf43", [0x02, 0x00, 0x0a, 0x87, 0x30, 0x05]);
+        assert_eq!(
+            args.join(" "),
+            "filter replace dev clvx-mediasbf43 egress pref 1 handle 1 protocol all \
+             flower src_mac 02:00:0a:87:30:05 action drop"
+        );
     }
 
     #[test]

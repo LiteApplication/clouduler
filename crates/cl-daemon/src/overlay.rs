@@ -234,7 +234,8 @@ impl Context_ {
         // whole cluster), and they keep the anycast gateway address on the
         // shared segment, so they go on answering ARP for it. They must answer
         // with the same MAC as everyone else or they hijack other nodes'
-        // containers - see `cl_net::vxlan::gateway_mac`.
+        // containers - see `cl_net::vxlan::gateway_mac`. A leftover tunnel
+        // still needs its gateway frames kept local, too.
         if let Some(netlink) = netlink {
             for overlay in all.keys().filter(|overlay| !mine.contains(*overlay)) {
                 if let Err(e) = netlink
@@ -242,6 +243,12 @@ impl Context_ {
                     .await
                 {
                     debug!(network = %overlay, error = %e, "could not pin a leftover bridge's mac");
+                }
+                if let Err(e) = netlink
+                    .keep_gateway_frames_local(&bridge_name(overlay), &vxlan_name(overlay))
+                    .await
+                {
+                    debug!(network = %overlay, error = %e, "could not filter a leftover vxlan device");
                 }
             }
         }
@@ -446,6 +453,11 @@ impl Context_ {
                 )
                 .await?;
             netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
+            // Not fatal: containers work without it, it only stops this
+            // node's own gateway traffic flooding every other node.
+            if let Err(e) = netlink.keep_gateway_frames_local(&bridge, &vxlan).await {
+                warn!(network = %overlay, error = %e, "cannot keep the gateway's own frames off the vxlan tunnel");
+            }
             mtu
         } else {
             let mtu = cl_net::vxlan::DEFAULT_UNDERLAY_MTU;
