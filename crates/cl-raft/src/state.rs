@@ -639,13 +639,11 @@ pub enum RestoreStatus {
     Failed { error: String },
 }
 
-/// A restore triggered through the api (the CLI's `backup restore-*`
-/// commands run directly against a node's own local drive registry/docker
-/// and never go through this - see `backup_restore.rs`'s doc comment). This
-/// exists so an api handler on any node can ask for a restore without
-/// itself having drive/docker access: whichever node actually implements the
-/// target drive claims it (`Pending` -> `Running`) and executes, the same
-/// "submit an intent through raft, the node that can act on it does"
+/// A restore submitted through raft, by the api or by a CLI run on a node
+/// that cannot carry the restore out itself. Whichever node can (the drive's
+/// primary, or the node holding a node-local repository - see
+/// `backup_restore.rs`) claims it (`Pending` -> `Running`) and executes, the
+/// same "submit an intent through raft, the node that can act on it does"
 /// pattern `BackupRun` uses for scheduled/manual backups.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestoreRequest {

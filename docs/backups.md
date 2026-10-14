@@ -102,19 +102,21 @@ live container" mode. Three granularities:
   snapshot.
 - **A service's volumes** - resolves every volume the service uses (which may
   span more than one drive), stops the service once, restores per-drive
-  (pass `--destination`/`destination_id` if a drive backs up to more than one
+  (pass `--restore-from`/`destination_id` if a drive backs up to more than one
   place), restarts once at the end.
 
 Web UI: **Backup > History > Restore something**, or from a drive's own page
 ("Restore this drive") or an instance's page ("Restore volumes"). CLI:
 
 ```
-clouduler backup restore-drive postgres-data --destination s3-eu [--snapshot ID] [--yes]
-clouduler backup restore-volume postgres-data/pgdata --destination s3-eu [--snapshot ID] [--yes]
-clouduler backup restore-service myapp postgres [--destination s3-eu] [--snapshot ID] [--yes]
+clouduler backup restore-drive postgres-data --restore-from s3-eu [--snapshot ID] [--yes]
+clouduler backup restore-volume postgres-data/pgdata --restore-from s3-eu [--snapshot ID] [--yes]
+clouduler backup restore-service myapp postgres [--restore-from s3-eu] [--snapshot ID] [--yes]
 ```
 
 Omitting `--snapshot` restores the latest one at the chosen destination.
+`--restore-from` names the backup destination to read from; the older
+`--destination` spelling still works as an alias.
 Without `--yes` each command prints what it's about to do and asks for
 confirmation.
 
@@ -122,13 +124,27 @@ confirmation.
 
 Restoring needs real local access to the drive registry, docker, and the
 cluster key - resources only the daemon process has, not `cl-api`. So the api
-and CLI both just submit a `RestoreRequest` through raft (`Pending`); a
-per-node watcher on whichever node actually implements the target drive
-claims it (`Pending -> Running`, first claim wins) and runs the same
-restore functions the CLI calls directly. `GET /api/restic/restore-requests`
-and the general `/api/events` state stream both show its progress - there is
-no separate progress endpoint for restores or backups, since a status
-transition (not a percent-complete meter) is all there is to show.
+submits a `RestoreRequest` through raft (`Pending`); a per-node watcher on the
+one node that can carry it out claims it (`Pending -> Running`, first claim
+wins). The CLI does the same whenever the node it runs on is not that node, and
+waits for the outcome, so a restore can be started from any node.
+
+Which node carries it out depends on where the data is:
+
+- **The drive's primary** (or active server, for a served drive) when it can
+  read the repository: S3 and SSH destinations always, a node-local one when
+  it is that destination's own node. restic restores straight onto the drive.
+- **The node holding a node-local repository**, when that is not the primary:
+  restic restores into a hidden `.<destination>-staging/<drive>.restore`
+  directory next to the repository (so it needs room for the restored volumes
+  there), the result is pushed to each volume's primary over the drive
+  transport, and the staging directory is removed. Replicas then re-sync from
+  the primary as after any restore.
+
+`GET /api/restic/restore-requests` and the general `/api/events` state stream
+both show its progress - there is no separate progress endpoint for restores or
+backups, since a status transition (not a percent-complete meter) is all there
+is to show.
 
 ## CLI reference
 
@@ -138,9 +154,9 @@ clouduler backup target set|list|remove
 clouduler backup run <target-id>
 clouduler backup history [--target ID]
 clouduler backup snapshots --destination ID
-clouduler backup restore-drive NAME --destination ID [--snapshot ID] [--yes]
-clouduler backup restore-volume DRIVE/VOLUME --destination ID [--snapshot ID] [--yes]
-clouduler backup restore-service STACK SERVICE [--destination ID] [--snapshot ID] [--yes]
+clouduler backup restore-drive NAME --restore-from ID [--snapshot ID] [--yes]
+clouduler backup restore-volume DRIVE/VOLUME --restore-from ID [--snapshot ID] [--yes]
+clouduler backup restore-service STACK SERVICE [--restore-from ID] [--snapshot ID] [--yes]
 ```
 
 See also [`docs/api.md`](api.md#restic-backups) for the equivalent HTTP

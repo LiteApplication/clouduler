@@ -15,12 +15,15 @@
 //! "submit an intent, the node that can act on it does" pattern
 //! `backup_runner` uses for scheduled/manual backups.
 //!
-//! Must run on a node that both implements the target drive (somewhere to
-//! write the restored files) and, for a `NodeLocal` destination, is that
-//! destination's own node - restic needs a real local path to read the
-//! repository from, the same operational requirement backups themselves
-//! have (see `cl-restic`'s crate doc comment and `backup_runner`'s module
-//! doc comment on the `NodeLocal`-elsewhere handoff).
+//! A restore can be started from any node. Each job (one drive's worth) is
+//! carried out by the one node that can: the node holding the authoritative
+//! copy when it can read the repository ([`Mode::Local`] - restic restores
+//! straight onto the drive), or, when the repository is a `NodeLocal`
+//! directory on some other node, that node ([`Mode::Push`] - restic restores
+//! into a staging directory next to the repository, which is then pushed to
+//! the authoritative node over the drive transport, the same way a backup
+//! stages a drive on a `NodeLocal`-elsewhere destination). A CLI run on a
+//! node that can do neither submits a `RestoreRequest` and waits for it.
 //!
 //! ## Which node, and what happens to the replicas
 //!
@@ -46,18 +49,19 @@
 //! outward; the recorded error says so.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::{ClusterConfig, StackFile};
-use cl_drive::DriveRegistry;
+use cl_drive::{drive_port, DeltaEngine, DriveRegistry, ProgressSink, SyncEngine};
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
 use cl_raft::state::{
-    BackupDestination, BackupDestinationKind, ClusterState, DesiredState, Request, RestoreScope,
-    RestoreStatus,
+    BackupDestination, BackupDestinationKind, ClusterState, DesiredState, Request, RestoreRequest,
+    RestoreScope, RestoreStatus,
 };
 use cl_restic::restic::{ResticRepo, SnapshotInfo};
 use cl_restic::restore::{include_path_for_volume, validate_snapshot_id};
@@ -96,13 +100,20 @@ pub fn start_restore_watcher(
                 if !matches!(request.status, RestoreStatus::Pending) {
                     continue;
                 }
-                let Ok(footprint) = scope_footprint(&state, &request.scope) else {
+                let Ok(plan) = plan(&state, &request.scope, request.destination_id.as_deref())
+                else {
                     continue;
                 };
-                // Not this node's job unless it can both write the drives and
-                // is authoritative for them. Every other node simply skips,
-                // so exactly the primary/active server ever claims.
-                if footprint.authority_problem(&registry, &state).is_some() {
+                // Not this node's job unless it can carry out every job:
+                // either it is authoritative for the drive and can read the
+                // repository, or it holds the `NodeLocal` repository and can
+                // push the result to the authoritative node. Every other
+                // node simply skips, so exactly one node ever claims.
+                if plan
+                    .jobs
+                    .iter()
+                    .any(|job| job_mode(&registry, &state, job).is_none())
+                {
                     continue;
                 }
 
@@ -146,35 +157,16 @@ async fn execute_restore(
     node_name: &str,
     request: &cl_raft::state::RestoreRequest,
 ) -> Result<()> {
-    let snapshot = request.snapshot.as_deref();
-    match &request.scope {
-        RestoreScope::Drive { drive } => {
-            let destination = request
-                .destination_id
-                .as_deref()
-                .ok_or_else(|| anyhow!("restore request {} has no destination", request.id))?;
-            restore_drive(cfg, node_name, drive, destination, snapshot, None).await
-        }
-        RestoreScope::Volume { volume } => {
-            let destination = request
-                .destination_id
-                .as_deref()
-                .ok_or_else(|| anyhow!("restore request {} has no destination", request.id))?;
-            restore_volume(cfg, node_name, volume, destination, snapshot, None).await
-        }
-        RestoreScope::Service { stack, service } => {
-            restore_service(
-                cfg,
-                node_name,
-                stack,
-                service,
-                request.destination_id.as_deref(),
-                snapshot,
-                None,
-            )
-            .await
-        }
-    }
+    restore_scope(
+        cfg,
+        node_name,
+        &request.scope,
+        request.destination_id.as_deref(),
+        request.snapshot.as_deref(),
+        None,
+        false,
+    )
+    .await
 }
 
 fn unix_now() -> i64 {
@@ -185,6 +177,10 @@ fn unix_now() -> i64 {
 }
 
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
+/// How often a CLI that handed its restore to the cluster checks on it, and
+/// how long it waits before saying nobody has claimed it.
+const REQUEST_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const REQUEST_UNCLAIMED_WARNING: Duration = Duration::from_secs(60);
 const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What one restore touches, per drive: either the whole drive or specific
@@ -311,19 +307,19 @@ pub async fn restore_drive(
     snapshot: Option<&str>,
     via: Option<&str>,
 ) -> Result<()> {
-    let ctx = Ctx::new(cfg, node_name, via)?;
-    let state = ctx.client.state_with_secrets().await.map_err(|e| anyhow!("{e}"))?;
-    let instances = instances_using_drive(&state, drive);
-
-    println!("restoring {drive} from {destination_id}");
-    let job = Job {
+    let scope = RestoreScope::Drive {
         drive: drive.to_string(),
-        destination_id: destination_id.to_string(),
-        volumes: None,
     };
-    ctx.run(&state, instances, vec![job], snapshot).await?;
-    println!("restored {drive}");
-    Ok(())
+    restore_scope(
+        cfg,
+        node_name,
+        &scope,
+        Some(destination_id),
+        snapshot,
+        via,
+        true,
+    )
+    .await
 }
 
 /// Restore a single volume out of the drive's whole-drive snapshot, stopping
@@ -337,19 +333,19 @@ pub async fn restore_volume(
     snapshot: Option<&str>,
     via: Option<&str>,
 ) -> Result<()> {
-    let ctx = Ctx::new(cfg, node_name, via)?;
-    let state = ctx.client.state_with_secrets().await.map_err(|e| anyhow!("{e}"))?;
-    let instances = instances_touching_volumes(&state, std::slice::from_ref(volume));
-
-    println!("restoring {volume} from {destination_id}");
-    let job = Job {
-        drive: volume.drive.clone(),
-        destination_id: destination_id.to_string(),
-        volumes: volume_footprint(std::slice::from_ref(volume)),
+    let scope = RestoreScope::Volume {
+        volume: volume.clone(),
     };
-    ctx.run(&state, instances, vec![job], snapshot).await?;
-    println!("restored {volume}");
-    Ok(())
+    restore_scope(
+        cfg,
+        node_name,
+        &scope,
+        Some(destination_id),
+        snapshot,
+        via,
+        true,
+    )
+    .await
 }
 
 /// Restore every volume a service uses, grouped by drive (a service can span
@@ -367,41 +363,191 @@ pub async fn restore_service(
     snapshot: Option<&str>,
     via: Option<&str>,
 ) -> Result<()> {
-    let ctx = Ctx::new(cfg, node_name, via)?;
-    let state = ctx.client.state_with_secrets().await.map_err(|e| anyhow!("{e}"))?;
+    let scope = RestoreScope::Service {
+        stack: stack.to_string(),
+        service: service.to_string(),
+    };
+    restore_scope(cfg, node_name, &scope, destination_id, snapshot, via, true).await
+}
 
-    let volumes = service_volumes(&state, stack, service)?;
-    if volumes.is_empty() {
-        println!("{stack}/{service} mounts no volumes; nothing to restore");
-        return Ok(());
-    }
-    let mut instances: BTreeSet<InstanceId> = instances_of_service(&state, stack, service)
-        .into_iter()
-        .collect();
-    instances.extend(instances_touching_volumes(&state, &volumes));
+/// Everything a restore needs to know before anything is touched.
+struct Plan {
+    /// Every instance to stop for the duration.
+    instances: Vec<InstanceId>,
+    jobs: Vec<Job>,
+}
 
-    let mut by_drive: std::collections::BTreeMap<String, Vec<VolumeId>> = Default::default();
-    for volume in volumes {
-        by_drive
-            .entry(volume.drive.clone())
-            .or_default()
-            .push(volume);
-    }
+/// Resolves a restore's scope against cluster state into the jobs and the
+/// instances that must be down while they run.
+fn plan(state: &ClusterState, scope: &RestoreScope, destination_id: Option<&str>) -> Result<Plan> {
+    let footprint = scope_footprint(state, scope)?;
+    let instances: Vec<InstanceId> = match scope {
+        RestoreScope::Drive { drive } => instances_using_drive(state, drive),
+        RestoreScope::Volume { volume } => {
+            instances_touching_volumes(state, std::slice::from_ref(volume))
+        }
+        RestoreScope::Service { stack, service } => {
+            let volumes = service_volumes(state, stack, service)?;
+            let mut instances: BTreeSet<InstanceId> = instances_of_service(state, stack, service)
+                .into_iter()
+                .collect();
+            instances.extend(instances_touching_volumes(state, &volumes));
+            instances.into_iter().collect()
+        }
+    };
     let mut jobs = Vec::new();
-    for (drive, volumes) in by_drive {
-        let destination = resolve_service_destination(&state, &drive, destination_id)?;
-        println!("restoring {drive} (for {stack}/{service}) from {destination}");
+    for (drive, volumes) in footprint.drives {
+        let destination = match scope {
+            RestoreScope::Service { .. } => {
+                resolve_service_destination(state, &drive, destination_id)?
+            }
+            _ => destination_id
+                .ok_or_else(|| anyhow!("a restore of {drive} needs a destination"))?
+                .to_string(),
+        };
         jobs.push(Job {
             drive,
             destination_id: destination,
-            volumes: volume_footprint(&volumes),
+            volumes,
         });
     }
+    Ok(Plan { instances, jobs })
+}
 
-    ctx.run(&state, instances.into_iter().collect(), jobs, snapshot)
-        .await?;
-    println!("restored {stack}/{service}");
+/// What a restore is called in progress messages.
+fn scope_subject(scope: &RestoreScope) -> String {
+    match scope {
+        RestoreScope::Drive { drive } => drive.clone(),
+        RestoreScope::Volume { volume } => volume.to_string(),
+        RestoreScope::Service { stack, service } => format!("{stack}/{service}"),
+    }
+}
+
+/// The one restore entry point. Runs the restore here when this node can
+/// carry out every job (see [`job_mode`]); otherwise, when `may_submit`,
+/// hands it to the cluster as a `RestoreRequest` for the node that can and
+/// waits for the outcome - so the CLI works from any node. The request
+/// watcher passes `may_submit = false`: it has already decided it can serve
+/// the request, and resubmitting would loop.
+async fn restore_scope(
+    cfg: &ClusterConfig,
+    node_name: &str,
+    scope: &RestoreScope,
+    destination_id: Option<&str>,
+    snapshot: Option<&str>,
+    via: Option<&str>,
+    may_submit: bool,
+) -> Result<()> {
+    let ctx = Ctx::new(cfg, node_name, via)?;
+    let state = ctx
+        .client
+        .state_with_secrets()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let Plan { instances, jobs } = plan(&state, scope, destination_id)?;
+    let subject = scope_subject(scope);
+    if jobs.is_empty() {
+        println!("{subject} mounts no volumes; nothing to restore");
+        return Ok(());
+    }
+
+    if jobs
+        .iter()
+        .any(|job| job_mode(&ctx.registry, &state, job).is_none())
+    {
+        if !may_submit {
+            bail!("{}", ctx.job_problems(&state, &jobs));
+        }
+        return ctx.submit_and_wait(scope, destination_id, snapshot).await;
+    }
+
+    for job in &jobs {
+        println!(
+            "restoring {subject} ({}) from {}",
+            job.drive, job.destination_id
+        );
+    }
+    ctx.run(&state, instances, jobs, snapshot).await?;
+    println!("restored {subject}");
     Ok(())
+}
+
+/// How this node can carry out one job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// This node holds the authoritative copy and can read the repository:
+    /// restic restores straight onto the drive.
+    Local,
+    /// The repository is a `NodeLocal` directory on this node, but the
+    /// authoritative copy lives elsewhere: restic restores into a staging
+    /// directory here and the result is pushed to the authoritative node
+    /// over the drive transport.
+    Push,
+}
+
+/// Whether the repository at `destination` can be opened from `node`: a
+/// `NodeLocal` directory is only on its own node, everything else is reached
+/// over the network. An unknown destination counts as readable so the
+/// attempt fails with the precise error rather than waiting forever.
+fn destination_readable_from(state: &ClusterState, destination_id: &str, node: &str) -> bool {
+    match state
+        .restic_destinations
+        .get(destination_id)
+        .map(|d| &d.kind)
+    {
+        Some(BackupDestinationKind::NodeLocal { node: holder, .. }) => holder == node,
+        _ => true,
+    }
+}
+
+/// How `registry`'s node can carry out `job`, or `None` if it can't. Exactly
+/// one node qualifies for a job: the authority when it can read the
+/// repository, else the node holding the `NodeLocal` repository.
+fn job_mode(registry: &DriveRegistry, state: &ClusterState, job: &Job) -> Option<Mode> {
+    let holds_repo = matches!(
+        state.restic_destinations.get(&job.destination_id).map(|d| &d.kind),
+        Some(BackupDestinationKind::NodeLocal { node, .. }) if node == registry.node()
+    );
+    let readable = destination_readable_from(state, &job.destination_id, registry.node());
+    let authoritative = Footprint {
+        drives: std::iter::once((job.drive.clone(), job.volumes.clone())).collect(),
+    }
+    .authority_problem(registry, state)
+    .is_none();
+    if readable && authoritative {
+        Some(Mode::Local)
+    } else if holds_repo {
+        Some(Mode::Push)
+    } else {
+        None
+    }
+}
+
+/// Whether a restored volume with no node to receive it can be skipped: only
+/// when it was found in the snapshot rather than asked for by name, which is
+/// to say it is not recorded in the cluster at all.
+fn push_is_optional(volume: &VolumeId, state: &ClusterState) -> bool {
+    !state.volumes.contains_key(volume)
+}
+
+/// The node that holds the authoritative copy of `volume`: the active server
+/// of a served drive, otherwise the volume's recorded primary.
+fn authority_node(
+    registry: &DriveRegistry,
+    state: &ClusterState,
+    volume: &VolumeId,
+) -> Result<String> {
+    if registry.is_served(&volume.drive) {
+        return registry
+            .active_server(&volume.drive, &state.unreachable)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("drive {} has no reachable active server", volume.drive));
+    }
+    state
+        .volumes
+        .get(volume)
+        .map(|v| v.primary.clone())
+        .ok_or_else(|| anyhow!("volume {volume} is not known to the cluster, so there is no node to restore it onto"))
 }
 
 /// The destination to restore `drive` from: the caller's explicit choice if
@@ -425,10 +571,10 @@ fn resolve_service_destination(
     destinations.sort();
     destinations.dedup();
     match destinations.as_slice() {
-        [] => bail!("drive {drive} has no backup target on record; pass --destination explicitly"),
+        [] => bail!("drive {drive} has no backup target on record; pass --restore-from explicitly"),
         [only] => Ok(only.to_string()),
         many => bail!(
-            "drive {drive} backs up to {} destinations ({}); pass --destination to pick one",
+            "drive {drive} backs up to {} destinations ({}); pass --restore-from to pick one",
             many.len(),
             many.join(", ")
         ),
@@ -491,8 +637,17 @@ struct Prepared {
     /// `None` entries restore everything under `source_dir`.
     includes: Vec<Option<String>>,
     /// Volumes whose generation must be bumped afterwards (replicated
-    /// drives only).
-    touch: Vec<VolumeId>,
+    /// drives only), with the node that is primary for each.
+    touch: Vec<(VolumeId, String)>,
+    /// Set for a [`Mode::Push`] job: `target_dir` is a staging directory and
+    /// what lands there still has to be pushed to the authoritative node.
+    push: Option<PushJob>,
+}
+
+/// The second half of a [`Mode::Push`] job.
+struct PushJob {
+    /// `None` pushes every volume directory the snapshot restored.
+    volumes: Option<Vec<VolumeId>>,
 }
 
 /// Shared plumbing every restore flow needs: the cluster client, this node's
@@ -503,6 +658,7 @@ struct Ctx {
     key: ClusterKey,
     node_name: String,
     data_dir: std::path::PathBuf,
+    keys: cl_raft::KeyWatch,
 }
 
 impl Ctx {
@@ -519,9 +675,11 @@ impl Ctx {
             )
         })?;
         let client = client_for(cfg, via)?;
+        let keys = cl_drive::transport::key_watch_from_config(cfg)?;
         Ok(Self {
             client,
             registry,
+            keys,
             key,
             node_name: node_name.to_string(),
             data_dir: node.data_dir(cfg).to_path_buf(),
@@ -539,21 +697,19 @@ impl Ctx {
     ) -> Result<()> {
         // 1. Everything that can fail without side effects, before anything
         //    is stopped.
-        let footprint = Footprint {
-            drives: jobs
-                .iter()
-                .map(|j| (j.drive.clone(), j.volumes.clone()))
-                .collect(),
-        };
-        if let Some(problem) = footprint.authority_problem(&self.registry, state) {
-            bail!("{problem}");
+        let mut modes = Vec::new();
+        for job in &jobs {
+            match job_mode(&self.registry, state, job) {
+                Some(mode) => modes.push(mode),
+                None => bail!("{}", self.job_problems(state, std::slice::from_ref(job))),
+            }
         }
         if let Some(snapshot) = snapshot {
             validate_snapshot_id(snapshot).map_err(|e| anyhow!(e))?;
         }
         let mut prepared = Vec::new();
-        for job in &jobs {
-            prepared.push(self.prepare(state, job, snapshot).await?);
+        for (job, mode) in jobs.iter().zip(modes) {
+            prepared.push(self.prepare(state, job, mode, snapshot).await?);
         }
 
         // 2. Stop what is running (and only that).
@@ -572,7 +728,7 @@ impl Ctx {
 
         // 3. The restore proper. A failure here may leave the data
         //    half-restored, so containers stay down.
-        let mut touch: Vec<VolumeId> = Vec::new();
+        let mut touch: Vec<(VolumeId, String)> = Vec::new();
         for job in prepared {
             let Prepared {
                 drive,
@@ -583,8 +739,10 @@ impl Ctx {
                 target_dir,
                 includes,
                 touch: job_touch,
+                push,
             } = job;
             debug!(%drive, snapshot = %snapshot_id, target = %target_dir.display(), "restic restore");
+            let target_dir_for_push = target_dir.clone();
             let restored = tokio::task::spawn_blocking(move || -> Result<()> {
                 for include in &includes {
                     repo.restore(&snapshot_id, &source_dir, &target_dir, include.as_deref())
@@ -595,6 +753,16 @@ impl Ctx {
             .await
             .map_err(|e| anyhow!("the restic task panicked: {e}"))
             .and_then(|r| r);
+            let mut job_touch = job_touch;
+            let restored = match (restored, push) {
+                (Ok(()), Some(push)) => {
+                    let pushed = self
+                        .push_staged(state, &drive, &target_dir_for_push, push)
+                        .await;
+                    pushed.map(|touched| job_touch = touched)
+                }
+                (restored, _) => restored,
+            };
             if let Err(e) = restored {
                 let left = if stopped.is_empty() {
                     String::new()
@@ -634,6 +802,7 @@ impl Ctx {
         &self,
         state: &ClusterState,
         job: &Job,
+        mode: Mode,
         requested: Option<&str>,
     ) -> Result<Prepared> {
         let destination: BackupDestination = state
@@ -641,16 +810,6 @@ impl Ctx {
             .get(&job.destination_id)
             .ok_or_else(|| anyhow!("unknown backup destination {}", job.destination_id))?
             .clone();
-        // restic needs a real local path for these; the same operational
-        // requirement a backup has.
-        if let BackupDestinationKind::NodeLocal { node, .. } = &destination.kind {
-            if node != &self.node_name {
-                bail!(
-                    "destination {} is a local directory on node {node}; run this restore there",
-                    destination.id
-                );
-            }
-        }
         let cred_dir = self
             .data_dir
             .join("restic")
@@ -685,21 +844,57 @@ impl Ctx {
                 .map(|v| include_path_for_volume(&v.volume))
                 .collect(),
         };
-        let touch: Vec<VolumeId> = if self.registry.is_served(&job.drive) {
-            Vec::new()
-        } else {
-            state
-                .volumes
-                .keys()
-                .filter(|id| {
-                    id.drive == job.drive
-                        && job
-                            .volumes
-                            .as_ref()
-                            .is_none_or(|wanted| wanted.iter().any(|w| w == *id))
-                })
-                .cloned()
-                .collect()
+        let (target_dir, touch, push) = match mode {
+            Mode::Local => {
+                let touch: Vec<(VolumeId, String)> = if self.registry.is_served(&job.drive) {
+                    Vec::new()
+                } else {
+                    state
+                        .volumes
+                        .keys()
+                        .filter(|id| {
+                            id.drive == job.drive
+                                && job
+                                    .volumes
+                                    .as_ref()
+                                    .is_none_or(|wanted| wanted.iter().any(|w| w == *id))
+                        })
+                        .map(|id| (id.clone(), self.node_name.clone()))
+                        .collect()
+                };
+                (self.registry.root(&job.drive)?.to_path_buf(), touch, None)
+            }
+            Mode::Push => {
+                // Everything that can be refused is refused before a
+                // container is stopped, including a volume nobody can
+                // receive.
+                for volume in job.volumes.iter().flatten() {
+                    authority_node(&self.registry, state, volume)?;
+                }
+                let BackupDestinationKind::NodeLocal { path, .. } = &destination.kind else {
+                    bail!("destination {} is not a local directory", destination.id);
+                };
+                // Not the backup path's staging directory for the drive: that
+                // one is a standing copy that may hold older or extra files,
+                // and everything under this one is pushed.
+                let staging = self
+                    .registry
+                    .staging_root_for(Path::new(path), &format!("{}.restore", job.drive));
+                match std::fs::remove_dir_all(&staging) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => bail!("clearing {}: {e}", staging.display()),
+                }
+                std::fs::create_dir_all(&staging)
+                    .with_context(|| format!("creating {}", staging.display()))?;
+                (
+                    staging,
+                    Vec::new(),
+                    Some(PushJob {
+                        volumes: job.volumes.clone(),
+                    }),
+                )
+            }
         };
         Ok(Prepared {
             drive: job.drive.clone(),
@@ -707,10 +902,169 @@ impl Ctx {
             _guards: guards,
             snapshot_id: info.id,
             source_dir,
-            target_dir: self.registry.root(&job.drive)?.to_path_buf(),
+            target_dir,
             includes,
             touch,
+            push,
         })
+    }
+
+    /// Why this node cannot carry out `jobs`, for an error message.
+    fn job_problems(&self, state: &ClusterState, jobs: &[Job]) -> String {
+        let mut problems = Vec::new();
+        for job in jobs
+            .iter()
+            .filter(|j| job_mode(&self.registry, state, j).is_none())
+        {
+            let authority = Footprint {
+                drives: std::iter::once((job.drive.clone(), job.volumes.clone())).collect(),
+            }
+            .authority_problem(&self.registry, state);
+            let readable = destination_readable_from(state, &job.destination_id, &self.node_name);
+            problems.push(match (authority, readable) {
+                (Some(a), false) => format!(
+                    "{a}, and destination {} is a local directory on another node",
+                    job.destination_id
+                ),
+                (Some(a), true) => a,
+                (None, _) => format!(
+                    "destination {} is a local directory on another node",
+                    job.destination_id
+                ),
+            });
+        }
+        format!(
+            "this node cannot carry out the restore: {}",
+            problems.join("; ")
+        )
+    }
+
+    /// Hands the restore to the cluster as a `RestoreRequest` - the node that
+    /// can carry it out claims it - and waits for the outcome.
+    async fn submit_and_wait(
+        &self,
+        scope: &RestoreScope,
+        destination_id: Option<&str>,
+        snapshot: Option<&str>,
+    ) -> Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let response = self
+            .client
+            .submit(Request::PutRestoreRequest(RestoreRequest {
+                id: id.clone(),
+                scope: scope.clone(),
+                destination_id: destination_id.map(str::to_string),
+                snapshot: snapshot.map(str::to_string),
+                requested_at: unix_now(),
+                finished_at: None,
+                status: RestoreStatus::Pending,
+                requested_by: format!("cli on {}", self.node_name),
+            }))
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        if let Some(error) = response.error {
+            bail!("the cluster refused the restore: {error}");
+        }
+        println!(
+            "this node cannot restore {} itself; handed to the cluster as request {id}",
+            scope_subject(scope)
+        );
+
+        let started = std::time::Instant::now();
+        let mut announced_running = false;
+        let mut warned_pending = false;
+        loop {
+            tokio::time::sleep(REQUEST_POLL_INTERVAL).await;
+            let state = self.client.state().await.map_err(|e| anyhow!("{e}"))?;
+            let request = state.restore_requests.get(&id).ok_or_else(|| {
+                anyhow!("restore request {id} disappeared from the cluster state")
+            })?;
+            match &request.status {
+                RestoreStatus::Succeeded => return Ok(()),
+                RestoreStatus::Failed { error } => bail!("{error}"),
+                RestoreStatus::Running if !announced_running => {
+                    announced_running = true;
+                    println!("a node claimed the restore and is running it");
+                }
+                RestoreStatus::Pending
+                    if !warned_pending && started.elapsed() > REQUEST_UNCLAIMED_WARNING =>
+                {
+                    warned_pending = true;
+                    println!(
+                        "no node has claimed the request yet (is the drive's primary, or the node holding the destination, up?); still waiting - request {id} stays queued"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Pushes what a [`Mode::Push`] restore left in `staging` to each
+    /// volume's authoritative node, then clears the staging directory.
+    /// Returns the volumes whose generation to bump, with their primary.
+    async fn push_staged(
+        &self,
+        state: &ClusterState,
+        drive: &str,
+        staging: &Path,
+        push: PushJob,
+    ) -> Result<Vec<(VolumeId, String)>> {
+        let volumes: Vec<VolumeId> = match push.volumes {
+            Some(volumes) => volumes,
+            None => {
+                let staging = staging.to_path_buf();
+                let drive = drive.to_string();
+                tokio::task::spawn_blocking(move || -> Result<Vec<VolumeId>> {
+                    let mut found = Vec::new();
+                    for entry in std::fs::read_dir(&staging)? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_dir() {
+                            found.push(VolumeId::new(
+                                drive.clone(),
+                                entry.file_name().to_string_lossy().into_owned(),
+                            ));
+                        }
+                    }
+                    found.sort();
+                    Ok(found)
+                })
+                .await
+                .map_err(|e| anyhow!("the directory scan panicked: {e}"))??
+            }
+        };
+
+        let engine = DeltaEngine::new(self.keys.clone());
+        let mut touched = Vec::new();
+        for volume in volumes {
+            let target = match authority_node(&self.registry, state, &volume) {
+                Ok(target) => target,
+                Err(e) if push_is_optional(&volume, state) => {
+                    println!("skipping {volume}: {e}");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let src = cl_drive::resolve_relative(staging, &volume.volume)?;
+            let addr = state
+                .nodes
+                .get(&target)
+                .map(|ns| ns.rpc_addr)
+                .ok_or_else(|| anyhow!("node {target} is not in the cluster"))?;
+            let peer = SocketAddr::new(addr.ip(), drive_port(addr.port()));
+            let generation = state.volumes.get(&volume).map_or(0, |v| v.generation);
+            println!("sending restored {volume} to {target}");
+            engine
+                .sync(&src, peer, &volume, generation, None, ProgressSink::none())
+                .await
+                .map_err(|e| anyhow!("sending {volume} to {target}: {e}"))?;
+            if !self.registry.is_served(drive) {
+                touched.push((volume, target));
+            }
+        }
+        if let Err(e) = std::fs::remove_dir_all(staging) {
+            warn!(path = %staging.display(), error = %e, "could not remove the restore staging directory");
+        }
+        Ok(touched)
     }
 
     /// Takes `running` down. Every instance is pushed onto `stopped` before
@@ -761,14 +1115,14 @@ impl Ctx {
 
     /// `TouchVolume` for each restored volume with this node as primary:
     /// bumps the generation so every other replica is stale and re-pulls.
-    async fn touch(&self, volumes: &[VolumeId]) -> std::result::Result<(), String> {
+    async fn touch(&self, volumes: &[(VolumeId, String)]) -> std::result::Result<(), String> {
         let mut failures = Vec::new();
-        for id in volumes {
+        for (id, primary) in volumes {
             let response = self
                 .client
                 .submit(Request::TouchVolume {
                     id: id.clone(),
-                    primary: self.node_name.clone(),
+                    primary: primary.clone(),
                 })
                 .await;
             match response {
@@ -1029,6 +1383,106 @@ mod tests {
         assert_eq!(authority_problem("n1", "d", Some(Some("n1")), &[]), None);
         assert!(authority_problem("n2", "d", Some(Some("n1")), &[]).is_some());
         assert!(authority_problem("n1", "d", Some(None), &[]).is_some());
+    }
+
+    fn destination(id: &str, node: &str) -> BackupDestination {
+        BackupDestination {
+            id: id.into(),
+            name: id.into(),
+            kind: BackupDestinationKind::NodeLocal {
+                node: node.into(),
+                path: "/srv/backups".into(),
+            },
+            password_secret: format!("_clouduler_restic_password_{id}"),
+            credentials_secret: None,
+        }
+    }
+
+    fn job(drive: &str, destination_id: &str) -> Job {
+        Job {
+            drive: drive.into(),
+            destination_id: destination_id.into(),
+            volumes: Some(vec![vol(drive, "db")]),
+        }
+    }
+
+    /// `db` is primary on `primary`, and the `local` destination lives on
+    /// `dest_node`.
+    fn restore_state(primary: &str, dest_node: &str) -> ClusterState {
+        let mut state = ClusterState::default();
+        state
+            .restic_destinations
+            .insert("local".into(), destination("local", dest_node));
+        state.volumes.insert(
+            vol("fast", "db"),
+            cl_raft::state::VolumeState {
+                id: vol("fast", "db"),
+                generation: 1,
+                primary: primary.into(),
+                replicas: Default::default(),
+                frozen: None,
+                sync_refused: None,
+            },
+        );
+        state
+    }
+
+    fn registry(node: &str) -> DriveRegistry {
+        DriveRegistry::from_drives(
+            node,
+            [("fast".to_string(), PathBuf::from("/srv/fast"))].into(),
+        )
+    }
+
+    #[test]
+    fn the_primary_restores_directly_when_it_can_read_the_repository() {
+        let state = restore_state("n1", "n1");
+        assert_eq!(
+            job_mode(&registry("n1"), &state, &job("fast", "local")),
+            Some(Mode::Local)
+        );
+    }
+
+    #[test]
+    fn the_node_holding_a_local_repository_pushes_to_a_primary_elsewhere() {
+        // The reported case: the repository is on n2, the primary is n1.
+        let state = restore_state("n1", "n2");
+        assert_eq!(
+            job_mode(&registry("n2"), &state, &job("fast", "local")),
+            Some(Mode::Push)
+        );
+        // The primary cannot read the repository, and a bystander can do
+        // neither.
+        assert_eq!(
+            job_mode(&registry("n1"), &state, &job("fast", "local")),
+            None
+        );
+        assert_eq!(
+            job_mode(&registry("n3"), &state, &job("fast", "local")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_repository_reachable_over_the_network_is_restored_by_the_primary_only() {
+        let mut state = restore_state("n1", "n2");
+        state.restic_destinations.insert(
+            "s3".into(),
+            BackupDestination {
+                kind: BackupDestinationKind::S3 {
+                    bucket: "b".into(),
+                    endpoint: "https://s3.example.com".into(),
+                    region: None,
+                    prefix: None,
+                },
+                ..destination("s3", "n2")
+            },
+        );
+        assert_eq!(
+            job_mode(&registry("n1"), &state, &job("fast", "s3")),
+            Some(Mode::Local)
+        );
+        assert_eq!(job_mode(&registry("n2"), &state, &job("fast", "s3")), None);
     }
 
     #[test]

@@ -826,8 +826,8 @@ pub enum BackupCommand {
         /// Drive to restore.
         #[arg(add = ArgValueCompleter::new(completion::drive_names))]
         drive: String,
-        /// Destination to restore from.
-        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
+        /// Backup destination id to restore from (`--destination` still works).
+        #[arg(long = "restore-from", alias = "destination", add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: String,
         /// Snapshot id, or "latest" (the default) for the most recent one.
         #[arg(long)]
@@ -844,8 +844,8 @@ pub enum BackupCommand {
         /// Volume to restore, as `drive/volume`.
         #[arg(add = ArgValueCompleter::new(completion::volume_ids))]
         volume: VolumeId,
-        /// Destination to restore from.
-        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
+        /// Backup destination id to restore from (`--destination` still works).
+        #[arg(long = "restore-from", alias = "destination", add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: String,
         /// Snapshot id, or "latest" (the default) for the most recent one.
         #[arg(long)]
@@ -865,9 +865,9 @@ pub enum BackupCommand {
         /// Service within the stack.
         #[arg(add = ArgValueCompleter::new(completion::service_names))]
         service: String,
-        /// Destination to restore from, needed only when the drive backs up
+        /// Backup destination id to restore from (`--destination` still works), needed only when the drive backs up
         /// to more than one.
-        #[arg(long, add = ArgValueCompleter::new(completion::backup_destination_ids))]
+        #[arg(long = "restore-from", alias = "destination", add = ArgValueCompleter::new(completion::backup_destination_ids))]
         destination: Option<String>,
         /// Snapshot id, or "latest" (the default) for the most recent one.
         #[arg(long)]
