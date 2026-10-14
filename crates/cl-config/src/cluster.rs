@@ -1030,7 +1030,8 @@ impl Node {
 }
 
 /// Append `domain` to a bare label. Anything already containing a dot is taken
-/// as a full name.
+/// as a full name. `@` (the DNS zone-file convention for "the zone itself")
+/// names the apex: the domain with no label in front of it.
 ///
 /// A trailing dot (the DNS zone-file convention for "this is already
 /// absolute") is stripped and the rest of the name used verbatim, regardless
@@ -1046,6 +1047,7 @@ pub fn qualify(name: &str, domain: Option<&str>) -> String {
         stripped.to_string()
     } else {
         match domain {
+            Some(domain) if name == "@" => domain.to_string(),
             Some(domain) if !name.contains('.') => format!("{name}.{domain}"),
             _ => name.to_string(),
         }
@@ -1102,6 +1104,11 @@ mod tests {
         assert!(!off.enabled);
         let round: McpConfig = serde_yaml::from_str(&serde_yaml::to_string(&off).unwrap()).unwrap();
         assert_eq!(round, off);
+    }
+
+    #[test]
+    fn at_sign_names_the_apex_of_the_domain() {
+        assert_eq!(qualify("@", Some("Cluster.lan")), "cluster.lan");
     }
 
     #[test]

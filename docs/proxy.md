@@ -83,6 +83,13 @@ site. The routing table
 atomically (`arc_swap`), so request handling never blocks on a reload and
 never sees a half-updated table.
 
+### Host names
+
+A bare `host` (`blog`) is qualified with the network's `domain`; a dotted one
+is taken as a full name. `host: "@"` publishes the apex, the network's domain
+itself. Quote it: a bare `@` is reserved in YAML. DNS needs an A/AAAA record
+at the apex, or a CNAME that the DNS provider flattens (Cloudflare does).
+
 ### Matching precedence
 
 Given a request's `Host` header (port suffix ignored) and path:
