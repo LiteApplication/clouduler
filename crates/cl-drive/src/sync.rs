@@ -94,6 +94,9 @@ pub struct SyncScheduler<E: SyncEngine> {
     engine: Arc<E>,
     quorum: QuorumWatch,
     guard: Arc<InFlightGuard>,
+    /// Volumes found without a file on the previous pass. One empty reading
+    /// is not enough to raise the alarm: a file can be mid-replace.
+    empty_seen: std::sync::Mutex<BTreeSet<VolumeId>>,
     /// How often to check whether any volume is due. Independent of any
     /// individual volume's own interval.
     tick: Duration,
@@ -108,6 +111,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             engine,
             quorum,
             guard: Arc::new(InFlightGuard::new()),
+            empty_seen: std::sync::Mutex::default(),
             tick: Duration::from_secs(30),
         }
     }
@@ -132,6 +136,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 
             let state = self.node.state().await;
             let now = Instant::now();
+
+            self.remove_deleted_volumes(&state.volume_removals).await;
 
             for (id, volume) in &state.volumes {
                 if !self.registry.implements(&id.drive) {
@@ -199,7 +205,91 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                         .collect()
                 };
 
+                self.check_empty(id, volume.looks_empty).await;
                 self.run_one(id.clone(), volume.generation, targets).await;
+            }
+        }
+    }
+
+    /// Removes this node's copy of every volume deleted on purpose, then says
+    /// so. A copy that has gained a file since is left alone and not
+    /// acknowledged: only a file-less tree is ever deleted here.
+    async fn remove_deleted_volumes(
+        &self,
+        removals: &std::collections::BTreeMap<VolumeId, BTreeSet<String>>,
+    ) {
+        for (id, pending) in removals {
+            if !pending.contains(self.registry.node()) {
+                continue;
+            }
+            if self.registry.implements(&id.drive) {
+                let Ok(path) = self.registry.volume_path(id) else {
+                    continue;
+                };
+                if path.exists() {
+                    match crate::scan::scan_off_runtime(path.clone(), false).await {
+                        Ok(m) if m.files.is_empty() => {
+                            if let Err(e) = std::fs::remove_dir_all(&path) {
+                                warn!(%id, error = %e, "could not delete the volume directory");
+                                continue;
+                            }
+                        }
+                        Ok(_) => {
+                            warn!(%id, "kept a deleted volume's directory: it holds files");
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(%id, error = %e, "could not check the volume before deleting it");
+                            continue;
+                        }
+                    }
+                }
+            }
+            let _ = self
+                .node
+                .submit(Request::AckVolumeRemoved {
+                    id: id.clone(),
+                    node: self.registry.node().to_string(),
+                })
+                .await;
+        }
+    }
+
+    /// Raises `looks_empty` once this volume has had no files on two passes
+    /// running, and lowers it as soon as one shows up. Nothing is done about
+    /// an empty volume here: whether it should be deleted or restored is the
+    /// operator's call.
+    async fn check_empty(&self, id: &VolumeId, recorded: bool) {
+        let Ok(src) = self.registry.volume_path(id) else {
+            return;
+        };
+        let manifest = match crate::scan::scan_off_runtime(src, false).await {
+            Ok(m) => m,
+            Err(e) => {
+                debug!(%id, error = %e, "could not scan for emptiness");
+                return;
+            }
+        };
+        let empty = manifest.files.is_empty();
+        let confirmed = {
+            let mut seen = self.empty_seen.lock().unwrap_or_else(|e| e.into_inner());
+            if empty {
+                !seen.insert(id.clone())
+            } else {
+                seen.remove(id);
+                false
+            }
+        };
+        if confirmed != recorded && (confirmed || !empty) {
+            if let Err(e) = self
+                .node
+                .submit(Request::SetVolumeEmpty {
+                    id: id.clone(),
+                    empty: confirmed,
+                })
+                .await
+            {
+                warn!(%id, error = %e, "failed to record whether the volume is empty");
             }
         }
     }

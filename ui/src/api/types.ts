@@ -260,6 +260,8 @@ export interface VolumeState {
   frozen: { node: string; stopped: string[] } | null;
   /** Set while the source refuses to replicate because it would wipe a replica. */
   sync_refused: { from: string; to: string; reason: string; at: number } | null;
+  /** The source found no files in the volume on two scans in a row. */
+  looks_empty: boolean;
 }
 
 export interface ClusterState {
@@ -498,6 +500,15 @@ export interface ApiErrorBody {
 // ---- drives ----
 
 export type DriveMode = 'replicated' | 'served';
+
+/** What GET /api/volumes/{drive}/{volume}/inspect reads off the source node. */
+export interface VolumeInspection {
+  node: string;
+  files: number;
+  bytes: number;
+  /** Unix seconds of the newest file, null when there is none. */
+  newest_file_at: number | null;
+}
 
 export interface DriveNodeStatus {
   node: string;

@@ -46,6 +46,7 @@ import type {
   UpdateRow,
   ValidationResult,
   VolumeState,
+  VolumeInspection,
   WireguardIngressRule,
 } from './types';
 
@@ -275,6 +276,10 @@ export const api = {
   // drives & volumes
   listDrives: () => get<DriveStatus[]>('/api/drives'),
   listVolumes: () => get<VolumeState[]>('/api/volumes'),
+  inspectVolume: (drive: string, volume: string) =>
+    get<VolumeInspection>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/inspect`),
+  deleteVolume: (drive: string, volume: string) =>
+    del<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}`),
   syncVolume: (drive: string, volume: string) =>
     post<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/sync`),
 

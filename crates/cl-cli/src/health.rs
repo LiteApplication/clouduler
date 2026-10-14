@@ -676,6 +676,7 @@ mod tests {
                 replicas,
                 frozen: None,
                 sync_refused: None,
+                looks_empty: false,
             },
         );
         state

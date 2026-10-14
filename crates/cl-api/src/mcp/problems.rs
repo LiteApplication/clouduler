@@ -270,6 +270,14 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
                 ),
             );
         }
+        if volume.looks_empty {
+            add(
+                "volume_empty",
+                id.to_string(),
+                "holds no files. Delete it if that is intended, or restore it from a backup"
+                    .to_string(),
+            );
+        }
         if !state.nodes.contains_key(&volume.primary) {
             add(
                 "volume",

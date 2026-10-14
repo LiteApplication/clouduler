@@ -17,6 +17,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/drives", get(list_drives))
         .route("/api/volumes", get(list_volumes))
         .route("/api/volumes/{drive}/{volume}/sync", post(sync_volume))
+        .route("/api/volumes/{drive}/{volume}/inspect", get(inspect_volume))
+        .route(
+            "/api/volumes/{drive}/{volume}",
+            axum::routing::delete(delete_volume),
+        )
 }
 
 #[derive(Serialize)]
@@ -81,6 +86,8 @@ struct VolumeSummary {
     generation: u64,
     primary: String,
     replicas: Vec<ReplicaStatus>,
+    /// The source found no files in it on two scans in a row.
+    looks_empty: bool,
 }
 
 #[derive(Serialize)]
@@ -112,6 +119,7 @@ async fn list_volumes(
                         in_sync: *gen == v.generation,
                     })
                     .collect(),
+                looks_empty: v.looks_empty,
             })
             .collect(),
     )
@@ -145,4 +153,86 @@ async fn sync_volume(
         return Err(ApiError::Conflict(msg));
     }
     Ok(StatusCode::OK)
+}
+
+#[derive(Serialize)]
+struct VolumeInspection {
+    /// The node whose copy was looked at.
+    node: String,
+    files: usize,
+    bytes: u64,
+    /// Modification time of the newest file, unix seconds. `None` when there
+    /// is no file at all.
+    newest_file_at: Option<i64>,
+}
+
+/// What a volume holds right now, read from its source node on demand: the
+/// cluster only records whether it looks empty, not how much is in it.
+async fn inspect_volume(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Path((drive, volume)): Path<(String, String)>,
+) -> Result<Json<VolumeInspection>, ApiError> {
+    let id = VolumeId::new(drive, volume);
+    let cluster_state = state.cluster.state().await;
+    let record = cluster_state
+        .volumes
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("no volume {id}")))?;
+    let served_by = state
+        .cluster_config
+        .read()
+        .await
+        .drives
+        .get(&id.drive)
+        .filter(|d| d.is_served())
+        .map(|d| d.served_by.clone());
+    let source = match served_by {
+        Some(candidates) => candidates
+            .into_iter()
+            .find(|n| !cluster_state.unreachable.contains(n))
+            .ok_or_else(|| ApiError::Conflict(format!("no node is serving {}", id.drive)))?,
+        None => record.primary.clone(),
+    };
+    let addr = cluster_state
+        .nodes
+        .get(&source)
+        .map(|n| n.rpc_addr)
+        .ok_or_else(|| ApiError::NotFound(format!("node {source} is not in the cluster")))?;
+    let key = state
+        .key
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("this node does not hold the cluster key".into()))?;
+    let peer = std::net::SocketAddr::new(addr.ip(), cl_drive::drive_port(addr.port()));
+    let manifest = cl_drive::transport::request_manifest(peer, &id, false, &cl_raft::fixed_key(key))
+        .await
+        .map_err(|e| ApiError::Conflict(format!("asking {source} about {id}: {e}")))?;
+    let regular = || manifest.files.values().filter(|f| !f.is_symlink);
+    Ok(Json(VolumeInspection {
+        node: source,
+        files: manifest.files.len(),
+        bytes: regular().map(|f| f.size).sum(),
+        newest_file_at: regular().map(|f| f.mtime_nanos.div_euclid(1_000_000_000)).max(),
+    }))
+}
+
+/// Deletes a volume that holds no files, on every node. The cluster refuses
+/// unless the volume is flagged empty, is not frozen and is not mounted.
+async fn delete_volume(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path((drive, volume)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let id = VolumeId::new(drive, volume);
+    let response = state
+        .cluster
+        .submit(ClusterRequest::RemoveVolume { id })
+        .await
+        .map_err(ApiError::not_leader)?;
+    match response.error {
+        Some(msg) => Err(ApiError::Conflict(msg)),
+        None => Ok(StatusCode::NO_CONTENT),
+    }
 }

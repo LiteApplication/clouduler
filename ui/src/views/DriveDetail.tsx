@@ -7,6 +7,7 @@ import { useAuth } from '../auth/AuthContext';
 import { Badge } from '../components/Badge';
 import { Icon } from '../components/Icon';
 import { Meter } from '../components/Meter';
+import { EmptyVolumeAlerts } from '../components/EmptyVolumeAlert';
 
 export function DriveDetail() {
   const { name = '' } = useParams();
@@ -71,6 +72,8 @@ export function DriveDetail() {
           </div>
         </div>
       </div>
+
+      <EmptyVolumeAlerts volumes={volumes} drive={name} />
 
       <div className="card-grid">
         <div className="card stat">

@@ -206,11 +206,13 @@
     },
     "unreachable": [],
     "version": 12,
+    "volume_removals": {},
     "volumes": {
       "fast/v0": {
         "frozen": null,
         "generation": 1,
         "id": "<volatile>",
+        "looks_empty": false,
         "primary": "n0",
         "replicas": {
           "n0": 1

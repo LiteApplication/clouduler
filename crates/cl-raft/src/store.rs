@@ -234,6 +234,7 @@ impl Store {
                             )]),
                             frozen: None,
                             sync_refused: None,
+            looks_empty: false,
                         },
                     );
                 }

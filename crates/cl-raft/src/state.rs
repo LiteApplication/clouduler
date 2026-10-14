@@ -376,6 +376,12 @@ pub struct VolumeState {
     /// goes through.
     #[serde(default)]
     pub sync_refused: Option<SyncRefusal>,
+    /// Set while the volume's source has found it holding no files at all,
+    /// twice in a row. Only the verdict lives here: how much is in the volume
+    /// and how old its newest file is gets scanned on demand. Cleared by the
+    /// first scan that finds a file.
+    #[serde(default)]
+    pub looks_empty: bool,
 }
 
 /// Why a volume's replication was stopped to protect a replica's data.
@@ -783,6 +789,11 @@ pub struct ClusterState {
     /// ever had one pin.
     #[serde(default)]
     pub previous_image_digests: BTreeMap<InstanceId, String>,
+    /// Volumes deleted on purpose, with the nodes that still have to remove
+    /// their copy. A node takes its name off once the directory is gone, and
+    /// the entry goes with the last one.
+    #[serde(default)]
+    pub volume_removals: BTreeMap<VolumeId, BTreeSet<String>>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -952,6 +963,22 @@ pub enum Request {
     SetVolumeSyncRefusal {
         id: VolumeId,
         refusal: Option<SyncRefusal>,
+    },
+    /// Deletes a volume that holds no files, on every node that implements its
+    /// drive. Refused unless the volume is flagged `looks_empty`, is not
+    /// frozen, and no instance mounts it.
+    RemoveVolume {
+        id: VolumeId,
+    },
+    /// `node` has removed its copy of a volume deleted with `RemoveVolume`.
+    AckVolumeRemoved {
+        id: VolumeId,
+        node: String,
+    },
+    /// Records whether the volume's source found it without a single file.
+    SetVolumeEmpty {
+        id: VolumeId,
+        empty: bool,
     },
     /// Pauses replication of the volume while `node` is edited by hand.
     FreezeVolume {
@@ -1158,6 +1185,9 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "SetVolumeReplica",
     "TouchVolume",
     "SetVolumeSyncRefusal",
+    "SetVolumeEmpty",
+    "RemoveVolume",
+    "AckVolumeRemoved",
     "FreezeVolume",
     "UnfreezeVolume",
     "StoreCertificate",
@@ -1281,6 +1311,17 @@ mod request_mirror {
         SetVolumeSyncRefusal {
             id: VolumeId,
             refusal: Option<SyncRefusal>,
+        },
+        SetVolumeEmpty {
+            id: VolumeId,
+            empty: bool,
+        },
+        RemoveVolume {
+            id: VolumeId,
+        },
+        AckVolumeRemoved {
+            id: VolumeId,
+            node: String,
         },
         FreezeVolume {
             id: VolumeId,
@@ -1910,6 +1951,7 @@ impl ClusterState {
                         replicas: BTreeMap::from([(primary.clone(), 1)]),
                         frozen: None,
                         sync_refused: None,
+                        looks_empty: false,
                     });
                 Ok(())
             }
@@ -1958,6 +2000,60 @@ impl ClusterState {
                     .get_mut(id)
                     .ok_or_else(|| format!("unknown volume {id}"))?;
                 volume.sync_refused = refusal.clone();
+                Ok(())
+            }
+
+            Request::SetVolumeEmpty { id, empty } => {
+                let volume = self
+                    .volumes
+                    .get_mut(id)
+                    .ok_or_else(|| format!("unknown volume {id}"))?;
+                volume.looks_empty = *empty;
+                Ok(())
+            }
+
+            Request::RemoveVolume { id } => {
+                let volume = self
+                    .volumes
+                    .get(id)
+                    .ok_or_else(|| format!("unknown volume {id}"))?;
+                if id.volume == "." {
+                    return Err("a whole-drive mount is not a volume that can be deleted".into());
+                }
+                if !volume.looks_empty {
+                    return Err(format!("{id} is not flagged as empty, so it is not deleted"));
+                }
+                if volume.frozen.is_some() {
+                    return Err(format!("{id} is frozen"));
+                }
+                let users = instances_using_volume(self, id);
+                if !users.is_empty() {
+                    let names: Vec<String> = users.iter().map(ToString::to_string).collect();
+                    return Err(format!(
+                        "{id} is still mounted by {}; remove it from the stack first",
+                        names.join(", ")
+                    ));
+                }
+                let holders: BTreeSet<String> = self
+                    .nodes
+                    .keys()
+                    .filter(|n| self.node_implements(n, &id.drive))
+                    .cloned()
+                    .collect();
+                self.volumes.remove(id);
+                if !holders.is_empty() {
+                    self.volume_removals.insert(id.clone(), holders);
+                }
+                Ok(())
+            }
+
+            Request::AckVolumeRemoved { id, node } => {
+                if let Some(pending) = self.volume_removals.get_mut(id) {
+                    pending.remove(node);
+                    if pending.is_empty() {
+                        self.volume_removals.remove(id);
+                    }
+                }
                 Ok(())
             }
 
@@ -2689,6 +2785,17 @@ mod tests {
             Request::SetVolumeSyncRefusal {
                 id: VolumeId::new("fast", "v1"),
                 refusal: None,
+            },
+            Request::SetVolumeEmpty {
+                id: VolumeId::new("fast", "v1"),
+                empty: true,
+            },
+            Request::RemoveVolume {
+                id: VolumeId::new("fast", "v1"),
+            },
+            Request::AckVolumeRemoved {
+                id: VolumeId::new("fast", "v1"),
+                node: "n1".into(),
             },
             Request::FreezeVolume {
                 id: VolumeId::new("fast", "v1"),
@@ -3569,6 +3676,67 @@ mod tests {
             generation: 1,
         });
         assert_eq!(state.volumes[&id].replicas["n2"], 2);
+    }
+
+    #[test]
+    fn only_an_empty_flagged_volume_can_be_removed_and_every_holder_must_ack() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        let refused = state.apply(&Request::RemoveVolume { id: id.clone() });
+        assert!(refused.error.unwrap().contains("not flagged as empty"));
+        assert!(state.volumes.contains_key(&id));
+
+        state.apply(&Request::SetVolumeEmpty {
+            id: id.clone(),
+            empty: true,
+        });
+        assert!(state.apply(&Request::RemoveVolume { id: id.clone() }).is_ok());
+        assert!(!state.volumes.contains_key(&id));
+        let pending = state.volume_removals[&id].clone();
+        assert!(pending.contains("n1"));
+
+        for node in &pending {
+            state.apply(&Request::AckVolumeRemoved {
+                id: id.clone(),
+                node: node.clone(),
+            });
+        }
+        assert!(state.volume_removals.is_empty());
+    }
+
+    #[test]
+    fn a_mounted_volume_cannot_be_removed() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        state.apply(&Request::SetVolumeEmpty {
+            id: id.clone(),
+            empty: true,
+        });
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "services:\n  web:\n    image: nginx\n    volumes:\n      - fast/data:/data\n"
+                .into(),
+        });
+        assign(&mut state, "n1", &["fast"]);
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "web", 1),
+            node: "n1".into(),
+            drives: drives(&["fast"]),
+        });
+        let refused = state.apply(&Request::RemoveVolume { id: id.clone() });
+        assert!(
+            refused.error.is_some_and(|e| e.contains("still mounted")),
+            "a mounted volume must not be deleted"
+        );
+        assert!(state.volumes.contains_key(&id));
     }
 
     #[test]

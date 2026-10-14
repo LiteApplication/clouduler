@@ -4,6 +4,7 @@ import type { ClusterStatus, InstanceState } from '../api/types';
 import { useClusterState } from '../state/store';
 import { Badge } from '../components/Badge';
 import { Icon, type IconName } from '../components/Icon';
+import { EmptyVolumeAlerts } from '../components/EmptyVolumeAlert';
 import { Donut, type DonutSegment } from '../components/Donut';
 
 export function Overview() {
@@ -117,6 +118,8 @@ export function Overview() {
           Cluster healthy, quorum held.
         </div>
       )}
+
+      <EmptyVolumeAlerts volumes={volumes} />
 
       <div className="card-grid">
         <Stat icon="crown" label="Leader" value={status?.leader ?? '-'} small={!!status?.leader} />
