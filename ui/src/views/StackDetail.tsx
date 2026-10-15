@@ -418,6 +418,16 @@ function UpdateWebhook({ name }: { name: string }) {
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [name]);
 
+  const regenerate = async () => {
+    if (!confirm('Regenerate the webhook URL? The current URL stops working immediately.')) return;
+    try {
+      setPath((await api.regenerateStackUpdateWebhook(name)).path);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   if (error) return <p className="muted">{error}</p>;
   if (!path) return null;
   const url = `${window.location.origin}${path}`;
@@ -439,11 +449,12 @@ function UpdateWebhook({ name }: { name: string }) {
       </div>
       <p className="page-sub">
         POST to this URL from a CI job to pull and restart every container of this stack. Anyone holding the URL can
-        trigger an update, so keep it secret.
+        trigger an update, so keep it secret; regenerate it if it leaks.
       </p>
       <div className="flex-row">
         <input type="text" readOnly className="mono" value={url} style={{ flex: 1 }} onFocus={(e) => e.target.select()} />
         <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+        <button onClick={regenerate}>Regenerate</button>
       </div>
       <pre className="mono">curl -fsS -X POST '{url}'</pre>
     </div>

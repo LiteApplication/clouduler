@@ -21,6 +21,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/stacks/{name}", get(detail).put(deploy).delete(remove))
         .route("/api/stacks/{name}/validate", post(validate))
         .route("/api/stacks/{name}/update-webhook", get(update_webhook_url))
+        .route(
+            "/api/stacks/{name}/update-webhook/regenerate",
+            post(regenerate_update_webhook),
+        )
         // Public, authenticated by the token in the path (see `webhook_token`).
         .route("/api/stacks/{name}/update-webhook/{token}", post(update_webhook))
 }
@@ -330,6 +334,7 @@ async fn remove(
 
 /// The body of `DELETE /api/stacks/{name}`, callable in-process.
 pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), ApiError> {
+    let secret = webhook_secret_name(&name);
     let response = state
         .cluster
         .submit(ClusterRequest::RemoveStack { name })
@@ -338,6 +343,12 @@ pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), A
     if let Some(msg) = response.error {
         return Err(ApiError::Conflict(msg));
     }
+    // Best effort: a leftover token would otherwise revive the old URL if a
+    // stack of the same name were deployed again.
+    let _ = state
+        .cluster
+        .submit(ClusterRequest::RemoveSecret { name: secret })
+        .await;
     Ok(())
 }
 
@@ -410,19 +421,56 @@ pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> 
     }
 }
 
-/// The per-stack token a CI job presents. Derived from the cluster key rather
-/// than stored, so there is nothing to replicate and every node agrees; the
-/// cost is that it can only be revoked by deleting the stack or rotating the
-/// cluster key.
-async fn webhook_token(state: &AppState, stack: &str) -> Result<String, ApiError> {
+const WEBHOOK_SECRET_PREFIX: &str = "_clouduler_stack_webhook_";
+
+fn webhook_secret_name(stack: &str) -> String {
+    format!("{WEBHOOK_SECRET_PREFIX}{stack}")
+}
+
+pub(crate) fn is_reserved_webhook_secret(name: &str) -> bool {
+    name.starts_with(WEBHOOK_SECRET_PREFIX)
+}
+
+/// The stack's current webhook token, if one has been issued.
+async fn read_webhook_token(state: &AppState, stack: &str) -> Option<String> {
+    let secret = webhook_secret_name(stack);
+    let entry = state.cluster.state().await.secrets.get(&secret).cloned()?;
+    let key_guard = state.key.read().await;
+    let key = key_guard.as_ref()?;
+    let opened = Sealed::from_blob(entry.sealed).open(key, &secret).ok()?;
+    String::from_utf8(opened.to_vec()).ok()
+}
+
+/// Mints a fresh random token and replaces whatever was stored, which
+/// invalidates the old URL immediately.
+async fn issue_webhook_token(state: &AppState, stack: &str) -> Result<String, ApiError> {
+    let mut buf = [0u8; 24];
+    rand::fill(&mut buf);
+    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    let secret = webhook_secret_name(stack);
+
     let key_guard = state.key.read().await;
     let key = key_guard
         .as_ref()
-        .ok_or_else(|| ApiError::Unavailable("this node holds no cluster key".into()))?;
-    Ok(cl_secret::internal_auth::sign(
-        key,
-        &format!("stack-update-webhook:{stack}"),
-    ))
+        .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
+    let sealed = Sealed::seal(key, &secret, token.as_bytes()).map_err(ApiError::internal)?;
+    let key_fingerprint = key.fingerprint();
+    drop(key_guard);
+
+    let response = state
+        .cluster
+        .submit(ClusterRequest::PutSecret {
+            name: secret,
+            sealed: sealed.blob,
+            key_fingerprint,
+            owner: None,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::BadRequest(msg));
+    }
+    Ok(token)
 }
 
 #[derive(Serialize)]
@@ -431,6 +479,13 @@ struct UpdateWebhook {
     path: String,
 }
 
+fn webhook_path(stack: &str, token: &str) -> UpdateWebhook {
+    UpdateWebhook {
+        path: format!("/api/stacks/{stack}/update-webhook/{token}"),
+    }
+}
+
+/// The current webhook, issuing the first token on demand.
 async fn update_webhook_url(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -439,10 +494,23 @@ async fn update_webhook_url(
     if !state.cluster.state().await.stacks.contains_key(&name) {
         return Err(ApiError::NotFound(format!("no stack {name}")));
     }
-    let token = webhook_token(&state, &name).await?;
-    Ok(Json(UpdateWebhook {
-        path: format!("/api/stacks/{name}/update-webhook/{token}"),
-    }))
+    let token = match read_webhook_token(&state, &name).await {
+        Some(token) => token,
+        None => issue_webhook_token(&state, &name).await?,
+    };
+    Ok(Json(webhook_path(&name, &token)))
+}
+
+async fn regenerate_update_webhook(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<UpdateWebhook>, ApiError> {
+    if !state.cluster.state().await.stacks.contains_key(&name) {
+        return Err(ApiError::NotFound(format!("no stack {name}")));
+    }
+    let token = issue_webhook_token(&state, &name).await?;
+    Ok(Json(webhook_path(&name, &token)))
 }
 
 /// Pulls and restarts every instance of the stack, the same rolling update
@@ -451,13 +519,16 @@ async fn update_webhook(
     State(state): State<AppState>,
     Path((name, token)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<super::updates::Accepted>), ApiError> {
-    let expected = webhook_token(&state, &name).await?;
-    let ok = expected.len() == token.len()
+    let ok = read_webhook_token(&state, &name)
+        .await
+        .is_some_and(|expected| {
+            expected.len() == token.len()
         && expected
             .bytes()
             .zip(token.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0;
+                    .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+        });
     if !ok {
         return Err(ApiError::Unauthenticated("bad webhook token".into()));
     }

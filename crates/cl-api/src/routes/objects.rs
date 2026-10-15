@@ -43,6 +43,7 @@ pub(crate) fn is_reserved_secret(name: &str) -> bool {
         || is_reserved_cloudflare_secret(name)
         || is_reserved_oidc_secret(name)
         || super::git_backup::is_reserved_secret(name)
+        || super::stacks::is_reserved_webhook_secret(name)
         || cl_restic::secret_names::is_reserved_restic_secret(name)
 }
 

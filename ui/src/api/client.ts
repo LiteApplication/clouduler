@@ -256,6 +256,9 @@ export const api = {
   stackUpdateWebhook: (name: string) =>
     get<{ path: string }>(`/api/stacks/${encodeURIComponent(name)}/update-webhook`),
 
+  regenerateStackUpdateWebhook: (name: string) =>
+    post<{ path: string }>(`/api/stacks/${encodeURIComponent(name)}/update-webhook/regenerate`, {}),
+
   // registry accounts. The password is write-only: there is no getter for it,
   // and `listRegistries` returns only the server and username.
   listRegistries: () => get<RegistryAccount[]>('/api/registries'),
