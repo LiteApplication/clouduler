@@ -32,6 +32,7 @@ import type {
   ClusterKeyStatus,
   ClusterState,
   ClusterStatus,
+  Connectivity,
   CloudflareTokenStatus,
   DriveStatus,
   Identity,
@@ -51,6 +52,7 @@ const cloudflare: CloudflareTokenStatus = shapes.cloudflareTokenStatus;
 const oidcSecret: OidcClientSecretStatus = shapes.oidcClientSecretStatus;
 const clusterKey: ClusterKeyStatus = shapes.clusterKeyStatus;
 const drives: DriveStatus[] = shapes.drives as unknown as DriveStatus[];
+const connectivity: Connectivity = shapes.nodeConnectivity;
 const updates: UpdateRow[] = shapes.updates as unknown as UpdateRow[];
 
 /** Keys the ui reads by name, per endpoint. */
@@ -64,6 +66,8 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   state: [state, ['nodes', 'stacks', 'assignments', 'unreachable', 'version']],
   clusterConfig: [config, ['cluster', 'networks', 'nodes', 'web', 'proxy']],
   drives: [drives[0], ['name', 'mode', 'served_by', 'active_server', 'sync_interval', 'nodes']],
+  nodeConnectivity: [connectivity, ['reports']],
+  nodeReport: [connectivity.reports[0], ['node', 'reported', 'links']],
   updates: [
     updates[0],
     ['id', 'stack', 'service', 'node', 'image', 'running_digest', 'latest_digest', 'pinned_digest', 'update_available', 'pin_drift'],

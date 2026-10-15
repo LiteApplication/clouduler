@@ -11,6 +11,7 @@ pub mod drives;
 pub mod git_backup;
 pub mod instances;
 pub mod key_distribution;
+pub mod links;
 pub mod nodes;
 pub mod oauth;
 pub mod objects;
@@ -33,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .merge(auth::router())
         .merge(auth_keys::router())
         .merge(cluster::router())
+        .merge(links::router())
         .merge(nodes::router())
         .merge(stacks::router())
         .merge(instances::router())

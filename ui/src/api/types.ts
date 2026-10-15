@@ -59,6 +59,30 @@ export interface NodeDetail {
   usage: ResourceUsage;
 }
 
+/** What one node sees of one peer (GET /api/nodes/connectivity). */
+export interface PeerLink {
+  peer: string;
+  /** A tcp connect from the reporting node to the peer's raft rpc port worked. */
+  raft: boolean;
+  /** Same, for the peer's web/api port. */
+  api: boolean;
+  /** Round trip of the raft connect in ms; null when it failed. */
+  raft_ms: number | null;
+}
+
+/** One node's own report. `reported` is false when the node could not be
+ *  asked, in which case `links` is empty and says nothing about its peers. */
+export interface NodeReport {
+  node: string;
+  reported: boolean;
+  links: PeerLink[];
+}
+
+/** Response of GET /api/nodes/connectivity. */
+export interface Connectivity {
+  reports: NodeReport[];
+}
+
 export type DesiredState = 'running' | 'stopped';
 
 export type MigrationPhase =

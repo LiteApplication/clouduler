@@ -94,6 +94,15 @@
     "subject": "<volatile>",
     "username": "test"
   },
+  "nodeConnectivity": {
+    "reports": [
+      {
+        "links": [],
+        "node": "n0",
+        "reported": true
+      }
+    ]
+  },
   "oidcClientSecretStatus": {
     "configured": false
   },

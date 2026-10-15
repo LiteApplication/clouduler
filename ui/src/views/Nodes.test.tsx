@@ -59,7 +59,7 @@ describe('Nodes view role gating', () => {
     renderNodes();
     expect(screen.queryByRole('button', { name: /add node/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /drain/i })).not.toBeInTheDocument();
-    expect(screen.getByText('n1')).toBeInTheDocument();
+    expect(screen.getAllByText('n1').length).toBeGreaterThan(0);
   });
 
   it('shows node actions and the add-node button for an admin', () => {
@@ -78,7 +78,7 @@ describe('a node declared in the config but not yet in the live roster', () => {
       n2: { role: 'worker', drives: { bulk: '/mnt/bulk' } },
     };
     renderNodes();
-    expect(screen.getByText('n2')).toBeInTheDocument();
+    expect(screen.getAllByText('n2').length).toBeGreaterThan(0);
     expect(screen.getByText('pending')).toBeInTheDocument();
     configNodes = {};
   });

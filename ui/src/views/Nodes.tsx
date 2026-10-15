@@ -6,6 +6,7 @@ import { Badge } from '../components/Badge';
 import { api, ApiError } from '../api/client';
 import { AddNodeForm } from './AddNodeForm';
 import { Icon } from '../components/Icon';
+import { NodeGraph } from '../components/NodeGraph';
 import { RelationDiagram, type RelationEdge, type RelationNode } from '../components/RelationDiagram';
 import { useConfigDraft } from './config/draft';
 
@@ -137,6 +138,19 @@ export function Nodes() {
       </div>
 
       {showAdd && <AddNodeForm onDone={() => setShowAdd(false)} />}
+
+      {total > 1 && (
+        <div className="section">
+          <div className="section-head">
+            <h2>
+              <Icon name="nodes" /> Connectivity
+            </h2>
+          </div>
+          <div className="card">
+            <NodeGraph names={[...nodes.map((n) => n.name), ...pendingNames]} />
+          </div>
+        </div>
+      )}
 
       {networkNodes.length > 0 && (
         <div className="section">

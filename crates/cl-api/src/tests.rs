@@ -880,6 +880,105 @@ async fn nodes_list_reflects_the_cluster_state() {
     assert_eq!(nodes[0]["name"], "n0");
 }
 
+fn loopback_node(rpc_port: u16) -> cl_config::Node {
+    cl_config::Node {
+        id: uuid::Uuid::new_v4(),
+        role: cl_config::NodeRole::Worker,
+        network: BTreeMap::from([(
+            "internal".to_string(),
+            cl_config::NodeAddress::Ip("127.0.0.1".parse().unwrap()),
+        )]),
+        drives: BTreeMap::new(),
+        labels: BTreeMap::new(),
+        rpc_port,
+        data_dir: None,
+        docker_data_dir: None,
+        generate_secret_key: None,
+        last_resort: false,
+    }
+}
+
+/// A peer whose raft port accepts connections is a healthy link; one whose
+/// port is closed is a broken one, and the two must not be confused.
+#[tokio::test]
+async fn connectivity_marks_a_closed_peer_broken_and_an_open_one_healthy() {
+    let h = harness().await;
+    let open = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let open_port = open.local_addr().unwrap().port();
+    let closed_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        cfg.nodes.insert("up".into(), loopback_node(open_port));
+        cfg.nodes.insert("down".into(), loopback_node(closed_port));
+    }
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/nodes/connectivity")
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let reports = value["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 3);
+
+    let n0 = reports.iter().find(|r| r["node"] == "n0").unwrap();
+    assert_eq!(n0["reported"], true);
+    let links = n0["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2, "n0 sees every peer but itself");
+    let up = links.iter().find(|l| l["peer"] == "up").unwrap();
+    let down = links.iter().find(|l| l["peer"] == "down").unwrap();
+    assert_eq!(up["raft"], true);
+    assert!(up["raft_ms"].is_u64());
+    assert_eq!(down["raft"], false);
+    assert!(down["raft_ms"].is_null());
+
+    // Neither peer runs an api here, so a node that cannot be asked is
+    // reported as such rather than silently dropped or shown as healthy.
+    for name in ["up", "down"] {
+        let r = reports.iter().find(|r| r["node"] == name).unwrap();
+        assert_eq!(r["reported"], false, "{name} has no report");
+        assert_eq!(r["links"].as_array().unwrap().len(), 0);
+    }
+}
+
+#[tokio::test]
+async fn the_internal_links_route_needs_a_signature_and_answers_the_local_view() {
+    let h = harness().await;
+    let path = "/api/nodes/internal/links";
+    let resp = h
+        .router
+        .clone()
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = signed_get(&h, path).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["node"], "n0");
+    assert_eq!(value["links"].as_array().unwrap().len(), 0);
+}
+
 /// Mirrors what a join does after a node was deleted and rejoins under the
 /// same name: `clouduler init` mints a fresh id for the new instance, so the
 /// old instance's tombstone (keyed by id, not name) never blocks it, and
@@ -2192,6 +2291,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         // below: the harness assigns `web.app.0` above, so there is a real
         // item to prove the row shape against.
         ("updates", "/api/updates"),
+        ("nodeConnectivity", "/api/nodes/connectivity"),
     ] {
         let resp = h
             .router
