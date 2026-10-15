@@ -252,6 +252,10 @@ export const api = {
   // progress is watched through the instance list (`pulling` -> `running`).
   applyUpdates: (instances?: string[]) => post<AcceptedUpdates>('/api/updates/apply', { instances: instances ?? [] }),
 
+  // Admin-only: the path a CI job POSTs to in order to update a stack's containers.
+  stackUpdateWebhook: (name: string) =>
+    get<{ path: string }>(`/api/stacks/${encodeURIComponent(name)}/update-webhook`),
+
   // registry accounts. The password is write-only: there is no getter for it,
   // and `listRegistries` returns only the server and username.
   listRegistries: () => get<RegistryAccount[]>('/api/registries'),

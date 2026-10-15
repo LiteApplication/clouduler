@@ -406,6 +406,50 @@ export function StackDetail() {
   );
 }
 
+function UpdateWebhook({ name }: { name: string }) {
+  const [path, setPath] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    api
+      .stackUpdateWebhook(name)
+      .then((r) => setPath(r.path))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [name]);
+
+  if (error) return <p className="muted">{error}</p>;
+  if (!path) return null;
+  const url = `${window.location.origin}${path}`;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      alert('failed to copy to clipboard');
+    }
+  };
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h2>
+          <Icon name="key" /> Update webhook
+        </h2>
+      </div>
+      <p className="page-sub">
+        POST to this URL from a CI job to pull and restart every container of this stack. Anyone holding the URL can
+        trigger an update, so keep it secret.
+      </p>
+      <div className="flex-row">
+        <input type="text" readOnly className="mono" value={url} style={{ flex: 1 }} onFocus={(e) => e.target.select()} />
+        <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+      </div>
+      <pre className="mono">curl -fsS -X POST '{url}'</pre>
+    </div>
+  );
+}
+
 function StackDetailBody({
   name,
   stack,
@@ -520,6 +564,8 @@ function StackDetailBody({
           <span className="stat-value">{stack.used_secrets.length}</span>
         </div>
       </div>
+
+      {isAdmin && <UpdateWebhook name={name} />}
 
       <div className="section">
         <div className="section-head">

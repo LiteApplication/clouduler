@@ -318,11 +318,11 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
 }
 
 #[derive(Deserialize, Default)]
-struct InstanceSelection {
+pub(crate) struct InstanceSelection {
     /// Instances to act on. Empty or absent means "every instance this action
     /// applies to", which is what the view's bulk buttons send.
     #[serde(default)]
-    instances: Vec<String>,
+    pub(crate) instances: Vec<String>,
 }
 
 /// Outcome per instance, so a partial failure is legible rather than the
@@ -388,7 +388,7 @@ async fn pin(
 
 /// What `apply` took on. The work itself outlives the request.
 #[derive(Serialize)]
-struct Accepted {
+pub(crate) struct Accepted {
     accepted: Vec<String>,
 }
 
@@ -444,7 +444,7 @@ async fn apply_internal(
     Ok(apply_selection(&state, selection).await)
 }
 
-async fn apply_selection(
+pub(crate) async fn apply_selection(
     state: &AppState,
     selection: InstanceSelection,
 ) -> (StatusCode, Json<Accepted>) {

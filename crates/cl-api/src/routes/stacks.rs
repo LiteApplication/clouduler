@@ -20,6 +20,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/stacks", get(list))
         .route("/api/stacks/{name}", get(detail).put(deploy).delete(remove))
         .route("/api/stacks/{name}/validate", post(validate))
+        .route("/api/stacks/{name}/update-webhook", get(update_webhook_url))
+        // Public, authenticated by the token in the path (see `webhook_token`).
+        .route("/api/stacks/{name}/update-webhook/{token}", post(update_webhook))
 }
 
 #[derive(Serialize)]
@@ -405,4 +408,76 @@ pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> 
             per_service: BTreeMap::new(),
         },
     }
+}
+
+/// The per-stack token a CI job presents. Derived from the cluster key rather
+/// than stored, so there is nothing to replicate and every node agrees; the
+/// cost is that it can only be revoked by deleting the stack or rotating the
+/// cluster key.
+async fn webhook_token(state: &AppState, stack: &str) -> Result<String, ApiError> {
+    let key_guard = state.key.read().await;
+    let key = key_guard
+        .as_ref()
+        .ok_or_else(|| ApiError::Unavailable("this node holds no cluster key".into()))?;
+    Ok(cl_secret::internal_auth::sign(
+        key,
+        &format!("stack-update-webhook:{stack}"),
+    ))
+}
+
+#[derive(Serialize)]
+struct UpdateWebhook {
+    /// Path to POST to; the caller prepends the cluster's public origin.
+    path: String,
+}
+
+async fn update_webhook_url(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<UpdateWebhook>, ApiError> {
+    if !state.cluster.state().await.stacks.contains_key(&name) {
+        return Err(ApiError::NotFound(format!("no stack {name}")));
+    }
+    let token = webhook_token(&state, &name).await?;
+    Ok(Json(UpdateWebhook {
+        path: format!("/api/stacks/{name}/update-webhook/{token}"),
+    }))
+}
+
+/// Pulls and restarts every instance of the stack, the same rolling update
+/// the Updates view starts. Answers 202 once the work is queued.
+async fn update_webhook(
+    State(state): State<AppState>,
+    Path((name, token)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<super::updates::Accepted>), ApiError> {
+    let expected = webhook_token(&state, &name).await?;
+    let ok = expected.len() == token.len()
+        && expected
+            .bytes()
+            .zip(token.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+    if !ok {
+        return Err(ApiError::Unauthenticated("bad webhook token".into()));
+    }
+    let cluster_state = state.cluster.state().await;
+    if !cluster_state.stacks.contains_key(&name) {
+        return Err(ApiError::NotFound(format!("no stack {name}")));
+    }
+    let instances: Vec<String> = cluster_state
+        .assignments
+        .keys()
+        .filter(|i| i.stack == name)
+        .map(|i| i.to_string())
+        .collect();
+    drop(cluster_state);
+    if instances.is_empty() {
+        return Err(ApiError::NotFound(format!("stack {name} has no instances")));
+    }
+    Ok(super::updates::apply_selection(
+        &state,
+        super::updates::InstanceSelection { instances },
+    )
+    .await)
 }
