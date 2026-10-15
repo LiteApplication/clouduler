@@ -49,6 +49,10 @@ pub fn throwaway_key() -> KeyWatch {
     fixed_key(Arc::new(ClusterKey::generate()))
 }
 
+/// How long a detached raft exchange may run before it is abandoned. Far above
+/// raft's own deadlines, which only bound how long raft waits, not the work.
+const DETACHED_CALL_LIMIT: Duration = Duration::from_secs(10);
+
 type NetError<E = RaftError<NodeId>> = RPCError<NodeId, BasicNode, E>;
 
 /// Hands raft a client per peer. Connections are cached and reopened lazily,
@@ -109,20 +113,18 @@ impl Peer {
         Self::new(addr.to_string(), keys)
     }
 
-    /// Drop the cached connection, if any, without waiting on whatever
-    /// in-flight exchange might still be holding it.
-    ///
-    /// Must be called whenever a caller gives up on a request via its own
-    /// deadline (see `Channel::call`) rather than a real socket error: `call`
-    /// pairs requests and responses purely by send-then-read order on one
-    /// shared socket, so if a caller stops waiting mid-exchange the request
-    /// it sent is still in flight and its response is still coming — read by
-    /// this same connection later, it would be handed to a completely
-    /// unrelated call as its answer. Forcing a reconnect here throws that
-    /// stale response away with the old socket instead of letting it
-    /// desynchronize every future exchange on this peer.
-    async fn invalidate(&self) {
-        *self.conn.lock().await = None;
+    /// `call` with an upper bound, for callers that run it detached and so
+    /// cannot rely on a caller's deadline to stop a dead peer holding the
+    /// connection lock.
+    async fn call_bounded(&self, request: &RpcRequest) -> Result<RpcResponse, std::io::Error> {
+        tokio::time::timeout(DETACHED_CALL_LIMIT, self.call(request))
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "rpc exchange timed out",
+                ))
+            })
     }
 
     /// Send one request, reconnecting once if the cached socket is stale.
@@ -203,17 +205,21 @@ impl Channel {
     where
         E: std::error::Error,
     {
-        match tokio::time::timeout(deadline, self.peer.call(&request)).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(e)) => Err(RPCError::Unreachable(Unreachable::new(&e))),
-            Err(elapsed) => {
-                // The request we just sent is still in flight on that socket
-                // with no one left reading its response; see `invalidate`'s
-                // doc comment for why the cached connection can't be reused
-                // as-is after this.
-                self.peer.invalidate().await;
-                Err(RPCError::Unreachable(Unreachable::new(&elapsed)))
-            }
+        // The exchange runs detached so a deadline only stops us waiting for
+        // it. Cancelling it mid connect would restart the TCP and auth
+        // handshake from scratch on the next attempt, so one lost SYN (a
+        // one second retransmit) would make every attempt miss its deadline
+        // and keep the peer in raft's growing backoff. Left to finish, the
+        // slow connection is cached and the next heartbeat finds it ready,
+        // and since the task consumes its own response a late answer can
+        // never be read by an unrelated call.
+        let peer = self.peer.clone();
+        let task = tokio::spawn(async move { peer.call_bounded(&request).await });
+        match tokio::time::timeout(deadline, task).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Ok(Ok(Err(e))) => Err(RPCError::Unreachable(Unreachable::new(&e))),
+            Ok(Err(join)) => Err(RPCError::Unreachable(Unreachable::new(&join))),
+            Err(elapsed) => Err(RPCError::Unreachable(Unreachable::new(&elapsed))),
         }
     }
 
@@ -280,8 +286,8 @@ impl RaftNetwork<TypeConfig> for Channel {
     /// all. Grow it so a long-downed node quiets down instead of logging a
     /// warn+error pair on every heartbeat forever.
     fn backoff(&self) -> Backoff {
-        let schedule = [1, 2, 5, 10, 30].into_iter().map(Duration::from_secs);
-        Backoff::new(schedule.chain(std::iter::repeat(Duration::from_secs(30))))
+        let schedule = [1, 1, 2, 5].into_iter().map(Duration::from_secs);
+        Backoff::new(schedule.chain(std::iter::repeat(Duration::from_secs(5))))
     }
 }
 
