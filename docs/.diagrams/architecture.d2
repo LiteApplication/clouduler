@@ -1,0 +1,38 @@
+direction: right
+client: Operator / AI client {shape: person}
+client -> n1.api: "HTTPS :8443\nUI, REST, /mcp"
+internet: Internet {shape: cloud}
+internet -> n1.proxy: "HTTP/HTTPS :80/:443"
+cf: Cloudflare {shape: cloud}
+n1.dns -> cf: "DNS records + ACME DNS-01"
+n1: Node n1 (manager) {
+  api: "API + web UI"
+  proxy: "reverse proxy"
+  dns: "DNS / ACME"
+  raft: "raft + redb database"
+  sched: "scheduler"
+  docker: "Docker"
+  key: "secrets.key" {shape: page}
+  api -> raft
+  sched -> raft: "reads desired state"
+  sched -> docker: "start / stop"
+  proxy -> docker
+  raft -> key: "secrets sealed with" {style.stroke-dash: 4}
+}
+n2: Node n2 (manager) {
+  raft: "raft + redb"
+  sched: scheduler
+  docker: Docker
+  sched -> docker
+  sched -> raft
+}
+n3: Node n3 (worker) {
+  raft: "read-only replica"
+  sched: scheduler
+  docker: Docker
+  sched -> docker
+  sched -> raft
+}
+n1.raft <-> n2.raft: "internal network\nraft RPC :7373" {style.bold: true}
+n1.raft <-> n3.raft: replication
+n2.raft <-> n3.raft: replication

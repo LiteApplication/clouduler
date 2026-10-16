@@ -1,0 +1,13 @@
+direction: right
+u: "clouduler stack deploy\nor web UI" {shape: person}
+any: "Any node"
+leader: "Raft leader"
+all: "Every node" {
+  state: "replicated state"
+  sched: "scheduler reconcile"
+  docker: "Docker"
+  state -> sched -> docker: "place, pull pinned image, start"
+}
+u -> any: "stack yaml (secrets sealed locally)"
+any -> leader: "forward write"
+leader -> all.state: "majority commit, apply in order"

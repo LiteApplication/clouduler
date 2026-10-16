@@ -1,0 +1,11 @@
+direction: right
+ok: "node healthy"
+lost: "quorum / node unreachable"
+lost -> fence: "no quorum > fence_timeout (15s)"
+fence: "node stops its own containers"
+lost -> resched: "unreachable > node_timeout (30s)"
+resched: "leader marks node unreachable,\nscheduler places instances elsewhere"
+ok -> lost
+fence -> resched: "must finish first" {style.stroke-dash: 4}
+back: "quorum returns: containers restart"
+fence -> back

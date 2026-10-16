@@ -1,0 +1,9 @@
+shape: sequence_diagram
+new: "new node"
+seed: "existing node"
+new -> seed: "GET /api/config (admin key)"
+seed -> new: "cluster config"
+new -> seed: "PUT /api/config (adds itself)"
+new -> seed: "POST /api/config/confirm"
+new -> seed: "POST /api/secrets/key/wrap (node public key)"
+seed -> new: "cluster key wrapped for that key"
