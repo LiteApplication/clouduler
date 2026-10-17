@@ -131,13 +131,24 @@ impl Peer {
     pub async fn call(&self, request: &RpcRequest) -> Result<RpcResponse, std::io::Error> {
         let mut guard = self.conn.lock().await;
 
-        if guard.is_some() {
-            match Self::exchange(guard.as_mut().expect("checked"), request).await {
-                Ok(response) => return Ok(response),
-                // A peer that restarted leaves us holding a dead socket. Drop it
-                // and try once more before giving up.
-                Err(_) => *guard = None,
+        // Take the socket out while it is in use and only put it back once the
+        // exchange completed. If this future is cancelled mid exchange (the
+        // detached call limit, or a caller's timeout) the socket is dropped
+        // with it; leaving it cached would keep an unread reply on it, and
+        // since replies are not tagged every later call would read the answer
+        // to the one before.
+        if let Some(mut conn) = guard.take() {
+            // A reply of the wrong kind means the socket is out of step with
+            // us (a stale answer is queued ahead of the real one), so it is
+            // dropped like a dead one rather than trusted for another call.
+            if let Ok(response) = Self::exchange(&mut conn, request).await {
+                if reply_fits(request, &response) {
+                    *guard = Some(conn);
+                    return Ok(response);
+                }
             }
+            // Otherwise a peer that restarted left us a dead socket. Drop it
+            // and try once more on a fresh one.
         }
 
         // No key means we cannot prove membership, and the listener would
@@ -291,6 +302,22 @@ impl RaftNetwork<TypeConfig> for Channel {
     }
 }
 
+/// Whether `response` is a possible answer to `request`. Replies are not
+/// tagged, so this is the only way to notice a socket that has fallen out of
+/// step. `Error` answers anything.
+fn reply_fits(request: &RpcRequest, response: &RpcResponse) -> bool {
+    matches!(
+        (request, response),
+        (_, RpcResponse::Error(_))
+            | (RpcRequest::AppendEntries(_), RpcResponse::AppendEntries(_))
+            | (RpcRequest::InstallSnapshot(_), RpcResponse::InstallSnapshot(_))
+            | (RpcRequest::Vote(_), RpcResponse::Vote(_))
+            | (RpcRequest::Forward(_), RpcResponse::Forward(_))
+            | (RpcRequest::Query(_), RpcResponse::Query(_))
+            | (RpcRequest::Ping, RpcResponse::Pong)
+    )
+}
+
 /// Probe a peer's liveness. Used by the leader's failure detector.
 pub async fn ping(peer: &Peer) -> bool {
     matches!(peer.call(&RpcRequest::Ping).await, Ok(RpcResponse::Pong))
@@ -303,5 +330,46 @@ pub async fn forward(peer: &Peer, request: StateRequest) -> Result<StateResponse
         Ok(RpcResponse::Error(msg)) => Err(msg),
         Ok(other) => Err(format!("unexpected reply {other:?}")),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn a_cancelled_exchange_does_not_leave_a_poisoned_socket_cached() {
+        // A peer that accepts and reads but never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1024];
+            while s.read(&mut buf).await.map(|n| n > 0).unwrap_or(false) {}
+        });
+
+        let peer = Peer::connect(&addr.to_string(), throwaway_key());
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        *peer.conn.lock().await = Some(frame(stream));
+
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(100), peer.call(&RpcRequest::Ping)).await;
+        assert!(outcome.is_err(), "the silent peer should time the call out");
+        assert!(
+            peer.conn.lock().await.is_none(),
+            "a cancelled exchange must not leave its socket cached"
+        );
+    }
+
+    #[test]
+    fn only_the_matching_reply_kind_fits() {
+        assert!(reply_fits(&RpcRequest::Ping, &RpcResponse::Pong));
+        assert!(reply_fits(&RpcRequest::Ping, &RpcResponse::Error("x".into())));
+        assert!(!reply_fits(
+            &RpcRequest::Ping,
+            &RpcResponse::Forward(Err("stale".into()))
+        ));
     }
 }
