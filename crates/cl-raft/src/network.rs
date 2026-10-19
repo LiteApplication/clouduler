@@ -310,7 +310,10 @@ fn reply_fits(request: &RpcRequest, response: &RpcResponse) -> bool {
         (request, response),
         (_, RpcResponse::Error(_))
             | (RpcRequest::AppendEntries(_), RpcResponse::AppendEntries(_))
-            | (RpcRequest::InstallSnapshot(_), RpcResponse::InstallSnapshot(_))
+            | (
+                RpcRequest::InstallSnapshot(_),
+                RpcResponse::InstallSnapshot(_)
+            )
             | (RpcRequest::Vote(_), RpcResponse::Vote(_))
             | (RpcRequest::Forward(_), RpcResponse::Forward(_))
             | (RpcRequest::Query(_), RpcResponse::Query(_))
@@ -366,7 +369,10 @@ mod tests {
     #[test]
     fn only_the_matching_reply_kind_fits() {
         assert!(reply_fits(&RpcRequest::Ping, &RpcResponse::Pong));
-        assert!(reply_fits(&RpcRequest::Ping, &RpcResponse::Error("x".into())));
+        assert!(reply_fits(
+            &RpcRequest::Ping,
+            &RpcResponse::Error("x".into())
+        ));
         assert!(!reply_fits(
             &RpcRequest::Ping,
             &RpcResponse::Forward(Err("stale".into()))

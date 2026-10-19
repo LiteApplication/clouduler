@@ -26,7 +26,10 @@ pub fn router() -> Router<AppState> {
             post(regenerate_update_webhook),
         )
         // Public, authenticated by the token in the path (see `webhook_token`).
-        .route("/api/stacks/{name}/update-webhook/{token}", post(update_webhook))
+        .route(
+            "/api/stacks/{name}/update-webhook/{token}",
+            post(update_webhook),
+        )
 }
 
 #[derive(Serialize)]
@@ -523,11 +526,11 @@ async fn update_webhook(
         .await
         .is_some_and(|expected| {
             expected.len() == token.len()
-        && expected
-            .bytes()
-            .zip(token.bytes())
+                && expected
+                    .bytes()
+                    .zip(token.bytes())
                     .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                == 0
+                    == 0
         });
     if !ok {
         return Err(ApiError::Unauthenticated("bad webhook token".into()));
@@ -546,9 +549,8 @@ async fn update_webhook(
     if instances.is_empty() {
         return Err(ApiError::NotFound(format!("stack {name} has no instances")));
     }
-    Ok(super::updates::apply_selection(
-        &state,
-        super::updates::InstanceSelection { instances },
+    Ok(
+        super::updates::apply_selection(&state, super::updates::InstanceSelection { instances })
+            .await,
     )
-    .await)
 }

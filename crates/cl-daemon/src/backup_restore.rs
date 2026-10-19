@@ -1422,7 +1422,7 @@ mod tests {
                 replicas: Default::default(),
                 frozen: None,
                 sync_refused: None,
-            looks_empty: false,
+                looks_empty: false,
             },
         );
         state

@@ -2021,7 +2021,9 @@ impl ClusterState {
                     return Err("a whole-drive mount is not a volume that can be deleted".into());
                 }
                 if !volume.looks_empty {
-                    return Err(format!("{id} is not flagged as empty, so it is not deleted"));
+                    return Err(format!(
+                        "{id} is not flagged as empty, so it is not deleted"
+                    ));
                 }
                 if volume.frozen.is_some() {
                     return Err(format!("{id} is frozen"));
@@ -3694,7 +3696,9 @@ mod tests {
             id: id.clone(),
             empty: true,
         });
-        assert!(state.apply(&Request::RemoveVolume { id: id.clone() }).is_ok());
+        assert!(state
+            .apply(&Request::RemoveVolume { id: id.clone() })
+            .is_ok());
         assert!(!state.volumes.contains_key(&id));
         let pending = state.volume_removals[&id].clone();
         assert!(pending.contains("n1"));

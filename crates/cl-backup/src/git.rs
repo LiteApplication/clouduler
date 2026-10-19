@@ -7,7 +7,7 @@
 //! repo for a one-shot offline operation.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -382,6 +382,39 @@ impl GitBackup {
         }
     }
 
+    /// Seeds `cache` with the secret ciphertexts the remote tip already holds,
+    /// so a node with no local cache (a fresh leader) reuses them rather than
+    /// re-encrypting - age output differs every time, so that would commit
+    /// every secret again with identical content. Best effort: anything
+    /// missing or unreadable just means those secrets get re-encrypted.
+    pub fn seed_secret_cache(
+        &self,
+        cache: &mut crate::tree::SecretCache,
+        private_key_pem: &str,
+    ) -> Result<()> {
+        let Some(tip) = self.fetch_remote_tip(private_key_pem)? else {
+            return Ok(());
+        };
+        let tree = self.repo.find_commit(tip)?.tree()?;
+        let blob = |path: &str| -> Option<Vec<u8>> {
+            let entry = tree.get_path(Path::new(path)).ok()?;
+            let blob = entry.to_object(&self.repo).ok()?.into_blob().ok()?;
+            Some(blob.content().to_vec())
+        };
+        let Some(raw) = blob(crate::tree::SECRET_REVISIONS_PATH) else {
+            return Ok(());
+        };
+        let Ok(revisions) = serde_json::from_slice::<BTreeMap<String, u64>>(&raw) else {
+            return Ok(());
+        };
+        for (name, revision) in revisions {
+            if let Some(ciphertext) = blob(&format!("secrets/{name}.age")) {
+                cache.seed(name, revision, ciphertext);
+            }
+        }
+        Ok(())
+    }
+
     /// Moves the local tracked branch ref to `oid` — used only as a push
     /// handle, not as a "known good" baseline.
     pub fn advance_local_ref(&self, oid: git2::Oid) -> Result<()> {
@@ -537,6 +570,7 @@ pub fn build_git_tree_on_parent(
             let _ = builder.remove("stacks");
             let _ = builder.remove("configs");
             let _ = builder.remove("secrets");
+            let _ = builder.remove(crate::tree::SECRET_REVISIONS_PATH);
             builder
         }
         None => repo.treebuilder(None)?,
@@ -921,6 +955,31 @@ mod tests {
             .expect("sync")
             .expect("a real commit");
         (backup, oid, local_dir)
+    }
+
+    #[test]
+    fn a_fresh_leader_reuses_the_ciphertext_already_committed() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let files = vec![
+            TreeFile {
+                path: "secrets/db.age".to_string(),
+                contents: b"ciphertext-v1".to_vec(),
+            },
+            TreeFile {
+                path: crate::tree::SECRET_REVISIONS_PATH.to_string(),
+                contents: br#"{"db": 4}"#.to_vec(),
+            },
+        ];
+        let (_first, _oid, _local) = seeded_backup(&bare_dir, &files);
+
+        let local_dir = tempfile::tempdir().expect("local tempdir");
+        let repo_url = format!("file://{}", bare_dir.path().display());
+        let fresh = GitBackup::open_or_init(local_dir.path(), &repo_url, "main").expect("open");
+        let mut cache = crate::tree::SecretCache::new();
+        fresh
+            .seed_secret_cache(&mut cache, "not-a-real-key")
+            .expect("seed");
+        assert_eq!(cache.0.get("db"), Some(&(4, b"ciphertext-v1".to_vec())),);
     }
 
     #[test]

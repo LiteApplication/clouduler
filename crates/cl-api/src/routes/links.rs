@@ -139,8 +139,7 @@ pub(crate) async fn collect(state: &AppState) -> Connectivity {
                 // Already known down: do not pay the fetch timeout on every poll.
                 None
             } else {
-                match internal_peer::fetch_json::<NodeLinks>(state, name, INTERNAL_LINKS_PATH)
-                    .await
+                match internal_peer::fetch_json::<NodeLinks>(state, name, INTERNAL_LINKS_PATH).await
                 {
                     Ok(report) => Some(report.links),
                     Err(e) => {

@@ -45,13 +45,26 @@ pub struct TreeFile {
 /// starting empty after a restart just means the next tick's export
 /// re-encrypts everything once, same as today.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SecretCache(BTreeMap<String, (u64, Vec<u8>)>);
+pub struct SecretCache(pub(crate) BTreeMap<String, (u64, Vec<u8>)>);
 
 impl SecretCache {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Records a ciphertext already committed to the repo for `revision`.
+    /// The repo is the truth for what is committed, so this overrides any
+    /// local entry: a node that was leader earlier may hold an older one.
+    pub fn seed(&mut self, name: String, revision: u64, ciphertext: Vec<u8>) {
+        self.0.insert(name, (revision, ciphertext));
+    }
 }
+
+/// Root-level file recording the raft revision each `secrets/<name>.age` was
+/// encrypted from (`{"name": revision}`). It is what lets a node that just
+/// became leader, with no local `SecretCache`, reuse the committed
+/// ciphertexts instead of re-encrypting every secret into a spurious commit.
+pub const SECRET_REVISIONS_PATH: &str = ".clouduler-secret-revisions.json";
 
 /// Builds the full working-tree file set for the current state. A secret
 /// this node's `ClusterKey` cannot open is skipped (logged, not fatal) —
@@ -135,6 +148,23 @@ pub fn build(
         });
     }
     cache.0.retain(|name, _| state.secrets.contains_key(name));
+
+    let revisions: BTreeMap<&str, u64> = state
+        .secrets
+        .keys()
+        .filter(|name| {
+            files
+                .iter()
+                .any(|f| f.path == format!("secrets/{name}.age"))
+        })
+        .filter_map(|name| cache.0.get(name).map(|(rev, _)| (name.as_str(), *rev)))
+        .collect();
+    if !revisions.is_empty() {
+        files.push(TreeFile {
+            path: SECRET_REVISIONS_PATH.to_string(),
+            contents: serde_json::to_vec_pretty(&revisions).expect("revisions serialize"),
+        });
+    }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
@@ -334,6 +364,7 @@ mod tests {
         assert_eq!(
             paths,
             vec![
+                ".clouduler-secret-revisions.json",
                 "cluster.yaml",
                 "configs/nginx.conf",
                 "secrets/db-password.age",

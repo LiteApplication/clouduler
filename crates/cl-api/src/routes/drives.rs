@@ -206,15 +206,18 @@ async fn inspect_volume(
         .clone()
         .ok_or_else(|| ApiError::Conflict("this node does not hold the cluster key".into()))?;
     let peer = std::net::SocketAddr::new(addr.ip(), cl_drive::drive_port(addr.port()));
-    let manifest = cl_drive::transport::request_manifest(peer, &id, false, &cl_raft::fixed_key(key))
-        .await
-        .map_err(|e| ApiError::Conflict(format!("asking {source} about {id}: {e}")))?;
+    let manifest =
+        cl_drive::transport::request_manifest(peer, &id, false, &cl_raft::fixed_key(key))
+            .await
+            .map_err(|e| ApiError::Conflict(format!("asking {source} about {id}: {e}")))?;
     let regular = || manifest.files.values().filter(|f| !f.is_symlink);
     Ok(Json(VolumeInspection {
         node: source,
         files: manifest.files.len(),
         bytes: regular().map(|f| f.size).sum(),
-        newest_file_at: regular().map(|f| f.mtime_nanos.div_euclid(1_000_000_000)).max(),
+        newest_file_at: regular()
+            .map(|f| f.mtime_nanos.div_euclid(1_000_000_000))
+            .max(),
     }))
 }
 

@@ -730,7 +730,9 @@ mod tests {
             hash: None,
         };
         scan::Manifest {
-            files: (0..files).map(|i| (format!("f{i}"), meta.clone())).collect(),
+            files: (0..files)
+                .map(|i| (format!("f{i}"), meta.clone()))
+                .collect(),
             ..Default::default()
         }
     }

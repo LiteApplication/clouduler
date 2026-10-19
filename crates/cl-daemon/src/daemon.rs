@@ -1008,9 +1008,13 @@ fn run_git_export(
     // Pulls and reconciles open the same on-disk repo from other tasks.
     let _repo_guard = cl_backup::git::lock_repo();
 
-    let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
     let repo =
         cl_backup::git::GitBackup::open_or_init(dir, &backup_cfg.repo_url, &backup_cfg.branch)?;
+    // A fresh leader has no local cache; reuse what the remote already holds.
+    if let Err(e) = repo.seed_secret_cache(secret_cache, &private_key_pem) {
+        tracing::warn!(error = %e, "git backup: could not read committed secrets from the remote");
+    }
+    let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
     let oid = repo.sync(&files, message, &private_key_pem, None)?;
     Ok(oid.map(|oid| oid.to_string()))
 }

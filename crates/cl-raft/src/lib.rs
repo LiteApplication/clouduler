@@ -29,6 +29,7 @@ pub use state::{
     base64_decode, base64_encode, dns_key, instances_using_volume, Assignment, Availability,
     CertificateState, ClusterConfigEntry, ClusterState, ConfigEntry, DesiredState, DnsRecordState,
     InstanceUpdate, Migration, MigrationPhase, NodeState, PortProtocol, ReconcileStatus, Request,
-    Response, Role, SecretEntry, StackState, SyncRefusal, UpdatePhase, VolumeState, MAX_OBJECT_BYTES,
+    Response, Role, SecretEntry, StackState, SyncRefusal, UpdatePhase, VolumeState,
+    MAX_OBJECT_BYTES,
 };
 pub use store::Store;

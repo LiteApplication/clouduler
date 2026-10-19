@@ -316,31 +316,32 @@ async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
 
     let cache_path = state.data_dir.join("git_backup_cache.json");
     let mut cache_state = cl_backup::cache_state::CacheState::load(&cache_path);
-    let files = cl_backup::tree::build(
-        &cluster_state,
-        &key,
-        &recipient,
-        &mut cache_state.secret_cache,
-    );
-
     let dir = state.data_dir.join("git-backup");
-    let commit_oid = tokio::task::spawn_blocking(move || {
+    let cluster_state_for_build = cluster_state.clone();
+    let mut secret_cache = std::mem::take(&mut cache_state.secret_cache);
+    let (commit_oid, secret_cache) = tokio::task::spawn_blocking(move || {
         let _repo_guard = cl_backup::git::lock_repo();
         let backup = cl_backup::git::GitBackup::open_or_init(
             &dir,
             &backup_cfg.repo_url,
             &backup_cfg.branch,
         )?;
-        backup.reconcile(
+        if let Err(e) = backup.seed_secret_cache(&mut secret_cache, &private_key_pem) {
+            tracing::warn!(error = %e, "git backup: could not read committed secrets from the remote");
+        }
+        let files = cl_backup::tree::build(&cluster_state_for_build, &key, &recipient, &mut secret_cache);
+        let oid = backup.reconcile(
             &files,
             "reconcile: mirror cluster state",
             &private_key_pem,
             None,
-        )
+        )?;
+        Ok::<_, cl_backup::error::BackupError>((oid, secret_cache))
     })
     .await
     .map_err(ApiError::internal)?
     .map_err(ApiError::internal)?;
+    cache_state.secret_cache = secret_cache;
 
     cache_state.last_snapshot = Some(cl_backup::snapshot::Snapshot::from_state(&cluster_state));
     if let Err(e) = cache_state.save(&cache_path) {
