@@ -23,6 +23,7 @@ impl StackFile {
         self.validate_stop_grace_periods()?;
         self.validate_colocate()?;
         self.validate_writable_secrets()?;
+        self.validate_single_config_writer()?;
         self.validate_replicas()?;
         self.validate_memory_sizes()?;
         Ok(())
@@ -82,6 +83,44 @@ impl StackFile {
                         format!("services.{name}.secrets[{idx}]"),
                         "write is not allowed on a secret, only on a config",
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A `write: true` config is copied per instance, and every copy's edits
+    /// are fed back into the one cluster object. Two writers (two services, or
+    /// several replicas of one) edit from copies that drift apart and replace
+    /// each other's changes, so only a single instance may hold it writable;
+    /// everything else mounts it read-only.
+    fn validate_single_config_writer(&self) -> Result<()> {
+        let mut writers: BTreeMap<&str, &str> = BTreeMap::new();
+        for (name, svc) in &self.services {
+            let replicas = svc.deploy.as_ref().and_then(|d| d.replicas).unwrap_or(1);
+            for (idx, config) in svc.configs.iter().enumerate().filter(|(_, c)| c.write) {
+                let field = format!("services.{name}.configs[{idx}]");
+                if replicas > 1 {
+                    return Err(ConfigError::invalid(
+                        field,
+                        format!(
+                            "{} is writable but this service runs {replicas} replicas; \
+                             only one instance may write a config",
+                            config.source
+                        ),
+                    ));
+                }
+                if let Some(other) = writers.insert(config.source.as_str(), name.as_str()) {
+                    if other != name {
+                        return Err(ConfigError::invalid(
+                            field,
+                            format!(
+                                "{} is already writable in service {other}; \
+                                 mount it read-only here so there is a single writer",
+                                config.source
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1143,6 +1182,27 @@ services:
     fn a_writable_config_is_accepted() {
         let raw = "services:\n  a:\n    image: x\n    configs:\n      - source: nginx_conf\n        write: true\n";
         StackFile::parse(raw).expect("a writable config is fine");
+    }
+
+    #[test]
+    fn two_services_may_not_both_write_one_config() {
+        let raw = "services:\n  a:\n    image: x\n    configs:\n      - source: app_conf\n        write: true\n  b:\n    image: x\n    configs:\n      - source: app_conf\n        write: true\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("services.b.configs[0]"));
+        assert!(err.to_string().contains("single writer"));
+    }
+
+    #[test]
+    fn one_writer_and_a_read_only_reader_is_fine() {
+        let raw = "services:\n  a:\n    image: x\n    configs:\n      - source: app_conf\n        write: true\n  b:\n    image: x\n    configs:\n      - source: app_conf\n";
+        StackFile::parse(raw).expect("one writer, one reader");
+    }
+
+    #[test]
+    fn a_replicated_service_may_not_write_a_config() {
+        let raw = "services:\n  a:\n    image: x\n    deploy:\n      replicas: 2\n    configs:\n      - source: app_conf\n        write: true\n";
+        let err = StackFile::parse(raw).unwrap_err();
+        assert!(err.to_string().contains("2 replicas"));
     }
 
     #[test]

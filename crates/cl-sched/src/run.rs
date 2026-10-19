@@ -409,10 +409,14 @@ impl Scheduler {
         // `submit` forwards to the leader on its own, so this runs the same
         // way whether or not this node happens to be it.
         for edit in config_edits {
-            let request = Request::PutConfig {
+            // Compare-and-set against the revision the container edited from:
+            // a second writer on the same config must not replace the first
+            // one's newer change with a copy it never saw.
+            let request = Request::PutConfigCas {
                 name: edit.name.clone(),
                 content: base64_encode(&edit.content),
                 owner: edit.owner,
+                expect_revision: edit.base_revision,
             };
             match self.cluster.submit(request).await {
                 Ok(response) => {

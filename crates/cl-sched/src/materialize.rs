@@ -60,6 +60,10 @@ pub struct ConfigEdit {
     pub name: String,
     pub owner: Option<String>,
     pub content: Vec<u8>,
+    /// The cluster revision the container started editing from. The write-back
+    /// must be refused if the config has moved past it, or it would silently
+    /// replace someone else's newer change.
+    pub base_revision: u64,
 }
 
 /// What an instance's configs and secrets resolve to: files to bind mount,
@@ -155,6 +159,7 @@ impl Materializer {
                         name: reference.source.clone(),
                         owner: entry.owner.clone(),
                         content: edit,
+                        base_revision: entry.revision,
                     });
                 }
                 continue;
@@ -294,13 +299,62 @@ impl Materializer {
             return Ok(None);
         }
 
-        let m = self.write_object(dir, reference, content, container_path, false, revision)?;
+        // Overwriting a file the container edited and nobody accepted (the
+        // cluster moved on first, or the write-back was refused as stale)
+        // would lose that edit without a trace. Keep it beside the file.
+        let base_path = host_path.with_extension("base");
+        if let (Ok(disk), Ok(base)) = (std::fs::read(&host_path), std::fs::read(&base_path)) {
+            if disk != base && disk != content {
+                let kept = host_path.with_extension("conflict");
+                write_private(&kept, &disk, false)?;
+                tracing::warn!(
+                    config = %reference.source,
+                    saved = %kept.display(),
+                    "overwriting a container's unsent edit to a config; its version was kept"
+                );
+            }
+        }
+
+        let m = self.write_in_place(dir, reference, content, container_path, revision)?;
+        write_private(&base_path, content, false)?;
         write_private(&rev_path, revision.to_string().as_bytes(), false)?;
         out.push(Materialized {
             writable: true,
             ..m
         });
         Ok(None)
+    }
+
+    /// Like `write_object`, but keeps the file's inode when it already exists.
+    ///
+    /// A container bind mounts a single file by inode, so replacing it by
+    /// rename leaves the container holding the old, now unlinked, file: its
+    /// later writes vanish and it never sees the cluster's updates. A writable
+    /// config is rewritten in place instead; the first write still goes
+    /// through the rename so a starting container never sees half a file.
+    fn write_in_place(
+        &self,
+        dir: &Path,
+        reference: &ObjectRef,
+        content: &[u8],
+        container_path: PathBuf,
+        revision: u64,
+    ) -> Result<Materialized> {
+        let host_path = dir.join(&reference.source);
+        if !host_path.exists() {
+            return self.write_object(dir, reference, content, container_path, false, revision);
+        }
+        write_private(&host_path, content, false)?;
+        set_owner(&host_path, reference)?;
+        set_mode(&host_path, reference.mode_or_default())?;
+        Ok(Materialized {
+            host_path,
+            container_path,
+            mode: reference.mode_or_default(),
+            secret: false,
+            revision,
+            writable: false,
+        })
     }
 
     fn write_object(
@@ -933,6 +987,104 @@ mod tests {
             std::fs::read(&first.mounts[0].host_path).expect("read"),
             b"server { listen 8080; }"
         );
+    }
+
+    #[test]
+    fn a_reported_edit_is_refused_once_another_writer_moved_the_config_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let mut state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        let first = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+        std::fs::write(&first.mounts[0].host_path, b"server { listen 8080; }")
+            .expect("simulate edit");
+        let edit = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare again")
+            .config_edits
+            .remove(0);
+        assert_eq!(edit.base_revision, 1);
+
+        // Someone else's write lands before this one is submitted.
+        state.apply(&cl_raft::state::Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"server { listen 9090; }"),
+            owner: None,
+        });
+        let response = state.apply(&cl_raft::state::Request::PutConfigCas {
+            name: edit.name,
+            content: base64_encode(&edit.content),
+            owner: edit.owner,
+            expect_revision: edit.base_revision,
+        });
+        assert!(!response.is_ok());
+        assert_eq!(
+            state.configs["nginx_conf"].decode().expect("decode"),
+            b"server { listen 9090; }"
+        );
+    }
+
+    #[test]
+    fn an_unsent_edit_overwritten_by_a_newer_revision_is_kept_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let mut state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        let first = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+        let host = first.mounts[0].host_path.clone();
+        std::fs::write(&host, b"server { listen 8080; }").expect("simulate edit");
+
+        state.apply(&cl_raft::state::Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"server { listen 9090; }"),
+            owner: None,
+        });
+        m.prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare after the change");
+
+        assert_eq!(
+            std::fs::read(&host).expect("read"),
+            b"server { listen 9090; }"
+        );
+        assert_eq!(
+            std::fs::read(host.with_extension("conflict")).expect("kept"),
+            b"server { listen 8080; }"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_writable_config_keeps_its_inode_when_the_cluster_updates_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ClusterKey::generate();
+        let mut state = state_with_objects(&key);
+
+        let m = Materializer::new(dir.path(), tokio::sync::watch::channel(None).1);
+        let first = m
+            .prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare");
+        let host = first.mounts[0].host_path.clone();
+        let inode = std::fs::metadata(&host).expect("stat").ino();
+
+        state.apply(&cl_raft::state::Request::PutConfig {
+            name: "nginx_conf".into(),
+            content: base64_encode(b"server { listen 9090; }"),
+            owner: None,
+        });
+        m.prepare(&state, &instance(), &[writable("nginx_conf")], &[])
+            .expect("prepare after the change");
+
+        // A container's single-file bind mount follows the inode, so a rename
+        // here would strand it on a file nothing reads any more.
+        assert_eq!(std::fs::metadata(&host).expect("stat").ino(), inode);
     }
 
     #[test]
