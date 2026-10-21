@@ -24,7 +24,7 @@ fn repo_in(dir: &Path) -> ResticRepo {
     fs::write(&password, "pw").unwrap();
     let repo_dir = dir.join("repo");
     let repo = ResticRepo::new(local_repo(&repo_dir), Vec::new(), &password, &[]);
-    repo.init().expect("init");
+    repo.ensure_initialized().expect("init");
     repo
 }
 

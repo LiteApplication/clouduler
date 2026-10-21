@@ -940,9 +940,8 @@ async fn run_restic_backup(
     // restic is a blocking `std::process::Command` - never call it straight
     // off an async fn's stack, see `clouduler-drive-sync-blocks-runtime`.
     let result = tokio::task::spawn_blocking(move || -> Result<BackupRunOutcome> {
-        if !repo.is_initialized() {
-            repo.init().map_err(|e| anyhow!("restic init: {e}"))?;
-        }
+        repo.ensure_initialized()
+            .map_err(|e| anyhow!("restic repository: {e}"))?;
         let mut last_sent = std::time::Instant::now()
             .checked_sub(PROGRESS_REPORT_INTERVAL)
             .unwrap_or_else(std::time::Instant::now);

@@ -84,17 +84,36 @@ impl ResticRepo {
         cmd
     }
 
-    /// Whether the repository has already been initialized, checked with the
-    /// cheapest read restic offers rather than parsing `init`'s failure text.
-    pub fn is_initialized(&self) -> bool {
-        self.command(&["cat", "config"])
+    /// Makes sure the repository exists, creating it only when it really is
+    /// absent. `cat config` is the cheapest read restic offers, but it also
+    /// fails for a wrong password, a permissions or I/O problem, so its
+    /// failure alone must not trigger `init`: on an existing repo that only
+    /// reports "config file already exists" and hides the real cause.
+    pub fn ensure_initialized(&self) -> Result<()> {
+        let output = self
+            .command(&["cat", "config"])
             .output()
-            .is_ok_and(|o| o.status.success())
+            .map_err(ResticError::Io)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let probe = String::from_utf8_lossy(&output.stderr).into_owned();
+        if probe_means_unreadable(&probe) {
+            return Err(ResticError::Failed(probe));
+        }
+        match self.init() {
+            Ok(()) => Ok(()),
+            // Raced another run's `init`, or the probe failed for a reason
+            // we don't recognise: either way the probe's text is the useful
+            // one, and a genuinely usable repo will let the backup proceed.
+            Err(ResticError::Failed(init)) if init.contains("already exists") => {
+                Err(ResticError::Failed(probe))
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    /// Only meaningful when `is_initialized` said no - restic's own `init`
-    /// on an already-initialized repo fails.
-    pub fn init(&self) -> Result<()> {
+    fn init(&self) -> Result<()> {
         run(self.command(&["init"]))
     }
 
@@ -263,6 +282,20 @@ pub fn restore_args(
     Ok(args)
 }
 
+/// Whether a failed `cat config` says the repository is there but cannot be
+/// opened, as opposed to missing.
+fn probe_means_unreadable(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    [
+        "wrong password",
+        "no key found",
+        "permission denied",
+        "input/output error",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn run(mut cmd: Command) -> Result<()> {
     let output = cmd.output().map_err(ResticError::Io)?;
     if !output.status.success() {
@@ -409,5 +442,21 @@ mod tests {
     fn an_unrecognized_line_is_ignored() {
         let line = r#"{"message_type":"verbose_status","action":"unchanged"}"#;
         assert!(parse_backup_line(line).is_none());
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::probe_means_unreadable;
+
+    #[test]
+    fn existing_but_unopenable_repos_are_not_reinitialised() {
+        assert!(probe_means_unreadable(
+            "Fatal: wrong password or no key found"
+        ));
+        assert!(probe_means_unreadable("open config: Permission denied"));
+        assert!(!probe_means_unreadable(
+            "Fatal: unable to open config file: no such file or directory\nIs there a repository at the following location?"
+        ));
     }
 }
