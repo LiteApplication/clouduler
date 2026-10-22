@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -486,28 +487,81 @@ pub fn build_router(state: AppState) -> Router {
 /// Only the leader serves the dashboard: a follower's replicated state can lag
 /// behind, and a client that loaded the page from one node then had requests
 /// bounce between nodes as leadership moved was a worse experience than one
-/// redirect up front. A follower instead sends the browser straight to the
-/// leader's address, where every subsequent asset and api call lands on the
-/// same node the page was actually served from.
+/// hop up front. A follower relays the request to the leader rather than
+/// redirecting to its bare IP address, since the dashboard's hostname may
+/// still resolve to this node while DNS catches up with a leader change.
 async fn serve_ui(State(state): State<AppState>, request: Request) -> Response {
     if state.cluster.is_leader() {
         return ui::serve(request).await;
     }
-    match leader_location(&state).await {
-        Some(leader) => {
-            let target = format!("{}{}", leader.trim_end_matches('/'), request.uri().path());
-            Redirect::temporary(&target).into_response()
-        }
-        None => (
+    relay_to_leader(&state, request).await
+}
+
+/// Largest request body a follower will buffer to relay to the leader.
+const MAX_RELAYED_BODY: usize = 32 * 1024 * 1024;
+
+/// Proxy a request to the leader unchanged (method, path, query, headers and
+/// body) and stream its answer back. The response is not buffered, so event
+/// streams and large assets pass through.
+async fn relay_to_leader(state: &AppState, request: Request) -> Response {
+    let Some(leader) = leader_location(state).await else {
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
             "no cluster leader elected yet",
         )
-            .into_response(),
+            .into_response();
+    };
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_RELAYED_BODY).await else {
+        return ApiError::BadRequest("request body too large".into()).into_response();
+    };
+    let pq = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| parts.uri.path());
+    let url = format!("{}{}", leader.trim_end_matches('/'), pq);
+    let mut req = state.http.request(parts.method.clone(), url).body(bytes);
+    for (name, value) in &parts.headers {
+        // The leader is addressed by ip, and this node's own compression layer
+        // handles encoding for the browser.
+        if matches!(
+            *name,
+            header::HOST
+                | header::CONNECTION
+                | header::TRANSFER_ENCODING
+                | header::CONTENT_LENGTH
+                | header::ACCEPT_ENCODING
+        ) {
+            continue;
+        }
+        req = req.header(name, value);
     }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiError::Unavailable(format!("could not reach the leader: {e}"))
+                .into_response()
+        }
+    };
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let mut out = Response::new(Body::from_stream(resp.bytes_stream()));
+    *out.status_mut() = status;
+    for (name, value) in &headers {
+        if matches!(
+            *name,
+            header::TRANSFER_ENCODING | header::CONNECTION | header::CONTENT_LENGTH
+        ) {
+            continue;
+        }
+        out.headers_mut().append(name.clone(), value.clone());
+    }
+    out
 }
 
 /// Only the leader has a fully caught up view of the cluster and can accept
-/// writes, so every `/api` and `/auth` route bounces elsewhere when this node
+/// writes, so every `/api` and `/auth` write is relayed to it when this node
 /// is not it.
 async fn redirect_non_leader(
     State(state): State<AppState>,
@@ -597,9 +651,7 @@ async fn redirect_non_leader(
         return Ok(next.run(request).await);
     }
 
-    Err(ApiError::NotLeader {
-        leader: leader_location(&state).await,
-    })
+    Ok(relay_to_leader(&state, request).await)
 }
 
 /// Best-effort address of the current leader, built from its internal rpc
