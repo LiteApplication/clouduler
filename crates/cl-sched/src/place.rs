@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cl_raft::ids::InstanceId;
-use cl_raft::state::{ClusterState, NodeState, Request, Role};
+use cl_raft::state::{ClusterState, NodeState, Request, Role, VolumeState};
 
 use crate::error::{Result, SchedError};
 use crate::plan::Desired;
@@ -106,6 +106,42 @@ impl Constraint {
     }
 }
 
+/// Whether `node` holds a copy of `record` an instance may start on.
+///
+/// A copy at the current generation always is. A copy that is behind is only
+/// once every node holding a current one is unreachable: the generation is
+/// bumped the moment a primary takes over, before any sync can have carried it
+/// to the replicas, so a primary that dies within one `sync_interval` of a
+/// handover leaves every other copy "behind" for good. Insisting on a current
+/// copy then keeps the service down until that machine is back. The freshest
+/// reachable copy is the best data left, so it is the one allowed to take over
+/// (costing the writes since its last sync, the same price any failover pays);
+/// a copy that is not the freshest still is not, and neither is a node that
+/// never received the volume at all.
+fn holds_usable_copy(state: &ClusterState, record: &VolumeState, node: &str) -> bool {
+    let Some(&held) = record.replicas.get(node) else {
+        return false;
+    };
+    if held == record.generation {
+        return true;
+    }
+    if held == 0 {
+        return false;
+    }
+    let reachable = |name: &String| !state.unreachable.contains(name);
+    let current_copy_reachable = record
+        .replicas
+        .iter()
+        .any(|(name, generation)| *generation == record.generation && reachable(name));
+    if current_copy_reachable {
+        return false;
+    }
+    !record
+        .replicas
+        .iter()
+        .any(|(name, generation)| *generation > held && reachable(name))
+}
+
 /// Why a node was rejected, kept so the error can say what went wrong.
 fn rejection(
     state: &ClusterState,
@@ -147,7 +183,8 @@ fn rejection(
     // since the last handover). Either way `run::volume_requests` would then
     // make *that* copy the primary, and the sync scheduler would push it over
     // the good one everywhere else. The primary itself always clears this bar,
-    // so there is always a candidate as long as it is up.
+    // so there is always a candidate as long as it is up. See
+    // `holds_usable_copy` for the one case a copy that is behind still counts.
     for volume in &desired.volumes {
         if served_drives.contains(&volume.drive) {
             continue;
@@ -157,7 +194,7 @@ fn rejection(
         let Some(record) = state.volumes.get(volume) else {
             continue;
         };
-        if record.replicas.get(&node.name) != Some(&record.generation) {
+        if !holds_usable_copy(state, record, &node.name) {
             return Some(format!(
                 "{} holds no current copy of volume {volume}",
                 node.name
@@ -792,6 +829,55 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("n2 holds no current copy of volume fast/data")),
             "rejected: {rejected:?}"
+        );
+    }
+
+    /// The primary died right after taking over, before its first sync
+    /// reached anyone: the replica is behind, but it is the best copy left, and
+    /// refusing it would keep the service down until the primary is back.
+    #[test]
+    fn the_freshest_reachable_copy_takes_over_when_the_current_one_is_unreachable() {
+        let (mut state, item) = with_replicated_volume(Some("n2"));
+        state.apply(&Request::TouchVolume {
+            id: VolumeId::new("fast", "data"),
+            primary: "n1".into(),
+        });
+        state.unreachable.insert("n1".into());
+
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert_eq!(
+            eligible.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            ["n2"]
+        );
+    }
+
+    /// Only the freshest of the reachable copies: promoting an older one would
+    /// sync the newer one's writes away.
+    #[test]
+    fn an_older_copy_does_not_take_over_from_a_fresher_reachable_one() {
+        let (mut state, item) = with_replicated_volume(Some("n2"));
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::TouchVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        state.apply(&Request::TouchVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        state.apply(&Request::SetVolumeReplica {
+            id,
+            node: "n3".into(),
+            generation: 2,
+        });
+        state.unreachable.insert("n1".into());
+
+        let (eligible, _) =
+            candidates(&state, &item, &no_served(), &no_everywhere()).expect("candidates");
+        assert!(
+            eligible.iter().all(|n| n.name != "n2"),
+            "n2 holds generation 1, n3 holds 2"
         );
     }
 
