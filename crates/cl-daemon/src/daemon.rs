@@ -279,7 +279,7 @@ pub async fn run(
 
     // Containers resolve each other through this, so it comes up alongside the
     // overlay rather than waiting for anything to be scheduled.
-    let internal_dns = crate::internal_dns::start(&cfg, &cluster);
+    let internal_dns = crate::internal_dns::start(&cfg, &cluster, &node_name);
     let exposed = crate::expose::start(&cfg, &cluster, relay.dialer.clone());
 
     // Worth waiting for: on a node that has just booted, dockerd is often a

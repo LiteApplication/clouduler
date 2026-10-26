@@ -16,7 +16,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::ClusterConfig;
+use cl_config::{qualify, ClusterConfig, NetworkKind};
 use cl_net::dns::{build_records, zone_origin, InternalDns, ZoneRecord};
 use cl_net::Allocations;
 use cl_raft::node::ClusterNode;
@@ -40,6 +40,7 @@ const BIND_RETRY: Duration = Duration::from_secs(30);
 pub fn start(
     cfg: &ClusterConfig,
     cluster: &Arc<ClusterNode>,
+    node_name: &str,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let origin = zone_origin(cfg);
     let name = match Name::parse(&origin, Some(&Name::root())) {
@@ -61,8 +62,9 @@ pub fn start(
     info!(zone = %origin, "internal dns ready");
     let cluster = cluster.clone();
     let boot_cfg = cfg.clone();
+    let node_name = node_name.to_string();
     Some(tokio::spawn(async move {
-        run(cluster, dns, boot_cfg).await;
+        run(cluster, dns, boot_cfg, node_name).await;
     }))
 }
 
@@ -77,7 +79,12 @@ fn nodes_of(cfg: &ClusterConfig) -> Vec<(String, Ipv4Addr)> {
         .collect()
 }
 
-async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: ClusterConfig) {
+async fn run(
+    cluster: Arc<ClusterNode>,
+    dns: Arc<InternalDns>,
+    boot_cfg: ClusterConfig,
+    node_name: String,
+) {
     // Gateways already being served. A bind that failed is not recorded, so
     // the next pass retries it: the address only exists once the overlay loop
     // has created the bridge, which may be a tick or two away.
@@ -96,6 +103,10 @@ async fn run(cluster: Arc<ClusterNode>, dns: Arc<InternalDns>, boot_cfg: Cluster
         if let Err(e) = dns.reload(&records).await {
             warn!(error = %e, "could not rebuild the internal zone");
             continue;
+        }
+        let overrides = proxy_overrides(&state, &live, &node_name);
+        if let Err(e) = dns.reload_overrides(&overrides).await {
+            warn!(error = %e, "could not rebuild the proxy host overrides");
         }
 
         for gateway in gateways(&state) {
@@ -197,6 +208,66 @@ fn zone_for(
     records
 }
 
+/// Hostnames of routes published on a public network, pointed at this node's
+/// own proxy over its internal address.
+///
+/// Resolved the normal way, such a name gives the node's public address, which
+/// is usually the router's: a container on the node that asks for a hostname
+/// the cluster itself serves then connects out to the router and back in, and
+/// that never works from the same node (and only by luck from another). The
+/// proxy on this node serves every route and relays to wherever the backend
+/// runs, so answering with it is the same service the outside world gets.
+///
+/// Public networks only: they carry no network gate, so any container is
+/// allowed. A route on a subnetted network is only served to peers inside
+/// that subnet, which the resolver cannot tell per caller, so those names are
+/// left to the upstream. Only done for the standard 80/443 proxy ports, since
+/// a client given a bare hostname will use those. No AAAA is served for them
+/// (the overlay has no IPv6 path to the proxy).
+fn proxy_overrides(state: &ClusterState, cfg: &ClusterConfig, node_name: &str) -> Vec<ZoneRecord> {
+    if !cfg.proxy.enabled || cfg.proxy.http_port != 80 || cfg.proxy.https_port != 443 {
+        return Vec::new();
+    }
+    let Some(own_ip) = cfg
+        .nodes
+        .get(node_name)
+        .and_then(|node| match cfg.internal_ip(node) {
+            Some(IpAddr::V4(ip)) => Some(ip),
+            _ => None,
+        })
+    else {
+        return Vec::new();
+    };
+    let (_, internal) = cfg.internal_network();
+    let internal_domain = internal.domain.as_deref().unwrap_or("");
+
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for (host, network) in crate::proxy::desired_dns_hosts(cfg, state).into_keys() {
+        let Some(net) = cfg.networks.get(&network) else {
+            continue;
+        };
+        if net.kind != NetworkKind::Public {
+            continue;
+        }
+        let fqdn = qualify(&host, net.domain.as_deref());
+        // The apex of the internal zone and anything under it is answered by
+        // the zone itself.
+        if !internal_domain.is_empty()
+            && (fqdn == internal_domain || fqdn.ends_with(&format!(".{internal_domain}")))
+        {
+            continue;
+        }
+        names.insert(format!("{fqdn}."));
+    }
+    names
+        .into_iter()
+        .map(|name| ZoneRecord {
+            name,
+            addresses: vec![own_ip],
+        })
+        .collect()
+}
+
 /// Gateway address of every overlay network that has a subnet. Bound
 /// everywhere rather than only on networks with a container here, because a
 /// container can be started on this node between two passes and its resolver
@@ -293,6 +364,70 @@ services:
         assert!(nodes_of(&cfg)
             .iter()
             .any(|(name, ip)| name == "n3" && *ip == Ipv4Addr::new(10, 10, 0, 3)));
+    }
+
+    fn public_cfg(proxy_ports: &str) -> ClusterConfig {
+        ClusterConfig::parse(&format!(
+            "\
+cluster: {{ name: test }}
+networks:
+  default: {{ type: internal, subnet: 10.10.0.0/24, domain: int.example.com }}
+  pub: {{ type: public, domain: example.org }}
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: {{ default: 10.10.0.1, pub: {{ ipv4: 203.0.113.5 }} }}
+web: {{ address: cloud, network: default }}
+{proxy_ports}"
+        ))
+        .expect("valid cluster config")
+    }
+
+    const PUBLIC_SPEC: &str = "\
+networks:
+  default: {}
+services:
+  web:
+    image: nginx
+    networks: [default]
+    x-clouduler:
+      proxy:
+        - host: auth
+          network: pub
+          port: 80
+";
+
+    /// A public route's name resolves to this node's own proxy, not to the
+    /// router address the outside world gets, which a container on the same
+    /// node cannot connect to.
+    #[test]
+    fn a_public_route_resolves_to_this_nodes_proxy() {
+        let records = proxy_overrides(&state_with(PUBLIC_SPEC, 1), &public_cfg(""), "n1");
+        assert_eq!(
+            records,
+            vec![ZoneRecord {
+                name: "auth.example.org.".to_string(),
+                addresses: vec![Ipv4Addr::new(10, 10, 0, 1)],
+            }]
+        );
+    }
+
+    /// SPEC's route sits on `wan`, an egress network: not a public one, so
+    /// nothing is overridden for it.
+    #[test]
+    fn a_route_on_a_non_public_network_is_left_to_the_upstream() {
+        let state = state_with(SPEC, 1);
+        assert!(proxy_overrides(&state, &cluster_config(), "n1").is_empty());
+    }
+
+    #[test]
+    fn nothing_is_overridden_when_the_proxy_is_off_or_on_other_ports() {
+        let state = state_with(PUBLIC_SPEC, 1);
+        let off = public_cfg("proxy: { enabled: false }");
+        assert!(proxy_overrides(&state, &off, "n1").is_empty());
+        let odd = public_cfg("proxy: { https_port: 9443 }");
+        assert!(proxy_overrides(&state, &odd, "n1").is_empty());
     }
 
     #[test]

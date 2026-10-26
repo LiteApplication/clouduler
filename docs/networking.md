@@ -264,6 +264,18 @@ inside the overlay:
 - `<node>` — a node's address on the internal network, so a container can
   reach a node directly (for example, to talk to a drive's sync endpoint)
   without knowing the cluster topology.
+- the hostname of any proxy route published on a `public` network — answered
+  with this node's own address on the internal network, where its reverse
+  proxy listens, instead of the node's public address. That address is
+  usually the router's, and a container cannot reach it from the node it
+  runs on (nor reliably from another), so a service that fetches a URL the
+  cluster itself serves (an OIDC discovery document, say) would fail
+  depending on where it was scheduled. The proxy relays to wherever the
+  backend runs, so the answer is the same service the outside world sees.
+  Only A records are served for these names, so clients do not try IPv6.
+  Routes on `internal`/`private` networks are not rewritten (they are gated
+  by caller subnet, which the resolver cannot see), and nothing is rewritten
+  unless the proxy is on its standard 80/443 ports.
 - anything else is forwarded to the host's configured upstream resolvers
   (read from `/etc/resolv.conf`), so ordinary internet names still resolve.
 

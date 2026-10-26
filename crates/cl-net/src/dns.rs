@@ -8,7 +8,7 @@
 //! server, so a service moving to another node updates the answer without a
 //! restart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -210,11 +210,104 @@ impl ZoneHandler for SwappableZone {
     }
 }
 
+/// Answers for names that live outside the internal zone, ahead of the
+/// upstream forwarder, and steps aside (`Skip`) for everything else so the
+/// forwarder still resolves it. Used to point a hostname the cluster itself
+/// serves at this node's own proxy, see `InternalDns::reload_overrides`.
+struct OverrideZone {
+    origin: LowerName,
+    current: RwLock<Arc<Overrides>>,
+}
+
+struct Overrides {
+    handler: InMemoryZoneHandler,
+    names: BTreeSet<LowerName>,
+}
+
+impl OverrideZone {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            origin: LowerName::from(Name::root()),
+            current: RwLock::new(Arc::new(build_overrides(&[])?)),
+        })
+    }
+}
+
+/// Like `build_authority`, rooted at `.` and with every record name taken as
+/// absolute.
+fn build_overrides(records: &[ZoneRecord]) -> Result<Overrides> {
+    let root = Name::root();
+    let handler = build_authority(&root, records)?;
+    let mut names = BTreeSet::new();
+    for record in records {
+        let name = Name::parse(&record.name, Some(&root))
+            .map_err(|e| NetError::Dns(format!("invalid record name {}: {e}", record.name)))?;
+        names.insert(LowerName::from(name));
+    }
+    Ok(Overrides { handler, names })
+}
+
+#[async_trait::async_trait]
+impl ZoneHandler for OverrideZone {
+    fn zone_type(&self) -> ZoneType {
+        ZoneType::Primary
+    }
+
+    fn axfr_policy(&self) -> AxfrPolicy {
+        AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &LowerName {
+        &self.origin
+    }
+
+    async fn lookup(
+        &self,
+        name: &LowerName,
+        rtype: RecordType,
+        request_info: Option<&RequestInfo<'_>>,
+        lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        let current = self.current.read().await.clone();
+        if !current.names.contains(name) {
+            return LookupControlFlow::Skip;
+        }
+        current
+            .handler
+            .lookup(name, rtype, request_info, lookup_options)
+            .await
+    }
+
+    async fn search(
+        &self,
+        request: &Request,
+        lookup_options: LookupOptions,
+    ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
+        let current = self.current.read().await.clone();
+        let Ok(info) = request.request_info() else {
+            return (LookupControlFlow::Skip, None);
+        };
+        if !current.names.contains(info.query.name()) {
+            return (LookupControlFlow::Skip, None);
+        }
+        current.handler.search(request, lookup_options).await
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
+
 /// The internal DNS resolver: serves the clouduler zone on the bridge
 /// address and forwards everything else to the host's configured resolvers.
 pub struct InternalDns {
     origin: Name,
     zone: Arc<SwappableZone>,
+    overrides: Arc<OverrideZone>,
 }
 
 impl InternalDns {
@@ -226,6 +319,7 @@ impl InternalDns {
         Ok(Self {
             origin,
             zone: Arc::new(SwappableZone::new(handler)),
+            overrides: Arc::new(OverrideZone::new()?),
         })
     }
 
@@ -235,6 +329,16 @@ impl InternalDns {
     pub async fn reload(&self, records: &[ZoneRecord]) -> Result<()> {
         let handler = build_authority(&self.origin, records)?;
         self.zone.swap(handler).await;
+        Ok(())
+    }
+
+    /// Replace the names answered outside the internal zone. Each record name
+    /// is an absolute hostname (`auth.example.com`); anything not listed still
+    /// goes upstream. Only A records are served for a listed name, so its
+    /// AAAA query gets an empty answer and clients stay on the address given.
+    pub async fn reload_overrides(&self, records: &[ZoneRecord]) -> Result<()> {
+        let overrides = build_overrides(records)?;
+        *self.overrides.current.write().await = Arc::new(overrides);
         Ok(())
     }
 
@@ -253,7 +357,13 @@ impl InternalDns {
             .map_err(NetError::Dns)?
             .build()
             .map_err(NetError::Dns)?;
-        catalog.upsert(forward_origin, vec![Arc::new(forwarder)]);
+        catalog.upsert(
+            forward_origin,
+            vec![
+                self.overrides.clone() as Arc<dyn ZoneHandler>,
+                Arc::new(forwarder),
+            ],
+        );
 
         let mut server = Server::new(catalog);
         let socket = tokio::net::UdpSocket::bind(bind_addr)
@@ -276,6 +386,84 @@ mod tests {
 
     fn iid(stack: &str, service: &str, index: u32) -> InstanceId {
         InstanceId::new(stack, service, index)
+    }
+
+    /// The override zone only claims the names it was given; everything else
+    /// must reach the upstream forwarder behind it.
+    #[test]
+    fn overrides_hold_absolute_names_only() {
+        let overrides = build_overrides(&[ZoneRecord {
+            name: "auth.example.org.".to_string(),
+            addresses: vec![Ipv4Addr::new(10, 10, 0, 1)],
+        }])
+        .unwrap();
+        let listed = LowerName::from(Name::parse("auth.example.org.", None).unwrap());
+        let other = LowerName::from(Name::parse("www.example.org.", None).unwrap());
+        assert!(overrides.names.contains(&listed));
+        assert!(!overrides.names.contains(&other));
+    }
+
+    /// Over the wire: a listed outside name gets the override, its AAAA is
+    /// empty rather than forwarded, and a name in the internal zone still
+    /// answers from the zone.
+    #[tokio::test]
+    async fn an_overridden_name_answers_a_and_leaves_aaaa_empty() {
+        use hickory_proto::op::{Message, MessageType, OpCode, Query};
+
+        let port = {
+            let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        let dns = Arc::new(
+            InternalDns::new(
+                Name::parse("int.example.com.", None).unwrap(),
+                &[ZoneRecord {
+                    name: "web.blog".to_string(),
+                    addresses: vec![Ipv4Addr::new(10, 244, 0, 2)],
+                }],
+            )
+            .unwrap(),
+        );
+        dns.reload_overrides(&[ZoneRecord {
+            name: "auth.example.org.".to_string(),
+            addresses: vec![Ipv4Addr::new(10, 10, 0, 1)],
+        }])
+        .await
+        .unwrap();
+        let server = dns.clone();
+        tokio::spawn(async move { server.serve(addr).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        async fn ask(addr: SocketAddr, name: &str, rtype: RecordType) -> Message {
+            let mut msg = Message::query();
+            msg.metadata.id = 7;
+            msg.metadata.message_type = MessageType::Query;
+            msg.metadata.op_code = OpCode::Query;
+            msg.add_query(Query::query(Name::parse(name, None).unwrap(), rtype));
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            socket.send_to(&msg.to_vec().unwrap(), addr).await.unwrap();
+            let mut buf = [0u8; 512];
+            let (n, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                socket.recv_from(&mut buf),
+            )
+            .await
+            .expect("an answer")
+            .unwrap();
+            Message::from_vec(&buf[..n]).unwrap()
+        }
+
+        let a = ask(addr, "auth.example.org.", RecordType::A).await;
+        assert_eq!(a.answers.len(), 1);
+        assert_eq!(
+            a.answers[0].data,
+            RData::A(A::from(Ipv4Addr::new(10, 10, 0, 1)))
+        );
+        let aaaa = ask(addr, "auth.example.org.", RecordType::AAAA).await;
+        assert!(aaaa.answers.is_empty());
+        let zone = ask(addr, "web.blog.int.example.com.", RecordType::A).await;
+        assert_eq!(zone.answers.len(), 1);
     }
 
     #[test]
