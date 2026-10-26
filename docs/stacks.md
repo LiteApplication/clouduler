@@ -31,8 +31,9 @@ x-clouduler: {...}
 - `version` is accepted and ignored.
 - `networks` declares which cluster networks this stack's services attach
   to. Clouduler does not create custom docker networks: each name here must
-  match a network declared in the cluster's `networks:` section. Entries take
-  no fields (`wan: {}` or `wan:`).
+  match a network declared in the cluster's `networks:` section. An entry
+  takes no fields (`wan: {}` or `wan:`) or an `allowed` list, see "Restricting
+  what a stack can reach" below.
   A service may name at most one network of the cluster's `egress` kind
   alongside its usual (non-egress) network — see `docs/networking.md`'s
   "Egress networks" section. It gets a second, NAT'd attachment forcing its
@@ -47,6 +48,61 @@ x-clouduler: {...}
   refers to an object that must already exist. Either way, a service mounts
   one by name through its own `configs:`/`secrets:` list — see
   `docs/secrets.md`.
+
+## Restricting what a stack can reach
+
+By default a stack's containers may reach whatever the network lets them. A
+network entry can carry an `allowed` list that turns this around: anything not
+listed is denied.
+
+```yaml
+networks:
+  tailscale:
+    allowed:
+      - cloud.home.liteapp.fr          # hostname: checked by the reverse proxy
+      - "service.home.liteapp.fr:22"   # host:port: checked by the firewall
+  wan:
+    allowed:
+      - auth.liteapp.fr
+```
+
+| Entry | Enforced by | Meaning |
+| --- | --- | --- |
+| `host` | reverse proxy | requests for any other host of a route published on this network get an explicit `403` |
+| `*.suffix` | reverse proxy | exactly one extra label, like a wildcard route; never the apex |
+| `host:port`, `host:lo-hi` | host firewall (iptables) | only this destination address and port range |
+| `host:port/udp` | host firewall | protocol is `tcp` unless given; `tcp` and `udp` only |
+
+* `allowed` absent means no restriction. `allowed: []` denies everything
+  except the stack itself. A key with no value (`allowed:`) is an error, so
+  commenting out every entry cannot silently open the stack up.
+* Traffic inside the stack is always allowed, on any port.
+* Names in `host:port` entries are resolved by the node every 10 seconds (IPv4
+  only). A name that does not resolve, and has never resolved, grants nothing.
+* An IPv4 literal is accepted in both forms.
+* The restriction is per stack and applies to every service in it.
+* Lists are allowed on `internal`, `private` and `public` networks only. A
+  `host:port` entry must sit on the network the stack's containers live on
+  (the internal or private network if the stack declares one, else the public
+  one); hostname entries may sit on any of the stack's networks and limit the
+  routes published on that network. See "Per-stack restrictions" in
+  `docs/networking.md` for exactly what the firewall does and does not grant.
+
+Things to know before relying on it:
+
+* Each list is scoped to its own network. A hostname list restricts only the
+  routes published on that network; a stack with `tailscale.allowed: []` still
+  reaches routes on `wan` unless `wan` has a list too. The firewall follows the
+  network the containers live on.
+* A hostname that is not a route this cluster publishes matches nothing: the
+  list limits what the proxy serves, it does not make the name reachable.
+* The firewall covers IPv4 and TCP/UDP only. Every other protocol (ICMP, SCTP)
+  leaving the stack is dropped; ICMP echo to the node is the one exception.
+* Name resolution (DNS) and the proxy ports stay reachable so hostnames and
+  routes work at all.
+* A connection already open when a grant is removed keeps running until it
+  ends; new connections are refused at once.
+* `host:port` entries take no wildcard.
 
 ## Services
 

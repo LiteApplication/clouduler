@@ -1,6 +1,7 @@
 //! Stack files: the Docker Swarm / Compose v3 subset clouduler schedules from,
 //! plus the `x-clouduler` extensions documented in `docs/stacks.md`.
 
+mod allowed;
 mod bytesize;
 mod de;
 mod deploy;
@@ -13,6 +14,7 @@ mod requirements;
 mod validate;
 mod volume;
 
+pub use allowed::{AllowedHost, AllowedPorts, AllowedTarget};
 pub use bytesize::ByteSize;
 pub use deploy::{
     Deploy, DeployMode, DeployRestartPolicy, Placement, ResourceSpec, Resources, UpdateConfig,
@@ -69,7 +71,17 @@ pub struct StackFile {
 /// docker networks: the name must match a network declared in the cluster.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct StackNetwork {}
+pub struct StackNetwork {
+    /// What the stack may reach through this network. Absent means no
+    /// restriction; present (even empty) denies everything not listed. See
+    /// `AllowedTarget` for the entry syntax.
+    #[serde(
+        default,
+        deserialize_with = "allowed::list",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed: Option<Vec<AllowedTarget>>,
+}
 
 /// Placeholder for a declared but unused top-level named volume.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

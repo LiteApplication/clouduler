@@ -1241,17 +1241,7 @@ pub fn overlay_name(stack: &str, network: &str) -> String {
 /// all, and must not be made to wait forever for an address on one of those
 /// instead.
 pub fn overlay_network_name<'a>(file: &'a StackFile, cfg: &ClusterConfig) -> Option<&'a str> {
-    let kind_of = |n: &str| cfg.networks.get(n).map(|net| net.kind);
-
-    file.networks
-        .keys()
-        .find(|n| kind_of(n).is_some_and(NetworkKind::is_subnetted))
-        .or_else(|| {
-            file.networks
-                .keys()
-                .find(|n| kind_of(n) == Some(NetworkKind::Public))
-        })
-        .map(String::as_str)
+    file.overlay_network(cfg)
 }
 
 /// The first pair of distinct stacks whose overlays share a docker network

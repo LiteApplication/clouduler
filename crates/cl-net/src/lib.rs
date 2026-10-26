@@ -16,6 +16,7 @@ pub mod expose;
 pub mod ipam;
 pub mod iptables;
 pub mod relay;
+pub mod restrict;
 pub mod vxlan;
 pub mod wireguard;
 

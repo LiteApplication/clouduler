@@ -311,6 +311,7 @@ fn build_listen(
     let (http_port, https_port) = desired.listen?;
 
     let routes = Arc::new(RouteTable::default());
+    let peers = Arc::new(cl_proxy::PeerPolicies::new());
     let certs = Arc::new(CertStore::new());
     let auth_gate = Arc::new(cl_proxy::AuthGate::new(
         config_rx.clone(),
@@ -324,7 +325,8 @@ fn build_listen(
             Some(auth_gate),
             http01.clone(),
         )
-        .with_dialer(dialer.clone()),
+        .with_dialer(dialer.clone())
+        .with_peer_policies(peers.clone()),
     );
     let mut tasks = Vec::new();
     // Flipped by `reconcile_loop` once the first full route set is in place.
@@ -358,6 +360,7 @@ fn build_listen(
         config_rx.clone(),
         cluster.clone(),
         routes.clone(),
+        peers,
         certs,
         ready_tx,
     )));
@@ -420,6 +423,7 @@ async fn reconcile_loop(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     cluster: Arc<ClusterNode>,
     routes: Arc<RouteTable>,
+    peers: Arc<cl_proxy::PeerPolicies>,
     certs: Arc<CertStore>,
     ready: tokio::sync::watch::Sender<bool>,
 ) {
@@ -430,6 +434,13 @@ async fn reconcile_loop(
         ticker.tick().await;
         let cfg = config_rx.borrow().clone();
         let state = cluster.state().await;
+
+        // Before the routes, so a request never meets a route its caller's
+        // stack has not yet been restricted from.
+        // Unknown state keeps the policies already in force.
+        if let Some(stacks) = crate::restrict::restricted_stacks(&cfg, &state) {
+            peers.replace(crate::restrict::proxy_policies(&stacks));
+        }
 
         // Static backends need a dns lookup each. On the first pass publish
         // what is already known rather than leaving every hostname unrouted
@@ -487,6 +498,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
                     response_timeout: entry.response_timeout,
                     allowed_subnet: allowed_subnet(cfg, &entry.network),
                     trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
+                    network: Some(entry.network.clone()),
                 }),
             );
         }
@@ -527,6 +539,7 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
             .with_options(RouteOptions {
                 allowed_subnet: allowed_subnet(cfg, &rule.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &rule.network),
+                network: Some(rule.network.clone()),
                 ..RouteOptions::default()
             })
             .with_redirect(RedirectTarget {
@@ -578,6 +591,7 @@ fn dashboard_route(cfg: &ClusterConfig, state: &ClusterState) -> Option<Route> {
             // dashboard reaches the proxy with its raw overlay address, which
             // is outside `allowed_subnet`; see `trusted_overlay_subnets`.
             trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &cfg.web.network),
+            network: Some(cfg.web.network.clone()),
             ..RouteOptions::default()
         }),
     )
@@ -637,6 +651,7 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
                 response_timeout: entry.response_timeout,
                 allowed_subnet: allowed_subnet(cfg, &entry.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
+                network: Some(entry.network.clone()),
             }),
         );
     }

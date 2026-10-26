@@ -23,6 +23,7 @@ cl-update.workspace = true
 anyhow.workspace = true
 age = "0.11"
 blake3.workspace = true
+futures.workspace = true
 hickory-proto.workspace = true
 instant-acme.workspace = true
 ipnet.workspace = true

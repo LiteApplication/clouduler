@@ -651,6 +651,103 @@ async fn a_public_route_has_no_subnet_restriction() {
     assert_eq!(resp.status, 200);
 }
 
+// ---- per-stack allowed hosts ----
+
+/// Serves two routes on network `wan` (`app.test`, `other.test`) with the
+/// loopback client treated as a stack whose policy is `policy`.
+async fn serve_with_policy(
+    backend: SocketAddr,
+    policy: Option<cl_proxy::StackPolicy>,
+) -> SocketAddr {
+    let options = || cl_proxy::RouteOptions {
+        network: Some("wan".to_string()),
+        ..cl_proxy::RouteOptions::permissive()
+    };
+    let routes = Arc::new(RouteTable::new(vec![
+        Route::new("app.test", None, false, vec![], false, "svc", vec![backend])
+            .with_options(options()),
+        Route::new(
+            "other.test",
+            None,
+            false,
+            vec![],
+            false,
+            "svc",
+            vec![backend],
+        )
+        .with_options(options()),
+    ]));
+    let peers = Arc::new(cl_proxy::PeerPolicies::new());
+    if let Some(policy) = policy {
+        peers.replace(vec![("127.0.0.0/8".parse().unwrap(), policy)]);
+    }
+    let server = ProxyServer::new(routes, Arc::new(CertStore::new())).with_peer_policies(peers);
+    let http_addr = free_addr();
+    tokio::spawn(async move { server.serve_http(http_addr).await.unwrap() });
+    wait_for_port(http_addr).await;
+    http_addr
+}
+
+fn policy_allowing(network: &str, hosts: &[&str]) -> cl_proxy::StackPolicy {
+    cl_proxy::StackPolicy {
+        stack: "blog".to_string(),
+        networks: HashMap::from([(network.to_string(), cl_proxy::HostAllow::new(hosts))]),
+    }
+}
+
+#[tokio::test]
+async fn a_listed_host_is_served_and_an_unlisted_one_gets_an_explicit_403() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_with_policy(backend, Some(policy_allowing("wan", &["app.test"]))).await;
+
+    assert_eq!(reqwest_like_get(addr, "app.test", "/").await.status, 200);
+
+    let denied = reqwest_like_get(addr, "other.test", "/").await;
+    assert_eq!(denied.status, 403);
+    assert!(denied.body.contains("other.test"), "{}", denied.body);
+    assert!(denied.body.contains("blog"), "{}", denied.body);
+    assert!(denied.body.contains("wan"), "{}", denied.body);
+}
+
+#[tokio::test]
+async fn the_host_header_port_does_not_dodge_the_list() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_with_policy(backend, Some(policy_allowing("wan", &["app.test"]))).await;
+    assert_eq!(reqwest_like_get(addr, "app.test:80", "/").await.status, 200);
+    assert_eq!(
+        reqwest_like_get(addr, "other.test:80", "/").await.status,
+        403
+    );
+}
+
+#[tokio::test]
+async fn an_empty_list_denies_every_host_on_the_network() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_with_policy(backend, Some(policy_allowing("wan", &[]))).await;
+    assert_eq!(reqwest_like_get(addr, "app.test", "/").await.status, 403);
+}
+
+#[tokio::test]
+async fn a_list_on_another_network_does_not_restrict_this_one() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_with_policy(backend, Some(policy_allowing("lan", &[]))).await;
+    assert_eq!(reqwest_like_get(addr, "app.test", "/").await.status, 200);
+}
+
+#[tokio::test]
+async fn no_policy_means_every_route_is_served() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_with_policy(backend, None).await;
+    assert_eq!(reqwest_like_get(addr, "other.test", "/").await.status, 200);
+}
+
+#[tokio::test]
+async fn an_unknown_host_is_still_a_404_not_a_403() {
+    let backend = spawn_echo_backend().await;
+    let addr = serve_with_policy(backend, Some(policy_allowing("wan", &[]))).await;
+    assert_eq!(reqwest_like_get(addr, "nope.test", "/").await.status, 404);
+}
+
 // ---- redirects ----
 
 #[tokio::test]

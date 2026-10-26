@@ -18,5 +18,6 @@ pub mod placement;
 pub mod proxy;
 pub mod quorum_stamp;
 pub mod relay;
+pub mod restrict;
 pub mod systemd;
 pub mod volume_freeze;

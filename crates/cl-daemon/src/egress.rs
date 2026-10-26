@@ -32,6 +32,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::restrict::{names_to_resolve, restricted_stacks, restrictions, HostResolver};
 use anyhow::{Context, Result};
 use cl_api::wireguard::{wireguard_secret_name, WireguardIngressStore};
 use cl_config::{ClusterConfig, InterfaceAddress, NetworkKind, NodeAddress};
@@ -42,6 +43,7 @@ use cl_net::egress::{
     overlay_pool, overlay_snat_plan, HostServices, Wanted,
 };
 use cl_net::iptables::apply_plan;
+use cl_net::restrict::{forward_plan, redirect_plan, Restriction, FORWARD_CHAIN, REDIRECT_CHAIN};
 use cl_net::vxlan::Overlay;
 use cl_net::wireguard::{
     ensure_wireguard_interface, parse_wg_quick, wireguard_ingress_iptables_plan, IngressRule,
@@ -155,15 +157,30 @@ pub fn start(
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         let mut cfg = boot_cfg;
+        let resolved = spawn_resolver(cluster.clone(), cfg.clone());
+        let mut restricted: Vec<Restriction> = Vec::new();
+        let mut firewall_clean = false;
         loop {
             ticker.tick().await;
             cfg = live_config(&cluster, &cfg).await;
 
+            let state = cluster.state().await;
+            // Unknown state keeps the restrictions applied so far; see
+            // `restricted_stacks`.
+            if let Some(stacks) = restricted_stacks(&cfg, &state) {
+                restricted = restrictions(&stacks, &resolved.borrow());
+            }
+
             // Before the docker check on purpose: the filter protects the host
             // from whatever containers exist, and must not wait for docker to
             // (re)connect to be in place.
-            if let Err(e) = ensure_container_input(&cluster, &cfg).await {
+            if let Err(e) = ensure_container_input(&state, &cfg, &restricted).await {
                 warn!(error = %e, "cannot apply the container input filter");
+            }
+            if let Err(e) =
+                ensure_restrictions(&cfg, &node_name, &restricted, &mut firewall_clean).await
+            {
+                warn!(error = %e, "cannot apply the per-stack network restrictions");
             }
 
             let Some(docker) = docker.read().await.clone() else {
@@ -245,21 +262,122 @@ pub fn start(
 
 /// Keeps containers from reaching the host's own listeners. See
 /// `cl_net::egress::container_input_plan` for exactly what is let through.
-async fn ensure_container_input(cluster: &Arc<ClusterNode>, cfg: &ClusterConfig) -> Result<()> {
-    let state = cluster.state().await;
+async fn ensure_container_input(
+    state: &cl_raft::state::ClusterState,
+    cfg: &ClusterConfig,
+    restricted: &[Restriction],
+) -> Result<()> {
     let services = HostServices {
         proxy_ports: if cfg.proxy.enabled {
             vec![cfg.proxy.http_port, cfg.proxy.https_port]
         } else {
             Vec::new()
         },
-        published: crate::expose::published_ports(&state, cfg),
+        published: crate::expose::published_ports(state, cfg),
+        restricted: restricted.to_vec(),
     };
     let plan = container_input_plan(overlay_pool(), &container_pools(), &services);
     tokio::task::spawn_blocking(move || apply_plan(&plan))
         .await
         .context("iptables task panicked")?
         .context("applying the container input filter")
+}
+
+/// Resolves the names of `host:port` entries on its own task, so a slow or
+/// dead resolver cannot hold up the egress reconcile that applies the rules.
+fn spawn_resolver(
+    cluster: Arc<ClusterNode>,
+    boot_cfg: ClusterConfig,
+) -> tokio::sync::watch::Receiver<BTreeMap<String, Vec<std::net::Ipv4Addr>>> {
+    let (tx, rx) = tokio::sync::watch::channel(BTreeMap::new());
+    tokio::spawn(async move {
+        let mut resolver = HostResolver::default();
+        let mut cfg = boot_cfg;
+        let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+        loop {
+            ticker.tick().await;
+            cfg = live_config(&cluster, &cfg).await;
+            let state = cluster.state().await;
+            if let Some(stacks) = restricted_stacks(&cfg, &state) {
+                resolver.refresh(&names_to_resolve(&stacks)).await;
+                tx.send_replace(resolver.resolved().clone());
+            }
+        }
+    });
+    rx
+}
+
+/// Applies the routed-traffic filter and the proxy redirect for stacks that
+/// declared an `allowed` list, or removes both chains once none does, so a
+/// cluster that never uses the feature carries no extra rule at all.
+///
+/// `clean` remembers that the chains are known to be absent, so the idle case
+/// costs nothing per tick; it starts false to clear what a previous daemon run
+/// left behind.
+async fn ensure_restrictions(
+    cfg: &ClusterConfig,
+    node_name: &str,
+    restricted: &[Restriction],
+    clean: &mut bool,
+) -> Result<()> {
+    if restricted.is_empty() {
+        if *clean {
+            return Ok(());
+        }
+        tokio::task::spawn_blocking(|| {
+            for (table, chain) in [("filter", FORWARD_CHAIN), ("nat", REDIRECT_CHAIN)] {
+                if cl_net::iptables::list_chains(table)?
+                    .iter()
+                    .any(|c| c == chain)
+                {
+                    cl_net::iptables::remove_chain(table, chain)?;
+                }
+            }
+            Ok::<_, cl_net::NetError>(())
+        })
+        .await
+        .context("iptables task panicked")?
+        .context("removing the per-stack restriction chains")?;
+        *clean = true;
+        return Ok(());
+    }
+    *clean = false;
+
+    let local = cfg
+        .nodes
+        .get(node_name)
+        .and_then(|node| match cfg.internal_ip(node) {
+            Some(IpAddr::V4(ip)) => Some(ip),
+            _ => None,
+        });
+    let others: Vec<std::net::Ipv4Addr> = cfg
+        .nodes
+        .iter()
+        .filter(|(name, _)| name.as_str() != node_name)
+        .filter_map(|(_, node)| match cfg.internal_ip(node) {
+            Some(IpAddr::V4(ip)) => Some(ip),
+            _ => None,
+        })
+        .collect();
+    let proxy_ports: Vec<u16> = if cfg.proxy.enabled {
+        vec![cfg.proxy.http_port, cfg.proxy.https_port]
+    } else {
+        Vec::new()
+    };
+    let forward = forward_plan(restricted);
+    // Without this node's own internal address there is nowhere to redirect
+    // to; the forward filter alone still keeps the stack in.
+    let redirect = local.map(|local| redirect_plan(restricted, &others, local, &proxy_ports));
+    tokio::task::spawn_blocking(move || {
+        apply_plan(&forward)?;
+        if let Some(redirect) = redirect {
+            apply_plan(&redirect)?;
+        }
+        Ok::<_, cl_net::NetError>(())
+    })
+    .await
+    .context("iptables task panicked")?
+    .context("applying the per-stack network restrictions")
 }
 
 /// Keeps an overlay container able to reach the other nodes' addresses on

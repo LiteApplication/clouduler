@@ -184,6 +184,44 @@ removed only if clouduler created it (it stamps `ifalias`
 `clouduler:wireguard`). A network whose docker network still has containers
 attached keeps its bridge and kill-switch until they are gone.
 
+## Per-stack restrictions
+
+A stack that declares `allowed` on its overlay network (`docs/stacks.md`,
+"Restricting what a stack can reach") has its containers held in by the host
+firewall. This is `cl_net::restrict`; `crates/cl-daemon/src/restrict.rs` derives
+the inputs from replicated state, so every node computes the same rules. Per
+packet the kernel evaluates a short rule list and clouduler does nothing. When
+no stack uses the feature the chains below do not exist.
+
+* `CLDR-ALLOW` (filter, first in `DOCKER-USER`): for each restricted subnet,
+  replies (`ESTABLISHED,RELATED`), the stack's own subnets and each resolved
+  `host:port` grant `RETURN` to the normal rules; everything else from that
+  subnet is dropped. It never `ACCEPT`s, so docker's rules and the egress
+  kill-switch still apply behind it.
+* `CLDR-IN` gets, ahead of its pool-wide rules, a block per restricted subnet:
+  DNS, the proxy ports and ICMP echo are accepted and everything else is
+  dropped. A grant reopens a host port only if clouduler already publishes it
+  (`x-clouduler.expose`); a stack file cannot open a host port `CLDR-IN` keeps
+  closed.
+* `CLDR-ALLOW-NAT` (nat, first in `PREROUTING`): proxy traffic (tcp, http and
+  https ports) from a restricted subnet to another node's internal address is
+  redirected to this node's own proxy. The proxy tells stacks apart by the
+  caller's source address, and `CLDR-OVL-SNAT` would otherwise replace it with
+  the node's. A grant naming a node's proxy port is redirected too, otherwise
+  the proxy could no longer apply the stack's host list.
+
+A `host:port` entry can only narrow what routing and `CLDR-IN` already carry:
+overlay containers have no route to the internet, and to a node's own ports
+only the ones listed above are reachable. Reaching the outside still takes a
+`nat`, `egress` or `wireguard` network, which `allowed` does not apply to.
+Rules are only ever replaced from state that was read successfully: with no
+cluster config replicated yet, an unreadable address book or a stack file that
+does not parse, the previous rules stay in place instead of the stacks being
+treated as unrestricted. Names in `host:port` entries are resolved on their own
+task, so a slow resolver delays the grants and not the rest of the reconcile.
+Hostname entries are enforced by the proxy, see "Per-stack host lists" in
+`docs/proxy.md`.
+
 ## MTU
 
 VXLAN encapsulates each frame inside outer IP + UDP + VXLAN + inner Ethernet

@@ -10,6 +10,7 @@
 //! it into hyper 1.x HTTP and HTTPS listeners.
 
 mod acme;
+mod allow;
 mod auth_gate;
 mod certs;
 mod connector;
@@ -26,6 +27,7 @@ pub use acme::{
     renewal_tick, run_renewal_loop, AcmeConfig, IssuedCertificate, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL, RENEWAL_WINDOW,
 };
+pub use allow::{Denied, HostAllow, PeerPolicies, StackPolicy};
 pub use auth_gate::AuthGate;
 pub use certs::{ensure_crypto_provider, parse_certified_key, CertResolver, CertStore};
 pub use error::{ProxyError, Result};

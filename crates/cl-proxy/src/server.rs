@@ -23,6 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::LazyConfigAcceptor;
 use tracing::{debug, warn};
 
+use crate::allow::PeerPolicies;
 use crate::auth_gate::{AuthGate, GateOutcome};
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
 use crate::connector::BackendConnector;
@@ -69,6 +70,7 @@ struct Backends {
     forward_auth_client: reqwest::Client,
     auth_gate: Option<Arc<AuthGate>>,
     http01: Arc<Http01Store>,
+    peers: Arc<PeerPolicies>,
 }
 
 /// Runs the plain HTTP and TLS listeners for one routing table and cert store.
@@ -89,6 +91,8 @@ pub struct ProxyServer {
     /// ACME HTTP-01 challenge responses, served out of the plain HTTP
     /// listener regardless of which route (if any) matches the request host.
     http01: Arc<Http01Store>,
+    /// Per-stack host allow lists, shared with whatever keeps them current.
+    peers: Arc<PeerPolicies>,
 }
 
 /// How long a backend gets to accept a TCP connection before it's treated as
@@ -157,7 +161,15 @@ impl ProxyServer {
             forward_auth_client: reqwest::Client::new(),
             auth_gate,
             http01,
+            peers: Arc::new(PeerPolicies::new()),
         }
+    }
+
+    /// Enforce `peers`: a caller whose stack restricted the network a route
+    /// is published on gets a 403 for any host it did not list.
+    pub fn with_peer_policies(mut self, peers: Arc<PeerPolicies>) -> Self {
+        self.peers = peers;
+        self
     }
 
     /// Dial backends through `dialer`, so a container another node runs is
@@ -176,6 +188,7 @@ impl ProxyServer {
             forward_auth_client: self.forward_auth_client.clone(),
             auth_gate: self.auth_gate.clone(),
             http01: self.http01.clone(),
+            peers: self.peers.clone(),
         }
     }
 
@@ -346,6 +359,29 @@ fn gate_by_network(route: &Route, peer: SocketAddr) -> Option<Response<ProxyBody
     ))
 }
 
+/// Refuses a request whose caller's stack did not list the host on the
+/// network the route is published on. The check is against the real socket
+/// peer, like `gate_by_network`.
+fn gate_by_allowed_hosts(
+    peers: &PeerPolicies,
+    route: &Route,
+    peer: SocketAddr,
+    host: &str,
+) -> Option<Response<ProxyBody>> {
+    let denied = peers.check(peer.ip(), route.options.network.as_deref(), host)?;
+    debug!(
+        stack = %denied.stack, network = %denied.network, host = %denied.host,
+        %peer, "host not in the stack's allowed list",
+    );
+    Some(status_response(
+        StatusCode::FORBIDDEN,
+        &format!(
+            "stack {} may not reach {} through network {}: it is not in the network's allowed list",
+            denied.stack, denied.host, denied.network
+        ),
+    ))
+}
+
 /// Answers a redirect route directly, never touching a backend.
 fn respond_redirect(redirect: &RedirectTarget, path_and_query: &str) -> Response<ProxyBody> {
     let location = if redirect.preserve_path {
@@ -447,6 +483,10 @@ async fn handle_http(
         return Ok(resp);
     }
 
+    if let Some(resp) = gate_by_allowed_hosts(&backends.peers, &route, peer, &host) {
+        return Ok(resp);
+    }
+
     let path_and_query = req
         .uri()
         .path_and_query()
@@ -505,6 +545,10 @@ async fn handle_https(
     };
 
     if let Some(resp) = gate_by_network(&route, peer) {
+        return Ok(resp);
+    }
+
+    if let Some(resp) = gate_by_allowed_hosts(&backends.peers, &route, peer, &host) {
         return Ok(resp);
     }
 

@@ -7,7 +7,9 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 /// Transport protocol for a published port.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     #[default]
@@ -25,7 +27,7 @@ impl fmt::Display for Protocol {
 }
 
 impl Protocol {
-    fn parse(s: &str) -> Result<Self, String> {
+    pub(super) fn parse(s: &str) -> Result<Self, String> {
         match s.to_ascii_lowercase().as_str() {
             "tcp" => Ok(Protocol::Tcp),
             "udp" => Ok(Protocol::Udp),
@@ -35,7 +37,7 @@ impl Protocol {
 }
 
 /// An inclusive port range. A single port has `start == end`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortRange {
     pub start: u16,
     pub end: u16,
@@ -47,7 +49,7 @@ impl PortRange {
         u32::from(self.end) - u32::from(self.start) + 1
     }
 
-    fn parse(s: &str) -> Result<Self, String> {
+    pub(super) fn parse(s: &str) -> Result<Self, String> {
         match s.split_once('-') {
             Some((a, b)) => {
                 let start: u16 = a.parse().map_err(|_| format!("invalid port \"{a}\""))?;

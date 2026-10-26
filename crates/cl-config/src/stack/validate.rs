@@ -199,6 +199,7 @@ impl StackFile {
         self.validate_whole_drive_mounts(cluster)?;
         self.validate_proxy_expose_networks(cluster)?;
         self.validate_service_network_kinds(cluster)?;
+        self.validate_allowed(cluster)?;
         self.validate_node_pins(cluster)?;
         self.validate_placement_constraints(cluster)?;
         Ok(())
@@ -571,6 +572,74 @@ impl StackFile {
                     ));
                 }
                 egress = Some(net.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// The one declared network this stack's containers get an overlay on,
+    /// if any. An internal or private network wins when the stack declares
+    /// one, since that is the network whose domain its containers should
+    /// resolve on; failing that, a public one. A stack whose networks are all
+    /// egress, wireguard or nat needs no overlay.
+    pub fn overlay_network<'a>(&'a self, cluster: &ClusterConfig) -> Option<&'a str> {
+        use crate::cluster::NetworkKind;
+
+        let kind_of = |n: &str| cluster.networks.get(n).map(|net| net.kind);
+        self.networks
+            .keys()
+            .find(|n| kind_of(n).is_some_and(NetworkKind::is_subnetted))
+            .or_else(|| {
+                self.networks
+                    .keys()
+                    .find(|n| kind_of(n) == Some(NetworkKind::Public))
+            })
+            .map(String::as_str)
+    }
+
+    /// `allowed` restricts what the stack reaches through a network, which
+    /// only means something where traffic is mediated by clouduler.
+    ///
+    /// * Egress, wireguard and nat networks leave the node by the host's own
+    ///   routing, with no proxy in the path and a bridge shared by every stack
+    ///   on it, so a per-stack list cannot be enforced there.
+    /// * An entry with a port is enforced by the firewall on the stack's own
+    ///   overlay, so it can only sit on the network the containers live on.
+    ///   Hostname-only entries are enforced by the proxy on the routes
+    ///   published on that network, and can sit on any usable network.
+    fn validate_allowed(&self, cluster: &ClusterConfig) -> Result<()> {
+        use crate::cluster::NetworkKind;
+
+        let overlay = self.overlay_network(cluster);
+        for (name, net) in &self.networks {
+            let Some(allowed) = net.as_ref().and_then(|n| n.allowed.as_ref()) else {
+                continue;
+            };
+            let at = format!("networks.{name}.allowed");
+            if let Some(kind) = cluster.networks.get(name).map(|n| n.kind) {
+                if !matches!(
+                    kind,
+                    NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
+                ) {
+                    return Err(ConfigError::invalid(
+                        at,
+                        format!(
+                            "network {name} is an {} network, whose traffic leaves through the host's own routing; allowed only applies to internal, private and public networks",
+                            format!("{kind:?}").to_lowercase()
+                        ),
+                    ));
+                }
+            }
+            if overlay != Some(name.as_str()) {
+                if let Some(entry) = allowed.iter().find(|e| e.ports.is_some()) {
+                    return Err(ConfigError::invalid(
+                        at,
+                        format!(
+                            "{entry} has a port, which the firewall enforces on the network this stack's containers live on ({}); keep only hostnames here",
+                            overlay.unwrap_or("none")
+                        ),
+                    ));
+                }
             }
         }
         Ok(())
@@ -1261,5 +1330,79 @@ services:
 "#;
         let err = stack(raw).validate(&cluster()).unwrap_err();
         assert!(err.to_string().contains("deploy.placement.constraints[0]"));
+    }
+
+    fn net_stack(allowed: &str) -> StackFile {
+        stack(&format!(
+            "services:\n  web:\n    image: x\n    networks: [tailscale]\nnetworks:\n  tailscale:\n{allowed}"
+        ))
+    }
+
+    #[test]
+    fn allowed_is_absent_by_default_and_empty_means_deny_all() {
+        let f = net_stack("    {}\n");
+        assert_eq!(f.networks["tailscale"].as_ref().unwrap().allowed, None);
+        let f = net_stack("    allowed: []\n");
+        assert_eq!(
+            f.networks["tailscale"].as_ref().unwrap().allowed,
+            Some(vec![])
+        );
+        f.validate(&cluster()).unwrap();
+    }
+
+    #[test]
+    fn allowed_entries_validate_on_the_overlay_network() {
+        let f = net_stack(
+            "    allowed:\n      - cloud.home.liteapp.fr\n      - \"service.home.liteapp.fr:22\"\n      - \"*.example.org\"\n",
+        );
+        f.validate(&cluster()).unwrap();
+    }
+
+    #[test]
+    fn a_bad_allowed_entry_is_a_parse_error() {
+        let err = StackFile::parse(
+            "services:\n  web:\n    image: x\nnetworks:\n  tailscale:\n    allowed: [\"bad host\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a valid hostname"), "{err}");
+    }
+
+    #[test]
+    fn allowed_is_refused_on_egress_networks() {
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [tailscale, vpn]\nnetworks:\n  tailscale: {}\n  vpn:\n    allowed: [a.example.org]\n",
+        );
+        let err = f.validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("networks.vpn.allowed"), "{err}");
+        assert!(err.to_string().contains("egress"), "{err}");
+    }
+
+    #[test]
+    fn port_entries_are_refused_off_the_overlay_network() {
+        // tailscale (internal) is the overlay; wan only carries routes.
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [tailscale, wan]\nnetworks:\n  tailscale: {}\n  wan:\n    allowed: [\"auth.example.org:22\"]\n",
+        );
+        let err = f.validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("networks.wan.allowed"), "{err}");
+        assert!(err.to_string().contains("tailscale"), "{err}");
+
+        // The same list with hostnames only is fine.
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [tailscale, wan]\nnetworks:\n  tailscale: {}\n  wan:\n    allowed: [auth.example.org]\n",
+        );
+        f.validate(&cluster()).unwrap();
+    }
+
+    #[test]
+    fn the_overlay_network_prefers_subnetted_over_public() {
+        let f = stack(
+            "services:\n  web:\n    image: x\nnetworks:\n  wan: {}\n  tailscale: {}\n  vpn: {}\n",
+        );
+        assert_eq!(f.overlay_network(&cluster()), Some("tailscale"));
+        let f = stack("services:\n  web:\n    image: x\nnetworks:\n  wan: {}\n  vpn: {}\n");
+        assert_eq!(f.overlay_network(&cluster()), Some("wan"));
+        let f = stack("services:\n  web:\n    image: x\nnetworks:\n  vpn: {}\n");
+        assert_eq!(f.overlay_network(&cluster()), None);
     }
 }

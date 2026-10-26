@@ -321,6 +321,9 @@ pub struct HostServices {
     /// Non-HTTP ports clouduler itself publishes on every node
     /// (`x-clouduler.expose`).
     pub published: Vec<(Protocol, u16)>,
+    /// Stacks whose containers are held to an `allowed` list; their rules come
+    /// ahead of the pool-wide ones below. See `crate::restrict`.
+    pub restricted: Vec<crate::restrict::Restriction>,
 }
 
 /// The `INPUT` filter that keeps containers away from the host's own
@@ -373,6 +376,15 @@ pub fn container_input_plan(
         .iter()
         .map(|(proto, port)| (proto.to_string(), *port))
         .collect();
+
+    for rule in crate::restrict::input_rules(
+        &services.restricted,
+        overlay_pool,
+        &services.proxy_ports,
+        &services.published,
+    ) {
+        chain.rules.push(rule.join(" "));
+    }
 
     for pool in pools {
         let src = pool.to_string();
@@ -912,6 +924,7 @@ mod tests {
             &HostServices {
                 proxy_ports: vec![80, 443],
                 published: vec![(Protocol::Tcp, 2222), (Protocol::Udp, 51413)],
+                ..HostServices::default()
             },
         )
     }

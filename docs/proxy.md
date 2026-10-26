@@ -449,3 +449,20 @@ every tick rather than remembering how a certificate was originally issued,
 so a certificate keeps renewing through HTTP-01 for as long as its stack
 still declares the host with a trailing dot, and switches back to DNS-01
 automatically if the domain is later added to a Cloudflare zone.
+
+## Per-stack host lists
+
+A stack can limit which hosts its containers ask the proxy for with
+`allowed` on a network (`docs/stacks.md`, "Restricting what a stack can
+reach"). The proxy identifies the caller by the TCP peer address, never a
+header, against the overlay subnets of the stacks that declared a list
+(`cl_proxy::PeerPolicies`, rebuilt from replicated state every reconcile pass).
+When the route found for the request is published on a network the caller's
+stack listed, and the request's `Host` is not on that list, the answer is a
+`403` naming the stack, host and network. A route on a network the stack did
+not list is unaffected, and a host with no route is still a `404`.
+
+The check runs after the route lookup and the network gate. With no restricted
+stack the table is empty and a request pays one atomic load. Otherwise it scans
+the restricted subnets and does a hash lookup only for a caller inside one.
+`host:port` entries never reach the proxy, the firewall enforces those.

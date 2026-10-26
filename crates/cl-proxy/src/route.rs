@@ -44,6 +44,10 @@ pub struct RouteOptions {
     /// `allowed_subnet`. Always empty for a public route (`allowed_subnet` is
     /// `None`, so this is never consulted).
     pub trusted_overlay_subnets: Vec<IpNet>,
+    /// The cluster network this route is published on. A caller whose stack
+    /// restricted that network (see `PeerPolicies`) may only reach the hosts
+    /// it listed. `None` skips that check.
+    pub network: Option<String>,
 }
 
 impl RouteOptions {
