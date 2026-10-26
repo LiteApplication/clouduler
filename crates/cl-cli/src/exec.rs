@@ -30,7 +30,7 @@ use cl_raft::client::client_for;
 /// container itself rather than picking one client-side: many images (most
 /// `alpine`-based ones) have no `bash` at all, and the server rejects an
 /// empty `cmd` outright (see `cl-api`'s `ExecQuery`), so a bare `clouduler
-/// exec target` used to always 400. `sh` is assumed to exist - `docker exec`
+/// exec target` would always 400. `sh` is assumed to exist - `docker exec`
 /// itself has nothing more minimal to fall back to.
 fn default_shell_command(cmd: Vec<String>) -> Vec<String> {
     if !cmd.is_empty() {

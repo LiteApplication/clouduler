@@ -463,9 +463,9 @@ mod tests {
         assert!(plan(&state, &items, &no_served(), &no_everywhere()).is_empty());
     }
 
-    /// The scenario the count-only algorithm got wrong: two nodes with equal
-    /// instance counts, but one of them a quarter the memory of the other and
-    /// already far more full. Equal counts alone would leave this untouched.
+    /// Two nodes with equal instance counts, but one of them a quarter the
+    /// memory of the other and already far more full. Equal counts alone
+    /// would leave this untouched.
     #[test]
     fn a_node_with_less_memory_gives_up_an_instance_even_at_equal_count() {
         let mut state = ClusterState::default();

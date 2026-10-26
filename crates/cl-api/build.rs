@@ -43,9 +43,9 @@ fn main() {
     let embed_dir = if !prebuilt && ui_dir.join("node_modules").is_dir() && which_npm_on_path() {
         // Built into this build's own OUT_DIR, never the shared `ui/dist`:
         // vite empties its output directory first, so two cargo builds running
-        // at once (one per target in a cross-build) used to wipe `ui/dist`
-        // under each other, and one binary shipped with the icons but no
-        // `index.html` or JS, serving a bare "not found" for the dashboard.
+        // at once (one per target in a cross-build) would wipe `ui/dist`
+        // under each other, leaving a binary with the icons but no
+        // `index.html` or JS.
         let own_dist = Path::new(&out_dir).join("ui_dist");
         let status = Command::new("npm")
             .args([

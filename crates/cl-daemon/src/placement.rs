@@ -293,11 +293,10 @@ mod tests {
         assert!(service_placements(&state_with(spec, 1), &cluster_config()).is_empty());
     }
 
-    /// The real bug this module used to have: `networks_by_stack` picked
-    /// whichever network sorted first out of a stack's *declared* networks,
-    /// not the one actually carrying the overlay - so a stack whose networks
-    /// happened to sort a public/egress one before its internal one got no
-    /// addresses at all, even though its containers were running fine.
+    /// `networks_by_stack` must pick the network actually carrying the
+    /// overlay, not whichever sorts first out of a stack's *declared*
+    /// networks - otherwise a stack whose public/egress network sorts before
+    /// its internal one gets no addresses at all.
     #[test]
     fn a_network_that_sorts_before_the_internal_one_does_not_hide_the_addresses() {
         let spec = "\

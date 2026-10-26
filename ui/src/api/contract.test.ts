@@ -20,10 +20,10 @@
 // Deliberately NOT covered: endpoints whose bodies are arrays of items keyed
 // by cluster contents the harness has none of (stacks, instances,
 // certificates). A fixture of `[]` proves nothing about the item shape, so
-// pretending otherwise would be worse than the gap. `drives` used to be in
-// this list too, until the Rust fixture setup started giving the harness a
-// served drive so the item shape (including `active_server` as a string, not
-// just its `null` case) is covered like everything else here.
+// pretending otherwise would be worse than the gap. `drives` is covered
+// because the Rust fixture setup gives the harness a served drive, so the
+// item shape (including `active_server` as a string, not just its `null`
+// case) is checked like everything else here.
 
 import { describe, expect, it } from 'vitest';
 import shapes from './__fixtures__/api-shapes.json';
@@ -42,7 +42,7 @@ import type {
 } from './types';
 
 // If any of these stops compiling, the interface above it claims a field the
-// server does not send. That is the bug that shipped three times.
+// server does not send.
 const status: ClusterStatus = shapes.status;
 const state: ClusterState = shapes.state as unknown as ClusterState;
 const identity: Identity = shapes.identity as Identity;

@@ -1446,7 +1446,7 @@ mod tests {
 
     #[test]
     fn the_node_holding_a_local_repository_pushes_to_a_primary_elsewhere() {
-        // The reported case: the repository is on n2, the primary is n1.
+        // The repository is on n2, the primary is n1.
         let state = restore_state("n1", "n2");
         assert_eq!(
             job_mode(&registry("n2"), &state, &job("fast", "local")),

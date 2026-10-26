@@ -3,15 +3,13 @@
 //!
 //! Both `snapshot::Snapshot` (what the last successful export actually
 //! contained) and `tree::SecretCache` (each secret's last-encrypted
-//! ciphertext) used to live only in the daemon loop's local variables. A
-//! restart or a leadership change starts that loop fresh with `None`/empty,
-//! which produced two visible bugs: the next export's commit message
-//! described every tracked object as newly added (diffed against
-//! `Snapshot::default()`), and every secret got re-encrypted from scratch -
-//! `age` is non-deterministic, so the fresh ciphertext differs from what's
-//! already committed even though the plaintext never changed, producing a
-//! real (spurious) commit that touches every secret file. Persisting both
-//! to disk and reloading them here closes that gap.
+//! ciphertext) are kept on disk. A restart or a leadership change starts the
+//! loop fresh with `None`/empty, which would make the next export's commit
+//! message describe every tracked object as newly added (diffed against
+//! `Snapshot::default()`) and re-encrypt every secret from scratch - `age` is
+//! non-deterministic, so the fresh ciphertext differs from what's already
+//! committed even though the plaintext never changed, producing a spurious
+//! commit that touches every secret file.
 
 use std::path::Path;
 
@@ -28,8 +26,7 @@ pub struct CacheState {
 
 impl CacheState {
     /// Missing or unreadable/corrupt is treated the same as "never
-    /// exported": the next tick just re-derives everything, same as today
-    /// before this cache existed.
+    /// exported": the next tick just re-derives everything.
     pub fn load(path: &Path) -> Self {
         std::fs::read(path)
             .ok()
