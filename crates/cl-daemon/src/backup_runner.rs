@@ -262,7 +262,7 @@ pub fn start_runner(
                 // == node_name }` destination branch must run even when
                 // this node does *not* implement the drive - that's exactly
                 // the `NodeLocal`-elsewhere case (see the module doc
-                // comment), and gating on it here used to skip that branch
+                // comment), and gating on it here would skip that branch
                 // entirely, leaving those runs stuck `Running` forever.
                 let is_source = is_local_source(&registry, &state, &run.drive);
 

@@ -14,8 +14,7 @@
 //!   active one is actually pointed at by mounting clients), and an NFS
 //!   mount of whichever candidate is currently active runs on every other
 //!   node implementing the drive. A background watcher remounts those mounts
-//!   when the active candidate changes: unlike the FUSE client this used to
-//!   be, a kernel NFS mount bakes its server address in at mount time, so
+//!   when the active candidate changes: unlike a FUSE client, a kernel NFS mount bakes its server address in at mount time, so
 //!   failover means unmount-then-remount rather than a live retarget.
 //!
 //! A node implementing nothing starts none of it and that is a normal setup,
@@ -491,7 +490,7 @@ struct ServedDriveInfo {
 /// task that mounts and unmounts individual volumes as this node's own
 /// running containers start and stop needing them (`watch_volume_mounts`),
 /// rather than mounting a served drive's whole directory up front the way a
-/// statically declared `Node.drives` entry used to.
+/// statically declared `Node.drives` entry does.
 ///
 /// A no-op if this process cannot call `mount(2)` at all (`mount_permission`
 /// — in practice, not root), or if the cluster has no served drives whose

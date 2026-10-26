@@ -121,14 +121,12 @@ async fn syncs_a_directory_tree_byte_for_byte() {
 }
 
 /// A file that already made it across must not be re-diffed as "changed" on
-/// the very next pass. Before the receiver preserved the sender's mtime, the
-/// write itself stamped a fresh "now" mtime that could never again match the
-/// source's — so a re-scan on both sides always disagreed, and every synced
-/// file was resent on every single pass forever, regardless of whether its
-/// content had actually changed. This is what made a large volume (e.g. a
-/// Nextcloud preview cache with hundreds of thousands of files) never settle:
-/// each pass took longer than the sync interval, so the scheduler restarted
-/// it back-to-back, pinning the daemon's CPU indefinitely.
+/// the very next pass. If the receiver does not preserve the sender's mtime,
+/// the write stamps a fresh "now" mtime that can never match the source's, so
+/// a re-scan on both sides always disagrees and every synced file is resent
+/// on every pass regardless of its content. On a large volume (hundreds of
+/// thousands of files) each pass then outlasts the sync interval, so the
+/// scheduler restarts it back-to-back and the daemon's CPU stays pinned.
 #[tokio::test]
 async fn a_synced_file_is_not_re_diffed_as_changed() {
     let src = tempfile::tempdir().unwrap();

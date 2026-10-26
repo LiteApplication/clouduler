@@ -141,10 +141,10 @@ pub struct InstanceProgressEvent {
 /// again until something about it actually changes.
 ///
 /// Every change found in one snapshot is sent before the next snapshot is
-/// taken. Returning after the first one used to make each event cost a whole
+/// taken. Returning after the first one would make each event cost a whole
 /// cluster-wide recompute (a docker inspect, or a request to the owning node,
-/// per instance), so a burst of changes trickled out one per round trip and
-/// short-lived steps were routinely never seen at all.
+/// per instance), so a burst of changes would trickle out one per round trip
+/// and short-lived steps would routinely never be seen.
 pub fn instance_progress_events(
     state: crate::server::AppState,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

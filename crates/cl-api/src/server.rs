@@ -661,8 +661,8 @@ async fn redirect_non_leader(
 /// Reads the address from raft's own membership (via `leader_rpc_addr`)
 /// rather than the replicated application-level node roster: the roster can
 /// lag behind on a follower, and briefly disagree entirely about a leader's
-/// id after it gets re-provisioned, which used to make a perfectly healthy
-/// leader lookup fail and this node answer with a 503 instead of a redirect.
+/// id after it gets re-provisioned, which could make a perfectly healthy
+/// leader lookup fail.
 pub(crate) async fn leader_location(state: &AppState) -> Option<String> {
     let addr = state.cluster.leader_rpc_addr().await?;
     let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&addr);

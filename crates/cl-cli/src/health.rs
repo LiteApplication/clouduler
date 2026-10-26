@@ -332,12 +332,9 @@ async fn row_for_assignment(
                     },
                 );
             }
-            // A move that has not finished. This command's own help has
-            // always advertised "stuck migrating", but only `Failed` was ever
-            // reported: an instance wedged in `Stopping` — the shape of the
-            // magev-planner.frontend.0 incident, where the driver skipped the
-            // job on every poll forever — showed up as a plain `exited`
-            // container, indistinguishable from a crash.
+            // A move that has not finished. An instance wedged in `Stopping`
+            // would otherwise show up as a plain `exited` container,
+            // indistinguishable from a crash.
             //
             // A move in progress is normally brief, so seeing one here is not
             // by itself a fault; seeing the same one across successive runs
@@ -454,9 +451,7 @@ async fn fetch_summary(
 /// either because no node currently satisfies what they need, or because a
 /// placement decision exists and nothing is stopping it, yet the real
 /// scheduler loop still hasn't turned it into an assignment - the reconcile
-/// loop stalling after a partial batch (see the mediaserver.jellyfin.0 /
-/// docs/clouduler-migration.md incident this was written for) is otherwise
-/// invisible: it recomputes as perfectly placeable every time this command
+/// loop stalling after a partial batch is otherwise invisible: it recomputes as perfectly placeable every time this command
 /// runs, so only comparing against `unplaceable` would report "healthy"
 /// forever. Mirrors `cl-api`'s `pending_placements`, against this node's own
 /// copy of the cluster config rather than the replicated one, the same trade

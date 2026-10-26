@@ -492,8 +492,7 @@ mod tests {
         }
     }
 
-    // Regression test for the bug this module's cleanup wrapper fixes: a
-    // `sync_all_inner` failure partway through the volume loop must not
+    // A `sync_all_inner` failure partway through the volume loop must not
     // leave the instance's progress entry stuck in the tracker forever,
     // reading as "still syncing" to anyone watching (the web UI) long after
     // the migration has actually failed.
@@ -519,9 +518,8 @@ mod tests {
             "success path must clear the tracker entry"
         );
 
-        // The failure path is what the bug actually broke: before the fix,
-        // an early `?` return from the volume loop skipped the cleanup that
-        // only ran after the loop, leaving this entry behind forever.
+        // The failure path: an early `?` return from the volume loop must not
+        // skip the cleanup, which would leave this entry behind forever.
         let tracker: crate::progress::MigrationSyncTracker = Arc::default();
         tracker.write().unwrap().insert(
             instance.clone(),

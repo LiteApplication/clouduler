@@ -581,7 +581,7 @@ pub fn build_git_tree_on_parent(
 
     for file in files {
         let parts: Vec<&str> = file.path.split('/').collect();
-        // The layout is at most one directory deep. Anything deeper used to
+        // The layout is at most one directory deep. Anything deeper would
         // keep only its last component, silently overwriting a sibling.
         if parts.len() > 2 || parts.iter().any(|p| p.is_empty()) {
             return Err(BackupError::Malformed {

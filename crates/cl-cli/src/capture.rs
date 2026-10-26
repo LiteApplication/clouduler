@@ -6,9 +6,8 @@
 //! directly to that node's api over a websocket
 //! (`cl-api::routes::instances::internal_capture`), which spawns `tcpdump`
 //! as the daemon's own root process (it already needs `CAP_NET_ADMIN` for the
-//! overlay bridges) and relays its output back frame by frame. This is what
-//! used to mean SSHing into a cluster node and reasoning out the right
-//! bridge interface name by hand.
+//! overlay bridges) and relays its output back frame by frame, so there is no
+//! need to SSH into a cluster node and work out the bridge interface name.
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;

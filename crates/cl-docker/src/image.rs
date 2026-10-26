@@ -143,10 +143,7 @@ fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str)
 /// Docker's `/images/create` endpoint pulls every tag in the repository when
 /// `fromImage` carries neither a tag nor a digest, rather than defaulting to
 /// `latest` the way the `docker` CLI does client-side before ever calling the
-/// API. An untagged reference like `alpine` hit this in production: pulling
-/// every tag walked into a years-old `alpine:2.6`, still served in the
-/// deprecated schema1 manifest format that current containerd rejects, and
-/// the pull never succeeded even though `alpine:latest` alone pulls fine.
+/// API.
 fn pull_reference(image: &str) -> String {
     let parsed = ImageRef::parse(image);
     if parsed.tag.is_none() && parsed.digest.is_none() {
@@ -312,7 +309,10 @@ mod tests {
     #[test]
     fn pull_reference_makes_a_bare_image_explicit() {
         // Docker's own `/images/create` pulls every tag in the repository
-        // when `fromImage` has none, rather than defaulting to `latest`.
+        // when `fromImage` has none, rather than defaulting to `latest`. For
+        // `alpine` that walks into a years-old tag still served in the
+        // deprecated schema1 manifest format, which current containerd
+        // rejects, so the pull never succeeds.
         assert_eq!(pull_reference("alpine"), "alpine:latest");
     }
 

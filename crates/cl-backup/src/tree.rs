@@ -455,10 +455,9 @@ mod tests {
         assert_eq!(plaintext, b"hunter2");
     }
 
-    /// The exact bug this feature hit in production: `age` encryption is
-    /// non-deterministic, so without a cache, a secret whose revision never
-    /// changed would still get fresh ciphertext (and a spurious commit)
-    /// every single export tick.
+    /// `age` encryption is non-deterministic, so without a cache, a secret
+    /// whose revision never changed would still get fresh ciphertext (and a
+    /// spurious commit) every single export tick.
     #[test]
     fn an_unchanged_secret_reuses_its_previous_ciphertext_across_ticks() {
         let key = ClusterKey::generate();

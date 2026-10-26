@@ -193,10 +193,9 @@ mod tests {
         }
     }
 
-    /// The exact loop this feature hit in production: publishing an export's
-    /// status bumps `LAST_EXPORT_CONFIG`'s revision, and that bump must not
-    /// look like a tracked change on the next tick, or the daemon exports
-    /// forever even with nothing else changed.
+    /// Publishing an export's status bumps `LAST_EXPORT_CONFIG`'s revision,
+    /// and that bump must not look like a tracked change on the next tick, or
+    /// the daemon exports forever even with nothing else changed.
     #[test]
     fn publishing_last_export_status_does_not_look_like_a_change() {
         let mut state = ClusterState::default();
