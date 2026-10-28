@@ -269,6 +269,12 @@ impl ClusterNode {
             for (name, node) in &state.nodes {
                 if name == &self.name {
                     tracker.seen(name, now);
+                    // Answering this loop proves the leader is up. Without
+                    // this a previous leader's verdict on it (it was down
+                    // when that leader last probed) is never revoked once it
+                    // wins the election itself, so it stays flagged
+                    // unreachable and takes no work.
+                    alive.push(name.clone());
                     continue;
                 }
                 tracker.track(name, now);

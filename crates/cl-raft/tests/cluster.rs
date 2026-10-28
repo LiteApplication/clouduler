@@ -241,6 +241,39 @@ async fn a_single_node_cluster_leads_itself() {
 }
 
 #[tokio::test]
+async fn a_leader_marked_unreachable_by_a_past_leader_is_cleared() {
+    let mut cluster = Harness::start(1).await;
+    assert_eq!(cluster.leader().await, 0);
+    let node = std::sync::Arc::new(cluster.nodes.remove(0));
+
+    // What a previous leader leaves behind when this node was down while it
+    // probed, and this node then wins the election.
+    for request in [
+        Request::UpsertNode(node_state("n0", cluster.addrs[0])),
+        Request::SetReachable {
+            node: "n0".into(),
+            reachable: false,
+        },
+    ] {
+        assert!(node.submit(request).await.expect("submit").is_ok());
+    }
+    assert!(node.state().await.unreachable.contains("n0"));
+
+    tokio::spawn(
+        node.clone()
+            .run_failure_detector(Duration::from_millis(100), Duration::from_secs(5)),
+    );
+
+    for _ in 0..50 {
+        if !node.state().await.unreachable.contains("n0") {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the leader stayed flagged unreachable");
+}
+
+#[tokio::test]
 async fn a_node_without_a_cluster_holds_no_quorum() {
     let dir = TempDir::new().expect("temp dir");
     let node = ClusterNode::start(Options {
