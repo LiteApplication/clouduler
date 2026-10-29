@@ -274,7 +274,7 @@ export function NodeDetail() {
   );
 }
 
-function describeAddress(addr: NodeAddress): string {
+export function describeAddress(addr: NodeAddress): string {
   if (typeof addr === 'string') return addr;
   const ports = addr.open_ports.map((p) => `${p.port}/${p.protocol}`).join(', ');
   if ('interface' in addr) return ports ? `${addr.interface} (open: ${ports})` : addr.interface;
