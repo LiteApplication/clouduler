@@ -117,6 +117,13 @@ pub async fn run(routes: Arc<RouteTable>, health: HealthTable, interval: Duratio
             if route.redirect.is_some() || route.backends().is_empty() {
                 continue;
             }
+            // Static backends point at something clouduler doesn't run (a
+            // router's admin page, a NAS), which commonly answers a bare
+            // probe badly while serving real clients fine. The operator
+            // owns that backend, so a probe verdict would only be noise.
+            if is_static_route(&route) {
+                continue;
+            }
             // On its own task so a panic in one route's probe (a reqwest
             // internal bug, an unexpected header value, anything) can't take
             // this loop down with it. Losing the loop wedges every route's
@@ -134,6 +141,12 @@ pub async fn run(routes: Arc<RouteTable>, health: HealthTable, interval: Duratio
             });
         }
     }
+}
+
+/// True for a UI-managed static backend route, labelled
+/// `clouduler.static.<host>` by the daemon.
+fn is_static_route(route: &Route) -> bool {
+    route.instance.starts_with("clouduler.static.")
 }
 
 /// A failed probe gets this many extra attempts before the backend is
@@ -243,6 +256,14 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn only_ui_managed_static_routes_are_skipped() {
+        let route = |instance: &str| Route::new("h", None, false, vec![], false, instance, vec![]);
+        assert!(is_static_route(&route("clouduler.static.router")));
+        assert!(!is_static_route(&route("web.app")));
+        assert!(!is_static_route(&route("clouduler.dashboard")));
+    }
 
     /// A backend that answers every request with a bare 204 and reports the
     /// request head it got.
