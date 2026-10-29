@@ -23,7 +23,6 @@ import { NodeDetail } from './views/infra/NodeDetail';
 import { Proxy } from './views/infra/Proxy';
 import { Dns } from './views/infra/Dns';
 import { Storage } from './views/infra/Storage';
-import { Backups } from './views/infra/Backups';
 import { DriveDetail } from './views/infra/DriveDetail';
 import { NetworkDetail } from './views/infra/NetworkDetail';
 import { Settings } from './views/infra/Settings';
@@ -90,8 +89,7 @@ function Shell() {
                 <Route path="/nodes/:name" element={<NodeDetail />} />
                 <Route path="/proxy/:tab?" element={<Proxy />} />
                 <Route path="/dns" element={<Dns />} />
-                <Route path="/storage" element={<Storage />} />
-                <Route path="/storage/backups" element={<Backups />} />
+                <Route path="/storage/:tab?" element={<Storage />} />
                 <Route path="/storage/drives/:name" element={<DriveDetail />} />
                 <Route path="/networks/:name" element={<NetworkDetail />} />
                 <Route path="/settings/:tab?" element={<Settings />} />

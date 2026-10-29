@@ -1,12 +1,12 @@
 // Volume handling shared by Storage and the drive page: the state banners, the
-// row actions (sync, compare, freeze) and the per-node comparison sheet.
+// row actions (sync, inspect, freeze) and the per-node copies panel.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../api/client';
 import type { VolumeInspection, VolumeState } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { Banner, BottomSheet, Button, StatusBadge, Tag, useConfirm, useToast } from '../../ds';
+import { Banner, Button, Panel, StatusBadge, Tag, useConfirm, useToast } from '../../ds';
 import { formatBytes, relativeTime } from '../../lib/format';
 import { volumeStatus } from '../../lib/status';
 import { DataTable } from './table';
@@ -14,6 +14,22 @@ import { DataTable } from './table';
 export function splitId(id: string): [string, string] {
   const [drive, ...rest] = id.split('/');
   return [drive, rest.join('/')];
+}
+
+/** A titled section: heading and optional secondary actions, then its content. */
+export function StorageSection({ id, title, sub, actions, children }: { id: string; title: string; sub?: string; actions?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="sec" aria-labelledby={id}>
+      <div className="sec__h">
+        <div className="col" style={{ gap: 'var(--space-1)' }}>
+          <h2 className="h2" id={id}>{title}</h2>
+          {sub && <p className="sub">{sub}</p>}
+        </div>
+        {actions && <div className="acts">{actions}</div>}
+      </div>
+      {children}
+    </section>
+  );
 }
 
 /** One banner per volume that needs a human: refused syncs, frozen volumes
@@ -25,7 +41,7 @@ export function VolumeBanners({ volumes, onCompare }: { volumes: VolumeState[]; 
     const [d, n] = splitId(v.id);
     try {
       await api.unfreezeVolume(d, n);
-      toast(`Unfroze ${v.id}.`);
+      toast(`Unfreezing ${v.id}.`);
     } catch (e) {
       toast(e instanceof ApiError ? e.message : 'Could not unfreeze.', { tone: 'danger' });
     }
@@ -51,7 +67,7 @@ export function VolumeBanners({ volumes, onCompare }: { volumes: VolumeState[]; 
   );
 }
 
-/** The volumes table. `onCompare` opens the comparison sheet for a row. */
+/** The volumes table. `onCompare` opens the copies panel for a row. */
 export function VolumesTable({ volumes, onCompare, showDrive = true }: { volumes: VolumeState[]; onCompare: (v: VolumeState) => void; showDrive?: boolean }) {
   const { isAdmin } = useAuth();
   const toast = useToast();
@@ -77,7 +93,7 @@ export function VolumesTable({ volumes, onCompare, showDrive = true }: { volumes
     if (!ok) return;
     try {
       await api.freezeVolume(d, n);
-      toast(`Froze ${v.id}.`);
+      toast(`Freezing ${v.id}.`);
     } catch (e) {
       toast(e instanceof ApiError ? e.message : 'Could not freeze.', { tone: 'danger' });
     }
@@ -86,7 +102,7 @@ export function VolumesTable({ volumes, onCompare, showDrive = true }: { volumes
     const [d, n] = splitId(v.id);
     try {
       await api.unfreezeVolume(d, n);
-      toast(`Unfroze ${v.id}.`);
+      toast(`Unfreezing ${v.id}.`);
     } catch (e) {
       toast(e instanceof ApiError ? e.message : 'Could not unfreeze.', { tone: 'danger' });
     }
@@ -118,9 +134,9 @@ export function VolumesTable({ volumes, onCompare, showDrive = true }: { volumes
               key: 'act',
               header: '',
               render: (v: VolumeState) => (
-                <span className="row">
+                <span className="acts">
                   <Button size="sm" icon="sync" label={`Sync ${v.id}`} onClick={() => void sync(v)}>Sync</Button>
-                  <Button size="sm" variant="ghost" onClick={() => onCompare(v)}>Inspect</Button>
+                  <Button size="sm" variant="ghost" label={`Inspect ${v.id}`} onClick={() => onCompare(v)}>Inspect</Button>
                   {v.frozen ? (
                     <Button size="sm" variant="ghost" onClick={() => void unfreeze(v)}>Unfreeze</Button>
                   ) : (
@@ -135,16 +151,19 @@ export function VolumesTable({ volumes, onCompare, showDrive = true }: { volumes
   );
 }
 
-/** What every copy of one volume holds, side by side. The primary is never
- *  overridden from here: restore from a backup or delete the volume. */
-export function CompareSheet({ volume, onClose }: { volume: VolumeState | null; onClose: () => void }) {
+/** What every copy of one volume holds, side by side, inline under the
+ *  volumes. The primary is never overridden from here: restore from a backup
+ *  or delete the volume. */
+export function CompareCopies({ volume, onClose }: { volume: VolumeState | null; onClose: () => void }) {
   const confirm = useConfirm();
   const toast = useToast();
+  const ref = useRef<HTMLDivElement>(null);
   const [inspections, setInspections] = useState<Record<string, VolumeInspection | string>>({});
 
   useEffect(() => {
     setInspections({});
     if (!volume) return;
+    ref.current?.scrollIntoView?.({ block: 'nearest' });
     const [drive, name] = splitId(volume.id);
     let off = false;
     for (const node of Object.keys(volume.replicas)) {
@@ -158,8 +177,9 @@ export function CompareSheet({ volume, onClose }: { volume: VolumeState | null; 
     };
   }, [volume]);
 
+  if (!volume) return null;
+
   const deleteEverywhere = async () => {
-    if (!volume) return;
     const [drive, name] = splitId(volume.id);
     const ok = await confirm({
       title: `Delete ${volume.id} everywhere?`,
@@ -179,37 +199,39 @@ export function CompareSheet({ volume, onClose }: { volume: VolumeState | null; 
   };
 
   return (
-    <BottomSheet
-      open={!!volume}
-      title={volume ? `Copies of ${volume.id}` : 'Copies'}
-      onClose={onClose}
-      footer={
-        volume && (
-          <>
-            <Link to="/storage/backups"><Button icon="archive">Restore from backup</Button></Link>
-            <Button variant="danger" icon="x" onClick={() => void deleteEverywhere()}>Delete {volume.id} everywhere</Button>
-          </>
-        )
-      }
+    <StorageSection
+      id="copies-h"
+      title={`Copies of ${volume.id}`}
+      sub={`Generation ${volume.generation}, primary on ${volume.primary}. Read from the disks just now.`}
+      actions={<Button size="sm" variant="ghost" onClick={onClose}>Close</Button>}
     >
-      {volume && (
-        <>
-          <p className="cl-sm cl-muted">Generation {volume.generation}, primary on {volume.primary}.</p>
+      <div ref={ref} style={{ scrollMarginTop: 'var(--space-4)' }}>
+        <Panel>
           {Object.entries(volume.replicas).map(([node, gen]) => {
             const i = inspections[node];
             return (
               <div className="li" key={node}>
-                <strong>{node}</strong>
-                {node === volume.primary && <Tag tone="pop">primary</Tag>}
+                <div className="li__main">
+                  <span className="li__name">
+                    {node}{' '}
+                    {node === volume.primary && <Tag tone="pop">primary</Tag>}
+                  </span>
+                  <span className="li__meta">
+                    {i === undefined ? 'Checking…' : typeof i === 'string' ? i : `${i.files} files, ${formatBytes(i.bytes)}${i.newest_file_at ? `, newest ${relativeTime(i.newest_file_at)}` : ''}`}
+                  </span>
+                </div>
                 <Tag tone={gen === volume.generation ? 'ok' : 'warn'}>generation {gen}</Tag>
-                <span className="cl-sm cl-muted" style={{ flex: 1 }}>
-                  {i === undefined ? 'Checking…' : typeof i === 'string' ? i : `${i.files} files, ${formatBytes(i.bytes)}${i.newest_file_at ? `, newest ${relativeTime(i.newest_file_at * 1000)}` : ''}`}
-                </span>
               </div>
             );
           })}
-        </>
-      )}
-    </BottomSheet>
+          <div className="acts">
+            <Link className="cl-btn cl-btn--secondary cl-btn--sm" to="/storage/backups">
+              Restore from backup
+            </Link>
+            <Button size="sm" variant="danger" icon="x" onClick={() => void deleteEverywhere()}>Delete {volume.id} everywhere</Button>
+          </div>
+        </Panel>
+      </div>
+    </StorageSection>
   );
 }

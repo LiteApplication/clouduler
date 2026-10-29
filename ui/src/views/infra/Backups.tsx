@@ -1,17 +1,18 @@
-// /storage/backups: schedules, recent runs, destinations, restores and the
-// snapshots each destination holds.
+// The Backups tab of /storage: schedules, recent runs, destinations, restores
+// and the snapshots each destination holds.
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../api/client';
 import type { BackupDestinationSummary, BackupRun, DriveBackupTarget, DriveStatus, RestoreRequest, SnapshotInfo } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { Banner, Button, Chip, Meter, PageHeader, Panel, StatusBadge, Tag, useConfirm, useToast } from '../../ds';
+import { Banner, Button, Chip, Meter, Panel, StatusBadge, Tag, useConfirm, useToast } from '../../ds';
 import { relativeTime } from '../../lib/format';
 import { runStatus } from '../../lib/status';
 import { useClusterState } from '../../state/store';
 import { DestinationSheet, KIND_LABEL, RestoreSheet, ScheduleSheet, summarizeKind, type RestorePreset } from './BackupForms';
 import { DataTable } from './table';
+import { StorageSection } from './volumes';
 
 function runState(run: BackupRun): 'running' | 'ok' | 'failed' {
   return 'Running' in run.outcome ? 'running' : 'Succeeded' in run.outcome ? 'ok' : 'failed';
@@ -64,7 +65,7 @@ export function Backups() {
     api.listSnapshots(snapDest).then(setSnapshots).catch(() => setSnapshots([]));
   }, [snapDest]);
 
-  if (!cluster) return <p className="cl-muted">Loading…</p>;
+  if (!cluster) return <p className="sub">Loading…</p>;
 
   const targets = Object.values(cluster.restic_targets);
   const runs = Object.values(cluster.restic_runs).sort((a, b) => b.started_at - a.started_at);
@@ -102,31 +103,29 @@ export function Backups() {
 
   return (
     <>
-      <PageHeader
-        breadcrumb={[{ label: 'Storage', to: '/storage' }, { label: 'Backups' }]}
-        title="Backups"
-        sub={`${targets.length} schedule${targets.length === 1 ? '' : 's'} · ${destinations.length} destination${destinations.length === 1 ? '' : 's'}`}
+      {error && <Banner tone="danger">{error}</Banner>}
+      {failedRuns.map((r) => (
+        <Banner key={r.id} tone="danger" title={`The last ${r.drive} backup failed`}>
+          {'Failed' in r.outcome ? r.outcome.Failed.error : ''}
+        </Banner>
+      ))}
+      {destinations.length === 0 && (
+        <Banner tone="warn" title="No destinations yet">Add one under Destinations, then schedule a drive to back up to it.</Banner>
+      )}
+
+      <StorageSection
+        id="sched-h"
+        title="Schedules"
+        sub={`${targets.length} schedule${targets.length === 1 ? '' : 's'}`}
         actions={
           isAdmin && (
-            <>
-              <Button icon="archive" onClick={() => setRestore({ open: true, preset: {} })}>Restore from backup</Button>
-              <Button variant="primary" icon="plus" disabled={drives.length === 0 || destinations.length === 0} onClick={() => setScheduleSheet({ open: true, editing: null })}>New schedule</Button>
-            </>
+            <Button variant="primary" icon="plus" disabled={drives.length === 0 || destinations.length === 0} onClick={() => setScheduleSheet({ open: true, editing: null })}>
+              New schedule
+            </Button>
           )
         }
-      />
-      <div className="stack">
-        {error && <Banner tone="danger">{error}</Banner>}
-        {failedRuns.map((r) => (
-          <Banner key={r.id} tone="danger" title={`The last ${r.drive} backup failed`}>
-            {'Failed' in r.outcome ? r.outcome.Failed.error : ''}
-          </Banner>
-        ))}
-        {destinations.length === 0 && (
-          <Banner tone="warn" title="No destinations yet">Add one below, then schedule a drive to back up to it.</Banner>
-        )}
-
-        <Panel title="Schedules" flush>
+      >
+        <Panel flush>
           <DataTable
             caption="Backup schedules"
             rows={targets.map((t) => ({ ...t, id: t.id }))}
@@ -140,7 +139,7 @@ export function Backups() {
                 header: 'Keeps',
                 render: (t) => [t.keep_last ? `last ${t.keep_last}` : '', t.keep_within_secs ? `${Math.round(t.keep_within_secs / 86400)}d` : ''].filter(Boolean).join(', ') || 'forever',
               },
-              { key: 'last', header: 'Last run', render: (t) => (t.last_run ? relativeTime(t.last_run * 1000) : 'never') },
+              { key: 'last', header: 'Last run', render: (t) => (t.last_run ? relativeTime(t.last_run) : 'never') },
               {
                 key: 'state',
                 header: 'State',
@@ -155,7 +154,7 @@ export function Backups() {
                     key: 'act',
                     header: '',
                     render: (t: DriveBackupTarget) => (
-                      <span className="row">
+                      <span className="acts">
                         <Button size="sm" icon="play" disabled={!!activeRun(t.id)} label={`Run ${t.drive} now`} onClick={() => void runNow(t)}>Run now</Button>
                         <Button iconOnly size="sm" variant="ghost" icon="edit" label={`Edit ${t.drive} schedule`} onClick={() => setScheduleSheet({ open: true, editing: t })} />
                         <Button iconOnly size="sm" variant="ghost" icon="trash" label={`Remove ${t.drive} schedule`} onClick={() => void removeTarget(t)} />
@@ -166,8 +165,10 @@ export function Backups() {
             ]}
           />
         </Panel>
+      </StorageSection>
 
-        <Panel title="Recent runs" flush>
+      <StorageSection id="runs-h" title="Recent runs">
+        <Panel flush>
           <DataTable
             caption="Recent backup runs"
             rows={runs.slice(0, 20).map((r) => ({ ...r, id: r.id }))}
@@ -175,7 +176,7 @@ export function Backups() {
             columns={[
               { key: 'drive', header: 'Drive', render: (r) => r.drive },
               { key: 'dest', header: 'Destination', render: (r) => destName(r.destination_id) },
-              { key: 'when', header: 'Started', render: (r) => relativeTime(r.started_at * 1000) },
+              { key: 'when', header: 'Started', render: (r) => relativeTime(r.started_at) },
               { key: 'by', header: 'By', render: (r) => (r.triggered_by === 'Schedule' ? 'schedule' : `manual (${r.triggered_by.Manual.by})`) },
               {
                 key: 'out',
@@ -200,8 +201,14 @@ export function Backups() {
             ]}
           />
         </Panel>
+      </StorageSection>
 
-        <Panel title="Destinations" flush actions={isAdmin && <Button size="sm" icon="plus" onClick={() => setDestSheet({ open: true, editing: null })}>New destination</Button>}>
+      <StorageSection
+        id="dest-h"
+        title="Destinations"
+        actions={isAdmin && <Button size="sm" icon="plus" onClick={() => setDestSheet({ open: true, editing: null })}>New destination</Button>}
+      >
+        <Panel flush>
           <DataTable
             caption="Backup destinations"
             rows={destinations.map((d) => ({ ...d, id: d.id }))}
@@ -216,7 +223,7 @@ export function Backups() {
                     key: 'act',
                     header: '',
                     render: (d: BackupDestinationSummary) => (
-                      <span className="row">
+                      <span className="acts">
                         <Button iconOnly size="sm" variant="ghost" icon="edit" label={`Edit ${d.name}`} onClick={() => setDestSheet({ open: true, editing: d })} />
                         <Button iconOnly size="sm" variant="ghost" icon="trash" label={`Remove ${d.name}`} onClick={() => void removeDest(d)} />
                       </span>
@@ -226,39 +233,59 @@ export function Backups() {
             ]}
           />
         </Panel>
+      </StorageSection>
 
-        <Panel title="Restores" flush>
+      <StorageSection
+        id="restore-h"
+        title="Restores"
+        sub="A restore stops containers that use the data, replaces it on every node, then starts them again."
+        actions={isAdmin && <Button size="sm" icon="archive" onClick={() => setRestore({ open: true, preset: {} })}>Restore from backup</Button>}
+      >
+        <Panel flush>
           <DataTable
             caption="Restore requests"
             rows={restores.slice(0, 20).map((r) => ({ ...r, id: r.id }))}
             empty="No restores yet."
             columns={[
               { key: 'scope', header: 'What', render: (r) => scopeLabel(r.scope) },
-              { key: 'when', header: 'Requested', render: (r) => relativeTime(r.requested_at * 1000) },
+              { key: 'when', header: 'Requested', render: (r) => relativeTime(r.requested_at) },
               { key: 'by', header: 'By', render: (r) => r.requested_by },
               { key: 'st', header: 'Status', render: (r) => <StatusBadge {...restoreView(r.status)} /> },
             ]}
           />
         </Panel>
+      </StorageSection>
 
-        <Panel title="Snapshots">
-          {destinations.length > 0 && (
+      <StorageSection
+        id="snap-h"
+        title="Snapshots"
+        sub={snapDest ? `In ${destName(snapDest)}.` : undefined}
+        actions={
+          destinations.length > 0 && (
             <div className="chips" role="group" aria-label="Destination">
               {destinations.map((d) => <Chip key={d.id} label={d.name} selected={snapDest === d.id} onClick={() => setSnapDest(d.id)} />)}
             </div>
-          )}
-          {snapshots === null && snapDest && <p className="cl-sm cl-muted">Reading snapshots…</p>}
-          {snapshots?.length === 0 && <p className="cl-sm cl-muted">No snapshots at this destination.</p>}
+          )
+        }
+      >
+        <Panel flush>
+          {snapshots === null && snapDest && <p className="sub" style={{ padding: 'var(--space-4)' }}>Reading snapshots…</p>}
+          {snapshots?.length === 0 && <p className="sub" style={{ padding: 'var(--space-4)' }}>No snapshots at this destination.</p>}
           {snapshots?.slice(0, 30).map((s) => (
             <div className="li" key={s.id}>
               <code>{s.id.slice(0, 8)}</code>
-              <span className="cl-sm cl-muted">{relativeTime(s.time)}</span>
-              <span style={{ flex: 1 }} />
-              {isAdmin && <Button size="sm" variant="ghost" onClick={() => setRestore({ open: true, preset: { destinationId: snapDest, snapshot: s.id } })}>Restore {s.id.slice(0, 8)}</Button>}
+              <span className="sub">{relativeTime(s.time)}</span>
+              {isAdmin && (
+                <span className="li__side">
+                  <Button size="sm" variant="secondary" icon="archive" onClick={() => setRestore({ open: true, preset: { destinationId: snapDest, snapshot: s.id } })}>
+                    Restore {s.id.slice(0, 8)}
+                  </Button>
+                </span>
+              )}
             </div>
           ))}
         </Panel>
-      </div>
+      </StorageSection>
 
       <ScheduleSheet {...scheduleSheet} drives={drives} destinations={destinations} onClose={() => setScheduleSheet({ open: false, editing: null })} onSaved={load} />
       <DestinationSheet {...destSheet} nodeNames={nodeNames} onClose={() => setDestSheet({ open: false, editing: null })} onSaved={load} />

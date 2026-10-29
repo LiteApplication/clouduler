@@ -9,7 +9,7 @@ import { relativeTime } from '../../lib/format';
 import { useClusterState } from '../../state/store';
 import { useDrives } from './Storage';
 import { DataTable } from './table';
-import { CompareSheet, VolumeBanners, VolumesTable } from './volumes';
+import { CompareCopies, StorageSection, VolumeBanners, VolumesTable } from './volumes';
 
 export function DriveDetail() {
   const { name = '' } = useParams();
@@ -22,7 +22,7 @@ export function DriveDetail() {
   const targets = cluster ? Object.values(cluster.restic_targets).filter((t) => t.drive === name) : [];
 
   if (error) return <Banner tone="danger">{error}</Banner>;
-  if (!drive) return <p className="cl-muted">{drives ? `No drive named ${name}.` : 'Loading drive…'}</p>;
+  if (!drive) return <p className="sub">{drives ? `No drive named ${name}.` : 'Loading drive…'}</p>;
 
   return (
     <>
@@ -32,8 +32,9 @@ export function DriveDetail() {
         sub={`${drive.mode} · sync every ${drive.sync_interval}`}
         actions={isAdmin && <Link to="/storage/backups"><Button icon="archive">Restore from backup</Button></Link>}
       />
-      <div className="stack">
+      <div className="tabpad">
         <VolumeBanners volumes={volumes} onCompare={setComparing} />
+
         <div className="grid grid--2">
           <Panel title="Nodes" flush>
             <DataTable
@@ -56,24 +57,31 @@ export function DriveDetail() {
             ]} />
           </Panel>
         </div>
-        <Panel title="Volumes" flush>
-          <VolumesTable volumes={volumes} onCompare={setComparing} showDrive={false} />
-        </Panel>
-        <Panel title="Backups" flush>
-          <DataTable
-            caption="Backup schedules for this drive"
-            rows={targets.map((t) => ({ ...t, id: t.id }))}
-            empty={<>No backup schedules for this drive. Add one on the <Link to="/storage/backups">Backups page</Link>.</>}
-            columns={[
-              { key: 'dest', header: 'Destination', render: (t) => cluster?.restic_destinations[t.destination_id]?.name ?? t.destination_id },
-              { key: 'freq', header: 'Frequency', render: (t) => `every ${Math.round(t.frequency_secs / 3600)}h` },
-              { key: 'last', header: 'Last run', render: (t) => (t.last_run ? relativeTime(t.last_run * 1000) : 'never') },
-              { key: 'en', header: 'State', render: (t) => <Tag tone={t.enabled ? 'ok' : undefined}>{t.enabled ? 'enabled' : 'paused'}</Tag> },
-            ]}
-          />
-        </Panel>
+
+        <StorageSection id="dvol-h" title="Volumes">
+          <Panel flush>
+            <VolumesTable volumes={volumes} onCompare={setComparing} showDrive={false} />
+          </Panel>
+        </StorageSection>
+
+        <CompareCopies volume={comparing} onClose={() => setComparing(null)} />
+
+        <StorageSection id="dbk-h" title="Backups">
+          <Panel flush>
+            <DataTable
+              caption="Backup schedules for this drive"
+              rows={targets.map((t) => ({ ...t, id: t.id }))}
+              empty={<>No backup schedules for this drive. Add one on the <Link to="/storage/backups">Backups tab</Link>.</>}
+              columns={[
+                { key: 'dest', header: 'Destination', render: (t) => cluster?.restic_destinations[t.destination_id]?.name ?? t.destination_id },
+                { key: 'freq', header: 'Frequency', render: (t) => `every ${Math.round(t.frequency_secs / 3600)}h` },
+                { key: 'last', header: 'Last run', render: (t) => (t.last_run ? relativeTime(t.last_run) : 'never') },
+                { key: 'en', header: 'State', render: (t) => <Tag tone={t.enabled ? 'ok' : undefined}>{t.enabled ? 'enabled' : 'paused'}</Tag> },
+              ]}
+            />
+          </Panel>
+        </StorageSection>
       </div>
-      <CompareSheet volume={comparing} onClose={() => setComparing(null)} />
     </>
   );
 }
