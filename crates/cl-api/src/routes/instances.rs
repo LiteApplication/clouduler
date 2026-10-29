@@ -122,6 +122,30 @@ pub(crate) struct InstanceSummary {
     /// does mean healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) proxy: Option<ProxyHealthSummary>,
+    // Everything below crosses nodes inside `internal_summary`, so each is
+    // `default`: an older peer simply leaves them out.
+    /// Exit code of the container's last run, when it has stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) oom_killed: bool,
+    #[serde(default)]
+    pub(crate) restart_count: i64,
+    /// Docker restart policy's retry cap, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) restart_limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_limit_bytes: Option<i64>,
+    /// How many nodes the scheduler has already moved this instance off
+    /// because it kept getting killed (`ClusterState::crash_moves`).
+    #[serde(default)]
+    pub(crate) crash_moves: u32,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,6 +325,16 @@ async fn summarize_local(
         proxy,
         reason,
         step,
+        exit_code: container.as_ref().and_then(|c| c.exit_code),
+        oom_killed: container.as_ref().is_some_and(|c| c.oom_killed),
+        restart_count: container.as_ref().map_or(0, |c| c.restart_count),
+        restart_limit: container.as_ref().and_then(|c| c.restart_limit),
+        finished_at: container.as_ref().and_then(|c| c.finished_at.clone()),
+        memory_limit_bytes: container.as_ref().and_then(|c| c.memory_limit_bytes),
+        crash_moves: cluster_state
+            .crash_moves
+            .get(&assignment.instance)
+            .map_or(0, |m| m.len() as u32),
     }
 }
 
@@ -557,6 +591,13 @@ async fn pending_placements(
             step: None,
             placement_error: Some(u.reason),
             proxy: None,
+            exit_code: None,
+            oom_killed: false,
+            restart_count: 0,
+            restart_limit: None,
+            finished_at: None,
+            memory_limit_bytes: None,
+            crash_moves: 0,
         })
         .collect()
 }
@@ -1712,6 +1753,9 @@ pub(crate) struct ExecRunResult {
     pub(crate) timed_out: bool,
     pub(crate) stdout_truncated: bool,
     pub(crate) stderr_truncated: bool,
+    /// Wall-clock time the command ran for.
+    #[serde(default)]
+    pub(crate) duration_ms: u64,
 }
 
 /// Bytes kept up to a cap, remembering whether anything was dropped. Output
@@ -1788,6 +1832,7 @@ async fn exec_run_docker(
     if req.cmd.is_empty() {
         return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
     }
+    let started = std::time::Instant::now();
     let stdin = req.stdin.unwrap_or_default().into_bytes();
     let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
     let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
@@ -1848,6 +1893,7 @@ async fn exec_run_docker(
         timed_out,
         stdout_truncated,
         stderr_truncated,
+        duration_ms: started.elapsed().as_millis() as u64,
     })
 }
 

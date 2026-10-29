@@ -709,6 +709,7 @@ mod tests {
             labels,
             started_at: None,
             networks: BTreeSet::new(),
+            ..Default::default()
         }
     }
 

@@ -419,12 +419,25 @@ pub struct ContainerState {
     /// that network existed — without needing a separate inspect call just
     /// to find out.
     pub networks: BTreeSet<String>,
+    /// The kernel OOM-killed the container's main process. Only known from
+    /// `inspect`, false otherwise.
+    pub oom_killed: bool,
+    /// How many times docker's own restart policy has restarted it.
+    pub restart_count: i64,
+    /// The restart policy's retry cap (`on-failure:N`), when it has one.
+    pub restart_limit: Option<i64>,
+    /// When the container last stopped. `None` while it has never run, or
+    /// from a list rather than an inspect.
+    pub finished_at: Option<String>,
+    /// The memory limit it was created with, in bytes. `None` when unlimited.
+    pub memory_limit_bytes: Option<i64>,
 }
 
 impl From<bollard::models::ContainerInspectResponse> for ContainerState {
     fn from(resp: bollard::models::ContainerInspectResponse) -> Self {
         let config = resp.config;
         let state: BollardContainerState = resp.state.unwrap_or_default();
+        let host_config = resp.host_config;
 
         ContainerState {
             id: resp.id.unwrap_or_default(),
@@ -444,6 +457,19 @@ impl From<bollard::models::ContainerInspectResponse> for ContainerState {
                 .and_then(|ns| ns.networks)
                 .map(|m| m.into_keys().collect())
                 .unwrap_or_default(),
+            oom_killed: state.oom_killed.unwrap_or(false),
+            restart_count: resp.restart_count.unwrap_or(0),
+            restart_limit: host_config
+                .as_ref()
+                .and_then(|h| h.restart_policy.as_ref())
+                .and_then(|p| p.maximum_retry_count)
+                .filter(|n| *n > 0),
+            // Docker reports a never-run container's finish time as the zero
+            // time.
+            finished_at: state
+                .finished_at
+                .filter(|t| !t.is_empty() && !t.starts_with("0001-")),
+            memory_limit_bytes: host_config.and_then(|h| h.memory).filter(|m| *m > 0),
         }
     }
 }
@@ -476,6 +502,7 @@ impl From<ContainerSummary> for ContainerState {
                 .and_then(|ns| ns.networks)
                 .map(|m| m.into_keys().collect())
                 .unwrap_or_default(),
+            ..Default::default()
         }
     }
 }
