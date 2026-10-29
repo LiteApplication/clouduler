@@ -1,0 +1,12 @@
+/* Infra views: the page rhythm between top-level sections, and the title of a
+   flush panel (one with a table or list inside) padded like a normal panel
+   title. Builds on the ds layout tokens; nothing hardcodes a value. */
+
+/* Top-level sections of an infra page. ds has no global .stack rule, so the
+   class the views used to pass gave their sections no gap at all. */
+.infra-stack { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
+.tabpad.infra-stack { gap: var(--space-6); }
+
+/* ds Panel sets the flush title's padding inline (top and sides, none below),
+   so the gap below the title has to come from margin. */
+.panel--flush > .panel__h { margin-bottom: var(--space-3); }

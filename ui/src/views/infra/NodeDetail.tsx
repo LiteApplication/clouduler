@@ -15,6 +15,7 @@ import { useInstances } from '../../state/instancesStore';
 import { useClusterState } from '../../state/store';
 import { useConfigApply, useConfigDraft } from '../config/draft';
 import { NodeCard as NodeConfigForm } from '../config/sections';
+import './infra.css';
 
 export function NodeDetail() {
   const { name = '' } = useParams();
@@ -137,7 +138,7 @@ export function NodeDetail() {
         {Object.entries(node?.labels ?? {}).map(([k, v]) => <Tag key={k}>{k}={v}</Tag>)}
       </div>
 
-      <div className="stack">
+      <div className="infra-stack">
         {error && <Banner tone="warn">{error}</Banner>}
         {diskOver && (
           <Banner tone="danger" title="Disk almost full">
