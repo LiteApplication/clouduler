@@ -130,6 +130,8 @@ describe('who can reach whom', () => {
     };
     vi.spyOn(api, 'nodeConnectivity').mockResolvedValue(connectivity);
     renderNodes();
+    // The table renders before the report arrives, so wait for its content.
+    await screen.findByText('4 ms');
     const table = await screen.findByRole('table', { name: 'Node connectivity' });
     expect(within(table).getByText('4 ms')).toBeInTheDocument();
     expect(within(table).getByText('Unreachable')).toBeInTheDocument();
