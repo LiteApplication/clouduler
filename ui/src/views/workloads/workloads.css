@@ -16,3 +16,16 @@
 .wl-pad { padding: var(--space-3) var(--space-4) 0; margin: 0; }
 .wl-src { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; color: var(--ink); font: inherit; cursor: pointer; }
 .wl-src:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+
+/* updates */
+.wl-stack { display: flex; flex-direction: column; gap: var(--space-1); align-items: flex-start; min-width: 0; }
+.wl-progress { display: flex; flex-direction: column; gap: var(--space-1); min-width: 160px; }
+.wl-bar { height: 8px; border-radius: var(--radius-pill); background: var(--surface-2); overflow: hidden; }
+.wl-bar > span { display: block; height: 100%; background: var(--brand-fill); transition: width .3s; }
+.wl-digest { min-height: 28px; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--ink); font: 500 12px/16px var(--font-mono); cursor: pointer; }
+.wl-digest--brand { color: var(--brand); border-color: var(--brand); }
+.wl-digest--danger { color: var(--danger); border-color: var(--danger); }
+.wl-digest:focus-visible, .wl-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.wl-link { background: none; border: 0; padding: 0; min-height: var(--tap-min); color: var(--brand); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+.wl-check { width: 22px; height: 22px; accent-color: var(--brand-fill); }
+@media (prefers-reduced-motion: reduce) { .wl-bar > span { transition: none; } }
