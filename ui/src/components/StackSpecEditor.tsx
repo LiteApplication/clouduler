@@ -3,73 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { autocompletion, closeBrackets, completionKeymap } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { yaml } from '@codemirror/lang-yaml';
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { syntaxHighlighting } from '@codemirror/language';
 import { Compartment, EditorState, Facet } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, keymap, MatchDecorator, ViewPlugin, type ViewUpdate } from '@codemirror/view';
-import { tags as t } from '@lezer/highlight';
+import { errorLines, setErrorLines, specHighlightStyle, specTheme } from '../lib/editorTheme';
 import { buildObjectIndex, objectRouteFor, emptyKnownNames, stackSpecCompletionSource, type KnownNames } from '../lib/stackSchema';
-
-// @codemirror/language's defaultHighlightStyle hard-codes light-mode colors,
-// so yaml keys/strings/comments went unreadable on the dark theme. This maps
-// tags to the same CSS variables the rest of the theme uses, so it follows
-// light/dark (and the color-mix'd variants) automatically.
-const stackHighlightStyle = HighlightStyle.define([
-  { tag: t.propertyName, color: 'var(--primary)' },
-  { tag: [t.keyword, t.bool, t.atom, t.null], color: 'var(--accent)' },
-  { tag: [t.string, t.special(t.string)], color: 'var(--good)' },
-  { tag: t.number, color: 'var(--secondary)' },
-  { tag: t.comment, color: 'var(--text-faint)', fontStyle: 'italic' },
-  { tag: [t.meta, t.punctuation], color: 'var(--text-dim)' },
-  { tag: t.invalid, color: 'var(--bad)' },
-]);
-
-const theme = EditorView.theme({
-  '&': {
-    color: 'var(--text)',
-    backgroundColor: 'var(--surface-2)',
-    border: '1px solid var(--border)',
-    borderRadius: 'var(--radius-sm)',
-  },
-  '&.cm-focused': {
-    outline: 'none',
-    borderColor: 'var(--primary)',
-    boxShadow: 'var(--glow)',
-  },
-  '.cm-content': {
-    fontFamily: 'var(--mono)',
-    fontSize: '13px',
-    padding: '10px 0',
-  },
-  '.cm-gutters': {
-    backgroundColor: 'var(--surface-2)',
-    color: 'var(--text-faint)',
-    border: 'none',
-  },
-  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--primary) 6%, transparent)' },
-  '.cm-activeLineGutter': { backgroundColor: 'color-mix(in srgb, var(--primary) 6%, transparent)' },
-  '.cm-selectionBackground': { backgroundColor: 'color-mix(in srgb, var(--primary) 25%, transparent) !important' },
-  '.cm-cursor': { borderLeftColor: 'var(--text)' },
-  '.cm-tooltip': {
-    backgroundColor: 'var(--surface)',
-    border: '1px solid var(--border)',
-    color: 'var(--text)',
-  },
-  '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-    backgroundColor: 'color-mix(in srgb, var(--accent) 18%, transparent)',
-    color: 'var(--text)',
-  },
-  // Every clickable object reference gets a permanent, subtle dotted
-  // underline so ctrl/cmd+click is discoverable without first holding the
-  // modifier — tracking live modifier state to gate the style would need a
-  // document-wide keydown/keyup listener for a purely cosmetic difference.
-  '.cm-object-link': {
-    cursor: 'pointer',
-    textDecoration: 'underline',
-    textDecorationColor: 'var(--accent)',
-    textDecorationStyle: 'dotted',
-    textUnderlineOffset: '2px',
-  },
-});
 
 const objectLinkMark = Decoration.mark({ class: 'cm-object-link' });
 
@@ -122,9 +60,11 @@ export interface StackSpecEditorProps {
   editable: boolean;
   known: KnownNames;
   minHeight?: string;
+  /** 1-based lines to flag with a wavy underline and a gutter mark. */
+  errorLines?: number[];
 }
 
-export function StackSpecEditor({ value, onChange, editable, known, minHeight }: StackSpecEditorProps) {
+export function StackSpecEditor({ value, onChange, editable, known, minHeight, errorLines: errLines }: StackSpecEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -170,13 +110,14 @@ export function StackSpecEditor({ value, onChange, editable, known, minHeight }:
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...completionKeymap]),
         yaml(),
-        syntaxHighlighting(stackHighlightStyle, { fallback: true }),
+        syntaxHighlighting(specHighlightStyle, { fallback: true }),
         closeBrackets(),
         autocompletion({ override: [stackSpecCompletionSource(() => knownRef.current)] }),
         knownCompartment.current.of(knownNamesFacet.of(known)),
         objectLinkPlugin,
         clickHandler,
-        theme,
+        specTheme,
+        errorLines,
         EditorView.lineWrapping,
         editableCompartment.current.of([EditorView.editable.of(editable), EditorState.readOnly.of(!editable)]),
         EditorView.updateListener.of((update) => {
@@ -218,6 +159,10 @@ export function StackSpecEditor({ value, onChange, editable, known, minHeight }:
       ]),
     });
   }, [editable]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: setErrorLines.of(errLines ?? []) });
+  }, [errLines, value]);
 
   useEffect(() => {
     const view = viewRef.current;

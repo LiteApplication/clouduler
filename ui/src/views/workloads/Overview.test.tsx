@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Overview } from './Overview';
-import type { ClusterState } from '../api/types';
+import type { ClusterState } from '../../api/types';
 
 const cluster: ClusterState = {
   nodes: {
@@ -31,7 +31,7 @@ const cluster: ClusterState = {
   version: 1,
 };
 
-vi.mock('../state/store', () => ({
+vi.mock('../../state/store', () => ({
   useClusterState: () => cluster,
 }));
 
@@ -59,8 +59,13 @@ const healthyStatus = {
 
 const status = vi.fn();
 const listInstances = vi.fn();
-vi.mock('../api/client', () => ({
-  api: { status: () => status(), listInstances: () => listInstances() },
+vi.mock('../../api/client', () => ({
+  api: {
+    status: () => status(),
+    listInstances: () => listInstances(),
+    listUpdates: () => Promise.resolve([]),
+    nodeMetrics: () => Promise.resolve({}),
+  },
 }));
 
 function renderOverview() {

@@ -2,8 +2,9 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConfirmProvider, ToastProvider } from '../../ds';
 import { Updates } from './Updates';
-import type { ClusterState, InstanceUpdate, UpdateRow } from '../api/types';
+import type { ClusterState, InstanceUpdate, UpdateRow } from '../../api/types';
 
 const NOW = Math.floor(Date.now() / 1000);
 
@@ -25,13 +26,13 @@ function row(id: string, over: Partial<UpdateRow> = {}): UpdateRow {
 const behind = (id: string) => row(id, { latest_digest: 'sha256:' + 'b'.repeat(64), update_available: true });
 
 let instanceUpdates: Record<string, InstanceUpdate> = {};
-vi.mock('../state/store', () => ({
+vi.mock('../../state/store', () => ({
   useClusterState: () => ({ instance_updates: instanceUpdates }) as unknown as ClusterState,
 }));
 
 const listUpdates = vi.fn();
 const applyUpdates = vi.fn();
-vi.mock('../api/client', () => ({
+vi.mock('../../api/client', () => ({
   ApiError: class extends Error {},
   api: {
     listUpdates: () => listUpdates(),
@@ -45,7 +46,11 @@ vi.mock('../api/client', () => ({
 function renderPage() {
   return render(
     <MemoryRouter>
-      <Updates />
+      <ToastProvider>
+        <ConfirmProvider>
+          <Updates />
+        </ConfirmProvider>
+      </ToastProvider>
     </MemoryRouter>,
   );
 }
@@ -82,7 +87,7 @@ describe('Updates page', () => {
     await screen.findByLabelText('Select a');
     await userEvent.click(screen.getByLabelText('Select a'));
     await userEvent.click(screen.getByLabelText('Select c'));
-    await userEvent.click(screen.getByRole('button', { name: 'Update 2' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Update 2 containers' }));
     expect(applyUpdates).toHaveBeenCalledWith(['a', 'c']);
   });
 
