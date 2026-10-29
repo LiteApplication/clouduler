@@ -1,6 +1,6 @@
 //! `/api/nodes`.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -15,6 +15,7 @@ use crate::auth::internal::InternalAuth;
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::internal_peer;
+use crate::node_logs;
 use crate::node_metrics::{self, DriveSpace, Sample};
 use crate::server::AppState;
 
@@ -36,6 +37,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/nodes/internal/{name}/metrics/history",
             get(internal_metrics_history),
+        )
+        .route("/api/nodes/internal/{name}/logs", get(internal_logs))
+        .route(
+            "/api/nodes/internal/{name}/log-tail",
+            get(internal_log_tail),
         )
         .route(
             "/api/nodes/internal/{name}/interfaces",
@@ -473,47 +479,122 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Daemon log tail for one node.
-///
-/// Only implemented for the node currently answering the request: cl-raft
-/// has no rpc call to fetch another node's log buffer, and adding one is out
-/// of scope for this crate. See docs/api.md for the note on this limitation.
+#[derive(Deserialize)]
+struct LogsQuery {
+    /// How many past lines to replay first (default 200, at most the ring's
+    /// capacity).
+    tail: Option<usize>,
+    /// Keep the stream open for new lines (default true).
+    follow: Option<bool>,
+}
+
+fn clamp_tail(tail: Option<usize>) -> usize {
+    tail.unwrap_or(200).min(node_logs::CAPACITY)
+}
+
+fn log_event(line: &node_logs::LogLine) -> axum::response::sse::Event {
+    axum::response::sse::Event::default()
+        .event("log")
+        .json_data(line)
+        .unwrap_or_else(|_| {
+            axum::response::sse::Event::default()
+                .event("log")
+                .data("{}")
+        })
+}
+
+/// Daemon logs of one node as server-sent `log` events: the last `tail`
+/// lines, then (unless `follow=false`) each new line as it is written. Admin
+/// only, since daemon logs can name hosts and paths. For another node the
+/// stream is relayed from that node.
 async fn logs(
-    _identity: Identity,
+    _admin: RequireAdmin,
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, ApiError> {
-    ensure_local_logs(&state, &name)?;
-    // No in-process log ring buffer is wired up yet; an empty stream is a
-    // truthful placeholder until one exists.
-    let empty =
-        futures::stream::empty::<Result<axum::response::sse::Event, std::convert::Infallible>>();
-    Ok(axum::response::sse::Sse::new(empty))
-}
-
-fn ensure_local_logs(state: &AppState, name: &str) -> Result<(), ApiError> {
-    if name != state.node_name {
-        return Err(ApiError::NotFound(format!(
-            "node {name} logs are only available by connecting to that node directly"
-        )));
+    Query(query): Query<LogsQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    if name == state.node_name {
+        return Ok(serve_logs(&query).into_response());
     }
-    Ok(())
+    let cluster_state = state.cluster.state().await;
+    if !cluster_state.nodes.contains_key(&name) {
+        return Err(ApiError::NotFound(format!("no node {name}")));
+    }
+    if cluster_state.unreachable.contains(&name) {
+        return Err(ApiError::Unavailable(format!("node {name} is unreachable")));
+    }
+    let path = format!(
+        "/api/nodes/internal/{name}/logs?tail={}&follow={}",
+        clamp_tail(query.tail),
+        query.follow.unwrap_or(true)
+    );
+    internal_peer::proxy_stream(&state, &name, &path).await
 }
 
-/// The last `tail` daemon log lines of `node`, for the MCP layer. Mirrors
-/// `logs` exactly, limitation included: there is no in-process log buffer and
-/// no node-to-node route for one, so this is empty for the node answering and
-/// `NotFound` for any other. The shape (lines, oldest first) is what a real
-/// buffer will fill in without changing callers. Redaction is the caller's
-/// job.
+fn serve_logs(
+    query: &LogsQuery,
+) -> axum::response::sse::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use futures::StreamExt;
+    let (backlog, rx) = node_logs::ring().follow(clamp_tail(query.tail));
+    let replay = futures::stream::iter(backlog);
+    let live: futures::stream::BoxStream<'static, node_logs::LogLine> =
+        if query.follow.unwrap_or(true) {
+            // A follower that fell too far behind skips ahead rather than
+            // ending the stream.
+            tokio_stream::wrappers::BroadcastStream::new(rx)
+                .filter_map(|r| futures::future::ready(r.ok()))
+                .boxed()
+        } else {
+            futures::stream::empty().boxed()
+        };
+    let events = replay.chain(live).map(|l| Ok(log_event(&l)));
+    axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+/// Node-to-node: this node's own log stream, regardless of `name`.
+async fn internal_logs(
+    _auth: InternalAuth,
+    State(_state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> impl IntoResponse {
+    serve_logs(&query)
+}
+
+/// Node-to-node: the last `tail` lines as JSON, for the MCP layer.
+async fn internal_log_tail(
+    _auth: InternalAuth,
+    State(_state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> Json<Vec<node_logs::LogLine>> {
+    Json(node_logs::ring().tail(clamp_tail(query.tail)))
+}
+
+/// The last `tail` daemon log lines of `node`, as plain text, oldest first,
+/// for the MCP layer. Redaction is the caller's job.
 #[allow(dead_code)] // called by `crate::mcp`
 pub(crate) async fn fetch_node_logs(
     state: &AppState,
     node: &str,
-    _tail: u32,
+    tail: u32,
 ) -> Result<Vec<String>, ApiError> {
-    ensure_local_logs(state, node)?;
-    Ok(Vec::new())
+    let tail = clamp_tail(Some(tail as usize));
+    let lines = if node == state.node_name {
+        node_logs::ring().tail(tail)
+    } else {
+        let cluster_state = state.cluster.state().await;
+        if !cluster_state.nodes.contains_key(node) {
+            return Err(ApiError::NotFound(format!("no node {node}")));
+        }
+        internal_peer::fetch_json::<Vec<node_logs::LogLine>>(
+            state,
+            node,
+            &format!("/api/nodes/internal/{node}/log-tail?tail={tail}"),
+        )
+        .await?
+    };
+    Ok(lines.iter().map(node_logs::LogLine::render).collect())
 }
 
 async fn submit(state: &AppState, request: ClusterRequest) -> Result<(), ApiError> {

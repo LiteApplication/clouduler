@@ -9,6 +9,7 @@ name = "clouduler"
 path = "src/main.rs"
 
 [dependencies]
+cl-api.workspace = true
 cl-cli.workspace = true
 cl-daemon.workspace = true
 cl-init.workspace = true

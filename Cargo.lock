@@ -857,6 +857,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.0",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zeroize",
 ]
@@ -1271,6 +1272,7 @@ name = "clouduler"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "cl-api",
  "cl-cli",
  "cl-config",
  "cl-daemon",

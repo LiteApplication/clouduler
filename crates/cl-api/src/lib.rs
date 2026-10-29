@@ -7,6 +7,7 @@ pub mod docker_stats;
 pub mod error;
 pub mod internal_peer;
 pub mod mcp;
+pub mod node_logs;
 pub mod node_metrics;
 pub mod nudges;
 pub mod oidc;
