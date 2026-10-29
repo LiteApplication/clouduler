@@ -21,7 +21,7 @@ import type {
   PortProtocol,
   PublicAddress,
 } from '../../api/types';
-import { Badge } from '../../components/Badge';
+import { Tag, useConfirm } from '../../ds';
 import { Icon } from '../../components/Icon';
 import {
   CheckboxField,
@@ -1061,6 +1061,7 @@ function WireguardAddressField({
   onCancel?: () => void;
   disabled: boolean;
 }) {
+  const confirm = useConfirm();
   const [mode, setMode] = useState<'paste' | 'file'>('paste');
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1084,7 +1085,13 @@ function WireguardAddressField({
   };
 
   const remove = async () => {
-    if (!confirm(`Remove the imported WireGuard config for ${nodeName} on ${netName}?`)) return;
+    const ok = await confirm({
+      title: `Remove the WireGuard config for ${nodeName}?`,
+      body: `${nodeName} stops using its imported tunnel config on ${netName}.`,
+      confirmLabel: 'Remove config',
+      confirmVariant: 'danger',
+    });
+    if (!ok) return;
     setError(null);
     setBusy(true);
     try {
@@ -1519,7 +1526,7 @@ function GitBackupDeployKey() {
         <button type="button" onClick={saveWebhookSecret} disabled={busy || !tokenInput.trim()}>
           <Icon name="key" /> Save webhook token
         </button>
-        {webhookSecret?.configured && <Badge tone="good">configured</Badge>}
+        {webhookSecret?.configured && <Tag tone="ok">configured</Tag>}
       </div>
       {tokenError && (
         <p className="field-error" style={{ marginTop: 8 }}>

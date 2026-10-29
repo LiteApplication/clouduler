@@ -41,6 +41,8 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
   const [githubToken, setGithubToken] = useState<SelfUpdateGithubTokenStatus | null>(null);
   const [repo, setRepo] = useState<SelfUpdateConfig | null>(null);
   const [latest, setLatest] = useState<SelfUpdateLatest | null>(null);
+  // Tags are `v0.8.0`, the running version is `0.8.0`.
+  const newer = !!latest && latest.tag.replace(/^v/, '') !== latest.running_version.replace(/^v/, '');
   const [releaseUrl, setReleaseUrl] = useState(DEFAULT_RELEASE_URL);
   const [tokenInput, setTokenInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -144,11 +146,11 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
         title="Update"
         actions={isAdmin && (inProgress
           ? <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>
-          : <Button icon="play" disabled={busy || !repo} onClick={() => void start()}>Start update{latest?.newer ? ` to ${latest.tag}` : ''}</Button>)}
+          : <Button icon="play" disabled={busy || !repo} onClick={() => void start()}>Start update{newer ? ` to ${latest.tag}` : ''}</Button>)}
       >
         <KV items={[
-          ['Running', latest?.current ?? '-'],
-          ['Available', latest ? <>{latest.tag}{latest.newer && <> <Tag tone="brand">newer</Tag></>}</> : '-'],
+          ['Running', latest?.running_version ?? '-'],
+          ['Available', latest ? <>{latest.tag}{newer && <> <Tag tone="brand">newer</Tag></>}</> : '-'],
           ...(run?.release_tag ? [['Rolling out', run.release_tag] as [string, string]] : []),
         ]} />
         {!repo && <p className="cl-sm cl-muted">Set a release source before starting an update.</p>}

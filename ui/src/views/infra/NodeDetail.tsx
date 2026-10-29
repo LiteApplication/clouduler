@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, nodeLogsUrl } from '../../api/client';
-import type { NodeAddress, NodeDetail as NodeDetailT } from '../../api/types';
+import type { NodeAddress, NodeDetail as NodeDetailT, NodeLogLine } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { Banner, Button, ContainerRow, LogView, Meter, PageHeader, Panel, KV, StatusBadge, Tag, TextField, useConfirm, useToast, type LogViewLine } from '../../ds';
 import { useEventSource } from '../../hooks/useEventSource';
@@ -283,27 +283,21 @@ export function describeAddress(addr: NodeAddress): string {
   return ports ? `${base} — open: ${ports}` : base;
 }
 
-interface DaemonLine {
-  timestamp?: string;
-  level?: string;
-  message: string;
-}
-
-function levelOf(l: DaemonLine): LogViewLine['level'] {
-  const s = (l.level ?? /\b(ERROR|WARN|DEBUG|INFO)\b/.exec(l.message)?.[1] ?? 'info').toLowerCase();
-  return s === 'error' || s === 'warn' || s === 'debug' ? s : 'info';
+function levelOf(l: NodeLogLine): LogViewLine['level'] {
+  return l.level === 'trace' ? 'debug' : l.level;
 }
 
 function DaemonLogs({ name }: { name: string }) {
   const { isAdmin } = useAuth();
   const [open, setOpen] = useState(false);
-  const { items, connected } = useEventSource<DaemonLine>(nodeLogsUrl(name), {
+  const { items, connected } = useEventSource<NodeLogLine>(nodeLogsUrl(name), {
     limit: 500,
+    dedupeKey: (l) => String(l.seq),
     enabled: open && isAdmin,
     events: ['log'],
   });
   const lines: LogViewLine[] = items.map((l) => ({
-    t: (l.timestamp ?? '').slice(11, 19),
+    t: new Date(l.timestamp).toLocaleTimeString([], { hour12: false }),
     level: levelOf(l),
     msg: l.message,
   }));

@@ -124,7 +124,7 @@ export function SettingsAccess({ sheetOpen, onOpen, onClose }: { sheetOpen: bool
               ['Answered on', r.node],
             ]} />
             <div className="chips" role="group" aria-label="Access to grant">
-              {r.allowed_grants.map((g) => (
+              {(['read', 'admin'] as const).map((g) => (
                 <Chip key={g} label={g === 'admin' ? 'Admin' : 'Read-only'} selected={grant === g} onClick={() => setGrants({ ...grants, [r.id]: g })} />
               ))}
             </div>

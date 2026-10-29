@@ -37,13 +37,14 @@ function useConfigNames() {
   return { networks, wireguard, nodes };
 }
 
-/** GET /api/proxy/routes is not in the client contract yet, so ask for it
- *  directly. `null` means the daemon does not have it (older build). */
+/** `null` means the daemon does not have the route list (older build). */
 async function fetchRoutes(): Promise<ProxyRoute[] | null> {
-  const res = await fetch('/api/proxy/routes', { credentials: 'same-origin' });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new ApiError(res.status, `Could not load the route list (${res.status}).`);
-  return res.json();
+  try {
+    return await api.proxyRoutes();
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  }
 }
 
 export function Proxy() {
@@ -102,7 +103,7 @@ function RoutesTab() {
   if (routes === undefined) return <p className="cl-muted">Loading routes…</p>;
   if (routes === null) return <Banner tone="info" title="Route list not available">This node's daemon is older than the UI. Update it to see live routes.</Banner>;
 
-  const bad = routes.filter((r) => r.health && !r.health.ok);
+  const bad = routes.filter((r) => r.health && !r.health.healthy);
   return (
     <>
       {bad.length > 0 && (
@@ -125,7 +126,7 @@ function RoutesTab() {
               key: 'health',
               header: 'Health',
               render: (r) =>
-                r.health ? <Tag tone={r.health.ok ? 'ok' : 'danger'}>{r.health.ok ? 'ok' : `502${r.health.node ? ` on ${r.health.node}` : ''}`}</Tag> : <span className="cl-muted">-</span>,
+                r.health ? <Tag tone={r.health.healthy ? 'ok' : 'danger'}>{r.health.healthy ? 'ok' : `502${r.health.node ? ` on ${r.health.node}` : ''}`}</Tag> : <span className="cl-muted">-</span>,
             },
           ]}
         />

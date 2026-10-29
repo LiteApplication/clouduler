@@ -122,11 +122,14 @@ pub(crate) struct ResourceUsage {
 
 #[derive(Deserialize)]
 struct JoinCommandRequest {
-    /// Names the minted api key, e.g. `join-atlas-03`.
+    /// Name of the new node; also names the minted api key.
     name: String,
     /// Role the node will join as; defaults to worker.
     #[serde(default)]
     role: Option<cl_raft::state::Role>,
+    /// The node's address on the internal network. Detected by init when left out.
+    #[serde(default)]
+    address: Option<std::net::IpAddr>,
 }
 
 #[derive(Serialize)]
@@ -184,8 +187,9 @@ async fn join_command(
         return Err(ApiError::Internal(msg));
     }
 
+    let ip = body.address.map(|ip| format!(" --ip {ip}")).unwrap_or_default();
     let command = format!(
-        "clouduler init --yes --join {address} --token {} --tls-fingerprint {} --role {role}",
+        "clouduler init --yes --join {address} --token {} --tls-fingerprint {} --node {name} --role {role}{ip}",
         new_key.secret, state.tls_fingerprint
     );
     Ok(Json(JoinCommand {

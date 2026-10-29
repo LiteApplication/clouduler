@@ -22,7 +22,7 @@ export function levelOf(line: StreamLine): LogLevel {
   return line.stream === 'stderr' ? 'warn' : 'info';
 }
 
-export function clockTime(timestamp: string): string {
+export function clockTime(timestamp: string | number): string {
   const d = new Date(timestamp);
   if (Number.isNaN(d.getTime())) return '--:--:--';
   return d.toLocaleTimeString([], { hour12: false });

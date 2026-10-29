@@ -7,7 +7,6 @@ import { api } from '../../api/client';
 import type { ClusterStatus, UpdateRow } from '../../api/types';
 import { useClusterState } from '../../state/store';
 import { useInstances } from '../../state/instancesStore';
-import { EmptyVolumeAlerts } from '../../components/EmptyVolumeAlert';
 import { cpuPercent, memPercent, useNodeMetrics } from '../../hooks/useNodeMetrics';
 import { Banner, Button, Chip, Icon, Meter, NodeCard, PageHeader, StackCard, StatusBadge, type Status } from '../../ds';
 import { daysUntil, formatBytes, relativeTime } from '../../lib/format';
@@ -168,7 +167,16 @@ export function Overview() {
             onAction={() => navigate('/dns')}
           />
         ))}
-        <EmptyVolumeAlerts volumes={volumes} />
+        {volumes.filter((v) => v.sync_refused).slice(0, 2).map((v) => (
+          <Banner key={`refused-${v.id}`} tone="danger" title={`Sync refused for ${v.id}`} action="Open storage" onAction={() => navigate('/storage')}>
+            {v.sync_refused!.reason}
+          </Banner>
+        ))}
+        {volumes.filter((v) => v.looks_empty).slice(0, 2).map((v) => (
+          <Banner key={`empty-${v.id}`} tone="danger" title={`${v.id} looks empty`} action="Open storage" onAction={() => navigate('/storage')}>
+            Its source found no files on two scans in a row. Check it before the empty copy replicates.
+          </Banner>
+        ))}
       </div>
 
       <section className="hero" aria-labelledby="cluster-h">

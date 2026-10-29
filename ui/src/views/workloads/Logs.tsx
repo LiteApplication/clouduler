@@ -137,7 +137,7 @@ function NodeLog({ node, tail, search }: { node: string; tail: number; search: s
   const { items, connected } = useEventSource<NodeLogLine>(nodeLogsUrl(node, tail), {
     limit: 2000,
     events: ['log'],
-    dedupeKey: (l) => `${l.timestamp}|${l.target}|${l.message}`,
+    dedupeKey: (l) => String(l.seq),
   });
   const q = search.toLowerCase();
   const lines: LogViewLine[] = items

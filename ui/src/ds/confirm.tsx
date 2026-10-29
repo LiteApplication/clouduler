@@ -15,6 +15,11 @@ type ConfirmFn = (opts: ConfirmOptions) => Promise<boolean>;
 
 const ConfirmContext = createContext<ConfirmFn | null>(null);
 
+const nativeConfirm: ConfirmFn = async ({ title, requireText }) => {
+  if (requireText) return window.prompt(`${title}\nType "${requireText}" to confirm.`) === requireText;
+  return window.confirm(title);
+};
+
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [opts, setOpts] = useState<ConfirmOptions | null>(null);
   const resolver = useRef<((ok: boolean) => void) | null>(null);
@@ -57,7 +62,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 /** A promise API over ConfirmDialog: `if (await confirm({ title, requireText })) ...`.
  *  Replaces window.confirm. Resolves false on cancel, Esc or scrim click. */
 export function useConfirm(): ConfirmFn {
-  const ctx = useContext(ConfirmContext);
-  if (!ctx) throw new Error('useConfirm must be used inside ConfirmProvider');
-  return ctx;
+  // Outside a provider (isolated tests, stray roots) fall back to the
+  // browser prompt rather than crashing the view.
+  return useContext(ConfirmContext) ?? nativeConfirm;
 }

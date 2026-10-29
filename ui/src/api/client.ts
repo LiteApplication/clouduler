@@ -224,7 +224,7 @@ export const api = {
   // Best-effort autofill for an egress/wireguard network's host interface
   // field — non-docker/non-clouduler-managed interfaces seen on that node.
   getNodeInterfaces: (name: string) => get<string[]>(`/api/nodes/${encodeURIComponent(name)}/interfaces`),
-  createJoinCommand: (body: { name: string; role?: 'manager' | 'worker' }) =>
+  createJoinCommand: (body: { name: string; role?: 'manager' | 'worker'; address?: string }) =>
     post<JoinCommand>('/api/nodes/join-command', body),
   addNode: (node: unknown) => post<void>('/api/nodes', node),
   setAvailability: (name: string, availability: 'active' | 'drain') =>
@@ -380,7 +380,6 @@ export const api = {
   tlsFingerprint: () => get<TlsFingerprint>('/api/tls-fingerprint'),
   listDns: () => get<DnsRecordState[]>('/api/dns'),
   proxyRoutes: () => get<ProxyRoute[]>('/api/proxy/routes'),
-  listProxyRoutes: () => get<ProxyRoute[]>('/api/proxy/routes'),
   reconcileDns: () => post<void>('/api/dns/reconcile'),
 
   // self-update: the github token is write-only, so there is no getter for its value
