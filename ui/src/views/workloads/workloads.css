@@ -29,3 +29,26 @@
 .wl-link { background: none; border: 0; padding: 0; min-height: var(--tap-min); color: var(--brand); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
 .wl-check { width: 22px; height: 22px; accent-color: var(--brand-fill); }
 @media (prefers-reduced-motion: reduce) { .wl-bar > span { transition: none; } }
+
+/* login and consent */
+.wl-login { display: flex; flex-wrap: wrap; min-height: 100vh; background: var(--surface-0); color: var(--ink); font: 400 16px/24px var(--font-sans); }
+.wl-login__art { flex: 1 1 440px; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 48px 24px; background: var(--surface-1); border-right: 2px solid var(--line); overflow: hidden; }
+.wl-login__shapes { position: relative; width: min(100%, 420px); height: 420px; }
+.wl-shape { position: absolute; border: 2px solid var(--ink); }
+.wl-shape--brand { left: 20px; top: 40px; width: 280px; height: 280px; background: var(--brand-fill); }
+.wl-shape--pop { right: 10px; bottom: 30px; width: 170px; height: 170px; background: var(--pop-fill); }
+.wl-shape--block { left: 0; bottom: 0; width: 120px; height: 120px; border-radius: var(--radius-lg); background: var(--surface-2); }
+.wl-shape--ring { right: 70px; top: 0; width: 64px; height: 64px; border-color: var(--line-strong); }
+.wl-login__main { flex: 1 1 440px; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 48px 24px; }
+.wl-login__col { width: min(100%, 420px); display: flex; flex-direction: column; gap: var(--space-6); }
+.wl-login__brand { display: inline-flex; align-items: center; gap: var(--space-3); font: 800 26px/30px var(--font-display); letter-spacing: -.02em; }
+.wl-login__title { margin: 0; font: 700 36px/40px var(--font-display); letter-spacing: -.02em; }
+.wl-login__title--sm { font-size: 28px; line-height: 34px; }
+.wl-block { width: 100%; justify-content: center; }
+.wl-or { gap: var(--space-3); flex-wrap: nowrap; }
+.wl-or > span:not(.eyebrow) { flex: 1; height: 1px; background: var(--line); }
+.wl-grants { display: flex; flex-direction: column; gap: var(--space-2); border: 0; padding: 0; margin: 0; }
+.wl-grant { display: flex; gap: var(--space-3); align-items: flex-start; padding: var(--space-3); min-height: var(--tap-min); border: 2px solid var(--line); border-radius: var(--radius-md); cursor: pointer; }
+.wl-grant--on { border-color: var(--brand); background: var(--brand-bg); }
+.wl-grant input { margin-top: 4px; width: 20px; height: 20px; accent-color: var(--brand-fill); }
+@media (max-width: 839px) { .wl-login__art { display: none; } }
