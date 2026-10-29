@@ -151,9 +151,10 @@ pub(crate) async fn harness() -> Harness {
         mcp: Default::default(),
     };
 
+    let node = Arc::new(node);
     let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(());
     let state = AppState {
-        cluster: Arc::new(node),
+        cluster: node.clone(),
         docker: Arc::new(RwLock::new(Docker::connect().ok())),
         pulling: Arc::new(RwLock::new(Default::default())),
         migration_sync: Arc::new(std::sync::RwLock::new(Default::default())),
@@ -163,7 +164,7 @@ pub(crate) async fn harness() -> Harness {
         key_path: dir.path().join("secrets.key"),
         key: Arc::new(RwLock::new(Some(Arc::new(ClusterKey::generate())))),
         key_tx: tokio::sync::watch::channel(None).0,
-        sessions: Arc::new(SessionStore::new()),
+        sessions: Arc::new(SessionStore::new(node.clone())),
         oidc: Arc::new(RwLock::new(None)),
         pending_edit: Arc::new(Mutex::new(None)),
         started_at: Instant::now(),
@@ -205,7 +206,8 @@ async fn viewer_cookie(state: &AppState) -> String {
             },
             Duration::from_secs(60),
         )
-        .await;
+        .await
+        .expect("storing the viewer session");
     format!("cl_session={id}")
 }
 
@@ -2198,7 +2200,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .cluster
         .submit(cl_raft::Request::DeployStack {
             name: "web".to_string(),
-            spec: "services: {}".to_string(),
+            spec: "services:\n  app:\n    image: nginx\n    volumes:\n      - fast/v0:/data\n  job:\n    image: nginx\n    volumes:\n      - fast/v0:/data\n".to_string(),
             at: 0,
         })
         .await
@@ -2224,6 +2226,49 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         })
         .await
         .expect("submit assign");
+
+    // A second node to move to, and a second instance whose move failed
+    // because the first one (same volume) kept writing: exercises
+    // `migration_problem` with a real co-writer.
+    h.state
+        .cluster
+        .submit(cl_raft::Request::UpsertNode(NodeState {
+            name: "n1".to_string(),
+            id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"n1"),
+            node_pubkey: None,
+            ..h.state.cluster.state().await.nodes["n0"].clone()
+        }))
+        .await
+        .expect("submit second node");
+    let moving = cl_raft::InstanceId::new("web", "job", 0);
+    h.state
+        .cluster
+        .submit(cl_raft::Request::Assign {
+            instance: moving.clone(),
+            node: "n0".to_string(),
+            drives: BTreeSet::new(),
+        })
+        .await
+        .expect("submit assign job");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::BeginMigration {
+            instance: moving.clone(),
+            to: "n1".to_string(),
+            drives: BTreeSet::new(),
+        })
+        .await
+        .expect("submit begin migration");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::AdvanceMigration {
+            instance: moving,
+            phase: cl_raft::state::MigrationPhase::Failed {
+                reason: "verification failed: fast/v0: target differs after sync (added=[] changed=[\"apps/activity/l10n/fr.json\", \"custom_apps/calendar/js/calendar-main.js\"] removed=[])".to_string(),
+            },
+        })
+        .await
+        .expect("submit failed migration");
 
     let volume = cl_raft::VolumeId::new("fast", "v0");
     h.state
@@ -2630,3 +2675,49 @@ async fn a_node_without_the_key_refuses_to_wrap_one() {
 
 mod mcp;
 mod oauth_flow;
+
+#[tokio::test]
+async fn a_session_is_stored_hashed_in_raft_and_logout_removes_it() {
+    let h = harness().await;
+    let identity = Identity {
+        subject: "u".into(),
+        username: "u".into(),
+        role: Role::Admin,
+    };
+    let id = h
+        .state
+        .sessions
+        .create(identity.clone(), Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(h.state.sessions.get(&id).await, Some(identity));
+
+    let stored = h.state.cluster.state().await.sessions;
+    assert_eq!(stored.len(), 1);
+    assert!(!stored.contains_key(&id), "the raw id must not be stored");
+
+    h.state.sessions.remove(&id).await;
+    assert!(h.state.sessions.get(&id).await.is_none());
+    assert!(h.state.cluster.state().await.sessions.is_empty());
+}
+
+#[tokio::test]
+async fn an_expired_session_is_ignored_and_then_pruned() {
+    let h = harness().await;
+    let id = h
+        .state
+        .sessions
+        .create(
+            Identity {
+                subject: "u".into(),
+                username: "u".into(),
+                role: Role::Viewer,
+            },
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+    assert!(h.state.sessions.get(&id).await.is_none());
+    h.state.sessions.prune_expired().await;
+    assert!(h.state.cluster.state().await.sessions.is_empty());
+}

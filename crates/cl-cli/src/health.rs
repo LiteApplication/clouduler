@@ -327,7 +327,10 @@ async fn row_for_assignment(
                         state: "migration_failed".to_string(),
                         health: "none".to_string(),
                         started_at: None,
-                        reason: Some(reason.clone()),
+                        reason: Some(
+                            cl_api::migration_problem::one_line_for(state, &assignment.instance)
+                                .unwrap_or_else(|| reason.clone()),
+                        ),
                         proxy_error: None,
                     },
                 );

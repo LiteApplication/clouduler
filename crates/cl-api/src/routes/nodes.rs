@@ -187,7 +187,10 @@ async fn join_command(
         return Err(ApiError::Internal(msg));
     }
 
-    let ip = body.address.map(|ip| format!(" --ip {ip}")).unwrap_or_default();
+    let ip = body
+        .address
+        .map(|ip| format!(" --ip {ip}"))
+        .unwrap_or_default();
     let command = format!(
         "clouduler init --yes --join {address} --token {} --tls-fingerprint {} --node {name} --role {role}{ip}",
         new_key.secret, state.tls_fingerprint

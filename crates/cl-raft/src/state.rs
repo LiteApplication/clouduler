@@ -811,9 +811,25 @@ pub struct ClusterState {
     /// the entry goes with the last one.
     #[serde(default)]
     pub volume_removals: BTreeMap<VolumeId, BTreeSet<String>>,
+    /// Logged-in browser sessions, keyed by a hash of the session id so the
+    /// raft log never holds a usable cookie. Replicated so a login survives a
+    /// daemon restart and a leader change. Deliberately not part of the git
+    /// backup export. See `Request::PutSession`.
+    #[serde(default)]
+    pub sessions: BTreeMap<String, SessionRecord>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
+}
+
+/// Who a session cookie belongs to. See `ClusterState::sessions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub subject: String,
+    pub username: String,
+    pub admin: bool,
+    /// Unix seconds after which the session no longer counts.
+    pub expires_at: i64,
 }
 
 /// One instance's last-observed docker state, as reported by the node that
@@ -963,6 +979,12 @@ pub enum Request {
     AdvanceMigration {
         instance: InstanceId,
         phase: MigrationPhase,
+    },
+    /// Forgets a failed move so the instance reads as steady-state again.
+    /// Refused unless the record is `Failed`: an active move must run to its
+    /// end and a finished one has no record left to clear.
+    ClearMigration {
+        instance: InstanceId,
     },
     UpsertVolume {
         id: VolumeId,
@@ -1145,6 +1167,23 @@ pub enum Request {
     ClearInstanceUpdate {
         instance: InstanceId,
     },
+    /// Store a login session under `key` (a hash of the session id, never the
+    /// id itself). `now` is unix seconds supplied by the caller so `apply`
+    /// stays pure; sessions already expired at `now` are dropped at the same
+    /// time so the map cannot grow without bound.
+    PutSession {
+        key: String,
+        session: SessionRecord,
+        now: i64,
+    },
+    /// Log a session out.
+    RemoveSession {
+        key: String,
+    },
+    /// Drop every session that expired at or before `now`.
+    PruneSessions {
+        now: i64,
+    },
     /// Remember that `instance` was moved off `from` because it kept crashing
     /// there. `at` is unix seconds supplied by the caller so `apply` stays
     /// pure; entries older than `CRASH_MOVE_RETENTION_SECS` before `at` are
@@ -1202,6 +1241,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "SetImageDigest",
     "BeginMigration",
     "AdvanceMigration",
+    "ClearMigration",
     "UpsertVolume",
     "SetVolumeReplica",
     "TouchVolume",
@@ -1236,6 +1276,9 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "ReportContainerStatus",
     "SetInstanceUpdate",
     "ClearInstanceUpdate",
+    "PutSession",
+    "RemoveSession",
+    "PruneSessions",
     "RecordCrashMove",
     "NoOp",
     "ClearEmergency",
@@ -1317,6 +1360,9 @@ mod request_mirror {
         AdvanceMigration {
             instance: InstanceId,
             phase: MigrationPhase,
+        },
+        ClearMigration {
+            instance: InstanceId,
         },
         UpsertVolume {
             id: VolumeId,
@@ -1439,6 +1485,17 @@ mod request_mirror {
         },
         ClearInstanceUpdate {
             instance: InstanceId,
+        },
+        PutSession {
+            key: String,
+            session: SessionRecord,
+            now: i64,
+        },
+        RemoveSession {
+            key: String,
+        },
+        PruneSessions {
+            now: i64,
         },
         RecordCrashMove {
             instance: InstanceId,
@@ -1967,6 +2024,21 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::ClearMigration { instance } => {
+                let assignment = self.assignment_mut(instance)?;
+                match &assignment.migration {
+                    Some(Migration {
+                        phase: MigrationPhase::Failed { .. },
+                        ..
+                    }) => {
+                        assignment.migration = None;
+                        Ok(())
+                    }
+                    Some(_) => Err(format!("{instance} is still migrating")),
+                    None => Err(format!("{instance} has no failed move to clear")),
+                }
+            }
+
             Request::UpsertVolume { id, primary } => {
                 if !self.node_implements(primary, &id.drive) {
                     return Err(format!(
@@ -2369,6 +2441,22 @@ impl ClusterState {
 
             Request::ClearInstanceUpdate { instance } => {
                 self.instance_updates.remove(instance);
+                Ok(())
+            }
+
+            Request::PutSession { key, session, now } => {
+                self.sessions.retain(|_, s| s.expires_at > *now);
+                self.sessions.insert(key.clone(), session.clone());
+                Ok(())
+            }
+
+            Request::RemoveSession { key } => {
+                self.sessions.remove(key);
+                Ok(())
+            }
+
+            Request::PruneSessions { now } => {
+                self.sessions.retain(|_, s| s.expires_at > *now);
                 Ok(())
             }
 
@@ -2804,6 +2892,9 @@ mod tests {
                 instance: InstanceId::new("s", "web", 0),
                 phase: MigrationPhase::Syncing,
             },
+            Request::ClearMigration {
+                instance: InstanceId::new("s", "web", 0),
+            },
             Request::UpsertVolume {
                 id: VolumeId::new("fast", "v1"),
                 primary: "n1".into(),
@@ -2973,6 +3064,18 @@ mod tests {
             Request::ClearInstanceUpdate {
                 instance: InstanceId::new("gitlab", "web", 0),
             },
+            Request::PutSession {
+                key: "k".into(),
+                session: SessionRecord {
+                    subject: "s".into(),
+                    username: "u".into(),
+                    admin: false,
+                    expires_at: 10,
+                },
+                now: 1,
+            },
+            Request::RemoveSession { key: "k".into() },
+            Request::PruneSessions { now: 5 },
             Request::RecordCrashMove {
                 instance: InstanceId::new("gitlab", "web", 0),
                 from: "n1".into(),
@@ -3451,6 +3554,81 @@ mod tests {
             phase: MigrationPhase::Done,
         });
         assert!(state.assignments[&instance].migration.is_none());
+    }
+
+    #[test]
+    fn clear_migration_only_clears_a_failed_record() {
+        let mut state = cluster();
+        let instance = InstanceId::new("gitlab", "web", 0);
+        assign(&mut state, "n1", &["fast"]);
+        let clear = Request::ClearMigration {
+            instance: instance.clone(),
+        };
+
+        // Nothing to clear.
+        assert!(state
+            .apply(&clear)
+            .error
+            .unwrap()
+            .contains("no failed move"));
+
+        state.apply(&Request::BeginMigration {
+            instance: instance.clone(),
+            to: "n2".into(),
+            drives: drives(&["fast"]),
+        });
+        // Active move is refused.
+        assert!(state
+            .apply(&clear)
+            .error
+            .unwrap()
+            .contains("still migrating"));
+        assert!(state.assignments[&instance].migration.is_some());
+
+        state.apply(&Request::AdvanceMigration {
+            instance: instance.clone(),
+            phase: MigrationPhase::Failed {
+                reason: "boom".into(),
+            },
+        });
+        assert!(state.apply(&clear).is_ok());
+        assert!(state.assignments[&instance].migration.is_none());
+        assert_eq!(state.assignments[&instance].node, "n1");
+    }
+
+    #[test]
+    fn sessions_are_stored_removed_and_pruned() {
+        let mut state = ClusterState::default();
+        let session = |expires_at| SessionRecord {
+            subject: "s".into(),
+            username: "u".into(),
+            admin: true,
+            expires_at,
+        };
+        state.apply(&Request::PutSession {
+            key: "old".into(),
+            session: session(10),
+            now: 0,
+        });
+        state.apply(&Request::PutSession {
+            key: "live".into(),
+            session: session(100),
+            now: 50,
+        });
+        // Storing a new session sweeps the one that expired at 10.
+        assert!(!state.sessions.contains_key("old"));
+        assert!(state.sessions.contains_key("live"));
+
+        state.apply(&Request::PruneSessions { now: 100 });
+        assert!(state.sessions.is_empty());
+
+        state.apply(&Request::PutSession {
+            key: "k".into(),
+            session: session(100),
+            now: 0,
+        });
+        state.apply(&Request::RemoveSession { key: "k".into() });
+        assert!(state.sessions.is_empty());
     }
 
     #[test]

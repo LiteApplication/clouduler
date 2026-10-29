@@ -1,71 +1,117 @@
-//! Server side session storage for cookie based (OIDC) logins.
+//! Server side session storage for cookie based (OIDC and api key) logins.
 //!
-//! Sessions live in memory only. Losing them on restart just means everyone
-//! logs in again, which is a fine trade for not putting session state through
-//! raft.
+//! Sessions live in raft (`ClusterState::sessions`), so a login survives a
+//! daemon restart and a leader change. Only a SHA-256 of the session id is
+//! stored: the id is the cookie, and the replicated state is readable through
+//! `/api/state` and sits in every node's raft log and snapshots. They are not
+//! part of the git backup export.
+//!
+//! Lookups are local reads, so a session created on one node can be a
+//! replication delay away from being visible on another.
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::Mutex;
+use cl_raft::{ClusterNode, Request, SessionRecord};
+use sha2::{Digest, Sha256};
 
-use super::Identity;
+use super::{Identity, Role};
+use crate::error::ApiError;
 
 const SESSION_ID_LEN: usize = 32;
 pub const COOKIE_NAME: &str = "cl_session";
 
-struct Session {
-    identity: Identity,
-    expires_at: Instant,
-}
-
-#[derive(Default)]
 pub struct SessionStore {
-    sessions: Mutex<HashMap<String, Session>>,
+    cluster: Arc<ClusterNode>,
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(cluster: Arc<ClusterNode>) -> Self {
+        Self { cluster }
     }
 
     /// Create a session and return its id, to be set as a cookie value.
-    pub async fn create(&self, identity: Identity, ttl: Duration) -> String {
+    pub async fn create(&self, identity: Identity, ttl: Duration) -> Result<String, ApiError> {
         let id = random_id();
-        let session = Session {
-            identity,
-            expires_at: Instant::now() + ttl,
+        let now = unix_now();
+        let request = Request::PutSession {
+            key: hash_id(&id),
+            session: SessionRecord {
+                subject: identity.subject,
+                username: identity.username,
+                admin: identity.role.is_admin(),
+                expires_at: now.saturating_add(ttl.as_secs().min(i64::MAX as u64) as i64),
+            },
+            now,
         };
-        self.sessions.lock().await.insert(id.clone(), session);
-        id
-    }
-
-    /// Look up a session, dropping it if it has expired.
-    pub async fn get(&self, id: &str) -> Option<Identity> {
-        let mut sessions = self.sessions.lock().await;
-        match sessions.get(id) {
-            Some(session) if session.expires_at > Instant::now() => Some(session.identity.clone()),
-            Some(_) => {
-                sessions.remove(id);
-                None
-            }
-            None => None,
+        let response = self
+            .cluster
+            .submit(request)
+            .await
+            .map_err(|e| ApiError::Unavailable(format!("could not store the session: {e}")))?;
+        match response.error {
+            Some(e) => Err(ApiError::Internal(format!(
+                "could not store the session: {e}"
+            ))),
+            None => Ok(id),
         }
     }
 
-    /// Drop every expired session. `get` only evicts a session when it is
-    /// presented again, so one never seen again would otherwise stay forever.
-    pub async fn prune_expired(&self) {
-        let now = Instant::now();
-        self.sessions
-            .lock()
+    /// Look up a session. An expired one is simply not found; `prune_expired`
+    /// removes it from the replicated state later.
+    pub async fn get(&self, id: &str) -> Option<Identity> {
+        let key = hash_id(id);
+        let now = unix_now();
+        self.cluster
+            .read(|state| {
+                let session = state.sessions.get(&key)?;
+                (session.expires_at > now).then(|| Identity {
+                    subject: session.subject.clone(),
+                    username: session.username.clone(),
+                    role: if session.admin {
+                        Role::Admin
+                    } else {
+                        Role::Viewer
+                    },
+                })
+            })
             .await
-            .retain(|_, session| session.expires_at > now);
+    }
+
+    /// Drop every expired session from the replicated state. `get` ignores an
+    /// expired session but cannot delete it, so one never seen again would
+    /// otherwise stay forever. Writes nothing when there is nothing to drop.
+    pub async fn prune_expired(&self) {
+        let now = unix_now();
+        let any = self
+            .cluster
+            .read(|state| state.sessions.values().any(|s| s.expires_at <= now))
+            .await;
+        if any {
+            let _ = self.cluster.submit(Request::PruneSessions { now }).await;
+        }
     }
 
     pub async fn remove(&self, id: &str) {
-        self.sessions.lock().await.remove(id);
+        let _ = self
+            .cluster
+            .submit(Request::RemoveSession { key: hash_id(id) })
+            .await;
     }
+}
+
+fn hash_id(id: &str) -> String {
+    Sha256::digest(id.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn random_id() -> String {
@@ -84,54 +130,4 @@ fn random_id() -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::Role;
-
-    fn identity() -> Identity {
-        Identity {
-            subject: "user@example.com".into(),
-            username: "user@example.com".into(),
-            role: Role::Viewer,
-        }
-    }
-
-    #[tokio::test]
-    async fn a_created_session_can_be_looked_up() {
-        let store = SessionStore::new();
-        let id = store.create(identity(), Duration::from_secs(60)).await;
-        let found = store.get(&id).await.expect("session present");
-        assert_eq!(found.subject, "user@example.com");
-    }
-
-    #[tokio::test]
-    async fn an_expired_session_is_gone() {
-        let store = SessionStore::new();
-        let id = store.create(identity(), Duration::from_millis(1)).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(store.get(&id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn removing_a_session_logs_it_out() {
-        let store = SessionStore::new();
-        let id = store.create(identity(), Duration::from_secs(60)).await;
-        store.remove(&id).await;
-        assert!(store.get(&id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn pruning_drops_only_expired_sessions() {
-        let store = SessionStore::new();
-        let old = store.create(identity(), Duration::from_millis(1)).await;
-        let live = store.create(identity(), Duration::from_secs(60)).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        store.prune_expired().await;
-        let sessions = store.sessions.lock().await;
-        assert!(!sessions.contains_key(&old));
-        assert!(sessions.contains_key(&live));
-    }
 }

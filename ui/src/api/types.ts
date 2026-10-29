@@ -155,6 +155,45 @@ export interface Assignment {
  *  `placement_error`. `stopping`/`restarting`/`exited` come straight from
  *  docker's own lifecycle status (`exited` only fires when the cluster wanted
  *  it running, i.e. it crashed rather than being asked to stop). */
+export type MigrationProblemKind =
+  | 'verify_mismatch'
+  | 'sync_refused'
+  | 'sync_failed'
+  | 'stop_failed'
+  | 'start_failed'
+  | 'other';
+
+export interface MigrationCoWriter {
+  instance: string;
+  node: string;
+  running: boolean;
+}
+
+export interface MigrationAction {
+  id: string;
+  label: string;
+  description: string;
+  primary: boolean;
+  danger: boolean;
+  confirm?: string;
+}
+
+export interface MigrationProblem {
+  kind: MigrationProblemKind;
+  title: string;
+  detail: string;
+  volume?: string;
+  added?: string[];
+  changed?: string[];
+  removed?: string[];
+  files_total?: number;
+  co_writers?: MigrationCoWriter[];
+  from: string;
+  to: string;
+  raw: string;
+  actions: MigrationAction[];
+}
+
 export interface InstanceState {
   id: InstanceId;
   node: string;
@@ -171,6 +210,9 @@ export interface InstanceState {
   running_digest?: string | null;
   started_at: string | null;
   migration: { to: string; phase: string } | null;
+  /** Set when the last move failed: what went wrong in plain words and the
+   *  actions that fit. */
+  migration_problem?: MigrationProblem;
   /** Why no node could run this instance, set only when `state` is
    *  `"pending_placement"`. */
   placement_error?: string;
@@ -389,6 +431,8 @@ export interface ClusterState {
    *  step by step by the node doing the work. Finished entries are cleared
    *  by that node about 15 minutes later. */
   instance_updates: Record<InstanceId, InstanceUpdate>;
+  /** Login sessions keyed by a hash of the cookie; the ui never needs them. */
+  sessions?: Record<string, unknown>;
   version: number;
 }
 

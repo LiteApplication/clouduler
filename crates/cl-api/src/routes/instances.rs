@@ -35,6 +35,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/{id}/actions", get(list_actions))
         .route("/api/instances/{id}/actions/{name}", post(run_action))
         .route("/api/instances/{id}/move", post(move_instance))
+        .route("/api/instances/{id}/migration/retry", post(retry_migration))
+        .route(
+            "/api/instances/{id}/migration/dismiss",
+            post(dismiss_migration),
+        )
         .route("/api/rebalance", post(rebalance))
         .route("/api/rebalance/last", get(last_rebalance))
         .route("/api/instances/{id}/update", post(update))
@@ -102,6 +107,10 @@ pub(crate) struct InstanceSummary {
     pub(crate) running_digest: Option<String>,
     pub(crate) started_at: Option<String>,
     pub(crate) migration: Option<MigrationSummary>,
+    /// Set when the last move failed: what went wrong in plain words and the
+    /// actions that fit. See `migration_problem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) migration_problem: Option<crate::migration_problem::MigrationProblem>,
     /// What is actively happening to this instance right now — a redeploy
     /// sub-step or a migration phase — or `None` when it is steady-state.
     /// `state`/`migration` above are the raw facts; this is the same
@@ -291,6 +300,7 @@ async fn summarize_local(
     });
     // Replicated, so this is the real answer even for an instance whose node
     // could not be asked just now.
+    let migration_problem = crate::migration_problem::classify(cluster_state, &assignment.instance);
     let (mut reason, step) = compose_progress(
         cluster_state.instance_updates.get(&assignment.instance),
         assignment
@@ -298,6 +308,10 @@ async fn summarize_local(
             .as_ref()
             .map(|m| (&m.phase, migration_sync)),
     );
+
+    if let (Some(problem), Some(m)) = (&migration_problem, &assignment.migration) {
+        reason = Some(format!("move to {} failed: {}", m.to, problem.title));
+    }
 
     if instance_state == STATE_WAITING {
         reason = waiting_for.map(|dep| format!("waiting for {dep}"));
@@ -320,8 +334,9 @@ async fn summarize_local(
         started_at: container.as_ref().and_then(|c| c.started_at.clone()),
         migration: assignment.migration.as_ref().map(|m| MigrationSummary {
             to: m.to.clone(),
-            phase: format!("{:?}", m.phase).to_lowercase(),
+            phase: phase_name(&m.phase).to_string(),
         }),
+        migration_problem,
         placement_error: None,
         proxy,
         reason,
@@ -419,6 +434,21 @@ fn compose_progress(
 /// Pulling, stopping, starting, started.
 const UPDATE_TOTAL_STEPS: u8 = 4;
 
+/// The bare phase name; `Failed` carries its reason, which has no place in a
+/// name the ui matches on (it lives in `migration_problem`).
+fn phase_name(phase: &cl_raft::state::MigrationPhase) -> &'static str {
+    use cl_raft::state::MigrationPhase::*;
+    match phase {
+        Stopping => "stopping",
+        Syncing => "syncing",
+        Verifying => "verifying",
+        Switching => "switching",
+        Starting => "starting",
+        Done => "done",
+        Failed { .. } => "failed",
+    }
+}
+
 fn compose_migration_reason(
     phase: &cl_raft::state::MigrationPhase,
     sync_progress: Option<cl_drive::MigrationSyncProgress>,
@@ -434,8 +464,12 @@ fn compose_migration_reason(
             );
         }
     }
-    let label = format!("{phase:?}").to_lowercase();
-    (Some(format!("migrating ({label})")), None)
+    match phase {
+        // Over: nothing is moving, so nothing should say it is.
+        cl_raft::state::MigrationPhase::Done => (None, None),
+        cl_raft::state::MigrationPhase::Failed { .. } => (Some("move failed".to_string()), None),
+        _ => (Some(format!("migrating ({})", phase_name(phase))), None),
+    }
 }
 
 #[cfg(test)]
@@ -588,6 +622,7 @@ async fn pending_placements(
             running_digest: None,
             started_at: None,
             migration: None,
+            migration_problem: None,
             reason: None,
             step: None,
             placement_error: Some(u.reason),
@@ -791,6 +826,67 @@ async fn move_instance(
         return Err(ApiError::Conflict(msg));
     }
     Ok(StatusCode::OK)
+}
+
+/// Starts the failed move again, to the same node.
+async fn retry_migration(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance = parse_id(&id)?;
+    let cluster_state = state.cluster.state().await;
+    let to = failed_move_target(&cluster_state, &instance)?;
+    let drives = required_drives(&cluster_state, &instance);
+    let response = state
+        .cluster
+        .submit(ClusterRequest::BeginMigration {
+            instance,
+            to,
+            drives,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
+    Ok(StatusCode::OK)
+}
+
+/// Clears a failed move, leaving the instance where it is.
+async fn dismiss_migration(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance = parse_id(&id)?;
+    let response = state
+        .cluster
+        .submit(ClusterRequest::ClearMigration { instance })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
+    Ok(StatusCode::OK)
+}
+
+/// Where the failed move was heading, or why there is no failed move.
+fn failed_move_target(
+    state: &cl_raft::ClusterState,
+    instance: &InstanceId,
+) -> Result<String, ApiError> {
+    let assignment = state
+        .assignments
+        .get(instance)
+        .ok_or_else(|| ApiError::NotFound(format!("no instance {instance}")))?;
+    match &assignment.migration {
+        Some(m) if matches!(m.phase, cl_raft::state::MigrationPhase::Failed { .. }) => {
+            Ok(m.to.clone())
+        }
+        Some(_) => Err(ApiError::Conflict(format!("{instance} is still moving"))),
+        None => Err(ApiError::Conflict(format!("{instance} has no failed move"))),
+    }
 }
 
 /// Drives the instance's service mounts volumes from, read back out of the

@@ -6,7 +6,7 @@ export interface ButtonProps {
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
   size?: 'md' | 'sm';
   icon?: IconName;
-  /** Icon-only button; `label` (or string children) becomes its aria-label. */
+  /** Icon-only button; `label` (or string children) becomes its aria-label. `label` also overrides the name of a text button. */
   iconOnly?: boolean;
   label?: string;
   loading?: boolean;
@@ -39,7 +39,7 @@ export function Button({
       disabled={disabled || loading}
       onClick={onClick}
       title={title}
-      aria-label={iconOnly ? (label ?? (typeof children === 'string' ? children : undefined)) : undefined}
+      aria-label={label ?? (iconOnly && typeof children === 'string' ? children : undefined)}
       aria-busy={loading || undefined}
     >
       {loading ? <Icon name="sync" className="cl-spin" /> : icon ? <Icon name={icon} /> : null}

@@ -71,25 +71,6 @@ const STEP_LABEL: Record<'queued' | UpdateStep, string> = {
   started: 'Started',
 };
 
-/** One row's live update progress, read from the replicated update record, so
- *  it is the same no matter which node this browser is talking to. */
-function UpdateProgress({ phase, waitingForHealth }: { phase: 'queued' | UpdateStep; waitingForHealth: boolean }) {
-  const step = phase === 'queued' ? 0 : UPDATE_STEPS.indexOf(phase) + 1;
-  const label = waitingForHealth ? 'Waiting for the health check' : STEP_LABEL[phase];
-  return (
-    <div className="wl-progress" role="progressbar" aria-valuemin={0} aria-valuemax={UPDATE_STEPS.length} aria-valuenow={step} aria-valuetext={label}>
-      <span className="steps" aria-hidden="true">
-        {UPDATE_STEPS.map((p, i) => (
-          <i key={p} className={i < step ? 'on' : undefined} />
-        ))}
-      </span>
-      <span className="sub">
-        {label} <span className="mono">{`${step}/${UPDATE_STEPS.length}`}</span>
-      </span>
-    </div>
-  );
-}
-
 /** A digest that copies itself on click: the short form is for eyeballing, the
  *  full value is what you paste into a registry or a pin. */
 function Digest({ digest, tone }: { digest: string; tone?: 'brand' | 'warn' | 'danger' }) {
@@ -169,11 +150,12 @@ export function Updates() {
   const [live, setLive] = useState<Record<string, InstanceState>>({});
   const [now, setNow] = useState(() => Date.now());
   const [dismissed, setDismissed] = useState<Record<string, number>>(loadDismissed);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [statusFilter, setStatusFilter] = useState<Status | null>(null);
   const [query, setQuery] = useState('');
   /** Every id accepted since nothing was last in flight, for "Updating 3 of 8". */
   const [batch, setBatch] = useState<Set<string>>(new Set());
+  /** Each batch member's furthest progress (0 to 1), so the overall bar only moves forward. */
+  const bestShare = useRef(new Map<string, number>());
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 15000);
@@ -332,22 +314,6 @@ export function Updates() {
     [inFlight, updates, live],
   );
   const behindIdle = useMemo(() => (rows ?? []).filter((r) => statusOf(r) === 'update' && !inFlight.has(r.id)), [rows, inFlight]);
-  const selectableIds = useMemo(
-    () => visibleRows.filter((r) => statusOf(r) === 'update' && !rowInFlight(r.id)).map((r) => r.id),
-    [visibleRows, rowInFlight],
-  );
-
-  // Selection only ever holds rows the user can still act on.
-  useEffect(() => {
-    setSelected((prev) => {
-      const ok = new Set(selectableIds);
-      const next = new Set([...prev].filter((id) => ok.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [selectableIds]);
-
-  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
-
   async function runPin() {
     setBusy('pin');
     setError(null);
@@ -376,7 +342,6 @@ export function Updates() {
     try {
       const { accepted } = await api.applyUpdates(ids);
       setRequested((prev) => ({ ...prev, ...Object.fromEntries(accepted.map((id) => [id, updates[id]?.started_at ?? 0])) }));
-      setSelected(new Set());
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -390,13 +355,6 @@ export function Updates() {
     setDismissed(next);
     saveDismissed(next);
   }
-
-  const toggleSelected = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
 
   if (!rows) {
     return error ? (
@@ -431,41 +389,39 @@ export function Updates() {
 
   // In-flight summary for the progress strip.
   const stripPhases = { downloading: 0, restarting: 0, queued: 0 };
-  let fraction = 0;
   for (const id of inFlight) {
     const u = updates[id];
     const phase = isUpdateActive(u) ? u.phase : 'queued';
     if (phase === 'pulling') stripPhases.downloading += 1;
     else if (phase === 'stopping' || phase === 'starting') stripPhases.restarting += 1;
     else stripPhases.queued += 1;
-    if (phase !== 'queued' && phase !== 'failed') fraction += (UPDATE_STEPS.indexOf(phase) + 1) / UPDATE_STEPS.length;
   }
-  fraction = inFlight.size > 0 ? fraction / inFlight.size : 0;
   const batchAll = new Set([...batch, ...inFlight]);
-  const batchDone = [...batchAll].filter((id) => !inFlight.has(id) && (updates[id]?.phase === 'started' || updates[id]?.phase === 'failed')).length;
+  const isDone = (id: string) => !inFlight.has(id) && (updates[id]?.phase === 'started' || updates[id]?.phase === 'failed');
+  const batchDone = [...batchAll].filter(isDone).length;
+  // The bar covers the whole batch, not just what is still running: a finished
+  // container counts as complete, and no container's share ever goes backward
+  // (a record briefly reading `queued` between steps must not undo its progress).
+  if (inFlight.size === 0) bestShare.current.clear();
+  let fraction = 0;
+  for (const id of batchAll) {
+    const u = updates[id];
+    const step = isUpdateActive(u) ? (UPDATE_STEPS as readonly string[]).indexOf(u.phase) + 1 : 0;
+    const now = isDone(id) ? 1 : step / (UPDATE_STEPS.length + 1);
+    const share = Math.max(bestShare.current.get(id) ?? 0, now);
+    bestShare.current.set(id, share);
+    fraction += share;
+  }
+  fraction = batchAll.size > 0 ? fraction / batchAll.size : 0;
   const filtering = statusFilter !== null || query.trim() !== '';
 
   const columns: Column<UpdateRow>[] = [
-    {
-      key: 'select',
-      label: 'Select',
-      render: (_, row) => (
-        <input
-          type="checkbox"
-          className="wl-check"
-          aria-label={`Select ${row.id}`}
-          checked={selected.has(row.id)}
-          disabled={statusOf(row) !== 'update' || rowInFlight(row.id)}
-          onChange={() => toggleSelected(row.id)}
-        />
-      ),
-    },
     {
       key: 'id',
       label: 'Container',
       render: (_, row) => (
         <span className="wl-stack">
-          <Link className="lnk" to={`/instances/${encodeURIComponent(row.id)}`}>
+          <Link className="li__name" to={`/instances/${encodeURIComponent(row.id)}`}>
             {row.id}
           </Link>
           <span className="code-sm muted" title={row.image ?? undefined}>
@@ -480,6 +436,14 @@ export function Updates() {
       label: 'Status',
       render: (_, row) => {
         const status = statusOf(row);
+        const update = updates[row.id];
+        if (rowInFlight(row.id)) {
+          const waiting = update?.phase === 'started' && live[row.id]?.health === 'starting' && !inFlight.has(row.id);
+          const phase = stepOf(update, !!waiting);
+          const step = phase === 'queued' ? 0 : UPDATE_STEPS.indexOf(phase) + 1;
+          const label = waiting ? 'Waiting for the health check' : STEP_LABEL[phase];
+          return <StatusBadge status="updating" label={step > 0 ? `${label}, step ${step} of ${UPDATE_STEPS.length}` : label} />;
+        }
         return (
           <span className="wl-stack">
             {status === 'update' ? (
@@ -521,8 +485,7 @@ export function Updates() {
         const flight = rowInFlight(row.id);
         const failedVisible = update?.phase === 'failed' && dismissed[row.id] !== update.at;
         const recent = update?.phase === 'started' && nowSecs - update.at < RECENT_RESULT_SECS;
-        const waitingForHealth = update?.phase === 'started' && live[row.id]?.health === 'starting' && !inFlight.has(row.id);
-        if (flight) return <UpdateProgress phase={stepOf(update, !!waitingForHealth)} waitingForHealth={!!waitingForHealth} />;
+        if (flight) return null;
         return (
           <span className="wl-stack wl-stack--end">
             {recent && update && <Tag tone="ok">{`Updated ${relativeTime(update.at, now)}`}</Tag>}
@@ -532,8 +495,8 @@ export function Updates() {
               </span>
             )}
             {status === 'update' && (
-              <Button variant="ghost" icon={failedVisible ? 'refresh' : 'download'} disabled={busy === row.id || busy === 'bulk'} onClick={() => void startUpdate([row.id])}>
-                {failedVisible ? `Retry ${row.id}` : `Update ${row.id}`}
+              <Button variant="ghost" icon={failedVisible ? 'refresh' : 'download'} label={`${failedVisible ? 'Retry' : 'Update'} ${row.id}`} disabled={busy === row.id || busy === 'bulk'} onClick={() => void startUpdate([row.id])}>
+                {failedVisible ? 'Retry' : 'Update'}
               </Button>
             )}
           </span>
@@ -557,15 +520,9 @@ export function Updates() {
               <Button variant="ghost" icon="refresh" loading={checking} onClick={() => void load()}>
                 {checking ? 'Checking' : 'Check again'}
               </Button>
-              {selected.size > 0 ? (
-                <Button variant="primary" icon="download" loading={busy === 'bulk'} disabled={busy !== null} onClick={() => void startUpdate([...selected])}>
-                  {`Update ${selected.size} ${selected.size === 1 ? 'container' : 'containers'}`}
-                </Button>
-              ) : (
-                <Button variant="primary" icon="download" disabled={busy !== null || behindIdle.length === 0} loading={busy === 'bulk'} onClick={() => void startUpdate(behindIdle.map((r) => r.id))}>
+              <Button variant="primary" icon="download" disabled={busy !== null || behindIdle.length === 0} loading={busy === 'bulk'} onClick={() => void startUpdate(behindIdle.map((r) => r.id))}>
                   {`Update all behind (${behindIdle.length})`}
                 </Button>
-              )}
             </>
           }
         />
@@ -631,9 +588,6 @@ export function Updates() {
             {FILTERS.map((f) => (
               <Chip key={f.status} label={f.label} count={counts[f.status]} selected={statusFilter === f.status} onClick={() => setStatusFilter(statusFilter === f.status ? null : f.status)} />
             ))}
-            {selectableIds.length > 0 && (
-              <Chip label={allSelected ? 'Clear selection' : 'Select all behind'} icon="check" onClick={() => setSelected(allSelected ? new Set() : new Set(selectableIds))} />
-            )}
           </div>
         </div>
         <TextField label="Filter by container, image or node" type="search" value={query} onChange={(e) => setQuery(e.target.value)} />

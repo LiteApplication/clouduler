@@ -249,6 +249,8 @@ export const api = {
   runAction: (id: string, name: string) =>
     post<ExecRunResult>(`/api/instances/${encodeURIComponent(id)}/actions/${encodeURIComponent(name)}`),
   moveInstance: (id: string, node: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/move`, { node }),
+  retryMigration: (id: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/migration/retry`),
+  dismissMigration: (id: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/migration/dismiss`),
   setDesired: (id: string, desired: 'running' | 'stopped') =>
     patch<void>(`/api/instances/${encodeURIComponent(id)}`, { desired }),
   updateInstance: (id: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/update`),

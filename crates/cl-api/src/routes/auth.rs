@@ -83,7 +83,7 @@ async fn login_with_key(
         .ok_or_else(|| ApiError::Unauthenticated("invalid api key".into()))?;
 
     let session_ttl = state.cluster_config.read().await.auth.session_ttl;
-    let session_id = state.sessions.create(identity.clone(), session_ttl).await;
+    let session_id = state.sessions.create(identity.clone(), session_ttl).await?;
     Ok((
         jar.add(session_cookie(session_id, session_ttl)),
         Json(identity),
@@ -210,6 +210,6 @@ async fn finish(
     let identity = oidc.finish_login(params.code, params.state).await?;
     drop(oidc_guard);
     let session_ttl = state.cluster_config.read().await.auth.session_ttl;
-    let session_id = state.sessions.create(identity, session_ttl).await;
+    let session_id = state.sessions.create(identity, session_ttl).await?;
     Ok(session_cookie(session_id, session_ttl))
 }

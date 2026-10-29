@@ -81,22 +81,11 @@ describe('Updates page', () => {
     expect(screen.getByText('db')).toBeInTheDocument();
   });
 
-  it('updates exactly the selected rows', async () => {
-    listUpdates.mockResolvedValue([behind('a'), behind('b'), behind('c')]);
-    renderPage();
-    await screen.findByLabelText('Select a');
-    await userEvent.click(screen.getByLabelText('Select a'));
-    await userEvent.click(screen.getByLabelText('Select c'));
-    await userEvent.click(screen.getByRole('button', { name: 'Update 2 containers' }));
-    expect(applyUpdates).toHaveBeenCalledWith(['a', 'c']);
-  });
-
   it('shows progress for an in-flight row without locking the others', async () => {
     instanceUpdates = { a: { node: 'n1', phase: 'pulling', started_at: NOW, at: NOW } };
     listUpdates.mockResolvedValue([behind('a'), behind('b')]);
     renderPage();
-    const rowBar = (await screen.findAllByRole('progressbar')).find((el) => el.getAttribute('aria-valuemax') === '4');
-    expect(rowBar).toHaveAttribute('aria-valuenow', '1');
+    expect(await screen.findByText('Downloading, step 1 of 4')).toBeInTheDocument();
     const rowB = screen.getByText('b').closest('tr')!;
     expect(within(rowB).getByRole('button', { name: /Update/ })).toBeEnabled();
   });

@@ -134,6 +134,8 @@ PATCH  /api/instances/:id               { "desired": "running|stopped" }
 POST   /api/instances/:id/update        pull a newer :latest and recreate
 GET    /api/instances/:id/logs          read    SSE, ?follow=&tail=&since=
 GET    /api/instances/:id/stats         read    SSE, cpu, memory, network, io
+POST   /api/instances/:id/migration/retry     retries a failed move, to the same node
+POST   /api/instances/:id/migration/dismiss   clears a failed move, instance stays where it is
 ```
 
 Instance ids are `stack.service.index`. A summary looks like:
@@ -150,9 +152,69 @@ Instance ids are `stack.service.index`. A summary looks like:
   "image_digest": "sha256:...",   // what the cluster has pinned
   "running_digest": "sha256:...", // what the container is actually running
   "started_at": "2026-08-18T09:30:19Z",
-  "migration": null           // { "to": "n2", "phase": "syncing" } while moving
+  "migration": null,          // { "to": "n2", "phase": "syncing" } while moving
+  "migration_problem": null   // set once "migration.phase" is "failed"; see below
 }
 ```
+
+### `migration_problem`
+
+Raft only ever records a failed move as `Failed { reason }`, the `Display`
+text of whatever `DriveError` stopped the migration driver. `migration_problem`
+turns that string back into something an operator can act on, computed fresh
+from current cluster state on every read (nothing extra is stored in raft).
+It is `null` until `migration.phase` is `"failed"`, and absent entirely once
+the move is retried or dismissed.
+
+```json
+{
+  "kind": "verify_mismatch",
+  "title": "The copy on n1 didn't match after the move",
+  "detail": "Files in fast/v0 changed while they were being copied. app.0 also uses this volume and kept running, so it most likely wrote to it. Nothing was switched. job.0 is still running on n0.",
+  "volume": "fast/v0",
+  "added": [],
+  "changed": ["apps/activity/l10n/fr.json"],
+  "removed": [],
+  "files_total": 2,
+  "co_writers": [{ "instance": "web.app.0", "node": "n0", "running": true }],
+  "from": "n0",
+  "to": "n1",
+  "raw": "verification failed: fast/v0: target differs after sync (...)",
+  "actions": [
+    {
+      "id": "retry",
+      "label": "Try moving to n1 again",
+      "description": "Copies the volume again and checks it.",
+      "primary": true,
+      "danger": false
+    }
+  ]
+}
+```
+
+`kind` is one of `verify_mismatch` (target differed from source after the
+sync), `sync_refused` (the sync would have overwritten data, so it never
+ran), `sync_failed` (the copy itself failed: network, protocol, missing
+volume, io), `stop_failed` (the source container would not stop), `start_failed`
+(the container would not start on the target — note `from`/`to` still say where
+it moved, but if the switch already completed the instance is *not* running on
+`from` anymore), or `other` for anything the parser does not recognise (its
+`raw` text is always kept intact so nothing is lost).
+
+`added`/`changed`/`removed` are capped at 20 entries each; `files_total` is
+the true count before the cap. `co_writers` lists other instances that mount
+the same volume, which is the most likely cause of a `verify_mismatch` when
+one of them is still `running`; detecting this does not stop or coordinate
+with those co-writers, it only surfaces them as a probable cause.
+
+`actions` is the server's proposed next steps for *this* problem in *this*
+cluster state — e.g. `retry` is only offered when the target node is still in
+the cluster and the move hasn't already switched past the point of no return.
+Each action's `id` is one of `retry`, `dismiss`, `restart` (server calls, via
+the two routes above or `POST /api/instances/:id/restart`), or `move_elsewhere`,
+`view_logs`, `view_volume` (client-side navigation only, nothing to call). An
+action may carry `"confirm": "..."` text the caller should have the operator
+confirm before firing it.
 
 `state` is `unknown`, and `running` null, for an instance on another node: there
 is no rpc path for one node to inspect another's containers, and that is a

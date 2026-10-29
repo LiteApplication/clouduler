@@ -177,14 +177,17 @@ pub fn start(
         tokio::spawn(async move {
             let mut cfg = boot_cfg;
             let mut topology = topology_of(&cfg, &node_name);
-            let mut running =
-                match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys, &docker).await {
-                    Ok(running) => running,
-                    Err(e) => {
-                        warn!(error = %e, "drive subsystem did not start");
-                        Running::default()
-                    }
-                };
+            let mut running = match build(
+                &cfg, &node_name, &cluster, &registry, &config_rx, &keys, &docker,
+            )
+            .await
+            {
+                Ok(running) => running,
+                Err(e) => {
+                    warn!(error = %e, "drive subsystem did not start");
+                    Running::default()
+                }
+            };
 
             let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL);
             loop {
@@ -211,15 +214,18 @@ pub fn start(
                 info!("drive topology changed, rebuilding the drive subsystem");
                 topology = live_topology;
                 running.teardown();
-                running =
-                    match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys, &docker).await {
-                        Ok(running) => running,
-                        Err(e) => {
-                            warn!(error = %e, "drive subsystem did not restart");
-                            *registry.write().await = None;
-                            Running::default()
-                        }
-                    };
+                running = match build(
+                    &cfg, &node_name, &cluster, &registry, &config_rx, &keys, &docker,
+                )
+                .await
+                {
+                    Ok(running) => running,
+                    Err(e) => {
+                        warn!(error = %e, "drive subsystem did not restart");
+                        *registry.write().await = None;
+                        Running::default()
+                    }
+                };
             }
         })
     };

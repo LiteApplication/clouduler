@@ -484,6 +484,12 @@ impl ClusterNode {
         self.shared.read().await.data.clone()
     }
 
+    /// Run `f` over the applied state without cloning it, for hot paths that
+    /// only need a lookup.
+    pub async fn read<R>(&self, f: impl FnOnce(&ClusterState) -> R) -> R {
+        f(&self.shared.read().await.data)
+    }
+
     pub fn quorum(&self) -> QuorumWatch {
         self.quorum.clone()
     }

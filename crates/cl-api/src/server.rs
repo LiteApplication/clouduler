@@ -222,7 +222,7 @@ impl ApiServer {
             key_path: options.key_path,
             key,
             key_tx: options.key_tx,
-            sessions: Arc::new(SessionStore::new()),
+            sessions: Arc::new(SessionStore::new(cluster.clone())),
             oidc: Arc::new(RwLock::new(oidc)),
             pending_edit: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),

@@ -114,6 +114,10 @@
         {
           "node": "n0",
           "reachable": true
+        },
+        {
+          "node": "n1",
+          "reachable": true
         }
       ],
       "served_by": [
@@ -138,6 +142,68 @@
       "image_digest": null,
       "migration": null,
       "node": "n0",
+      "restart_count": 0,
+      "running": null,
+      "started_at": null,
+      "state": "stopped"
+    },
+    {
+      "crash_moves": 0,
+      "desired": "running",
+      "health": "none",
+      "id": "<volatile>",
+      "image": null,
+      "image_digest": null,
+      "migration": {
+        "phase": "failed",
+        "to": "n1"
+      },
+      "migration_problem": {
+        "actions": [
+          {
+            "danger": false,
+            "description": "Copies the volume again. It may fail the same way while app.0 keeps writing to it; stopping it first gives it the best chance.",
+            "id": "<volatile>",
+            "label": "Try moving to n1 again",
+            "primary": true
+          },
+          {
+            "danger": false,
+            "description": "Pick a different node and start a new move.",
+            "id": "<volatile>",
+            "label": "Move to another node",
+            "primary": false
+          },
+          {
+            "danger": false,
+            "description": "Clears this message and leaves the container where it is.",
+            "id": "<volatile>",
+            "label": "Keep it on n0",
+            "primary": false
+          }
+        ],
+        "changed": [
+          "apps/activity/l10n/fr.json",
+          "custom_apps/calendar/js/calendar-main.js"
+        ],
+        "co_writers": [
+          {
+            "instance": "web.app.0",
+            "node": "n0",
+            "running": true
+          }
+        ],
+        "detail": "Files in fast/v0 changed while they were being copied. app.0 also uses this volume and kept running, so it most likely wrote to it. Nothing was switched. job.0 is still running on n0.",
+        "files_total": 2,
+        "from": "n0",
+        "kind": "verify_mismatch",
+        "raw": "verification failed: fast/v0: target differs after sync (added=[] changed=[\"apps/activity/l10n/fr.json\", \"custom_apps/calendar/js/calendar-main.js\"] removed=[])",
+        "title": "The copy on n1 didn't match after the move",
+        "to": "n1",
+        "volume": "fast/v0"
+      },
+      "node": "n0",
+      "reason": "move to n1 failed: The copy on n1 didn't match after the move",
       "restart_count": 0,
       "running": null,
       "started_at": null,
@@ -230,7 +296,9 @@
       "allowed": {},
       "bound_ports": [],
       "configs": [],
-      "drives": [],
+      "drives": [
+        "fast"
+      ],
       "file_configs": [],
       "file_secrets": [],
       "hosts": [],
@@ -238,14 +306,16 @@
       "pinned_node": null,
       "placement_constraints": [],
       "secrets": [],
-      "volumes": [],
+      "volumes": [
+        "fast/v0"
+      ],
       "whole_drive_mounts": []
     },
     "revision": 1,
     "secrets": [
       "web.secret"
     ],
-    "spec": "services: {}",
+    "spec": "services:\n  app:\n    image: nginx\n    volumes:\n      - fast/v0:/data\n  job:\n    image: nginx\n    volumes:\n      - fast/v0:/data\n",
     "used_configs": [
       "web.conf"
     ],
@@ -267,6 +337,21 @@
         "image_digest": null,
         "instance": "web.app.0",
         "migration": null,
+        "node": "n0"
+      },
+      "web.job.0": {
+        "desired": "running",
+        "image_digest": null,
+        "instance": "web.job.0",
+        "migration": {
+          "from": "n0",
+          "phase": {
+            "failed": {
+              "reason": "verification failed: fast/v0: target differs after sync (added=[] changed=[\"apps/activity/l10n/fr.json\", \"custom_apps/calendar/js/calendar-main.js\"] removed=[])"
+            }
+          },
+          "to": "n1"
+        },
         "node": "n0"
       }
     },
@@ -333,6 +418,26 @@
         "role": "manager",
         "rpc_addr": "<volatile>",
         "version": ""
+      },
+      "n1": {
+        "arch": "",
+        "availability": "active",
+        "binary_hash": "",
+        "drives": {
+          "fast": "/mnt/fast"
+        },
+        "egress_networks": [],
+        "id": "<volatile>",
+        "labels": {},
+        "last_resort": false,
+        "memory_total_bytes": 0,
+        "name": "n1",
+        "networks": [],
+        "node_pubkey": null,
+        "open_ports": {},
+        "role": "manager",
+        "rpc_addr": "<volatile>",
+        "version": ""
       }
     },
     "overlay": null,
@@ -351,6 +456,7 @@
         "sealed": ""
       }
     },
+    "sessions": {},
     "stacks": {
       "web": {
         "configs": [
@@ -363,7 +469,7 @@
         "secrets": [
           "web.secret"
         ],
-        "spec": "services: {}",
+        "spec": "services:\n  app:\n    image: nginx\n    volumes:\n      - fast/v0:/data\n  job:\n    image: nginx\n    volumes:\n      - fast/v0:/data\n",
         "used_configs": [
           "web.conf"
         ],
@@ -373,7 +479,7 @@
       }
     },
     "unreachable": [],
-    "version": 15,
+    "version": 19,
     "volume_removals": {},
     "volumes": {
       "fast/v0": {
@@ -401,8 +507,8 @@
     "has_quorum": true,
     "is_leader": true,
     "leader": "n0",
-    "managers_reachable": 1,
-    "managers_total": 1,
+    "managers_reachable": 2,
+    "managers_total": 2,
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
@@ -412,13 +518,25 @@
   "updates": [
     {
       "id": "<volatile>",
-      "image": null,
-      "latest_digest": null,
+      "image": "nginx",
+      "latest_digest": "sha256:600f7cd45e27aa13e9304c834ab7c1b0ff39df85ee1dcc5087955455d77bc83b",
       "node": "n0",
       "pin_drift": false,
       "pinned_digest": null,
       "running_digest": null,
       "service": "app",
+      "stack": "web",
+      "update_available": false
+    },
+    {
+      "id": "<volatile>",
+      "image": "nginx",
+      "latest_digest": "sha256:600f7cd45e27aa13e9304c834ab7c1b0ff39df85ee1dcc5087955455d77bc83b",
+      "node": "n0",
+      "pin_drift": false,
+      "pinned_digest": null,
+      "running_digest": null,
+      "service": "job",
       "stack": "web",
       "update_available": false
     }

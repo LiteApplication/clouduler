@@ -32,6 +32,7 @@ import { StackSpecEditor } from '../../components/StackSpecEditor';
 import { DnsCertPanel, PlacementPanel } from './PlacementPanel';
 import { logStreamOptions, toLogViewLine, type StreamLine } from './logLines';
 import { copyText, useKnownNames } from './specTools';
+import { MigrationProblem } from './MigrationProblem';
 import './workloads.css';
 
 export function StackDetail() {
@@ -229,6 +230,7 @@ function InstanceRow({ a, i, isAdmin }: { a: Assignment; i: InstanceState | unde
   const migration = i?.migration ?? a.migration;
   const phase = migration && typeof migration.phase === 'string' ? migration.phase : null;
   const failedPhase = migration && typeof migration.phase !== 'string' ? migration.phase.failed.reason : null;
+  const migrationProblem = i?.migration_problem;
   const STEPS = ['stopping', 'syncing', 'verifying', 'switching', 'starting'];
 
   const act = async (what: 'restart' | 'start') => {
@@ -273,12 +275,20 @@ function InstanceRow({ a, i, isAdmin }: { a: Assignment; i: InstanceState | unde
             )}
             {failedPhase && (
               <span className="sub wl-danger">
-                <Icon name="x" size={14} /> {`Move to ${migration!.to} failed: ${failedPhase}`}
+                <Icon name="x" size={14} /> {`Move to ${migration!.to} failed: ${migrationProblem ? migrationProblem.title : failedPhase}`}
               </span>
             )}
           </>
         }
       />
+      {migrationProblem && (
+        <MigrationProblem
+          instanceId={a.instance}
+          problem={migrationProblem}
+          isAdmin={isAdmin}
+          className="wl-mig-problem-inline"
+        />
+      )}
       {issue && i && (
         <div className="wl-issue">
           <p className="sub wl-danger">

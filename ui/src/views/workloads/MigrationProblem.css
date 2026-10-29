@@ -1,0 +1,223 @@
+.cl-mig-problem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 2px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
+  color: var(--ink);
+  font: 400 15px/22px var(--font-sans);
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.cl-mig-problem__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.cl-mig-problem__icon {
+  color: var(--danger);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.cl-mig-problem__title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.cl-mig-problem__title {
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 22px;
+  color: var(--ink);
+}
+
+.cl-mig-problem__detail {
+  margin: 0;
+  color: var(--ink);
+  line-height: 20px;
+}
+
+.cl-mig-problem__cowriters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-left: calc(20px + var(--space-3));
+}
+
+.cl-mig-problem__subhead {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.cl-mig-problem__cowriter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.cl-mig-problem__cowriter-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.cl-mig-problem__cowriter-link:hover {
+  border-color: var(--brand);
+}
+
+.cl-mig-problem__node-tag {
+  color: var(--ink-muted);
+}
+
+.cl-mig-problem__state-running {
+  font-size: 11px;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.cl-mig-problem__state-stopped {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.cl-mig-problem__files {
+  padding-left: calc(20px + var(--space-3));
+}
+
+.cl-mig-problem__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.cl-mig-problem__toggle:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.cl-mig-problem__chev {
+  transition: transform 0.12s;
+}
+
+.cl-mig-problem__chev--open {
+  transform: rotate(90deg);
+}
+
+.cl-mig-problem__file-lists {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.cl-mig-problem__file-group {
+  margin-bottom: var(--space-2);
+}
+
+.cl-mig-problem__file-group:last-child {
+  margin-bottom: 0;
+}
+
+.cl-mig-problem__file-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: 4px;
+}
+
+.cl-mig-problem__file-ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.cl-mig-problem__file-item {
+  word-break: break-all;
+}
+
+.cl-mig-problem__files-more {
+  margin: var(--space-1) 0 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
+.cl-mig-problem__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-left: calc(20px + var(--space-3));
+  margin-top: var(--space-1);
+}
+
+.cl-mig-problem__technical {
+  padding-left: calc(20px + var(--space-3));
+  margin-top: var(--space-1);
+}
+
+.cl-mig-problem__raw {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow-y: auto;
+  color: var(--ink);
+}
+
+@media (max-width: 559px) {
+  .cl-mig-problem__cowriters,
+  .cl-mig-problem__files,
+  .cl-mig-problem__actions,
+  .cl-mig-problem__technical {
+    padding-left: 0;
+  }
+
+  .cl-mig-problem__actions {
+    flex-direction: column;
+  }
+
+  .cl-mig-problem__actions .cl-btn {
+    width: 100%;
+  }
+}

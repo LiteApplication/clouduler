@@ -327,7 +327,10 @@ networks: {}
         );
         assert_eq!(web.whole_drive_mounts, BTreeSet::from(["fast".to_string()]));
         assert_eq!(web.drives, BTreeSet::from(["fast".to_string()]));
-        assert!(web.volumes.is_empty(), "a whole-drive mount is not a volume");
+        assert!(
+            web.volumes.is_empty(),
+            "a whole-drive mount is not a volume"
+        );
 
         let worker = &per_service["worker"];
         assert_eq!(worker.pinned_node, None);

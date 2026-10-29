@@ -31,6 +31,7 @@ import { useInstanceProgress } from '../../state/progressStore';
 import { useClusterState } from '../../state/store';
 import { logStreamOptions, toLogViewLine, type StreamLine } from './logLines';
 import { usePlacementContext } from './specTools';
+import { MigrationProblem } from './MigrationProblem';
 import './workloads.css';
 
 /** `stack.service.index`; split from the right like the server does, since a
@@ -175,6 +176,18 @@ export function ContainerDetail() {
         <Banner tone="danger" title="Out of memory">
           {`The kernel killed ${id} for going over its memory limit${instance.memory_limit_bytes ? ` of ${formatBytes(instance.memory_limit_bytes)}` : ''}. Raise the limit in the stack spec and redeploy.`}
         </Banner>
+      )}
+
+      {instance.migration_problem && (
+        <MigrationProblem
+          instanceId={id}
+          problem={instance.migration_problem}
+          isAdmin={isAdmin}
+          onOpenMove={() => setMoveOpen(true)}
+          onActionComplete={() => {
+            api.getInstance(id).then((i) => setInstance(i)).catch(() => {});
+          }}
+        />
       )}
 
       <Panel>

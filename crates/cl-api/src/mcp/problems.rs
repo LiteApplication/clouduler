@@ -133,7 +133,11 @@ fn instance_problems(state: &ClusterState, s: &InstanceSummary) -> Vec<Problem> 
     if let Some(migration) = assignment.and_then(|a| a.migration.as_ref()) {
         match &migration.phase {
             MigrationPhase::Failed { reason } => {
-                out.push(mk("migration_failed", reason.clone()));
+                let text = id
+                    .as_ref()
+                    .and_then(|i| crate::migration_problem::one_line_for(state, i))
+                    .unwrap_or_else(|| reason.clone());
+                out.push(mk("migration_failed", text));
                 return out;
             }
             phase if !phase.is_terminal() => {

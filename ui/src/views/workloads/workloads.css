@@ -5,6 +5,8 @@
 .sec.wl-page { gap: var(--space-6); }
 .wl-rows { display: flex; flex-direction: column; border: 2px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--surface-1); }
 .wl-rows > .cl-crow:last-child { border-bottom: 0; }
+.wl-rows > div:not(:last-child) .cl-crow { border-bottom: 1px solid var(--line); }
+.wl-mig-problem-inline { border-radius: 0; border-inline: 0; border-bottom: 0; }
 .wl-issue { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 2px solid var(--danger); border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); background: var(--danger-bg); margin-top: calc(var(--space-1) * -1); }
 .wl-danger { color: var(--danger); display: inline-flex; align-items: center; gap: var(--space-1); }
 .wl-inline { display: inline-flex; align-items: center; gap: var(--space-2); }
@@ -12,10 +14,10 @@
 .wl-file { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--tap-min); color: var(--brand); font-weight: 600; cursor: pointer; }
 .wl-file input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
 .wl-file:focus-within { outline: 2px solid var(--brand); outline-offset: 2px; }
-.list--bare { border: 0; border-radius: 0; }
+.list.list--bare { border: 0; border-radius: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .stack-spec-editor .cm-editor { max-width: 100%; }
-.wl-pad { padding: var(--space-3) var(--space-4) 0; margin: 0; }
+.wl-pad { padding: var(--space-3) var(--space-4); margin: 0; }
 .wl-src { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; color: var(--ink); font: inherit; cursor: pointer; }
 .wl-src:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 
@@ -29,7 +31,6 @@
 .wl-digest--danger { color: var(--danger); border-color: var(--danger); }
 .wl-digest:focus-visible, .wl-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .wl-link { background: none; border: 0; padding: 0; min-height: var(--tap-min); color: var(--brand); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
-.wl-check { width: 22px; height: 22px; accent-color: var(--brand-fill); }
 @media (prefers-reduced-motion: reduce) { .wl-bar > span { transition: none; } }
 
 /* updates page */
@@ -67,3 +68,8 @@
 .wl-grant input { margin-top: 4px; width: 20px; height: 20px; accent-color: var(--brand-fill); }
 @media (max-width: 839px) { .wl-login__art { display: none; } }
 .wl-stack--end { align-items: flex-end; }
+
+/* Updates table: digests read as plain mono text, as in the design. */
+.wl-digest { min-height: 0; padding: 0; border: 0; background: none; font-size: 13px; }
+.wl-digest:hover { text-decoration: underline; }
+.wl-digest--brand, .wl-digest--danger { border: 0; }
