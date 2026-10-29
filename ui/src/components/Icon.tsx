@@ -325,7 +325,7 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   cloud: <path d="M7 19a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.7 9.2 4 4 0 0 1 17 19H7Z" />,
-  // The redesign's glyphs (design-ref/ds/clouduler/components/bundle.js).
+  // The redesign's glyphs, from the design bundle's components/bundle.js.
   // `x` and `pause` are the circled forms the status badges use; `check` stays
   // the bare tick, so the circled check is `check-circle`.
   stack: (

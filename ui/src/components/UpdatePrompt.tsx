@@ -3,8 +3,8 @@
 // is in the middle of.
 
 import { useEffect, useState } from 'react';
+import { Toast } from '../ds';
 import { registerServiceWorker } from '../pwa';
-import { Icon } from './Icon';
 
 export function UpdatePrompt() {
   const [apply, setApply] = useState<(() => void) | null>(null);
@@ -17,15 +17,8 @@ export function UpdatePrompt() {
   if (!apply) return null;
 
   return (
-    <div className="toast" role="status">
-      <Icon name="download" />
-      <span>A new version is ready.</span>
-      <button className="primary" onClick={apply}>
-        Reload
-      </button>
-      <button className="ghost icon-btn" onClick={() => setApply(null)} aria-label="Dismiss">
-        <Icon name="close" />
-      </button>
+    <div className="cl-toasts">
+      <Toast tone="info" title="A new version is ready." action="Reload" onAction={apply} onClose={() => setApply(null)} />
     </div>
   );
 }

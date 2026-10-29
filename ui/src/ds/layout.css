@@ -1,6 +1,5 @@
-/* Page scaffolding from the redesign (design-ref/app.css). The shell classes
-   are .shell* rather than the mockup's .app*, because the old styles.css still
-   owns .app until integration deletes it. Everything else keeps its name:
+/* Page scaffolding from the redesign mockups. The shell classes are .shell*
+   rather than the mockup's .app*. Everything else keeps its mockup name:
    views use .hd, .panel, .li, .kv, .tag, .grid, .split, .codeblock, .diff and
    friends directly. */
 *,*::before,*::after{box-sizing:border-box}

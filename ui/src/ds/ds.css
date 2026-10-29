@@ -1,5 +1,5 @@
-/* Clouduler design-system component styles, ported from the design bundle
-   (design-ref/ds/clouduler/components/bundle.css). Fonts are self-hosted via
+/* Clouduler design-system component styles, ported from the design bundle's
+   components/bundle.css. Fonts are self-hosted via
    @fontsource in main.tsx, so the bundle's Google Fonts @import is dropped. */
 .cl-icon{flex:none;display:block}
 .cl-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}

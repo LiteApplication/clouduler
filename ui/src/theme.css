@@ -1,15 +1,11 @@
 /* ============================================================================
    THEME: design tokens for the Clouduler redesign (deep grape / warm cream).
 
-   Source of truth is design-ref/ds/clouduler/tokens.json. Dark is the
+   Ported from the design system's tokens.json. Dark is the
    default; the theme is selected by data-theme="light" | "dark" on <html>,
    stamped before first paint by the script in index.html. If that script
    never runs, "system" falls back to the OS setting through the
    prefers-color-scheme block below.
-
-   The "legacy aliases" block at the bottom maps the old token names onto the
-   new palette so views that have not been ported yet still render. Delete it
-   together with styles.css once every view uses the ds components.
    ========================================================================= */
 
 :root,
@@ -125,39 +121,4 @@
   --z-nav: 20;
   --z-overlay: 50;
   --z-toast: 60;
-}
-
-/* ---- legacy aliases (old token names -> new palette) ---- */
-:root {
-  --text: var(--ink);
-  --background: var(--surface-0);
-  --primary: var(--brand);
-  --secondary: var(--pop);
-  --accent: var(--brand);
-  --good: var(--ok);
-  --bad: var(--danger);
-  --on-primary: var(--on-brand-fill);
-  --on-accent: var(--on-brand-fill);
-  --surface: var(--surface-1);
-  --surface-3: var(--line);
-  --border: var(--line);
-  --border-strong: var(--line-strong);
-  --text-dim: var(--ink-muted);
-  --text-faint: var(--ink-muted);
-  --good-bg: var(--ok-bg);
-  --bad-bg: var(--danger-bg);
-  --shadow-1: none;
-  --shadow-2: var(--shadow-raised);
-  --aurora-strength: 0;
-  --scrim: var(--overlay);
-  --log-bg: var(--surface-2);
-  --log-text: var(--ink);
-  --glow: 0 0 0 3px var(--brand-bg);
-  --font: var(--font-sans);
-  --mono: var(--font-mono);
-  --radius: var(--radius-md);
-  --sidebar-w: var(--rail-w);
-  --topbar-h: 60px;
-  --tabbar-h: var(--bottom-nav-h);
-  --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }

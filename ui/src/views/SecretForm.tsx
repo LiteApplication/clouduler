@@ -64,114 +64,116 @@ export function SecretForm({
   };
 
   return (
-    <form onSubmit={submit} className="card section">
-      <h3 className="flex-row">
-        <Icon name="key" /> New secret
-      </h3>
-      <div className="field">
-        <label htmlFor="secret-name">Name</label>
-        <input
-          id="secret-name"
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          disabled={lockName}
-          required
-        />
-      </div>
-
-      <div className="field">
-        <label>Source</label>
-        <div className="segmented" role="tablist">
-          <button type="button" role="tab" aria-selected={mode === 'paste'} onClick={() => setMode('paste')}>
-            <Icon name="edit" /> Paste string
-          </button>
-          <button type="button" role="tab" aria-selected={mode === 'file'} onClick={() => setMode('file')}>
-            <Icon name="file" /> File
-          </button>
-          <button type="button" role="tab" aria-selected={mode === 'generate'} onClick={() => setMode('generate')}>
-            <Icon name="dice" /> Generate
-          </button>
-        </div>
-      </div>
-
-      {mode === 'paste' && (
+    <div className="cfg">
+      <form onSubmit={submit} className="card section">
+        <h3 className="flex-row">
+          <Icon name="key" /> New secret
+        </h3>
         <div className="field">
-          <label htmlFor="secret-value">Value</label>
+          <label htmlFor="secret-name">Name</label>
           <input
-            id="secret-value"
-            type="password"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoComplete="off"
+            id="secret-name"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            disabled={lockName}
+            required
           />
         </div>
-      )}
 
-      {mode === 'file' && (
         <div className="field">
-          <label htmlFor="secret-file">File</label>
-          <input
-            id="secret-file"
-            type="file"
-            onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
-          />
-          <textarea
-            aria-label="File contents"
-            rows={8}
-            value={fileContent}
-            onChange={(e) => setFileContent(e.target.value)}
-            placeholder="paste or edit file contents here"
-          />
+          <label>Source</label>
+          <div className="segmented" role="tablist">
+            <button type="button" role="tab" aria-selected={mode === 'paste'} onClick={() => setMode('paste')}>
+              <Icon name="edit" /> Paste string
+            </button>
+            <button type="button" role="tab" aria-selected={mode === 'file'} onClick={() => setMode('file')}>
+              <Icon name="file" /> File
+            </button>
+            <button type="button" role="tab" aria-selected={mode === 'generate'} onClick={() => setMode('generate')}>
+              <Icon name="dice" /> Generate
+            </button>
+          </div>
         </div>
-      )}
 
-      {mode === 'generate' && (
-        <>
+        {mode === 'paste' && (
           <div className="field">
-            <label htmlFor="secret-length">Length</label>
+            <label htmlFor="secret-value">Value</label>
             <input
-              id="secret-length"
-              type="number"
-              value={length}
-              onChange={(e) => setLength(Number(e.target.value))}
-              className={lengthCheck.valid ? '' : 'invalid'}
+              id="secret-value"
+              type="password"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              autoComplete="off"
             />
-            {!lengthCheck.valid && <p className="field-error">{lengthCheck.error}</p>}
           </div>
-          <div className="field">
-            <label htmlFor="secret-charset">Character set</label>
-            <select id="secret-charset" value={charset} onChange={(e) => setCharset(e.target.value as SecretCharset)}>
-              <option value="alphanumeric">Alphanumeric</option>
-              <option value="hex">Hex</option>
-              <option value="base64">Base64</option>
-              <option value="printable">Printable</option>
-            </select>
-          </div>
-          <div className="field">
-            <label>Preview of the format (not the actual value)</label>
-            <p className="mono muted">{previewFor(charset, length)}</p>
-          </div>
-        </>
-      )}
+        )}
 
-      {error && (
-        <p className="field-error">
-          <Icon name="alert-circle" /> {error}
+        {mode === 'file' && (
+          <div className="field">
+            <label htmlFor="secret-file">File</label>
+            <input
+              id="secret-file"
+              type="file"
+              onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+            />
+            <textarea
+              aria-label="File contents"
+              rows={8}
+              value={fileContent}
+              onChange={(e) => setFileContent(e.target.value)}
+              placeholder="paste or edit file contents here"
+            />
+          </div>
+        )}
+
+        {mode === 'generate' && (
+          <>
+            <div className="field">
+              <label htmlFor="secret-length">Length</label>
+              <input
+                id="secret-length"
+                type="number"
+                value={length}
+                onChange={(e) => setLength(Number(e.target.value))}
+                className={lengthCheck.valid ? '' : 'invalid'}
+              />
+              {!lengthCheck.valid && <p className="field-error">{lengthCheck.error}</p>}
+            </div>
+            <div className="field">
+              <label htmlFor="secret-charset">Character set</label>
+              <select id="secret-charset" value={charset} onChange={(e) => setCharset(e.target.value as SecretCharset)}>
+                <option value="alphanumeric">Alphanumeric</option>
+                <option value="hex">Hex</option>
+                <option value="base64">Base64</option>
+                <option value="printable">Printable</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Preview of the format (not the actual value)</label>
+              <p className="mono muted">{previewFor(charset, length)}</p>
+            </div>
+          </>
+        )}
+
+        {error && (
+          <p className="field-error">
+            <Icon name="alert-circle" /> {error}
+          </p>
+        )}
+        <p className="field-hint">
+          The value is sealed on the server and never returned by the API, so this is the only chance to copy it down
+          if you set it yourself.
         </p>
-      )}
-      <p className="field-hint">
-        The value is sealed on the server and never returned by the API, so this is the only chance to copy it down
-        if you set it yourself.
-      </p>
-      <div className="btn-row">
-        <button type="submit" className="primary" disabled={busy}>
-          <Icon name="key" /> Create secret
-        </button>
-        <button type="button" onClick={onDone} disabled={busy}>
-          <Icon name="close" /> Cancel
-        </button>
-      </div>
-    </form>
+        <div className="btn-row">
+          <button type="submit" className="primary" disabled={busy}>
+            <Icon name="key" /> Create secret
+          </button>
+          <button type="button" onClick={onDone} disabled={busy}>
+            <Icon name="close" /> Cancel
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
