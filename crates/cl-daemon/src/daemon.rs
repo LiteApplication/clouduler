@@ -357,6 +357,7 @@ pub async fn run(
         cluster.clone(),
         failover.probe_interval,
     ));
+    cl_api::node_metrics::spawn();
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
     let git_backup = tokio::spawn(watch_git_backup(

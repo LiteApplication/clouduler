@@ -15,6 +15,7 @@ use crate::auth::internal::InternalAuth;
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::internal_peer;
+use crate::node_metrics::{self, DriveSpace, Sample};
 use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -24,12 +25,18 @@ pub fn router() -> Router<AppState> {
             "/api/nodes/{name}",
             get(detail).patch(patch_node).delete(remove),
         )
+        .route("/api/nodes/metrics", get(metrics))
+        .route("/api/nodes/{name}/metrics/history", get(metrics_history))
         .route("/api/nodes/{name}/logs", get(logs))
         .route("/api/nodes/{name}/interfaces", get(interfaces))
         // Node-to-node only, HMAC authenticated: what `detail`/`interfaces`
         // forward to when asked about a node other than the one answering.
         // See `internal_peer`.
         .route("/api/nodes/internal/{name}/usage", get(internal_usage))
+        .route(
+            "/api/nodes/internal/{name}/metrics/history",
+            get(internal_metrics_history),
+        )
         .route(
             "/api/nodes/internal/{name}/interfaces",
             get(internal_interfaces),
@@ -91,10 +98,104 @@ pub(crate) struct ResourceUsage {
     pub(crate) memory_total_bytes: u64,
     pub(crate) memory_used_bytes: u64,
     pub(crate) uptime_seconds: u64,
+    /// Global CPU use over the last sampling interval, 0 to 100.
+    #[serde(default)]
+    pub(crate) cpu_percent: f32,
+    /// Release version of the daemon answering.
+    #[serde(default)]
+    pub(crate) version: String,
+    /// Space on the filesystem behind each of the node's drives.
+    #[serde(default)]
+    pub(crate) drives: Vec<DriveSpace>,
     /// True once this reflects a real reading rather than the zeroed
     /// default returned when neither a local read nor forwarding to the
     /// owning node succeeded.
     pub(crate) local: bool,
+}
+
+#[derive(Serialize)]
+struct NodeMetrics {
+    name: String,
+    container_count: usize,
+    usage: ResourceUsage,
+}
+
+/// How long one node gets to answer the fan-out below; a slow node must not
+/// hold up the whole overview.
+const METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Resource usage of every reachable node in one call, for the overview and
+/// nodes pages. Unreachable or unresponsive nodes are left out.
+async fn metrics(_identity: Identity, State(state): State<AppState>) -> Json<Vec<NodeMetrics>> {
+    let cluster_state = state.cluster.state().await;
+    let reads = cluster_state
+        .nodes
+        .values()
+        .filter(|n| n.name == state.node_name || !cluster_state.unreachable.contains(&n.name))
+        .map(|node| {
+            let state = &state;
+            let cluster_state = &cluster_state;
+            async move {
+                let usage = if node.name == state.node_name {
+                    local_resource_usage(&node.drives)
+                } else {
+                    internal_peer::fetch_json_within::<ResourceUsage>(
+                        state,
+                        &node.name,
+                        &internal_usage_path(&node.name),
+                        METRICS_TIMEOUT,
+                    )
+                    .await
+                    .ok()?
+                };
+                Some(NodeMetrics {
+                    name: node.name.clone(),
+                    container_count: cluster_state.assignments_on(&node.name).count(),
+                    usage,
+                })
+            }
+        });
+    Json(
+        futures::future::join_all(reads)
+            .await
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+}
+
+/// The last ~10 minutes of CPU and memory samples for one node.
+async fn metrics_history(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<Sample>>, ApiError> {
+    if name == state.node_name {
+        return Ok(Json(node_metrics::history()));
+    }
+    let cluster_state = state.cluster.state().await;
+    if !cluster_state.nodes.contains_key(&name) {
+        return Err(ApiError::NotFound(format!("no node {name}")));
+    }
+    if cluster_state.unreachable.contains(&name) {
+        return Ok(Json(Vec::new()));
+    }
+    let samples = internal_peer::fetch_json_within(
+        &state,
+        &name,
+        &format!("/api/nodes/internal/{name}/metrics/history"),
+        METRICS_TIMEOUT,
+    )
+    .await?;
+    Ok(Json(samples))
+}
+
+/// Node-to-node: this node's own samples.
+async fn internal_metrics_history(
+    _auth: InternalAuth,
+    State(_state): State<AppState>,
+) -> Json<Vec<Sample>> {
+    Json(node_metrics::history())
 }
 
 #[derive(Serialize)]
@@ -142,7 +243,7 @@ pub(crate) async fn node_detail(state: &AppState, name: String) -> Result<NodeDe
     };
 
     let usage = if name == state.node_name {
-        local_resource_usage()
+        local_resource_usage(&node.drives)
     } else if cluster_state.unreachable.contains(&name) {
         // Already known down: skip the round trip rather than pay its
         // timeout on every poll of a node everyone already knows is gone.
@@ -173,14 +274,19 @@ fn internal_usage_path(name: &str) -> String {
 
 /// Node-to-node: always this node's own reading, regardless of `name` — a
 /// node only ever forwards to the node it is actually asking about.
-async fn internal_usage(
-    _auth: InternalAuth,
-    State(_state): State<AppState>,
-) -> Json<ResourceUsage> {
-    Json(local_resource_usage())
+async fn internal_usage(_auth: InternalAuth, State(state): State<AppState>) -> Json<ResourceUsage> {
+    let cluster_state = state.cluster.state().await;
+    let drives = cluster_state
+        .nodes
+        .get(&state.node_name)
+        .map(|n| n.drives.clone())
+        .unwrap_or_default();
+    Json(local_resource_usage(&drives))
 }
 
-fn local_resource_usage() -> ResourceUsage {
+fn local_resource_usage(
+    drives: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> ResourceUsage {
     let mut sys = System::new();
     sys.refresh_all();
     let load = System::load_average();
@@ -190,6 +296,9 @@ fn local_resource_usage() -> ResourceUsage {
         memory_total_bytes: sys.total_memory(),
         memory_used_bytes: sys.used_memory(),
         uptime_seconds: System::uptime(),
+        cpu_percent: node_metrics::latest_cpu_percent(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        drives: node_metrics::drive_space(drives),
         local: true,
     }
 }
