@@ -379,12 +379,22 @@ function ServiceActionsPanel({ id, isAdmin }: { id: string; isAdmin: boolean }) 
 function DataPanel({ requirements }: { requirements: StackRequirements | null }) {
   const cluster = useClusterState();
   if (!cluster || !requirements || requirements.drives.length === 0) return null;
+  // Older daemons don't report `volumes`; fall back to everything on the drives used.
+  const own = requirements.volumes ? new Set(requirements.volumes) : null;
+  const whole = new Set(requirements.whole_drive_mounts);
   const drives = new Set(requirements.drives);
-  const volumes = Object.values(cluster.volumes).filter((v) => drives.has(v.id.split('/')[0]));
+  const volumes = Object.values(cluster.volumes).filter((v) => {
+    const drive = v.id.split('/')[0];
+    return own ? own.has(v.id) || whole.has(drive) : drives.has(drive);
+  });
   if (volumes.length === 0) return null;
   return (
     <Panel title="Data" flush>
-      <p className="sub wl-pad">{`Volumes on the drives this service uses: ${requirements.drives.join(', ')}.`}</p>
+      <p className="sub wl-pad">
+        {own
+          ? `Volumes this container mounts${whole.size ? `, and everything on ${[...whole].join(', ')}, which it mounts whole` : ''}.`
+          : `Volumes on the drives this service uses: ${requirements.drives.join(', ')}.`}
+      </p>
       <div className="list list--bare">
         {volumes.map((v) => {
           const sv = volumeStatus(v);

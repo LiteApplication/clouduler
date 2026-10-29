@@ -483,6 +483,18 @@ function SettingsTab({
 }) {
   const confirm = useConfirm();
   const toast = useToast();
+  const [allowed, setAllowed] = useState<Record<string, string[] | null> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getStack(name)
+      .then((s) => !cancelled && setAllowed(s.requirements.allowed ?? null))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [name]);
 
   const remove = async () => {
     const ok = await confirm({
@@ -504,6 +516,27 @@ function SettingsTab({
 
   return (
     <div className="sec">
+      {allowed && Object.keys(allowed).length > 0 && (
+        <Panel title="Reachable hosts per network">
+          <p className="sub">Hosts outside this stack its containers may reach. Traffic inside the stack is always allowed.</p>
+          <KV
+            items={Object.entries(allowed).map(([net, hosts]) => [
+              net,
+              hosts === null ? (
+                <Tag tone="warn">unrestricted</Tag>
+              ) : hosts.length === 0 ? (
+                <Tag tone="ok">nothing outside the stack</Tag>
+              ) : (
+                hosts.map((h) => (
+                  <Tag key={h}>
+                    <span className="mono">{h}</span>
+                  </Tag>
+                ))
+              ),
+            ])}
+          />
+        </Panel>
+      )}
       <Panel title="Configs and secrets used">
         <KV
           items={[

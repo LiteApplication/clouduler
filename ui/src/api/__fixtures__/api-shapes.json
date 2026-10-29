@@ -227,6 +227,7 @@
     "name": "web",
     "previous_spec": null,
     "requirements": {
+      "allowed": {},
       "bound_ports": [],
       "configs": [],
       "drives": [],
@@ -237,6 +238,7 @@
       "pinned_node": null,
       "placement_constraints": [],
       "secrets": [],
+      "volumes": [],
       "whole_drive_mounts": []
     },
     "revision": 1,

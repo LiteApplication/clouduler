@@ -283,6 +283,12 @@ export interface StackRequirements {
    *  check every other drive gets. Per-service only, same reasoning as
    *  `pinned_node`. */
   whole_drive_mounts: string[];
+  /** `drive/volume` ids of the named volumes mounted. Whole-drive mounts
+   *  are in `whole_drive_mounts` instead. */
+  volumes?: string[];
+  /** Each network the stack declares, with its `allowed` list as written;
+   *  `null` means unrestricted. Stack aggregate only (empty on `per_service`). */
+  allowed?: Record<string, string[] | null>;
 }
 
 /** GET /api/stacks/:name. */

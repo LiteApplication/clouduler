@@ -66,6 +66,20 @@ pub struct StackRequirements {
     /// same reasoning as `pinned_node`.
     #[serde(default)]
     pub whole_drive_mounts: BTreeSet<String>,
+    /// `drive/volume` ids of the named volumes mounted, so the ui can show a
+    /// container's own data rather than everything on its drives. Whole-drive
+    /// mounts are in `whole_drive_mounts` instead.
+    #[serde(default)]
+    pub volumes: BTreeSet<String>,
+    /// Each network the stack declares, with its `allowed` list as written;
+    /// `None` means unrestricted. Stack aggregate only: the list belongs to
+    /// the stack, not to one service.
+    #[serde(default)]
+    pub allowed: BTreeMap<String, Option<Vec<String>>>,
+}
+
+fn named_volume(drive: &str, volume: Option<&str>) -> Option<String> {
+    volume.filter(|v| *v != ".").map(|v| format!("{drive}/{v}"))
 }
 
 impl StackFile {
@@ -77,6 +91,7 @@ impl StackFile {
             for vol in &svc.volumes {
                 if let Some(drive) = &vol.drive {
                     r.drives.insert(drive.clone());
+                    r.volumes.extend(named_volume(drive, vol.volume.as_deref()));
                 }
             }
             r.configs
@@ -94,6 +109,13 @@ impl StackFile {
             if secret.as_ref().and_then(|s| s.file.as_ref()).is_some() {
                 r.file_secrets.insert(name.clone());
             }
+        }
+        for (name, net) in &self.networks {
+            let allowed = net
+                .as_ref()
+                .and_then(|n| n.allowed.as_ref())
+                .map(|list| list.iter().map(|t| t.to_string()).collect());
+            r.allowed.insert(name.clone(), allowed);
         }
 
         r
@@ -114,6 +136,7 @@ impl StackFile {
             for vol in &svc.volumes {
                 let Some(drive) = &vol.drive else { continue };
                 r.drives.insert(drive.clone());
+                r.volumes.extend(named_volume(drive, vol.volume.as_deref()));
                 if vol.volume.as_deref() == Some(".") {
                     r.whole_drive_mounts.insert(drive.clone());
                 }
@@ -304,6 +327,7 @@ networks: {}
         );
         assert_eq!(web.whole_drive_mounts, BTreeSet::from(["fast".to_string()]));
         assert_eq!(web.drives, BTreeSet::from(["fast".to_string()]));
+        assert!(web.volumes.is_empty(), "a whole-drive mount is not a volume");
 
         let worker = &per_service["worker"];
         assert_eq!(worker.pinned_node, None);
@@ -311,6 +335,36 @@ networks: {}
         assert!(worker.bound_ports.is_empty());
         assert!(worker.whole_drive_mounts.is_empty());
         assert_eq!(worker.drives, BTreeSet::from(["fast".to_string()]));
+        assert_eq!(worker.volumes, BTreeSet::from(["fast/logs".to_string()]));
+    }
+
+    #[test]
+    fn requirements_report_each_networks_allowed_list_as_written() {
+        let spec = r#"
+services:
+  web:
+    image: nginx
+    networks: [lan, wan, open]
+networks:
+  lan:
+    allowed:
+      - cloud.example.com
+      - "ssh.example.com:22"
+  wan:
+    allowed: []
+  open: {}
+"#;
+        let stack = StackFile::parse(spec).expect("parse");
+        let allowed = stack.requirements().allowed;
+        assert_eq!(
+            allowed["lan"],
+            Some(vec![
+                "cloud.example.com".to_string(),
+                "ssh.example.com:22".to_string()
+            ])
+        );
+        assert_eq!(allowed["wan"], Some(vec![]));
+        assert_eq!(allowed["open"], None);
     }
 
     #[test]
