@@ -1,7 +1,7 @@
 // Precaches the app shell so the console opens offline, but never caches API
 // traffic: cluster state must always come from the daemon, and a stale cached
 // /api response would show a cluster that no longer exists.
-const CACHE = 'clouduler-shell-v1';
+const CACHE = 'clouduler-shell-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -42,7 +42,9 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Hashed build assets: cache first, they never change under the same name.
+  // Hashed build assets (JS, CSS and the self-hosted @fontsource woff2 files):
+  // cache first, they never change under the same name. Fonts are picked up
+  // here on first use rather than precached, as their hashed names are not known.
   event.respondWith(
     caches.match(request).then(
       (hit) =>

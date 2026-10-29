@@ -28,6 +28,12 @@ import type {
   McpGrant,
   OAuthRequestInfo,
   InstanceState,
+  JoinCommand,
+  LastRebalance,
+  NodeMetrics,
+  PendingOAuthRequest,
+  ProxyRoute,
+  SelfUpdateLatest,
   OidcClientSecretStatus,
   PendingConfig,
   RebalanceResponse,
@@ -197,6 +203,7 @@ export const api = {
   // mcp / oauth
   listMcpClients: () => get<McpClient[]>('/api/mcp/clients'),
   revokeMcpClient: (id: string) => del<void>(`/api/mcp/clients/${encodeURIComponent(id)}`),
+  listOAuthRequests: () => get<PendingOAuthRequest[]>('/api/oauth/requests'),
   getOAuthRequest: (id: string) => get<OAuthRequestInfo>(`/api/oauth/requests/${encodeURIComponent(id)}`),
   approveOAuthRequest: (id: string, grant: McpGrant) =>
     post<{ redirect: string }>(`/api/oauth/requests/${encodeURIComponent(id)}/approve`, { grant }),
@@ -209,11 +216,14 @@ export const api = {
 
   // nodes
   listNodes: () => get<ClusterState['nodes']>('/api/nodes'),
+  nodeMetrics: () => get<NodeMetrics>('/api/nodes/metrics'),
   nodeConnectivity: () => get<import('./types').Connectivity>('/api/nodes/connectivity'),
   getNode: (name: string) => get<import('./types').NodeDetail>(`/api/nodes/${encodeURIComponent(name)}`),
   // Best-effort autofill for an egress/wireguard network's host interface
   // field — non-docker/non-clouduler-managed interfaces seen on that node.
   getNodeInterfaces: (name: string) => get<string[]>(`/api/nodes/${encodeURIComponent(name)}/interfaces`),
+  createJoinCommand: (body: { name: string; role?: 'manager' | 'worker'; address?: string }) =>
+    post<JoinCommand>('/api/nodes/join-command', body),
   addNode: (node: unknown) => post<void>('/api/nodes', node),
   setAvailability: (name: string, availability: 'active' | 'drain') =>
     patch<void>(`/api/nodes/${encodeURIComponent(name)}`, { availability }),
@@ -245,6 +255,7 @@ export const api = {
   // move does, so by the time this resolves they are underway, not just
   // planned.
   rebalance: () => post<RebalanceResponse>('/api/rebalance'),
+  lastRebalance: () => get<LastRebalance | null>('/api/rebalance/last'),
 
   // updates: what every container runs versus what its registry now serves.
   // `pinUpdates`/`applyUpdates` with no argument mean "everything this
@@ -288,8 +299,14 @@ export const api = {
   // drives & volumes
   listDrives: () => get<DriveStatus[]>('/api/drives'),
   listVolumes: () => get<VolumeState[]>('/api/volumes'),
-  inspectVolume: (drive: string, volume: string) =>
-    get<VolumeInspection>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/inspect`),
+  inspectVolume: (drive: string, volume: string, node?: string) =>
+    get<VolumeInspection>(
+      `/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/inspect${node ? `?node=${encodeURIComponent(node)}` : ''}`,
+    ),
+  freezeVolume: (drive: string, volume: string) =>
+    post<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/freeze`),
+  unfreezeVolume: (drive: string, volume: string) =>
+    post<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/unfreeze`),
   deleteVolume: (drive: string, volume: string) =>
     del<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}`),
   syncVolume: (drive: string, volume: string) =>
@@ -360,18 +377,23 @@ export const api = {
   renewCertificate: (fqdn: string) => post<void>(`/api/certificates/${encodeURIComponent(fqdn)}/renew`),
   tlsFingerprint: () => get<TlsFingerprint>('/api/tls-fingerprint'),
   listDns: () => get<DnsRecordState[]>('/api/dns'),
+  listProxyRoutes: () => get<ProxyRoute[]>('/api/proxy/routes'),
   reconcileDns: () => post<void>('/api/dns/reconcile'),
 
   // self-update: the github token is write-only, so there is no getter for its value
   selfUpdateGithubToken: () => get<SelfUpdateGithubTokenStatus>('/api/self-update/github-token'),
   setSelfUpdateGithubToken: (token: string) => put<void>('/api/self-update/github-token', { token }),
   setSelfUpdateRepo: (body: SelfUpdateConfig) => put<void>('/api/self-update/repo', body),
+  selfUpdateLatest: () => get<SelfUpdateLatest>('/api/self-update/latest'),
   selfUpdateRepo: () => get<SelfUpdateConfig | null>('/api/self-update/repo'),
   startSelfUpdate: () => post<SelfUpdateRunState>('/api/self-update/run'),
   selfUpdateRun: () => get<SelfUpdateRunState | null>('/api/self-update/run'),
   cancelSelfUpdate: () => post<void>('/api/self-update/cancel'),
 
   gitBackupStatus: () => get<GitBackupStatus>('/api/git-backup/status'),
+  gitBackupExportNow: () => post<void>('/api/git-backup/export-now'),
+  gitBackupPullNow: () => post<void>('/api/git-backup/pull-now'),
+  gitBackupReconcileNow: () => post<void>('/api/git-backup/reconcile-now'),
   gitBackupWebhookSecret: () => get<GitBackupWebhookSecretStatus>('/api/git-backup/webhook-secret'),
   setGitBackupWebhookSecret: (token: string) => put<void>('/api/git-backup/webhook-secret', { token }),
 
@@ -430,4 +452,9 @@ export const api = {
  */
 export function sseUrl(path: string): string {
   return path;
+}
+
+/** SSE url for a node's daemon log: replays the tail, then follows. Admin only. */
+export function nodeLogsUrl(node: string, tail = 200): string {
+  return sseUrl(`/api/nodes/${encodeURIComponent(node)}/logs?tail=${tail}`);
 }

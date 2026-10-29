@@ -1,52 +1,16 @@
-// App shell. On a wide screen this is a fixed sidebar next to the content; on
-// a phone the sidebar becomes an off-canvas drawer with a top bar and a
-// bottom tab bar for the destinations an operator reaches most often.
+// App shell. From 840px a side rail carries every destination; below that the
+// page gets a bottom nav (Overview, Stacks, Nodes, Logs, More) and `/more`
+// holds the rest. Both read one route table so they cannot drift apart.
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useClusterState, useClusterStore } from '../state/store';
+import { failedStacks, useInstances } from '../state/instancesStore';
 import { useAuth } from '../auth/AuthContext';
 import { api } from '../api/client';
-import { Icon, type IconName } from './Icon';
-import { CONFIG_GROUPS, CONFIG_PAGES } from '../views/config/pages';
-import { changesFor, useConfigDraft } from '../views/config/draft';
-import { Logo } from './Logo';
+import { BottomNav, SideRail, Tag, type BottomNavItem, type IconName, type SideRailEntry } from '../ds';
+import { Icon } from '../ds/Icon';
 import { useTheme, type ThemeChoice } from '../theme';
-
-interface NavItem {
-  to: string;
-  label: string;
-  short: string;
-  icon: IconName;
-  end?: boolean;
-  /** Shown in the phone tab bar as well as the drawer. */
-  tab?: boolean;
-  /** Expands into a submenu while the section is open. */
-  submenu?: SubmenuEntry[];
-}
-
-type SubmenuEntry =
-  | { heading: string }
-  | { to: string; label: string; icon: IconName; keys?: string[] };
-
-const CONFIGURATION_LINK: NavItem = {
-  to: '/configuration',
-  label: 'Configuration',
-  short: 'Config',
-  icon: 'settings',
-  submenu: [
-    ...CONFIG_GROUPS.flatMap((group) => [
-      { heading: group } as SubmenuEntry,
-      ...CONFIG_PAGES.filter((p) => p.group === group).map((p) => ({
-        to: `/configuration/${p.slug}`,
-        label: p.label,
-        icon: p.icon,
-        keys: p.keys,
-      })),
-    ]),
-    { to: '/configuration/review', label: 'Review', icon: 'check-circle' as IconName },
-  ],
-};
 
 const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
   { value: 'light', icon: 'sun', label: 'Light theme' },
@@ -54,220 +18,161 @@ const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
   { value: 'system', icon: 'system', label: 'Follow system theme' },
 ];
 
-export function Layout({ children }: { children: ReactNode }) {
-  const { status } = useClusterStore();
-  const cluster = useClusterState();
-  const { identity, isAdmin } = useAuth();
-  const { choice, setChoice } = useTheme();
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [clusterName, setClusterName] = useState<string | null>(null);
-  const location = useLocation();
-  // Absent on an older server, which has no MCP to switch off.
-  const mcpEnabled = identity?.mcp_enabled !== false;
-
-  // The event stream carries raft state, not cluster.yaml, so the name shown
-  // here needs its own one-shot fetch.
-  useEffect(() => {
-    api.getConfiguration().then((cfg) => setClusterName(cfg.cluster.name), () => {});
-  }, []);
-
-  // A drawer that survives navigation would cover the page just opened.
-  useEffect(() => setDrawerOpen(false), [location.pathname]);
-
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setDrawerOpen(false);
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [drawerOpen]);
-
-  // Each node gets its own submenu entry for its config (role, ports,
-  // addresses, drives) lives on its detail page now, not a Configuration
-  // subpage, so this is the only place it's reachable besides the table.
-  const nodeNames = useMemo(() => Object.keys(cluster?.nodes ?? {}).sort(), [cluster]);
-
-  const links: NavItem[] = useMemo(
-    () => [
-      { to: '/', label: 'Overview', short: 'Home', icon: 'overview', end: true, tab: true },
-      {
-        to: '/nodes',
-        label: 'Nodes',
-        short: 'Nodes',
-        icon: 'nodes',
-        tab: true,
-        submenu:
-          nodeNames.length > 0
-            ? nodeNames.map((name) => ({
-                to: `/nodes/${encodeURIComponent(name)}`,
-                label: name,
-                icon: 'nodes' as IconName,
-                keys: [`nodes.${name}`],
-              }))
-            : undefined,
-      },
-      { to: '/stacks', label: 'Stacks', short: 'Stacks', icon: 'stacks', tab: true },
-      { to: '/instances', label: 'Instances', short: 'Instances', icon: 'instances', tab: true },
-      { to: '/updates', label: 'Updates', short: 'Updates', icon: 'download' },
-      { to: '/configs-secrets', label: 'Configs & Secrets', short: 'Secrets', icon: 'secrets' },
-      { to: '/drives', label: 'Drives & Volumes', short: 'Drives', icon: 'drives' },
-      {
-        to: '/backup',
-        label: 'Backup',
-        short: 'Backup',
-        icon: 'cloud',
-        submenu: [
-          { to: '/backup/destinations', label: 'Destinations', icon: 'cloud' as IconName },
-          { to: '/backup/schedules', label: 'Schedules', icon: 'clock' as IconName },
-          { to: '/backup/history', label: 'History', icon: 'file' as IconName },
-        ],
-      },
-      CONFIGURATION_LINK,
-      { to: '/certificates', label: 'Certificates & DNS', short: 'Certs', icon: 'certificate' },
-      { to: '/redirects', label: 'Redirects', short: 'Redirects', icon: 'external' },
-      { to: '/self-update', label: 'Self-update', short: 'Update', icon: 'refresh' },
-      ...(mcpEnabled ? [{ to: '/ai-access', label: 'AI access', short: 'AI', icon: 'sparkle' as IconName }] : []),
-    ],
-    [nodeNames, mcpEnabled],
-  );
-
-  const current = links.find((l) => (l.end ? location.pathname === l.to : location.pathname.startsWith(l.to)));
-  const live = status === 'open';
-
-  return (
-    <div className="app">
-      <header className="topbar">
-        <button
-          className="icon-btn ghost"
-          onClick={() => setDrawerOpen(true)}
-          aria-label="Open navigation"
-          aria-expanded={drawerOpen}
-        >
-          <Icon name="menu" />
-        </button>
-        <span className="topbar-title">
-          <Logo size={26} className="brand-mark" />
-          {current?.label ?? clusterName ?? 'clouduler'}
-        </span>
-        <span className="topbar-spacer" />
-        <span className={`live-dot ${live ? 'on' : 'off'}`} title={live ? 'live' : status} />
-      </header>
-
-      {drawerOpen && <div className="scrim" onClick={() => setDrawerOpen(false)} aria-hidden="true" />}
-
-      <nav className={`sidebar${drawerOpen ? ' open' : ''}`} aria-label="Main navigation">
-        <NavLink to="/" className="sidebar-brand">
-          <Logo size={32} className="brand-mark" />
-          <span>
-            {clusterName ?? 'clouduler'}
-            <span className="brand-sub">cluster console</span>
-          </span>
-        </NavLink>
-
-        {links.map((link) => {
-          const open = link.submenu && location.pathname.startsWith(link.to);
-          return (
-            <div key={link.to} className="nav-group">
-              <NavLink
-                to={link.to}
-                end={link.end}
-                className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
-              >
-                <Icon name={link.icon} />
-                {link.label}
-                {link.submenu && <Icon name="chevron-right" className={`nav-caret${open ? ' open' : ''}`} />}
-              </NavLink>
-              {open && (
-                <div className="nav-sub" role="group" aria-label={`${link.label} sections`}>
-                  {link.submenu!.map((sub) =>
-                    'heading' in sub ? (
-                      <div key={sub.heading} className="nav-subgroup-label">
-                        {sub.heading}
-                      </div>
-                    ) : (
-                      <NavLink
-                        key={sub.to}
-                        to={sub.to}
-                        className={({ isActive }) => `nav-link nav-sublink${isActive ? ' active' : ''}`}
-                      >
-                        <Icon name={sub.icon} />
-                        <span className="nav-sublabel">{sub.label}</span>
-                        <ConfigChanges keys={sub.keys} />
-                      </NavLink>
-                    ),
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-
-        <div className="sidebar-foot">
-          <div className="status-line">
-            <span className={`live-dot ${live ? 'on' : 'off'}`} />
-            {live ? 'live' : status}
-          </div>
-          {identity && (
-            <div className="identity-chip">
-              <span className="avatar" aria-hidden="true">
-                {identity.username.slice(0, 2).toUpperCase()}
-              </span>
-              <span style={{ minWidth: 0 }}>
-                <span className="identity-name" title={identity.username}>
-                  {identity.username}
-                </span>
-                <span className="identity-role">
-                  {isAdmin && <Icon name="crown" style={{ width: 11, height: 11, marginRight: 3 }} />}
-                  {isAdmin ? 'admin' : 'viewer'}
-                </span>
-              </span>
-            </div>
-          )}
-          <div className="theme-switch" role="group" aria-label="Color theme">
-            {THEMES.map((t) => (
-              <button
-                key={t.value}
-                type="button"
-                onClick={() => setChoice(t.value)}
-                aria-pressed={choice === t.value}
-                aria-label={t.label}
-                title={t.label}
-              >
-                <Icon name={t.icon} />
-              </button>
-            ))}
-          </div>
-        </div>
-      </nav>
-
-      <main className="main">{children}</main>
-
-      <nav className="tabbar" aria-label="Primary">
-        {links.filter((l) => l.tab).map((link) => (
-          <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => `tab${isActive ? ' active' : ''}`}>
-            <Icon name={link.icon} />
-            {link.short}
-          </NavLink>
-        ))}
-        <button className="tab" onClick={() => setDrawerOpen(true)} aria-label="More">
-          <Icon name="menu" />
-          More
-        </button>
-      </nav>
-    </div>
-  );
+/** The rail item that owns a path: the longest matching prefix. */
+function activeFor(pathname: string, ids: string[]): string | undefined {
+  let best: string | undefined;
+  for (const id of ids) {
+    const hit = id === '/' ? pathname === '/' : pathname === id || pathname.startsWith(`${id}/`);
+    if (hit && (!best || id.length > best.length)) best = id;
+  }
+  return best;
 }
 
-/**
- * Unsaved-edit count for one configuration subpage, so the sidebar shows where
- * a staged change lives. With no keys (the Review entry) it counts the lot.
- */
-function ConfigChanges({ keys }: { keys?: string[] }) {
-  const { diff } = useConfigDraft();
-  const count = keys ? changesFor(diff, keys) : diff.length;
-  if (count === 0) return null;
+/** Counts shown as badges: the things that need a person's attention. */
+export function useNavBadges() {
+  const cluster = useClusterState();
+  const instances = useInstances();
+  return useMemo(() => {
+    const failedUpdates = Object.values(cluster?.instance_updates ?? {}).filter((u) => u.phase === 'failed').length;
+    const nodeProblems = (cluster?.unreachable.length ?? 0) +
+      Object.values(cluster?.nodes ?? {}).filter((n) => n.availability === 'drain').length;
+    return { stacks: failedStacks(instances).size, nodes: nodeProblems, updates: failedUpdates };
+  }, [cluster, instances]);
+}
+
+export function Layout({ children }: { children: ReactNode }) {
+  const { status } = useClusterStore();
+  const { identity, isAdmin, refresh } = useAuth();
+  const { choice, setChoice } = useTheme();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const badges = useNavBadges();
+  const [clusterName, setClusterName] = useState<string | null>(null);
+  const [networks, setNetworks] = useState<string[]>([]);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // Absent on an older server, which has no MCP to switch off.
+  const mcpEnabled = identity?.mcp_enabled !== false;
+  const live = status === 'open';
+
+  // The event stream carries raft state, not cluster.yaml, so the name and the
+  // network list need their own one-shot fetch.
+  useEffect(() => {
+    api.getConfiguration().then(
+      (cfg) => {
+        setClusterName(cfg.cluster.name);
+        setNetworks(Object.keys(cfg.networks ?? {}).sort());
+      },
+      () => {},
+    );
+  }, []);
+
+  const inMore = location.pathname.startsWith('/instances') || location.pathname.startsWith('/networks');
+  useEffect(() => {
+    if (inMore) setMoreOpen(true);
+  }, [inMore]);
+
+  const items: SideRailEntry[] = useMemo(() => {
+    const more: SideRailEntry[] = [
+      { id: '/instances', label: 'Instances', icon: 'container', indent: true },
+      ...networks.map((n): SideRailEntry => ({ id: `/networks/${encodeURIComponent(n)}`, label: n, icon: 'network', indent: true })),
+      ...(mcpEnabled ? [{ id: '/settings/access', label: 'AI access', icon: 'sparkle', indent: true } as SideRailEntry] : []),
+    ];
+    return [
+      { id: '/', label: 'Overview', icon: 'overview' },
+      { id: '/stacks', label: 'Stacks', icon: 'stack', badge: badges.stacks },
+      { id: '/nodes', label: 'Nodes', icon: 'node', badge: badges.nodes },
+      { id: '/logs', label: 'Logs', icon: 'terminal' },
+      { heading: 'Network & data' },
+      { id: '/proxy', label: 'Proxy', icon: 'proxy' },
+      { id: '/dns', label: 'DNS', icon: 'globe' },
+      { id: '/storage', label: 'Storage', icon: 'archive' },
+      { heading: 'System' },
+      { id: '/updates', label: 'Updates', icon: 'download', badge: badges.updates },
+      { id: '/settings', label: 'Settings', icon: 'settings' },
+      { id: '/more-group', label: 'More', icon: 'more', expanded: moreOpen },
+      ...(moreOpen ? more : []),
+    ];
+  }, [badges, networks, moreOpen, mcpEnabled]);
+
+  const ids = items.flatMap((i) => ('id' in i && i.id !== '/more-group' ? [i.id] : []));
+  const active = activeFor(location.pathname, ids);
+
+  const onRail = (id: string) => {
+    if (id === '/more-group') setMoreOpen((o) => !o);
+    else navigate(id);
+  };
+
+  const bottom: BottomNavItem[] = [
+    { id: '/', label: 'Overview', icon: 'overview' },
+    { id: '/stacks', label: 'Stacks', icon: 'stack', badge: badges.stacks },
+    { id: '/nodes', label: 'Nodes', icon: 'node', badge: badges.nodes },
+    { id: '/logs', label: 'Logs', icon: 'terminal' },
+    { id: '/more', label: 'More', icon: 'more', badge: badges.updates },
+  ];
+  const bottomActive = activeFor(location.pathname, bottom.map((b) => b.id)) ?? '/more';
+
+  const logout = () => {
+    api.logout().catch(() => {}).finally(() => void refresh());
+  };
+
   return (
-    <span className="change-dot" aria-label={`${count} changed`}>
-      {count}
-    </span>
+    <div className="shell">
+      <a className="skip" href="#main">
+        Skip to content
+      </a>
+      <aside className="shell__rail">
+        <SideRail
+          label="Main navigation"
+          items={items}
+          active={active}
+          onChange={onRail}
+          header={
+            <span className="rail-brand" style={{ padding: 0 }}>
+              <img src="/icon.svg" alt="" width={36} height={36} />
+              <span className="rail-name">{clusterName ?? 'clouduler'}</span>
+            </span>
+          }
+          footer={
+            <div className="rail-foot" style={{ borderTop: 0, padding: 0 }}>
+              <div className="rail-user">
+                <span className="row" style={{ minWidth: 0 }}>
+                  <span className={`livedot${live ? '' : ' livedot--off'}`} title={live ? 'live' : status} />
+                  <span className="body-sm" title={identity?.username} style={{ overflowWrap: 'anywhere' }}>
+                    {identity?.username}
+                  </span>
+                </span>
+                {identity && <Tag tone={isAdmin ? 'pop' : undefined}>{isAdmin ? 'admin' : 'viewer'}</Tag>}
+              </div>
+              <div className="theme-seg" role="group" aria-label="Color theme">
+                {THEMES.map((t) => (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => setChoice(t.value)}
+                    aria-pressed={choice === t.value}
+                    aria-label={t.label}
+                    title={t.label}
+                  >
+                    <Icon name={t.icon} size={18} />
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="cl-btn cl-btn--ghost" onClick={logout}>
+                <Icon name="logout" />
+                <span>Log out</span>
+              </button>
+            </div>
+          }
+        />
+      </aside>
+
+      <main id="main" className="shell__main">
+        <div className="shell__col">{children}</div>
+      </main>
+
+      <div className="bnav-fixed">
+        <BottomNav label="Primary" items={bottom} active={bottomActive} onChange={(id) => navigate(id)} />
+      </div>
+    </div>
   );
 }

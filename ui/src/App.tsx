@@ -1,88 +1,117 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
 import { ClusterStoreProvider } from './state/store';
 import { InstanceProgressProvider } from './state/progressStore';
+import { InstancesProvider } from './state/instancesStore';
+import { ConfirmProvider, ToastProvider } from './ds';
 import { Layout } from './components/Layout';
-import { Login } from './views/Login';
-import { Overview } from './views/Overview';
-import { Nodes } from './views/Nodes';
-import { NodeDetail } from './views/NodeDetail';
-import { Stacks } from './views/Stacks';
-import { StackDetail } from './views/StackDetail';
-import { Instances } from './views/Instances';
-import { InstanceDetail } from './views/InstanceDetail';
-import { ConfigsSecrets } from './views/ConfigsSecrets';
-import { Drives } from './views/Drives';
-import { DriveDetail } from './views/DriveDetail';
-import { NetworkDetail } from './views/NetworkDetail';
-import { Configuration } from './views/Configuration';
+import { PhoneMore } from './views/PhoneMore';
 import { ConfigDraftProvider } from './views/config/draft';
-import { Certificates } from './views/Certificates';
-import { Redirects } from './views/Redirects';
-import { SelfUpdate } from './views/SelfUpdate';
-import { Updates } from './views/Updates';
-import { Destinations } from './views/backup/Destinations';
-import { Schedules } from './views/backup/Schedules';
-import { History } from './views/backup/History';
-import { RestoreWizard } from './views/backup/RestoreWizard';
-import { AiAccess } from './views/AiAccess';
-import { OAuthConsent } from './views/OAuthConsent';
+import { CONFIG_SLUG_TAB } from './views/infra/Settings';
+import { Login } from './views/workloads/Login';
+import { OAuthConsent } from './views/workloads/OAuthConsent';
+import { Overview } from './views/workloads/Overview';
+import { Stacks } from './views/workloads/Stacks';
+import { StackDetail } from './views/workloads/StackDetail';
+import { Deploy } from './views/workloads/Deploy';
+import { Instances } from './views/workloads/Instances';
+import { ContainerDetail } from './views/workloads/ContainerDetail';
+import { Logs } from './views/workloads/Logs';
+import { Updates } from './views/workloads/Updates';
+import { Nodes } from './views/infra/Nodes';
+import { NodeDetail } from './views/infra/NodeDetail';
+import { Proxy } from './views/infra/Proxy';
+import { Dns } from './views/infra/Dns';
+import { Storage } from './views/infra/Storage';
+import { Backups } from './views/infra/Backups';
+import { DriveDetail } from './views/infra/DriveDetail';
+import { NetworkDetail } from './views/infra/NetworkDetail';
+import { Settings } from './views/infra/Settings';
 
 export function App() {
   const { identity, loading } = useAuth();
 
-  if (loading) {
-    return (
-      <p className="loading" style={{ padding: 24 }}>
-        <span className="spinner" /> Loading...
-      </p>
-    );
-  }
-  if (!identity) return <Login />;
-
-  // The consent page is a standalone approval screen reached from an MCP
-  // client's browser redirect, so it renders without the app shell.
   return (
-    <Routes>
-      <Route path="/oauth/consent" element={<OAuthConsent />} />
-      <Route path="*" element={<Shell mcpEnabled={identity.mcp_enabled !== false} />} />
-    </Routes>
+    <ToastProvider>
+      <ConfirmProvider>
+        {loading ? (
+          <p className="pageload" style={{ padding: 24 }}>
+            <span className="spinner" /> Loading...
+          </p>
+        ) : !identity ? (
+          <Login />
+        ) : (
+          // The consent page is a standalone approval screen reached from an MCP
+          // client's browser redirect, so it renders without the app shell.
+          <Routes>
+            <Route path="/oauth/consent" element={<OAuthConsent />} />
+            <Route path="*" element={<Shell />} />
+          </Routes>
+        )}
+      </ConfirmProvider>
+    </ToastProvider>
   );
 }
 
-function Shell({ mcpEnabled }: { mcpEnabled: boolean }) {
+/** `/configuration/<slug>` -> the Settings tab that now owns that page. */
+function ConfigurationRedirect() {
+  const slug = useParams()['*']?.split('/')[0] ?? '';
+  const tab = CONFIG_SLUG_TAB[slug] ?? 'general';
+  const page = CONFIG_SLUG_TAB[slug] && slug !== 'review' && tab !== 'secrets' ? `?page=${slug}` : '';
+  return <Navigate to={`/settings/${tab}${page}`} replace />;
+}
+
+/** Redirect that keeps the query string, so deep links such as
+ *  /backup/restore?scope=drive&drive=x still carry their parameters. */
+function Redirect({ to }: { to: (params: Record<string, string | undefined>) => string }) {
+  const params = useParams();
+  const { search } = useLocation();
+  return <Navigate to={`${to(params)}${search}`} replace />;
+}
+
+function Shell() {
   return (
     <ClusterStoreProvider>
       <InstanceProgressProvider>
-        <ConfigDraftProvider>
-          <Layout>
-            <Routes>
-              <Route path="/" element={<Overview />} />
-              <Route path="/nodes" element={<Nodes />} />
-              <Route path="/nodes/:name" element={<NodeDetail />} />
-              <Route path="/stacks" element={<Stacks />} />
-              <Route path="/stacks/:name" element={<StackDetail />} />
-              <Route path="/instances" element={<Instances />} />
-              <Route path="/instances/:id" element={<InstanceDetail />} />
-              <Route path="/updates" element={<Updates />} />
-              <Route path="/configs-secrets" element={<ConfigsSecrets />} />
-              <Route path="/drives" element={<Drives />} />
-              <Route path="/drives/:name" element={<DriveDetail />} />
-              <Route path="/networks/:name" element={<NetworkDetail />} />
-              <Route path="/configuration/*" element={<Configuration />} />
-              <Route path="/certificates" element={<Certificates />} />
-              <Route path="/redirects" element={<Redirects />} />
-              <Route path="/backup" element={<Navigate to="/backup/destinations" replace />} />
-              <Route path="/backup/destinations" element={<Destinations />} />
-              <Route path="/backup/schedules" element={<Schedules />} />
-              <Route path="/backup/history" element={<History />} />
-              <Route path="/backup/restore" element={<RestoreWizard />} />
-              <Route path="/self-update" element={<SelfUpdate />} />
-              {mcpEnabled && <Route path="/ai-access" element={<AiAccess />} />}
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Layout>
-        </ConfigDraftProvider>
+        <InstancesProvider>
+          <ConfigDraftProvider>
+            <Layout>
+              <Routes>
+                <Route path="/" element={<Overview />} />
+                <Route path="/stacks" element={<Stacks />} />
+                <Route path="/stacks/new" element={<Deploy />} />
+                <Route path="/stacks/:name" element={<StackDetail />} />
+                <Route path="/stacks/:name/deploy" element={<Deploy />} />
+                <Route path="/instances" element={<Instances />} />
+                <Route path="/instances/:id" element={<ContainerDetail />} />
+                <Route path="/logs" element={<Logs />} />
+                <Route path="/updates" element={<Updates />} />
+                <Route path="/nodes" element={<Nodes />} />
+                <Route path="/nodes/:name" element={<NodeDetail />} />
+                <Route path="/proxy/:tab?" element={<Proxy />} />
+                <Route path="/dns" element={<Dns />} />
+                <Route path="/storage" element={<Storage />} />
+                <Route path="/storage/backups" element={<Backups />} />
+                <Route path="/storage/drives/:name" element={<DriveDetail />} />
+                <Route path="/networks/:name" element={<NetworkDetail />} />
+                <Route path="/settings/:tab?" element={<Settings />} />
+                <Route path="/more" element={<PhoneMore />} />
+
+                {/* Old URLs, kept working for bookmarks and links in old views. */}
+                <Route path="/configs-secrets" element={<Navigate to="/settings/secrets" replace />} />
+                <Route path="/drives" element={<Navigate to="/storage" replace />} />
+                <Route path="/drives/:name" element={<Redirect to={(p) => `/storage/drives/${p.name}`} />} />
+                <Route path="/configuration/*" element={<ConfigurationRedirect />} />
+                <Route path="/certificates" element={<Navigate to="/dns" replace />} />
+                <Route path="/redirects" element={<Navigate to="/proxy/redirects" replace />} />
+                <Route path="/backup/*" element={<Redirect to={() => '/storage/backups'} />} />
+                <Route path="/self-update" element={<Navigate to="/settings/self-update" replace />} />
+                <Route path="/ai-access" element={<Navigate to="/settings/access" replace />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Layout>
+          </ConfigDraftProvider>
+        </InstancesProvider>
       </InstanceProgressProvider>
     </ClusterStoreProvider>
   );
