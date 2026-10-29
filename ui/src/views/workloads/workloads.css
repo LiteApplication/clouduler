@@ -1,0 +1,15 @@
+/* Per-view styling for the cluster and workloads screens. Everything here
+   builds on ds tokens; nothing hardcodes a colour. */
+
+.wl-page { min-width: 0; }
+.wl-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+.wl-issue { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 2px solid var(--danger); border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); background: var(--danger-bg); margin-top: calc(var(--space-1) * -1); }
+.wl-danger { color: var(--danger); display: inline-flex; align-items: center; gap: var(--space-1); }
+.wl-inline { display: inline-flex; align-items: center; gap: var(--space-2); }
+.wl-validation .wl-errors { margin: var(--space-1) 0 0; padding-left: 18px; }
+.wl-file { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--tap-min); color: var(--brand); font-weight: 600; cursor: pointer; }
+.wl-file input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+.wl-file:focus-within { outline: 2px solid var(--brand); outline-offset: 2px; }
+.list--bare { border: 0; border-radius: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.stack-spec-editor .cm-editor { max-width: 100%; }
