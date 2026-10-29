@@ -1,0 +1,13 @@
+/* HelpTip: a "?" button whose explanation opens on hover, focus or tap. */
+.cl-tip{display:inline-flex;vertical-align:middle;flex:none}
+.cl-tip__btn{position:relative;width:20px;height:20px;padding:0;border-radius:var(--radius-pill);border:2px solid var(--line-strong);background:var(--surface-2);color:var(--ink-muted);font:700 12px/1 var(--font-sans);cursor:help;display:inline-flex;align-items:center;justify-content:center}
+.cl-tip__btn:hover,.cl-tip__btn[aria-expanded='true']{border-color:var(--ink);background:var(--brand-bg);color:var(--ink)}
+.cl-tip__btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+/* 44px tap target around the 20px button on touch screens. */
+@media (pointer:coarse){.cl-tip__btn::after{content:'';position:absolute;inset:-12px}}
+.cl-tip__pop{position:fixed;z-index:var(--z-overlay);width:min(320px,calc(100vw - 16px));padding:var(--space-3) var(--space-4);background:var(--surface-1);color:var(--ink);border:2px solid var(--ink);border-radius:var(--radius-md);box-shadow:var(--shadow-pop);font:400 14px/20px var(--font-sans);letter-spacing:0;text-transform:none;white-space:normal;text-align:left;cursor:auto}
+.cl-tip__pop[hidden]{display:none}
+.cl-tip__key{display:block;margin-top:var(--space-2);font:500 12px/16px var(--font-mono);color:var(--ink-muted);overflow-wrap:anywhere}
+
+/* Label row shared by the form fields: the name, then its "?". */
+.fld__head{display:flex;align-items:center;gap:var(--space-2)}

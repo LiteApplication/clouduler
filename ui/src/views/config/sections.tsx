@@ -21,7 +21,7 @@ import type {
   PortProtocol,
   PublicAddress,
 } from '../../api/types';
-import { Tag, useConfirm } from '../../ds';
+import { HelpTip, Tag, useConfirm } from '../../ds';
 import { Icon } from '../../components/Icon';
 import {
   CheckboxField,
@@ -52,10 +52,12 @@ export function ClusterSection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <TextField
         id="cluster-name"
-        label="Name"
+        label="Cluster name"
         value={draft.cluster.name}
         onChange={(name) => setDraft({ ...draft, cluster: { ...draft.cluster, name } })}
-        hint="Shown in the UI and used as the default suffix for internal DNS names."
+        hint="Shown across the UI."
+        help="Shown in the UI and used as the default suffix for internal DNS names."
+        configKey="cluster.name"
         disabled={disabled}
       />
     </div>
@@ -195,7 +197,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
           )}
           <SelectField
             id={`net-${name}-type`}
-            label="Type"
+            label="Network type"
             value={net.type}
             onChange={(type) => updateNetwork(name, { type: type as NetworkKind })}
             options={[
@@ -206,26 +208,32 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               { value: 'wireguard', label: 'WireGuard' },
               { value: 'nat', label: 'NAT' },
             ]}
-            hint="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below. NAT routes a service's outbound traffic through the node's own routing table, masqueraded like ordinary NAT, instead of a named interface — no per-node setup needed."
+            hint="What this network is used for."
+            help="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below. NAT routes a service's outbound traffic through the node's own routing table, masqueraded like ordinary NAT, instead of a named interface — no per-node setup needed."
+            configKey={`networks.${name}.type`}
             disabled={disabled}
           />
           {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <CidrField
               id={`net-${name}-subnet`}
-              label="Subnet"
+              label="Address range"
               value={net.subnet ?? ''}
               onChange={(subnet) => updateNetwork(name, { subnet: subnet || null })}
-              hint="The address range nodes on this network get their addresses from, e.g. 10.10.0.0/24."
+              hint="CIDR, e.g. 10.10.0.0/24."
+              help="The address range nodes on this network get their addresses from."
+              configKey={`networks.${name}.subnet`}
               disabled={disabled}
             />
           )}
           {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <TextField
               id={`net-${name}-domain`}
-              label="Domain"
+              label="DNS domain"
               value={net.domain ?? ''}
               onChange={(domain) => updateNetwork(name, { domain: domain || null })}
-              hint="Records under this domain resolve to node addresses on this network."
+              hint="Names under it resolve to node addresses here."
+              help="Records under this domain resolve to node addresses on this network."
+              configKey={`networks.${name}.domain`}
               disabled={disabled}
             />
           )}
@@ -389,23 +397,27 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
           )}
           <SelectField
             id={`drive-${name}-mode`}
-            label="Mode"
+            label="Storage mode"
             value={drive.mode}
             onChange={(mode) => update(name, { mode: mode as 'replicated' | 'served' })}
             options={[
               { value: 'replicated', label: 'Replicated' },
               { value: 'served', label: 'Served' },
             ]}
-            hint="Replicated keeps a synced copy on every node that implements this drive, resynced on the interval below. Served keeps one active copy on a single node, with the rest as standby backups (pick the candidate order below)."
+            hint="Copy everywhere, or serve from one node."
+            help="Replicated keeps a synced copy on every node that implements this drive, resynced on the interval below. Served keeps one active copy on a single node, with the rest as standby backups (pick the candidate order below)."
+            configKey={`drives.${name}.mode`}
             disabled={disabled}
           />
           {drive.mode === 'replicated' ? (
             <DurationField
               id={`drive-${name}-interval`}
-              label="Sync interval"
+              label="Resync every"
               value={drive.sync_interval}
               onChange={(sync_interval) => update(name, { sync_interval })}
-              hint="How often each replica resyncs against the primary copy, e.g. 15m. A stack can override this per volume."
+              hint="e.g. 15m."
+              help="How often each replica resyncs against the primary copy, e.g. 15m. A stack can override this per volume."
+              configKey={`drives.${name}.sync_interval`}
               disabled={disabled}
             />
           ) : (
@@ -581,45 +593,54 @@ export function NodeCard({
       </div>
       <SelectField
         id={`node-${name}-role`}
-        label="Role"
+        label="Node role"
+        configKey={`nodes.${name}.role`}
         value={node.role}
         onChange={(role) => onChange({ role: role as 'manager' | 'worker' })}
         options={[
           { value: 'manager', label: 'Manager' },
           { value: 'worker', label: 'Worker' },
         ]}
-        hint="Managers take part in raft consensus and can become leader; workers only run stacks. A cluster needs at least one manager, and an odd number of managers to keep quorum decisive."
+        hint="Managers vote; workers only run stacks."
+        help="Managers take part in raft consensus and can become leader; workers only run stacks. A cluster needs at least one manager, and an odd number of managers to keep quorum decisive."
         disabled={disabled}
       />
       <PortField
         id={`node-${name}-port`}
-        label="RPC port"
+        label="Cluster RPC port"
+        configKey={`nodes.${name}.rpc_port`}
         value={node.rpc_port}
         onChange={(rpc_port) => onChange({ rpc_port })}
-        hint="The port other nodes dial, on this node's internal-network address, to reach its cluster RPC service."
+        hint="Other nodes dial this port."
+        help="The port other nodes dial, on this node's internal-network address, to reach its cluster RPC service."
         disabled={disabled}
       />
       <TextField
         id={`node-${name}-datadir`}
-        label="Data dir override"
+        label="Data directory"
+        configKey={`nodes.${name}.data_dir`}
         value={node.data_dir ?? ''}
         onChange={(data_dir) => onChange({ data_dir: data_dir || null })}
-        hint="Overrides the cluster-wide data directory for this node only. Leave blank to use the cluster default."
+        hint="Blank uses the cluster default."
+        help="Overrides the cluster-wide data directory for this node only. Leave blank to use the cluster default."
         disabled={disabled}
       />
       <TextField
         id={`node-${name}-docker-datadir`}
-        label="Docker data dir"
+        label="Docker data directory"
+        configKey={`nodes.${name}.docker_data_dir`}
         value={node.docker_data_dir ?? ''}
         onChange={(docker_data_dir) => onChange({ docker_data_dir: docker_data_dir || null })}
-        hint="Where this node's docker daemon stores images and containers. Leave blank for docker's own default (/var/lib/docker). Changing this only takes effect once docker is restarted, and existing data under the old location is not moved."
+        hint="Blank uses docker's default."
+        help="Where this node's docker daemon stores images and containers. Leave blank for docker's own default (/var/lib/docker). Changing this only takes effect once docker is restarted, and existing data under the old location is not moved."
         disabled={disabled}
       />
       {/* A node that joined an existing cluster is set to "never", because a
           second cluster key would only seal secrets nothing else can open. */}
       <SelectField
         id={`node-${name}-genkey`}
-        label="Create the cluster key if missing"
+        label="Cluster key creation"
+        configKey={`nodes.${name}.generate_secret_key`}
         value={
           node.generate_secret_key === null || node.generate_secret_key === undefined
             ? 'inherit'
@@ -631,15 +652,18 @@ export function NodeCard({
           { value: 'true', label: 'Yes, this node may create it' },
           { value: 'false', label: 'Never, it can only be given the key' },
         ]}
-        hint="Only the first node bootstrapping a brand new cluster should be allowed to generate the key. A node joining an existing cluster should be set to 'Never', since a second key could not open secrets the rest of the cluster already sealed."
+        hint="Only the first node of a new cluster should."
+        help="Only the first node bootstrapping a brand new cluster should be allowed to generate the key. A node joining an existing cluster should be set to 'Never', since a second key could not open secrets the rest of the cluster already sealed."
         disabled={disabled}
       />
       <CheckboxField
         id={`node-${name}-last-resort`}
-        label="Last resort"
+        label="Use only as a last resort"
+        configKey={`nodes.${name}.last_resort`}
         value={node.last_resort}
         onChange={(last_resort) => onChange({ last_resort })}
-        hint="Only place a stack here when no other eligible node can take it. Useful for a node whose one virtue is a large drive but whose cpu/ram are weak, so the scheduler doesn't pile general workload onto it just because it sorts first."
+        hint="Gets work only when nothing else fits."
+        help="Only place a stack here when no other eligible node can take it. Useful for a node whose one virtue is a large drive but whose cpu/ram are weak, so the scheduler doesn't pile general workload onto it just because it sorts first."
         disabled={disabled}
       />
 
@@ -709,26 +733,29 @@ export function NodeCard({
               </div>
               <TextField
                 id={`node-${name}-${netName}-ipv4`}
-                label="IPv4"
+                label="Public IPv4"
                 value={pub.ipv4 ?? ''}
                 onChange={(v) => update({ ipv4: v || null })}
-                hint="This node's public IPv4 address on this network. Publishes an A record if the network has a domain."
+                hint="Publishes an A record."
+                help="This node's public IPv4 address on this network. Publishes an A record if the network has a domain."
                 disabled={disabled}
               />
               <TextField
                 id={`node-${name}-${netName}-ipv6`}
-                label="IPv6"
+                label="Public IPv6"
                 value={pub.ipv6 ?? ''}
                 onChange={(v) => update({ ipv6: v || null })}
-                hint="This node's public IPv6 address on this network. Publishes an AAAA record if the network has a domain."
+                hint="Publishes an AAAA record."
+                help="This node's public IPv6 address on this network. Publishes an AAAA record if the network has a domain."
                 disabled={disabled}
               />
               <TextField
                 id={`node-${name}-${netName}-domain`}
-                label="Domain (CNAME)"
+                label="Alias hostname"
                 value={pub.domain ?? ''}
                 onChange={(v) => update({ domain: v || null })}
-                hint="Points this node's DNS record at another hostname instead of a fixed IP, e.g. for a dynamic-DNS address."
+                hint="Points DNS at a hostname instead of an IP."
+                help="Points this node's DNS record at another hostname instead of a fixed IP, e.g. for a dynamic-DNS address."
                 disabled={disabled}
               />
               <OpenPortsEditor
@@ -765,14 +792,16 @@ export function NodeCard({
             <div style={{ flex: 1 }}>
               <IpField
                 id={`node-${name}-${netName}-ip`}
-                label={`${netName} (${net.type})`}
-                value={ip}
-                onChange={(v) => setAddress(netName, v || null)}
-                hint={
+                label={`Address on ${netName}`}
+                hint={net.type === 'internal' ? 'Required, inside the subnet.' : 'Inside the subnet.'}
+                help={
                   net.type === 'internal'
                     ? "This node's fixed address on the internal network, inside its subnet. Required for every node because raft, drive sync and the container overlay all use it."
                     : "This node's fixed address on this network, inside its subnet."
                 }
+                configKey={`nodes.${name}.network.${netName}`}
+                value={ip}
+                onChange={(v) => setAddress(netName, v || null)}
                 disabled={disabled}
               />
             </div>
@@ -865,8 +894,10 @@ function OpenPortsEditor({
 
   return (
     <div className="field">
-      <label>Open ports</label>
-      <p className="field-hint">{hint}</p>
+      <div className="fld__head">
+        <label>Open ports</label>
+        <HelpTip label="Open ports">{hint}</HelpTip>
+      </div>
       {ports.map((p) => (
         <div key={`${p.protocol}-${p.port}`} className="flex-row" style={{ gap: 8, marginBottom: 4 }}>
           <span className="mono">
@@ -980,7 +1011,13 @@ function EgressInterfaceField({
         )}
       </div>
       <div className="field">
-        <label htmlFor={`node-${nodeName}-${netName}-iface`}>Interface</label>
+        <div className="fld__head">
+          <label htmlFor={`node-${nodeName}-${netName}-iface`}>Interface</label>
+          <HelpTip label="Interface">
+            The host interface this node's outbound traffic on this network leaves through, e.g. a VPN tunnel or the
+            node's WAN interface. Must already exist on the node; clouduler does not bring it up.
+          </HelpTip>
+        </div>
         <input
           id={`node-${nodeName}-${netName}-iface`}
           className="mono"
@@ -995,18 +1032,14 @@ function EgressInterfaceField({
             <option key={name} value={name} />
           ))}
         </datalist>
-        <span className="field-hint">
-          The host interface this node's outbound traffic on this network leaves through, e.g. a
-          VPN tunnel or the node's WAN interface. Must already exist on the node — clouduler does
-          not bring it up.
-        </span>
       </div>
       <CheckboxField
         id={`node-${nodeName}-${netName}-fallback-enabled`}
-        label="Fall back to a second interface"
+        label="Use a backup interface"
         value={fallbackEnabled}
         onChange={toggleFallback}
-        hint="If this node cannot reach an IP through the interface above for one reconcile tick, route this network out a second interface instead until the first one answers again."
+        hint="Takes over when the main one stops answering."
+        help="If this node cannot reach an IP through the interface above for one reconcile tick, route this network out a second interface instead until the first one answers again."
         disabled={disabled}
       />
       {fallbackEnabled && (
@@ -1025,10 +1058,11 @@ function EgressInterfaceField({
           </div>
           <IpField
             id={`node-${nodeName}-${netName}-fallback-healthcheck`}
-            label="Health check IP"
+            label="Health check address"
             value={addr.fallback?.health_check_ip ?? ''}
             onChange={(v) => updateFallback({ health_check_ip: v })}
-            hint="Checked by pinging it out the primary interface, once per reconcile tick. Pick something reliably up, e.g. 1.1.1.1."
+            hint="Pinged every tick, e.g. 1.1.1.1."
+            help="Checked by pinging it out the primary interface, once per reconcile tick. Pick something reliably up, e.g. 1.1.1.1."
             disabled={disabled}
           />
         </>
@@ -1201,19 +1235,22 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <TextField
         id="web-address"
-        label="Address"
+        label="Dashboard address"
         value={draft.web.address}
         onChange={(address) => setDraft({ ...draft, web: { ...draft.web, address } })}
         hint="A bare label gets the network's domain appended."
+        configKey="web.address"
         disabled={disabled}
       />
       <SelectField
         id="web-network"
-        label="Network"
+        label="Address network"
         value={draft.web.network}
         onChange={(network) => setDraft({ ...draft, web: { ...draft.web, network } })}
         options={Object.keys(draft.networks).map((n) => ({ value: n, label: n }))}
-        hint="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use."
+        hint="Which node address DNS points at."
+        help="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use."
+        configKey="web.network"
         disabled={disabled}
       />
       <PortField
@@ -1221,15 +1258,19 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
         label="Direct HTTPS port"
         value={draft.web.port}
         onChange={(port) => setDraft({ ...draft, web: { ...draft.web, port } })}
-        hint="Always listening, even when the dashboard is also published through the proxy. This is the way back in if the proxy cannot bind its ports."
+        hint="Always on, even behind the proxy."
+        help="Always listening, even when the dashboard is also published through the proxy. This is the way back in if the proxy cannot bind its ports."
+        configKey="web.port"
         disabled={disabled}
       />
       <CheckboxField
         id="web-through-proxy"
-        label="Publish the dashboard through the reverse proxy"
+        label="Also publish through the proxy"
         value={draft.web.through_proxy}
         onChange={(through_proxy) => setDraft({ ...draft, web: { ...draft.web, through_proxy } })}
-        hint="Serves it on the standard HTTPS port with the same Let's Encrypt certificate and Cloudflare record as any other route."
+        hint="Standard HTTPS port, same certificate."
+        help="Serves it on the standard HTTPS port with the same Let's Encrypt certificate and Cloudflare record as any other route."
+        configKey="web.through_proxy"
         disabled={disabled || !draft.proxy.enabled}
       />
       {draft.web.through_proxy && (
@@ -1238,7 +1279,9 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
           label="Proxy backend port"
           value={draft.web.backend_port}
           onChange={(backend_port) => setDraft({ ...draft, web: { ...draft.web, backend_port } })}
-          hint="Loopback only, plain HTTP, reachable only by this node's proxy. Must differ from every other port here."
+          hint="Loopback only; must be unique."
+          help="Loopback only, plain HTTP, reachable only by this node's proxy. Must differ from every other port here."
+          configKey="web.backend_port"
           disabled={disabled}
         />
       )}
@@ -1251,37 +1294,45 @@ export function FailoverSection({ draft, setDraft, disabled }: SectionProps) {
   const set = (patch: Partial<ClusterConfig['failover']>) => setDraft({ ...draft, failover: { ...f, ...patch } });
   const marginWarning = fenceMarginWarning(f);
   return (
-    <div className="card">
+    <div className="card card--grid">
       <DurationField
         id="fo-node"
-        label="Node timeout"
+        label="Declare a node lost after"
         value={f.node_timeout}
         onChange={(node_timeout) => set({ node_timeout })}
-        hint="How long a node can go unreachable before the leader marks it unreachable and reschedules its work elsewhere, e.g. 30s. Must be longer than the fence timeout, so a node has fenced itself before the rest of the cluster gives up on it."
+        hint="e.g. 30s. Longer than the fence timeout."
+        help="How long a node can go unreachable before the leader marks it unreachable and reschedules its work elsewhere, e.g. 30s. Must be longer than the fence timeout, so a node has fenced itself before the rest of the cluster gives up on it."
+        configKey="failover.node_timeout"
         disabled={disabled}
       />
       <DurationField
         id="fo-fence"
-        label="Fence timeout"
+        label="Stop containers without quorum after"
         value={f.fence_timeout}
         onChange={(fence_timeout) => set({ fence_timeout })}
         disabled={disabled}
-        hint="How long a node can go without raft quorum before it stops its own containers, e.g. 15s. Must be shorter than the node timeout and longer than the probe interval; this ordering is what stops a replicated volume from ending up with two writers."
+        hint="e.g. 15s. Shorter than the node timeout."
+        help="How long a node can go without raft quorum before it stops its own containers, e.g. 15s. Must be shorter than the node timeout and longer than the probe interval; this ordering is what stops a replicated volume from ending up with two writers."
+        configKey="failover.fence_timeout"
       />
       <DurationField
         id="fo-probe"
-        label="Probe interval"
+        label="Check nodes every"
         value={f.probe_interval}
         onChange={(probe_interval) => set({ probe_interval })}
-        hint="How often the leader probes every node's reachability, e.g. 5s. Must be shorter than the fence timeout, so a node cannot be declared dead before it has had the chance to fence itself."
+        hint="e.g. 5s. Shorter than the fence timeout."
+        help="How often the leader probes every node's reachability, e.g. 5s. Must be shorter than the fence timeout, so a node cannot be declared dead before it has had the chance to fence itself."
+        configKey="failover.probe_interval"
         disabled={disabled}
       />
       <DurationField
         id="fo-grace"
-        label="Stop grace"
+        label="Container stop grace period"
         value={f.stop_grace}
         onChange={(stop_grace) => set({ stop_grace })}
-        hint="How long a container gets to stop cleanly before it is killed, e.g. 30s, for services that do not set their own stop_grace_period. Counts against the gap between the fence timeout and the node timeout. Applies live."
+        hint="e.g. 30s. Applies live."
+        help="How long a container gets to stop cleanly before it is killed, e.g. 30s, for services that do not set their own stop_grace_period. Counts against the gap between the fence timeout and the node timeout. Applies live."
+        configKey="failover.stop_grace"
         disabled={disabled}
       />
       {marginWarning && (
@@ -1305,10 +1356,12 @@ export function SecretsSection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <CheckboxField
         id="sec-genmissing"
-        label="Generate a key if missing"
+        label="Create the cluster key if missing"
         value={s.generate_if_missing}
         onChange={(generate_if_missing) => set({ generate_if_missing })}
-        hint="Cluster-wide default for whether a node may create the secret-sealing key if it doesn't have one yet. Each node can override this under its own Nodes page card, e.g. to forbid it on a node joining an existing cluster."
+        hint="Each node can override this."
+        help="Cluster-wide default for whether a node may create the secret-sealing key if it doesn't have one yet. Each node can override this under its own Nodes page card, e.g. to forbid it on a node joining an existing cluster."
+        configKey="secrets.generate_if_missing"
         disabled={disabled}
       />
     </div>
@@ -1370,10 +1423,12 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <CheckboxField
         id="backup-enabled"
-        label="Mirror cluster state into a git repository"
+        label="Back up cluster state to git"
         value={b != null}
         onChange={(enabled) => setDraft({ ...draft, backup: enabled ? DEFAULT_GIT_BACKUP : null })}
-        hint="The leader pushes cluster.yaml, stack specs, configs and secrets to this repo as soon as they change, so it can be rebuilt from git after a total loss. Secrets are re-encrypted for the age key below - the cluster's own key never leaves it."
+        hint="Pushed whenever something changes."
+        help="The leader pushes cluster.yaml, stack specs, configs and secrets to this repo as soon as they change, so it can be rebuilt from git after a total loss. Secrets are re-encrypted for the age key below - the cluster's own key never leaves it."
+        configKey="backup"
         disabled={disabled}
       />
       {b && (
@@ -1383,15 +1438,19 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
             label="Repository URL"
             value={b.repo_url}
             onChange={(repo_url) => set({ repo_url })}
-            hint="An SSH url, e.g. git@github.com:org/repo.git. Push auth uses a deploy key clouduler generates itself - add its public half as a write-capable deploy key on the repo once it appears below."
+            hint="SSH, e.g. git@github.com:org/repo.git."
+            help="An SSH url, e.g. git@github.com:org/repo.git. Push auth uses a deploy key clouduler generates itself - add its public half as a write-capable deploy key on the repo once it appears below."
+            configKey="backup.repo_url"
             disabled={disabled}
           />
           <TextField
             id="backup-age-recipient"
-            label="Age recipient"
+            label="Encrypt secrets for"
             value={b.age_recipient}
             onChange={(age_recipient) => set({ age_recipient })}
-            hint="The admin's age (X25519) public key, e.g. age1.... Secrets are encrypted for this key before being committed; only whoever holds the matching private key, generated and kept outside clouduler entirely, can read them back."
+            hint="An age public key, age1..."
+            help="The admin's age (X25519) public key, e.g. age1.... Secrets are encrypted for this key before being committed; only whoever holds the matching private key, generated and kept outside clouduler entirely, can read them back."
+            configKey="backup.age_recipient"
             disabled={disabled}
           />
           <div className="btn-row" style={{ marginTop: -8, marginBottom: 16 }}>
@@ -1412,6 +1471,7 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
           <TextField
             id="backup-branch"
             label="Branch"
+            configKey="backup.branch"
             value={b.branch}
             onChange={(branch) => set({ branch })}
             disabled={disabled}
@@ -1554,10 +1614,12 @@ export function McpSection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <CheckboxField
         id="mcp-enabled"
-        label="Allow AI clients over MCP"
+        label="Allow AI clients"
         value={draft.mcp.enabled}
         onChange={(enabled) => setDraft({ ...draft, mcp: { ...draft.mcp, enabled } })}
-        hint="Serves the /mcp endpoint and the OAuth pages that let tools such as Claude Code, Cursor or claude.ai connect after a user approves them. Turning it off hides all of it at once; clients that were already approved can still be listed and revoked on the AI access page. Applies live."
+        hint="Claude Code, Cursor and similar tools."
+        help="Serves the /mcp endpoint and the OAuth pages that let tools such as Claude Code, Cursor or claude.ai connect after a user approves them. Turning it off hides all of it at once; clients that were already approved can still be listed and revoked on the AI access page. Applies live."
+        configKey="mcp.enabled"
         disabled={disabled}
       />
     </div>
@@ -1578,18 +1640,21 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
         onChange={(api_keys) => set({ api_keys })}
         disabled={disabled}
         hint="Only turn off once OIDC is confirmed working."
+        configKey="auth.api_keys"
       />
       <DurationField
         id="auth-ttl"
-        label="Session TTL"
+        label="Stay signed in for"
         value={a.session_ttl}
         onChange={(session_ttl) => set({ session_ttl })}
-        hint="How long a browser session stays signed in before it has to log in again, e.g. 12h."
+        hint="e.g. 12h."
+        help="How long a browser session stays signed in before it has to log in again, e.g. 12h."
+        configKey="auth.session_ttl"
         disabled={disabled}
       />
       <CheckboxField
         id="auth-oidc-enabled"
-        label="Use OIDC"
+        label="Sign in with OIDC"
         value={hasOidc}
         onChange={(enabled) =>
           set({
@@ -1605,17 +1670,21 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
               : null,
           })
         }
-        hint="Register clouduler as an app with your identity provider (Authentik, Keycloak, Google, Okta, etc.) first, with its redirect/callback URL set to https://<the dashboard's address>/auth/oidc/callback, which is the address configured on the Web page."
+        hint="Authentik, Keycloak, Google, Okta..."
+        help="Register clouduler as an app with your identity provider (Authentik, Keycloak, Google, Okta, etc.) first, with its redirect/callback URL set to https://<the dashboard's address>/auth/oidc/callback, which is the address configured on the Web page."
+        configKey="auth.oidc"
         disabled={disabled}
       />
       {a.oidc && (
         <div className="card" style={{ marginTop: 8 }}>
           <TextField
             id="oidc-issuer"
-            label="Issuer"
+            label="Issuer URL"
             value={a.oidc.issuer}
             onChange={(issuer) => set({ oidc: { ...a.oidc!, issuer } })}
-            hint="Your provider's base URL. Must start with https://. Discovery is fetched from <issuer>/.well-known/openid-configuration, e.g. https://accounts.google.com or https://your-tenant.eu.auth0.com."
+            hint="Must start with https://."
+            help="Your provider's base URL. Must start with https://. Discovery is fetched from <issuer>/.well-known/openid-configuration, e.g. https://accounts.google.com or https://your-tenant.eu.auth0.com."
+            configKey="auth.oidc.issuer"
             disabled={disabled}
           />
           <TextField
@@ -1623,7 +1692,9 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Client ID"
             value={a.oidc.client_id}
             onChange={(client_id) => set({ oidc: { ...a.oidc!, client_id } })}
-            hint="The client/application ID your provider issued when you registered clouduler as an app."
+            hint="Issued by your provider."
+            help="The client/application ID your provider issued when you registered clouduler as an app."
+            configKey="auth.oidc.client_id"
             disabled={disabled}
           />
           {/* The client secret is its own sealed secret, independent of `a.oidc`
@@ -1636,23 +1707,29 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
             label="Username claim"
             value={a.oidc.username_claim}
             onChange={(username_claim) => set({ oidc: { ...a.oidc!, username_claim } })}
-            hint="Name of the claim shown in the web ui as the signed-in user's name, e.g. preferred_username, email, or name. Falls back to the opaque subject id when this claim is absent."
+            hint="e.g. preferred_username."
+            help="Name of the claim shown in the web ui as the signed-in user's name, e.g. preferred_username, email, or name. Falls back to the opaque subject id when this claim is absent."
+            configKey="auth.oidc.username_claim"
             disabled={disabled}
           />
           <TextField
             id="oidc-adminclaim"
-            label="Admin claim"
+            label="Admin group claim"
             value={a.oidc.admin_claim}
             onChange={(admin_claim) => set({ oidc: { ...a.oidc!, admin_claim } })}
-            hint="Name of the claim in the ID token that lists the user's groups or roles, e.g. groups. Check what your provider actually sends, as it varies (roles, groups, https://your-app/roles, ...)."
+            hint="e.g. groups."
+            help="Name of the claim in the ID token that lists the user's groups or roles, e.g. groups. Check what your provider actually sends, as it varies (roles, groups, https://your-app/roles, ...)."
+            configKey="auth.oidc.admin_claim"
             disabled={disabled}
           />
           <TextField
             id="oidc-adminvalue"
-            label="Admin value"
+            label="Admin group value"
             value={a.oidc.admin_value ?? ''}
             onChange={(v) => set({ oidc: { ...a.oidc!, admin_value: v || null } })}
-            hint="A user whose admin claim contains this value gets the admin role; everyone else who signs in successfully gets read-only viewer access. Leave blank and nobody gets admin through OIDC."
+            hint="Blank means nobody gets admin."
+            help="A user whose admin claim contains this value gets the admin role; everyone else who signs in successfully gets read-only viewer access. Leave blank and nobody gets admin through OIDC."
+            configKey="auth.oidc.admin_value"
             disabled={disabled}
           />
         </div>
@@ -1753,10 +1830,12 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <CheckboxField
         id="proxy-enabled"
-        label="Publish routes through the reverse proxy"
+        label="Run the reverse proxy"
         value={p.enabled}
         onChange={(enabled) => set({ enabled })}
-        hint="Terminates HTTP/HTTPS for every service route declared under a stack's x-clouduler.proxy and forwards to its container. Both ports below are bound on every node, on every address, since a route follows its container as it moves."
+        hint="Serves every route your stacks declare."
+        help="Terminates HTTP/HTTPS for every service route declared under a stack's x-clouduler.proxy and forwards to its container. Both ports below are bound on every node, on every address, since a route follows its container as it moves."
+        configKey="proxy.enabled"
         disabled={disabled}
       />
       <PortField
@@ -1764,7 +1843,9 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="HTTP port"
         value={p.http_port}
         onChange={(http_port) => set({ http_port })}
-        hint="Usually 80. Below 1024, so the daemon needs root to bind it."
+        hint="Usually 80."
+        help="Usually 80. Below 1024, so the daemon needs root to bind it."
+        configKey="proxy.http_port"
         disabled={disabled || !p.enabled}
       />
       <PortField
@@ -1772,25 +1853,30 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
         label="HTTPS port"
         value={p.https_port}
         onChange={(https_port) => set({ https_port })}
-        hint="Usually 443. Must differ from the web ui's port, which listens on the same addresses."
+        hint="Usually 443."
+        help="Must differ from the web ui's port, which listens on the same addresses."
+        configKey="proxy.https_port"
         disabled={disabled || !p.enabled}
       />
       <CheckboxField
         id="proxy-acme-enabled"
-        label="Issue certificates with ACME"
+        label="Issue certificates automatically"
         value={p.acme.enabled}
         onChange={(enabled) => set({ acme: { ...p.acme, enabled } })}
-        hint="Automatically obtains and renews TLS certificates via ACME DNS-01 for every published route's hostname. Requires Cloudflare DNS management to be configured below, as DNS-01 is the only challenge type supported."
+        hint="Needs Cloudflare DNS below."
+        help="Automatically obtains and renews TLS certificates via ACME DNS-01 for every published route's hostname. Requires Cloudflare DNS management to be configured below, as DNS-01 is the only challenge type supported."
+        configKey="proxy.acme.enabled"
         disabled={disabled || !p.enabled}
       />
       {p.acme.enabled && (
         <>
           <TextField
             id="proxy-acme-directory"
-            label="Directory URL"
+            label="ACME directory URL"
             value={p.acme.directory_url ?? ''}
             onChange={(v) => set({ acme: { ...p.acme, directory_url: v || null } })}
             hint="Leave blank for Let's Encrypt production."
+            configKey="proxy.acme.directory_url"
             disabled={disabled}
           />
           <TextField
@@ -1799,6 +1885,7 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
             value={p.acme.contact_email ?? ''}
             onChange={(v) => set({ acme: { ...p.acme, contact_email: v || null } })}
             hint="Where the CA sends expiry warnings."
+            configKey="proxy.acme.contact_email"
             disabled={disabled}
           />
         </>
@@ -1817,16 +1904,18 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
     <div className="card">
       <CheckboxField
         id="cf-enabled"
-        label="Manage DNS through Cloudflare"
+        label="Manage DNS with Cloudflare"
         value={cf != null}
         onChange={(enabled) => setDraft({ ...draft, cloudflare: enabled ? { zones: [] } : null })}
-        hint="Lets clouduler write DNS records for network and route domains, and is required if ACME certificate issuance is turned on above (DNS-01 challenges go through Cloudflare)."
+        hint="Required for automatic certificates."
+        help="Lets clouduler write DNS records for network and route domains, and is required if ACME certificate issuance is turned on above (DNS-01 challenges go through Cloudflare)."
+        configKey="cloudflare"
         disabled={disabled}
       />
       {cf && (
         <TextField
           id="cf-zones"
-          label="Zones (comma separated)"
+          label="DNS zones"
           value={cf.zones.join(', ')}
           onChange={(v) =>
             setDraft({
@@ -1834,7 +1923,9 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
               cloudflare: { ...cf, zones: v.split(',').map((z) => z.trim()).filter(Boolean) },
             })
           }
-          hint="Zone names clouduler may write records to, e.g. example.com, other-example.com. Every network domain and the dashboard's own address must fall under one of these zones."
+          hint="Comma separated, e.g. example.com."
+          help="Zone names clouduler may write records to, e.g. example.com, other-example.com. Every network domain and the dashboard's own address must fall under one of these zones."
+          configKey="cloudflare.zones"
           disabled={disabled}
         />
       )}

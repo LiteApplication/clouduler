@@ -39,7 +39,7 @@ function CopyRow({ label, text }: { label: string; text: string }) {
   );
 }
 
-export function SettingsAccess({ sheetOpen, onOpen, onClose }: { sheetOpen: boolean; onOpen: () => void; onClose: () => void }) {
+export function SettingsAccess({ sheetOpen, onClose }: { sheetOpen: boolean; onClose: () => void }) {
   const { isAdmin, identity } = useAuth();
   const confirm = useConfirm();
   const toast = useToast();
@@ -140,7 +140,7 @@ export function SettingsAccess({ sheetOpen, onOpen, onClose }: { sheetOpen: bool
         );
       })}
 
-      <Panel title="API keys" actions={isAdmin && <Button size="sm" icon="plus" onClick={onOpen}>Create API key</Button>}>
+      <Panel title="API keys">
         <p className="cl-sm cl-muted">Shown once, when created.</p>
         {keys?.length === 0 && <p className="cl-sm cl-muted">No API keys yet.</p>}
         {keys?.map((k) => (
@@ -159,7 +159,7 @@ export function SettingsAccess({ sheetOpen, onOpen, onClose }: { sheetOpen: bool
           <div className="li" key={c.client_id}>
             <strong>{c.client_name}</strong>
             <Tag tone={c.grant === 'admin' ? 'warn' : undefined}>{c.grant === 'admin' ? 'admin' : 'read-only'}</Tag>
-            <span className="cl-sm cl-muted">approved by {c.approved_by} {relativeTime(c.created_at * 1000)}</span>
+            <span className="cl-sm cl-muted">approved by {c.approved_by} {relativeTime(c.created_at)}</span>
             <span style={{ flex: 1 }} />
             {isAdmin && <Button iconOnly size="sm" variant="ghost" icon="trash" label={`Revoke ${c.client_name}`} onClick={() => void revoke(c)} />}
           </div>

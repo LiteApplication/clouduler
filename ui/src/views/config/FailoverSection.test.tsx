@@ -14,10 +14,10 @@ describe('FailoverSection fence margin warning', () => {
     render(<Harness failover={{ node_timeout: '60s', fence_timeout: '15s', probe_interval: '5s', stop_grace: '30s' }} />);
     expect(screen.queryByRole('alert')).toBeNull();
 
-    fireEvent.change(screen.getByLabelText('Stop grace'), { target: { value: '45s' } });
+    fireEvent.change(screen.getByLabelText('Container stop grace period'), { target: { value: '45s' } });
     expect(screen.getByRole('alert').textContent).toMatch(/two writers/);
 
-    fireEvent.change(screen.getByLabelText('Node timeout'), { target: { value: '2m' } });
+    fireEvent.change(screen.getByLabelText('Declare a node lost after'), { target: { value: '2m' } });
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });

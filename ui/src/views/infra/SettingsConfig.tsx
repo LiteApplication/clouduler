@@ -1,10 +1,12 @@
 // The four config tabs (General, Network, Storage, Security). They all edit
 // the one draft held by ConfigDraftProvider, so a tab's badge counts only its
 // own unsaved fields and the "Changes to apply" panel lists every tab's.
+// Each page is one panel with a one-line purpose under its title.
 
-import { Link } from 'react-router-dom';
+import { useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthContext';
-import { Banner, Button, EmptyState, KV, Panel, Tag, TextField, useConfirm, useToast } from '../../ds';
+import { Banner, Button, Icon, Panel, Tag, TextField, useConfirm, useToast } from '../../ds';
 import { useConfigApply, useConfigDraft, changesFor } from '../config/draft';
 import { CONFIG_PAGES, nodePathTarget, pageForPath } from '../config/pages';
 import type { SectionProps } from '../config/sections';
@@ -44,6 +46,13 @@ export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
   const { isAdmin } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
+  const [params] = useSearchParams();
+  const wanted = params.get('page');
+  const ready = !!cfg.original && !!cfg.draft;
+  // /configuration/<slug> redirects here with ?page=<slug>: bring that panel into view.
+  useEffect(() => {
+    if (wanted && ready) document.getElementById(`cfg-${wanted}`)?.scrollIntoView({ block: 'start' });
+  }, [wanted, ready, tab]);
   const { original, draft, setDraft, discard, diff, loadError, errors, pending, validate, rollback } = cfg;
 
   if (loadError) return <Banner tone="danger" title="Could not load the configuration">{loadError}</Banner>;
@@ -79,8 +88,9 @@ export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
         </Banner>
       )}
       {pages.map(({ slug, label, blurb, Component }) => (
-        <Panel key={slug} title={label}>
-          <p className="cl-sm cl-muted">{blurb}</p>
+        <Panel key={slug} title={label} className="settings__panel">
+          <span id={`cfg-${slug}`} className="settings__anchor" />
+          <p className="sub settings__blurb">{blurb}</p>
           <Component {...props} />
         </Panel>
       ))}
@@ -110,11 +120,9 @@ function ChangesPanel({ diff, isAdmin, busy, rollbackAfter, setRollbackAfter, on
 }) {
   if (diff.length === 0) {
     return (
-      <Panel title="Changes to apply">
-        <EmptyState icon="check-circle" title="In sync">
-          Nothing staged. The draft matches what the cluster is running.
-        </EmptyState>
-      </Panel>
+      <p className="settings__sync">
+        <Icon name="check-circle" size={18} /> In sync. Nothing staged; the cluster runs what you see here.
+      </p>
     );
   }
   return (
@@ -143,19 +151,15 @@ function ChangesPanel({ diff, isAdmin, busy, rollbackAfter, setRollbackAfter, on
           ];
         })}
       </div>
-      <KV items={[[
-        'Rollback window',
-        <TextField
-          key="rb"
-          label="Seconds"
-          type="number"
-          inputMode="numeric"
-          mono
-          value={String(rollbackAfter)}
-          onChange={(e) => setRollbackAfter(Math.max(5, Number(e.target.value) || 60))}
-          hint={`Network-affecting changes roll back after ${rollbackAfter} seconds unless you confirm.`}
-        />,
-      ]]} />
+      <TextField
+        label="Confirm within (seconds)"
+        type="number"
+        inputMode="numeric"
+        mono
+        value={String(rollbackAfter)}
+        onChange={(e) => setRollbackAfter(Math.max(5, Number(e.target.value) || 60))}
+        hint="Network changes roll back after this long unless you confirm."
+      />
     </Panel>
   );
 }

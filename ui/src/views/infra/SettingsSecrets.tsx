@@ -10,7 +10,7 @@ import { useClusterState } from '../../state/store';
 import { SecretForm } from '../SecretForm';
 import { DataTable } from './table';
 
-export function SettingsSecrets({ sheetOpen, onOpen, onClose }: { sheetOpen: boolean; onOpen: () => void; onClose: () => void }) {
+export function SettingsSecrets({ sheetOpen, onClose }: { sheetOpen: boolean; onClose: () => void }) {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
   const confirm = useConfirm();
@@ -64,9 +64,8 @@ export function SettingsSecrets({ sheetOpen, onOpen, onClose }: { sheetOpen: boo
       <Panel
         title="Secrets"
         flush
-        actions={isAdmin && <Button size="sm" icon="plus" onClick={onOpen}>Create secret</Button>}
       >
-        <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
+        <p className="cl-sm cl-muted" style={{ padding: 'var(--space-3) var(--space-4)' }}>
           Clouduler stores these sealed and never shows them again.
         </p>
         <DataTable

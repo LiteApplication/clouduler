@@ -3,39 +3,136 @@
 // and reports up through onChange so the parent doesn't need to know the
 // validation rule for every field kind.
 
-import { Toggle, TextField as DsTextField } from '../ds';
+import { useId, type ReactNode } from 'react';
+import { HelpTip, Icon } from '../ds';
 import { isValidCidr, isValidDuration, isValidIp, isValidPort } from '../lib/validate';
 
 interface FieldProps<T> {
   id: string;
+  /** Short human name, sentence case. */
   label: string;
   value: T;
   onChange: (value: T) => void;
-  hint?: string;
+  /** One short line under the input, or nothing. */
+  hint?: ReactNode;
+  /** The longer explanation, shown behind a "?" next to the label. */
+  help?: ReactNode;
+  /** The raw config key, shown small inside the "?" text. */
+  configKey?: string;
   disabled?: boolean;
 }
 
-export function TextField({ label, value, onChange, hint, disabled }: FieldProps<string>) {
-  return <DsTextField label={label} value={value} onChange={(e) => onChange(e.target.value)} hint={hint} disabled={disabled} />;
-}
-
-export function NumberField({ label, value, onChange, hint, disabled }: FieldProps<number>) {
+/** Label row (name plus "?"), the control, then the one-line hint or error. */
+function Shell({
+  label,
+  help,
+  configKey,
+  hint,
+  error,
+  htmlFor,
+  hintId,
+  children,
+}: {
+  label: string;
+  help?: ReactNode;
+  configKey?: string;
+  hint?: ReactNode;
+  error?: string;
+  htmlFor: string;
+  hintId: string;
+  children: ReactNode;
+}) {
   return (
-    <DsTextField
-      label={label}
-      type="number"
-      inputMode="numeric"
-      mono
-      value={String(value)}
-      onChange={(e) => onChange(Number(e.target.value))}
-      hint={hint}
-      disabled={disabled}
-    />
+    <div className="cl-field fld">
+      <div className="fld__head">
+        <label className="cl-label fld__label" htmlFor={htmlFor}>
+          {label}
+        </label>
+        {(help || configKey) && <HelpTip label={label} configKey={configKey}>{help}</HelpTip>}
+      </div>
+      {children}
+      {(error || hint) && (
+        <div id={hintId} className={error ? 'cl-hint cl-hint--error' : 'cl-hint fld__hint'}>
+          {error ? (
+            <>
+              <Icon name="x" size={14} />
+              <span>{error}</span>
+            </>
+          ) : (
+            hint
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
-export function CheckboxField({ label, value, onChange, hint, disabled }: FieldProps<boolean>) {
-  return <Toggle label={label} description={hint} checked={value} onChange={onChange} disabled={disabled} />;
+function Input({
+  label,
+  value,
+  onChange,
+  hint,
+  help,
+  configKey,
+  disabled,
+  error,
+  placeholder,
+  type = 'text',
+  mono,
+  numeric,
+}: Omit<FieldProps<string>, 'id'> & { error?: string; placeholder?: string; type?: string; mono?: boolean; numeric?: boolean }) {
+  const id = useId();
+  const hid = `${id}-h`;
+  return (
+    <Shell label={label} help={help} configKey={configKey} hint={hint} error={error} htmlFor={id} hintId={hid}>
+      <input
+        id={id}
+        type={type}
+        inputMode={numeric ? 'numeric' : undefined}
+        className={`cl-input${mono ? ' cl-input--mono' : ''}${error ? ' cl-input--error' : ''}`}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error || hint ? hid : undefined}
+        autoComplete="off"
+        disabled={disabled}
+      />
+    </Shell>
+  );
+}
+
+export function TextField({ id: _id, ...p }: FieldProps<string>) {
+  return <Input {...p} />;
+}
+
+export function NumberField({ id: _id, value, onChange, ...p }: FieldProps<number>) {
+  return <Input {...p} type="number" numeric mono value={String(value)} onChange={(v) => onChange(Number(v))} />;
+}
+
+export function CheckboxField({ label, value, onChange, hint, help, configKey, disabled }: FieldProps<boolean>) {
+  return (
+    <div className="cl-toggle fld-toggle">
+      <div className="cl-toggle__text">
+        <span className="cl-toggle__label fld__head">
+          {label}
+          {(help || configKey) && <HelpTip label={label} configKey={configKey}>{help}</HelpTip>}
+        </span>
+        {hint && <span className="cl-sm cl-muted">{hint}</span>}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label={label}
+        disabled={disabled}
+        className={`cl-switch${value ? ' cl-switch--on' : ''}`}
+        onClick={() => onChange(!value)}
+      >
+        <span className="cl-switch__knob">{value && <Icon name="check" size={14} />}</span>
+      </button>
+    </div>
+  );
 }
 
 export function SelectField<T extends string>({
@@ -45,13 +142,12 @@ export function SelectField<T extends string>({
   onChange,
   options,
   hint,
+  help,
+  configKey,
   disabled,
 }: FieldProps<T> & { options: { value: T; label: string }[] }) {
   return (
-    <div className="cl-field">
-      <label className="cl-label" htmlFor={id}>
-        {label}
-      </label>
+    <Shell label={label} help={help} configKey={configKey} hint={hint} htmlFor={id} hintId={`${id}-h`}>
       <select id={id} className="cl-input" value={value} onChange={(e) => onChange(e.target.value as T)} disabled={disabled}>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -59,33 +155,18 @@ export function SelectField<T extends string>({
           </option>
         ))}
       </select>
-      {hint && <div className="cl-hint">{hint}</div>}
-    </div>
+    </Shell>
   );
 }
 
 function Checked({
-  label,
-  value,
-  onChange,
-  hint,
-  disabled,
   valid,
   error,
   placeholder,
-}: Omit<FieldProps<string>, 'id'> & { valid: boolean; error: string; placeholder?: string }) {
-  return (
-    <DsTextField
-      label={label}
-      mono
-      value={value}
-      placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value)}
-      error={valid ? undefined : error}
-      hint={hint}
-      disabled={disabled}
-    />
-  );
+  id: _id,
+  ...p
+}: FieldProps<string> & { valid: boolean; error: string; placeholder?: string }) {
+  return <Input {...p} mono placeholder={placeholder} error={valid ? undefined : error} />;
 }
 
 export function IpField(p: FieldProps<string>) {
@@ -109,24 +190,20 @@ export function DurationField(p: FieldProps<string>) {
   );
 }
 
-export function TimeOfDayField({ label, value, onChange, hint, disabled }: FieldProps<string>) {
-  return (
-    <DsTextField label={label} type="time" mono value={value} onChange={(e) => onChange(e.target.value)} hint={hint} disabled={disabled} />
-  );
+export function TimeOfDayField({ id: _id, ...p }: FieldProps<string>) {
+  return <Input {...p} type="time" mono />;
 }
 
-export function PortField({ label, value, onChange, hint, disabled }: FieldProps<number>) {
+export function PortField({ id: _id, value, onChange, ...p }: FieldProps<number>) {
   return (
-    <DsTextField
-      label={label}
+    <Input
+      {...p}
       type="number"
-      inputMode="numeric"
+      numeric
       mono
       value={String(value)}
-      onChange={(e) => onChange(Number(e.target.value))}
+      onChange={(v) => onChange(Number(v))}
       error={isValidPort(value) ? undefined : 'Port must be between 1 and 65535.'}
-      hint={hint}
-      disabled={disabled}
     />
   );
 }
