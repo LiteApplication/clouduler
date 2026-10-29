@@ -23,28 +23,82 @@ pub fn router() -> Router<AppState> {
 #[derive(Serialize)]
 struct CertificateSummary {
     fqdn: String,
+    /// Unix seconds. 0 for a hostname with no certificate yet.
     not_after: i64,
+    /// Unix seconds the certificate was issued at; 0 when unknown.
+    issued_at: i64,
     /// True once the chain is parseable enough to say who issued it; kept
     /// simple since the full issuer name is not tracked in cluster state.
     has_chain: bool,
+    /// `ready`: a certificate is held and nothing is wrong. `pending`: no
+    /// certificate yet. `error`: issuance or renewal is failing (`error`
+    /// says why; a held certificate keeps serving meanwhile).
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// Unix seconds of the failure above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_at: Option<i64>,
 }
 
+/// Every certificate held, plus every hostname still waiting on one or whose
+/// issuance failed: the union of `certificates` and `cert_status`.
 async fn list_certificates(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<CertificateSummary>> {
     let cluster_state = state.cluster.state().await;
-    Json(
-        cluster_state
-            .certificates
-            .values()
-            .map(|c| CertificateSummary {
+    Json(certificate_summaries(&cluster_state))
+}
+
+fn certificate_summaries(cluster_state: &cl_raft::ClusterState) -> Vec<CertificateSummary> {
+    let status_of = |fqdn: &str| match cluster_state.cert_status.get(fqdn) {
+        Some(cl_raft::ReconcileStatus::Error { message, at }) => {
+            ("error", Some(message.clone()), Some(*at))
+        }
+        Some(cl_raft::ReconcileStatus::Pending) => ("pending", None, None),
+        None => ("ready", None, None),
+    };
+    let mut rows: Vec<CertificateSummary> = cluster_state
+        .certificates
+        .values()
+        .map(|c| {
+            // A held certificate is never "pending": that status is only
+            // meaningful while there is nothing to serve.
+            let (status, error, error_at) = match status_of(&c.fqdn) {
+                ("pending", ..) => ("ready", None, None),
+                other => other,
+            };
+            CertificateSummary {
                 fqdn: c.fqdn.clone(),
                 not_after: c.not_after,
+                issued_at: c.issued_at,
                 has_chain: !c.chain_pem.is_empty(),
-            })
-            .collect(),
-    )
+                status,
+                error,
+                error_at,
+            }
+        })
+        .collect();
+    rows.extend(
+        cluster_state
+            .cert_status
+            .keys()
+            .filter(|fqdn| !cluster_state.certificates.contains_key(*fqdn))
+            .map(|fqdn| {
+                let (status, error, error_at) = status_of(fqdn);
+                CertificateSummary {
+                    fqdn: fqdn.clone(),
+                    not_after: 0,
+                    issued_at: 0,
+                    has_chain: false,
+                    status,
+                    error,
+                    error_at,
+                }
+            }),
+    );
+    rows
 }
 
 #[derive(Serialize)]
@@ -91,25 +145,48 @@ struct DnsRecordSummary {
     record_type: String,
     content: String,
     zone: String,
+    /// `ready` for a live record, `pending` for a hostname still waiting for
+    /// one, `error` when publishing it failed (`error` says why).
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
+/// Live records, plus a row for each hostname still waiting on its record or
+/// failing to get one (from `dns_status`). Those rows have no type, content
+/// or zone yet.
 async fn list_dns(
     _identity: Identity,
     State(state): State<AppState>,
 ) -> Json<Vec<DnsRecordSummary>> {
     let cluster_state = state.cluster.state().await;
-    Json(
-        cluster_state
-            .dns_records
-            .values()
-            .map(|r| DnsRecordSummary {
-                fqdn: r.fqdn.clone(),
-                record_type: r.record_type.clone(),
-                content: r.content.clone(),
-                zone: r.zone.clone(),
-            })
-            .collect(),
-    )
+    let mut rows: Vec<DnsRecordSummary> = cluster_state
+        .dns_records
+        .values()
+        .map(|r| DnsRecordSummary {
+            fqdn: r.fqdn.clone(),
+            record_type: r.record_type.clone(),
+            content: r.content.clone(),
+            zone: r.zone.clone(),
+            status: "ready",
+            error: None,
+        })
+        .collect();
+    rows.extend(cluster_state.dns_status.iter().map(|(fqdn, status)| {
+        let (status, error) = match status {
+            cl_raft::ReconcileStatus::Pending => ("pending", None),
+            cl_raft::ReconcileStatus::Error { message, .. } => ("error", Some(message.clone())),
+        };
+        DnsRecordSummary {
+            fqdn: fqdn.clone(),
+            record_type: String::new(),
+            content: String::new(),
+            zone: String::new(),
+            status,
+            error,
+        }
+    }));
+    Json(rows)
 }
 
 /// Runs the dns reconcile and certificate passes now instead of at their

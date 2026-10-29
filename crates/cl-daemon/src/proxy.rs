@@ -1284,8 +1284,14 @@ async fn prune_stale_status(
     let mut stale = BTreeSet::new();
     if check_certs {
         let wanted = tls_hosts(cfg, state);
-        for fqdn in state.cert_status.keys() {
-            if !wanted.contains_key(fqdn) || state.certificates.contains_key(fqdn) {
+        for (fqdn, status) in &state.cert_status {
+            // A renewal failure is recorded against a certificate that
+            // exists, and stays until a renewal succeeds (which clears it
+            // in `StoreCertificate`). Only a pending status is stale once
+            // the certificate is there.
+            let outlived = state.certificates.contains_key(fqdn)
+                && !matches!(status, cl_raft::ReconcileStatus::Error { .. });
+            if !wanted.contains_key(fqdn) || outlived {
                 stale.insert(fqdn.clone());
             }
         }
