@@ -1606,10 +1606,11 @@ fn to_state(
         binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
         node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
         memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
+        version: current.map(|c| c.version.clone()).unwrap_or_default(),
     }
 }
 
-/// Keep this node's own `arch`, `binary_hash` and `memory_total_bytes`
+/// Keep this node's own `arch`, `binary_hash`, `version` and `memory_total_bytes`
 /// accurate in the roster. Unlike the rest of a `NodeState`, these fields
 /// describe facts only the node itself can observe, so every node runs this
 /// about itself regardless of leadership — the leader-driven `seed_roster`
@@ -1630,7 +1631,9 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
         let arch = std::env::consts::ARCH.to_string();
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
-        if current.arch == arch
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        if current.version == version
+            && current.arch == arch
             && current.binary_hash == binary_hash
             && current.node_pubkey == node_pubkey
             && current.memory_total_bytes == memory_total_bytes
@@ -1642,6 +1645,7 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
             binary_hash,
             node_pubkey: node_pubkey.clone(),
             memory_total_bytes,
+            version,
             ..current.clone()
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {

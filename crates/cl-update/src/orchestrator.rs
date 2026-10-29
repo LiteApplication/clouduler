@@ -354,6 +354,7 @@ mod tests {
             binary_hash: String::new(),
             node_pubkey: None,
             memory_total_bytes: 0,
+            version: Default::default(),
         }
     }
 

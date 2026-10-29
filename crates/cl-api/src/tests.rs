@@ -85,6 +85,7 @@ pub(crate) async fn harness() -> Harness {
         binary_hash: Default::default(),
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
+        version: Default::default(),
     }))
     .await
     .expect("submit");
@@ -1153,6 +1154,7 @@ async fn renaming_a_network_updates_config_stacks_and_redirects() {
         .submit(cl_raft::Request::DeployStack {
             name: "site".into(),
             spec: spec.into(),
+            at: 0,
         })
         .await
         .expect("deploy stack");
@@ -1231,6 +1233,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
         .submit(cl_raft::Request::DeployStack {
             name: "site".into(),
             spec: spec.into(),
+            at: 0,
         })
         .await
         .expect("deploy stack");
@@ -1310,6 +1313,7 @@ async fn an_existing_stack_with_a_now_invalid_name_can_still_be_redeployed() {
         .submit(cl_raft::Request::DeployStack {
             name: "Old Stack".into(),
             spec: "services:\n  web:\n    image: nginx:1\n".into(),
+            at: 0,
         })
         .await
         .expect("seed stack");
@@ -1385,6 +1389,7 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
             .submit(cl_raft::Request::DeployStack {
                 name: name.into(),
                 spec,
+                at: 0,
             })
             .await
             .expect("deploy stack");
@@ -1680,6 +1685,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }))
         .await
         .expect("add n1");
@@ -2179,6 +2185,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .submit(cl_raft::Request::DeployStack {
             name: "web".to_string(),
             spec: "services: {}".to_string(),
+            at: 0,
         })
         .await
         .expect("submit stack");
@@ -2242,6 +2249,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                 chain_pem: "chain".to_string(),
                 key_pem: "key".to_string(),
                 not_after: 0,
+                issued_at: 0,
             },
         ))
         .await

@@ -104,6 +104,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }))
         .await
         .expect("seed roster");
@@ -328,6 +329,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
             binary_hash: Default::default(),
             node_pubkey: Some(n2_keypair.public_key_encoded()),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }))
         .await
         .expect("seed n2's roster entry with a published pubkey");

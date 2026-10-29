@@ -894,6 +894,10 @@ async fn issue_missing(
                     chain_pem: issued.chain_pem,
                     key_pem: issued.key_pem,
                     not_after: issued.not_after,
+                    issued_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
                 });
                 if let Err(e) = cluster.submit(request).await {
                     warn!(%host, error = %e, "could not store the issued certificate");

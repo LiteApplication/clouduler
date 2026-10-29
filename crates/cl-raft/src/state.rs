@@ -90,6 +90,11 @@ pub struct NodeState {
     /// pressure instead of treating every node as equally sized.
     #[serde(default)]
     pub memory_total_bytes: u64,
+    /// Release version of the running binary (`CARGO_PKG_VERSION`),
+    /// self-reported next to `binary_hash`. Empty until the node has
+    /// reported in. The ui shows it; nothing decides on it.
+    #[serde(default)]
+    pub version: String,
 }
 
 impl NodeState {
@@ -154,6 +159,14 @@ pub struct StackState {
     /// relationship to `secrets` as `used_configs` has to `configs`.
     #[serde(default)]
     pub used_secrets: BTreeSet<String>,
+    /// Unix seconds of the latest `DeployStack`. Taken from the request so
+    /// `apply` stays clock-free. 0 for a stack deployed before this existed.
+    #[serde(default)]
+    pub deployed_at: i64,
+    /// The spec this stack had before the latest deploy that changed it.
+    /// Lets the ui show "changes since last deploy". `None` on a first deploy.
+    #[serde(default)]
+    pub previous_spec: Option<String>,
 }
 
 /// The cluster config file, replicated so an edit made on one node reaches the
@@ -425,6 +438,10 @@ pub struct CertificateState {
     pub key_pem: String,
     /// Unix seconds.
     pub not_after: i64,
+    /// Unix seconds the certificate was issued at. 0 when unknown (stored
+    /// before this field existed).
+    #[serde(default)]
+    pub issued_at: i64,
 }
 
 /// A DNS record clouduler created, tracked so ownership survives leader change.
@@ -901,6 +918,10 @@ pub enum Request {
     DeployStack {
         name: String,
         spec: String,
+        /// Unix seconds of the deploy, stamped by the caller so `apply`
+        /// needs no clock.
+        #[serde(default)]
+        at: i64,
     },
     RemoveStack {
         name: String,
@@ -1257,6 +1278,8 @@ mod request_mirror {
         DeployStack {
             name: String,
             spec: String,
+            #[serde(default)]
+            at: i64,
         },
         RemoveStack {
             name: String,
@@ -1739,7 +1762,7 @@ impl ClusterState {
                 Ok(())
             }
 
-            Request::DeployStack { name, spec } => {
+            Request::DeployStack { name, spec, at } => {
                 let revision = self.stacks.get(name).map(|s| s.revision + 1).unwrap_or(1);
                 let previous = self.stacks.get(name);
                 // A changed spec (new image, new limits) may well have fixed
@@ -1752,6 +1775,13 @@ impl ClusterState {
                 let secrets = previous.map(|s| s.secrets.clone()).unwrap_or_default();
                 let used_configs = previous.map(|s| s.used_configs.clone()).unwrap_or_default();
                 let used_secrets = previous.map(|s| s.used_secrets.clone()).unwrap_or_default();
+                // A redeploy of an unchanged spec keeps the older "previous"
+                // so the diff still shows the last real change.
+                let previous_spec = match previous {
+                    Some(p) if p.spec != *spec => Some(p.spec.clone()),
+                    Some(p) => p.previous_spec.clone(),
+                    None => None,
+                };
                 self.stacks.insert(
                     name.clone(),
                     StackState {
@@ -1762,6 +1792,8 @@ impl ClusterState {
                         secrets,
                         used_configs,
                         used_secrets,
+                        deployed_at: *at,
+                        previous_spec,
                     },
                 );
                 Ok(())
@@ -2737,6 +2769,7 @@ mod tests {
             Request::DeployStack {
                 name: "s".into(),
                 spec: "spec".into(),
+                at: 0,
             },
             Request::RemoveStack { name: "s".into() },
             Request::SetStackObjects {
@@ -2812,6 +2845,7 @@ mod tests {
                 chain_pem: "chain".into(),
                 key_pem: "key".into(),
                 not_after: 0,
+                issued_at: 0,
             }),
             Request::RemoveCertificate {
                 fqdn: "example.com".into(),
@@ -3045,6 +3079,7 @@ mod tests {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }
     }
 
@@ -3349,11 +3384,13 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "a".into(),
+            at: 0,
         });
         assert_eq!(state.stacks["gitlab"].revision, 1);
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "b".into(),
+            at: 0,
         });
         assert_eq!(state.stacks["gitlab"].revision, 2);
         assert_eq!(state.stacks["gitlab"].spec, "b");
@@ -3728,6 +3765,7 @@ mod tests {
             name: "site".into(),
             spec: "services:\n  web:\n    image: nginx\n    volumes:\n      - fast/data:/data\n"
                 .into(),
+            at: 0,
         });
         assign(&mut state, "n1", &["fast"]);
         state.apply(&Request::Assign {
@@ -3857,6 +3895,7 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "services: {}".into(),
+            at: 0,
         });
         state.apply(&Request::PutConfig {
             name: "nginx_conf".into(),
@@ -3883,6 +3922,7 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "services: {}".into(),
+            at: 0,
         });
         state.apply(&Request::PutConfig {
             name: "nginx_conf".into(),
@@ -3916,6 +3956,7 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "a".into(),
+            at: 0,
         });
         state.apply(&Request::SetStackObjects {
             name: "site".into(),
@@ -3927,6 +3968,7 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: "b".into(),
+            at: 0,
         });
         assert_eq!(state.stacks["site"].configs.len(), 1);
     }
@@ -3964,6 +4006,7 @@ mod tests {
             chain_pem: "chain".into(),
             key_pem: "key".into(),
             not_after: 0,
+            issued_at: 0,
         }));
 
         assert!(state.certificates.contains_key("app.example.com"));
@@ -4444,16 +4487,19 @@ mod tests {
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "a".into(),
+            at: 0,
         });
         assert!(record(&mut state, "n1", 5).is_ok());
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "a".into(),
+            at: 0,
         });
         assert!(state.crash_moves.contains_key(&instance));
         state.apply(&Request::DeployStack {
             name: "gitlab".into(),
             spec: "b".into(),
+            at: 0,
         });
         assert!(state.crash_moves.is_empty());
 

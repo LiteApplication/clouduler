@@ -122,6 +122,7 @@ fn node_state(name: &str, addr: SocketAddr) -> NodeState {
         binary_hash: Default::default(),
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
+        version: Default::default(),
     }
 }
 

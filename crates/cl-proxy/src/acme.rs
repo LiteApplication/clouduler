@@ -354,6 +354,7 @@ pub async fn renewal_tick(
                     chain_pem: issued.chain_pem,
                     key_pem: issued.key_pem,
                     not_after: issued.not_after,
+                    issued_at: now_unix(),
                 });
                 if let Err(e) = node.submit(req).await {
                     error!(fqdn = %cert.fqdn, error = %e, "failed to store renewed certificate");

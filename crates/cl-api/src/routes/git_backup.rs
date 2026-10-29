@@ -793,6 +793,7 @@ mod tests {
             .submit(ClusterRequest::DeployStack {
                 name: "site".to_string(),
                 spec: SPEC.to_string(),
+                at: 0,
             })
             .await
             .expect("deploy");
@@ -842,6 +843,7 @@ mod tests {
             .submit(ClusterRequest::DeployStack {
                 name: "site".to_string(),
                 spec: SPEC.to_string(),
+                at: 0,
             })
             .await
             .expect("deploy");

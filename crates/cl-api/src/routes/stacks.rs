@@ -283,6 +283,7 @@ pub(crate) async fn deploy_from_files(
         .submit(ClusterRequest::DeployStack {
             name: name.to_string(),
             spec,
+            at: crate::auth::oauth::now_secs(),
         })
         .await
         .map_err(ApiError::not_leader)?;
