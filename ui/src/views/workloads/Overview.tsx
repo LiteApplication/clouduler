@@ -125,9 +125,6 @@ export function Overview() {
         title="Overview"
         actions={
           <>
-            <Button icon="node" onClick={() => navigate('/nodes')}>
-              Add node
-            </Button>
             <Button variant="primary" icon="plus" onClick={() => navigate('/stacks/new')}>
               Deploy stack
             </Button>

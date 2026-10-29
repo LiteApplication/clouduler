@@ -40,11 +40,17 @@ export function daysUntil(unixSeconds: number): number {
   return Math.ceil((unixSeconds * 1000 - Date.now()) / 86_400_000);
 }
 
-/** "2 days ago", "in 3 hours", "just now". Accepts unix seconds, an ISO
- *  string or a Date. Design copy rule: never show ISO timestamps in UI text. */
+/** Any unix time above this is milliseconds: 1e12 ms is 2001-09-09, and 1e12
+ *  seconds is in the year 33658, so no real timestamp sits near it. */
+const MS_THRESHOLD = 1e12;
+
+/** "2 days ago", "in 3 hours", "just now". Accepts unix seconds, unix
+ *  milliseconds, an ISO string or a Date. A number above 1e12 is read as
+ *  milliseconds, so a caller that already multiplied by 1000 still gets the
+ *  right answer. Design copy rule: never show ISO timestamps in UI text. */
 export function relativeTime(when: number | string | Date | null | undefined, now: number = Date.now()): string {
   if (when == null || when === '') return '-';
-  const ms = typeof when === 'number' ? when * 1000 : new Date(when).getTime();
+  const ms = typeof when === 'number' ? (when > MS_THRESHOLD ? when : when * 1000) : new Date(when).getTime();
   if (!Number.isFinite(ms)) return '-';
   const diff = Math.round((ms - now) / 1000);
   const abs = Math.abs(diff);

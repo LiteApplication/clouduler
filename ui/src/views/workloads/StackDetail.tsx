@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../api/client';
-import type { Assignment, InstanceState, StackValidationResult, UpdateRow } from '../../api/types';
+import type { Assignment, InstanceState, StackDetailResponse, StackValidationResult, UpdateRow } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Banner,
@@ -117,7 +117,7 @@ export function StackDetail() {
           `Revision ${stack.revision}`,
           `${services.size} ${services.size === 1 ? 'service' : 'services'}`,
           `${nodes.size} ${nodes.size === 1 ? 'node' : 'nodes'}`,
-          stack.deployed_at ? `Deployed ${relativeTime(stack.deployed_at * 1000)}` : null,
+          stack.deployed_at ? `Deployed ${relativeTime(stack.deployed_at)}` : null,
         ]
           .filter(Boolean)
           .join(' · ')}
@@ -468,6 +468,40 @@ export function DiffView({ lines }: { lines: ReturnType<typeof diffLines> }) {
 
 // ---- settings ----
 
+/** Every network the stack uses, plus any it only appears in `allowed` for. */
+function ReachablePanel({ requirements }: { requirements: StackDetailResponse['requirements'] }) {
+  const allowed = requirements.allowed ?? {};
+  const networks = [...new Set([...requirements.networks, ...Object.keys(allowed)])];
+  return (
+    <Panel title="Reachable hosts per network">
+      <p className="sub">Hosts outside this stack its containers may reach. Traffic inside the stack is always allowed.</p>
+      {networks.length === 0 ? (
+        <p className="cl-sm cl-muted">This stack uses no networks.</p>
+      ) : (
+        <KV
+          items={networks.map((net) => {
+            const hosts = allowed[net];
+            return [
+              net,
+              hosts == null ? (
+                <Tag tone="warn">Unrestricted</Tag>
+              ) : hosts.length === 0 ? (
+                'Nothing outside the stack'
+              ) : (
+                hosts.map((h) => (
+                  <Tag key={h}>
+                    <span className="mono">{h}</span>
+                  </Tag>
+                ))
+              ),
+            ];
+          })}
+        />
+      )}
+    </Panel>
+  );
+}
+
 function SettingsTab({
   name,
   isAdmin,
@@ -483,14 +517,16 @@ function SettingsTab({
 }) {
   const confirm = useConfirm();
   const toast = useToast();
-  const [allowed, setAllowed] = useState<Record<string, string[] | null> | null>(null);
+  // undefined while loading, null when the fetch failed.
+  const [requirements, setRequirements] = useState<StackDetailResponse['requirements'] | null | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
+    setRequirements(undefined);
     api
       .getStack(name)
-      .then((s) => !cancelled && setAllowed(s.requirements.allowed ?? null))
-      .catch(() => {});
+      .then((s) => !cancelled && setRequirements(s.requirements))
+      .catch(() => !cancelled && setRequirements(null));
     return () => {
       cancelled = true;
     };
@@ -516,27 +552,8 @@ function SettingsTab({
 
   return (
     <div className="sec">
-      {allowed && Object.keys(allowed).length > 0 && (
-        <Panel title="Reachable hosts per network">
-          <p className="sub">Hosts outside this stack its containers may reach. Traffic inside the stack is always allowed.</p>
-          <KV
-            items={Object.entries(allowed).map(([net, hosts]) => [
-              net,
-              hosts === null ? (
-                <Tag tone="warn">unrestricted</Tag>
-              ) : hosts.length === 0 ? (
-                <Tag tone="ok">nothing outside the stack</Tag>
-              ) : (
-                hosts.map((h) => (
-                  <Tag key={h}>
-                    <span className="mono">{h}</span>
-                  </Tag>
-                ))
-              ),
-            ])}
-          />
-        </Panel>
-      )}
+      {requirements === null && <p className="cl-sm cl-muted">Could not load the network rules.</p>}
+      {requirements && <ReachablePanel requirements={requirements} />}
       <Panel title="Configs and secrets used">
         <KV
           items={[

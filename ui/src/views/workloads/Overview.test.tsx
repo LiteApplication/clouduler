@@ -76,6 +76,20 @@ function renderOverview() {
   );
 }
 
+describe('Overview header', () => {
+  beforeEach(() => {
+    listInstances.mockResolvedValue([]);
+  });
+
+  it('offers deploy stack but not add node, which lives on the Nodes page', async () => {
+    status.mockResolvedValue(healthyStatus);
+    renderOverview();
+    expect(screen.getByRole('button', { name: /deploy stack/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add node/i })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/cluster healthy/i)).toBeInTheDocument());
+  });
+});
+
 describe('Overview quorum banner', () => {
   beforeEach(() => {
     listInstances.mockResolvedValue([]);

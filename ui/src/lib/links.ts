@@ -45,3 +45,25 @@ export function pairLinks(names: string[], connectivity: Connectivity | null): P
   }
   return pairs;
 }
+
+/** What one directed cell of the matrix says: `from` as it reports `to`.
+ *  self: the diagonal. ok: raft and api both connect (rtt in ms when known).
+ *  down: the raft connect failed. api-down: raft works, the api port does not.
+ *  no-report: `from` could not be asked, or it did not list `to`. */
+export type CellState =
+  | { kind: 'self' }
+  | { kind: 'ok'; ms: number | null }
+  | { kind: 'down' }
+  | { kind: 'api-down' }
+  | { kind: 'no-report' };
+
+export function cellState(connectivity: Connectivity | null, from: string, to: string): CellState {
+  if (from === to) return { kind: 'self' };
+  const report = connectivity?.reports.find((r) => r.node === from);
+  if (!report?.reported) return { kind: 'no-report' };
+  const link = report.links.find((l) => l.peer === to);
+  if (!link) return { kind: 'no-report' };
+  if (!link.raft) return { kind: 'down' };
+  if (!link.api) return { kind: 'api-down' };
+  return { kind: 'ok', ms: link.raft_ms ?? null };
+}

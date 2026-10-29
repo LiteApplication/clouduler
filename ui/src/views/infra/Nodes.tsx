@@ -9,7 +9,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { Banner, BottomSheet, Button, Chip, EmptyState, Meter, NodeCard, PageHeader, Panel, StatusBadge, Tag, TextField, useConfirm, useToast } from '../../ds';
 import { useNodeMetrics, cpuPercent, memPercent } from '../../hooks/useNodeMetrics';
 import { formatUptime, relativeTime } from '../../lib/format';
-import { pairLinks, type LinkStatus } from '../../lib/links';
+import { cellState, type CellState } from '../../lib/links';
 import { nodeStatus } from '../../lib/status';
 import { useInstances } from '../../state/instancesStore';
 import { useClusterState } from '../../state/store';
@@ -26,18 +26,21 @@ interface Row {
   address: string;
 }
 
-const LINK_LABEL: Record<LinkStatus, string> = {
-  healthy: 'ok',
-  broken: 'down',
-  half: 'one-way',
-  unknown: '?',
-};
-const LINK_TONE: Record<LinkStatus, 'ok' | 'danger' | 'warn' | undefined> = {
-  healthy: 'ok',
-  broken: 'danger',
-  half: 'warn',
-  unknown: undefined,
-};
+/** Text first, colour second: every cell says what it is in words. */
+function CellTag({ state }: { state: CellState }) {
+  switch (state.kind) {
+    case 'self':
+      return <span className="cl-muted">self</span>;
+    case 'ok':
+      return <Tag tone="ok">{state.ms != null ? `${state.ms} ms` : 'ok'}</Tag>;
+    case 'down':
+      return <Tag tone="danger">Unreachable</Tag>;
+    case 'api-down':
+      return <Tag tone="warn">API down</Tag>;
+    case 'no-report':
+      return <Tag tone="warn">No report</Tag>;
+  }
+}
 
 export function Nodes() {
   const cluster = useClusterState();
@@ -125,10 +128,7 @@ export function Nodes() {
     }
   };
 
-  const pairs = pairLinks(rows.filter((r) => !r.pending).map((r) => r.name), links);
   const sorted = rows.filter((r) => !r.pending).map((r) => r.name).sort();
-  const pairOf = (a: string, b: string) => pairs.find((p) => (p.a === a && p.b === b) || (p.a === b && p.b === a));
-  const rtt = (from: string, to: string) => links?.reports.find((r) => r.node === from)?.links.find((l) => l.peer === to)?.raft_ms ?? null;
 
   return (
     <>
@@ -217,17 +217,22 @@ export function Nodes() {
           />
         </Panel>
 
-        {sorted.length > 1 && (
+        {sorted.length > 0 && (
           <Panel title="Who can reach whom" flush>
             <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
-              Each cell is the raft round trip from the row's node to the column's, as that node reports it.
+              Raft and API links, round trip in milliseconds. Rows report, columns are peers.
             </p>
+            {sorted.length === 1 && (
+              <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
+                Links appear here once there is more than one node.
+              </p>
+            )}
             <div className="cl-tablewrap">
               <table className="cl-table">
                 <caption className="cl-sr">Node connectivity</caption>
                 <thead>
                   <tr>
-                    <th scope="col" />
+                    <th scope="col">From</th>
                     {sorted.map((n) => <th scope="col" key={n}>{n}</th>)}
                   </tr>
                 </thead>
@@ -235,16 +240,11 @@ export function Nodes() {
                   {sorted.map((from) => (
                     <tr key={from}>
                       <th scope="row">{from}</th>
-                      {sorted.map((to) => {
-                        if (from === to) return <td key={to} className="cl-muted">-</td>;
-                        const p = pairOf(from, to);
-                        const ms = rtt(from, to);
-                        return (
-                          <td key={to} className="cl-td--mono">
-                            <Tag tone={p ? LINK_TONE[p.status] : undefined}>{ms != null ? `${ms} ms` : p ? LINK_LABEL[p.status] : '?'}</Tag>
-                          </td>
-                        );
-                      })}
+                      {sorted.map((to) => (
+                        <td key={to} className="cl-td--mono" data-label={to}>
+                          <CellTag state={cellState(links, from, to)} />
+                        </td>
+                      ))}
                     </tr>
                   ))}
                 </tbody>
@@ -257,7 +257,7 @@ export function Nodes() {
           <Panel title="History">
             {last && (
               <p>
-                Last rebalance <strong>{relativeTime(last.at * 1000)}</strong>:{' '}
+                Last rebalance <strong>{relativeTime(last.at)}</strong>:{' '}
                 {last.moves.length === 0 ? 'nothing needed to move.' : `${last.moves.length} move${last.moves.length === 1 ? '' : 's'}.`}
               </p>
             )}
