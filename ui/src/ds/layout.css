@@ -127,5 +127,6 @@ a.cl-btn--ghost{color:var(--ink)}
 .more-row:focus-visible{outline:2px solid var(--brand);outline-offset:-2px}
 .more-row .grow{flex:1}
 .pageload{display:flex;align-items:center;gap:var(--space-2);color:var(--ink-muted);padding:var(--space-6) 0}
-.shell__rail{position:sticky;top:0;align-self:flex-start;height:100vh}
-.shell__rail>.cl-rail{height:100%;overflow-y:auto}
+/* The rail column stretches the full page height (so its background never ends); the nav inside sticks to the viewport. */
+.shell__rail{align-self:stretch}
+.shell__rail>.cl-rail{flex:none;position:sticky;top:0;height:100vh;min-height:0;overflow-y:auto}

@@ -109,7 +109,7 @@
 @media (min-width:840px){.cl-bnav{display:none}}
 
 /* Tabs */
-.cl-tabs{display:flex;gap:var(--space-1);overflow-x:auto;border-bottom:2px solid var(--line);scrollbar-width:none;font-family:var(--font-sans)}
+.cl-tabs{margin-bottom:calc(var(--space-2) * -1);display:flex;gap:var(--space-1);overflow-x:auto;border-bottom:2px solid var(--line);scrollbar-width:none;font-family:var(--font-sans)}
 .cl-tabs::-webkit-scrollbar{display:none}
 .cl-tab{display:inline-flex;align-items:center;gap:var(--space-2);min-height:var(--tap-min);padding:0 var(--space-3);margin-bottom:-2px;background:none;border:0;border-bottom:4px solid transparent;color:var(--ink-muted);font:700 15px/20px var(--font-sans);white-space:nowrap;cursor:pointer}
 .cl-tab:hover{color:var(--ink)}
@@ -160,7 +160,9 @@
 /* Toast / Banner */
 .cl-notice{display:flex;align-items:flex-start;gap:var(--space-3);box-sizing:border-box;padding:var(--space-3) var(--space-3) var(--space-3) var(--space-4);border:2px solid var(--tone);border-radius:var(--radius-md);background:var(--surface-1);color:var(--ink);font:400 15px/22px var(--font-sans)}
 .cl-notice>.cl-icon:first-child{color:var(--tone);margin-top:1px}
-.cl-notice__text{display:flex;flex-direction:column;flex:1;min-width:0;padding-top:1px}
+.cl-notice__text{display:flex;flex-direction:column;flex:1;min-width:0}
+.cl-notice>.cl-btn{margin-block:-7px}
+.cl-notice>.cl-btn--icon{margin-left:calc(var(--space-2) * -1)}
 .cl-notice__text strong{font-weight:700}
 .cl-notice--ok{--tone:var(--ok);--tone-bg:var(--ok-bg)}
 .cl-notice--warn{--tone:var(--warn);--tone-bg:var(--warn-bg)}

@@ -414,7 +414,7 @@ export function Updates() {
   const retryable = failedUpdates
     .map(([id]) => id)
     .filter((id) => rows.some((r) => r.id === id && statusOf(r) === 'update') && !inFlight.has(id));
-  const checkedLabel = checkedAt ? `Checked ${relativeTime(checkedAt, now)}` : 'Not checked yet';
+  const checkedLabel = checkedAt ? `Checked ${relativeTime(Math.floor(checkedAt / 1000), now)}` : 'Not checked yet';
   const subtitle =
     rows.length === 0
       ? `No containers · ${checkedLabel}`
@@ -474,7 +474,7 @@ export function Updates() {
         </span>
       ),
     },
-    { key: 'version', label: 'Image', render: (_, row) => <VersionCell row={row} status={statusOf(row)} /> },
+    { key: 'node', label: 'Node', mono: true },
     {
       key: 'status',
       label: 'Status',
@@ -510,10 +510,11 @@ export function Updates() {
         );
       },
     },
-    { key: 'node', label: 'Node' },
+    { key: 'version', label: 'Running to latest', render: (_, row) => <VersionCell row={row} status={statusOf(row)} /> },
     {
       key: 'actions',
       label: 'Action',
+      align: 'right',
       render: (_, row) => {
         const status = statusOf(row);
         const update = updates[row.id];
@@ -523,15 +524,15 @@ export function Updates() {
         const waitingForHealth = update?.phase === 'started' && live[row.id]?.health === 'starting' && !inFlight.has(row.id);
         if (flight) return <UpdateProgress phase={stepOf(update, !!waitingForHealth)} waitingForHealth={!!waitingForHealth} />;
         return (
-          <span className="wl-stack">
-            {recent && update && <Tag tone="ok">{`Updated ${relativeTime(update.at * 1000, now)}`}</Tag>}
+          <span className="wl-stack wl-stack--end">
+            {recent && update && <Tag tone="ok">{`Updated ${relativeTime(update.at, now)}`}</Tag>}
             {failedVisible && (
               <span className="wl-danger" title={update.error}>
                 <Icon name="x" size={14} /> Failed
               </span>
             )}
             {status === 'update' && (
-              <Button size="sm" icon={failedVisible ? 'refresh' : 'download'} disabled={busy === row.id || busy === 'bulk'} onClick={() => void startUpdate([row.id])}>
+              <Button variant="ghost" icon={failedVisible ? 'refresh' : 'download'} disabled={busy === row.id || busy === 'bulk'} onClick={() => void startUpdate([row.id])}>
                 {failedVisible ? `Retry ${row.id}` : `Update ${row.id}`}
               </Button>
             )}
@@ -543,33 +544,32 @@ export function Updates() {
 
   return (
     <div className="sec wl-page">
-      <PageHeader
-        eyebrow="Cluster"
-        title="Updates"
-        sub={subtitle}
-        actions={
-          <>
-            <Button icon="key" onClick={() => setAccountsOpen(true)}>
-              {`Registry accounts (${accounts.length})`}
-            </Button>
-            <Button icon="lock" disabled={busy !== null || unpinned.length === 0} title="Record what each unpinned container runs as its pin, so it cannot drift on a later restart" onClick={() => void runPin()}>
-              {`Pin running digests (${unpinned.length})`}
-            </Button>
-            <Button icon="refresh" loading={checking} onClick={() => void load()}>
-              {checking ? 'Checking' : 'Check again'}
-            </Button>
-            {selected.size > 0 ? (
-              <Button variant="primary" icon="download" loading={busy === 'bulk'} disabled={busy !== null} onClick={() => void startUpdate([...selected])}>
-                {`Update ${selected.size} ${selected.size === 1 ? 'container' : 'containers'}`}
+      <div className="upd-head">
+        <PageHeader
+          eyebrow="System"
+          title="Image updates"
+          sub={subtitle}
+          actions={
+            <>
+              <Button icon="lock" disabled={busy !== null || unpinned.length === 0} title="Record what each unpinned container runs as its pin, so it cannot drift on a later restart" onClick={() => void runPin()}>
+                {`Pin digests (${unpinned.length})`}
               </Button>
-            ) : (
-              <Button variant="primary" icon="download" disabled={busy !== null || behindIdle.length === 0} loading={busy === 'bulk'} onClick={() => void startUpdate(behindIdle.map((r) => r.id))}>
-                {`Update all behind (${behindIdle.length})`}
+              <Button variant="ghost" icon="refresh" loading={checking} onClick={() => void load()}>
+                {checking ? 'Checking' : 'Check again'}
               </Button>
-            )}
-          </>
-        }
-      />
+              {selected.size > 0 ? (
+                <Button variant="primary" icon="download" loading={busy === 'bulk'} disabled={busy !== null} onClick={() => void startUpdate([...selected])}>
+                  {`Update ${selected.size} ${selected.size === 1 ? 'container' : 'containers'}`}
+                </Button>
+              ) : (
+                <Button variant="primary" icon="download" disabled={busy !== null || behindIdle.length === 0} loading={busy === 'bulk'} onClick={() => void startUpdate(behindIdle.map((r) => r.id))}>
+                  {`Update all behind (${behindIdle.length})`}
+                </Button>
+              )}
+            </>
+          }
+        />
+      </div>
 
       {error && (
         <Banner tone="danger" title="Something went wrong" onClose={() => setError(null)}>
@@ -621,38 +621,71 @@ export function Updates() {
         </Panel>
       )}
 
-      <div className="chips" role="group" aria-label="Filter by status">
-        {FILTERS.map((f) => (
-          <Chip key={f.status} label={f.label} count={counts[f.status]} selected={statusFilter === f.status} onClick={() => setStatusFilter(statusFilter === f.status ? null : f.status)} />
-        ))}
-        {selectableIds.length > 0 && (
-          <Chip label={allSelected ? 'Clear selection' : 'Select all behind'} icon="check" onClick={() => setSelected(allSelected ? new Set() : new Set(selectableIds))} />
-        )}
-      </div>
-      <TextField label="Filter by container, image or node" type="search" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <section className="sec" aria-labelledby="inst-h">
+        <div className="sec__h">
+          <h2 className="h2" id="inst-h">
+            Containers
+          </h2>
+          <div className="chips upd-chips" role="group" aria-label="Filter by status">
+            <Chip label="All" count={rows.length} selected={statusFilter === null} onClick={() => setStatusFilter(null)} />
+            {FILTERS.map((f) => (
+              <Chip key={f.status} label={f.label} count={counts[f.status]} selected={statusFilter === f.status} onClick={() => setStatusFilter(statusFilter === f.status ? null : f.status)} />
+            ))}
+            {selectableIds.length > 0 && (
+              <Chip label={allSelected ? 'Clear selection' : 'Select all behind'} icon="check" onClick={() => setSelected(allSelected ? new Set() : new Set(selectableIds))} />
+            )}
+          </div>
+        </div>
+        <TextField label="Filter by container, image or node" type="search" value={query} onChange={(e) => setQuery(e.target.value)} />
 
-      {visibleRows.length === 0 ? (
-        <EmptyState
-          icon="download"
-          title={rows.length === 0 ? 'Nothing is running yet' : 'No containers match'}
-          action={
-            filtering ? (
-              <Button
-                onClick={() => {
-                  setStatusFilter(null);
-                  setQuery('');
-                }}
-              >
-                Clear filters
-              </Button>
-            ) : undefined
-          }
-        >
-          {rows.length === 0 ? 'Deploy a stack and its images are checked here.' : 'Try another filter.'}
-        </EmptyState>
-      ) : (
-        <DataTable caption="Image updates" columns={columns} rows={visibleRows} />
-      )}
+        {visibleRows.length === 0 ? (
+          <EmptyState
+            icon="download"
+            title={rows.length === 0 ? 'Nothing is running yet' : 'No containers match'}
+            action={
+              filtering ? (
+                <Button
+                  onClick={() => {
+                    setStatusFilter(null);
+                    setQuery('');
+                  }}
+                >
+                  Clear filters
+                </Button>
+              ) : undefined
+            }
+          >
+            {rows.length === 0 ? 'Deploy a stack and its images are checked here.' : 'Try another filter.'}
+          </EmptyState>
+        ) : (
+          <DataTable caption="Image updates" columns={columns} rows={visibleRows} />
+        )}
+      </section>
+
+      <Panel
+        title="Registry accounts"
+        actions={
+          <Button icon="key" onClick={() => setAccountsOpen(true)}>
+            Manage registry accounts
+          </Button>
+        }
+      >
+        <p className="sub">Used for private images and higher pull limits.</p>
+        {accounts.length > 0 ? (
+          <div className="list">
+            {accounts.map((a) => (
+              <div className="li" key={a.server}>
+                <div className="li__main">
+                  <span className="li__name mono">{a.server}</span>
+                  <span className="li__meta">{a.username}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="sub">No registry logins stored yet.</p>
+        )}
+      </Panel>
 
       <RegistryAccounts open={accountsOpen} accounts={accounts} onClose={() => setAccountsOpen(false)} onChanged={() => void loadAccounts()} />
     </div>

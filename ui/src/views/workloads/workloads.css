@@ -2,7 +2,9 @@
    builds on ds tokens; nothing hardcodes a colour. */
 
 .wl-page { min-width: 0; }
-.wl-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+.sec.wl-page { gap: var(--space-6); }
+.wl-rows { display: flex; flex-direction: column; border: 2px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--surface-1); }
+.wl-rows > .cl-crow:last-child { border-bottom: 0; }
 .wl-issue { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 2px solid var(--danger); border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); background: var(--danger-bg); margin-top: calc(var(--space-1) * -1); }
 .wl-danger { color: var(--danger); display: inline-flex; align-items: center; gap: var(--space-1); }
 .wl-inline { display: inline-flex; align-items: center; gap: var(--space-2); }
@@ -30,6 +32,18 @@
 .wl-check { width: 22px; height: 22px; accent-color: var(--brand-fill); }
 @media (prefers-reduced-motion: reduce) { .wl-bar > span { transition: none; } }
 
+/* updates page */
+.upd-chips { align-items: center; }
+.upd-reg { display: flex; flex-direction: column; gap: var(--space-3); }
+@media (max-width: 559px) {
+  .upd-head .acts { width: 100%; }
+  .upd-head .acts > .cl-btn--primary { order: -1; flex: 1 1 100%; }
+  .upd-head .acts > .cl-btn:not(.cl-btn--primary) { flex: 1 1 0; padding: 0 var(--space-2); }
+  .sec__h .upd-chips { flex-wrap: nowrap; overflow-x: auto; width: 100%; padding: 2px 2px var(--space-1); scrollbar-width: none; }
+  .sec__h .upd-chips::-webkit-scrollbar { display: none; }
+  .sec__h .upd-chips .cl-chip { flex: none; }
+}
+
 /* login and consent */
 .wl-login { display: flex; flex-wrap: wrap; min-height: 100vh; background: var(--surface-0); color: var(--ink); font: 400 16px/24px var(--font-sans); }
 .wl-login__art { flex: 1 1 440px; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 48px 24px; background: var(--surface-1); border-right: 2px solid var(--line); overflow: hidden; }
@@ -52,3 +66,4 @@
 .wl-grant--on { border-color: var(--brand); background: var(--brand-bg); }
 .wl-grant input { margin-top: 4px; width: 20px; height: 20px; accent-color: var(--brand-fill); }
 @media (max-width: 839px) { .wl-login__art { display: none; } }
+.wl-stack--end { align-items: flex-end; }
