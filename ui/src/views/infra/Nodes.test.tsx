@@ -1,8 +1,9 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { ConfirmProvider, ToastProvider } from '../../ds';
 import { describe, expect, it, vi } from 'vitest';
 import { Nodes } from './Nodes';
-import type { ClusterState } from '../api/types';
+import type { ClusterState } from '../../api/types';
 
 const cluster: ClusterState = {
   nodes: {
@@ -31,42 +32,46 @@ const cluster: ClusterState = {
   version: 1,
 };
 
-vi.mock('../state/store', () => ({
+vi.mock('../../state/store', () => ({
   useClusterState: () => cluster,
 }));
 
 let configNodes: Record<string, { role: string; drives?: Record<string, string>; network?: Record<string, string> }> = {};
-vi.mock('./config/draft', () => ({
+vi.mock('../config/draft', () => ({
   useConfigDraft: () => ({ original: { nodes: configNodes }, draft: null }),
 }));
 
 let isAdmin = false;
-vi.mock('../auth/AuthContext', () => ({
+vi.mock('../../auth/AuthContext', () => ({
   useAuth: () => ({ isAdmin, identity: { subject: 'test', username: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
 }));
 
 function renderNodes() {
   return render(
     <MemoryRouter>
-      <Nodes />
+      <ToastProvider>
+        <ConfirmProvider>
+          <Nodes />
+        </ConfirmProvider>
+      </ToastProvider>
     </MemoryRouter>,
   );
 }
 
 describe('Nodes view role gating', () => {
-  it('hides node actions and the add-node button for a viewer', () => {
+  it('hides the cluster actions for a viewer', () => {
     isAdmin = false;
     renderNodes();
     expect(screen.queryByRole('button', { name: /add node/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /drain/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /rebalance/i })).not.toBeInTheDocument();
     expect(screen.getAllByText('n1').length).toBeGreaterThan(0);
   });
 
-  it('shows node actions and the add-node button for an admin', () => {
+  it('shows rebalance and add node for an admin', () => {
     isAdmin = true;
     renderNodes();
     expect(screen.getByRole('button', { name: /add node/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /drain/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /rebalance cluster/i })).toBeInTheDocument();
   });
 });
 

@@ -1,0 +1,7 @@
+/* Settings: the legacy config sections render inside design-system panels, so
+   their old .card wrappers lose their own chrome here. */
+.settings .cfg .card{background:none;border:0;box-shadow:none;padding:0;margin:0}
+.settings .cfg .card.section{padding:var(--space-3) 0;border-top:1px solid var(--line);border-radius:0}
+.settings .cfg .section-head h2{font:var(--heading)}
+.settings .stack{display:flex;flex-direction:column;gap:var(--space-3)}
+.settings .pending-countdown{font:700 20px/1 var(--font-mono)}

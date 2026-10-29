@@ -1,74 +1,81 @@
-// Placeholder: Agent C replaces this with the tabbed Settings screen
-// (/settings/:tab). Until then each tab hosts the old page that matches it; the
-// config tabs mount the old Configuration view at one of its sub-pages, picked
-// with Chips.
-import { Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Chip, PageHeader, Tabs } from '../../ds';
-import { AiAccess } from '../AiAccess';
-import { ConfigsSecrets } from '../ConfigsSecrets';
-import { Configuration } from '../Configuration';
-import { SelfUpdate } from '../SelfUpdate';
-import { CONFIG_PAGES } from '../config/pages';
+// /settings/:tab. The config editors live in four tabs (General, Network,
+// Storage, Security) that share one draft; the header's primary button follows
+// the active tab.
 
-export const SETTINGS_TABS = [
-  { id: 'general', label: 'General' },
-  { id: 'network', label: 'Network' },
-  { id: 'storage', label: 'Storage' },
-  { id: 'security', label: 'Security' },
-  { id: 'secrets', label: 'Secrets & configs' },
-  { id: 'access', label: 'Access' },
-  { id: 'self-update', label: 'Self-update' },
-];
+import { useState } from 'react';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
+import { useAuth } from '../../auth/AuthContext';
+import { Button, PageHeader, Tabs } from '../../ds';
+import { ConfigTab, primaryAction, tabChanges, useSettingsConfig } from './SettingsConfig';
+import { SettingsAccess } from './SettingsAccess';
+import { SettingsSecrets } from './SettingsSecrets';
+import { SettingsUpdate } from './SettingsUpdate';
+import { SETTINGS_TABS } from './settingsTabs';
+import './settings.css';
 
-/** Which settings tab owns an old /configuration/<slug> page. */
-export const CONFIG_SLUG_TAB: Record<string, string> = {
-  cluster: 'general',
-  failover: 'general',
-  review: 'general',
-  networks: 'network',
-  web: 'network',
-  proxy: 'network',
-  cloudflare: 'network',
-  drives: 'storage',
-  auth: 'security',
-  mcp: 'security',
-  'git-backup': 'security',
-  secrets: 'secrets',
+export { SETTINGS_TABS, CONFIG_SLUG_TAB } from './settingsTabs';
+
+const CONFIG_TABS = ['general', 'network', 'storage', 'security'];
+
+const HINTS: Record<string, string> = {
+  general: 'The cluster itself and when a silent node is declared lost.',
+  network: 'Networks, the web UI, the reverse proxy and Cloudflare. Risky changes roll back unless you confirm.',
+  storage: 'How each drive is replicated or served across the cluster.',
+  security: 'Sign-in, AI access and the encrypted git backup.',
+  secrets: 'Sealed values and bundled files. Secret values are never shown.',
+  access: 'Who and what can reach this cluster.',
+  'self-update': 'Roll out a new Clouduler release across every node.',
 };
 
 export function Settings() {
   const { tab = 'general' } = useParams();
   const navigate = useNavigate();
-  const [params, setParams] = useSearchParams();
+  const { isAdmin } = useAuth();
+  const cfg = useSettingsConfig();
+  const [rollbackAfter, setRollbackAfter] = useState(60);
+  const [sheet, setSheet] = useState(false);
+  const [startSignal, setStartSignal] = useState(0);
+
   if (!SETTINGS_TABS.some((t) => t.id === tab)) return <Navigate to="/settings/general" replace />;
 
-  const slugs = CONFIG_PAGES.filter((p) => CONFIG_SLUG_TAB[p.slug] === tab).map((p) => p.slug);
-  const slug = slugs.includes(params.get('page') ?? '') ? params.get('page')! : slugs[0];
+  const isConfig = CONFIG_TABS.includes(tab);
+  const items = SETTINGS_TABS.map((t) => ({ ...t, count: CONFIG_TABS.includes(t.id) ? tabChanges(cfg.diff, t.id) : null }));
+
+  let primary: React.ReactNode = null;
+  if (isAdmin) {
+    if (isConfig) {
+      const p = primaryAction(cfg);
+      primary = (
+        <Button
+          variant="primary"
+          icon={p.icon}
+          disabled={p.disabled}
+          loading={cfg.busy}
+          onClick={() => {
+            if (cfg.pending?.armed) void cfg.confirm();
+            else if (cfg.draft) void cfg.apply(cfg.draft, `${rollbackAfter}s`);
+          }}
+        >
+          {p.label}
+        </Button>
+      );
+    } else if (tab === 'secrets') {
+      primary = <Button variant="primary" icon="plus" onClick={() => setSheet(true)}>Create secret</Button>;
+    } else if (tab === 'access') {
+      primary = <Button variant="primary" icon="plus" onClick={() => setSheet(true)}>Create API key</Button>;
+    } else {
+      primary = <Button variant="primary" icon="play" onClick={() => setStartSignal((n) => n + 1)}>Start update</Button>;
+    }
+  }
 
   return (
-    <>
-      <PageHeader eyebrow="System" title="Settings" />
-      <Tabs label="Settings sections" items={SETTINGS_TABS} active={tab} onChange={(id) => navigate(`/settings/${id}`)} />
-      {slug && (
-        <>
-          <div className="chips">
-            {slugs.map((s) => (
-              <Chip
-                key={s}
-                label={CONFIG_PAGES.find((p) => p.slug === s)!.label}
-                selected={s === slug}
-                onClick={() => setParams({ page: s })}
-              />
-            ))}
-          </div>
-          <Routes location={{ pathname: `/configuration/${slug}` }}>
-            <Route path="/configuration/*" element={<Configuration />} />
-          </Routes>
-        </>
-      )}
-      {tab === 'secrets' && <ConfigsSecrets />}
-      {tab === 'access' && <AiAccess />}
-      {tab === 'self-update' && <SelfUpdate />}
-    </>
+    <div className="settings">
+      <PageHeader eyebrow="System" title="Settings" sub={HINTS[tab]} actions={primary} />
+      <Tabs label="Settings sections" items={items} active={tab} onChange={(id) => { setSheet(false); navigate(`/settings/${id}`); }} />
+      {isConfig && <ConfigTab tab={tab} cfg={cfg} rollbackAfter={rollbackAfter} setRollbackAfter={setRollbackAfter} />}
+      {tab === 'secrets' && <SettingsSecrets sheetOpen={sheet} onOpen={() => setSheet(true)} onClose={() => setSheet(false)} />}
+      {tab === 'access' && <SettingsAccess sheetOpen={sheet} onOpen={() => setSheet(true)} onClose={() => setSheet(false)} />}
+      {tab === 'self-update' && <SettingsUpdate startSignal={startSignal} />}
+    </div>
   );
 }

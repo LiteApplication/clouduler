@@ -1,7 +1,9 @@
-// Small typed input wrappers used by the config form. Each validates its own
-// value and reports up through onChange/onValid so the parent doesn't need
-// to know the validation rule for every field kind.
+// Typed input wrappers used by the config form, re-skinned onto the design
+// system's TextField, Toggle and cl-input styles. Each validates its own value
+// and reports up through onChange so the parent doesn't need to know the
+// validation rule for every field kind.
 
+import { Toggle, TextField as DsTextField } from '../ds';
 import { isValidCidr, isValidDuration, isValidIp, isValidPort } from '../lib/validate';
 
 interface FieldProps<T> {
@@ -13,49 +15,27 @@ interface FieldProps<T> {
   disabled?: boolean;
 }
 
-export function TextField({ id, label, value, onChange, hint, disabled }: FieldProps<string>) {
+export function TextField({ label, value, onChange, hint, disabled }: FieldProps<string>) {
+  return <DsTextField label={label} value={value} onChange={(e) => onChange(e.target.value)} hint={hint} disabled={disabled} />;
+}
+
+export function NumberField({ label, value, onChange, hint, disabled }: FieldProps<number>) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input id={id} type="text" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} />
-      {hint && <span className="field-hint">{hint}</span>}
-    </div>
+    <DsTextField
+      label={label}
+      type="number"
+      inputMode="numeric"
+      mono
+      value={String(value)}
+      onChange={(e) => onChange(Number(e.target.value))}
+      hint={hint}
+      disabled={disabled}
+    />
   );
 }
 
-export function NumberField({
-  id,
-  label,
-  value,
-  onChange,
-  hint,
-  disabled,
-}: FieldProps<number>) {
-  return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input
-        id={id}
-        type="number"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        disabled={disabled}
-      />
-      {hint && <span className="field-hint">{hint}</span>}
-    </div>
-  );
-}
-
-export function CheckboxField({ id, label, value, onChange, hint, disabled }: FieldProps<boolean>) {
-  return (
-    <div className="field">
-      <label className="flex-row" htmlFor={id}>
-        <input id={id} type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} disabled={disabled} />
-        {label}
-      </label>
-      {hint && <span className="field-hint">{hint}</span>}
-    </div>
-  );
+export function CheckboxField({ label, value, onChange, hint, disabled }: FieldProps<boolean>) {
+  return <Toggle label={label} description={hint} checked={value} onChange={onChange} disabled={disabled} />;
 }
 
 export function SelectField<T extends string>({
@@ -68,105 +48,86 @@ export function SelectField<T extends string>({
   disabled,
 }: FieldProps<T> & { options: { value: T; label: string }[] }) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <select id={id} value={value} onChange={(e) => onChange(e.target.value as T)} disabled={disabled}>
+    <div className="cl-field">
+      <label className="cl-label" htmlFor={id}>
+        {label}
+      </label>
+      <select id={id} className="cl-input" value={value} onChange={(e) => onChange(e.target.value as T)} disabled={disabled}>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
       </select>
-      {hint && <span className="field-hint">{hint}</span>}
+      {hint && <div className="cl-hint">{hint}</div>}
     </div>
   );
 }
 
-export function IpField({ id, label, value, onChange, hint, disabled }: FieldProps<string>) {
-  const valid = value.length === 0 || isValidIp(value);
+function Checked({
+  label,
+  value,
+  onChange,
+  hint,
+  disabled,
+  valid,
+  error,
+  placeholder,
+}: Omit<FieldProps<string>, 'id'> & { valid: boolean; error: string; placeholder?: string }) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input
-        id={id}
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={valid ? '' : 'invalid'}
-        disabled={disabled}
-      />
-      {!valid && <span className="field-error">not a valid IP address</span>}
-      {hint && valid && <span className="field-hint">{hint}</span>}
-    </div>
+    <DsTextField
+      label={label}
+      mono
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      error={valid ? undefined : error}
+      hint={hint}
+      disabled={disabled}
+    />
   );
 }
 
-export function CidrField({ id, label, value, onChange, hint, disabled }: FieldProps<string>) {
-  const valid = value.length === 0 || isValidCidr(value);
+export function IpField(p: FieldProps<string>) {
+  return <Checked {...p} valid={p.value.length === 0 || isValidIp(p.value)} error="Not a valid IP address." />;
+}
+
+export function CidrField(p: FieldProps<string>) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input
-        id={id}
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={valid ? '' : 'invalid'}
-        disabled={disabled}
-        placeholder="10.10.0.0/24"
-      />
-      {!valid && <span className="field-error">not a valid CIDR subnet</span>}
-      {hint && valid && <span className="field-hint">{hint}</span>}
-    </div>
+    <Checked {...p} placeholder="10.10.0.0/24" valid={p.value.length === 0 || isValidCidr(p.value)} error="Not a valid CIDR subnet." />
   );
 }
 
-export function DurationField({ id, label, value, onChange, hint, disabled }: FieldProps<string>) {
-  const valid = value.length === 0 || isValidDuration(value);
+export function DurationField(p: FieldProps<string>) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input
-        id={id}
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={valid ? '' : 'invalid'}
-        disabled={disabled}
-        placeholder="30s"
-      />
-      {!valid && <span className="field-error">not a valid duration (e.g. 30s, 5m, 1h30m)</span>}
-      {hint && valid && <span className="field-hint">{hint}</span>}
-    </div>
+    <Checked
+      {...p}
+      placeholder="30s"
+      valid={p.value.length === 0 || isValidDuration(p.value)}
+      error="Not a valid duration. Try 30s, 5m or 1h30m."
+    />
   );
 }
 
-export function TimeOfDayField({ id, label, value, onChange, hint, disabled }: FieldProps<string>) {
+export function TimeOfDayField({ label, value, onChange, hint, disabled }: FieldProps<string>) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input id={id} type="time" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} />
-      {hint && <span className="field-hint">{hint}</span>}
-    </div>
+    <DsTextField label={label} type="time" mono value={value} onChange={(e) => onChange(e.target.value)} hint={hint} disabled={disabled} />
   );
 }
 
-export function PortField({ id, label, value, onChange, hint, disabled }: FieldProps<number>) {
-  const valid = isValidPort(value);
+export function PortField({ label, value, onChange, hint, disabled }: FieldProps<number>) {
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input
-        id={id}
-        type="number"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className={valid ? '' : 'invalid'}
-        disabled={disabled}
-      />
-      {!valid && <span className="field-error">must be a port between 1 and 65535</span>}
-      {hint && valid && <span className="field-hint">{hint}</span>}
-    </div>
+    <DsTextField
+      label={label}
+      type="number"
+      inputMode="numeric"
+      mono
+      value={String(value)}
+      onChange={(e) => onChange(Number(e.target.value))}
+      error={isValidPort(value) ? undefined : 'Port must be between 1 and 65535.'}
+      hint={hint}
+      disabled={disabled}
+    />
   );
 }
 

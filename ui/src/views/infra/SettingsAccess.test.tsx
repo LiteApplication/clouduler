@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cursorInstallLink, vscodeInstallLink } from './AiAccess';
+import { cursorInstallLink, vscodeInstallLink } from './SettingsAccess';
 
 describe('install deep links', () => {
   it('encodes the cursor config as base64 json', () => {

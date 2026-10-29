@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { ConfirmProvider, ToastProvider } from '../../ds';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NodeDetail } from './NodeDetail';
-import { ConfigDraftProvider } from './config/draft';
-import type { ClusterConfig, ClusterState } from '../api/types';
+import { ConfigDraftProvider } from '../config/draft';
+import type { ClusterConfig, ClusterState } from '../../api/types';
 
 const cluster: ClusterState = {
   nodes: {
@@ -65,12 +66,12 @@ const clusterConfig: ClusterConfig = {
   self_update: null,
 };
 
-vi.mock('../state/store', () => ({
+vi.mock('../../state/store', () => ({
   useClusterState: () => cluster,
 }));
 
 let isAdmin = true;
-vi.mock('../auth/AuthContext', () => ({
+vi.mock('../../auth/AuthContext', () => ({
   useAuth: () => ({ isAdmin, identity: { subject: 'test', username: 'test', role: isAdmin ? 'admin' : 'viewer' }, loading: false }),
 }));
 
@@ -80,7 +81,7 @@ const pendingConfiguration = vi.fn();
 const validateConfiguration = vi.fn();
 const applyConfiguration = vi.fn();
 
-vi.mock('../api/client', () => ({
+vi.mock('../../api/client', () => ({
   api: {
     getNode: (...args: unknown[]) => getNode(...args),
     getConfiguration: (...args: unknown[]) => getConfiguration(...args),
@@ -91,16 +92,21 @@ vi.mock('../api/client', () => ({
     removeNode: vi.fn(),
   },
   ApiError: class ApiError extends Error {},
+  nodeLogsUrl: (n: string) => `/api/nodes/${n}/logs`,
 }));
 
 function renderNodeDetail() {
   return render(
     <MemoryRouter initialEntries={['/nodes/n1']}>
-      <ConfigDraftProvider>
-        <Routes>
-          <Route path="/nodes/:name" element={<NodeDetail />} />
-        </Routes>
-      </ConfigDraftProvider>
+      <ToastProvider>
+        <ConfirmProvider>
+          <ConfigDraftProvider>
+            <Routes>
+              <Route path="/nodes/:name" element={<NodeDetail />} />
+            </Routes>
+          </ConfigDraftProvider>
+        </ConfirmProvider>
+      </ToastProvider>
     </MemoryRouter>,
   );
 }
