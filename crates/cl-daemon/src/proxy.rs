@@ -320,6 +320,7 @@ pub fn start(
 
 /// The two listeners plus the routing table/certificate reconcile loop.
 /// `None` when the proxy is disabled.
+#[allow(clippy::too_many_arguments)]
 fn build_listen(
     desired: &Desired,
     cluster: &Arc<ClusterNode>,
@@ -402,6 +403,7 @@ fn build_listen(
 
 /// The certificate issuance/renewal loop. `None` when ACME issuance is
 /// turned off in config, or there is no Cloudflare section to issue against.
+#[allow(clippy::too_many_arguments)]
 fn build_acme(
     desired: &Desired,
     cfg: &ClusterConfig,

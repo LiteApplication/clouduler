@@ -2120,7 +2120,19 @@ const API_SHAPES_FIXTURE: &str = "../../ui/src/api/__fixtures__/api-shapes.json"
 fn normalize(value: &mut serde_json::Value, tempdir: &str) {
     /// Random per run: generated ids, hashes, key fingerprints, ephemeral ports.
     const VOLATILE_STRINGS: &[&str] = &["fingerprint", "subject", "rpc_addr", "content", "id"];
-    const VOLATILE_NUMBERS: &[&str] = &["state_version"];
+    const VOLATILE_NUMBERS: &[&str] = &[
+        "state_version",
+        // Live readings of the machine the test happens to run on.
+        "cpu_percent",
+        "cpu_count",
+        "load_1m",
+        "memory_total_bytes",
+        "memory_used_bytes",
+        "uptime_seconds",
+        "total_bytes",
+        "free_bytes",
+        "container_count",
+    ];
 
     match value {
         serde_json::Value::Object(map) => {
@@ -2283,6 +2295,36 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .await
         .expect("submit wrapped key");
 
+    // A certificate whose renewal is failing, and a record still waiting to
+    // be published: the two non-"ready" row shapes.
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetCertStatus {
+            fqdn: "example.test".to_string(),
+            status: cl_raft::ReconcileStatus::Error {
+                message: "dns challenge timed out".to_string(),
+                at: 0,
+            },
+        })
+        .await
+        .expect("submit cert status");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetCertStatus {
+            fqdn: "new.example.test".to_string(),
+            status: cl_raft::ReconcileStatus::Pending,
+        })
+        .await
+        .expect("submit pending cert");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetDnsStatus {
+            fqdn: "new.example.test".to_string(),
+            status: cl_raft::ReconcileStatus::Pending,
+        })
+        .await
+        .expect("submit pending dns");
+
     let mut shapes = serde_json::Map::new();
     for (name, uri) in [
         ("status", "/api/status"),
@@ -2302,6 +2344,16 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         // item to prove the row shape against.
         ("updates", "/api/updates"),
         ("nodeConnectivity", "/api/nodes/connectivity"),
+        ("stacks", "/api/stacks"),
+        ("stackDetail", "/api/stacks/web"),
+        ("instances", "/api/instances"),
+        ("volumes", "/api/volumes"),
+        ("certificates", "/api/certificates"),
+        ("dns", "/api/dns"),
+        ("nodeDetail", "/api/nodes/n0"),
+        ("nodeMetrics", "/api/nodes/metrics"),
+        ("proxyRoutes", "/api/proxy/routes"),
+        ("lastRebalance", "/api/rebalance/last"),
     ] {
         let resp = h
             .router

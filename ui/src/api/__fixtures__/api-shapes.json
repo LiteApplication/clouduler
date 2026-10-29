@@ -1,4 +1,22 @@
 {
+  "certificates": [
+    {
+      "error": "dns challenge timed out",
+      "error_at": 0,
+      "fqdn": "example.test",
+      "has_chain": true,
+      "issued_at": 0,
+      "not_after": 0,
+      "status": "error"
+    },
+    {
+      "fqdn": "new.example.test",
+      "has_chain": false,
+      "issued_at": 0,
+      "not_after": 0,
+      "status": "pending"
+    }
+  ],
   "cloudflareTokenStatus": {
     "configured": false
   },
@@ -71,6 +89,22 @@
     "fingerprint": "<volatile>",
     "held": true
   },
+  "dns": [
+    {
+      "content": "<volatile>",
+      "fqdn": "example.test",
+      "record_type": "A",
+      "status": "ready",
+      "zone": "test"
+    },
+    {
+      "content": "<volatile>",
+      "fqdn": "new.example.test",
+      "record_type": "",
+      "status": "pending",
+      "zone": ""
+    }
+  ],
   "drives": [
     {
       "active_server": "n0",
@@ -94,6 +128,23 @@
     "subject": "<volatile>",
     "username": "test"
   },
+  "instances": [
+    {
+      "crash_moves": 0,
+      "desired": "running",
+      "health": "none",
+      "id": "<volatile>",
+      "image": null,
+      "image_digest": null,
+      "migration": null,
+      "node": "n0",
+      "restart_count": 0,
+      "running": null,
+      "started_at": null,
+      "state": "stopped"
+    }
+  ],
+  "lastRebalance": null,
   "nodeConnectivity": {
     "reports": [
       {
@@ -103,6 +154,58 @@
       }
     ]
   },
+  "nodeDetail": {
+    "availability": "active",
+    "container_count": 0,
+    "drives": [
+      "fast"
+    ],
+    "name": "n0",
+    "reachable": true,
+    "role": "manager",
+    "usage": {
+      "cpu_count": 0,
+      "cpu_percent": 0,
+      "drives": [
+        {
+          "drive": "fast",
+          "free_bytes": 0,
+          "path": "/mnt/fast",
+          "total_bytes": 0
+        }
+      ],
+      "load_1m": 0,
+      "local": true,
+      "memory_total_bytes": 0,
+      "memory_used_bytes": 0,
+      "uptime_seconds": 0,
+      "version": "0.8.0"
+    }
+  },
+  "nodeMetrics": [
+    {
+      "container_count": 0,
+      "name": "n0",
+      "usage": {
+        "cpu_count": 0,
+        "cpu_percent": 0,
+        "drives": [
+          {
+            "drive": "fast",
+            "free_bytes": 0,
+            "path": "/mnt/fast",
+            "total_bytes": 0
+          }
+        ],
+        "load_1m": 0,
+        "local": true,
+        "memory_total_bytes": 0,
+        "memory_used_bytes": 0,
+        "uptime_seconds": 0,
+        "version": "0.8.0"
+      }
+    }
+  ],
   "oidcClientSecretStatus": {
     "configured": false
   },
@@ -110,11 +213,51 @@
     "armed": false,
     "seconds_left": null
   },
+  "proxyRoutes": [],
   "selfUpdateGithubToken": {
     "configured": false
   },
   "selfUpdateRepo": null,
   "selfUpdateRun": null,
+  "stackDetail": {
+    "configs": [
+      "web.conf"
+    ],
+    "deployed_at": 0,
+    "name": "web",
+    "previous_spec": null,
+    "requirements": {
+      "bound_ports": [],
+      "configs": [],
+      "drives": [],
+      "file_configs": [],
+      "file_secrets": [],
+      "hosts": [],
+      "networks": [],
+      "pinned_node": null,
+      "placement_constraints": [],
+      "secrets": [],
+      "whole_drive_mounts": []
+    },
+    "revision": 1,
+    "secrets": [
+      "web.secret"
+    ],
+    "spec": "services: {}",
+    "used_configs": [
+      "web.conf"
+    ],
+    "used_secrets": [
+      "web.secret"
+    ]
+  },
+  "stacks": [
+    {
+      "deployed_at": 0,
+      "name": "web",
+      "revision": 1
+    }
+  ],
   "state": {
     "assignments": {
       "web.app.0": {
@@ -125,11 +268,20 @@
         "node": "n0"
       }
     },
-    "cert_status": {},
+    "cert_status": {
+      "example.test": {
+        "Error": {
+          "at": 0,
+          "message": "dns challenge timed out"
+        }
+      },
+      "new.example.test": "Pending"
+    },
     "certificates": {
       "example.test": {
         "chain_pem": "chain",
         "fqdn": "example.test",
+        "issued_at": 0,
         "key_pem": "",
         "not_after": 0
       }
@@ -154,7 +306,9 @@
         "zone": "test"
       }
     },
-    "dns_status": {},
+    "dns_status": {
+      "new.example.test": "Pending"
+    },
     "emergency_stack": null,
     "instance_updates": {},
     "nodes": {
@@ -175,7 +329,8 @@
         "node_pubkey": "target",
         "open_ports": {},
         "role": "manager",
-        "rpc_addr": "<volatile>"
+        "rpc_addr": "<volatile>",
+        "version": ""
       }
     },
     "overlay": null,
@@ -199,7 +354,9 @@
         "configs": [
           "web.conf"
         ],
+        "deployed_at": 0,
         "name": "web",
+        "previous_spec": null,
         "revision": 1,
         "secrets": [
           "web.secret"
@@ -214,7 +371,7 @@
       }
     },
     "unreachable": [],
-    "version": 12,
+    "version": 15,
     "volume_removals": {},
     "volumes": {
       "fast/v0": {
@@ -262,6 +419,23 @@
       "service": "app",
       "stack": "web",
       "update_available": false
+    }
+  ],
+  "volumes": [
+    {
+      "frozen": null,
+      "generation": 1,
+      "id": "<volatile>",
+      "looks_empty": false,
+      "primary": "n0",
+      "replicas": [
+        {
+          "generation": 1,
+          "in_sync": true,
+          "node": "n0"
+        }
+      ],
+      "sync_refused": null
     }
   ]
 }

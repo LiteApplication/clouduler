@@ -35,7 +35,14 @@ import type {
   Connectivity,
   CloudflareTokenStatus,
   DriveStatus,
+  CertificateState,
+  DnsRecordState,
   Identity,
+  InstanceState,
+  NodeDetail,
+  NodeMetrics,
+  StackDetailResponse,
+  VolumeState,
   OidcClientSecretStatus,
   PendingConfig,
   UpdateRow,
@@ -54,6 +61,13 @@ const clusterKey: ClusterKeyStatus = shapes.clusterKeyStatus;
 const drives: DriveStatus[] = shapes.drives as unknown as DriveStatus[];
 const connectivity: Connectivity = shapes.nodeConnectivity;
 const updates: UpdateRow[] = shapes.updates as unknown as UpdateRow[];
+const stackDetail: StackDetailResponse = shapes.stackDetail as unknown as StackDetailResponse;
+const instances: InstanceState[] = shapes.instances as unknown as InstanceState[];
+const volumes: VolumeState[] = shapes.volumes as unknown as VolumeState[];
+const certificates: CertificateState[] = shapes.certificates as unknown as CertificateState[];
+const dns: DnsRecordState[] = shapes.dns as unknown as DnsRecordState[];
+const nodeDetail: NodeDetail = shapes.nodeDetail as unknown as NodeDetail;
+const nodeMetrics: NodeMetrics = shapes.nodeMetrics as unknown as NodeMetrics;
 
 /** Keys the ui reads by name, per endpoint. */
 const READ_BY_UI: Record<string, [object, string[]]> = {
@@ -72,6 +86,14 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
     updates[0],
     ['id', 'stack', 'service', 'node', 'image', 'running_digest', 'latest_digest', 'pinned_digest', 'update_available', 'pin_drift'],
   ],
+  stackDetail: [stackDetail, ['name', 'spec', 'revision', 'deployed_at', 'previous_spec', 'requirements']],
+  instance: [instances[0], ['id', 'node', 'state', 'health']],
+  volume: [volumes[0], ['id', 'primary', 'replicas']],
+  certificate: [certificates[0], ['fqdn', 'not_after', 'issued_at', 'status']],
+  dnsRecord: [dns[0], ['fqdn', 'record_type', 'status']],
+  nodeDetail: [nodeDetail, ['name', 'usage', 'container_count']],
+  nodeMetricsRow: [nodeMetrics[0], ['name', 'container_count', 'usage']],
+  nodeUsage: [nodeMetrics[0].usage, ['cpu_percent', 'version', 'drives']],
 };
 
 describe('api response shapes match what the ui reads', () => {

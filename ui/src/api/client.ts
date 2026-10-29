@@ -217,12 +217,14 @@ export const api = {
   // nodes
   listNodes: () => get<ClusterState['nodes']>('/api/nodes'),
   nodeMetrics: () => get<NodeMetrics>('/api/nodes/metrics'),
+  nodeMetricsHistory: (name: string) =>
+    get<import('./types').NodeMetricSample[]>(`/api/nodes/${encodeURIComponent(name)}/metrics/history`),
   nodeConnectivity: () => get<import('./types').Connectivity>('/api/nodes/connectivity'),
   getNode: (name: string) => get<import('./types').NodeDetail>(`/api/nodes/${encodeURIComponent(name)}`),
   // Best-effort autofill for an egress/wireguard network's host interface
   // field — non-docker/non-clouduler-managed interfaces seen on that node.
   getNodeInterfaces: (name: string) => get<string[]>(`/api/nodes/${encodeURIComponent(name)}/interfaces`),
-  createJoinCommand: (body: { name: string; role?: 'manager' | 'worker'; address?: string }) =>
+  createJoinCommand: (body: { name: string; role?: 'manager' | 'worker' }) =>
     post<JoinCommand>('/api/nodes/join-command', body),
   addNode: (node: unknown) => post<void>('/api/nodes', node),
   setAvailability: (name: string, availability: 'active' | 'drain') =>
@@ -377,6 +379,7 @@ export const api = {
   renewCertificate: (fqdn: string) => post<void>(`/api/certificates/${encodeURIComponent(fqdn)}/renew`),
   tlsFingerprint: () => get<TlsFingerprint>('/api/tls-fingerprint'),
   listDns: () => get<DnsRecordState[]>('/api/dns'),
+  proxyRoutes: () => get<ProxyRoute[]>('/api/proxy/routes'),
   listProxyRoutes: () => get<ProxyRoute[]>('/api/proxy/routes'),
   reconcileDns: () => post<void>('/api/dns/reconcile'),
 
@@ -455,6 +458,6 @@ export function sseUrl(path: string): string {
 }
 
 /** SSE url for a node's daemon log: replays the tail, then follows. Admin only. */
-export function nodeLogsUrl(node: string, tail = 200): string {
-  return sseUrl(`/api/nodes/${encodeURIComponent(node)}/logs?tail=${tail}`);
+export function nodeLogsUrl(node: string, tail = 200, follow = true): string {
+  return sseUrl(`/api/nodes/${encodeURIComponent(node)}/logs?tail=${tail}&follow=${follow}`);
 }

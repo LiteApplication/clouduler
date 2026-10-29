@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
-import type { NodeMetrics, ResourceUsage } from '../api/types';
+import type { ResourceUsage } from '../api/types';
 
 export const NODE_METRICS_POLL_MS = 5000;
 export const NODE_METRICS_RING = 120;
@@ -18,7 +18,7 @@ export interface NodeSample {
 
 export interface UseNodeMetrics {
   /** Latest usage per node; a node missing here is unreachable or not yet answered. */
-  metrics: NodeMetrics;
+  metrics: Record<string, ResourceUsage>;
   /** Per node, newest last, capped at 120 samples. */
   history: Record<string, NodeSample[]>;
   loaded: boolean;
@@ -44,16 +44,16 @@ export function useNodeMetrics(nodeNames: string[], enabled = true): UseNodeMetr
     if (!enabled) return;
     let stopped = false;
 
-    const fetchAll = async (): Promise<NodeMetrics> => {
+    const fetchAll = async (): Promise<Record<string, ResourceUsage>> => {
       if (!perNodeFallback.current) {
         try {
-          return await api.nodeMetrics();
+          return Object.fromEntries((await api.nodeMetrics()).map((r) => [r.name, r.usage]));
         } catch (e) {
           if (!(e instanceof ApiError && e.status === 404)) throw e;
           perNodeFallback.current = true;
         }
       }
-      const out: NodeMetrics = {};
+      const out: Record<string, ResourceUsage> = {};
       await Promise.all(
         names.current.map(async (n) => {
           try {
@@ -67,7 +67,7 @@ export function useNodeMetrics(nodeNames: string[], enabled = true): UseNodeMetr
     };
 
     const tick = async () => {
-      let metrics: NodeMetrics;
+      let metrics: Record<string, ResourceUsage>;
       try {
         metrics = await fetchAll();
       } catch {

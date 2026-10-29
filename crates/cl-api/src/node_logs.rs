@@ -26,7 +26,7 @@ pub struct LogLine {
     /// Counts up from 0 for this process, so a client can tell it missed lines.
     pub seq: u64,
     /// Unix milliseconds.
-    pub at: i64,
+    pub timestamp: i64,
     /// `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE`.
     pub level: String,
     pub target: String,
@@ -37,7 +37,7 @@ pub struct LogLine {
 impl LogLine {
     /// One line of plain text, the way a terminal would show it.
     pub fn render(&self) -> String {
-        format!("{} {:>5} {}", self.at, self.level, self.message)
+        format!("{} {:>5} {}", self.timestamp, self.level, self.message)
     }
 }
 
@@ -70,7 +70,7 @@ impl LogRing {
         };
         let line = LogLine {
             seq: inner.next_seq,
-            at: unix_millis(),
+            timestamp: unix_millis(),
             level: level.to_string(),
             target: target.to_string(),
             message,
