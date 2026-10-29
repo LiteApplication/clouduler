@@ -211,6 +211,7 @@ pub fn start(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     dialer: Dialer,
+    nudges: cl_api::Nudges,
 ) -> Proxy {
     ensure_crypto_provider();
 
@@ -234,9 +235,9 @@ pub fn start(
             &desired, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
         );
         let mut acme = build_acme(
-            &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
+            &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
         );
-        let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
+        let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx, &nudges);
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         loop {
@@ -277,14 +278,14 @@ pub fn start(
                     group.teardown();
                 }
                 acme = build_acme(
-                    &live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
+                    &live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
                 );
             }
             if live.dns != desired.dns {
                 if let Some(group) = dns.take() {
                     group.teardown();
                 }
-                dns = build_dns(&live, &cluster, &config_rx, &key_rx);
+                dns = build_dns(&live, &cluster, &config_rx, &key_rx, &nudges);
             }
             desired = live;
         }
@@ -384,6 +385,7 @@ fn build_acme(
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     http01: &Arc<Http01Store>,
+    nudges: &cl_api::Nudges,
 ) -> Option<Group> {
     desired.acme.as_ref()?;
     let acme = acme_setup(cfg, data_dir)?;
@@ -394,6 +396,7 @@ fn build_acme(
             config_rx.clone(),
             key_rx.clone(),
             http01.clone(),
+            nudges.acme.clone(),
         ))],
     })
 }
@@ -405,6 +408,7 @@ fn build_dns(
     cluster: &Arc<ClusterNode>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    nudges: &cl_api::Nudges,
 ) -> Option<Group> {
     if !desired.dns {
         return None;
@@ -414,6 +418,7 @@ fn build_dns(
             cluster.clone(),
             config_rx.clone(),
             key_rx.clone(),
+            nudges.dns.clone(),
         ))],
     })
 }
@@ -792,6 +797,7 @@ async fn run_acme(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     http01: Arc<Http01Store>,
+    nudge: Arc<tokio::sync::Notify>,
 ) {
     let account = match cl_proxy::load_or_create_account(&acme.config, &acme.credentials).await {
         Ok(account) => account,
@@ -806,7 +812,10 @@ async fn run_acme(
 
     let mut ticker = tokio::time::interval(ISSUANCE_INTERVAL);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = nudge.notified() => {}
+        }
         if !cluster.is_leader() {
             continue;
         }
@@ -995,10 +1004,14 @@ async fn run_dns_reconcile(
     cluster: Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    nudge: Arc<tokio::sync::Notify>,
 ) {
     let mut ticker = tokio::time::interval(DNS_RECONCILE_INTERVAL);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = nudge.notified() => {}
+        }
         if !cluster.is_leader() {
             continue;
         }

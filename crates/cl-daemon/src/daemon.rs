@@ -241,6 +241,7 @@ pub async fn run(
     // Started before the api so the api can hand out `proxy.health`, the
     // reverse proxy's own active backend health checks, from the moment it
     // comes up rather than needing a second wiring pass later.
+    let nudges = cl_api::Nudges::default();
     let proxy = crate::proxy::start(
         &cfg,
         &cluster,
@@ -248,6 +249,7 @@ pub async fn run(
         config_rx.clone(),
         key_rx.clone(),
         relay.dialer.clone(),
+        nudges.clone(),
     );
 
     let (api, api_state) = start_api(StartApiArgs {
@@ -266,6 +268,7 @@ pub async fn run(
         http: internal_http.clone(),
         node_keypair,
         proxy_health: proxy.health.clone(),
+        nudges: nudges.clone(),
     })
     .await;
 
@@ -479,6 +482,7 @@ struct StartApiArgs<'a> {
     http: reqwest::Client,
     node_keypair: Option<cl_secret::NodeKeypair>,
     proxy_health: cl_proxy::HealthTable,
+    nudges: cl_api::Nudges,
 }
 
 /// Returns the serve task alongside a clone of the `AppState` it built, so
@@ -506,6 +510,7 @@ async fn start_api(
         http,
         node_keypair,
         proxy_health,
+        nudges,
     } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -553,6 +558,7 @@ async fn start_api(
         http,
         node_keypair,
         proxy_health,
+        nudges,
     };
 
     let server = match cl_api::ApiServer::new(options).await {
@@ -879,7 +885,15 @@ async fn watch_git_backup(
     let mut secret_cache = cache_state.secret_cache;
 
     loop {
-        ticker.tick().await;
+        match &api_state {
+            Some(api) => tokio::select! {
+                _ = ticker.tick() => {}
+                _ = api.nudges.git_export.notified() => {}
+            },
+            None => {
+                ticker.tick().await;
+            }
+        }
 
         if !cluster.is_leader() {
             continue;

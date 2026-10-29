@@ -83,6 +83,58 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/git-backup/pull", post(pull_now))
         .route("/api/git-backup/reconcile", post(reconcile_now))
+        // Admin-authenticated counterparts for the web ui: the three above
+        // are cli-only (internal auth).
+        .route("/api/git-backup/export-now", post(export_now_admin))
+        .route("/api/git-backup/pull-now", post(pull_now_admin))
+        .route("/api/git-backup/reconcile-now", post(reconcile_now_admin))
+        .route(
+            "/api/git-backup/internal-export-now",
+            post(internal_export_now),
+        )
+}
+
+/// Run the export loop's next pass now instead of at its next 2 second tick.
+/// The loop only exports when something tracked changed, so this is a
+/// "check immediately" more than a forced push. The loop is leader-only, so
+/// a non-leader forwards to the leader.
+async fn export_now_admin(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    if state.cluster.is_leader() {
+        state.nudges.git_export.notify_one();
+        return Ok(StatusCode::ACCEPTED);
+    }
+    let leader = leader_node_name(&state)
+        .await
+        .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+    internal_peer::post_empty(&state, &leader, "/api/git-backup/internal-export-now").await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Node-to-node only: what `export_now_admin` forwards to the leader.
+async fn internal_export_now(_auth: InternalAuth, State(state): State<AppState>) -> StatusCode {
+    state.nudges.git_export.notify_one();
+    StatusCode::ACCEPTED
+}
+
+/// `pull_now` for a signed-in admin rather than the cli.
+async fn pull_now_admin(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    trigger_pull(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `reconcile_now` for a signed-in admin rather than the cli.
+async fn reconcile_now_admin(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    trigger_reconcile(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]
@@ -188,7 +240,7 @@ async fn verify_webhook_token(state: &AppState, presented: &str) -> bool {
 
 /// The node currently holding raft leadership, by name - `internal_peer`
 /// addresses peers by name, but raft only knows leadership by `NodeId`.
-async fn leader_node_name(state: &AppState) -> Option<String> {
+pub(crate) async fn leader_node_name(state: &AppState) -> Option<String> {
     let leader_id = state.cluster.quorum().leader()?;
     let cfg = state.cluster_config.read().await;
     cfg.nodes

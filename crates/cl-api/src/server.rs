@@ -109,6 +109,8 @@ pub struct AppState {
     pub oauth: Arc<crate::auth::oauth::OAuthMemory>,
     /// The `/mcp` protocol service and its sessions; see `mcp`.
     pub mcp: Arc<crate::mcp::McpHub>,
+    /// Wakes the daemon's dns, certificate and git export loops early.
+    pub nudges: crate::Nudges,
 }
 
 impl AppState {
@@ -153,6 +155,7 @@ pub struct ApiServerOptions {
     pub node_keypair: Option<cl_secret::NodeKeypair>,
     pub proxy_health: cl_proxy::HealthTable,
     pub data_dir: PathBuf,
+    pub nudges: crate::Nudges,
 }
 
 pub struct ApiServer {
@@ -227,6 +230,7 @@ impl ApiServer {
             tls_fingerprint,
             proxy_health: options.proxy_health,
             data_dir: options.data_dir,
+            nudges: options.nudges,
             internal_replay: Default::default(),
             oauth: Default::default(),
             mcp: Default::default(),

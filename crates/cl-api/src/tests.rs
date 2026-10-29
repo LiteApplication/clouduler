@@ -177,6 +177,7 @@ pub(crate) async fn harness() -> Harness {
             .expect("building the test http client"),
         tls_fingerprint: "test:fingerprint".to_string(),
         proxy_health: cl_proxy::HealthTable::default(),
+        nudges: Default::default(),
         internal_replay: Default::default(),
         oauth: Default::default(),
         mcp: Default::default(),

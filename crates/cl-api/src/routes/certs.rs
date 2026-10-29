@@ -17,6 +17,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/tls-fingerprint", get(tls_fingerprint))
         .route("/api/dns", get(list_dns))
         .route("/api/dns/reconcile", post(reconcile))
+        .route("/api/dns/internal-reconcile", post(internal_reconcile))
 }
 
 #[derive(Serialize)]
@@ -111,11 +112,35 @@ async fn list_dns(
     )
 }
 
-/// The reconcile loop itself runs in the daemon (`clouduler::proxy`, every
-/// 60s on the leader), not in this crate, and there is no channel from here
-/// to nudge it early. This reports what the api can actually promise today
-/// (a pass is already running periodically) rather than pretending to force
-/// an immediate one.
-async fn reconcile(_admin: RequireAdmin) -> StatusCode {
+/// Runs the dns reconcile and certificate passes now instead of at their
+/// next tick. Both loops are leader-only, so a non-leader forwards the nudge
+/// to the leader. The passes run in the background: 202 means "asked", the
+/// outcome shows up as record and certificate status.
+async fn reconcile(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    if state.cluster.is_leader() {
+        nudge(&state);
+        return Ok(StatusCode::ACCEPTED);
+    }
+    let leader = super::git_backup::leader_node_name(&state)
+        .await
+        .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+    crate::internal_peer::post_empty(&state, &leader, "/api/dns/internal-reconcile").await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Node-to-node only: what `reconcile` forwards to the leader.
+async fn internal_reconcile(
+    _auth: crate::auth::internal::InternalAuth,
+    State(state): State<AppState>,
+) -> StatusCode {
+    nudge(&state);
     StatusCode::ACCEPTED
+}
+
+fn nudge(state: &AppState) {
+    state.nudges.dns.notify_one();
+    state.nudges.acme.notify_one();
 }

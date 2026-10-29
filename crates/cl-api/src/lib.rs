@@ -8,6 +8,7 @@ pub mod error;
 pub mod internal_peer;
 pub mod mcp;
 pub mod node_metrics;
+pub mod nudges;
 pub mod oidc;
 pub mod redirects;
 pub mod routes;
@@ -20,6 +21,7 @@ pub mod volume_ops;
 pub mod wireguard;
 
 pub use error::ApiError;
+pub use nudges::Nudges;
 pub use server::{ApiServer, ApiServerOptions, AppState};
 
 #[cfg(test)]
