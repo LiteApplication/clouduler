@@ -54,7 +54,17 @@ export type IconName =
   | 'copy'
   | 'sync'
   | 'sparkle'
-  | 'cloud';
+  | 'cloud'
+  | 'stack'
+  | 'node'
+  | 'container'
+  | 'x'
+  | 'pause'
+  | 'more'
+  | 'chevron'
+  | 'globe'
+  | 'archive'
+  | 'proxy';
 
 // Every path is drawn on a 24x24 grid with round caps and no fill, so they
 // share one optical weight regardless of the size they are rendered at.
@@ -315,6 +325,60 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   cloud: <path d="M7 19a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.7 9.2 4 4 0 0 1 17 19H7Z" />,
+  // The redesign's glyphs (design-ref/ds/clouduler/components/bundle.js).
+  // `x` and `pause` are the circled forms the status badges use; `check` stays
+  // the bare tick, so the circled check is `check-circle`.
+  stack: (
+    <>
+      <path d="M12 3 3 8l9 5 9-5-9-5Z" />
+      <path d="M3 13l9 5 9-5" />
+    </>
+  ),
+  node: (
+    <>
+      <path d="M4 4h16v6H4z" />
+      <path d="M4 14h16v6H4z" />
+      <path d="M8 7h.01M8 17h.01" />
+    </>
+  ),
+  container: (
+    <>
+      <path d="M21 8 12 3 3 8v8l9 5 9-5V8Z" />
+      <path d="M3 8l9 5 9-5M12 13v8" />
+    </>
+  ),
+  x: (
+    <>
+      <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z" />
+      <path d="M9 9l6 6M15 9l-6 6" />
+    </>
+  ),
+  pause: (
+    <>
+      <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z" />
+      <path d="M10 9v6M14 9v6" />
+    </>
+  ),
+  more: <path d="M5 12h.01M12 12h.01M19 12h.01" />,
+  chevron: <path d="M9 6l6 6-6 6" />,
+  globe: (
+    <>
+      <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z" />
+      <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
+    </>
+  ),
+  archive: (
+    <>
+      <path d="M3 5h18v4H3z" />
+      <path d="M5 9v10h14V9M10 13h4" />
+    </>
+  ),
+  proxy: (
+    <>
+      <path d="M4 8h13M13 4l4 4-4 4" />
+      <path d="M20 16H7M11 12l-4 4 4 4" />
+    </>
+  ),
 };
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {
@@ -325,12 +389,13 @@ export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {
   title?: string;
 }
 
-export function Icon({ name, size, title, className, ...rest }: IconProps) {
+export function Icon({ name, size, title, className, style, ...rest }: IconProps) {
   return (
     <svg
       className={className ? `icon ${className}` : 'icon'}
       width={size}
       height={size}
+      style={size ? { width: size, height: size, ...style } : style}
       viewBox="0 0 24 24"
       fill={name === 'play' || name === 'stop' || name === 'filter' || name === 'crown' ? 'currentColor' : 'none'}
       stroke="currentColor"

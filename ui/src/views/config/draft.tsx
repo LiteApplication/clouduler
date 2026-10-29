@@ -37,7 +37,7 @@ export function ConfigDraftProvider({ children }: { children: ReactNode }) {
   // declares but the live roster hasn't admitted yet (see `Nodes`), and node
   // detail pages edit a slice of this same config (see `NodeCard`).
   const pathname = useLocation().pathname;
-  const onConfigPage = pathname.startsWith('/configuration') || pathname.startsWith('/nodes');
+  const onConfigPage = pathname.startsWith('/configuration') || pathname.startsWith('/settings') || pathname.startsWith('/nodes');
 
   const reload = useCallback(() => {
     api

@@ -1,175 +1,163 @@
 /* ============================================================================
-   THEME — the one file to edit to restyle the app.
+   THEME: design tokens for the Clouduler redesign (deep grape / warm cream).
 
-   Everything in styles.css and every component reads these custom properties,
-   so nothing else hardcodes a color. Each theme is defined by five brand
-   tokens; every surface, border and state color below is derived from them
-   with color-mix, so changing the five is enough for a coherent repaint.
+   Source of truth is design-ref/ds/clouduler/tokens.json. Dark is the
+   default; the theme is selected by data-theme="light" | "dark" on <html>,
+   stamped before first paint by the script in index.html. If that script
+   never runs, "system" falls back to the OS setting through the
+   prefers-color-scheme block below.
 
-   To retheme:
-     1. change --text / --background / --primary / --secondary / --accent in
-        both blocks below (light first, dark second),
-     2. optionally adjust the STATE colors if your palette needs different
-        success/warning/danger hues,
-     3. nothing else — surfaces and borders follow automatically.
-
-   The theme is selected by data-theme="light" | "dark" on <html>. A blocking
-   script in index.html stamps it before first paint from the user's saved
-   choice (or the OS setting), so there is no flash of the wrong theme.
+   The "legacy aliases" block at the bottom maps the old token names onto the
+   new palette so views that have not been ported yet still render. Delete it
+   together with styles.css once every view uses the ds components.
    ========================================================================= */
 
-/* ---- LIGHT (also the default when no data-theme is set) ---- */
 :root,
-:root[data-theme='light'] {
-  --text: #031121;
-  --background: #f1f8fe;
-  --primary: #0c4079;
-  --secondary: #e46ff1;
-  --accent: #c8147d;
-
-  /* state colors */
-  --good: #0f7a4f;
-  --warn: #9a5b00;
-  --bad: #c0233c;
-
-  /* text on top of primary/accent fills */
-  --on-primary: #ffffff;
-  --on-accent: #ffffff;
-
-  /* surface ramp: panels lift off the background by mixing toward white */
-  --surface: #ffffff;
-  --surface-2: color-mix(in srgb, var(--primary) 7%, var(--background));
-  --surface-3: color-mix(in srgb, var(--primary) 14%, var(--background));
-
-  --border: color-mix(in srgb, var(--text) 12%, transparent);
-  --border-strong: color-mix(in srgb, var(--text) 24%, transparent);
-  --text-dim: color-mix(in srgb, var(--text) 66%, transparent);
-  --text-faint: color-mix(in srgb, var(--text) 45%, transparent);
-
-  --shadow-1: 0 1px 2px color-mix(in srgb, var(--text) 5%, transparent);
-  --shadow-2: 0 2px 8px color-mix(in srgb, var(--text) 6%, transparent),
-    0 8px 20px color-mix(in srgb, var(--text) 6%, transparent);
-  --shadow-pop: 0 6px 16px color-mix(in srgb, var(--text) 9%, transparent),
-    0 18px 44px color-mix(in srgb, var(--text) 10%, transparent);
-
-  /* strength of the ambient aurora wash behind the app (0 disables it) —
-     kept faint so it reads as texture, not decoration */
-  --aurora-strength: 0.2;
-  --scrim: color-mix(in srgb, var(--text) 42%, transparent);
-
-  /* log panes stay dark in both themes: terminal output is read that way */
-  --log-bg: #0b1520;
-  --log-text: #d8e6f5;
-
-  color-scheme: light;
-}
-
-/* ---- DARK ---- */
 :root[data-theme='dark'] {
-  --text: #ddecfc;
-  --background: #01080d;
-  --primary: #86baf3;
-  --secondary: #820e8e;
-  --accent: #ec39a2;
-
-  --good: #46d6a0;
-  --warn: #ffb454;
-  --bad: #ff6b85;
-
-  --on-primary: #01080d;
-  --on-accent: #ffffff;
-
-  /* surfaces lift by mixing the primary hue into the background, not by
-     going gray, which keeps the deep blue-black from muddying */
-  --surface: color-mix(in srgb, var(--primary) 6%, var(--background));
-  --surface-2: color-mix(in srgb, var(--primary) 10%, var(--background));
-  --surface-3: color-mix(in srgb, var(--primary) 16%, var(--background));
-
-  --border: color-mix(in srgb, var(--primary) 16%, transparent);
-  --border-strong: color-mix(in srgb, var(--primary) 30%, transparent);
-  --text-dim: color-mix(in srgb, var(--text) 66%, transparent);
-  --text-faint: color-mix(in srgb, var(--text) 42%, transparent);
-
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.4), 0 10px 26px rgba(0, 0, 0, 0.28);
-  --shadow-pop: 0 8px 20px rgba(0, 0, 0, 0.45), 0 22px 50px rgba(0, 0, 0, 0.4);
-
-  --aurora-strength: 0.4;
-  --scrim: color-mix(in srgb, var(--background) 70%, transparent);
-
-  --log-bg: color-mix(in srgb, var(--primary) 4%, var(--background));
-  --log-text: #cfe2f5;
-
+  --surface-0: #150f1f;
+  --surface-1: #1f1830;
+  --surface-2: #2b2142;
+  --line: #3a2f57;
+  --line-strong: #8c7fb0;
+  --ink: #f6f0ff;
+  --ink-muted: #b9acd6;
+  --brand: #ff5cae;
+  --brand-bg: #4a1233;
+  --brand-fill: #ff5cae;
+  --on-brand-fill: #2a0517;
+  --pop: #c8f542;
+  --pop-bg: #2f3d0a;
+  --pop-fill: #c8f542;
+  --ok: #2fd0a8;
+  --ok-bg: #0d3a33;
+  --warn: #ffc83d;
+  --warn-bg: #40300a;
+  --danger: #ff7a5c;
+  --danger-bg: #4a1a14;
+  --on-danger: #1c0802;
+  --overlay: #0a0612b3;
+  --shadow-pop: 4px 4px 0 #c8f542;
+  --shadow-raised: 0 6px 0 #00000080;
   color-scheme: dark;
 }
 
-/* If the theme script never runs (blocked JS), still follow the OS. */
-@media (prefers-color-scheme: dark) {
+:root[data-theme='light'] {
+  --surface-0: #fff4df;
+  --surface-1: #fffdf8;
+  --surface-2: #f6e8cc;
+  --line: #e6d5b3;
+  --line-strong: #7a6a4a;
+  --ink: #1d1230;
+  --ink-muted: #5a4c73;
+  --brand: #c4156f;
+  --brand-bg: #fde0ee;
+  --brand-fill: #ff5cae;
+  --on-brand-fill: #2a0517;
+  --pop: #4d6a00;
+  --pop-bg: #eaf5c2;
+  --pop-fill: #c8f542;
+  --ok: #00695a;
+  --ok-bg: #d5efe6;
+  --warn: #7a5200;
+  --warn-bg: #ffe8b0;
+  --danger: #b4300a;
+  --danger-bg: #fbdcd2;
+  --on-danger: #ffffff;
+  --overlay: #1d123080;
+  --shadow-pop: 4px 4px 0 #b5e61d;
+  --shadow-raised: 0 6px 0 #1d123033;
+  color-scheme: light;
+}
+
+/* "System" with the theme script blocked: follow the OS. */
+@media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --text: #ddecfc;
-    --background: #01080d;
-    --primary: #86baf3;
-    --secondary: #820e8e;
-    --accent: #ec39a2;
-
-    --good: #46d6a0;
-    --warn: #ffb454;
-    --bad: #ff6b85;
-
-    --on-primary: #01080d;
-    --on-accent: #ffffff;
-
-    --surface: color-mix(in srgb, var(--primary) 6%, var(--background));
-    --surface-2: color-mix(in srgb, var(--primary) 10%, var(--background));
-    --surface-3: color-mix(in srgb, var(--primary) 16%, var(--background));
-
-    --border: color-mix(in srgb, var(--primary) 16%, transparent);
-    --border-strong: color-mix(in srgb, var(--primary) 30%, transparent);
-    --text-dim: color-mix(in srgb, var(--text) 66%, transparent);
-    --text-faint: color-mix(in srgb, var(--text) 42%, transparent);
-
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-    --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.55), 0 16px 40px rgba(0, 0, 0, 0.4);
-    --shadow-pop: 0 10px 26px rgba(0, 0, 0, 0.6), 0 30px 70px rgba(0, 0, 0, 0.55);
-
-    --aurora-strength: 0.4;
-    --scrim: color-mix(in srgb, var(--background) 70%, transparent);
-
-    --log-bg: color-mix(in srgb, var(--primary) 4%, var(--background));
-    --log-text: #cfe2f5;
-
-    color-scheme: dark;
+    --surface-0: #fff4df;
+    --surface-1: #fffdf8;
+    --surface-2: #f6e8cc;
+    --line: #e6d5b3;
+    --line-strong: #7a6a4a;
+    --ink: #1d1230;
+    --ink-muted: #5a4c73;
+    --brand: #c4156f;
+    --brand-bg: #fde0ee;
+    --pop: #4d6a00;
+    --pop-bg: #eaf5c2;
+    --ok: #00695a;
+    --ok-bg: #d5efe6;
+    --warn: #7a5200;
+    --warn-bg: #ffe8b0;
+    --danger: #b4300a;
+    --danger-bg: #fbdcd2;
+    --on-danger: #ffffff;
+    --overlay: #1d123080;
+    --shadow-pop: 4px 4px 0 #b5e61d;
+    --shadow-raised: 0 6px 0 #1d123033;
+    color-scheme: light;
   }
 }
 
-/* ---- tinted backgrounds derived from the state colors (theme-agnostic) ---- */
+/* ---- type, spacing, shape and size: shared by both themes ---- */
 :root {
-  --good-bg: color-mix(in srgb, var(--good) 14%, transparent);
-  --warn-bg: color-mix(in srgb, var(--warn) 14%, transparent);
-  --bad-bg: color-mix(in srgb, var(--bad) 14%, transparent);
-  --glow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
-}
-
-/* ---- shape, type and motion: shared by every theme ---- */
-:root {
-  --font: "Inter var", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
-
-  --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 18px;
-  --radius-pill: 999px;
+  --font-sans: 'Hanken Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-display: 'Bricolage Grotesque', 'Hanken Grotesk', system-ui, sans-serif;
 
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
 
-  --sidebar-w: 248px;
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+
+  --tap-min: 44px;
+  --bottom-nav-h: 64px;
+  --rail-w: 240px;
+  --content-max: 1120px;
+
+  --z-nav: 20;
+  --z-overlay: 50;
+  --z-toast: 60;
+}
+
+/* ---- legacy aliases (old token names -> new palette) ---- */
+:root {
+  --text: var(--ink);
+  --background: var(--surface-0);
+  --primary: var(--brand);
+  --secondary: var(--pop);
+  --accent: var(--brand);
+  --good: var(--ok);
+  --bad: var(--danger);
+  --on-primary: var(--on-brand-fill);
+  --on-accent: var(--on-brand-fill);
+  --surface: var(--surface-1);
+  --surface-3: var(--line);
+  --border: var(--line);
+  --border-strong: var(--line-strong);
+  --text-dim: var(--ink-muted);
+  --text-faint: var(--ink-muted);
+  --good-bg: var(--ok-bg);
+  --bad-bg: var(--danger-bg);
+  --shadow-1: none;
+  --shadow-2: var(--shadow-raised);
+  --aurora-strength: 0;
+  --scrim: var(--overlay);
+  --log-bg: var(--surface-2);
+  --log-text: var(--ink);
+  --glow: 0 0 0 3px var(--brand-bg);
+  --font: var(--font-sans);
+  --mono: var(--font-mono);
+  --radius: var(--radius-md);
+  --sidebar-w: var(--rail-w);
   --topbar-h: 60px;
-  --tabbar-h: 62px;
-
+  --tabbar-h: var(--bottom-nav-h);
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }

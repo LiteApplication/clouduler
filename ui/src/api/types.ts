@@ -36,6 +36,18 @@ export interface NodeState {
   /** Total system memory in bytes, self-reported alongside arch/binary_hash.
    *  0 until the node has reported in at least once. */
   memory_total_bytes: number;
+  /** Version of the running binary, e.g. "0.14.2". Absent until the node has
+   *  reported in since this field was added. */
+  version?: string;
+}
+
+/** Per-drive space on one node: the drive's configured path matched to the
+ *  longest-prefix mount. */
+export interface DriveUsage {
+  drive: string;
+  path: string;
+  total_bytes: number;
+  free_bytes: number;
 }
 
 export interface ResourceUsage {
@@ -46,7 +58,15 @@ export interface ResourceUsage {
   uptime_seconds: number;
   /** False (all-zero above) unless the answering node is this node itself. */
   local: boolean;
+  /** CPU use 0-100 from the node's 5 s sampler. Absent on an older daemon. */
+  cpu_percent?: number;
+  /** Binary version of the node. Absent on an older daemon. */
+  version?: string;
+  drives?: DriveUsage[];
 }
+
+/** GET /api/nodes/metrics: node name -> usage, unreachable nodes skipped. */
+export type NodeMetrics = Record<string, ResourceUsage>;
 
 /** Response of GET /api/nodes/:name. */
 export interface NodeDetail {
@@ -154,6 +174,19 @@ export interface InstanceState {
    *  `reason` describes something with no fixed step count (e.g. a
    *  migration phase other than "syncing"). */
   step?: [number, number] | null;
+  // The fields below are all absent on an older daemon (and on an instance
+  // that lives on another node, for the container ones).
+  /** The kernel killed the container for exceeding its memory limit. */
+  oom_killed?: boolean;
+  /** Exit code of the last run; null while it is running. */
+  exit_code?: number | null;
+  restart_count?: number;
+  /** Restarts allowed before the instance is rescheduled elsewhere. */
+  restart_limit?: number | null;
+  /** How many times crash-loop handling has moved this instance to another node. */
+  crash_moves?: number;
+  finished_at?: string | null;
+  memory_limit_bytes?: number | null;
 }
 
 /** One `progress` event from `GET /api/instances/events`: sent once when an
@@ -194,6 +227,12 @@ export interface StackState {
    *  not the stack bundles its own file for it. */
   used_configs: string[];
   used_secrets: string[];
+  /** Unix seconds of the last deploy. Absent for a stack deployed before
+   *  this was recorded. */
+  deployed_at?: number;
+  /** The spec this stack ran before its latest deploy, for a "changes since
+   *  last deploy" diff. Absent or null on a first deploy. */
+  previous_spec?: string | null;
 }
 
 /** What a stack needs from the cluster to schedule: computed from its spec by
@@ -259,6 +298,12 @@ export interface CertificateState {
   chain_pem: string;
   key_pem: string;
   not_after: number;
+  /** Unix seconds. */
+  issued_at?: number;
+  /** From the list endpoint, which unions certificates and `cert_status`. */
+  status?: 'issued' | 'pending' | 'error';
+  error?: string;
+  error_at?: number;
 }
 
 export interface DnsRecordState {
@@ -267,6 +312,8 @@ export interface DnsRecordState {
   content: string;
   zone: string;
   provider_id: string | null;
+  status?: 'published' | 'pending' | 'error';
+  error?: string;
 }
 
 /** Where a certificate or DNS record stands before it has anything to show
@@ -985,10 +1032,70 @@ export interface RegistryAccount {
 
 /** Result of running a service action (`POST /api/instances/{id}/actions/{name}`). */
 export interface ExecRunResult {
+  /** Wall time of the action. Absent on an older daemon. */
+  duration_ms?: number;
   stdout: string;
   stderr: string;
   exit_code: number | null;
   timed_out: boolean;
   stdout_truncated: boolean;
   stderr_truncated: boolean;
+}
+
+// ---- redesign additions (all optional on the wire until the backend lands) ----
+
+/** One row of GET /api/proxy/routes: what the reverse proxy serves right now. */
+export interface ProxyRoute {
+  host: string;
+  path: string;
+  kind: 'service' | 'redirect' | 'static' | 'dashboard';
+  stack?: string;
+  service?: string;
+  port?: number;
+  network?: string;
+  tls: boolean;
+  websockets: boolean;
+  /** The host is a zone apex ("@"). */
+  apex: boolean;
+  /** Unix seconds the serving certificate expires, if any. */
+  cert_not_after?: number;
+  health?: { ok: boolean; error?: string; checked_at?: string; node?: string };
+}
+
+/** One entry of a node's daemon log (GET /api/nodes/:name/logs, SSE event `log`). */
+export interface NodeLogLine {
+  timestamp: string;
+  level: 'error' | 'warn' | 'info' | 'debug' | 'trace';
+  target: string;
+  message: string;
+}
+
+/** GET /api/self-update/latest: what the configured release source offers. */
+export interface SelfUpdateLatest {
+  tag: string;
+  /** The running version, for comparison. */
+  current?: string;
+  newer: boolean;
+  checked_at?: number;
+}
+
+/** One row of GET /api/oauth/requests: a pending MCP consent on the answering node. */
+export interface PendingOAuthRequest extends OAuthRequestInfo {
+  id: string;
+  node: string;
+}
+
+/** POST /api/nodes/join-command. The key is shown once; revoke it from the
+ *  API keys list if the command is not used. */
+export interface JoinCommand {
+  command: string;
+  key_id: string;
+  address: string;
+  fingerprint: string;
+}
+
+/** GET /api/rebalance/last: the most recent rebalance, kept on the leader. */
+export interface LastRebalance extends RebalanceResponse {
+  /** Unix seconds. */
+  at: number;
 }

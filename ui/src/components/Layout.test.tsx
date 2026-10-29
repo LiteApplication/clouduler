@@ -1,8 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { Layout } from './Layout';
-import { ConfigDraftProvider } from '../views/config/draft';
 import type { ClusterState } from '../api/types';
 
 const cluster: ClusterState = {
@@ -38,8 +38,30 @@ vi.mock('../state/store', () => ({
   useClusterStore: () => ({ status: 'open' }),
 }));
 
+vi.mock('../state/instancesStore', () => ({
+  useInstances: () => [
+    { id: 'web.app.0', state: 'exited' },
+    { id: 'web.db.0', state: 'running' },
+    { id: 'media.jf.0', state: 'running' },
+  ],
+  failedStacks: (list: { id: string; state: string }[]) =>
+    new Set(list.filter((i) => i.state === 'exited').map((i) => i.id.split('.')[0])),
+}));
+
+vi.mock('../api/client', () => ({
+  api: {
+    getConfiguration: () => Promise.resolve({ cluster: { name: 'homelab' }, networks: { lan: {}, vpn: {} } }),
+    logout: () => Promise.resolve(),
+  },
+}));
+
 vi.mock('../auth/AuthContext', () => ({
-  useAuth: () => ({ isAdmin: true, identity: { subject: 'test', username: 'test', role: 'admin' }, loading: false }),
+  useAuth: () => ({
+    isAdmin: true,
+    identity: { subject: 'test', username: 'test', role: 'admin' },
+    loading: false,
+    refresh: () => Promise.resolve(),
+  }),
 }));
 
 // jsdom has no matchMedia, which the real hook probes for the "system" theme.
@@ -50,26 +72,55 @@ vi.mock('../theme', () => ({
 function renderLayout(initialPath: string) {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
-      <ConfigDraftProvider>
-        <Layout>
-          <div>content</div>
-        </Layout>
-      </ConfigDraftProvider>
+      <Layout>
+        <div>content</div>
+      </Layout>
     </MemoryRouter>,
   );
 }
 
-describe('Layout sidebar', () => {
-  it('lists every node as a submenu entry under Nodes when on a nodes route', () => {
-    renderLayout('/nodes');
-    const nav = screen.getByLabelText('Nodes sections');
-    expect(nav).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'n1' })).toHaveAttribute('href', '/nodes/n1');
-    expect(screen.getByRole('link', { name: 'n2' })).toHaveAttribute('href', '/nodes/n2');
+describe('Layout rail', () => {
+  it('lists the destinations and marks the current one', () => {
+    renderLayout('/stacks');
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' });
+    for (const label of ['Overview', 'Stacks', 'Nodes', 'Logs', 'Proxy', 'DNS', 'Storage', 'Updates', 'Settings']) {
+      expect(within(nav).getByRole('button', { name: new RegExp(label) })).toBeInTheDocument();
+    }
+    expect(within(nav).getByRole('button', { name: /Stacks/ })).toHaveAttribute('aria-current', 'page');
+    expect(within(nav).getByRole('button', { name: /Overview/ })).not.toHaveAttribute('aria-current');
   });
 
-  it('does not expand the nodes submenu while on an unrelated page', () => {
-    renderLayout('/stacks');
-    expect(screen.queryByLabelText('Nodes sections')).not.toBeInTheDocument();
+  it('badges Stacks with the number of failing stacks', () => {
+    renderLayout('/');
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' });
+    expect(within(nav).getByRole('button', { name: /Stacks/ })).toHaveTextContent('1');
+  });
+
+  it('keeps Instances and networks inside the collapsed More group', async () => {
+    renderLayout('/');
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' });
+    expect(within(nav).queryByRole('button', { name: 'Instances' })).not.toBeInTheDocument();
+    await userEvent.click(within(nav).getByRole('button', { name: 'More' }));
+    expect(within(nav).getByRole('button', { name: 'Instances' })).toBeInTheDocument();
+    expect(await within(nav).findByRole('button', { name: 'lan' })).toBeInTheDocument();
+  });
+
+  it('opens the More group by itself on an instances route', () => {
+    renderLayout('/instances/web.app.0');
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' });
+    expect(within(nav).getByRole('button', { name: 'Instances' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('has the five phone destinations in the bottom nav', () => {
+    renderLayout('/nodes');
+    const bottom = screen.getByRole('navigation', { name: 'Primary' });
+    expect(within(bottom).getAllByRole('button').map((b) => b.textContent?.replace(/\d+$/, ''))).toEqual([
+      'Overview',
+      'Stacks',
+      'Nodes',
+      'Logs',
+      'More',
+    ]);
+    expect(within(bottom).getByRole('button', { name: /Nodes/ })).toHaveAttribute('aria-current', 'page');
   });
 });
