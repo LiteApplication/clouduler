@@ -9,7 +9,6 @@ import { Banner, Button, PageHeader, Panel, Tag, useConfirm, useToast } from '..
 import { daysUntil, relativeTime } from '../../lib/format';
 import { useClusterState } from '../../state/store';
 import { DataTable } from './table';
-import './infra.css';
 
 /** Pending / error tag for a hostname with nothing issued or published yet. */
 function StatusTag({ status }: { status: ReconcileStatus | undefined }) {
@@ -95,7 +94,7 @@ export function Dns() {
         sub={next ? `Next certificate expires in ${daysUntil(next.not_after)} days.` : 'Certificates and the records that point at them.'}
         actions={isAdmin && <Button variant="primary" icon="sync" loading={reconciling} onClick={() => void reconcile()}>Reconcile DNS</Button>}
       />
-      <div className="infra-stack">
+      <div className="stack">
         {failed.length > 0 && (
           <Banner tone="danger" title={`${failed.length === 1 ? 'A certificate' : `${failed.length} certificates`} could not be issued`}>
             {failed.map(([fqdn, s]) => `${fqdn}: ${(s as { Error: { message: string } }).Error.message}`).join('. ')}

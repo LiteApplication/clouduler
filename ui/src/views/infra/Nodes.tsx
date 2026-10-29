@@ -15,7 +15,6 @@ import { useInstances } from '../../state/instancesStore';
 import { useClusterState } from '../../state/store';
 import { useConfigDraft } from '../config/draft';
 import { DataTable } from './table';
-import './infra.css';
 
 interface Row {
   id: string;
@@ -147,7 +146,7 @@ export function Nodes() {
         }
       />
 
-      <div className="infra-stack">
+      <div className="stack">
         {status && !status.has_quorum && (
           <Banner tone="danger" title="No quorum">
             This node can reach {status.reachable} of {status.voters} voters, so changes are paused. Bring a manager back online.

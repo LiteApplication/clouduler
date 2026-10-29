@@ -61,7 +61,7 @@ export function Panel({
   return (
     <Tag className={cx('panel', flush && 'panel--flush', className)}>
       {(title || actions) && (
-        <div className="panel__h" style={flush ? { padding: 'var(--space-4) var(--space-4) 0' } : undefined}>
+        <div className="panel__h">
           {title && <h2 className="h2">{title}</h2>}
           {actions && <div className="acts">{actions}</div>}
         </div>

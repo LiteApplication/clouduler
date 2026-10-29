@@ -58,6 +58,7 @@ a{color:var(--brand)}
 /* Panels and lists */
 .panel{display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-4);background:var(--surface-1);border:2px solid var(--line);border-radius:var(--radius-lg)}
 .panel--flush{padding:0;gap:0;overflow:hidden}
+.panel--flush>.panel__h{padding:var(--space-4) var(--space-4) var(--space-3)}
 .panel__h{display:flex;flex-wrap:wrap;gap:var(--space-2) var(--space-3);align-items:center;justify-content:space-between}
 a.panel{color:var(--ink);text-decoration:none}
 a.panel:hover{background:var(--surface-2);border-color:var(--ink);transform:translate(-2px,-2px);box-shadow:var(--shadow-pop)}
@@ -85,7 +86,9 @@ a.cl-btn{text-decoration:none}
 a.cl-btn--primary{color:var(--on-brand-fill)}
 a.cl-btn--secondary{color:var(--ink)}
 a.cl-btn--ghost{color:var(--ink)}
+.stack{display:flex;flex-direction:column;gap:var(--space-6);min-width:0}
 .tabpad{padding-top:var(--space-4);display:flex;flex-direction:column;gap:var(--space-4)}
+.tabpad.stack{gap:var(--space-6)}
 .spark{display:block;width:100%;height:44px}
 .spark path{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .disc{border-radius:var(--radius-pill)}

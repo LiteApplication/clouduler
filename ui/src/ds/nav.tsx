@@ -187,7 +187,7 @@ export function Chip({
     >
       {icon && <Icon name={icon} size={16} />}
       <span>{label}</span>
-      {count != null && <span className="cl-code-sm">{count}</span>}
+      {count != null && <span className="cl-chip__count">{count}</span>}
     </button>
   );
 }

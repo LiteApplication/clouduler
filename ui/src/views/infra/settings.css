@@ -4,7 +4,6 @@
 .settings__body{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-6);align-items:start}
 @media (min-width:1100px){.settings__body{grid-template-columns:272px minmax(0,1fr)}}
 .settings__main{display:flex;flex-direction:column;gap:var(--space-4);min-width:0}
-.settings .stack{display:flex;flex-direction:column;gap:var(--space-4)}
 .settings__back{align-self:flex-start;margin-left:calc(var(--space-3) * -1)}
 .settings__back-icon{transform:rotate(180deg)}
 

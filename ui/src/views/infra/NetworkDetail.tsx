@@ -8,7 +8,6 @@ import { Banner, KV, PageHeader, Panel, Tag } from '../../ds';
 import { useClusterState } from '../../state/store';
 import { describeAddress } from './NodeDetail';
 import { DataTable } from './table';
-import './infra.css';
 
 export function NetworkDetail() {
   const { name = '' } = useParams();
@@ -37,7 +36,7 @@ export function NetworkDetail() {
   return (
     <>
       <PageHeader breadcrumb={[{ label: 'Networks' }, { label: name }]} title={name} sub={net.type} />
-      <div className="infra-stack">
+      <div className="stack">
         <Panel title="About">
           <KV items={[
             ['Type', net.type],

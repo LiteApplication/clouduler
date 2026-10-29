@@ -13,7 +13,6 @@ import { useAuth } from '../../auth/AuthContext';
 import { useClusterState } from '../../state/store';
 import { Backups } from './Backups';
 import { CompareCopies, StorageSection, VolumeBanners, VolumesTable } from './volumes';
-import './infra.css';
 
 const TABS = [
   { id: 'volumes', label: 'Volumes' },
@@ -68,7 +67,7 @@ export function Storage() {
         active={active}
         onChange={(id) => navigate(id === 'backups' ? '/storage/backups' : '/storage')}
       />
-      <div className="tabpad infra-stack">
+      <div className="tabpad stack">
         {active === 'volumes' ? <VolumesTab /> : <Backups />}
       </div>
     </>

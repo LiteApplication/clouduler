@@ -11,7 +11,6 @@ import { Banner, BottomSheet, Button, PageHeader, Panel, Tabs, Tag, TextField, T
 import { daysUntil } from '../../lib/format';
 import { DataTable, type Col } from './table';
 import { SelectField } from '../../components/FormFields';
-import './infra.css';
 
 const TABS = [
   { id: 'routes', label: 'Routes' },
@@ -75,7 +74,7 @@ export function Proxy() {
         actions={isAdmin && primary && <Button variant="primary" icon="plus" onClick={() => setSheetOpen(true)}>{primary}</Button>}
       />
       <Tabs label="Proxy sections" items={TABS} active={tab} onChange={(id) => { setSheetOpen(false); navigate(`/proxy/${id}`); }} />
-      <div className="infra-stack" style={{ marginTop: 'var(--space-4)' }}>
+      <div className="stack" style={{ marginTop: 'var(--space-4)' }}>
         {tab === 'routes' && <RoutesTab />}
         {tab === 'redirects' && <RedirectsTab open={sheetOpen} onClose={() => setSheetOpen(false)} onOpen={() => setSheetOpen(true)} />}
         {tab === 'static' && <StaticTab open={sheetOpen} onClose={() => setSheetOpen(false)} onOpen={() => setSheetOpen(true)} />}

@@ -10,7 +10,6 @@ import { useClusterState } from '../../state/store';
 import { useDrives } from './Storage';
 import { DataTable } from './table';
 import { CompareCopies, StorageSection, VolumeBanners, VolumesTable } from './volumes';
-import './infra.css';
 
 export function DriveDetail() {
   const { name = '' } = useParams();
@@ -33,7 +32,7 @@ export function DriveDetail() {
         sub={`${drive.mode} · sync every ${drive.sync_interval}`}
         actions={isAdmin && <Link to="/storage/backups"><Button icon="archive">Restore from backup</Button></Link>}
       />
-      <div className="tabpad infra-stack">
+      <div className="tabpad stack">
         <VolumeBanners volumes={volumes} onCompare={setComparing} />
 
         <div className="grid grid--2">
