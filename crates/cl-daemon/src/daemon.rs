@@ -269,6 +269,7 @@ pub async fn run(
         node_keypair,
         proxy_health: proxy.health.clone(),
         nudges: nudges.clone(),
+        proxy_routes: proxy.routes.clone(),
     })
     .await;
 
@@ -483,6 +484,7 @@ struct StartApiArgs<'a> {
     node_keypair: Option<cl_secret::NodeKeypair>,
     proxy_health: cl_proxy::HealthTable,
     nudges: cl_api::Nudges,
+    proxy_routes: cl_proxy::SharedRoutes,
 }
 
 /// Returns the serve task alongside a clone of the `AppState` it built, so
@@ -511,6 +513,7 @@ async fn start_api(
         node_keypair,
         proxy_health,
         nudges,
+        proxy_routes,
     } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -559,6 +562,7 @@ async fn start_api(
         node_keypair,
         proxy_health,
         nudges,
+        proxy_routes,
     };
 
     let server = match cl_api::ApiServer::new(options).await {

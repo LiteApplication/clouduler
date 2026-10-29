@@ -110,6 +110,8 @@ pub struct Proxy {
     /// `/api/instances` and `clouduler stack unhealthy` can report a backend
     /// the proxy can't reach without waiting for a real client to hit it.
     pub health: cl_proxy::HealthTable,
+    /// The live routing table, shared with the api for `/api/proxy/routes`.
+    pub routes: cl_proxy::SharedRoutes,
 }
 
 impl Proxy {
@@ -221,6 +223,8 @@ pub fn start(
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let health = cl_proxy::HealthTable::default();
     let task_health = health.clone();
+    let shared_routes = cl_proxy::SharedRoutes::default();
+    let task_routes = shared_routes.clone();
     // Shared across `listen` and `acme` regardless of which one restarts: an
     // HTTP-01 token the issuance task hands out must still be answered by
     // whichever listener is live when the CA's validator comes knocking.
@@ -229,10 +233,18 @@ pub fn start(
     let mut config_rx = config_rx;
     let supervisor = tokio::spawn(async move {
         let health = task_health;
+        let shared_routes = task_routes;
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
         let mut listen = build_listen(
-            &desired, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
+            &desired,
+            &cluster,
+            &config_rx,
+            &key_rx,
+            &health,
+            &http01,
+            &dialer,
+            &shared_routes,
         );
         let mut acme = build_acme(
             &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
@@ -270,7 +282,14 @@ pub fn start(
                     group.teardown();
                 }
                 listen = build_listen(
-                    &live, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
+                    &live,
+                    &cluster,
+                    &config_rx,
+                    &key_rx,
+                    &health,
+                    &http01,
+                    &dialer,
+                    &shared_routes,
                 );
             }
             if live.acme != desired.acme {
@@ -295,6 +314,7 @@ pub fn start(
         supervisor,
         shutdown_tx,
         health,
+        routes: shared_routes,
     }
 }
 
@@ -308,10 +328,15 @@ fn build_listen(
     health: &cl_proxy::HealthTable,
     http01: &Arc<Http01Store>,
     dialer: &Dialer,
+    shared_routes: &cl_proxy::SharedRoutes,
 ) -> Option<Group> {
-    let (http_port, https_port) = desired.listen?;
+    let Some((http_port, https_port)) = desired.listen else {
+        shared_routes.clear();
+        return None;
+    };
 
     let routes = Arc::new(RouteTable::default());
+    shared_routes.set(routes.clone());
     let peers = Arc::new(cl_proxy::PeerPolicies::new());
     let certs = Arc::new(CertStore::new());
     let auth_gate = Arc::new(cl_proxy::AuthGate::new(

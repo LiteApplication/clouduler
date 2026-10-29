@@ -16,6 +16,7 @@ pub mod nodes;
 pub mod oauth;
 pub mod objects;
 pub mod oidc;
+pub mod proxy;
 pub mod redirects;
 pub mod registries;
 pub mod restic;
@@ -47,6 +48,7 @@ pub fn router() -> Router<AppState> {
         .merge(oauth::router())
         .merge(crate::mcp::router())
         .merge(oidc::router())
+        .merge(proxy::router())
         .merge(certs::router())
         .merge(redirects::router())
         .merge(static_routes::router())

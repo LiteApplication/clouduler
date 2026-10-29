@@ -111,6 +111,8 @@ pub struct AppState {
     pub mcp: Arc<crate::mcp::McpHub>,
     /// Wakes the daemon's dns, certificate and git export loops early.
     pub nudges: crate::Nudges,
+    /// This node's live routing table, for `/api/proxy/routes`.
+    pub proxy_routes: cl_proxy::SharedRoutes,
 }
 
 impl AppState {
@@ -156,6 +158,7 @@ pub struct ApiServerOptions {
     pub proxy_health: cl_proxy::HealthTable,
     pub data_dir: PathBuf,
     pub nudges: crate::Nudges,
+    pub proxy_routes: cl_proxy::SharedRoutes,
 }
 
 pub struct ApiServer {
@@ -231,6 +234,7 @@ impl ApiServer {
             proxy_health: options.proxy_health,
             data_dir: options.data_dir,
             nudges: options.nudges,
+            proxy_routes: options.proxy_routes,
             internal_replay: Default::default(),
             oauth: Default::default(),
             mcp: Default::default(),
