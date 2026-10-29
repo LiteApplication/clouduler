@@ -36,6 +36,8 @@ pub fn router() -> Router<AppState> {
 struct StackSummary {
     name: String,
     revision: u64,
+    /// Unix seconds of the latest deploy; 0 when unknown.
+    deployed_at: i64,
 }
 
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<StackSummary>> {
@@ -47,6 +49,7 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<St
             .map(|s| StackSummary {
                 name: s.name.clone(),
                 revision: s.revision,
+                deployed_at: s.deployed_at,
             })
             .collect(),
     )
@@ -62,6 +65,10 @@ pub(crate) struct StackDetail {
     pub(crate) used_configs: Vec<String>,
     pub(crate) used_secrets: Vec<String>,
     pub(crate) requirements: StackRequirements,
+    /// Unix seconds of the latest deploy; 0 when unknown.
+    pub(crate) deployed_at: i64,
+    /// The spec before the latest deploy that changed it, for a diff.
+    pub(crate) previous_spec: Option<String>,
 }
 
 async fn detail(
@@ -100,6 +107,8 @@ pub(crate) async fn stack_detail(state: &AppState, name: &str) -> Result<StackDe
         used_configs: stack.used_configs.iter().cloned().collect(),
         used_secrets: stack.used_secrets.iter().cloned().collect(),
         requirements,
+        deployed_at: stack.deployed_at,
+        previous_spec: stack.previous_spec.clone(),
     })
 }
 
@@ -283,6 +292,7 @@ pub(crate) async fn deploy_from_files(
         .submit(ClusterRequest::DeployStack {
             name: name.to_string(),
             spec,
+            at: crate::auth::oauth::now_secs(),
         })
         .await
         .map_err(ApiError::not_leader)?;

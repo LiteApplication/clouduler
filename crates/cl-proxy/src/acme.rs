@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cl_dns::Cloudflare;
-use cl_raft::{CertificateState, ClusterNode, Request};
+use cl_raft::{CertificateState, ClusterNode, ReconcileStatus, Request};
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
@@ -354,12 +354,35 @@ pub async fn renewal_tick(
                     chain_pem: issued.chain_pem,
                     key_pem: issued.key_pem,
                     not_after: issued.not_after,
+                    issued_at: now_unix(),
                 });
                 if let Err(e) = node.submit(req).await {
                     error!(fqdn = %cert.fqdn, error = %e, "failed to store renewed certificate");
                 }
             }
-            Err(e) => error!(fqdn = %cert.fqdn, error = %e, "certificate renewal failed"),
+            Err(e) => {
+                error!(fqdn = %cert.fqdn, error = %e, "certificate renewal failed");
+                // The certificate itself stays in place; the status is what
+                // lets the ui say the renewal is failing before it expires.
+                let message = e.to_string();
+                // Same failure as the last pass: leave the original time.
+                if matches!(
+                    state.cert_status.get(&cert.fqdn),
+                    Some(ReconcileStatus::Error { message: m, .. }) if *m == message
+                ) {
+                    continue;
+                }
+                let req = Request::SetCertStatus {
+                    fqdn: cert.fqdn.clone(),
+                    status: ReconcileStatus::Error {
+                        message,
+                        at: now_unix(),
+                    },
+                };
+                if let Err(e) = node.submit(req).await {
+                    error!(fqdn = %cert.fqdn, error = %e, "failed to record the renewal failure");
+                }
+            }
         }
     }
 }

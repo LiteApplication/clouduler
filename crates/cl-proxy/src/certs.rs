@@ -211,6 +211,7 @@ mod tests {
             chain_pem: chain,
             key_pem: key,
             not_after: 0,
+            issued_at: 0,
         }]);
         assert!(store.resolve("app.example.com").await.is_ok());
     }
@@ -235,6 +236,7 @@ mod tests {
             chain_pem: chain,
             key_pem: key,
             not_after: 0,
+            issued_at: 0,
         }]);
         assert!(store.resolve("foo.example.com").await.is_ok());
     }

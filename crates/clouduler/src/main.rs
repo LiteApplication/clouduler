@@ -388,15 +388,24 @@ fn init_tracing(log: &str, verbose: bool) -> Result<()> {
     } else {
         log.to_string()
     };
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .with_target(false);
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let fmt = tracing_subscriber::fmt::layer().with_target(false);
     // journald already stamps every line and does not render colour codes.
-    if std::env::var_os("JOURNAL_STREAM").is_some() {
-        builder.with_ansi(false).without_time().init();
-    } else {
-        builder.init();
-    }
+    // Boxed so both variants have one type.
+    let fmt: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> =
+        if std::env::var_os("JOURNAL_STREAM").is_some() {
+            Box::new(fmt.with_ansi(false).without_time())
+        } else {
+            Box::new(fmt)
+        };
+    // The ring sits behind the same filter, so the ui shows what the journal
+    // shows.
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(filter))
+        .with(fmt)
+        .with(cl_api::node_logs::LogRingLayer)
+        .try_init()?;
     Ok(())
 }
 

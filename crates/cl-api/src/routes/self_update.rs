@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
             get(github_token_status).put(set_github_token),
         )
         .route("/api/self-update/repo", put(set_repo).get(get_repo))
+        .route("/api/self-update/latest", get(latest))
         .route("/api/self-update/run", post(start_run).get(get_run))
         .route("/api/self-update/cancel", post(cancel_run))
         .route("/api/self-update/internal/restart", post(internal_restart))
@@ -227,4 +228,75 @@ async fn internal_restart(
         .map_err(ApiError::internal)?;
     let _ = state.shutdown.send(());
     Ok(StatusCode::ACCEPTED)
+}
+
+/// How long a resolved release is reused. GitHub allows 60 unauthenticated
+/// requests an hour, and the settings page polls.
+const LATEST_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[derive(Clone, Serialize)]
+struct SelfUpdateLatest {
+    /// The release tag the configured source resolves to right now.
+    tag: String,
+    /// Architectures the release published a binary for.
+    architectures: Vec<String>,
+    /// The configured `release_url`.
+    source: String,
+    /// Version of the daemon answering, for comparison with `tag`.
+    running_version: String,
+    /// Unix seconds this answer was fetched from GitHub.
+    fetched_at: i64,
+}
+
+type LatestCache = std::sync::Mutex<Option<(std::time::Instant, SelfUpdateLatest)>>;
+
+fn latest_cache() -> &'static LatestCache {
+    static CACHE: std::sync::OnceLock<LatestCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// What the configured release source points at now, for "running vs
+/// available". Cached for five minutes per source.
+async fn latest(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Result<Json<SelfUpdateLatest>, ApiError> {
+    let source = state
+        .cluster_config
+        .read()
+        .await
+        .self_update
+        .as_ref()
+        .map(|c| c.release_url.clone())
+        .ok_or_else(|| ApiError::Conflict("no self-update release is configured".into()))?;
+    if let Some((at, cached)) = latest_cache().lock().ok().and_then(|g| g.clone()) {
+        if at.elapsed() < LATEST_TTL && cached.source == source {
+            return Ok(Json(cached));
+        }
+    }
+    let token = unseal_github_token(&state).await;
+    let resolved = cl_update::release::resolve(&source, token.as_deref())
+        .await
+        .map_err(ApiError::Unavailable)?;
+    let answer = SelfUpdateLatest {
+        tag: resolved.tag,
+        architectures: resolved.assets.into_keys().collect(),
+        source,
+        running_version: env!("CARGO_PKG_VERSION").to_string(),
+        fetched_at: now(),
+    };
+    if let Ok(mut cache) = latest_cache().lock() {
+        *cache = Some((std::time::Instant::now(), answer.clone()));
+    }
+    Ok(Json(answer))
+}
+
+/// The stored GitHub token, when there is one this node can open.
+async fn unseal_github_token(state: &AppState) -> Option<String> {
+    let cluster_state = state.cluster.state().await;
+    let entry = cluster_state.secrets.get(GITHUB_TOKEN_SECRET)?;
+    let sealed = Sealed::from_blob(entry.sealed.clone());
+    let key = state.key.read().await.clone()?;
+    let plaintext = sealed.open(&key, GITHUB_TOKEN_SECRET).ok()?;
+    String::from_utf8(plaintext).ok()
 }

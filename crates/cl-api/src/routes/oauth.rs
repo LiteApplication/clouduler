@@ -54,6 +54,7 @@ pub fn router() -> Router<AppState> {
         .route("/oauth/register", post(register))
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/token", post(token))
+        .route("/api/oauth/requests", get(list_requests))
         .route("/api/oauth/requests/{id}", get(request_info))
         .route("/api/oauth/requests/{id}/approve", post(approve))
         .route("/api/oauth/requests/{id}/deny", post(deny))
@@ -440,6 +441,54 @@ struct RequestInfo {
     /// What the requested scope suggests; the user still chooses.
     requested_grant: McpGrant,
     allowed_grants: Vec<McpGrant>,
+}
+
+#[derive(Serialize)]
+struct PendingRow {
+    id: String,
+    client_name: String,
+    redirect_host: String,
+    scope: String,
+    requested_grant: McpGrant,
+    /// Seconds until the request expires.
+    expires_in: u64,
+    /// The node holding the request. Pending requests live in the memory of
+    /// the node that received the authorize call, so this list only covers
+    /// the node answering.
+    node: String,
+}
+
+/// Authorization requests waiting for someone to approve them, so the ui can
+/// show them without the user having the consent link.
+async fn list_requests(
+    admin: crate::auth::RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PendingRow>>, ApiError> {
+    let _ = admin;
+    require_enabled(&state).await?;
+    Ok(Json(
+        state
+            .oauth
+            .list_pending()
+            .into_iter()
+            .map(|(id, p, expires_in)| {
+                let wants_admin = p.scope.split_whitespace().any(|s| s == "mcp:admin");
+                PendingRow {
+                    id,
+                    client_name: p.client_name,
+                    redirect_host: display_target(&p.redirect_uri),
+                    scope: p.scope,
+                    requested_grant: if wants_admin {
+                        McpGrant::Admin
+                    } else {
+                        McpGrant::Read
+                    },
+                    expires_in,
+                    node: state.node_name.clone(),
+                }
+            })
+            .collect(),
+    ))
 }
 
 fn allowed_grants(identity: &Identity) -> Vec<McpGrant> {

@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/{id}/actions/{name}", post(run_action))
         .route("/api/instances/{id}/move", post(move_instance))
         .route("/api/rebalance", post(rebalance))
+        .route("/api/rebalance/last", get(last_rebalance))
         .route("/api/instances/{id}/update", post(update))
         .route("/api/instances/{id}/logs", get(logs))
         .route("/api/instances/{id}/stats", get(stats))
@@ -122,6 +123,30 @@ pub(crate) struct InstanceSummary {
     /// does mean healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) proxy: Option<ProxyHealthSummary>,
+    // Everything below crosses nodes inside `internal_summary`, so each is
+    // `default`: an older peer simply leaves them out.
+    /// Exit code of the container's last run, when it has stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) oom_killed: bool,
+    #[serde(default)]
+    pub(crate) restart_count: i64,
+    /// Docker restart policy's retry cap, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) restart_limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_limit_bytes: Option<i64>,
+    /// How many nodes the scheduler has already moved this instance off
+    /// because it kept getting killed (`ClusterState::crash_moves`).
+    #[serde(default)]
+    pub(crate) crash_moves: u32,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,6 +326,16 @@ async fn summarize_local(
         proxy,
         reason,
         step,
+        exit_code: container.as_ref().and_then(|c| c.exit_code),
+        oom_killed: container.as_ref().is_some_and(|c| c.oom_killed),
+        restart_count: container.as_ref().map_or(0, |c| c.restart_count),
+        restart_limit: container.as_ref().and_then(|c| c.restart_limit),
+        finished_at: container.as_ref().and_then(|c| c.finished_at.clone()),
+        memory_limit_bytes: container.as_ref().and_then(|c| c.memory_limit_bytes),
+        crash_moves: cluster_state
+            .crash_moves
+            .get(&assignment.instance)
+            .map_or(0, |m| m.len() as u32),
     }
 }
 
@@ -557,6 +592,13 @@ async fn pending_placements(
             step: None,
             placement_error: Some(u.reason),
             proxy: None,
+            exit_code: None,
+            oom_killed: false,
+            restart_count: 0,
+            restart_limit: None,
+            finished_at: None,
+            memory_limit_bytes: None,
+            crash_moves: 0,
         })
         .collect()
 }
@@ -780,7 +822,7 @@ fn required_drives(
         .unwrap_or_default()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct RebalanceMove {
     instance: String,
     from: String,
@@ -790,6 +832,32 @@ struct RebalanceMove {
 #[derive(Serialize)]
 struct RebalanceResponse {
     moves: Vec<RebalanceMove>,
+}
+
+/// Reserved config holding the outcome of the latest rebalance, so any node
+/// can answer `GET /api/rebalance/last` whichever one ran it.
+const LAST_REBALANCE_CONFIG: &str = "_clouduler_last_rebalance";
+
+#[derive(Serialize, Deserialize)]
+struct LastRebalance {
+    /// Unix seconds.
+    at: i64,
+    moves: Vec<RebalanceMove>,
+}
+
+/// The most recent rebalance request and the moves it started, `null` when
+/// there has not been one.
+async fn last_rebalance(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Option<LastRebalance>> {
+    let cluster_state = state.cluster.state().await;
+    Json(
+        cluster_state
+            .configs
+            .get(LAST_REBALANCE_CONFIG)
+            .and_then(|c| serde_json::from_str(&c.content).ok()),
+    )
 }
 
 /// Actively relocate instances to smooth load across nodes, on operator
@@ -842,7 +910,28 @@ async fn rebalance(
             }
         }
     }
-    Ok(Json(RebalanceResponse { moves }))
+    let record = LastRebalance {
+        at: crate::auth::oauth::now_secs(),
+        moves,
+    };
+    // Best effort: the moves are already under way, and a lost record only
+    // costs the "last rebalance" line in the ui.
+    if let Ok(content) = serde_json::to_string(&record) {
+        if let Err(e) = state
+            .cluster
+            .submit(ClusterRequest::PutConfig {
+                name: LAST_REBALANCE_CONFIG.to_string(),
+                content,
+                owner: None,
+            })
+            .await
+        {
+            warn!(error = %e, "could not record the rebalance");
+        }
+    }
+    Ok(Json(RebalanceResponse {
+        moves: record.moves,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1712,6 +1801,9 @@ pub(crate) struct ExecRunResult {
     pub(crate) timed_out: bool,
     pub(crate) stdout_truncated: bool,
     pub(crate) stderr_truncated: bool,
+    /// Wall-clock time the command ran for.
+    #[serde(default)]
+    pub(crate) duration_ms: u64,
 }
 
 /// Bytes kept up to a cap, remembering whether anything was dropped. Output
@@ -1788,6 +1880,7 @@ async fn exec_run_docker(
     if req.cmd.is_empty() {
         return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
     }
+    let started = std::time::Instant::now();
     let stdin = req.stdin.unwrap_or_default().into_bytes();
     let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
     let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
@@ -1848,6 +1941,7 @@ async fn exec_run_docker(
         timed_out,
         stdout_truncated,
         stderr_truncated,
+        duration_ms: started.elapsed().as_millis() as u64,
     })
 }
 

@@ -40,5 +40,7 @@ pub use middleware::{
     cors_response_headers, is_cors_preflight, is_upgrade, redirect_https, strip_hop_by_hop,
     strip_prefix, BasicAuthCreds, HeaderOps,
 };
-pub use route::{Picked, RedirectTarget, Route, RouteOptions, RouteTable, STICKY_COOKIE};
+pub use route::{
+    Picked, RedirectTarget, Route, RouteOptions, RouteTable, SharedRoutes, STICKY_COOKIE,
+};
 pub use server::{ProxyBody, ProxyServer};

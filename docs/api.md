@@ -83,26 +83,31 @@ whenever the state version moves, so the ui does not poll.
 ## Nodes
 
 ```
-GET    /api/nodes                       read
+GET    /api/nodes                       read    node states
+GET    /api/nodes/metrics               read    [{ name, container_count, usage }], unreachable nodes skipped
 GET    /api/nodes/:name                 read    includes live resource usage
+GET    /api/nodes/:name/metrics/history read    last 120 samples, 5 s apart: { at (ms), cpu_percent, memory_used_bytes }
 POST   /api/nodes                       add a node to the cluster
+POST   /api/nodes/join-command          admin   { name, role? } -> { command, key_id, address, fingerprint }
 PATCH  /api/nodes/:name                 { "availability": "active|drain" }
 DELETE /api/nodes/:name                 decommission, refused while it runs work
-GET    /api/nodes/:name/logs            read    SSE stream of daemon logs
+GET    /api/nodes/:name/logs            admin   SSE, ?tail=200&follow=true
 ```
 
-Node detail includes CPU count and load, memory total and used, container
-counts, and the reachability flag. Live resource usage (`usage`) is only
-populated when the node answering the request is the node being described;
-cl-raft carries no rpc call for one node to pull another's live resource
-figures, so a remote node's `usage` comes back zeroed with `local: false`.
-Disk usage per implemented drive is not currently reported.
+`usage` carries CPU count, load, `cpu_percent` (5 s sampler), memory, uptime,
+the node's `version` and per-drive `drives` space (longest-prefix mount match
+of each drive path). The answering node fans out to the others over the
+internal HMAC routes; a node that does not answer within 2 s is left out of
+`/api/nodes/metrics`.
 
-`GET /api/nodes/:name/logs` similarly only streams the daemon log of the node
-answering the request. Asking a node for another node's log returns `404`
-with a message saying to connect to that node directly, since there is no rpc
-path to fetch it remotely either. No in-process log ring buffer exists yet, so
-even the local case currently streams nothing; wiring one up is future work.
+`join-command` mints an API key named `join <name>` and returns the
+`clouduler init --yes --join ...` line to run on the new machine. The key is
+shown once.
+
+`logs` is an SSE stream of event `log`, payload
+`{ seq, timestamp (unix ms), level, target, message }`. It replays the last
+`tail` lines of the node's 2000-line ring and then follows. A remote node's log
+is streamed through the answering node.
 
 ## Stacks
 
@@ -296,6 +301,9 @@ GET    /api/git-backup/webhook-secret               read    whether a webhook to
 PUT    /api/git-backup/webhook-secret               { "token": "..." } set/replace the webhook token
 POST   /api/git-backup/webhook/:token               git host -> cluster: trigger a pull, token in the url
 POST   /api/git-backup/pull                         internal auth: same pull, for `clouduler git-backup pull`
+POST   /api/git-backup/export-now                   admin: export to git now (forwarded to the leader)
+POST   /api/git-backup/pull-now                     admin: pull now
+POST   /api/git-backup/reconcile-now                admin: reconcile now
 POST   /api/git-backup/reconcile                    internal auth: reconcile git repo from Raft, for `clouduler git-backup reconcile`
 ```
 
@@ -344,7 +352,10 @@ than this endpoint for live status - there is no separate progress stream.
 ```
 GET    /api/drives                      read    mode, serving node, per-node status
 GET    /api/volumes                     read    generation, replicas, sync state
+GET    /api/volumes/:drive/:volume/inspect?node=   files of the copy held by `node`
 POST   /api/volumes/:drive/:volume/sync trigger a sync now
+POST   /api/volumes/:drive/:volume/freeze   admin, 202: stop replication, stop its instances
+POST   /api/volumes/:drive/:volume/unfreeze admin, 202: finishes in the background
 ```
 
 `sync` bumps the volume's generation (`TouchVolume`) rather than signalling
@@ -377,19 +388,22 @@ GET    /api/config/pending              read    what is armed and how long is le
 ## Certificates and DNS
 
 ```
-GET    /api/certificates                read    fqdn, expiry, never keys
+GET    /api/certificates                read    fqdn, expiry, issued_at, status (ready|pending|error), error; never keys
 POST   /api/certificates/:fqdn/renew
 GET    /api/tls-fingerprint             read    fingerprint of the cert this node is serving now
-GET    /api/dns                         read    records clouduler owns
-POST   /api/dns/reconcile               force a reconcile pass
+GET    /api/dns                         read    records clouduler owns, plus pending/error rows (status, error)
+POST   /api/dns/reconcile               nudge the leader's dns and acme loops now
+GET    /api/proxy/routes                read    what the proxy serves: host, path, kind, stack, service, port, tls, health
+GET    /api/oauth/requests              admin   pending MCP consents on the answering node
+GET    /api/self-update/latest          read    { tag, architectures, source, running_version, fetched_at }, cached 5 min
+GET    /api/rebalance/last              read    { at, moves } or null
 ```
 
 `cl_raft::CertificateState` does not track an issuer name, so certificate
 listing reports `fqdn`, `not_after` and `has_chain` rather than an issuer.
-Neither `renew` nor `reconcile` has a direct channel into `cl-dns`, which owns
-the ACME account and the reconcile loop: `renew` removes the stored
-certificate so the next pass reissues it, and `reconcile` currently just
-accepts the request (`202`) without a way to force a pass early.
+`renew` removes the stored certificate so the next pass reissues it.
+`reconcile` wakes the leader's loops immediately (followers forward to it). A
+failed issuance or DNS publish is recorded and shown as `status: error`.
 
 ## MCP and OAuth
 

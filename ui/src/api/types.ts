@@ -65,8 +65,21 @@ export interface ResourceUsage {
   drives?: DriveUsage[];
 }
 
-/** GET /api/nodes/metrics: node name -> usage, unreachable nodes skipped. */
-export type NodeMetrics = Record<string, ResourceUsage>;
+/** One row of GET /api/nodes/metrics; unreachable nodes are skipped. */
+export interface NodeMetricsRow {
+  name: string;
+  container_count: number;
+  usage: ResourceUsage;
+}
+export type NodeMetrics = NodeMetricsRow[];
+
+/** One point of GET /api/nodes/:name/metrics/history (5 s apart, last 120). */
+export interface NodeMetricSample {
+  /** Unix ms. */
+  at: number;
+  cpu_percent: number;
+  memory_used_bytes: number;
+}
 
 /** Response of GET /api/nodes/:name. */
 export interface NodeDetail {
@@ -301,7 +314,7 @@ export interface CertificateState {
   /** Unix seconds. */
   issued_at?: number;
   /** From the list endpoint, which unions certificates and `cert_status`. */
-  status?: 'issued' | 'pending' | 'error';
+  status?: 'ready' | 'pending' | 'error';
   error?: string;
   error_at?: number;
 }
@@ -312,7 +325,7 @@ export interface DnsRecordState {
   content: string;
   zone: string;
   provider_id: string | null;
-  status?: 'published' | 'pending' | 'error';
+  status?: 'ready' | 'pending' | 'error';
   error?: string;
 }
 
@@ -1059,12 +1072,15 @@ export interface ProxyRoute {
   apex: boolean;
   /** Unix seconds the serving certificate expires, if any. */
   cert_not_after?: number;
-  health?: { ok: boolean; error?: string; checked_at?: string; node?: string };
+  health?: { node: string; checked_at: string; healthy: boolean; error?: string | null };
 }
 
 /** One entry of a node's daemon log (GET /api/nodes/:name/logs, SSE event `log`). */
 export interface NodeLogLine {
-  timestamp: string;
+  /** Monotonic per node; use it to drop duplicates on reconnect. */
+  seq: number;
+  /** Unix ms. */
+  timestamp: number;
   level: 'error' | 'warn' | 'info' | 'debug' | 'trace';
   target: string;
   message: string;
@@ -1073,15 +1089,22 @@ export interface NodeLogLine {
 /** GET /api/self-update/latest: what the configured release source offers. */
 export interface SelfUpdateLatest {
   tag: string;
-  /** The running version, for comparison. */
-  current?: string;
-  newer: boolean;
-  checked_at?: number;
+  architectures: string[];
+  source: string;
+  running_version: string;
+  /** Unix seconds; the answer is cached for 5 minutes. */
+  fetched_at: number;
 }
 
 /** One row of GET /api/oauth/requests: a pending MCP consent on the answering node. */
-export interface PendingOAuthRequest extends OAuthRequestInfo {
+export interface PendingOAuthRequest {
   id: string;
+  client_name: string;
+  redirect_host: string;
+  scope: string;
+  requested_grant: McpGrant;
+  /** Seconds until the request expires. */
+  expires_in: number;
   node: string;
 }
 
@@ -1094,7 +1117,7 @@ export interface JoinCommand {
   fingerprint: string;
 }
 
-/** GET /api/rebalance/last: the most recent rebalance, kept on the leader. */
+/** GET /api/rebalance/last: the most recent rebalance (replicated); null if none. */
 export interface LastRebalance extends RebalanceResponse {
   /** Unix seconds. */
   at: number;

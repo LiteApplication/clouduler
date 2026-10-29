@@ -63,6 +63,10 @@ async fn deploy_bundle(
         .submit(Request::DeployStack {
             name: name.clone(),
             spec: bundle.spec.clone(),
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
         })
         .await
         .map_err(|e| anyhow!("{e}"))?;

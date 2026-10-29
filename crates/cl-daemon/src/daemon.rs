@@ -241,6 +241,7 @@ pub async fn run(
     // Started before the api so the api can hand out `proxy.health`, the
     // reverse proxy's own active backend health checks, from the moment it
     // comes up rather than needing a second wiring pass later.
+    let nudges = cl_api::Nudges::default();
     let proxy = crate::proxy::start(
         &cfg,
         &cluster,
@@ -248,6 +249,7 @@ pub async fn run(
         config_rx.clone(),
         key_rx.clone(),
         relay.dialer.clone(),
+        nudges.clone(),
     );
 
     let (api, api_state) = start_api(StartApiArgs {
@@ -266,6 +268,8 @@ pub async fn run(
         http: internal_http.clone(),
         node_keypair,
         proxy_health: proxy.health.clone(),
+        nudges: nudges.clone(),
+        proxy_routes: proxy.routes.clone(),
     })
     .await;
 
@@ -357,6 +361,7 @@ pub async fn run(
         cluster.clone(),
         failover.probe_interval,
     ));
+    cl_api::node_metrics::spawn();
     let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
     let git_backup = tokio::spawn(watch_git_backup(
@@ -478,6 +483,8 @@ struct StartApiArgs<'a> {
     http: reqwest::Client,
     node_keypair: Option<cl_secret::NodeKeypair>,
     proxy_health: cl_proxy::HealthTable,
+    nudges: cl_api::Nudges,
+    proxy_routes: cl_proxy::SharedRoutes,
 }
 
 /// Returns the serve task alongside a clone of the `AppState` it built, so
@@ -505,6 +512,8 @@ async fn start_api(
         http,
         node_keypair,
         proxy_health,
+        nudges,
+        proxy_routes,
     } = args;
     // The issued certificate when there is one, and a self signed one until
     // then, so the ui is reachable on a brand new cluster. Browsers complain
@@ -552,6 +561,8 @@ async fn start_api(
         http,
         node_keypair,
         proxy_health,
+        nudges,
+        proxy_routes,
     };
 
     let server = match cl_api::ApiServer::new(options).await {
@@ -878,7 +889,15 @@ async fn watch_git_backup(
     let mut secret_cache = cache_state.secret_cache;
 
     loop {
-        ticker.tick().await;
+        match &api_state {
+            Some(api) => tokio::select! {
+                _ = ticker.tick() => {}
+                _ = api.nudges.git_export.notified() => {}
+            },
+            None => {
+                ticker.tick().await;
+            }
+        }
 
         if !cluster.is_leader() {
             continue;
@@ -1606,10 +1625,11 @@ fn to_state(
         binary_hash: current.map(|c| c.binary_hash.clone()).unwrap_or_default(),
         node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
         memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
+        version: current.map(|c| c.version.clone()).unwrap_or_default(),
     }
 }
 
-/// Keep this node's own `arch`, `binary_hash` and `memory_total_bytes`
+/// Keep this node's own `arch`, `binary_hash`, `version` and `memory_total_bytes`
 /// accurate in the roster. Unlike the rest of a `NodeState`, these fields
 /// describe facts only the node itself can observe, so every node runs this
 /// about itself regardless of leadership — the leader-driven `seed_roster`
@@ -1630,7 +1650,9 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
         let arch = std::env::consts::ARCH.to_string();
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
-        if current.arch == arch
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        if current.version == version
+            && current.arch == arch
             && current.binary_hash == binary_hash
             && current.node_pubkey == node_pubkey
             && current.memory_total_bytes == memory_total_bytes
@@ -1642,6 +1664,7 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
             binary_hash,
             node_pubkey: node_pubkey.clone(),
             memory_total_bytes,
+            version,
             ..current.clone()
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {

@@ -167,6 +167,8 @@ pub mod fixtures {
                     secrets: Default::default(),
                     used_configs: Default::default(),
                     used_secrets: Default::default(),
+                    deployed_at: 0,
+                    previous_spec: None,
                 },
             )]),
             ..Default::default()

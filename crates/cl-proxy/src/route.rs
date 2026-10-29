@@ -216,6 +216,28 @@ struct Snapshot {
     wildcard: HashMap<String, Vec<Arc<Route>>>,
 }
 
+/// Where the api finds the live routing table. The proxy supervisor rebuilds
+/// the listeners (and with them the table) when its config changes, so the
+/// table the api should read changes over the process's life; the supervisor
+/// publishes each new one here. Cheap to clone: every clone shares the slot.
+#[derive(Clone, Default)]
+pub struct SharedRoutes(Arc<arc_swap::ArcSwapOption<RouteTable>>);
+
+impl SharedRoutes {
+    pub fn set(&self, table: Arc<RouteTable>) {
+        self.0.store(Some(table));
+    }
+
+    pub fn clear(&self) {
+        self.0.store(None);
+    }
+
+    /// The current table, `None` while the proxy is off.
+    pub fn get(&self) -> Option<Arc<RouteTable>> {
+        self.0.load_full()
+    }
+}
+
 /// Lock-free-for-readers routing table. Reload swaps in a whole new snapshot.
 #[derive(Default)]
 pub struct RouteTable {
@@ -245,6 +267,16 @@ impl RouteTable {
             .flatten()
             .cloned()
             .collect()
+    }
+
+    /// Every published route in a stable order (host, then path prefix), for
+    /// listing. `all` makes no promise about order.
+    pub fn snapshot(&self) -> Vec<Arc<Route>> {
+        let mut routes = self.all();
+        routes.sort_by(|a, b| {
+            (&a.host, &a.path_prefix, &a.instance).cmp(&(&b.host, &b.path_prefix, &b.instance))
+        });
+        routes
     }
 
     /// Find the best matching route for a host and path.

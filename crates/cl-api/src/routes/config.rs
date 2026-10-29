@@ -253,6 +253,7 @@ async fn rename_network(
             .submit(cl_raft::Request::DeployStack {
                 name: stack_name.clone(),
                 spec,
+                at: crate::auth::oauth::now_secs(),
             })
             .await
             .map_err(ApiError::not_leader)?;
@@ -372,6 +373,7 @@ async fn rename_drive(
             .submit(cl_raft::Request::DeployStack {
                 name: stack_name.clone(),
                 spec,
+                at: crate::auth::oauth::now_secs(),
             })
             .await
             .map_err(ApiError::not_leader)?;

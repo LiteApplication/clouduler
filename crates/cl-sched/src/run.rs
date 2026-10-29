@@ -1658,6 +1658,7 @@ mod tests {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }
     }
 
@@ -1756,6 +1757,7 @@ web: { address: cloud, network: tailscale }
         state.apply(&Request::DeployStack {
             name: "site".into(),
             spec: STACK.into(),
+            at: 0,
         });
         state
     }
@@ -1797,6 +1799,7 @@ web: { address: cloud, network: tailscale }
         state.apply(&Request::DeployStack {
             name: "broken".into(),
             spec: "this is not: [valid yaml".into(),
+            at: 0,
         });
         // The good stack still schedules.
         let requests = plan_requests(&state).expect("plan");
@@ -1812,6 +1815,7 @@ web: { address: cloud, network: tailscale }
         state.apply(&Request::DeployStack {
             name: "other".into(),
             spec: STACK.into(),
+            at: 0,
         });
         state.emergency_stack = Some("site".into());
 
@@ -1843,6 +1847,7 @@ services:
         state.apply(&Request::DeployStack {
             name: "app".into(),
             spec: STATEFUL.into(),
+            at: 0,
         });
         for request in plan_requests(&state).expect("plan") {
             assert!(state.apply(&request).is_ok());
@@ -1959,6 +1964,7 @@ web: { address: cloud, network: tailscale }
         state.apply(&Request::DeployStack {
             name: "app".into(),
             spec: STATEFUL.into(),
+            at: 0,
         });
         // `check_placement` reads the *replicated* config, not the `cfg`
         // this test hands `volume_requests` directly, so the served-drive
@@ -2087,6 +2093,7 @@ web: { address: cloud, network: tailscale }
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }
     }
 

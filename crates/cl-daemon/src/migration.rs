@@ -340,6 +340,7 @@ mod tests {
                 secrets: Default::default(),
                 used_configs: Default::default(),
                 used_secrets: Default::default(),
+                deployed_at: 0,  previous_spec: None,
             },
         );
         let instance: InstanceId = "app.db.0".parse().expect("instance id");

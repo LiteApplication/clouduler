@@ -85,6 +85,7 @@ pub(crate) async fn harness() -> Harness {
         binary_hash: Default::default(),
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
+        version: Default::default(),
     }))
     .await
     .expect("submit");
@@ -176,6 +177,8 @@ pub(crate) async fn harness() -> Harness {
             .expect("building the test http client"),
         tls_fingerprint: "test:fingerprint".to_string(),
         proxy_health: cl_proxy::HealthTable::default(),
+        nudges: Default::default(),
+        proxy_routes: Default::default(),
         internal_replay: Default::default(),
         oauth: Default::default(),
         mcp: Default::default(),
@@ -1153,6 +1156,7 @@ async fn renaming_a_network_updates_config_stacks_and_redirects() {
         .submit(cl_raft::Request::DeployStack {
             name: "site".into(),
             spec: spec.into(),
+            at: 0,
         })
         .await
         .expect("deploy stack");
@@ -1231,6 +1235,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
         .submit(cl_raft::Request::DeployStack {
             name: "site".into(),
             spec: spec.into(),
+            at: 0,
         })
         .await
         .expect("deploy stack");
@@ -1310,6 +1315,7 @@ async fn an_existing_stack_with_a_now_invalid_name_can_still_be_redeployed() {
         .submit(cl_raft::Request::DeployStack {
             name: "Old Stack".into(),
             spec: "services:\n  web:\n    image: nginx:1\n".into(),
+            at: 0,
         })
         .await
         .expect("seed stack");
@@ -1385,6 +1391,7 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
             .submit(cl_raft::Request::DeployStack {
                 name: name.into(),
                 spec,
+                at: 0,
             })
             .await
             .expect("deploy stack");
@@ -1680,6 +1687,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            version: Default::default(),
         }))
         .await
         .expect("add n1");
@@ -2112,7 +2120,19 @@ const API_SHAPES_FIXTURE: &str = "../../ui/src/api/__fixtures__/api-shapes.json"
 fn normalize(value: &mut serde_json::Value, tempdir: &str) {
     /// Random per run: generated ids, hashes, key fingerprints, ephemeral ports.
     const VOLATILE_STRINGS: &[&str] = &["fingerprint", "subject", "rpc_addr", "content", "id"];
-    const VOLATILE_NUMBERS: &[&str] = &["state_version"];
+    const VOLATILE_NUMBERS: &[&str] = &[
+        "state_version",
+        // Live readings of the machine the test happens to run on.
+        "cpu_percent",
+        "cpu_count",
+        "load_1m",
+        "memory_total_bytes",
+        "memory_used_bytes",
+        "uptime_seconds",
+        "total_bytes",
+        "free_bytes",
+        "container_count",
+    ];
 
     match value {
         serde_json::Value::Object(map) => {
@@ -2179,6 +2199,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .submit(cl_raft::Request::DeployStack {
             name: "web".to_string(),
             spec: "services: {}".to_string(),
+            at: 0,
         })
         .await
         .expect("submit stack");
@@ -2242,6 +2263,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                 chain_pem: "chain".to_string(),
                 key_pem: "key".to_string(),
                 not_after: 0,
+                issued_at: 0,
             },
         ))
         .await
@@ -2273,6 +2295,36 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .await
         .expect("submit wrapped key");
 
+    // A certificate whose renewal is failing, and a record still waiting to
+    // be published: the two non-"ready" row shapes.
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetCertStatus {
+            fqdn: "example.test".to_string(),
+            status: cl_raft::ReconcileStatus::Error {
+                message: "dns challenge timed out".to_string(),
+                at: 0,
+            },
+        })
+        .await
+        .expect("submit cert status");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetCertStatus {
+            fqdn: "new.example.test".to_string(),
+            status: cl_raft::ReconcileStatus::Pending,
+        })
+        .await
+        .expect("submit pending cert");
+    h.state
+        .cluster
+        .submit(cl_raft::Request::SetDnsStatus {
+            fqdn: "new.example.test".to_string(),
+            status: cl_raft::ReconcileStatus::Pending,
+        })
+        .await
+        .expect("submit pending dns");
+
     let mut shapes = serde_json::Map::new();
     for (name, uri) in [
         ("status", "/api/status"),
@@ -2292,6 +2344,16 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         // item to prove the row shape against.
         ("updates", "/api/updates"),
         ("nodeConnectivity", "/api/nodes/connectivity"),
+        ("stacks", "/api/stacks"),
+        ("stackDetail", "/api/stacks/web"),
+        ("instances", "/api/instances"),
+        ("volumes", "/api/volumes"),
+        ("certificates", "/api/certificates"),
+        ("dns", "/api/dns"),
+        ("nodeDetail", "/api/nodes/n0"),
+        ("nodeMetrics", "/api/nodes/metrics"),
+        ("proxyRoutes", "/api/proxy/routes"),
+        ("lastRebalance", "/api/rebalance/last"),
     ] {
         let resp = h
             .router

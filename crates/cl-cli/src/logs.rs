@@ -426,6 +426,8 @@ mod tests {
             secrets: BTreeSet::new(),
             used_configs: BTreeSet::new(),
             used_secrets: BTreeSet::new(),
+            deployed_at: 0,
+            previous_spec: None,
         }
     }
 

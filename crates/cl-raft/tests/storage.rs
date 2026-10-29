@@ -48,6 +48,7 @@ fn node(name: &str) -> NodeState {
         binary_hash: Default::default(),
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
+        version: Default::default(),
     }
 }
 
@@ -324,6 +325,8 @@ async fn restore_state_replaces_content_but_never_membership() {
             secrets: Default::default(),
             used_configs: Default::default(),
             used_secrets: Default::default(),
+            deployed_at: 0,
+            previous_spec: None,
         },
     );
     let mut configs = BTreeMap::new();

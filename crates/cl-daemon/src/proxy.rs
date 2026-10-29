@@ -110,6 +110,8 @@ pub struct Proxy {
     /// `/api/instances` and `clouduler stack unhealthy` can report a backend
     /// the proxy can't reach without waiting for a real client to hit it.
     pub health: cl_proxy::HealthTable,
+    /// The live routing table, shared with the api for `/api/proxy/routes`.
+    pub routes: cl_proxy::SharedRoutes,
 }
 
 impl Proxy {
@@ -211,6 +213,7 @@ pub fn start(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     dialer: Dialer,
+    nudges: cl_api::Nudges,
 ) -> Proxy {
     ensure_crypto_provider();
 
@@ -220,6 +223,8 @@ pub fn start(
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let health = cl_proxy::HealthTable::default();
     let task_health = health.clone();
+    let shared_routes = cl_proxy::SharedRoutes::default();
+    let task_routes = shared_routes.clone();
     // Shared across `listen` and `acme` regardless of which one restarts: an
     // HTTP-01 token the issuance task hands out must still be answered by
     // whichever listener is live when the CA's validator comes knocking.
@@ -228,15 +233,23 @@ pub fn start(
     let mut config_rx = config_rx;
     let supervisor = tokio::spawn(async move {
         let health = task_health;
+        let shared_routes = task_routes;
         let mut cfg = boot_cfg;
         let mut desired = desired_of(&cfg);
         let mut listen = build_listen(
-            &desired, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
+            &desired,
+            &cluster,
+            &config_rx,
+            &key_rx,
+            &health,
+            &http01,
+            &dialer,
+            &shared_routes,
         );
         let mut acme = build_acme(
-            &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
+            &desired, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
         );
-        let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx);
+        let mut dns = build_dns(&desired, &cluster, &config_rx, &key_rx, &nudges);
 
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         loop {
@@ -269,7 +282,14 @@ pub fn start(
                     group.teardown();
                 }
                 listen = build_listen(
-                    &live, &cluster, &config_rx, &key_rx, &health, &http01, &dialer,
+                    &live,
+                    &cluster,
+                    &config_rx,
+                    &key_rx,
+                    &health,
+                    &http01,
+                    &dialer,
+                    &shared_routes,
                 );
             }
             if live.acme != desired.acme {
@@ -277,14 +297,14 @@ pub fn start(
                     group.teardown();
                 }
                 acme = build_acme(
-                    &live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01,
+                    &live, &cfg, &data_dir, &cluster, &config_rx, &key_rx, &http01, &nudges,
                 );
             }
             if live.dns != desired.dns {
                 if let Some(group) = dns.take() {
                     group.teardown();
                 }
-                dns = build_dns(&live, &cluster, &config_rx, &key_rx);
+                dns = build_dns(&live, &cluster, &config_rx, &key_rx, &nudges);
             }
             desired = live;
         }
@@ -294,11 +314,13 @@ pub fn start(
         supervisor,
         shutdown_tx,
         health,
+        routes: shared_routes,
     }
 }
 
 /// The two listeners plus the routing table/certificate reconcile loop.
 /// `None` when the proxy is disabled.
+#[allow(clippy::too_many_arguments)]
 fn build_listen(
     desired: &Desired,
     cluster: &Arc<ClusterNode>,
@@ -307,10 +329,15 @@ fn build_listen(
     health: &cl_proxy::HealthTable,
     http01: &Arc<Http01Store>,
     dialer: &Dialer,
+    shared_routes: &cl_proxy::SharedRoutes,
 ) -> Option<Group> {
-    let (http_port, https_port) = desired.listen?;
+    let Some((http_port, https_port)) = desired.listen else {
+        shared_routes.clear();
+        return None;
+    };
 
     let routes = Arc::new(RouteTable::default());
+    shared_routes.set(routes.clone());
     let peers = Arc::new(cl_proxy::PeerPolicies::new());
     let certs = Arc::new(CertStore::new());
     let auth_gate = Arc::new(cl_proxy::AuthGate::new(
@@ -376,6 +403,7 @@ fn build_listen(
 
 /// The certificate issuance/renewal loop. `None` when ACME issuance is
 /// turned off in config, or there is no Cloudflare section to issue against.
+#[allow(clippy::too_many_arguments)]
 fn build_acme(
     desired: &Desired,
     cfg: &ClusterConfig,
@@ -384,6 +412,7 @@ fn build_acme(
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     http01: &Arc<Http01Store>,
+    nudges: &cl_api::Nudges,
 ) -> Option<Group> {
     desired.acme.as_ref()?;
     let acme = acme_setup(cfg, data_dir)?;
@@ -394,6 +423,7 @@ fn build_acme(
             config_rx.clone(),
             key_rx.clone(),
             http01.clone(),
+            nudges.acme.clone(),
         ))],
     })
 }
@@ -405,6 +435,7 @@ fn build_dns(
     cluster: &Arc<ClusterNode>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: &tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    nudges: &cl_api::Nudges,
 ) -> Option<Group> {
     if !desired.dns {
         return None;
@@ -414,6 +445,7 @@ fn build_dns(
             cluster.clone(),
             config_rx.clone(),
             key_rx.clone(),
+            nudges.dns.clone(),
         ))],
     })
 }
@@ -792,6 +824,7 @@ async fn run_acme(
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     http01: Arc<Http01Store>,
+    nudge: Arc<tokio::sync::Notify>,
 ) {
     let account = match cl_proxy::load_or_create_account(&acme.config, &acme.credentials).await {
         Ok(account) => account,
@@ -806,7 +839,10 @@ async fn run_acme(
 
     let mut ticker = tokio::time::interval(ISSUANCE_INTERVAL);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = nudge.notified() => {}
+        }
         if !cluster.is_leader() {
             continue;
         }
@@ -894,6 +930,10 @@ async fn issue_missing(
                     chain_pem: issued.chain_pem,
                     key_pem: issued.key_pem,
                     not_after: issued.not_after,
+                    issued_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
                 });
                 if let Err(e) = cluster.submit(request).await {
                     warn!(%host, error = %e, "could not store the issued certificate");
@@ -991,10 +1031,14 @@ async fn run_dns_reconcile(
     cluster: Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    nudge: Arc<tokio::sync::Notify>,
 ) {
     let mut ticker = tokio::time::interval(DNS_RECONCILE_INTERVAL);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = nudge.notified() => {}
+        }
         if !cluster.is_leader() {
             continue;
         }
@@ -1267,8 +1311,14 @@ async fn prune_stale_status(
     let mut stale = BTreeSet::new();
     if check_certs {
         let wanted = tls_hosts(cfg, state);
-        for fqdn in state.cert_status.keys() {
-            if !wanted.contains_key(fqdn) || state.certificates.contains_key(fqdn) {
+        for (fqdn, status) in &state.cert_status {
+            // A renewal failure is recorded against a certificate that
+            // exists, and stays until a renewal succeeds (which clears it
+            // in `StoreCertificate`). Only a pending status is stale once
+            // the certificate is there.
+            let outlived = state.certificates.contains_key(fqdn)
+                && !matches!(status, cl_raft::ReconcileStatus::Error { .. });
+            if !wanted.contains_key(fqdn) || outlived {
                 stale.insert(fqdn.clone());
             }
         }

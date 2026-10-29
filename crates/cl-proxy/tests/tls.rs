@@ -33,6 +33,7 @@ fn make_cert(name: &str) -> CertificateState {
         chain_pem: cert.pem(),
         key_pem: signing_key.serialize_pem(),
         not_after: 0,
+        issued_at: 0,
     }
 }
 
