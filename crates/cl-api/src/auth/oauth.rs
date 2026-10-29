@@ -249,6 +249,22 @@ impl OAuthMemory {
         Ok(id)
     }
 
+    /// Every pending request still within its lifetime, with the seconds
+    /// each has left, newest first.
+    pub fn list_pending(&self) -> Vec<(String, PendingRequest, u64)> {
+        let map = lock(&self.pending);
+        let mut rows: Vec<_> = map
+            .iter()
+            .filter(|(_, p)| p.created.elapsed() < PENDING_TTL)
+            .map(|(id, p)| {
+                let left = PENDING_TTL.saturating_sub(p.created.elapsed()).as_secs();
+                (id.clone(), p.clone(), left)
+            })
+            .collect();
+        rows.sort_by_key(|(_, _, left)| std::cmp::Reverse(*left));
+        rows
+    }
+
     pub fn peek_pending(&self, id: &str) -> Option<PendingRequest> {
         let map = lock(&self.pending);
         map.get(id)

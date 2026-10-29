@@ -3,7 +3,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use cl_raft::state::{Availability, NodeState};
 use cl_raft::Request as ClusterRequest;
@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
             get(detail).patch(patch_node).delete(remove),
         )
         .route("/api/nodes/metrics", get(metrics))
+        .route("/api/nodes/join-command", post(join_command))
         .route("/api/nodes/{name}/metrics/history", get(metrics_history))
         .route("/api/nodes/{name}/logs", get(logs))
         .route("/api/nodes/{name}/interfaces", get(interfaces))
@@ -117,6 +118,82 @@ pub(crate) struct ResourceUsage {
     /// default returned when neither a local read nor forwarding to the
     /// owning node succeeded.
     pub(crate) local: bool,
+}
+
+#[derive(Deserialize)]
+struct JoinCommandRequest {
+    /// Names the minted api key, e.g. `join-atlas-03`.
+    name: String,
+    /// Role the node will join as; defaults to worker.
+    #[serde(default)]
+    role: Option<cl_raft::state::Role>,
+}
+
+#[derive(Serialize)]
+struct JoinCommand {
+    /// Run on the new machine. Holds the api key, so treat it as a secret.
+    command: String,
+    /// Id of the api key minted for this join; delete it once the node is in.
+    key_id: String,
+    /// `host:port` the new node will join through.
+    address: String,
+    fingerprint: String,
+}
+
+/// Mints a named api key and the `clouduler init --join ...` line that uses
+/// it, pinned to this node's certificate. The key is shown only here.
+async fn join_command(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<JoinCommandRequest>,
+) -> Result<Json<JoinCommand>, ApiError> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return Err(ApiError::BadRequest(
+            "name must be a single word with no spaces".into(),
+        ));
+    }
+    let (address, role) = {
+        let config = state.cluster_config.read().await;
+        (
+            format!("{}:{}", config.web_fqdn(), config.web.port),
+            body.role.unwrap_or(cl_raft::state::Role::Worker),
+        )
+    };
+    let role = match role {
+        cl_raft::state::Role::Manager => "manager",
+        cl_raft::state::Role::Worker => "worker",
+    };
+
+    let cluster_state = state.cluster.state().await;
+    let mut store = crate::auth::keys::ApiKeyStore::load(&cluster_state);
+    let new_key =
+        crate::auth::keys::generate(Some(format!("join {name}")), crate::auth::oauth::now_secs());
+    let key_id = new_key.record.id.clone();
+    store.keys.push(new_key.record);
+    let response = state
+        .cluster
+        .submit(ClusterRequest::PutConfig {
+            name: crate::auth::keys::API_KEYS_CONFIG.to_string(),
+            content: store.encode(),
+            owner: None,
+        })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Internal(msg));
+    }
+
+    let command = format!(
+        "clouduler init --yes --join {address} --token {} --tls-fingerprint {} --role {role}",
+        new_key.secret, state.tls_fingerprint
+    );
+    Ok(Json(JoinCommand {
+        command,
+        key_id,
+        address,
+        fingerprint: state.tls_fingerprint.clone(),
+    }))
 }
 
 #[derive(Serialize)]

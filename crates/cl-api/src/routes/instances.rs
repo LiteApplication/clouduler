@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances/{id}/actions/{name}", post(run_action))
         .route("/api/instances/{id}/move", post(move_instance))
         .route("/api/rebalance", post(rebalance))
+        .route("/api/rebalance/last", get(last_rebalance))
         .route("/api/instances/{id}/update", post(update))
         .route("/api/instances/{id}/logs", get(logs))
         .route("/api/instances/{id}/stats", get(stats))
@@ -821,7 +822,7 @@ fn required_drives(
         .unwrap_or_default()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct RebalanceMove {
     instance: String,
     from: String,
@@ -831,6 +832,32 @@ struct RebalanceMove {
 #[derive(Serialize)]
 struct RebalanceResponse {
     moves: Vec<RebalanceMove>,
+}
+
+/// Reserved config holding the outcome of the latest rebalance, so any node
+/// can answer `GET /api/rebalance/last` whichever one ran it.
+const LAST_REBALANCE_CONFIG: &str = "_clouduler_last_rebalance";
+
+#[derive(Serialize, Deserialize)]
+struct LastRebalance {
+    /// Unix seconds.
+    at: i64,
+    moves: Vec<RebalanceMove>,
+}
+
+/// The most recent rebalance request and the moves it started, `null` when
+/// there has not been one.
+async fn last_rebalance(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<Option<LastRebalance>> {
+    let cluster_state = state.cluster.state().await;
+    Json(
+        cluster_state
+            .configs
+            .get(LAST_REBALANCE_CONFIG)
+            .and_then(|c| serde_json::from_str(&c.content).ok()),
+    )
 }
 
 /// Actively relocate instances to smooth load across nodes, on operator
@@ -883,7 +910,28 @@ async fn rebalance(
             }
         }
     }
-    Ok(Json(RebalanceResponse { moves }))
+    let record = LastRebalance {
+        at: crate::auth::oauth::now_secs(),
+        moves,
+    };
+    // Best effort: the moves are already under way, and a lost record only
+    // costs the "last rebalance" line in the ui.
+    if let Ok(content) = serde_json::to_string(&record) {
+        if let Err(e) = state
+            .cluster
+            .submit(ClusterRequest::PutConfig {
+                name: LAST_REBALANCE_CONFIG.to_string(),
+                content,
+                owner: None,
+            })
+            .await
+        {
+            warn!(error = %e, "could not record the rebalance");
+        }
+    }
+    Ok(Json(RebalanceResponse {
+        moves: record.moves,
+    }))
 }
 
 #[derive(Deserialize)]
