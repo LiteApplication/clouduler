@@ -16,6 +16,7 @@ pub mod server;
 pub mod static_routes;
 pub mod stream;
 pub mod ui;
+pub mod volume_ops;
 pub mod wireguard;
 
 pub use error::ApiError;
