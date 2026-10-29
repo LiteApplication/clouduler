@@ -130,6 +130,9 @@
 .cl-table th{text-align:left;padding:var(--space-3) var(--space-4);background:var(--surface-2);border-bottom:2px solid var(--line)}
 .cl-table td{padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line);font:400 15px/22px var(--font-sans);vertical-align:middle}
 .cl-table tbody tr:last-child td{border-bottom:0}
+/* Matrix row headers sit on the panel like the data cells: no header fill, no header rule. */
+.cl-table--matrix tbody th{background:transparent;border-bottom:1px solid var(--line)}
+.cl-table--matrix tbody tr:last-child th{border-bottom:0}
 .cl-td--mono{font:500 13px/20px var(--font-mono)!important}
 .cl-right{text-align:right!important}
 .cl-tr--press{cursor:pointer}

@@ -228,7 +228,7 @@ export function Nodes() {
               </p>
             )}
             <div className="cl-tablewrap">
-              <table className="cl-table">
+              <table className="cl-table cl-table--matrix">
                 <caption className="cl-sr">Node connectivity</caption>
                 <thead>
                   <tr>
