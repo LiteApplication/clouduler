@@ -275,6 +275,7 @@ pub async fn run(
         &cluster,
         config_rx.clone(),
         key_rx.clone(),
+        docker.clone(),
     );
 
     // Containers resolve each other through this, so it comes up alongside the

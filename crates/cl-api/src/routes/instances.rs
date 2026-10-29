@@ -32,6 +32,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/instances", get(list))
         .route("/api/instances/{id}", get(detail).patch(patch_instance))
         .route("/api/instances/{id}/restart", post(restart))
+        .route("/api/instances/{id}/actions", get(list_actions))
+        .route("/api/instances/{id}/actions/{name}", post(run_action))
         .route("/api/instances/{id}/move", post(move_instance))
         .route("/api/rebalance", post(rebalance))
         .route("/api/instances/{id}/update", post(update))
@@ -1768,16 +1770,27 @@ pub(crate) async fn exec_run_local(
     if req.cmd.is_empty() {
         return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
     }
-    let stdin = req.stdin.unwrap_or_default().into_bytes();
-    if stdin.len() > MAX_BUFFERED_BYTES {
+    if req.stdin.as_deref().map_or(0, str::len) > MAX_BUFFERED_BYTES {
         return Err(ApiError::BadRequest(format!(
             "stdin is limited to {MAX_BUFFERED_BYTES} bytes"
         )));
     }
-    let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
-    let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
 
     let docker = state.docker().await?;
+    exec_run_docker(&docker, instance, req).await
+}
+
+async fn exec_run_docker(
+    docker: &Docker,
+    instance: &InstanceId,
+    req: ExecRunRequest,
+) -> Result<ExecRunResult, ApiError> {
+    if req.cmd.is_empty() {
+        return Err(ApiError::BadRequest("cmd must not be empty".to_string()));
+    }
+    let stdin = req.stdin.unwrap_or_default().into_bytes();
+    let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
+    let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
     let session = docker
         .exec(
             &instance.container_name(),
@@ -1869,6 +1882,104 @@ async fn internal_exec_run(
     let req: ExecRunRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid exec-run request: {e}")))?;
     Ok(Json(exec_run_local(&state, &parse_id(&id)?, req).await?))
+}
+
+/// The service definition an instance was created from.
+fn instance_service(
+    state: &cl_raft::ClusterState,
+    instance: &InstanceId,
+) -> Result<Service, ApiError> {
+    let stack = state
+        .stacks
+        .get(&instance.stack)
+        .ok_or_else(|| ApiError::NotFound(format!("stack {} not found", instance.stack)))?;
+    let file = StackFile::parse(&stack.spec).map_err(|e| ApiError::Internal(e.to_string()))?;
+    file.services
+        .get(&instance.service)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound(format!("no service {}", instance.service)))
+}
+
+#[derive(Serialize)]
+struct ActionSummary {
+    name: String,
+    confirm: bool,
+}
+
+/// The actions the instance's service defines, in display order.
+async fn list_actions(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ActionSummary>>, ApiError> {
+    let service = instance_service(&state.cluster.state().await, &parse_id(&id)?)?;
+    Ok(Json(
+        service
+            .x_clouduler
+            .map(|x| {
+                x.actions
+                    .into_iter()
+                    .filter(|(_, a)| a.show_in_ui)
+                    .map(|(name, a)| ActionSummary {
+                        name,
+                        confirm: a.confirm,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    ))
+}
+
+/// Runs one of the service's predefined actions. Only commands written in the
+/// stack file can run: the caller picks a name, never a command line.
+async fn run_action(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Json<ExecRunResult>, ApiError> {
+    let instance = parse_id(&id)?;
+    let service = instance_service(&state.cluster.state().await, &instance)?;
+    let action = service
+        .x_clouduler
+        .and_then(|x| x.actions.get(&name).filter(|a| a.show_in_ui).cloned())
+        .ok_or_else(|| ApiError::NotFound(format!("no action {name:?} on {}", instance.service)))?;
+    Ok(Json(
+        exec_run(&state, &instance, action_request(&action)).await?,
+    ))
+}
+
+fn action_request(action: &cl_config::ServiceAction) -> ExecRunRequest {
+    ExecRunRequest {
+        cmd: action.argv(),
+        user: action.user.clone(),
+        stdin: None,
+        timeout_secs: action.timeout.map_or(30, |d| d.as_secs()),
+        max_output: default_exec_output(),
+    }
+}
+
+/// Runs a service action in a container on this node's docker, for callers
+/// outside the api (replication hooks). `Err` is a one-line reason: the
+/// command could not run, timed out, or exited non-zero.
+pub async fn run_action_local(
+    docker: &Docker,
+    instance: &InstanceId,
+    action: &cl_config::ServiceAction,
+) -> Result<(), String> {
+    let r = exec_run_docker(docker, instance, action_request(action))
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.timed_out {
+        return Err("timed out".to_string());
+    }
+    match r.exit_code {
+        Some(0) => Ok(()),
+        code => Err(format!(
+            "exit {}: {}",
+            code.map_or("?".to_string(), |c| c.to_string()),
+            r.stderr.trim()
+        )),
+    }
 }
 
 /// A file or directory read out of a container.

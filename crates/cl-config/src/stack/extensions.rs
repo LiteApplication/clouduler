@@ -422,6 +422,15 @@ pub struct VolumeSyncOverride {
     pub interval: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Name of one of this service's `actions`, run in its container on the
+    /// primary node before each replication. A failure skips that
+    /// replication. Service level only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Action run after each replication attempt, whether it succeeded or
+    /// was skipped because `before` failed. Service level only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
 }
 
 /// Per service/stack override of whether a restic backup run stops this
@@ -459,6 +468,44 @@ pub struct ServiceExtensions {
     pub colocate: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupOverride>,
+    /// Named commands an operator can run in this service's containers with
+    /// one click. The key is the button's label.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub actions: BTreeMap<String, ServiceAction>,
+}
+
+/// A predefined command, run in a container when its action is triggered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceAction {
+    /// A shell string (run as `sh -c`) or an exec array.
+    pub cmd: super::Command,
+    /// User to run as. Defaults to the container's own user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// How long to wait for the command, default 30s, at most 300s.
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout: Option<Duration>,
+    /// Ask for confirmation in the UI before running. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confirm: bool,
+    /// Whether the action gets a button in the UI. Turn off for one that only
+    /// exists to be a `volume_sync` `before`/`after` hook. On by default.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_in_ui: bool,
+}
+
+impl ServiceAction {
+    pub fn argv(&self) -> Vec<String> {
+        match &self.cmd {
+            super::Command::Shell(s) => vec!["sh".to_string(), "-c".to_string(), s.clone()],
+            super::Command::Exec(v) => v.clone(),
+        }
+    }
 }
 
 /// Stack wide defaults under the top level `x-clouduler` key. Services
@@ -868,5 +915,27 @@ proxy:
         let encoded = serde_yaml::to_string(&original).expect("encode");
         let decoded: Middleware = serde_yaml::from_str(&encoded).expect("decode");
         assert_eq!(decoded, original);
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn parses_actions() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "actions:\n  Reset WAL:\n    cmd: pg_resetwal -f /var/lib/postgresql/data\n    user: postgres\n    timeout: 1m\n    confirm: true\n    show_in_ui: false\n  Ping:\n    cmd: [echo, hi]\n",
+        )
+        .unwrap();
+        let wal = &ext.actions["Reset WAL"];
+        assert_eq!(wal.argv()[..2], ["sh", "-c"]);
+        assert_eq!(wal.user.as_deref(), Some("postgres"));
+        assert_eq!(wal.timeout, Some(Duration::from_secs(60)));
+        assert!(wal.confirm);
+        assert!(!wal.show_in_ui);
+        assert!(ext.actions["Ping"].show_in_ui);
+        assert!(!ext.actions["Ping"].confirm);
+        assert_eq!(ext.actions["Ping"].argv(), ["echo", "hi"]);
     }
 }

@@ -48,7 +48,7 @@ export function collectImages(specs: string[]): string[] {
 // name, a drive name under volume_sync, a declared config/secret name)
 // rather than fixed schema keys — so the next path segment normalizes to `*`
 // instead of being looked up literally.
-const DYNAMIC_PARENTS = new Set(['services', 'volume_sync', 'configs', 'secrets']);
+const DYNAMIC_PARENTS = new Set(['services', 'volume_sync', 'configs', 'secrets', 'actions']);
 
 /** A line's nesting column: right after its `- ` marker when it's a list
  *  item, otherwise its plain leading-whitespace length. Used both to record
@@ -70,7 +70,12 @@ function lineIndent(raw: string): number {
  *  and every key after the first in a `- foo: 1\n  bar: 2` item resolves to
  *  the wrong schema path. `lineIndent` normalizes both to the same column so
  *  they pop each other correctly. */
-function contextPath(doc: string, lineFrom: number, curIndent: number): string[] {
+function contextPath(
+  doc: string,
+  lineFrom: number,
+  curIndent: number,
+  onKey?: (path: string[]) => void,
+): string[] {
   const lines = doc.slice(0, lineFrom).split('\n');
   const stack: { indent: number; key: string }[] = [];
   for (const raw of lines) {
@@ -78,13 +83,28 @@ function contextPath(doc: string, lineFrom: number, curIndent: number): string[]
     const dash = raw.match(/^(\s*)-\s+/);
     const rest = dash ? raw.slice(dash[0].length) : raw.trimStart();
     const indent = lineIndent(raw);
-    const m = rest.match(/^([A-Za-z0-9_.-]+):/);
+    const m = rest.match(/^([A-Za-z0-9_.][A-Za-z0-9_. -]*):(?:\s|$)/);
     if (!m) continue;
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
     stack.push({ indent, key: m[1] });
+    onKey?.(stack.map((s) => s.key));
   }
   while (stack.length && stack[stack.length - 1].indent >= curIndent) stack.pop();
   return stack.map((s) => s.key);
+}
+
+/** Names of the actions defined on the service whose block the cursor is in.
+ *  Action names are free-form labels, so they are read from the document. */
+function actionNamesFor(doc: string, rawPath: string[]): string[] {
+  if (rawPath[0] !== 'services' || rawPath.length < 2) return [];
+  const prefix = [rawPath[0], rawPath[1], 'x-clouduler', 'actions'];
+  const names: string[] = [];
+  contextPath(doc, doc.length, 0, (path) => {
+    if (path.length === prefix.length + 1 && prefix.every((k, i) => path[i] === k)) {
+      names.push(path[path.length - 1]);
+    }
+  });
+  return names;
 }
 
 function normalizePath(path: string[]): string[] {
@@ -149,6 +169,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.deploy.update_config': ['parallelism', 'delay', 'order', 'failure_action'],
   'services.*.x-clouduler': [
     'proxy', 'expose', 'volume_sync', 'auto_update', 'node', 'docker_socket', 'colocate', 'backup',
+    'actions',
   ],
   'services.*.x-clouduler.proxy': [
     'host', 'network', 'port', 'path_prefix', 'tls', 'middlewares', 'sticky', 'max_body_size',
@@ -160,9 +181,10 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.proxy.middlewares.forward_auth': ['address', 'auth_response_headers', 'timeout'],
   'services.*.x-clouduler.proxy.middlewares.redirect_regex': ['regex', 'replacement', 'permanent'],
   'services.*.x-clouduler.expose': ['port', 'published', 'protocol', 'network', 'proxy_protocol'],
-  'services.*.x-clouduler.volume_sync.*': ['interval', 'enabled'],
+  'services.*.x-clouduler.volume_sync.*': ['interval', 'enabled', 'before', 'after'],
   'services.*.x-clouduler.docker_socket': ['target', 'read_only'],
   'services.*.x-clouduler.backup': ['stop_before'],
+  'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup'],
@@ -176,7 +198,7 @@ const SCHEMA: Record<string, string[]> = {
  *  none of them collide with a differently-typed field of the same name. */
 const BOOLEAN_KEYS = new Set([
   'tls', 'sticky', 'websockets', 'preserve_host', 'proxy_protocol', 'allow_credentials', 'permanent',
-  'stop_before', 'auto_update', 'read_only', 'enabled', 'disable',
+  'stop_before', 'auto_update', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui',
 ]);
 
 const BARE_MIDDLEWARES = ['redirect_https', 'strip_prefix', 'authenticated'];
@@ -184,8 +206,18 @@ const CONFIGURED_MIDDLEWARES = ['basic_auth', 'headers', 'cors', 'forward_auth',
 
 const RESTART_VALUES = ['no', 'always', 'on-failure', 'unless-stopped'];
 
-function valueNamesFor(key: string, path: string[], known: KnownNames, doc: string): string[] | null {
+function valueNamesFor(
+  key: string,
+  path: string[],
+  known: KnownNames,
+  doc: string,
+  rawPath: string[] = [],
+): string[] | null {
   const container = path[path.length - 1];
+
+  if ((key === 'before' || key === 'after') && path.join('.') === 'services.*.x-clouduler.volume_sync.*') {
+    return actionNamesFor(doc, rawPath);
+  }
 
   if (key === 'network') return dedupe([...topLevelChildKeys(doc, 'networks'), ...known.networks]);
   if (key === 'node') return known.nodes;
@@ -233,8 +265,9 @@ export function stackSpecCompletionSource(getKnown: () => KnownNames) {
     const listMatch = !kvMatch && before.match(/^(\s*)-\s*(\S*)$/);
 
     if (kvMatch) {
-      const path = normalizePath(contextPath(doc, line.from, lineIndent(before)));
-      const names = valueNamesFor(kvMatch[2], path, known, doc);
+      const rawPath = contextPath(doc, line.from, lineIndent(before));
+      const path = normalizePath(rawPath);
+      const names = valueNamesFor(kvMatch[2], path, known, doc, rawPath);
       if (!names || names.length === 0) return null;
       const wordLen = kvMatch[3].length;
       return {

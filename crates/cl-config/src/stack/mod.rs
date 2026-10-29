@@ -22,7 +22,7 @@ pub use deploy::{
 };
 pub use extensions::{
     CorsPolicy, DockerSocket, ExposePort, ForwardAuth, Middleware, ProxyRoute, RedirectRegex,
-    ServiceExtensions, StackDefaults, VolumeSyncOverride,
+    ServiceAction, ServiceExtensions, StackDefaults, VolumeSyncOverride,
 };
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};

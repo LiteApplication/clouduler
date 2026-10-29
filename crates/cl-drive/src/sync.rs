@@ -28,7 +28,7 @@ use tracing::{debug, warn};
 
 use cl_raft::{ClusterNode, QuorumWatch, Request, VolumeId};
 
-use crate::delta::SyncEngine;
+use crate::delta::{BoxFuture, SyncEngine};
 use crate::registry::DriveRegistry;
 
 /// The effective sync interval for a volume: its own override if the caller
@@ -87,12 +87,35 @@ pub trait IntervalSource: Send + Sync {
     fn interval_for(&self, volume: &VolumeId) -> Duration;
 }
 
+/// Which side of a replication a hook runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPhase {
+    Before,
+    After,
+}
+
+/// What a hook did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookOutcome {
+    /// Nothing is configured for this volume and phase.
+    None,
+    Ok,
+    Failed(String),
+}
+
+/// Commands to run around a volume's replication, supplied by the daemon
+/// (which knows the stacks and docker; this crate knows neither).
+pub trait SyncHooks: Send + Sync {
+    fn run<'a>(&'a self, volume: &'a VolumeId, phase: SyncPhase) -> BoxFuture<'a, HookOutcome>;
+}
+
 /// Runs the periodic sync loop for one node.
 pub struct SyncScheduler<E: SyncEngine> {
     node: Arc<ClusterNode>,
     registry: Arc<DriveRegistry>,
     engine: Arc<E>,
     quorum: QuorumWatch,
+    hooks: Option<Arc<dyn SyncHooks>>,
     guard: Arc<InFlightGuard>,
     /// Volumes found without a file on the previous pass. One empty reading
     /// is not enough to raise the alarm: a file can be mid-replace.
@@ -110,10 +133,28 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             registry,
             engine,
             quorum,
+            hooks: None,
             guard: Arc::new(InFlightGuard::new()),
             empty_seen: std::sync::Mutex::default(),
             tick: Duration::from_secs(30),
         }
+    }
+
+    /// Runs `hooks` before and after each replication of a volume.
+    pub fn with_hooks(mut self, hooks: Arc<dyn SyncHooks>) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    async fn hook(&self, id: &VolumeId, phase: SyncPhase) -> HookOutcome {
+        let Some(hooks) = &self.hooks else {
+            return HookOutcome::None;
+        };
+        let outcome = hooks.run(id, phase).await;
+        if let HookOutcome::Failed(reason) = &outcome {
+            warn!(%id, ?phase, %reason, "replication hook failed");
+        }
+        outcome
     }
 
     /// Run forever, syncing every volume this node is primary for once its
@@ -360,7 +401,14 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             }
         };
 
-        for target in targets {
+        // A failed `before` skips this replication, but `after` still runs:
+        // the `before` may have paused or locked something halfway.
+        let skip = matches!(
+            self.hook(&id, SyncPhase::Before).await,
+            HookOutcome::Failed(_)
+        );
+
+        for target in targets.into_iter().filter(|_| !skip) {
             // A freeze can land while earlier targets of this run were
             // syncing; stop pushing the moment it does.
             if self
@@ -415,6 +463,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             }
         }
 
+        self.hook(&id, SyncPhase::After).await;
         self.guard.finish(&id).await;
     }
 }

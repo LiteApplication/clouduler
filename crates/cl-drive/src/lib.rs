@@ -33,5 +33,7 @@ pub use served::{
     client_available, ensure_export, exports_available, mount_permission, remove_export,
     MountManager, MountSpec, NFS_PORT,
 };
-pub use sync::{IntervalSource, StaticIntervals, SyncScheduler};
+pub use sync::{
+    HookOutcome, IntervalSource, StaticIntervals, SyncHooks, SyncPhase, SyncScheduler,
+};
 pub use transport::{drive_port, Message};

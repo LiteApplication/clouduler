@@ -3,6 +3,7 @@
 // in exactly one place.
 
 import type {
+  ExecRunResult,
   ApiErrorBody,
   ApiKey,
   ApiKeyCreated,
@@ -232,6 +233,9 @@ export const api = {
   listInstances: () => get<InstanceState[]>('/api/instances'),
   getInstance: (id: string) => get<InstanceState>(`/api/instances/${encodeURIComponent(id)}`),
   restartInstance: (id: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/restart`),
+  listActions: (id: string) => get<{ name: string; confirm: boolean }[]>(`/api/instances/${encodeURIComponent(id)}/actions`),
+  runAction: (id: string, name: string) =>
+    post<ExecRunResult>(`/api/instances/${encodeURIComponent(id)}/actions/${encodeURIComponent(name)}`),
   moveInstance: (id: string, node: string) => post<void>(`/api/instances/${encodeURIComponent(id)}/move`, { node }),
   setDesired: (id: string, desired: 'running' | 'stopped') =>
     patch<void>(`/api/instances/${encodeURIComponent(id)}`, { desired }),

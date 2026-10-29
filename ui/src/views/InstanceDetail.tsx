@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { InstanceState, InstanceStatsSample, LogLine, StackRequirements } from '../api/types';
+import type { ExecRunResult, InstanceState, InstanceStatsSample, LogLine, StackRequirements } from '../api/types';
 import { useClusterState } from '../state/store';
 import { useInstanceProgress } from '../state/progressStore';
 import { useAuth } from '../auth/AuthContext';
@@ -33,6 +33,8 @@ export function InstanceDetail() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [moveTarget, setMoveTarget] = useState('');
+  const [actions, setActions] = useState<{ name: string; confirm: boolean }[]>([]);
+  const [actionResult, setActionResult] = useState<{ name: string; result: ExecRunResult } | null>(null);
   const [tab, setTab] = useState<'logs' | 'stats' | 'placement'>('logs');
   const parsed = parseInstanceId(id);
   const progress = useInstanceProgress(id);
@@ -51,6 +53,19 @@ export function InstanceDetail() {
       clearInterval(timer);
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    api.listActions(id).then(setActions).catch(() => setActions([]));
+  }, [id, isAdmin]);
+
+  const runAction = (name: string, confirm: boolean) =>
+    confirm && !window.confirm(`Run "${name}" on ${id}?`)
+      ? undefined
+      : run(async () => {
+      setActionResult(null);
+      setActionResult({ name, result: await api.runAction(id, name) });
+    });
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -210,6 +225,11 @@ export function InstanceDetail() {
                 <Icon name="download" /> Update to latest
               </button>
             )}
+            {actions.map(({ name, confirm }) => (
+              <button key={name} disabled={busy} onClick={() => runAction(name, confirm)}>
+                <Icon name="play" /> {name}
+              </button>
+            ))}
             {parsed && (
               <Link to={`/backup/restore?scope=service&stack=${encodeURIComponent(parsed.stack)}&service=${encodeURIComponent(parsed.service)}`}>
                 <button>
@@ -218,6 +238,13 @@ export function InstanceDetail() {
               </Link>
             )}
           </div>
+          {actionResult && (
+            <pre className="mono" style={{ marginBottom: 12, whiteSpace: 'pre-wrap' }}>
+              {`${actionResult.name}: ${
+                actionResult.result.timed_out ? 'timed out' : `exit ${actionResult.result.exit_code ?? '?'}`
+              }\n${actionResult.result.stdout}${actionResult.result.stderr}`}
+            </pre>
+          )}
           <div className="flex-row">
             <select value={moveTarget} onChange={(e) => setMoveTarget(e.target.value)} aria-label="Move to node">
               <option value="">Move to...</option>

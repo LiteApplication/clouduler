@@ -982,3 +982,13 @@ export interface RegistryAccount {
   server: string;
   username: string;
 }
+
+/** Result of running a service action (`POST /api/instances/{id}/actions/{name}`). */
+export interface ExecRunResult {
+  stdout: string;
+  stderr: string;
+  exit_code: number | null;
+  timed_out: boolean;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+}

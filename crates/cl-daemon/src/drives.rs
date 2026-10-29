@@ -41,8 +41,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, Node};
 use cl_drive::{
-    drive_port, transport, DeltaEngine, DriveRegistry, IntervalSource, MountManager, MountSpec,
-    SyncScheduler,
+    drive_port, transport, BoxFuture, DeltaEngine, DriveRegistry, HookOutcome, IntervalSource,
+    MountManager, MountSpec, SyncHooks, SyncPhase, SyncScheduler,
 };
 use cl_raft::ids::VolumeId;
 use cl_raft::node::ClusterNode;
@@ -161,6 +161,7 @@ pub fn start(
     cluster: &Arc<ClusterNode>,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     keys: cl_raft::KeyWatch,
+    docker: Arc<RwLock<Option<cl_docker::Docker>>>,
 ) -> Drives {
     let boot_cfg = cfg.clone();
     let node_name = node_name.to_string();
@@ -172,11 +173,12 @@ pub fn start(
         let registry = registry.clone();
         let mut config_rx = config_rx;
         let keys = keys;
+        let docker = docker;
         tokio::spawn(async move {
             let mut cfg = boot_cfg;
             let mut topology = topology_of(&cfg, &node_name);
             let mut running =
-                match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys).await {
+                match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys, &docker).await {
                     Ok(running) => running,
                     Err(e) => {
                         warn!(error = %e, "drive subsystem did not start");
@@ -210,7 +212,7 @@ pub fn start(
                 topology = live_topology;
                 running.teardown();
                 running =
-                    match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys).await {
+                    match build(&cfg, &node_name, &cluster, &registry, &config_rx, &keys, &docker).await {
                         Ok(running) => running,
                         Err(e) => {
                             warn!(error = %e, "drive subsystem did not restart");
@@ -269,6 +271,7 @@ async fn build(
     live_registry: &Arc<RwLock<Option<Arc<DriveRegistry>>>>,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     keys: &cl_raft::KeyWatch,
+    docker: &Arc<RwLock<Option<cl_docker::Docker>>>,
 ) -> Result<Running> {
     let mut running = Running::default();
 
@@ -346,7 +349,12 @@ async fn build(
                 cluster.clone(),
                 registry.clone(),
                 Arc::new(DeltaEngine::new(keys.clone())),
-            );
+            )
+            .with_hooks(Arc::new(ActionHooks {
+                cluster: cluster.clone(),
+                node: node_name.to_string(),
+                docker: docker.clone(),
+            }));
             let intervals = DriveIntervals {
                 config_rx: config_rx.clone(),
             };
@@ -695,6 +703,70 @@ async fn watch_volume_mounts(
                 }
             }
         }
+    }
+}
+
+/// Runs a service's `volume_sync` `before`/`after` actions in the containers
+/// on this node that mount the volume being replicated.
+struct ActionHooks {
+    cluster: Arc<ClusterNode>,
+    node: String,
+    docker: Arc<RwLock<Option<cl_docker::Docker>>>,
+}
+
+impl SyncHooks for ActionHooks {
+    fn run<'a>(&'a self, volume: &'a VolumeId, phase: SyncPhase) -> BoxFuture<'a, HookOutcome> {
+        Box::pin(async move {
+            let state = self.cluster.state().await;
+            let mut work = Vec::new();
+            for (id, assignment) in &state.assignments {
+                if assignment.node != self.node
+                    || assignment.desired != cl_raft::state::DesiredState::Running
+                {
+                    continue;
+                }
+                let Some(stack) = state.stacks.get(&id.stack) else {
+                    continue;
+                };
+                let Ok(file) = cl_config::StackFile::parse(&stack.spec) else {
+                    continue;
+                };
+                let Some(svc) = file.services.get(&id.service) else {
+                    continue;
+                };
+                let mounts = svc.volumes.iter().any(|v| {
+                    v.drive.as_deref() == Some(volume.drive.as_str())
+                        && v.volume.as_deref() == Some(volume.volume.as_str())
+                });
+                let Some(ext) = svc.x_clouduler.as_ref().filter(|_| mounts) else {
+                    continue;
+                };
+                let Some(hook) = ext.volume_sync.get(&volume.volume) else {
+                    continue;
+                };
+                let name = match phase {
+                    SyncPhase::Before => &hook.before,
+                    SyncPhase::After => &hook.after,
+                };
+                if let Some(action) = name.as_ref().and_then(|n| ext.actions.get(n)) {
+                    work.push((id.clone(), name.clone().unwrap_or_default(), action.clone()));
+                }
+            }
+            if work.is_empty() {
+                return HookOutcome::None;
+            }
+            let Some(docker) = self.docker.read().await.clone() else {
+                return HookOutcome::Failed("no docker on this node".to_string());
+            };
+            for (id, name, action) in work {
+                if let Err(e) =
+                    cl_api::routes::instances::run_action_local(&docker, &id, &action).await
+                {
+                    return HookOutcome::Failed(format!("action {name:?} on {id}: {e}"));
+                }
+            }
+            HookOutcome::Ok
+        })
     }
 }
 

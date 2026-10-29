@@ -97,6 +97,13 @@ x-clouduler:
 does not parse stack files itself — the daemon hands the scheduler (`sync::SyncScheduler`) a
 resolved `IntervalSource`, keeping this crate decoupled from compose parsing.
 
+A service can also run one of its `actions` before and after each replication of a volume
+(`before:`/`after:` on that volume's service-level `volume_sync` entry), e.g. to checkpoint a
+database first. `SyncScheduler::with_hooks` takes a `SyncHooks` implementation; the daemon's runs
+the action in the service's containers on the primary node. A failed `before` skips that
+replication, and `after` always runs. Migrations and manual syncs do not run hooks. See
+`docs/stacks.md`.
+
 The scheduler runs one loop per node, ticking periodically and, for each volume this node is
 primary for, checking whether its interval has elapsed. A newly discovered volume gets a random
 jitter within its own interval before its first tick, so a fleet of volumes on the same interval

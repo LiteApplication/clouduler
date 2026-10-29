@@ -22,6 +22,7 @@ impl StackFile {
         self.validate_stop_signals()?;
         self.validate_stop_grace_periods()?;
         self.validate_colocate()?;
+        self.validate_sync_hooks()?;
         self.validate_writable_secrets()?;
         self.validate_single_config_writer()?;
         self.validate_replicas()?;
@@ -119,6 +120,38 @@ impl StackFile {
                                  mount it read-only here so there is a single writer",
                                 config.source
                             ),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `before`/`after` on `volume_sync` run a service's action, so they only
+    /// make sense on a service and must name an action it defines.
+    fn validate_sync_hooks(&self) -> Result<()> {
+        if let Some(defaults) = &self.x_clouduler {
+            for (volume, o) in &defaults.volume_sync {
+                if o.before.is_some() || o.after.is_some() {
+                    return Err(ConfigError::invalid(
+                        format!("x-clouduler.volume_sync.{volume}"),
+                        "before/after run a service's action, set them on the service",
+                    ));
+                }
+            }
+        }
+        for (name, svc) in &self.services {
+            let Some(ext) = &svc.x_clouduler else {
+                continue;
+            };
+            for (volume, o) in &ext.volume_sync {
+                for (key, action) in [("before", &o.before), ("after", &o.after)] {
+                    let Some(action) = action else { continue };
+                    if !ext.actions.contains_key(action) {
+                        return Err(ConfigError::invalid(
+                            format!("services.{name}.x-clouduler.volume_sync.{volume}.{key}"),
+                            format!("no action named {action:?} on this service"),
                         ));
                     }
                 }
@@ -793,6 +826,16 @@ fn is_dns_label(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sync_hooks_must_name_a_service_action() {
+        let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      actions:\n        Flush: { cmd: sync }\n      volume_sync:\n        data: { before: Flush }\n";
+        super::StackFile::parse(ok).unwrap();
+        let bad = ok.replace("before: Flush", "before: Nope");
+        assert!(super::StackFile::parse(&bad).is_err());
+        let stack_level = "x-clouduler:\n  volume_sync:\n    data: { after: Flush }\nservices:\n  db:\n    image: x\n";
+        assert!(super::StackFile::parse(stack_level).is_err());
+    }
+
     use super::*;
     use crate::cluster::ClusterConfig;
 

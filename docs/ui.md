@@ -37,42 +37,101 @@ generic HTTP failure into every view.
 
 ## View structure
 
-Routes are declared in `src/App.tsx`:
+Routes are declared in `src/App.tsx`. The sidebar (`components/Layout.tsx`)
+mirrors them; on phones it collapses into a drawer plus a bottom tab bar
+(Home, Stacks, Instances, More). Every mutating control is rendered only for
+admins; viewers see read-only pages.
 
-- `/` — **Overview**: quorum and leader status, per-node health, counts of
-  stacks/instances/volumes, and banners for anything degraded (lost quorum,
-  unreachable nodes, out-of-sync volumes).
-- `/nodes`, `/nodes/:name` — list and detail. Detail shows role, addresses,
-  implemented drives with disk usage, live CPU/memory/uptime, and streams
-  the node's daemon logs on demand. Admin actions: drain, activate,
-  decommission, add a node.
-- `/stacks`, `/stacks/:name` — list, detail, and deploy/redeploy (also used
-  for `/stacks/_new`). Deploy accepts a pasted or uploaded yaml spec, runs it
-  through `POST /api/stacks/:name/validate` before submitting, and renders
-  validation errors against the yaml path they name.
-- `/instances`, `/instances/:id` — state, health, image/digest, node.
-  Actions: restart, stop/start, move (with a node picker limited to
-  schedulable, reachable nodes), and update a `:latest` image. Live log
-  viewer with follow/tail/search and a live stats panel, both opened
-  on-demand SSE subscriptions independent of the main state stream.
-- `/updates` — every container's running image digest against what its
-  registry currently serves, with filters, multi-select, per-row and bulk update
-  actions (instances queue and roll as described under Updates in the API
-  docs, and failed ones can be retried), a "pin
-  running" action for instances that carry no pin, and a dialog for registry
-  accounts (added, tested against the registry, and removed; passwords are
-  write-only). Deliberately **not** polled: each load costs one registry
-  round trip per distinct image across the cluster, so it refreshes on
-  demand.
-- `/configs-secrets` — configs and secrets lists, the three secret creation
-  paths (paste, file, generate-with-preview), and the cluster key panel
-  (fingerprint, whether this node holds it, upload-after-outage).
-- `/drives` — drive mode/served-by/per-node implementation status, and
-  per-volume generation/replica/sync-state with a manual sync trigger.
-- `/configuration` — a real form over the structured cluster config (not a
-  text box), with a diff preview and the auto-rollback confirm flow.
-- `/certificates` — expiry, issuer status, renew action, and the DNS records
-  clouduler owns, with a manual reconcile trigger.
+**Cluster**
+
+- `/` — **Overview**: leader, quorum (`reachable/total`), counts of nodes,
+  stacks, instances and volumes; a healthy / quorum-lost / nodes-unreachable
+  banner; donut charts for node availability (by role) and instance state; a
+  node health table; a degraded-volumes table; empty-volume alerts.
+- `/nodes`, `/nodes/:name` — list with a connectivity graph between nodes,
+  drain/activate per row, a **Rebalance** action that moves instances to
+  smooth load, and an **Add node** form (role, addresses) that generates the
+  join command. Detail shows role, availability, reachability, instances,
+  live resource usage, the node's own config (per-network addresses, open
+  ports, drive paths, egress/WireGuard interfaces, scheduling flags, whether it
+  may create the cluster key), and its daemon logs on demand. Admin actions:
+  drain, activate, decommission (blocked while instances remain).
+
+**Workloads**
+
+- `/stacks`, `/stacks/:name`, `/stacks/_new` — list (revision, services,
+  instances). Detail shows revision, config/secret counts, the instances table
+  (desired, state, health, migration phase; a failing instance expands an
+  inline log tail), a per-service **placement** table explaining why each node
+  can or cannot run it (`ConstraintTable`), the read-only spec, and a CI
+  **update webhook** URL (copy / regenerate). Deploy and redeploy use a
+  CodeMirror YAML editor with schema-aware completion, file upload, validation
+  against `POST /api/stacks/:name/validate` with errors shown per YAML path, a
+  required-configs-and-secrets panel (upload or paste each file, standalone vs
+  bundled marked), and a relation diagram. Also: copy spec, remove.
+- `/instances`, `/instances/:id` — filterable list. Detail shows state, health,
+  node, image and digest; actions restart, stop/start, update to `:latest`,
+  move to an eligible node, and restore volumes (links into the restore
+  wizard). Tabs: live **Logs** (follow, tail, search, ANSI colors), **Stats**
+  (CPU, memory, network, disk IO) and **Placement**.
+- `/updates` — every container's running digest against its registry, grouped
+  into update available / not on its pin / up to date / unknown, with tile
+  filters, text search, multi-select, per-row and bulk update, retry of failed
+  updates, dismissable failures, per-instance progress (pulling, restarting,
+  health watch), "pin running" for unpinned instances, and a registry accounts
+  dialog (add, test, remove; passwords are write-only). Not polled: it
+  refreshes on demand because each load costs a registry round trip.
+
+**Data**
+
+- `/configs-secrets` — configs (create, edit, delete) and secrets (paste,
+  file upload, or generate with a length, character set and format preview;
+  values are never shown), plus the **cluster key** panel: fingerprint, whether
+  this node holds it, and upload after an outage.
+- `/drives`, `/drives/:name` — drive modes (replicated or served), topology,
+  per-node implementation and disk usage, per-volume generation, replica
+  sync state and primary, and a manual **Sync now**. Drive detail lists
+  implementing nodes, volumes and their backups. Empty-volume alerts offer to
+  inspect (newest file age) and delete a suspicious empty volume.
+- `/networks/:name` — a network's type, subnet, domain and the address each
+  node has on it.
+- `/backup/destinations`, `/backup/schedules`, `/backup/history`,
+  `/backup/restore` — restic backups. Destinations are a node-local path, an
+  SSH server or an S3 bucket (credentials write-only). Schedules set per-drive
+  frequency, time of day, retention (keep last / keep within) and whether to
+  stop containers, with run-now. History lists backup runs and restore
+  requests. The restore wizard (what → source snapshot → confirm) restores a
+  drive, a volume or a service, and can be deep-linked with `?scope=`.
+
+**Edge**
+
+- `/certificates` — certificate expiry, issuer and status with renew, and the
+  DNS records clouduler owns with a manual reconcile.
+- `/redirects` — three UI-managed rule sets that apply immediately and live
+  outside `cluster.yaml`: host/path **redirects**, **static backends**
+  (external targets with path prefix, response timeout, max body size) and
+  **WireGuard ingress** rules (tunnel port to a target port on a node).
+
+**Cluster configuration**
+
+- `/configuration/*` — a form over the structured cluster config, split into
+  pages grouped General (Cluster, Failover), Network & Access (Networks, Web
+  UI, Reverse proxy, Cloudflare), Storage (Drives) and Security (Auth, Secrets,
+  AI access, Git backup), with a per-page unsaved-change count. Networks cover
+  the internal, private, public, egress, WireGuard and NAT kinds, plus rename
+  of networks and drives across all references. Secrets for Cloudflare, OIDC
+  and the git-backup webhook are entered here (write-only), and the git-backup
+  deploy key is shown. `/configuration/review` shows a field-level diff linking
+  back to each editor. Applying validates first, then arms an auto-rollback
+  timer for network-affecting changes (a banner offers **Confirm** or
+  **Roll back**).
+- `/self-update` — upgrade the cluster binary from a GitHub release URL (with
+  optional token), with run progress and cancel.
+- `/ai-access` (shown only when MCP is enabled) — connected AI clients with
+  their grant (read-only or admin) and revoke. `/oauth/consent` is the
+  approval page an AI tool is sent to, where the user picks the grant.
+- Login (`views/Login.tsx`) offers OIDC single sign-on or an API key. API keys
+  are also created and revoked through the API.
 
 Each view reads from the shared cluster state store rather than fetching its
 own copy of `/api/state`; a few views (node/instance detail, drives) also
@@ -99,6 +158,10 @@ unnamed `message` event carrying one JSON line/sample, not a `state` event).
 Those go through `src/hooks/useEventSource.ts`, opened only while the log or
 stats panel is actually mounted, each keeping its own bounded ring buffer.
 
+A second app-wide stream (`src/state/progressStore.tsx`) subscribes to
+`/api/instances/events` and feeds per-instance update progress (pulling,
+restarting, health watch) to the Updates and instance views.
+
 ## Auth, from the browser's side
 
 On load, `AuthProvider` (`src/auth/AuthContext.tsx`) calls `GET /auth/me`.
@@ -122,26 +185,33 @@ back to `null`, which drops the whole app back to the login screen — so a
 session or key that stops working mid-use is handled once, centrally,
 instead of being a special case every view has to think about.
 
-## Styling
+## Styling and theme
 
-One token stylesheet, `src/styles.css`: CSS custom properties for color,
-spacing and radius on `:root`, redefined under
-`@media (prefers-color-scheme: dark)` so the app follows the OS theme with
-no toggle or JS. No utility-class framework and no component kit; views
+Design tokens are CSS custom properties: palettes in `src/theme.css`, layout
+and components in `src/styles.css`. `src/theme.ts` picks the active palette:
+a sidebar switch offers light, dark or follow-system, the choice is kept in
+`localStorage` (`clouduler-theme`), and "system" keeps tracking the OS while
+the page is open. No utility-class framework and no component kit; views
 compose a small shared set of classes (`.card`, `.table-wrap`, `.badge`,
-`.field`, `.btn-row`, ...) plus a few real components
-(`src/components/Badge.tsx`, `src/components/FormFields.tsx`) for anything
-with actual behavior, like the validated config-form inputs.
+`.field`, `.btn-row`, ...) plus real components in `src/components/` (Badge,
+Donut, Meter, NodeGraph, RelationDiagram, ConstraintTable, FormFields,
+StackSpecEditor, Icon, Logo, EmptyVolumeAlert, UpdatePrompt).
+
+## Installable app
+
+`src/pwa.ts` registers `public/sw.js`, which precaches only the app shell.
+Cluster data is always fetched live, so an installed console opens offline
+but never shows stale state. When a new build is waiting, `UpdatePrompt`
+offers to reload. The manifest and icons are in `public/`.
 
 ## Dependencies
 
 - `react` / `react-dom` — the framework.
-- `react-router-dom` — client-side routing for the view list above; the
-  alternative was hand-rolling history/route matching, which routers exist
-  specifically to not need.
-- Dev-only: `vite` + `@vitejs/plugin-react` (build/dev server), `typescript`,
-  `vitest` + `@testing-library/react` + `@testing-library/jest-dom` +
-  `@testing-library/user-event` + `jsdom` (tests). Nothing else — no chart
-  library (stats are shown as plain numeric tiles, per-sample), no state
-  management library (context + `useReducer` covers one store), no CSS
-  framework.
+- `react-router-dom` — client-side routing for the views above.
+- `codemirror` and `@codemirror/*`, `@lezer/highlight` — the YAML editor for
+  stack specs, with completion driven by `lib/stackSchema.ts`.
+- `age-encryption` — generates the git-backup age keypair in the browser, so the private key never leaves the page.
+- Dev-only: `vite` + `@vitejs/plugin-react`, `typescript`, `vitest` +
+  Testing Library + `jsdom`. No chart library (donuts, meters and the node
+  graph are small hand-written SVG/CSS components) and no state management
+  library (context + `useReducer` covers the two stores).

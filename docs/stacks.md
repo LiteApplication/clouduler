@@ -451,7 +451,13 @@ volume_sync:
   gitlab-data:
     interval: 5m
     enabled: true
+    before: Checkpoint   # service level only: an action to run before each replication
+    after: Resume        # ... and after it
 ```
+
+`before`/`after` name an [`action`](#actions) of the same service and are
+rejected on the stack-wide `x-clouduler.volume_sync`. See `actions` for how
+they behave.
 
 `StackFile::sync_interval(service, volume, cluster)` resolves, in order: the
 service's own `volume_sync` entry for that volume, then the stack-wide
@@ -475,6 +481,42 @@ node: n1
 
 Pins the service to a specific node by name, instead of letting the
 scheduler place it. Must name a node declared in the cluster.
+
+### `actions`
+
+```yaml
+actions:
+  Reset WAL:
+    cmd: pg_resetwal -f /var/lib/postgresql/data   # string runs as `sh -c`; or an exec array
+    user: postgres                                  # optional
+    timeout: 1m                                     # optional, default 30s, max 5m
+    confirm: true                                   # optional, default false: ask before running
+    show_in_ui: true                                # optional, default true: false hides the button
+```
+
+Predefined commands shown as buttons on the instance page. The key is the
+button's label. Clicking one runs the command immediately in that instance's
+container and shows its exit code and output. `confirm: true` asks first in
+the UI. `show_in_ui: false` removes the button and refuses running the action
+from the UI or API; it can then only run as a `volume_sync` hook (below).
+
+An action can also run around a volume's replication, with `before` and
+`after` on that volume's `volume_sync` entry (service level only):
+
+```yaml
+x-clouduler:
+  actions:
+    Checkpoint: { cmd: psql -U postgres -c CHECKPOINT, user: postgres }
+  volume_sync:
+    data: { before: Checkpoint }
+```
+
+They run in this service's running containers on the node holding the
+volume's primary copy. If `before` fails, that replication is skipped and
+retried at the next interval. `after` runs after every attempt, including a
+skipped one, so a `before` that paused something is always undone. Only the
+scheduled replication runs hooks, not migrations or manual syncs. Admin only; only commands
+written here can run.
 
 ### `docker_socket`
 

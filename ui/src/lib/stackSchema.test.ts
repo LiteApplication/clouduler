@@ -132,6 +132,47 @@ describe('stackSpecCompletionSource', () => {
   });
 });
 
+describe('actions', () => {
+  const doc = [
+    'services:',
+    '  db:',
+    '    image: postgres',
+    '    x-clouduler:',
+    '      actions:',
+    '        Reset WAL:',
+    '          cmd: pg_resetwal',
+    '        Checkpoint:',
+    '          cmd: x',
+    '      volume_sync:',
+    '        data:',
+    '          before: |',
+  ].join('\n');
+
+  it('suggests action keys, including inside a spaced action name', () => {
+    const lines = doc.split('\n');
+    expect(complete([...lines.slice(0, 7), '          |'].join('\n'))).toEqual(
+      expect.arrayContaining(['cmd', 'user', 'timeout', 'confirm', 'show_in_ui']),
+    );
+  });
+
+  it('suggests booleans for confirm and show_in_ui', () => {
+    expect(complete('services:\n  a:\n    x-clouduler:\n      actions:\n        X:\n          show_in_ui: |')).toEqual([
+      'true',
+      'false',
+    ]);
+  });
+
+  it('completes before/after with the service\'s action names', () => {
+    expect(complete(doc)).toEqual(['Reset WAL', 'Checkpoint']);
+  });
+
+  it('suggests before/after under volume_sync', () => {
+    expect(
+      complete('services:\n  a:\n    x-clouduler:\n      volume_sync:\n        data:\n          |'),
+    ).toEqual(expect.arrayContaining(['interval', 'enabled', 'before', 'after']));
+  });
+});
+
 describe('collectImages', () => {
   it('collects distinct image values across multiple specs', () => {
     const a = 'services:\n  web:\n    image: nginx:1.25\n';
