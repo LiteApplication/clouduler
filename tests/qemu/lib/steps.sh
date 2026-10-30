@@ -560,17 +560,30 @@ step_assert_logs() {
   svc="$(echo "$1" | jq -r '.service')"
   contains="$(echo "$1" | jq -r '.contains')"
   timeout="$(echo "$1" | jq -r '.timeout // 90')"
-  wait_for "$stack.$svc logs contain '$contains'" "$timeout" \
-    "_logs_contain '$stack' '$svc' '$contains'"
+  (wait_for "$stack.$svc logs contain '$contains'" "$timeout" \
+    "_logs_contain '$stack' '$svc' '$contains'") || { _dump_logs "$stack" "$svc"; exit 1; }
   log "$stack.$svc logged '$contains'"
 }
 
-_logs_contain() {
-  local stack="$1" svc="$2" contains="$3" node id
+# Prints what the service did log, so a failed assert_logs shows why.
+_dump_logs() {
+  local stack="$1" svc="$2" node id
   node="$(any_manager)"
   for id in $(instances_everywhere | jq -r --arg s "$stack" --arg v "$svc" \
       '.[] | select(.id | startswith($s + "." + $v + ".")) | .id'); do
-    api_get "$node" "/api/instances/$id/logs?tail=500" 2>/dev/null | grep -qF -- "$contains" && return 0
+    log "logs of $id:"
+    api_get "$node" "/api/instances/$id/logs?tail=40" 2>&1 | sed 's/^/    /'
+  done
+}
+
+_logs_contain() {
+  local stack="$1" svc="$2" contains="$3" node id logs
+  node="$(any_manager)"
+  for id in $(instances_everywhere | jq -r --arg s "$stack" --arg v "$svc" \
+      '.[] | select(.id | startswith($s + "." + $v + ".")) | .id'); do
+    # Not `| grep -q`: grep exiting early SIGPIPEs curl, and pipefail turns that into a miss.
+    logs="$(api_get "$node" "/api/instances/$id/logs?tail=500" 2>/dev/null)" || true
+    [[ "$logs" == *"$contains"* ]] && return 0
   done
   return 1
 }

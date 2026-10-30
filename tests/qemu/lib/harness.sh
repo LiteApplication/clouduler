@@ -58,6 +58,14 @@ GUEST_EXPOSE_PORT=2222
 
 declare -a VM_NODES=()
 
+# The host address the VMs' multicast segments are bound to. Without it qemu
+# lets the kernel pick the default-route interface, whose address can be one a
+# host firewall drops: tailscale's ts-input chain discards anything sourced
+# from 100.64.0.0/10 that does not arrive on tailscale0, which is exactly what
+# a wifi interface on a CGNAT network sends, and the VMs then never see each
+# other. Every VM runs on this host, so loopback is always enough.
+MCAST_LOCALADDR="${QEMU_MCAST_LOCALADDR:-127.0.0.1}"
+
 vm_start() {
   local node="$1" ip="$2" web_port="$3" rpc_port="$4" mcast="$5" idx="$6" host_ip="$7"
   local http_port="$8" expose_port="$9"
@@ -83,7 +91,7 @@ vm_start() {
 
   local -a vpn_args=()
   if [[ -n "$vpn_mcast" ]]; then
-    vpn_args=(-netdev "socket,mcast=$vpn_mcast:4321,id=net2" -device "virtio-net-pci,netdev=net2,mac=$mac2")
+    vpn_args=(-netdev "socket,mcast=$vpn_mcast:4321,localaddr=$MCAST_LOCALADDR,id=net2" -device "virtio-net-pci,netdev=net2,mac=$mac2")
   fi
 
   # shellcheck disable=SC2086
@@ -94,7 +102,7 @@ vm_start() {
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
     -append "$(kernel_cmdline "$node" "$ip" "$vpn_ip" "$vpn_canary")" \
     -drive file="$disk",if=virtio,format=raw \
-    -netdev socket,mcast="$mcast":4321,id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
+    -netdev socket,mcast="$mcast":4321,localaddr="$MCAST_LOCALADDR",id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
     -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \
     -device virtio-net-pci,netdev=net1,mac="$mac1" \
     "${vpn_args[@]}" \
@@ -157,7 +165,7 @@ vm_restart() {
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
     -append "$(kernel_cmdline "$node" "$ip")" \
     -drive file="$disk",if=virtio,format=raw \
-    -netdev socket,mcast="$mcast":4321,id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
+    -netdev socket,mcast="$mcast":4321,localaddr="$MCAST_LOCALADDR",id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
     -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \
     -device virtio-net-pci,netdev=net1,mac="$mac1" \
     -qmp unix:"$qmp",server,nowait \

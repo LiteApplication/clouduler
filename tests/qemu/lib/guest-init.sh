@@ -90,6 +90,12 @@ if [ -n "$VPN_ADDR" ]; then
   if [ -e "/sys/class/net/$VPN_IFACE" ]; then
     ip link set "$VPN_IFACE" up
     ip addr add "$VPN_ADDR" dev "$VPN_IFACE"
+    # clouduler only routes an egress network out of an interface that has a
+    # default gateway; the canary stands in for the tunnel's far end. The high
+    # metric keeps the slirp default route first for everything else.
+    if [ -z "$(get_arg clvpncanary)" ]; then
+      ip route add default via 172.31.0.2 dev "$VPN_IFACE" metric 900
+    fi
     echo "init-clouduler: vpn segment interface $VPN_IFACE up at $VPN_ADDR"
   else
     echo "init-clouduler: WARNING vpn segment interface $VPN_IFACE never appeared"

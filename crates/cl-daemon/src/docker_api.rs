@@ -114,7 +114,7 @@ impl ClusterBackend {
     }
 
     /// The first peer that holds `name`, with its answer to `op`.
-    async fn from_any_peer(&self, op: &str, name: &str) -> Option<Value> {
+    async fn ask_any_peer(&self, op: &str, name: &str) -> Option<Value> {
         for (node, base) in self.peers().await {
             if let Peer::Found(v) = self.peer_json(&base, op, Some(name)).await {
                 debug!(%node, %name, op, "image answered by a peer");
@@ -147,7 +147,7 @@ impl ImageBackend for ClusterBackend {
         Box::pin(async move {
             match self.local().await?.inspect(name).await {
                 Err(BackendError::NotFound(_)) => self
-                    .from_any_peer("inspect", name)
+                    .ask_any_peer("inspect", name)
                     .await
                     .ok_or_else(|| not_found(name)),
                 other => other,
@@ -159,7 +159,7 @@ impl ImageBackend for ClusterBackend {
         Box::pin(async move {
             match self.local().await?.history(name).await {
                 Err(BackendError::NotFound(_)) => self
-                    .from_any_peer("history", name)
+                    .ask_any_peer("history", name)
                     .await
                     .ok_or_else(|| not_found(name)),
                 other => other,

@@ -100,9 +100,28 @@ pub fn start_restore_watcher(
                 if !matches!(request.status, RestoreStatus::Pending) {
                     continue;
                 }
-                let Ok(plan) = plan(&state, &request.scope, request.destination_id.as_deref())
-                else {
-                    continue;
+                let plan = match plan(&state, &request.scope, request.destination_id.as_deref()) {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        // A request that cannot be planned never will be as
+                        // submitted (an ambiguous destination, an unknown
+                        // service). Left Pending it would be skipped forever
+                        // and run unasked the day the ambiguity went away, so
+                        // finish it with the reason instead. Every node gets
+                        // here; the first to commit wins and the rest are
+                        // told it already finished.
+                        warn!(request = %request.id, error = %e, "restore request cannot be planned, failing it");
+                        let _ = cluster
+                            .submit(Request::SetRestoreStatus {
+                                id: request.id.clone(),
+                                status: RestoreStatus::Failed {
+                                    error: format!("{e:#}"),
+                                },
+                                at: unix_now(),
+                            })
+                            .await;
+                        continue;
+                    }
                 };
                 // Not this node's job unless it can carry out every job:
                 // either it is authoritative for the drive and can read the

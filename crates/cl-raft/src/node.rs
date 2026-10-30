@@ -37,6 +37,12 @@ const QUORUM_ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 /// `seed_roster` retries on its own timer.
 const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a write forwarded to the leader may take. A leader that just died
+/// without closing its sockets would otherwise hold the caller for the OS TCP
+/// timeout, and the caller can be the scheduler loop that has to fence this
+/// node.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct Options {
     pub name: String,
     /// Config-declared identity this node was provisioned with. See
@@ -450,8 +456,9 @@ impl ClusterNode {
             .ok_or(ClusterError::NoLeader)?;
 
         let peer = Peer::connect(&addr, self.keys.clone());
-        forward(&peer, request)
+        timeout(FORWARD_TIMEOUT, forward(&peer, request))
             .await
+            .unwrap_or_else(|_| Err("the leader did not answer in time".to_string()))
             .map_err(|msg| ClusterError::Forward { leader, msg })
     }
 
