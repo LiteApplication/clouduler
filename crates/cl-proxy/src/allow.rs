@@ -78,6 +78,10 @@ fn strip_port(host: &str) -> &str {
 pub struct StackPolicy {
     pub stack: String,
     pub networks: HashMap<String, HostAllow>,
+    /// The hostnames the stack's own services publish, by the network each
+    /// route is on. Always permitted there, so a stack can call its own
+    /// public address without listing it.
+    pub own_routes: HashMap<String, HostAllow>,
 }
 
 /// Why a request was refused, for the 403 body and the log.
@@ -91,7 +95,12 @@ pub struct Denied {
 impl StackPolicy {
     fn check(&self, route_network: &str, host: &str) -> Option<Denied> {
         let allow = self.networks.get(route_network)?;
-        if allow.permits(host) {
+        if allow.permits(host)
+            || self
+                .own_routes
+                .get(route_network)
+                .is_some_and(|own| own.permits(host))
+        {
             return None;
         }
         Some(Denied {
@@ -156,6 +165,16 @@ mod tests {
                         ("wan".to_string(), HostAllow::new(["auth.example.org"])),
                         ("sealed".to_string(), HostAllow::new(Vec::<String>::new())),
                     ]),
+                    own_routes: HashMap::from([
+                        (
+                            "tailscale".to_string(),
+                            HostAllow::new(["blog.home.example.org"]),
+                        ),
+                        (
+                            "sealed".to_string(),
+                            HostAllow::new(["me.sealed.example.org"]),
+                        ),
+                    ]),
                 },
             ),
             (
@@ -166,6 +185,7 @@ mod tests {
                         "wan".to_string(),
                         HostAllow::new(["x.example.org"]),
                     )]),
+                    own_routes: HashMap::new(),
                 },
             ),
         ]);
@@ -188,6 +208,35 @@ mod tests {
         assert!(!a.permits("evil-auth.example.org"));
         assert!(!a.permits("auth.example.org.evil.com"));
         assert!(!a.permits(""));
+    }
+
+    #[test]
+    fn a_stacks_own_routes_pass_without_being_listed() {
+        let p = policies();
+        let blog = peer("10.244.1.9");
+        // Not on the tailscale list, but the stack publishes it there itself.
+        assert_eq!(
+            p.check(blog, Some("tailscale"), "blog.home.example.org"),
+            None
+        );
+        assert_eq!(
+            p.check(blog, Some("tailscale"), "BLOG.home.example.org:443"),
+            None
+        );
+        // Even on a network whose list is empty.
+        assert_eq!(p.check(blog, Some("sealed"), "me.sealed.example.org"), None);
+        // Only on the network the route is published on.
+        assert!(p
+            .check(blog, Some("wan"), "blog.home.example.org")
+            .is_some());
+        // And it is the caller's own routes, not anyone's.
+        assert!(p
+            .check(peer("10.244.2.5"), Some("wan"), "blog.home.example.org")
+            .is_some());
+        // Other hosts stay denied.
+        assert!(p
+            .check(blog, Some("tailscale"), "evil.home.example.org")
+            .is_some());
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use cl_config::{AllowedHost, AllowedTarget, ClusterConfig, StackFile};
+use cl_config::{qualify, AllowedHost, AllowedTarget, ClusterConfig, StackFile};
 use cl_net::restrict::{PortGrant, Restriction};
 use cl_net::Allocations;
 use cl_proxy::{HostAllow, StackPolicy};
@@ -33,6 +33,10 @@ pub struct RestrictedStack {
     pub subnet: Ipv4Net,
     /// Every network that declared a list, by name.
     pub networks: BTreeMap<String, Vec<AllowedTarget>>,
+    /// Fully qualified hostnames the stack's own services publish through the
+    /// proxy, by network. The proxy lets the stack reach these regardless of
+    /// its lists.
+    pub own_routes: BTreeMap<String, Vec<String>>,
     /// The network the containers live on. The firewall restricts the stack
     /// only when that network declared a list.
     pub overlay_network: String,
@@ -81,10 +85,27 @@ pub fn restricted_stacks(
         let Some(subnet) = allocations.subnet(&overlay_name(name, overlay)) else {
             continue;
         };
+        let mut own_routes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for entry in file
+            .services
+            .values()
+            .filter_map(|svc| svc.x_clouduler.as_ref())
+            .flat_map(|ext| &ext.proxy)
+        {
+            let domain = cfg
+                .networks
+                .get(&entry.network)
+                .and_then(|n| n.domain.as_deref());
+            own_routes
+                .entry(entry.network.clone())
+                .or_default()
+                .push(qualify(&entry.host, domain));
+        }
         out.push(RestrictedStack {
             stack: name.clone(),
             subnet,
             networks,
+            own_routes,
             overlay_network: overlay.to_string(),
         });
     }
@@ -116,11 +137,17 @@ pub fn proxy_policies(stacks: &[RestrictedStack]) -> Vec<(Ipv4Net, StackPolicy)>
                     (net.clone(), HostAllow::new(hosts))
                 })
                 .collect();
+            let own_routes = s
+                .own_routes
+                .iter()
+                .map(|(net, hosts)| (net.clone(), HostAllow::new(hosts)))
+                .collect();
             (
                 s.subnet,
                 StackPolicy {
                     stack: s.stack.clone(),
                     networks,
+                    own_routes,
                 },
             )
         })
@@ -240,6 +267,7 @@ mod tests {
                 .iter()
                 .map(|(n, e)| (n.to_string(), targets(e)))
                 .collect(),
+            own_routes: BTreeMap::new(),
             overlay_network: overlay.into(),
         }
     }

@@ -23,10 +23,11 @@ pub use netalloc::{
 };
 pub use stack::{
     validate_stack_name, AllowedHost, AllowedPorts, AllowedTarget, BoundPort, ByteSize, Command,
-    CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket, ExposePort, ForwardAuth,
-    Healthcheck, HealthcheckTest, Middleware, ObjectRef, Placement, PortMapping, PortRange,
-    Protocol, ProxyRoute, PublishMode, RedirectRegex, ResourceSpec, Resources, RestartPolicy,
-    Service, ServiceAction, ServiceExtensions, StackConfig, StackDefaults, StackFile, StackNetwork,
-    StackRequirements, StackSecret, StackVolume, TmpfsOptions, UpdateConfig, VolumeMount,
-    VolumeSyncOverride, DEFAULT_SYNC_INTERVAL, MAX_REPLICAS, SECRET_DIR,
+    CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket, DockerSocketMode,
+    ExposePort, ForwardAuth, Healthcheck, HealthcheckTest, Middleware, ObjectRef, Placement,
+    PortMapping, PortRange, Protocol, ProxyRoute, PublishMode, RedirectRegex, ResourceSpec,
+    Resources, RestartPolicy, Service, ServiceAction, ServiceExtensions, StackConfig,
+    StackDefaults, StackFile, StackNetwork, StackRequirements, StackSecret, StackVolume,
+    TmpfsOptions, UpdateConfig, VolumeMount, VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
+    MAX_REPLICAS, SECRET_DIR,
 };

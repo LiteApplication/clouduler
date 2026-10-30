@@ -300,6 +300,17 @@ pub async fn run(
     let docker_reconnect = tokio::spawn(run_docker_reconnect(docker.clone()));
 
     let materializer = Materializer::new(&data_dir, key_rx.clone());
+    let docker_api = crate::docker_api::start(
+        materializer.docker_api_socket().to_path_buf(),
+        crate::docker_api::ClusterBackend {
+            docker: docker.clone(),
+            node_name: node_name.clone(),
+            cluster: cluster.clone(),
+            config: config_rx.clone(),
+            key: key_rx.clone(),
+            http: internal_http.clone(),
+        },
+    );
     let scheduler = Scheduler::new(
         node_name.clone(),
         cluster.clone(),
@@ -433,6 +444,7 @@ pub async fn run(
     detector.abort();
     fencing.abort();
     docker_reconnect.abort();
+    docker_api.abort();
     scheduler.abort();
     if let Some((orchestrator, worker)) = self_update {
         orchestrator.abort();

@@ -550,6 +550,31 @@ step_assert_healthy() {
   log "$stack.$svc reports healthy"
 }
 
+# assert_logs: { stack: scan, service: scanner, contains: "nginx", timeout: 120 }
+#
+# For output only a container produces and nothing publishes: waits for the
+# instance's buffered log (any replica of the service) to contain a string.
+step_assert_logs() {
+  local stack svc contains timeout
+  stack="$(echo "$1" | jq -r '.stack')"
+  svc="$(echo "$1" | jq -r '.service')"
+  contains="$(echo "$1" | jq -r '.contains')"
+  timeout="$(echo "$1" | jq -r '.timeout // 90')"
+  wait_for "$stack.$svc logs contain '$contains'" "$timeout" \
+    "_logs_contain '$stack' '$svc' '$contains'"
+  log "$stack.$svc logged '$contains'"
+}
+
+_logs_contain() {
+  local stack="$1" svc="$2" contains="$3" node id
+  node="$(any_manager)"
+  for id in $(instances_everywhere | jq -r --arg s "$stack" --arg v "$svc" \
+      '.[] | select(.id | startswith($s + "." + $v + ".")) | .id'); do
+    api_get "$node" "/api/instances/$id/logs?tail=500" 2>/dev/null | grep -qF -- "$contains" && return 0
+  done
+  return 1
+}
+
 dispatch_step() {
   local key val
   key="$(echo "$1" | jq -r 'keys[0]')"

@@ -1,0 +1,20 @@
+# syft scanning an image through clouduler's own docker socket. The image
+# runs on n2 and the scanner on n1, so a scan that succeeds went through the
+# cluster-wide lookup. The socket has to be read-only in this mode.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  scanner:
+    image: anchore/syft:latest
+    restart: on-failure
+    networks: [cluster]
+    command: ["docker:nginx:1.27-alpine", "-o", "table"]
+    x-clouduler:
+      node: n1
+      docker_socket:
+        target: /var/run/docker.sock
+        mode: clouduler
+        read_only: true

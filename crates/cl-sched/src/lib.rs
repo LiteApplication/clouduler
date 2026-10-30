@@ -13,7 +13,7 @@ pub mod run;
 pub mod spec;
 
 pub use error::{Result, SchedError};
-pub use materialize::{Materialized, Materializer};
+pub use materialize::{docker_api_socket_path, Materialized, Materializer};
 pub use place::{candidates, place, Constraint, Decision, PlaceOutcome, Unplaceable};
 pub use plan::{expand, Desired};
 pub use progress::UpdateReporter;

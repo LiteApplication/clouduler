@@ -1,0 +1,13 @@
+# Holds an image on one node only, so the scan stack has to find it elsewhere.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  holder:
+    image: nginx:1.27-alpine
+    restart: always
+    networks: [cluster]
+    x-clouduler:
+      node: n2

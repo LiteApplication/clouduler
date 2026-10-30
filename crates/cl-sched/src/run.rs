@@ -873,6 +873,7 @@ impl Scheduler {
                     objects: &objects.mounts,
                     env: &objects.env,
                     drive_roots: &drive_roots,
+                    docker_api_socket: self.materializer.docker_api_socket(),
                 },
                 placement,
                 assignment.image_digest.as_deref(),

@@ -466,3 +466,9 @@ The check runs after the route lookup and the network gate. With no restricted
 stack the table is empty and a request pays one atomic load. Otherwise it scans
 the restricted subnets and does a hash lookup only for a caller inside one.
 `host:port` entries never reach the proxy, the firewall enforces those.
+
+A stack's own routes are exempt: a container that requests a hostname its own
+stack publishes on that network passes without a list entry. Only hostnames
+declared in the stack's own `x-clouduler.proxy` count, and only on the network
+each is published on. Calls to sibling services by service name never reach the
+proxy and need no entry.

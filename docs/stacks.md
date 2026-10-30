@@ -76,7 +76,11 @@ networks:
 * `allowed` absent means no restriction. `allowed: []` denies everything
   except the stack itself. A key with no value (`allowed:`) is an error, so
   commenting out every entry cannot silently open the stack up.
-* Traffic inside the stack is always allowed, on any port.
+* Traffic inside the stack is always allowed, on any port, when it goes to a
+  sibling service by its service name (`db:5432`, `http://app:8080`): that stays
+  on the stack's own subnets and never reaches the proxy. A request to the
+  stack's *own* route by hostname (`https://app.home.example.org`) goes through
+  the proxy but is allowed too, on the network that route is published on.
 * Names in `host:port` entries are resolved by the node every 10 seconds (IPv4
   only). A name that does not resolve, and has never resolved, grants nothing.
 * An IPv4 literal is accepted in both forms.
@@ -103,6 +107,16 @@ Things to know before relying on it:
 * A connection already open when a grant is removed keeps running until it
   ends; new connections are refused at once.
 * `host:port` entries take no wildcard.
+* The firewall and the proxy identify a stack by its overlay subnet on the
+  restricted network. A service that also joins an `egress` network leaves
+  through that network's bridge instead, so `allowed` does not apply to what
+  it sends that way: a hostname the internal DNS answers with a node address
+  (for example `auth.example.org` -> the node's internal address) is then
+  reached through the node's proxy as an unrestricted caller, and the egress
+  network itself does not filter destinations other than the interface it
+  leaves by, so private ranges reachable from that interface stay reachable.
+  Treat `allowed` as a limit on the stack's overlay networks, not as a
+  substitute for keeping a service off an egress network.
 
 ## Services
 
@@ -524,6 +538,7 @@ written here can run.
 docker_socket:
   target: /var/run/docker.sock   # path inside the container
   read_only: false                # default false
+  mode: local                     # local (default) or clouduler
 ```
 
 Bind-mounts the host's docker socket into the container, so it can control
@@ -537,7 +552,13 @@ drive could back.
 clients need to create and start containers, not just inspect what's
 running.
 
-Granting this is equivalent to giving the container root on the host:
+`mode: clouduler` mounts clouduler's own socket instead of the node's real
+one. It speaks only the read-only image endpoints that scanners such as
+grype and syft use (`docker:<image>` sources), answered from the images on the
+node the container runs on (`pull` fetches a missing one). Everything else is refused with a 403. It requires
+`read_only: true`; a read-write socket in this mode is rejected at deploy.
+
+With the default `mode: local`, granting this is equivalent to giving the container root on the host:
 anything with write access to the socket can launch a privileged container
 and mount the host filesystem into it. Only set it on services you already
 trust with root.

@@ -7,6 +7,7 @@ members = [
     "crates/cl-config",
     "crates/cl-daemon",
     "crates/cl-docker",
+    "crates/cl-dockerapi",
     "crates/cl-dns",
     "crates/cl-init",
     "crates/cl-raft",
@@ -34,6 +35,7 @@ cl-config = { path = "crates/cl-config" }
 cl-daemon = { path = "crates/cl-daemon" }
 cl-dns = { path = "crates/cl-dns" }
 cl-docker = { path = "crates/cl-docker" }
+cl-dockerapi = { path = "crates/cl-dockerapi" }
 cl-drive = { path = "crates/cl-drive" }
 cl-init = { path = "crates/cl-init" }
 cl-net = { path = "crates/cl-net" }

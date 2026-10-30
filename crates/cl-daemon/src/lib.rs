@@ -8,6 +8,7 @@ pub mod backup_restore;
 pub mod backup_runner;
 pub mod backup_secrets;
 pub mod daemon;
+pub mod docker_api;
 pub mod drives;
 pub mod egress;
 pub mod expose;

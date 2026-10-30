@@ -182,7 +182,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.proxy.middlewares.redirect_regex': ['regex', 'replacement', 'permanent'],
   'services.*.x-clouduler.expose': ['port', 'published', 'protocol', 'network', 'proxy_protocol'],
   'services.*.x-clouduler.volume_sync.*': ['interval', 'enabled', 'before', 'after'],
-  'services.*.x-clouduler.docker_socket': ['target', 'read_only'],
+  'services.*.x-clouduler.docker_socket': ['target', 'read_only', 'mode'],
   'services.*.x-clouduler.backup': ['stop_before'],
   'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],

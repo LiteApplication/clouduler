@@ -154,6 +154,40 @@ fn pull_reference(image: &str) -> String {
 }
 
 impl Docker {
+    /// `GET /images/{name}/json` as docker returned it, for a caller that
+    /// relays the answer rather than reading fields out of it.
+    pub async fn inspect_image_json(&self, image: &str) -> Result<serde_json::Value> {
+        let info = self.inner.inspect_image(image).await.map_err(classify)?;
+        serde_json::to_value(info).map_err(|e| DockerError::Other(e.to_string()))
+    }
+
+    /// `GET /images/{name}/history` as docker returned it.
+    pub async fn image_history_json(&self, image: &str) -> Result<serde_json::Value> {
+        let history = self.inner.image_history(image).await.map_err(classify)?;
+        serde_json::to_value(history).map_err(|e| DockerError::Other(e.to_string()))
+    }
+
+    /// `GET /images/json`: every local image.
+    pub async fn list_images_json(&self) -> Result<serde_json::Value> {
+        let images = self
+            .inner
+            .list_images(None::<bollard::query_parameters::ListImagesOptions>)
+            .await
+            .map_err(classify)?;
+        serde_json::to_value(images).map_err(|e| DockerError::Other(e.to_string()))
+    }
+
+    /// `GET /images/{name}/get`: the image as a `docker save` tar. Streamed,
+    /// since an image is routinely larger than anything worth holding in memory.
+    pub fn save_image(
+        &self,
+        image: &str,
+    ) -> impl futures::Stream<Item = Result<bytes::Bytes>> + Send + 'static {
+        self.inner
+            .export_image(image)
+            .map(|chunk| chunk.map_err(classify))
+    }
+
     /// Pull `image`, streaming progress to completion, then return the digest
     /// docker resolved it to locally.
     pub async fn pull(&self, image: &str) -> Result<String> {

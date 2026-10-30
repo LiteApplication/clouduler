@@ -944,11 +944,13 @@ dependencies = [
  "age",
  "anyhow",
  "blake3",
+ "bytes",
  "cl-api",
  "cl-backup",
  "cl-config",
  "cl-dns",
  "cl-docker",
+ "cl-dockerapi",
  "cl-drive",
  "cl-init",
  "cl-net",
@@ -968,6 +970,7 @@ dependencies = [
  "reqwest",
  "rtnetlink",
  "serde_json",
+ "serde_urlencoded",
  "serde_yaml",
  "tempfile",
  "tokio",
@@ -1000,6 +1003,23 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cl-dockerapi"
+version = "0.9.0"
+dependencies = [
+ "bytes",
+ "cl-docker",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

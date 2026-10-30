@@ -8,6 +8,7 @@ use crate::cluster::{ClusterConfig, MAX_STOP_GRACE};
 use crate::error::{ConfigError, Result};
 
 use super::deploy::{parse_memory_bytes, MAX_REPLICAS};
+use super::extensions::DockerSocketMode;
 use super::port::Protocol;
 use super::StackFile;
 
@@ -27,6 +28,29 @@ impl StackFile {
         self.validate_single_config_writer()?;
         self.validate_replicas()?;
         self.validate_memory_sizes()?;
+        self.validate_docker_sockets()?;
+        Ok(())
+    }
+
+    /// The clouduler socket only ever serves read-only image endpoints, so a
+    /// stack asking for it read-write has misunderstood what it is getting.
+    /// Refused rather than silently downgraded.
+    fn validate_docker_sockets(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            let Some(socket) = svc
+                .x_clouduler
+                .as_ref()
+                .and_then(|x| x.docker_socket.as_ref())
+            else {
+                continue;
+            };
+            if socket.mode == DockerSocketMode::Clouduler && !socket.read_only {
+                return Err(ConfigError::invalid(
+                    format!("services.{name}.x-clouduler.docker_socket.read_only"),
+                    "mode: clouduler is read-only; set read_only: true",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -826,6 +850,21 @@ fn is_dns_label(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clouduler_docker_socket_must_be_read_only() {
+        let socket = |extra: &str| {
+            format!("services:\n  scan:\n    image: x\n    x-clouduler:\n      docker_socket:\n        target: /var/run/docker.sock\n        mode: clouduler\n{extra}")
+        };
+        let err = super::StackFile::parse(&socket("")).unwrap_err();
+        assert!(err.to_string().contains("read_only: true"), "{err}");
+        super::StackFile::parse(&socket("        read_only: true\n")).unwrap();
+        // The default mode keeps allowing a read-write socket.
+        super::StackFile::parse(
+            "services:\n  ci:\n    image: x\n    x-clouduler:\n      docker_socket:\n        target: /var/run/docker.sock\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn sync_hooks_must_name_a_service_action() {
         let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      actions:\n        Flush: { cmd: sync }\n      volume_sync:\n        data: { before: Flush }\n";

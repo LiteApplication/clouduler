@@ -77,8 +77,16 @@ pub struct Prepared {
 }
 
 /// Writes objects out for one instance.
+/// The unix socket the daemon serves the read-only image API on, under the
+/// node's data directory. One definition so the listener and the container
+/// mount cannot drift apart.
+pub fn docker_api_socket_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("docker-api").join("docker.sock")
+}
+
 pub struct Materializer {
     root: PathBuf,
+    docker_api_socket: PathBuf,
     /// A live view of the cluster key rather than a snapshot: a node started
     /// with none still gets secrets materialized once one is delivered to it
     /// automatically, without a restart. `borrow()` is synchronous and cheap,
@@ -95,8 +103,15 @@ impl Materializer {
     ) -> Self {
         Self {
             root: data_dir.join(OBJECT_DIR),
+            docker_api_socket: docker_api_socket_path(data_dir),
             key,
         }
+    }
+
+    /// Where this node serves clouduler's own docker API socket, the one a
+    /// `docker_socket` with `mode: clouduler` mounts.
+    pub fn docker_api_socket(&self) -> &Path {
+        &self.docker_api_socket
     }
 
     pub fn has_key(&self) -> bool {

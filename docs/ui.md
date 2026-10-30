@@ -144,7 +144,7 @@ Stack file vocabulary (`docs/stacks.md`):
   the network's apex domain; a trailing dot marks an absolute host outside
   Cloudflare), `expose`, `proxy_protocol`, `volume_sync` (`interval`,
   `enabled`, service-level `before` / `after` action), `auto_update`, `node`,
-  `actions`, `docker_socket` (`target`, `read_only`), `colocate`.
+  `actions`, `docker_socket` (`target`, `read_only`, `mode`), `colocate`.
 - Action definition: the key is the label; `cmd` (a string run as `sh -c`, or an
   exec array), `user`, `timeout` (default 30s, max 5m), `confirm`, `show_in_ui`.
 

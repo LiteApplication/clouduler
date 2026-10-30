@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use cl_config::{Command, RestartPolicy as StackRestart, Service};
+use cl_config::{Command, DockerSocketMode, RestartPolicy as StackRestart, Service};
 use cl_docker::{
     BindMount, ContainerSpec, Healthcheck, PortMapping, PortProtocol, ResourceLimits,
     RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
@@ -44,6 +44,8 @@ pub struct Materialization<'a> {
     pub objects: &'a [Materialized],
     pub env: &'a [(String, String)],
     pub drive_roots: &'a BTreeMap<String, PathBuf>,
+    /// Host path of clouduler's own docker API socket, for `mode: clouduler`.
+    pub docker_api_socket: &'a Path,
 }
 
 /// The host directory a `drive/volume` mount binds. Defense in depth behind
@@ -80,6 +82,7 @@ pub fn build(
         objects,
         env: object_env,
         drive_roots,
+        docker_api_socket,
     } = materialized;
 
     let mut labels: HashMap<String, String> = service
@@ -122,7 +125,10 @@ pub fn build(
         .and_then(|x| x.docker_socket.as_ref())
     {
         mounts.push(BindMount {
-            host_path: DOCKER_SOCKET_PATH.to_string(),
+            host_path: match docker_socket.mode {
+                DockerSocketMode::Local => DOCKER_SOCKET_PATH.to_string(),
+                DockerSocketMode::Clouduler => docker_api_socket.display().to_string(),
+            },
             container_path: docker_socket.target.display().to_string(),
             read_only: docker_socket.read_only,
         });
@@ -360,6 +366,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots,
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -411,6 +418,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -445,6 +453,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             placement,
             None,
@@ -484,6 +493,7 @@ mod tests {
                     objects: &[],
                     env: &[],
                     drive_roots: &roots(),
+                    docker_api_socket: Path::new("/data/docker-api/docker.sock"),
                 },
                 Placement {
                     network: Some("site_default".into()),
@@ -516,6 +526,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             Some("sha256:abc"),
@@ -546,6 +557,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -573,6 +585,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -588,6 +601,38 @@ mod tests {
     }
 
     #[test]
+    fn clouduler_mode_mounts_the_daemons_own_socket() {
+        let s = service(
+            "services:\n  scan:\n    image: grype\n    x-clouduler:\n      docker_socket:\n        target: /var/run/docker.sock\n        mode: clouduler\n        read_only: true\n",
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
+            },
+            Placement::default(),
+            None,
+            1,
+        );
+
+        let mount = spec
+            .mounts
+            .iter()
+            .find(|m| m.container_path == "/var/run/docker.sock")
+            .expect("socket mounted");
+        assert_eq!(mount.host_path, "/data/docker-api/docker.sock");
+        assert!(mount.read_only);
+        assert!(spec
+            .mounts
+            .iter()
+            .all(|m| m.host_path != DOCKER_SOCKET_PATH));
+    }
+
+    #[test]
     fn no_docker_socket_mount_without_the_extension() {
         let s = service("services:\n  web:\n    image: nginx\n");
         let spec = build(
@@ -597,6 +642,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -628,6 +674,7 @@ mod tests {
                 objects: &objects,
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -650,6 +697,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -671,6 +719,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -699,6 +748,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -719,6 +769,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -742,6 +793,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -768,6 +820,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -792,6 +845,7 @@ mod tests {
                 objects: &[],
                 env: &object_env,
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -829,6 +883,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -850,6 +905,7 @@ mod tests {
                     objects: &[],
                     env: &[],
                     drive_roots: &roots(),
+                    docker_api_socket: Path::new("/data/docker-api/docker.sock"),
                 },
                 Placement::default(),
                 None,
@@ -868,6 +924,7 @@ mod tests {
                     objects: &[],
                     env: &[],
                     drive_roots: &roots(),
+                    docker_api_socket: Path::new("/data/docker-api/docker.sock"),
                 },
                 Placement::default(),
                 None,
@@ -889,6 +946,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,
@@ -910,6 +968,7 @@ mod tests {
                 objects: &[],
                 env: &[],
                 drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
             },
             Placement::default(),
             None,

@@ -692,6 +692,7 @@ fn policy_allowing(network: &str, hosts: &[&str]) -> cl_proxy::StackPolicy {
     cl_proxy::StackPolicy {
         stack: "blog".to_string(),
         networks: HashMap::from([(network.to_string(), cl_proxy::HostAllow::new(hosts))]),
+        own_routes: HashMap::new(),
     }
 }
 

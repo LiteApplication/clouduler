@@ -405,9 +405,32 @@ pub struct DockerSocket {
     pub target: PathBuf,
     /// Read-write by default: most docker clients need to create and start
     /// containers, not just inspect what's running, so that's the useful
-    /// default despite being the more dangerous one.
+    /// default despite being the more dangerous one. `mode: clouduler`
+    /// refuses a read-write socket, so it has to say `read_only: true`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+    /// Which socket gets mounted.
+    #[serde(default, skip_serializing_if = "DockerSocketMode::is_local")]
+    pub mode: DockerSocketMode,
+}
+
+/// Where a `docker_socket` mount is served from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerSocketMode {
+    /// The node's real docker socket: the full engine API, root on the host.
+    #[default]
+    Local,
+    /// Clouduler's own socket: only the read-only image endpoints scanners
+    /// like grype and syft use, answered for every image in the cluster
+    /// rather than just this node's cache.
+    Clouduler,
+}
+
+impl DockerSocketMode {
+    fn is_local(&self) -> bool {
+        *self == Self::Local
+    }
 }
 
 /// Per volume override of the drive's default sync interval.
@@ -661,6 +684,31 @@ volume_sync:
         )
         .unwrap();
         assert!(ext.docker_socket.unwrap().read_only);
+    }
+
+    #[test]
+    fn docker_socket_mode_defaults_to_local() {
+        let ext: ServiceExtensions =
+            serde_yaml::from_str("docker_socket:\n  target: /var/run/docker.sock\n").unwrap();
+        assert_eq!(ext.docker_socket.unwrap().mode, DockerSocketMode::Local);
+    }
+
+    #[test]
+    fn docker_socket_mode_clouduler_parses() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "docker_socket:\n  target: /var/run/docker.sock\n  mode: clouduler\n  read_only: true\n",
+        )
+        .unwrap();
+        assert_eq!(ext.docker_socket.unwrap().mode, DockerSocketMode::Clouduler);
+    }
+
+    #[test]
+    fn docker_socket_rejects_an_unknown_mode() {
+        let err = serde_yaml::from_str::<ServiceExtensions>(
+            "docker_socket:\n  target: /var/run/docker.sock\n  mode: remote\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("remote"), "{err}");
     }
 
     #[test]

@@ -1,0 +1,19 @@
+# The read-only docker socket (`docker_socket: { mode: clouduler }`) lets a
+# scanner inspect and export images held by other nodes. Syft is the client
+# because it is what the feature is for; its table output naming nginx's
+# packages proves the whole inspect + save path worked.
+name: image-scan
+description: syft on one node scans an image that only another node holds, through the clouduler docker socket.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/image-holder.yaml, name: image-holder }
+  - wait_running: { stack: image-holder, service: holder, timeout: 180 }
+  - deploy_stack: { file: stacks/image-scan.yaml, name: image-scan }
+  # busybox's package is in every alpine image; the table lists name + version + type.
+  - assert_logs: { stack: image-scan, service: scanner, contains: "busybox", timeout: 240 }
