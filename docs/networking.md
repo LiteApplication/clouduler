@@ -244,6 +244,14 @@ once a second (`docker network inspect`, joined to the `clouduler.stack` label).
   waiting for its 10 second tick.
 * Grants lapse after the record's TTL or five minutes, whichever is longer.
   Lookups are per node, so each node learns only what its own containers asked.
+* Only answers that come from the upstream forwarder are observed. Hostnames of
+  routes on a `public` network are answered by the resolver's own override
+  records (`proxy_overrides`, the node's proxy address on the internal
+  network) before the forwarder is reached, so they never produce a wan grant.
+  They are governed by the `public` list through the proxy instead. Their
+  non-proxy ports (a mail submission port exposed by another stack, say) are
+  not covered by either list: a `host:port` firewall entry is resolved by the
+  node's own resolver, which returns the public address, not the override.
 
 ## MTU
 

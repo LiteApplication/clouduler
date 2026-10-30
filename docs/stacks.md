@@ -161,6 +161,14 @@ networks:
   for up to a second after it starts.
 * IPv4 and the stack's own DNS only: IPv6 is not routed out these networks, and
   names resolved by anything other than the cluster resolver are not seen.
+* A route this cluster publishes on a `public` network (`auth.example.org`) is
+  not an outside destination for this purpose: the cluster resolver answers it
+  with the node's own proxy, not from upstream, so no grant is ever made for it
+  and an entry for it here does nothing. List it on the stack's `public`
+  network instead, where the proxy checks it. A stack that has no internal or
+  private network (only `public` plus the egress network) has no pinned route
+  to the proxy, so the proxy sees it as an unrestricted caller and the list is
+  not enforced against it; the entry is still the right place for it.
 
 ## Services
 
