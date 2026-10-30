@@ -83,6 +83,26 @@ impl Restriction {
     }
 }
 
+/// One destination a wan-restricted stack may reach. Without `ports` every
+/// port and protocol to the address is open, which is what a bare hostname or
+/// IP entry means on a wan network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WanGrant {
+    pub addr: Ipv4Addr,
+    pub ports: Option<(Protocol, PortRange)>,
+}
+
+/// A stack with an `allowed` list on an egress, wireguard or nat network.
+///
+/// The bridge of such a network is shared by every stack on it, so the stack
+/// is told apart by the addresses its own containers hold on that bridge
+/// (`sources`) rather than by a subnet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WanRestriction {
+    pub sources: Vec<Ipv4Addr>,
+    pub grants: Vec<WanGrant>,
+}
+
 /// Restrictions in a stable order with the same subnet merged, so the same
 /// input always yields the same rules (the plan is re-applied every tick).
 fn normalized(restrictions: &[Restriction]) -> Vec<Restriction> {
@@ -108,6 +128,15 @@ fn normalized(restrictions: &[Restriction]) -> Vec<Restriction> {
 /// The routed-traffic filter. Empty `restrictions` yields no plan: the caller
 /// removes the chain instead of leaving a jump that does nothing.
 pub fn forward_plan(restrictions: &[Restriction]) -> IptablesPlan {
+    forward_plan_with_wan(restrictions, &[])
+}
+
+/// [`forward_plan`] plus the wan-restricted stacks: from each of their
+/// containers' bridge addresses, replies and the grants return to the normal
+/// rules (the egress kill-switch among them) and everything else is dropped.
+/// A container address with no grants at all is dropped entirely, which is how
+/// `allowed: []` denies the outside.
+pub fn forward_plan_with_wan(restrictions: &[Restriction], wan: &[WanRestriction]) -> IptablesPlan {
     let mut chain = ChainSpec::new("filter", FORWARD_CHAIN);
     for r in normalized(restrictions) {
         let src = r.subnet.to_string();
@@ -142,6 +171,45 @@ pub fn forward_plan(restrictions: &[Restriction]) -> IptablesPlan {
         }
         chain.push(&["-s", &src, "-j", "DROP"]);
     }
+    for (src, grants) in wan_sources(wan) {
+        let src = format!("{src}/32");
+        chain.push(&[
+            "-s",
+            &src,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "RETURN",
+        ]);
+        for g in &grants {
+            let dst = format!("{}/32", g.addr);
+            match g.ports {
+                None => chain.push(&["-s", &src, "-d", &dst, "-j", "RETURN"]),
+                Some((protocol, range)) => {
+                    let dport = if range.start == range.end {
+                        range.start.to_string()
+                    } else {
+                        format!("{}:{}", range.start, range.end)
+                    };
+                    chain.push(&[
+                        "-s",
+                        &src,
+                        "-d",
+                        &dst,
+                        "-p",
+                        &protocol.to_string(),
+                        "--dport",
+                        &dport,
+                        "-j",
+                        "RETURN",
+                    ]);
+                }
+            }
+        }
+        chain.push(&["-s", &src, "-j", "DROP"]);
+    }
     IptablesPlan {
         chains: vec![chain],
         jumps: vec![Jump::new(
@@ -151,6 +219,20 @@ pub fn forward_plan(restrictions: &[Restriction]) -> IptablesPlan {
             true,
         )],
     }
+}
+
+/// Every restricted bridge address with the sorted grants of the stack that
+/// owns it, in address order so the same input always yields the same rules.
+fn wan_sources(wan: &[WanRestriction]) -> std::collections::BTreeMap<Ipv4Addr, BTreeSet<WanGrant>> {
+    let mut out: std::collections::BTreeMap<Ipv4Addr, BTreeSet<WanGrant>> = Default::default();
+    for r in wan {
+        for src in &r.sources {
+            out.entry(*src)
+                .or_default()
+                .extend(r.grants.iter().copied());
+        }
+    }
+    out
 }
 
 /// Sends a restricted stack's proxy traffic to another node to this node's own
@@ -431,6 +513,89 @@ mod tests {
 
     fn forward() -> Vec<String> {
         chain_rules(&forward_plan(&[blog()]), FORWARD_CHAIN)
+    }
+
+    fn wan_rules(wan: &[WanRestriction]) -> Vec<String> {
+        chain_rules(&forward_plan_with_wan(&[], wan), FORWARD_CHAIN)
+    }
+
+    fn wan_stack() -> WanRestriction {
+        WanRestriction {
+            sources: vec![ip("10.245.3.2")],
+            grants: vec![
+                WanGrant {
+                    addr: ip("93.184.216.34"),
+                    ports: None,
+                },
+                WanGrant {
+                    addr: ip("140.82.112.3"),
+                    ports: Some((
+                        Protocol::Tcp,
+                        PortRange {
+                            start: 443,
+                            end: 443,
+                        },
+                    )),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_wan_stack_reaches_only_its_grants_and_replies() {
+        let rules = wan_rules(&[wan_stack()]);
+        let from = "10.245.3.2";
+        for (dst, proto, port, want) in [
+            ("93.184.216.34", Protocol::Tcp, 80, Verdict::Return),
+            ("93.184.216.34", Protocol::Udp, 53, Verdict::Return),
+            ("140.82.112.3", Protocol::Tcp, 443, Verdict::Return),
+            ("140.82.112.3", Protocol::Tcp, 22, Verdict::Drop),
+            ("140.82.112.3", Protocol::Udp, 443, Verdict::Drop),
+            ("1.1.1.1", Protocol::Tcp, 443, Verdict::Drop),
+        ] {
+            assert_eq!(
+                eval(&rules, &pkt(from, dst, proto, port)),
+                want,
+                "{dst}:{port}"
+            );
+        }
+        assert_eq!(
+            eval(
+                &rules,
+                &established(pkt(from, "1.1.1.1", Protocol::Tcp, 443))
+            ),
+            Verdict::Return
+        );
+    }
+
+    #[test]
+    fn other_addresses_on_the_bridge_are_left_alone() {
+        let rules = wan_rules(&[wan_stack()]);
+        assert_eq!(
+            eval(&rules, &pkt("10.245.3.3", "1.1.1.1", Protocol::Tcp, 443)),
+            Verdict::Fallthrough
+        );
+    }
+
+    #[test]
+    fn an_empty_wan_list_drops_everything_new() {
+        let rules = wan_rules(&[WanRestriction {
+            sources: vec![ip("10.245.3.2")],
+            grants: vec![],
+        }]);
+        assert_eq!(
+            eval(&rules, &pkt("10.245.3.2", "1.1.1.1", Protocol::Tcp, 443)),
+            Verdict::Drop
+        );
+    }
+
+    #[test]
+    fn wan_rules_do_not_depend_on_input_order() {
+        let a = wan_stack();
+        let mut b = wan_stack();
+        b.grants.reverse();
+        b.sources = vec![ip("10.245.3.2")];
+        assert_eq!(wan_rules(&[a]), wan_rules(&[b]));
     }
 
     #[test]

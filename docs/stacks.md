@@ -85,12 +85,14 @@ networks:
   only). A name that does not resolve, and has never resolved, grants nothing.
 * An IPv4 literal is accepted in both forms.
 * The restriction is per stack and applies to every service in it.
-* Lists are allowed on `internal`, `private` and `public` networks only. A
-  `host:port` entry must sit on the network the stack's containers live on
-  (the internal or private network if the stack declares one, else the public
-  one); hostname entries may sit on any of the stack's networks and limit the
-  routes published on that network. See "Per-stack restrictions" in
-  `docs/networking.md` for exactly what the firewall does and does not grant.
+* On `internal`, `private` and `public` networks, a `host:port` entry must sit
+  on the network the stack's containers live on (the internal or private
+  network if the stack declares one, else the public one); hostname entries may
+  sit on any of the stack's networks and limit the routes published on that
+  network. See "Per-stack restrictions" in `docs/networking.md` for exactly what
+  the firewall does and does not grant.
+* `egress`, `wireguard` and `nat` networks take a list too, which works
+  differently: see "Restricting the outside" below.
 
 Things to know before relying on it:
 
@@ -117,6 +119,48 @@ Things to know before relying on it:
   leaves by, so private ranges reachable from that interface stay reachable.
   Treat `allowed` as a limit on the stack's overlay networks, not as a
   substitute for keeping a service off an egress network.
+
+### Restricting the outside
+
+A list on an `egress`, `wireguard` or `nat` network (the networks a service
+leaves the cluster through) limits what the stack's containers can reach out
+there. Deny by default once the key is present, allow everything when it is
+absent, as everywhere else.
+
+```yaml
+networks:
+  internal: {}
+  vpn:                                # an egress, wireguard or nat network
+    allowed:
+      - api.github.com                # this name, any port
+      - "*.githubusercontent.com"     # any name below it, never the apex
+      - "*.docker.io:443"             # a wildcard may take a port here
+      - 192.0.2.10                    # an IPv4 literal, any port
+      - "198.51.100.7:5432"           # literal plus port
+      - "registry.example.org:443/tcp"
+```
+
+* A hostname or wildcard is allowed on the addresses the stack's own DNS
+  lookups of it return. The cluster resolver sees every lookup, so the grant is
+  in the firewall before the answer reaches the container; nothing is resolved
+  ahead of time. An address stays allowed for the record's TTL or five minutes,
+  whichever is longer, and a new lookup renews it. A connection already open is
+  never cut.
+* `*.suffix` matches any number of labels below the suffix (`a.b.suffix` too),
+  not the suffix itself. Wildcards are accepted on these networks only.
+* An entry without a port allows every port and protocol to the address; with
+  one (`host:port`, `host:lo-hi`, `/udp`) only that.
+* Because it hangs on the resolver, the stack must also be on an `internal`,
+  `private` or `public` network, whose gateway its containers use for DNS. A
+  container that skips the resolver and dials an address it knows reaches it
+  only if the address is a literal in the list, or was returned to another
+  lookup of the same stack for an allowed name.
+* The list applies to every container of the stack on that network, and to
+  nothing else on the bridge. Containers are recognised by the address they
+  hold on the bridge, read once a second, so a new container can reach anything
+  for up to a second after it starts.
+* IPv4 and the stack's own DNS only: IPv6 is not routed out these networks, and
+  names resolved by anything other than the cluster resolver are not seen.
 
 ## Services
 

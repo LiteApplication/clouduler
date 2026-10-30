@@ -10,6 +10,11 @@
 //!   range) and a protocol (`tcp` by default). Enforced by the host firewall,
 //!   which resolves the name and accepts only that destination.
 //! * An IPv4 literal takes either form.
+//!
+//! On a wan (`egress`, `wireguard` or `nat`) network every entry is enforced
+//! by the firewall: a hostname (or `*.suffix`) is allowed on the addresses
+//! the stack's own DNS lookups of it return, an entry without a port meaning
+//! every port and protocol. See `docs/stacks.md`.
 
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -47,6 +52,14 @@ pub struct AllowedTarget {
 }
 
 impl AllowedTarget {
+    /// A wildcard with a port. Only meaningful on a wan (egress, wireguard or
+    /// nat) network, where the firewall enforces it on the addresses the
+    /// name resolves to; on any other network a wildcard is a proxy host
+    /// pattern and cannot take a port.
+    pub fn is_wildcard_with_port(&self) -> bool {
+        matches!(self.host, AllowedHost::Wildcard(_)) && self.ports.is_some()
+    }
+
     pub fn parse(raw: &str) -> Result<Self, String> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -66,7 +79,7 @@ impl AllowedTarget {
                 protocol.unwrap_or_default()
             ));
         }
-        let host = parse_host(host, ports.is_some())?;
+        let host = parse_host(host)?;
         Ok(AllowedTarget {
             host,
             ports: ports.map(|range| AllowedPorts {
@@ -77,7 +90,7 @@ impl AllowedTarget {
     }
 }
 
-fn parse_host(host: &str, has_port: bool) -> Result<AllowedHost, String> {
+fn parse_host(host: &str) -> Result<AllowedHost, String> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
         return Err("an allowed entry needs a host".into());
@@ -86,11 +99,6 @@ fn parse_host(host: &str, has_port: bool) -> Result<AllowedHost, String> {
         return Err(format!("host \"{host}\" is too long"));
     }
     if let Some(suffix) = host.strip_prefix("*.") {
-        if has_port {
-            return Err(format!(
-                "\"{host}\": a wildcard host is checked by the proxy and cannot take a port"
-            ));
-        }
         check_name(suffix)?;
         return Ok(AllowedHost::Wildcard(suffix.to_string()));
     }
@@ -227,13 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn wildcards_are_proxy_only() {
+    fn wildcards_parse_with_or_without_a_port() {
         assert_eq!(
             ok("*.Example.org").host,
             AllowedHost::Wildcard("example.org".into())
         );
-        let err = AllowedTarget::parse("*.example.org:443").unwrap_err();
-        assert!(err.contains("cannot take a port"), "{err}");
+        assert!(ok("*.example.org:443").is_wildcard_with_port());
+        assert!(!ok("*.example.org").is_wildcard_with_port());
     }
 
     #[test]

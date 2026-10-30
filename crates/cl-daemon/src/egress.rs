@@ -43,7 +43,10 @@ use cl_net::egress::{
     overlay_pool, overlay_snat_plan, HostServices, Wanted,
 };
 use cl_net::iptables::apply_plan;
-use cl_net::restrict::{forward_plan, redirect_plan, Restriction, FORWARD_CHAIN, REDIRECT_CHAIN};
+use cl_net::restrict::{
+    forward_plan_with_wan, redirect_plan, Restriction, WanRestriction, FORWARD_CHAIN,
+    REDIRECT_CHAIN,
+};
 use cl_net::vxlan::Overlay;
 use cl_net::wireguard::{
     ensure_wireguard_interface, parse_wg_quick, wireguard_ingress_iptables_plan, IngressRule,
@@ -137,6 +140,7 @@ pub fn start(
     cluster: &Arc<ClusterNode>,
     docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    wan: Arc<crate::wan::WanFirewall>,
 ) -> tokio::task::JoinHandle<()> {
     let cluster = cluster.clone();
     let node_name = node_name.to_string();
@@ -160,8 +164,23 @@ pub fn start(
         let resolved = spawn_resolver(cluster.clone(), cfg.clone());
         let mut restricted: Vec<Restriction> = Vec::new();
         let mut firewall_clean = false;
+        let mut wan_wake = wan.subscribe();
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                // A lookup (or a new container) changed what a wan list
+                // allows. Nothing else is worth redoing for that, and a
+                // lookup is waiting on it.
+                Ok(()) = wan_wake.changed() => {
+                    let version = wan.version();
+                    let wan_rules = wan.restrictions(std::time::Instant::now());
+                    match ensure_restrictions(&cfg, &node_name, &restricted, &wan_rules, &mut firewall_clean).await {
+                        Ok(()) => wan.mark_applied(version),
+                        Err(e) => warn!(error = %e, "cannot apply the wan allowlists"),
+                    }
+                    continue;
+                }
+            }
             cfg = live_config(&cluster, &cfg).await;
 
             let state = cluster.state().await;
@@ -177,10 +196,19 @@ pub fn start(
             if let Err(e) = ensure_container_input(&state, &cfg, &restricted).await {
                 warn!(error = %e, "cannot apply the container input filter");
             }
-            if let Err(e) =
-                ensure_restrictions(&cfg, &node_name, &restricted, &mut firewall_clean).await
+            let wan_version = wan.version();
+            let wan_rules = wan.restrictions(std::time::Instant::now());
+            match ensure_restrictions(
+                &cfg,
+                &node_name,
+                &restricted,
+                &wan_rules,
+                &mut firewall_clean,
+            )
+            .await
             {
-                warn!(error = %e, "cannot apply the per-stack network restrictions");
+                Ok(()) => wan.mark_applied(wan_version),
+                Err(e) => warn!(error = %e, "cannot apply the per-stack network restrictions"),
             }
 
             let Some(docker) = docker.read().await.clone() else {
@@ -318,9 +346,10 @@ async fn ensure_restrictions(
     cfg: &ClusterConfig,
     node_name: &str,
     restricted: &[Restriction],
+    wan: &[WanRestriction],
     clean: &mut bool,
 ) -> Result<()> {
-    if restricted.is_empty() {
+    if restricted.is_empty() && wan.is_empty() {
         if *clean {
             return Ok(());
         }
@@ -364,7 +393,7 @@ async fn ensure_restrictions(
     } else {
         Vec::new()
     };
-    let forward = forward_plan(restricted);
+    let forward = forward_plan_with_wan(restricted, wan);
     // Without this node's own internal address there is nowhere to redirect
     // to; the forward filter alone still keeps the stack in.
     let redirect = local.map(|local| redirect_plan(restricted, &others, local, &proxy_ports));

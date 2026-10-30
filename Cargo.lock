@@ -943,6 +943,7 @@ version = "0.9.0"
 dependencies = [
  "age",
  "anyhow",
+ "async-trait",
  "blake3",
  "bytes",
  "cl-api",

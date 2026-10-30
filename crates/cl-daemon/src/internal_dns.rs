@@ -41,6 +41,7 @@ pub fn start(
     cfg: &ClusterConfig,
     cluster: &Arc<ClusterNode>,
     node_name: &str,
+    wan: Arc<crate::wan::WanFirewall>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let origin = zone_origin(cfg);
     let name = match Name::parse(&origin, Some(&Name::root())) {
@@ -58,6 +59,9 @@ pub fn start(
             return None;
         }
     };
+
+    // Opens a stack's wan `allowed` entries as it looks the names up.
+    dns.set_observer(wan);
 
     info!(zone = %origin, "internal dns ready");
     let cluster = cluster.clone();

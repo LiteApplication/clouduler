@@ -9,8 +9,8 @@
 //! restart.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use cl_raft::InstanceId;
 use hickory_proto::rr::rdata::{A, SOA};
@@ -302,12 +302,97 @@ impl ZoneHandler for OverrideZone {
     }
 }
 
+/// Told about every address the upstream resolver answered for a client, before
+/// the answer goes back to it. This is how a wan `allowed` list opens the
+/// firewall for a name exactly when the stack asks for it: the observer has
+/// the grant in place by the time the container learns the address.
+#[async_trait::async_trait]
+pub trait AnswerObserver: Send + Sync {
+    /// `name` is the queried name, lowercase with no trailing dot. `answers`
+    /// are the IPv4 addresses of the answer, with their TTL in seconds.
+    async fn observe(&self, client: IpAddr, name: &str, answers: &[(Ipv4Addr, u32)]);
+}
+
+type ObserverSlot = Arc<StdRwLock<Option<Arc<dyn AnswerObserver>>>>;
+
+/// The upstream forwarder with the [`AnswerObserver`] hooked onto its answers.
+struct ObservedForwarder {
+    inner: ForwardZoneHandler<TokioRuntimeProvider>,
+    observer: ObserverSlot,
+}
+
+#[async_trait::async_trait]
+impl ZoneHandler for ObservedForwarder {
+    fn zone_type(&self) -> ZoneType {
+        self.inner.zone_type()
+    }
+
+    fn axfr_policy(&self) -> AxfrPolicy {
+        self.inner.axfr_policy()
+    }
+
+    fn origin(&self) -> &LowerName {
+        self.inner.origin()
+    }
+
+    async fn lookup(
+        &self,
+        name: &LowerName,
+        rtype: RecordType,
+        request_info: Option<&RequestInfo<'_>>,
+        lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        self.inner
+            .lookup(name, rtype, request_info, lookup_options)
+            .await
+    }
+
+    async fn search(
+        &self,
+        request: &Request,
+        lookup_options: LookupOptions,
+    ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
+        let (flow, ctx) = self.inner.search(request, lookup_options).await;
+        let observer = self.observer.read().ok().and_then(|slot| slot.clone());
+        if let (Some(observer), LookupControlFlow::Continue(Ok(lookup))) = (observer, &flow) {
+            let answers: Vec<(Ipv4Addr, u32)> = lookup
+                .iter()
+                .filter_map(|record| match &record.data {
+                    RData::A(a) => Some((a.0, record.ttl)),
+                    _ => None,
+                })
+                .collect();
+            if !answers.is_empty() {
+                if let Ok(info) = request.request_info() {
+                    let name = info
+                        .query
+                        .name()
+                        .to_string()
+                        .trim_end_matches('.')
+                        .to_ascii_lowercase();
+                    observer.observe(request.src().ip(), &name, &answers).await;
+                }
+            }
+        }
+        (flow, ctx)
+    }
+
+    async fn nsec_records(
+        &self,
+        name: &LowerName,
+        lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        self.inner.nsec_records(name, lookup_options).await
+    }
+}
+
 /// The internal DNS resolver: serves the clouduler zone on the bridge
 /// address and forwards everything else to the host's configured resolvers.
 pub struct InternalDns {
     origin: Name,
     zone: Arc<SwappableZone>,
     overrides: Arc<OverrideZone>,
+    observer: ObserverSlot,
 }
 
 impl InternalDns {
@@ -320,7 +405,16 @@ impl InternalDns {
             origin,
             zone: Arc::new(SwappableZone::new(handler)),
             overrides: Arc::new(OverrideZone::new()?),
+            observer: Arc::default(),
         })
+    }
+
+    /// Have `observer` told of every upstream answer from now on. Applies to
+    /// servers already running too.
+    pub fn set_observer(&self, observer: Arc<dyn AnswerObserver>) {
+        if let Ok(mut slot) = self.observer.write() {
+            *slot = Some(observer);
+        }
     }
 
     /// Replace the zone content in place. Called whenever placement changes,
@@ -361,7 +455,10 @@ impl InternalDns {
             forward_origin,
             vec![
                 self.overrides.clone() as Arc<dyn ZoneHandler>,
-                Arc::new(forwarder),
+                Arc::new(ObservedForwarder {
+                    inner: forwarder,
+                    observer: self.observer.clone(),
+                }),
             ],
         );
 

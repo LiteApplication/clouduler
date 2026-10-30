@@ -22,3 +22,4 @@ pub mod relay;
 pub mod restrict;
 pub mod systemd;
 pub mod volume_freeze;
+pub mod wan;

@@ -22,6 +22,7 @@ cl-secret.workspace = true
 cl-update.workspace = true
 
 anyhow.workspace = true
+async-trait.workspace = true
 age = "0.11"
 blake3.workspace = true
 bytes.workspace = true

@@ -654,16 +654,17 @@ impl StackFile {
             .map(String::as_str)
     }
 
-    /// `allowed` restricts what the stack reaches through a network, which
-    /// only means something where traffic is mediated by clouduler.
+    /// `allowed` restricts what the stack reaches through a network.
     ///
-    /// * Egress, wireguard and nat networks leave the node by the host's own
-    ///   routing, with no proxy in the path and a bridge shared by every stack
-    ///   on it, so a per-stack list cannot be enforced there.
-    /// * An entry with a port is enforced by the firewall on the stack's own
-    ///   overlay, so it can only sit on the network the containers live on.
-    ///   Hostname-only entries are enforced by the proxy on the routes
-    ///   published on that network, and can sit on any usable network.
+    /// * On an internal, private or public network, an entry with a port is
+    ///   enforced by the firewall on the stack's own overlay, so it can only
+    ///   sit on the network the containers live on. Hostname-only entries are
+    ///   enforced by the proxy on the routes published on that network, and
+    ///   can sit on any usable network. A wildcard cannot take a port there.
+    /// * On a wan (egress, wireguard or nat) network every entry is enforced
+    ///   by the firewall on the stack's own containers: hostnames are allowed
+    ///   on whatever the stack's DNS lookups of them return, which needs the
+    ///   stack's resolver, so the stack must also have an overlay network.
     fn validate_allowed(&self, cluster: &ClusterConfig) -> Result<()> {
         use crate::cluster::NetworkKind;
 
@@ -673,19 +674,28 @@ impl StackFile {
                 continue;
             };
             let at = format!("networks.{name}.allowed");
-            if let Some(kind) = cluster.networks.get(name).map(|n| n.kind) {
-                if !matches!(
-                    kind,
-                    NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
-                ) {
+            let kind = cluster.networks.get(name).map(|n| n.kind);
+            if matches!(
+                kind,
+                Some(NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat)
+            ) {
+                if overlay.is_none() {
                     return Err(ConfigError::invalid(
                         at,
                         format!(
-                            "network {name} is an {} network, whose traffic leaves through the host's own routing; allowed only applies to internal, private and public networks",
-                            format!("{kind:?}").to_lowercase()
+                            "network {name} has an allowed list, which is applied as the stack's containers look names up through the cluster resolver; the stack needs an internal, private or public network as well"
                         ),
                     ));
                 }
+                continue;
+            }
+            if let Some(entry) = allowed.iter().find(|e| e.is_wildcard_with_port()) {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!(
+                        "{entry}: a wildcard host is checked by the proxy here and cannot take a port (a port on a wildcard is only supported on egress, wireguard and nat networks)"
+                    ),
+                ));
             }
             if overlay != Some(name.as_str()) {
                 if let Some(entry) = allowed.iter().find(|e| e.ports.is_some()) {
@@ -1450,13 +1460,29 @@ services:
     }
 
     #[test]
-    fn allowed_is_refused_on_egress_networks() {
+    fn allowed_is_accepted_on_egress_networks_with_an_overlay() {
         let f = stack(
-            "services:\n  web:\n    image: x\n    networks: [tailscale, vpn]\nnetworks:\n  tailscale: {}\n  vpn:\n    allowed: [a.example.org]\n",
+            "services:\n  web:\n    image: x\n    networks: [tailscale, vpn]\nnetworks:\n  tailscale: {}\n  vpn:\n    allowed: [a.example.org, \"*.b.example.org:443\", 1.2.3.4]\n",
+        );
+        f.validate(&cluster()).unwrap();
+    }
+
+    #[test]
+    fn allowed_on_egress_needs_an_overlay_for_the_resolver() {
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [vpn]\nnetworks:\n  vpn:\n    allowed: [a.example.org]\n",
         );
         let err = f.validate(&cluster()).unwrap_err();
         assert!(err.to_string().contains("networks.vpn.allowed"), "{err}");
-        assert!(err.to_string().contains("egress"), "{err}");
+    }
+
+    #[test]
+    fn a_wildcard_port_is_refused_off_wan_networks() {
+        let f = stack(
+            "services:\n  web:\n    image: x\n    networks: [tailscale]\nnetworks:\n  tailscale:\n    allowed: [\"*.example.org:443\"]\n",
+        );
+        let err = f.validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("cannot take a port"), "{err}");
     }
 
     #[test]

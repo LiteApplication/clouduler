@@ -212,8 +212,8 @@ no stack uses the feature the chains below do not exist.
 
 A `host:port` entry can only narrow what routing and `CLDR-IN` already carry:
 overlay containers have no route to the internet, and to a node's own ports
-only the ones listed above are reachable. Reaching the outside still takes a
-`nat`, `egress` or `wireguard` network, which `allowed` does not apply to.
+only the ones listed above are reachable. Reaching the outside takes a `nat`,
+`egress` or `wireguard` network, which has its own kind of list, below.
 Rules are only ever replaced from state that was read successfully: with no
 cluster config replicated yet, an unreadable address book or a stack file that
 does not parse, the previous rules stay in place instead of the stacks being
@@ -221,6 +221,29 @@ treated as unrestricted. Names in `host:port` entries are resolved on their own
 task, so a slow resolver delays the grants and not the rest of the reconcile.
 Hostname entries are enforced by the proxy, see "Per-stack host lists" in
 `docs/proxy.md`.
+
+### Wan lists
+
+An `allowed` list on an `egress`, `wireguard` or `nat` network (`docs/stacks.md`,
+"Restricting the outside") filters what leaves through that network's bridge.
+That bridge is shared by every stack on it, so `cl_daemon::wan` tells stacks
+apart by the address each of their containers holds on it, read from docker
+once a second (`docker network inspect`, joined to the `clouduler.stack` label).
+
+* The rules go in `CLDR-ALLOW`, with the overlay restrictions
+  (`forward_plan_with_wan`). For each container address: replies `RETURN`,
+  each grant `RETURN`s, everything else is dropped. `RETURN`, so the bridge's
+  kill-switch behind it still decides the way out. Addresses of containers with
+  no list are not mentioned and untouched.
+* Literal entries are grants from the start. A name or wildcard becomes a grant
+  when the cluster resolver forwards an answer for it to one of the stack's
+  containers (identified by its overlay address): `InternalDns` wraps its
+  upstream forwarder in an `AnswerObserver`, which records the answer's IPv4
+  addresses and waits, up to two seconds, for the egress loop to write the rules
+  before the answer is released. The egress loop wakes on a change instead of
+  waiting for its 10 second tick.
+* Grants lapse after the record's TTL or five minutes, whichever is longer.
+  Lookups are per node, so each node learns only what its own containers asked.
 
 ## MTU
 

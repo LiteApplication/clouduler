@@ -295,6 +295,26 @@ impl Docker {
             })
     }
 
+    /// The containers attached to `name`, as `(container id, address on that
+    /// network)`. Empty when the network does not exist. Used to tell the
+    /// stacks sharing an egress bridge apart by the address each container
+    /// holds on it.
+    pub async fn network_members(&self, name: &str) -> Result<Vec<(String, Ipv4Addr)>> {
+        let Some(network) = self.inspect_network_opt(name).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(network
+            .containers
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, member)| {
+                let addr = member.ipv4_address?;
+                let addr = addr.split('/').next()?.parse().ok()?;
+                Some((id, addr))
+            })
+            .collect())
+    }
+
     pub async fn network_exists(&self, name: &str) -> Result<bool> {
         Ok(self.inspect_network_opt(name).await?.is_some())
     }

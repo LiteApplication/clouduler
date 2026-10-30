@@ -284,7 +284,8 @@ pub async fn run(
 
     // Containers resolve each other through this, so it comes up alongside the
     // overlay rather than waiting for anything to be scheduled.
-    let internal_dns = crate::internal_dns::start(&cfg, &cluster, &node_name);
+    let wan = crate::wan::WanFirewall::new();
+    let internal_dns = crate::internal_dns::start(&cfg, &cluster, &node_name, wan.clone());
     let exposed = crate::expose::start(&cfg, &cluster, relay.dialer.clone());
 
     // Worth waiting for: on a node that has just booted, dockerd is often a
@@ -332,7 +333,15 @@ pub async fn run(
     // Built before the scheduler needs it, but idempotent and on a loop, so
     // ordering against a stack deploy does not matter.
     let overlay = crate::overlay::start(&cfg, &node_name, &cluster, docker.clone());
-    let egress = crate::egress::start(&cfg, &node_name, &cluster, docker.clone(), key_rx.clone());
+    let wan_sources = crate::wan::start(wan.clone(), cluster.clone(), docker.clone(), cfg.clone());
+    let egress = crate::egress::start(
+        &cfg,
+        &node_name,
+        &cluster,
+        docker.clone(),
+        key_rx.clone(),
+        wan,
+    );
 
     let self_update = start_self_update(
         &cfg,
@@ -456,6 +465,7 @@ pub async fn run(
     migrations.abort();
     overlay.abort();
     egress.abort();
+    wan_sources.abort();
     if let Some(internal_dns) = internal_dns {
         internal_dns.abort();
     }
