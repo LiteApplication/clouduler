@@ -447,8 +447,15 @@ impl InternalDns {
         );
 
         let forward_origin = LowerName::from(Name::root());
+        // The host's search list and domain must not apply: the forwarder strips
+        // the trailing dot from every name, and a lookup that comes back empty
+        // (an AAAA for a name that only has an A) is then retried as
+        // `name.<search>`, whose NXDOMAIN replaces the real "no data" answer.
+        // musl clients (Alpine) treat that as the whole lookup failing.
         let forwarder = ForwardZoneHandler::builder(TokioRuntimeProvider::default())
             .map_err(NetError::Dns)?
+            .with_search(Vec::new())
+            .with_domain(Name::root())
             .build()
             .map_err(NetError::Dns)?;
         catalog.upsert(
