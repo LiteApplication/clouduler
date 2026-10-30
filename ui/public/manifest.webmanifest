@@ -8,8 +8,8 @@
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui"],
   "orientation": "any",
-  "background_color": "#01080d",
-  "theme_color": "#01080d",
+  "background_color": "#150f1f",
+  "theme_color": "#150f1f",
   "categories": ["productivity", "utilities"],
   "icons": [
     { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
@@ -18,8 +18,13 @@
     { "src": "./icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "shortcuts": [
-    { "name": "Nodes", "url": "./nodes" },
-    { "name": "Stacks", "url": "./stacks" },
-    { "name": "Instances", "url": "./instances" }
+    { "name": "Stacks", "short_name": "Stacks", "description": "Deployed stacks", "url": "./stacks" },
+    { "name": "Instances", "short_name": "Instances", "description": "Running containers", "url": "./instances" },
+    { "name": "Nodes", "short_name": "Nodes", "description": "Cluster nodes and connectivity", "url": "./nodes" },
+    { "name": "Logs", "short_name": "Logs", "description": "Live container logs", "url": "./logs" },
+    { "name": "Proxy", "short_name": "Proxy", "description": "Routes, redirects and certificates", "url": "./proxy" },
+    { "name": "Storage", "short_name": "Storage", "description": "Drives and backups", "url": "./storage" },
+    { "name": "Updates", "short_name": "Updates", "description": "Image updates", "url": "./updates" },
+    { "name": "Settings", "short_name": "Settings", "description": "Cluster settings and secrets", "url": "./settings" }
   ]
 }
