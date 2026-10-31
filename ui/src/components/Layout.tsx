@@ -10,6 +10,7 @@ import { useAuth } from '../auth/AuthContext';
 import { api } from '../api/client';
 import { BottomNav, SideRail, Tag, type BottomNavItem, type IconName, type SideRailEntry } from '../ds';
 import { Icon } from '../ds/Icon';
+import { UpdateBanner } from './UpdateBanner';
 import { useTheme, type ThemeChoice } from '../theme';
 
 const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
@@ -167,7 +168,10 @@ export function Layout({ children }: { children: ReactNode }) {
       </aside>
 
       <main id="main" className="shell__main">
-        <div className="shell__col">{children}</div>
+        <div className="shell__col">
+          <UpdateBanner />
+          {children}
+        </div>
       </main>
 
       <div className="bnav-fixed">
