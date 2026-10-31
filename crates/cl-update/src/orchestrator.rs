@@ -16,7 +16,9 @@ use tracing::{info, warn};
 
 use crate::internal_client;
 use crate::peers;
-use crate::plan::{NodePhase, UpdateCheck, UpdateRunState, CHECK_CONFIG, GITHUB_TOKEN_SECRET, RUN_CONFIG};
+use crate::plan::{
+    NodePhase, UpdateCheck, UpdateRunState, CHECK_CONFIG, GITHUB_TOKEN_SECRET, RUN_CONFIG,
+};
 use crate::release;
 
 /// How often the leader checks the run's progress. Same order of magnitude
@@ -122,9 +124,17 @@ impl Orchestrator {
         let check = match release::resolve(&self_update.release_url, token.as_deref()).await {
             Ok(resolved) => {
                 info!(tag = %resolved.tag, "checked for a self-update release");
-                UpdateCheck { checked_at: now(), tag: Some(resolved.tag), error: None }
+                UpdateCheck {
+                    checked_at: now(),
+                    tag: Some(resolved.tag),
+                    error: None,
+                }
             }
-            Err(e) => UpdateCheck { checked_at: now(), tag: None, error: Some(e) },
+            Err(e) => UpdateCheck {
+                checked_at: now(),
+                tag: None,
+                error: Some(e),
+            },
         };
         let content = cl_raft::base64_encode(
             &serde_json::to_vec(&check).map_err(|e| format!("encoding the check: {e}"))?,

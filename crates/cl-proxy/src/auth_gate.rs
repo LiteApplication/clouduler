@@ -882,10 +882,7 @@ impl AuthGate {
             let saved = ProxySessionRecord {
                 host: trusted_host(network, peer),
                 expires_at: now
-                    + settings
-                        .remember_ip_ttl
-                        .as_secs()
-                        .min(i64::MAX as u64 / 2) as i64,
+                    + settings.remember_ip_ttl.as_secs().min(i64::MAX as u64 / 2) as i64,
                 ..record.clone()
             };
             if let Err(e) = self

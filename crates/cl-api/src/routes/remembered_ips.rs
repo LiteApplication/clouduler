@@ -44,10 +44,7 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-async fn list(
-    _admin: RequireAdmin,
-    State(state): State<AppState>,
-) -> Json<Vec<RememberedIp>> {
+async fn list(_admin: RequireAdmin, State(state): State<AppState>) -> Json<Vec<RememberedIp>> {
     let now = now();
     let cluster_state = state.cluster.state().await;
     let mut rows: Vec<RememberedIp> = cluster_state
