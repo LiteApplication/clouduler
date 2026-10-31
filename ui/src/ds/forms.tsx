@@ -42,7 +42,11 @@ export function TextField(p: TextFieldProps) {
     autoFocus: p.autoFocus,
     'aria-invalid': p.error ? true : undefined,
     'aria-describedby': p.error || p.hint ? hid : undefined,
-    autoComplete: p.autoComplete ?? 'off',
+    // Browsers ignore "off" on a password field and offer saved logins; only
+    // "new-password" stops that. The data attributes do the same for the
+    // 1Password and LastPass extensions.
+    autoComplete: p.autoComplete ?? (p.type === 'password' ? 'new-password' : 'off'),
+    ...(p.type === 'password' ? { 'data-1p-ignore': true, 'data-lpignore': 'true' } : {}),
   };
   return (
     <div className={cx('cl-field', p.className)}>

@@ -1578,6 +1578,7 @@ function GitBackupDeployKey() {
       <input
         id="backup-webhook-token"
         type="password"
+        autoComplete="new-password"
         placeholder={webhookSecret?.configured ? 'already configured' : 'token to paste into the webhook url'}
         value={tokenInput}
         onChange={(e) => setTokenInput(e.target.value)}
@@ -1831,7 +1832,7 @@ function ClientSecretForm({
         value={secret}
         onChange={(e) => setSecret(e.target.value)}
         placeholder={placeholder}
-        autoComplete="off"
+        autoComplete="new-password"
         disabled={disabled || busy}
       />
       {!status.configured && (
@@ -2280,7 +2281,7 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
         value={token}
         onChange={(e) => setToken(e.target.value)}
         placeholder="Cloudflare API token"
-        autoComplete="off"
+        autoComplete="new-password"
         disabled={disabled || busy}
       />
       {!status.configured && (

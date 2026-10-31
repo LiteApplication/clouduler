@@ -104,7 +104,7 @@ export function SecretForm({
               type="password"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              autoComplete="off"
+              autoComplete="new-password"
             />
           </div>
         )}

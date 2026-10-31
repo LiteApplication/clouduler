@@ -95,7 +95,7 @@ function Input({
         onChange={(e) => onChange(e.target.value)}
         aria-invalid={error ? true : undefined}
         aria-describedby={error || hint ? hid : undefined}
-        autoComplete="off"
+        autoComplete={type === 'password' ? 'new-password' : 'off'}
         disabled={disabled}
       />
     </Shell>
