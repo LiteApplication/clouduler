@@ -7,6 +7,7 @@ import type { SelfUpdateCheck, SelfUpdateConfig, SelfUpdateGithubTokenStatus, Se
 import { useAuth } from '../../auth/AuthContext';
 import { Banner, Button, KV, Panel, Tag, TextField, useConfirm, useToast, type TagTone } from '../../ds';
 import { useClusterState } from '../../state/store';
+import { isNewer } from '../../components/version';
 
 const RUN_CONFIG = '_clouduler_self_update_run';
 const CHECK_CONFIG = '_clouduler_self_update_check';
@@ -51,8 +52,9 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
   const [githubToken, setGithubToken] = useState<SelfUpdateGithubTokenStatus | null>(null);
   const [repo, setRepo] = useState<SelfUpdateConfig | null>(null);
   const [latest, setLatest] = useState<SelfUpdateLatest | null>(null);
-  // Tags are `v0.8.0`, the running version is `0.8.0`.
-  const newer = !!latest && latest.tag.replace(/^v/, '') !== latest.running_version.replace(/^v/, '');
+  const newer = !!latest && isNewer(latest.tag, latest.running_version);
+  // Until the latest release is known, do not block; once known, nothing to do unless newer.
+  const upToDate = !!latest && !newer;
   const [releaseUrl, setReleaseUrl] = useState(DEFAULT_RELEASE_URL);
   const [tokenInput, setTokenInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +96,10 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
   };
   // The header's "Start update" button lives in Settings; it bumps this signal.
   useEffect(() => {
-    if (startSignal > 0 && !inProgress && repo) void start();
+    if (startSignal > 0 && !inProgress && repo) {
+      if (upToDate) toast('Already on the latest version.');
+      else void start();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startSignal]);
 
@@ -205,7 +210,7 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
         title="Update"
         actions={isAdmin && (inProgress
           ? <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>
-          : <Button icon="play" disabled={busy || !repo} onClick={() => void start()}>Start update{newer ? ` to ${latest.tag}` : ''}</Button>)}
+          : <Button icon="play" disabled={busy || !repo || upToDate} onClick={() => void start()}>Start update{newer ? ` to ${latest.tag}` : ''}</Button>)}
       >
         <KV items={[
           ['Running', latest?.running_version ?? '-'],
@@ -213,6 +218,7 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
           ...(run?.release_tag ? [['Rolling out', run.release_tag] as [string, string]] : []),
         ]} />
         {!repo && <p className="cl-sm cl-muted">Set a release source before starting an update.</p>}
+        {upToDate && !inProgress && <p className="cl-sm cl-muted">Already on the latest version.</p>}
         {run ? (
           <div className="stack">
             {nodes.map((n) => {

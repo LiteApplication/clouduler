@@ -7,6 +7,7 @@ import type { SelfUpdateCheck, SelfUpdateRunState } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { Banner, useConfirm, useToast } from '../ds';
 import { useClusterState } from '../state/store';
+import { isNewer } from './version';
 
 const CHECK_CONFIG = '_clouduler_self_update_check';
 const RUN_CONFIG = '_clouduler_self_update_run';
@@ -21,8 +22,6 @@ function decode<T>(content: string | undefined): T | null {
   }
 }
 
-const bare = (v: string) => v.replace(/^v/, '');
-
 export function UpdateBanner() {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
@@ -36,8 +35,9 @@ export function UpdateBanner() {
   const tag = check?.tag;
   if (!cluster || !tag || dismissed === tag) return null;
   if (run && !run.finished_at) return null;
-  // A node that has not reported a version yet is not evidence of anything.
-  const behind = Object.values(cluster.nodes).some((n) => n.version && bare(n.version) !== bare(tag));
+  // A node that has not reported a version yet is not evidence of anything,
+  // and a stored check older than what runs (stale after an update) is not an update.
+  const behind = Object.values(cluster.nodes).some((n) => n.version && isNewer(tag, n.version));
   if (!behind) return null;
 
   const start = async () => {
