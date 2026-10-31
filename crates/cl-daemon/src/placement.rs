@@ -322,6 +322,7 @@ services:
                 kind: cl_config::NetworkKind::Egress,
                 subnet: None,
                 domain: None,
+                publish_dns: true,
             },
         );
         let state = state_with(spec, 1);

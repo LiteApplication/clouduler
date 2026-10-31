@@ -101,6 +101,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
     let network = Network {
         kind: NetworkKind::Internal,
         subnet: Some(plan.subnet),
+        publish_dns: true,
         domain: plan.internal_domain.clone(),
     };
 

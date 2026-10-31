@@ -843,6 +843,7 @@ mod tests {
                 kind: NetworkKind::Egress,
                 subnet: None,
                 domain: None,
+                publish_dns: true,
             },
         );
         cfg.networks.insert(
@@ -851,6 +852,7 @@ mod tests {
                 kind: NetworkKind::Wireguard,
                 subnet: None,
                 domain: None,
+                publish_dns: true,
             },
         );
         cfg

@@ -20,6 +20,7 @@ import type {
   OpenPort,
   PortProtocol,
   PortalPalette,
+  DnsServerConfig,
   ProxyAuthConfig,
   PublicAddress,
 } from '../../api/types';
@@ -237,6 +238,18 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               hint="Names under it resolve to node addresses here."
               help="Records under this domain resolve to node addresses on this network."
               configKey={`networks.${name}.domain`}
+              disabled={disabled}
+            />
+          )}
+          {(net.type === 'internal' || net.type === 'private') && (
+            <CheckboxField
+              id={`net-${name}-publish-dns`}
+              label="Publish to DNS provider (Cloudflare)"
+              value={net.publish_dns ?? true}
+              onChange={(v) => updateNetwork(name, { publish_dns: v ? undefined : false })}
+              hint="Turn off to keep this network's hostnames out of Cloudflare; they are then answered only by the cluster DNS server."
+              help="Turn off to keep this network's hostnames out of Cloudflare; they are then answered only by the cluster DNS server."
+              configKey={`networks.${name}.publish_dns`}
               disabled={disabled}
             />
           )}
@@ -1667,13 +1680,13 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
           set({
             oidc: enabled
               ? {
-                  issuer: '',
-                  client_id: '',
-                  scopes: ['openid', 'profile', 'email'],
-                  admin_claim: 'groups',
-                  admin_value: null,
-                  username_claim: 'preferred_username',
-                }
+                issuer: '',
+                client_id: '',
+                scopes: ['openid', 'profile', 'email'],
+                admin_claim: 'groups',
+                admin_value: null,
+                username_claim: 'preferred_username',
+              }
               : null,
           })
         }
@@ -2208,11 +2221,71 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
           />
         </>
       )}
+      <DnsServerFields draft={draft} setDraft={setDraft} disabled={disabled} />
       <p className="field-hint">
         Static/external backends and redirects apply immediately from the Redirects page, since
         they live outside cluster.yaml. See docs/proxy.md.
       </p>
     </div>
+  );
+}
+
+const DEFAULT_DNS_SERVER: DnsServerConfig = { enabled: false, networks: [], port: 53 };
+
+function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, "draft" | "setDraft" | "disabled">) {
+  const d = draft.proxy.dns_server ?? DEFAULT_DNS_SERVER;
+  const set = (patch: Partial<DnsServerConfig>) =>
+    setDraft({ ...draft, proxy: { ...draft.proxy, dns_server: { ...d, ...patch } } });
+  const nets = Object.entries(draft.networks).filter(([, n]) =>
+    ['internal', 'private', 'public'].includes(n.type),
+  );
+  return (
+    <>
+      <CheckboxField
+        id="proxy-dns-server-enabled"
+        label="Run a cluster DNS server"
+        value={d.enabled}
+        onChange={(enabled) => set({ enabled })}
+        hint="Answers cluster hostnames by the network the client is on."
+        help="Answers cluster hostnames by the network the client is on: a client gets the node's address on its own network; hostnames on networks it can't reach are refused; other names are forwarded upstream for private-network clients only."
+        configKey="proxy.dns_server.enabled"
+        disabled={disabled}
+      />
+      {d.enabled && (
+        <>
+          <div className="field">
+            <label>DNS server networks</label>
+            <span className="field-hint">
+              Leave all unchecked to serve every internal/private network the node has an address on; a public
+              network is served only if listed.
+            </span>
+            {nets.map(([name, net]) => (
+              <label key={name} style={{ display: 'block' }}>
+                <input
+                  type="checkbox"
+                  checked={d.networks.includes(name)}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    set({ networks: e.target.checked ? [...d.networks, name] : d.networks.filter((n) => n !== name) })
+                  }
+                />{' '}
+                {name} <span className="muted">({net.type})</span>
+              </label>
+            ))}
+          </div>
+          <PortField
+            id="proxy-dns-server-port"
+            label="DNS server port"
+            value={d.port}
+            onChange={(port) => set({ port })}
+            hint="Usually 53."
+            help="UDP/TCP port the cluster DNS server listens on. Below 1024, so the daemon needs root to bind it."
+            configKey="proxy.dns_server.port"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
   );
 }
 
@@ -2304,11 +2377,6 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
         Create one at the Cloudflare dashboard under My Profile &gt; API Tokens, scoped to Zone / DNS / Edit for the
         zones listed above.
       </span>
-      {status.configured && (
-        <p className="muted">
-          A token is stored, replicated to every node. It cannot be shown again; enter a new one below to rotate it.
-        </p>
-      )}
       <input
         id="cf-token"
         type="password"

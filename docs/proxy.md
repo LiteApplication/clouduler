@@ -384,6 +384,50 @@ since a plain A record has nothing to do with TLS.
   cannot be satisfied is reported unplaceable rather than silently split
   across nodes.
 
+A network can opt out of this with `publish_dns: false` on the network
+(internal and private networks only). Its hostnames are then never sent to
+Cloudflare, and records already published for it are deleted on the next
+pass. They are answered by the client DNS server below, or by whatever DNS
+the operator runs. Certificates for those hostnames are unaffected: DNS-01
+only writes a challenge TXT record.
+
+### Client DNS server
+
+`proxy.dns_server` makes every node answer DNS itself, split-horizon style:
+
+```yaml
+proxy:
+  dns_server:
+    enabled: true      # default false; port 53 on node addresses is left alone otherwise
+    networks: [lan]    # empty = every internal/private network the node has an address on
+    port: 53
+```
+
+Each node listens on its own address on those networks
+(`cl_daemon::client_dns`). The network a query comes from is decided by the
+client's source address (`ClusterConfig::client_network`): the subnetted
+network whose subnet holds it, else the public network for a globally
+routable address. Answers follow:
+
+- A hostname on a **public** network is answered to everyone. A client inside
+  a private network gets each serving node's address *on that network* (a LAN
+  client gets the node's LAN address, so it skips the router and the proxy
+  sees its real address, which `proxy.auth.remember_ip` relies on). A node
+  with no address on the client's network falls back to its address on the
+  route's network.
+- A hostname on a **subnetted** network is answered only to clients inside
+  that subnet, exactly the proxy's network gate. Anyone else gets `REFUSED`.
+- Which nodes are named follows `proxy.dns_publish`, and the web ui hostname
+  names the leader alone, as in the published records.
+- Names the cluster does not own are forwarded to the host's resolvers for
+  clients inside a subnetted network, and `REFUSED` for everyone else, so
+  listing a public network never makes the node an open resolver. A public
+  address is only bound if this node actually holds it (often it sits on the
+  router), otherwise the bind is retried quietly.
+
+Config changes take effect without a restart. This is separate from the
+container-facing resolver on the overlay gateways (`internal_dns`).
+
 Records are tagged with an ownership TXT record the same way
 `cl_dns::reconcile` always has, so a zone can be shared with records
 clouduler doesn't manage. A record apply failure (e.g. a name colliding with

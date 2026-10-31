@@ -9,6 +9,7 @@
 //! internal network can read or spoof container traffic. Don't run the
 //! internal network over anything you don't already trust.
 
+pub mod client_dns;
 pub mod dns;
 pub mod egress;
 pub mod error;

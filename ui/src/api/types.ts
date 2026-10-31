@@ -724,6 +724,9 @@ export interface NetworkConfig {
   type: NetworkKind;
   subnet: string | null;
   domain: string | null;
+  /** Publish this network's hostnames to the DNS provider (Cloudflare).
+   *  Default true; omitted when true. Only meaningful for internal/private. */
+  publish_dns?: boolean;
 }
 
 export type DriveModeConfig = 'replicated' | 'served';
@@ -860,12 +863,21 @@ export interface RememberedIp {
   expires_at: number;
 }
 
+/** `proxy.dns_server`: the cluster's own DNS answerer. */
+export interface DnsServerConfig {
+  enabled: boolean;
+  /** Empty means every internal/private network the node has an address on. */
+  networks: string[];
+  port: number;
+}
+
 export interface ProxyConfig {
   enabled: boolean;
   http_port: number;
   https_port: number;
   acme: AcmeConfig;
   dns_publish: DnsPublishMode;
+  dns_server?: DnsServerConfig;
   auth?: ProxyAuthConfig | null;
 }
 

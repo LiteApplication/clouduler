@@ -18,6 +18,9 @@ networks:
     type: private
     subnet: 192.168.1.0/24
     domain: lan.example.com
+    # Set false to keep this network's hostnames out of Cloudflare (internal
+    # and private networks only). Defaults to true.
+    # publish_dns: false
 
   # Public networks have no subnet. Records for their domain resolve to the
   # public address of the node running the service.
@@ -137,6 +140,12 @@ proxy:
   enabled: true
   http_port: 80
   https_port: 443
+  # Answers cluster hostnames to clients by the network they are on (see
+  # docs/proxy.md). Off by default so port 53 on node addresses stays free.
+  dns_server:
+    enabled: false
+    networks: []   # empty = every internal/private network the node sits on
+    port: 53
   acme:
     # Off by default: ordering certificates from a cluster the internet cannot
     # reach yet spends rate limit for nothing. Turn it on once the names in

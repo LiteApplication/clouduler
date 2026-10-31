@@ -1182,6 +1182,12 @@ fn leader_node(
         .find(|node| cl_raft::node_id(node.id) == leader_id)
 }
 
+/// Whether hostnames on `network` go to the DNS provider. A network switched
+/// to `publish_dns: false` is answered only by the client-facing DNS server.
+fn publishes_dns(cfg: &ClusterConfig, network: &str) -> bool {
+    cfg.networks.get(network).is_none_or(|n| n.publish_dns)
+}
+
 /// Resolves `desired_dns_hosts` against every node, deduplicated, plus the
 /// web ui hostname against the leader alone. A node with no address on a
 /// given hostname's network is skipped rather than failing the whole pass: a
@@ -1194,13 +1200,18 @@ fn desired_records(
     let mut out: Vec<DesiredRecord> = Vec::new();
     let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
 
-    if let Some(leader) = leader_node(cfg, leader_id) {
+    if let Some(leader) =
+        leader_node(cfg, leader_id).filter(|_| publishes_dns(cfg, &cfg.web.network))
+    {
         if let Ok(records) = cl_dns::records_for(cfg, &cfg.web.address, &cfg.web.network, leader) {
             push_new(&mut out, &mut seen, records);
         }
     }
 
     for ((host, network), nodes) in desired_dns_hosts(cfg, state) {
+        if !publishes_dns(cfg, &network) {
+            continue;
+        }
         for node_name in &nodes {
             let Some(node) = cfg.nodes.get(node_name) else {
                 continue;
@@ -1851,6 +1862,7 @@ services:
                 kind: NetworkKind::Nat,
                 subnet: None,
                 domain: None,
+                publish_dns: true,
             },
         );
 
@@ -2049,6 +2061,24 @@ services:
         // and so never reaches the desired set.
         assert_eq!(blog.len(), 2, "{blog:?}");
         assert!(blog.iter().all(|r| r.kind != cl_dns::RecordType::CNAME));
+    }
+
+    /// A network switched to `publish_dns: false` keeps its hostnames out of
+    /// the provider, whatever else is published.
+    #[test]
+    fn a_network_that_does_not_publish_dns_sends_nothing_to_the_provider() {
+        let state = with_static_routes(
+            state_with(SPEC, 1),
+            vec![static_route("printer", "lan", "192.168.1.50:9100")],
+        );
+        let mut cfg = cfg();
+        let on = desired_records(&cfg, None, &state);
+        assert!(on.iter().any(|r| r.fqdn.starts_with("printer.")));
+
+        cfg.networks.get_mut("lan").unwrap().publish_dns = false;
+        let off = desired_records(&cfg, None, &state);
+        assert!(!off.iter().any(|r| r.fqdn.starts_with("printer.")));
+        assert!(off.iter().any(|r| r.fqdn == "blog.example.com"));
     }
 
     /// Under `DnsPublishMode::OwningNode`, only the node actually running

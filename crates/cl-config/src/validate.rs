@@ -99,6 +99,12 @@ impl ClusterConfig {
                 }
                 _ => {}
             }
+            if net.kind == NetworkKind::Public && !net.publish_dns {
+                return Err(ConfigError::invalid(
+                    at,
+                    "a public network is always published to dns; publish_dns can only be turned off on internal and private networks",
+                ));
+            }
             if matches!(
                 net.kind,
                 NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat
@@ -482,6 +488,30 @@ impl ClusterConfig {
         let proxy = &self.proxy;
         if !proxy.enabled {
             return Ok(());
+        }
+        let dns = &proxy.dns_server;
+        if dns.port == 0 {
+            return Err(ConfigError::invalid(
+                "proxy.dns_server.port",
+                "must not be 0",
+            ));
+        }
+        for network in &dns.networks {
+            let Some(net) = self.networks.get(network) else {
+                return Err(ConfigError::invalid(
+                    "proxy.dns_server.networks",
+                    format!("no network named {network}"),
+                ));
+            };
+            if !matches!(
+                net.kind,
+                NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
+            ) {
+                return Err(ConfigError::invalid(
+                    "proxy.dns_server.networks",
+                    format!("{network} has no node address to listen on"),
+                ));
+            }
         }
         if proxy.http_port == proxy.https_port {
             return Err(ConfigError::invalid(
@@ -1261,7 +1291,10 @@ cloudflare:
         let on = format!("{base}    remember_ip: [wan]\n");
         let auth = ClusterConfig::parse(&on).unwrap().proxy.auth.unwrap();
         assert!(auth.remembers_ip("wan") && !auth.remembers_ip("lan"));
-        assert_eq!(auth.remember_ip_ttl, std::time::Duration::from_secs(30 * 86_400));
+        assert_eq!(
+            auth.remember_ip_ttl,
+            std::time::Duration::from_secs(30 * 86_400)
+        );
     }
 
     #[test]
@@ -1271,6 +1304,51 @@ cloudflare:
         assert!(err.contains("remember_ip"), "{err}");
         let zero = format!("{BASE}{AUTH}    remember_ip_ttl: 0s\n");
         assert!(ClusterConfig::parse(&zero).is_err());
+    }
+
+    #[test]
+    fn publishing_to_dns_is_on_unless_a_private_network_opts_out() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        assert!(cfg.networks.values().all(|n| n.publish_dns));
+
+        let off = BASE.replace(
+            "lan:       { type: private,",
+            "lan:       { type: private, publish_dns: false,",
+        );
+        assert!(!ClusterConfig::parse(&off).unwrap().networks["lan"].publish_dns);
+
+        let bad = BASE.replace(
+            "wan:       { type: public,",
+            "wan:       { type: public, publish_dns: false,",
+        );
+        let err = ClusterConfig::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("publish_dns"), "{err}");
+    }
+
+    #[test]
+    fn the_dns_server_is_off_by_default_and_checks_its_networks() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        assert!(!cfg.proxy.dns_server.enabled);
+        assert_eq!(cfg.proxy.dns_server.port, 53);
+
+        let on = format!("{BASE}proxy:\n  dns_server: {{ enabled: true, networks: [lan, wan] }}\n");
+        let cfg = ClusterConfig::parse(&on).unwrap();
+        assert_eq!(cfg.proxy.dns_server.networks, ["lan", "wan"]);
+
+        let unknown = format!("{BASE}proxy:\n  dns_server: {{ networks: [nope] }}\n");
+        assert!(ClusterConfig::parse(&unknown).is_err());
+        let port = format!("{BASE}proxy:\n  dns_server: {{ port: 0 }}\n");
+        assert!(ClusterConfig::parse(&port).is_err());
+    }
+
+    #[test]
+    fn a_client_is_classified_by_its_address() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(cfg.client_network(ip("192.168.1.40")), Some("lan"));
+        assert_eq!(cfg.client_network(ip("10.10.0.7")), Some("tailscale"));
+        assert_eq!(cfg.client_network(ip("203.0.113.9")), Some("wan"));
+        assert_eq!(cfg.client_network(ip("127.0.0.1")), None);
     }
 
     #[test]

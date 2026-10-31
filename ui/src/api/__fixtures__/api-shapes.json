@@ -68,6 +68,11 @@
         "enabled": false
       },
       "dns_publish": "all-nodes",
+      "dns_server": {
+        "enabled": false,
+        "networks": [],
+        "port": 53
+      },
       "enabled": true,
       "http_port": 80,
       "https_port": 443

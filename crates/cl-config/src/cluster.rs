@@ -345,6 +345,16 @@ pub struct Network {
     /// Records under this domain resolve to node addresses on this network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    /// Whether hostnames on this network are published to the DNS provider
+    /// (Cloudflare). `false` keeps a private network's names out of public
+    /// DNS; they are then answered only by `proxy.dns_server`. Always true
+    /// for a public network.
+    #[serde(default = "default_true_bool", skip_serializing_if = "is_true")]
+    pub publish_dns: bool,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// How a drive's data is made available to the nodes using it.
@@ -727,6 +737,9 @@ pub struct ProxyConfig {
     /// How a proxied hostname's DNS record is published.
     #[serde(default)]
     pub dns_publish: DnsPublishMode,
+    /// The client-facing DNS server, answering per the network the client is on.
+    #[serde(default)]
+    pub dns_server: DnsServerConfig,
     /// Login for routes carrying the `authenticated` middleware. A separate
     /// identity provider client (and group namespace) from `auth.oidc`, which
     /// is for people operating the cluster.
@@ -860,6 +873,23 @@ impl ProxyAuthConfig {
 }
 
 impl ClusterConfig {
+    /// The network `ip` is a client of: the subnetted network whose subnet
+    /// holds it, else the first public network for a globally routable
+    /// address. `None` for anything else (loopback, an unknown private range).
+    pub fn client_network(&self, ip: std::net::IpAddr) -> Option<&str> {
+        let subnetted = self
+            .networks
+            .iter()
+            .find(|(name, net)| net.kind.is_subnetted() && self.ip_in_network(name, ip));
+        subnetted
+            .or_else(|| {
+                self.networks.iter().find(|(name, net)| {
+                    net.kind == NetworkKind::Public && self.ip_in_network(name, ip)
+                })
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
     /// Is `ip` an address of `network`'s own clients? A subnetted network
     /// owns the addresses inside its subnet; a public network owns every
     /// globally routable address, i.e. one that is not private, loopback,
@@ -918,7 +948,41 @@ impl Default for ProxyConfig {
             https_port: default_https_port(),
             acme: AcmeConfig::default(),
             dns_publish: DnsPublishMode::default(),
+            dns_server: DnsServerConfig::default(),
             auth: None,
+        }
+    }
+}
+
+/// A DNS server on the nodes' own addresses that answers cluster hostnames
+/// by the network the asking client is on: a client inside a network gets the
+/// node address on that network, and a hostname on a network the client cannot
+/// reach is refused. Names the cluster does not own are forwarded upstream for
+/// clients inside a subnetted network and refused for everyone else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DnsServerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Networks to listen on, at this node's address on each. Empty means
+    /// every subnetted network the node has an address on; a public network
+    /// is only served when listed.
+    #[serde(default)]
+    pub networks: Vec<String>,
+    #[serde(default = "default_dns_port")]
+    pub port: u16,
+}
+
+fn default_dns_port() -> u16 {
+    53
+}
+
+impl Default for DnsServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            networks: Vec::new(),
+            port: default_dns_port(),
         }
     }
 }

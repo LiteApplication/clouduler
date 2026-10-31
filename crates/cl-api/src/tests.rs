@@ -112,6 +112,7 @@ pub(crate) async fn harness() -> Harness {
                 kind: NetworkKind::Internal,
                 subnet: None,
                 domain: None,
+                publish_dns: true,
             },
         )]),
         drives: BTreeMap::new(),
@@ -1380,6 +1381,7 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
                     kind: NetworkKind::Public,
                     subnet: None,
                     domain: None,
+                    publish_dns: true,
                 },
             );
         }
@@ -2737,11 +2739,18 @@ async fn remembered_ips_are_admin_only_and_hidden_from_the_state() {
         expires_at: far,
         parent: String::new(),
     };
-    for (key, host) in [("saved", "ip:public:203.0.113.7"), ("cookie", "app.example.com")] {
+    for (key, host) in [
+        ("saved", "ip:public:203.0.113.7"),
+        ("cookie", "app.example.com"),
+    ] {
         let r = h
             .state
             .cluster
-            .submit(Raft::PutProxySession { key: key.into(), session: record(host), now: 0 })
+            .submit(Raft::PutProxySession {
+                key: key.into(),
+                session: record(host),
+                now: 0,
+            })
             .await
             .unwrap();
         assert!(r.error.is_none());
@@ -2760,14 +2769,22 @@ async fn remembered_ips_are_admin_only_and_hidden_from_the_state() {
 
     let viewer = ("cookie", viewer_cookie(&h.state).await);
     assert_eq!(
-        call("GET", "/api/proxy/remembered-ips", viewer).await.unwrap().status(),
+        call("GET", "/api/proxy/remembered-ips", viewer)
+            .await
+            .unwrap()
+            .status(),
         StatusCode::FORBIDDEN
     );
 
-    let listed = call("GET", "/api/proxy/remembered-ips", admin.clone()).await.unwrap();
+    let listed = call("GET", "/api/proxy/remembered-ips", admin.clone())
+        .await
+        .unwrap();
     assert_eq!(listed.status(), StatusCode::OK);
     let rows: serde_json::Value = serde_json::from_slice(
-        &http_body_util::BodyExt::collect(listed.into_body()).await.unwrap().to_bytes(),
+        &http_body_util::BodyExt::collect(listed.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
     )
     .unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1);
@@ -2778,18 +2795,28 @@ async fn remembered_ips_are_admin_only_and_hidden_from_the_state() {
     // The full state, as any signed-in viewer receives it, carries none of it.
     let state = call("GET", "/api/state", admin.clone()).await.unwrap();
     let text = String::from_utf8(
-        http_body_util::BodyExt::collect(state.into_body()).await.unwrap().to_bytes().to_vec(),
+        http_body_util::BodyExt::collect(state.into_body())
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(!text.contains("203.0.113.7"), "{text}");
 
     // An ordinary login session is not a remembered address.
     assert_eq!(
-        call("DELETE", "/api/proxy/remembered-ips/cookie", admin.clone()).await.unwrap().status(),
+        call("DELETE", "/api/proxy/remembered-ips/cookie", admin.clone())
+            .await
+            .unwrap()
+            .status(),
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        call("DELETE", "/api/proxy/remembered-ips/saved", admin.clone()).await.unwrap().status(),
+        call("DELETE", "/api/proxy/remembered-ips/saved", admin.clone())
+            .await
+            .unwrap()
+            .status(),
         StatusCode::NO_CONTENT
     );
     let after = h.state.cluster.state().await;

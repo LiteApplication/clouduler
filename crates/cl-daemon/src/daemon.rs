@@ -286,6 +286,7 @@ pub async fn run(
     // overlay rather than waiting for anything to be scheduled.
     let wan = crate::wan::WanFirewall::new();
     let internal_dns = crate::internal_dns::start(&cfg, &cluster, &node_name, wan.clone());
+    let client_dns = crate::client_dns::start(&cfg, &cluster, &node_name);
     let exposed = crate::expose::start(&cfg, &cluster, relay.dialer.clone());
 
     // Worth waiting for: on a node that has just booted, dockerd is often a
@@ -469,6 +470,9 @@ pub async fn run(
     wan_sources.abort();
     if let Some(internal_dns) = internal_dns {
         internal_dns.abort();
+    }
+    if let Some(client_dns) = client_dns {
+        client_dns.abort();
     }
     exposed.abort();
     // Stops serving the other nodes and refreshing the table. The proxy,
