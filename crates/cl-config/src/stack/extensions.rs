@@ -19,9 +19,6 @@ use crate::stack::port::Protocol;
 /// ```yaml
 /// middlewares:
 ///   - redirect_https
-///   - basic_auth:
-///       users:
-///         alice: "$2y$05$..."   # bcrypt, as in an htpasswd file
 ///   - headers:
 ///       request:
 ///         X-Real-Source: clouduler
@@ -35,10 +32,8 @@ pub enum Middleware {
     RedirectHttps,
     /// Strip the route's `path_prefix` before forwarding.
     StripPrefix,
-    BasicAuth(BasicAuth),
     Headers(Headers),
     Cors(CorsPolicy),
-    ForwardAuth(ForwardAuth),
     RedirectRegex(RedirectRegex),
     /// Requires a login through the cluster's `proxy.auth` portal before a
     /// request reaches the backend, so an app with no login of its own can
@@ -78,7 +73,7 @@ impl Default for Authenticated {
 }
 
 /// Wire form. serde_yaml renders an externally tagged enum as a yaml tag
-/// (`!BasicAuth`), which nobody wants to write in a compose file, so the two
+/// (`!Headers`), which nobody wants to write in a compose file, so the two
 /// shapes are spelled out and mapped by hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -98,7 +93,7 @@ impl TryFrom<RawMiddleware> for Middleware {
                 "authenticated" => Ok(Middleware::Authenticated(Authenticated::default())),
                 // Naming one that needs settings without giving any is a
                 // mistake worth reporting rather than defaulting.
-                "basic_auth" | "headers" | "cors" | "forward_auth" | "redirect_regex" => {
+                "headers" | "cors" | "redirect_regex" => {
                     Err(format!("middleware {name} needs settings, use a map"))
                 }
                 other => Err(format!("unknown middleware {other}")),
@@ -115,28 +110,12 @@ impl TryFrom<RawMiddleware> for Middleware {
                 }
 
                 match name.as_str() {
-                    "basic_auth" => serde_yaml::from_value(value)
-                        .map(Middleware::BasicAuth)
-                        .map_err(|e| format!("basic_auth: {e}")),
                     "headers" => serde_yaml::from_value(value)
                         .map(Middleware::Headers)
                         .map_err(|e| format!("headers: {e}")),
                     "cors" => serde_yaml::from_value(value)
                         .map(Middleware::Cors)
                         .map_err(|e| format!("cors: {e}")),
-                    "forward_auth" => {
-                        let auth: ForwardAuth = serde_yaml::from_value(value)
-                            .map_err(|e| format!("forward_auth: {e}"))?;
-                        if !auth.address.starts_with("http://")
-                            && !auth.address.starts_with("https://")
-                        {
-                            return Err(format!(
-                                "forward_auth: address \"{}\" must start with http:// or https://",
-                                auth.address
-                            ));
-                        }
-                        Ok(Middleware::ForwardAuth(auth))
-                    }
                     "redirect_regex" => {
                         let redirect: RedirectRegex = serde_yaml::from_value(value)
                             .map_err(|e| format!("redirect_regex: {e}"))?;
@@ -183,10 +162,6 @@ impl From<Middleware> for RawMiddleware {
                 name,
                 serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
             )])),
-            Middleware::BasicAuth(auth) => RawMiddleware::Configured(BTreeMap::from([(
-                name,
-                serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
-            )])),
             Middleware::Headers(headers) => RawMiddleware::Configured(BTreeMap::from([(
                 name,
                 serde_yaml::to_value(headers).unwrap_or(serde_yaml::Value::Null),
@@ -194,10 +169,6 @@ impl From<Middleware> for RawMiddleware {
             Middleware::Cors(cors) => RawMiddleware::Configured(BTreeMap::from([(
                 name,
                 serde_yaml::to_value(cors).unwrap_or(serde_yaml::Value::Null),
-            )])),
-            Middleware::ForwardAuth(auth) => RawMiddleware::Configured(BTreeMap::from([(
-                name,
-                serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
             )])),
             Middleware::RedirectRegex(redirect) => RawMiddleware::Configured(BTreeMap::from([(
                 name,
@@ -213,10 +184,8 @@ impl Middleware {
         match self {
             Middleware::RedirectHttps => "redirect_https",
             Middleware::StripPrefix => "strip_prefix",
-            Middleware::BasicAuth(_) => "basic_auth",
             Middleware::Headers(_) => "headers",
             Middleware::Cors(_) => "cors",
-            Middleware::ForwardAuth(_) => "forward_auth",
             Middleware::RedirectRegex(_) => "redirect_regex",
             Middleware::Authenticated(_) => "authenticated",
         }
@@ -272,26 +241,6 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
-/// HTTP basic auth in front of a route.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct BasicAuth {
-    /// Username to password hash. Hashes only: a plaintext password in a stack
-    /// file would end up in the cluster database and in everyone's shell
-    /// history.
-    pub users: BTreeMap<String, String>,
-    #[serde(default = "default_realm", skip_serializing_if = "is_default_realm")]
-    pub realm: String,
-}
-
-fn is_default_realm(realm: &str) -> bool {
-    realm == default_realm()
-}
-
-fn default_realm() -> String {
-    "clouduler".to_string()
-}
-
 /// Header rewriting in both directions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -306,30 +255,6 @@ pub struct Headers {
     pub remove_request: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_response: Vec<String>,
-}
-
-/// Delegates authentication to an external HTTP endpoint before forwarding
-/// the request. The endpoint is called with the original request's method,
-/// URI and a subset of its headers; a 2xx response lets the request through,
-/// anything else is relayed back to the client as-is.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ForwardAuth {
-    /// The auth endpoint's URL, e.g. `https://auth.example.com/verify`.
-    pub address: String,
-    /// Header names copied from the auth endpoint's response onto the
-    /// request forwarded to the backend, e.g. `X-User`, so the backend can
-    /// see the identity the auth endpoint established.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub auth_response_headers: Vec<String>,
-    /// How long to wait for the auth endpoint. Unset waits forever, which
-    /// ties up the client's connection if it wedges.
-    #[serde(
-        default,
-        with = "humantime_serde::option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub timeout: Option<Duration>,
 }
 
 /// Rewrites a request's URL via regex and redirects to the result, instead of
@@ -810,9 +735,6 @@ proxy:
     middlewares:
       - redirect_https
       - strip_prefix
-      - basic_auth:
-          users:
-            alice: "$2y$05$abcdefghijklmnopqrstuv"
       - headers:
           request:
             X-Real-Source: clouduler
@@ -825,19 +747,10 @@ proxy:
         let mw = &ext.proxy[0].middlewares;
         assert_eq!(
             mw.iter().map(|m| m.name()).collect::<Vec<_>>(),
-            vec!["redirect_https", "strip_prefix", "basic_auth", "headers"]
+            vec!["redirect_https", "strip_prefix", "headers"]
         );
 
         match &mw[2] {
-            Middleware::BasicAuth(auth) => {
-                assert!(auth.users.contains_key("alice"));
-                // The realm has a sensible default so it can be left out.
-                assert_eq!(auth.realm, "clouduler");
-            }
-            other => panic!("expected basic_auth, got {other:?}"),
-        }
-
-        match &mw[3] {
             Middleware::Headers(headers) => {
                 assert_eq!(
                     headers.request.get("X-Real-Source").map(String::as_str),
@@ -894,48 +807,13 @@ proxy:
     network: wan
     port: 80
     middlewares:
-      - basic_auth:
-          users: {}
+      - headers:
+          request: {}
           bogus: 1
 "#,
         )
         .unwrap_err();
         assert!(err.to_string().contains("bogus"), "{err}");
-    }
-
-    #[test]
-    fn forward_auth_parses_and_validates_the_address() {
-        let ext: ServiceExtensions = serde_yaml::from_str(
-            r#"
-proxy:
-  - host: site
-    network: wan
-    port: 80
-    middlewares:
-      - forward_auth:
-          address: https://auth.example.com/verify
-          auth_response_headers: [X-User, X-Email]
-          timeout: 5s
-"#,
-        )
-        .expect("parse");
-        match &ext.proxy[0].middlewares[0] {
-            Middleware::ForwardAuth(auth) => {
-                assert_eq!(auth.address, "https://auth.example.com/verify");
-                assert_eq!(auth.auth_response_headers, vec!["X-User", "X-Email"]);
-                assert_eq!(auth.timeout, Some(Duration::from_secs(5)));
-            }
-            other => panic!("expected forward_auth, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn forward_auth_rejects_an_address_with_no_scheme() {
-        let err = serde_yaml::from_str::<ServiceExtensions>(
-            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares:\n      - forward_auth:\n          address: auth.example.com/verify\n",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("http:// or https://"), "{err}");
     }
 
     #[test]
@@ -952,15 +830,6 @@ proxy:
         let back: ServiceExtensions =
             serde_yaml::from_str(&serde_yaml::to_string(&ext).unwrap()).unwrap();
         assert_eq!(back.proxy[0].middlewares, ext.proxy[0].middlewares);
-    }
-
-    #[test]
-    fn bare_forward_auth_is_rejected() {
-        let err = serde_yaml::from_str::<ServiceExtensions>(
-            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares: [forward_auth]\n",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("needs settings"), "{err}");
     }
 
     #[test]

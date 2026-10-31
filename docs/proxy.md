@@ -187,22 +187,14 @@ stack file:
 2. **`strip_prefix`** — removes the route's own `path_prefix` from the request
    path before it reaches the backend. `/api/things` on a route with
    `path_prefix: /api` becomes `/things`.
-3. **`basic_auth`** — challenges the request with HTTP basic auth, short
-   circuiting with 401 on failure.
-4. **`headers`** — adds or removes headers on the proxied request.
-5. **`cors`** — see below. Answers a preflight directly; adds
+3. **`headers`** — sets or removes headers on the proxied request and on the
+   response.
+4. **`cors`** — see below. Answers a preflight directly; adds
    `Access-Control-Allow-*` to a real request's response when its `Origin` is
    allowed.
 
-`basic_auth` credentials and the `headers` additions/removals are not yet
-modeled in `cl-config` (`Middleware` there is a bare enum tag with no
-per-route configuration payload). The pure functions that implement both
-(`check_basic_auth`, `apply_headers`, plus their response helpers) are fully
-implemented and unit tested in `middleware.rs`, but until a config channel
-for their parameters exists, the proxy wires them as no-ops: a route that
-lists `basic_auth` or `headers` is accepted but currently enforces nothing
-extra. This is a known gap, not an oversight, tracked against the day
-`ProxyRoute` grows per-middleware config.
+There is no HTTP basic auth middleware. To put a login in front of an app
+that has none, use `authenticated` (below).
 
 ### Login (`authenticated`)
 
@@ -295,7 +287,7 @@ them too. Caveat: a host process on a node counts as internal.
 
 ### CORS
 
-Unlike `basic_auth`/`headers`, `cors` does carry its settings and is fully
+`cors` carries its settings and is fully
 enforced, since cross-origin access control is a property of the stack's own
 application. Declared on a service's proxy route in the stack file:
 

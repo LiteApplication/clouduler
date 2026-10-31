@@ -175,10 +175,8 @@ const SCHEMA: Record<string, string[]> = {
     'host', 'network', 'port', 'path_prefix', 'tls', 'middlewares', 'sticky', 'max_body_size',
     'websockets', 'preserve_host', 'response_timeout',
   ],
-  'services.*.x-clouduler.proxy.middlewares.basic_auth': ['users', 'realm'],
   'services.*.x-clouduler.proxy.middlewares.headers': ['request', 'response', 'remove_request', 'remove_response'],
   'services.*.x-clouduler.proxy.middlewares.cors': ['origins', 'methods', 'headers', 'allow_credentials', 'max_age'],
-  'services.*.x-clouduler.proxy.middlewares.forward_auth': ['address', 'auth_response_headers', 'timeout'],
   'services.*.x-clouduler.proxy.middlewares.redirect_regex': ['regex', 'replacement', 'permanent'],
   'services.*.x-clouduler.expose': ['port', 'published', 'protocol', 'network', 'proxy_protocol'],
   'services.*.x-clouduler.volume_sync.*': ['interval', 'enabled', 'before', 'after'],
@@ -202,7 +200,7 @@ const BOOLEAN_KEYS = new Set([
 ]);
 
 const BARE_MIDDLEWARES = ['redirect_https', 'strip_prefix', 'authenticated'];
-const CONFIGURED_MIDDLEWARES = ['basic_auth', 'headers', 'cors', 'forward_auth', 'redirect_regex'];
+const CONFIGURED_MIDDLEWARES = ['headers', 'cors', 'redirect_regex'];
 
 const RESTART_VALUES = ['no', 'always', 'on-failure', 'unless-stopped'];
 

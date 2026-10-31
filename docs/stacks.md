@@ -447,10 +447,6 @@ takes a single key map:
 middlewares:
   - redirect_https
   - strip_prefix
-  - basic_auth:
-      users:
-        alice: "$2y$05$..."     # bcrypt hash, as in an htpasswd file
-      realm: "internal"          # optional, defaults to "clouduler"
   - headers:
       request:                   # set on the way to the container
         X-Real-Source: clouduler
@@ -464,10 +460,6 @@ middlewares:
       headers: []                             # empty echoes the browser's requested headers
       allow_credentials: false
       max_age: 10m
-  - forward_auth:
-      address: https://auth.example.com/verify
-      auth_response_headers: [X-User, X-Email]   # copied from the auth response onto the forwarded request
-      timeout: 5s                                 # optional, unset waits forever
   - redirect_regex:
       regex: "^https://old\\.example\\.com/(.*)"
       replacement: "https://new.example.com/$1"
@@ -476,25 +468,15 @@ middlewares:
 
 - `redirect_https`: answer plain HTTP with a redirect to the same URL over TLS.
 - `strip_prefix`: remove the route's `path_prefix` before forwarding.
-- `basic_auth`: HTTP basic auth. Passwords are given as hashes only; a
-  plaintext password here would end up in the cluster database and in shell
-  history.
-- `headers`: header rewriting in both directions.
+- `headers`: header rewriting in both directions. `request` and `remove_request`
+  apply on the way to the container, `response` and `remove_response` on the
+  way back. Header names and values are validated when the stack is.
 - `cors`: cross-origin access control. An `OPTIONS` preflight is answered
   directly, without reaching the container; a real request from an allowed
   origin gets `Access-Control-Allow-*` added to the response. `origins:
   ["*"]` cannot be combined with `allow_credentials: true` — browsers reject
   that pairing, so it is rejected here instead of failing confusingly at
   request time.
-- `forward_auth`: delegates authentication to an external HTTP endpoint
-  before the request reaches the container. The endpoint is called with the
-  request's `Cookie`/`Authorization` headers plus `X-Forwarded-Method` and
-  `X-Forwarded-Uri`; a 2xx response lets the request through, with any header
-  named in `auth_response_headers` copied from the auth response onto the
-  request forwarded to the backend (so the backend can see the identity the
-  auth endpoint established); anything else is relayed straight back to the
-  client, and the backend is never contacted. `address` must start with
-  `http://` or `https://`.
 - `redirect_regex`: rewrites the request's URL via regex and redirects to the
   result, instead of proxying to a backend. Matched against the *full*
   request URL (`scheme://host/path?query`, not just the path), so a rewrite
@@ -502,7 +484,7 @@ middlewares:
   regex's capture groups. A request that doesn't match falls through to
   normal proxying. `permanent` (default `true`) picks 301/308 vs 302/307.
 
-Naming `basic_auth`, `headers`, `cors`, `forward_auth` or `redirect_regex` as
+Naming `headers`, `cors` or `redirect_regex` as
 a bare string is an error, since none of them do anything useful without
 settings.
 

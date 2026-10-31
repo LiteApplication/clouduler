@@ -15,7 +15,6 @@ mod auth_gate;
 mod certs;
 mod connector;
 mod error;
-mod forward_auth;
 mod health;
 mod http01;
 mod middleware;
@@ -36,9 +35,8 @@ pub use health::{
 };
 pub use http01::Http01Store;
 pub use middleware::{
-    apply_headers, basic_auth_challenge, check_basic_auth, cors_origin_allowed,
-    cors_response_headers, is_cors_preflight, is_upgrade, redirect_https, strip_hop_by_hop,
-    strip_prefix, BasicAuthCreds, HeaderOps,
+    apply_headers, cors_origin_allowed, cors_response_headers, is_cors_preflight, is_upgrade,
+    redirect_https, strip_hop_by_hop, strip_prefix,
 };
 pub use route::{
     Picked, RedirectTarget, Route, RouteOptions, RouteTable, SharedRoutes, STICKY_COOKIE,

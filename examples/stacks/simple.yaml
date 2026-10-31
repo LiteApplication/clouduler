@@ -29,9 +29,6 @@ services:
           network: wan
           port: 8080
           middlewares:
-            - forward_auth:
-                address: https://auth.example.com/verify
-                auth_response_headers: [X-User]
             - redirect_regex:
                 regex: "^https://app\\.example\\.com/old/(.*)"
                 replacement: "https://app.example.com/new/$1"

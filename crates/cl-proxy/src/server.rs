@@ -28,7 +28,6 @@ use crate::auth_gate::{AuthGate, GateOutcome};
 use crate::certs::{ensure_crypto_provider, CertResolver, CertStore};
 use crate::connector::BackendConnector;
 use crate::error::Result;
-use crate::forward_auth;
 use crate::http01::Http01Store;
 use crate::middleware;
 use crate::route::{RedirectTarget, Route, RouteTable, STICKY_COOKIE};
@@ -67,7 +66,6 @@ struct Backends {
     /// What `client` dials through, for the websocket path, which opens its
     /// own connection outside the pool.
     dialer: Dialer,
-    forward_auth_client: reqwest::Client,
     auth_gate: Option<Arc<AuthGate>>,
     http01: Arc<Http01Store>,
     peers: Arc<PeerPolicies>,
@@ -81,10 +79,6 @@ pub struct ProxyServer {
     /// How backends are dialed: directly, or through the relay of the node
     /// running a container this node does not (see `with_dialer`).
     dialer: Dialer,
-    /// Separate from `client`: a `forward_auth` endpoint can be external and
-    /// speak TLS, unlike backends, which are always plain HTTP to a
-    /// container and reached through `dialer`.
-    forward_auth_client: reqwest::Client,
     /// `None` when nothing needs it yet: only built once a route actually
     /// carries the `authenticated` middleware.
     auth_gate: Option<Arc<AuthGate>>,
@@ -158,7 +152,6 @@ impl ProxyServer {
             certs,
             client: backend_client(dialer.clone()),
             dialer,
-            forward_auth_client: reqwest::Client::new(),
             auth_gate,
             http01,
             peers: Arc::new(PeerPolicies::new()),
@@ -185,7 +178,6 @@ impl ProxyServer {
         Backends {
             client: self.client.clone(),
             dialer: self.dialer.clone(),
-            forward_auth_client: self.forward_auth_client.clone(),
             auth_gate: self.auth_gate.clone(),
             http01: self.http01.clone(),
             peers: self.peers.clone(),
@@ -585,11 +577,7 @@ async fn handle_https(
     Ok(proxy(req, &route, "https", peer, &backends).await)
 }
 
-/// Applies `strip_prefix` and `basic_auth` in that order, ahead of `headers`.
-/// `basic_auth` credentials and `headers` values aren't modeled in
-/// `cl-config` yet (`Middleware` there is a bare tag with no per-route
-/// config), so both are currently no-ops here; the pure functions they'd call
-/// live in `middleware.rs` and are unit tested there.
+/// Applies `strip_prefix` to the request path.
 fn apply_route_middlewares(route: &Route, req: &mut Request<Incoming>) {
     if route
         .middlewares
@@ -612,18 +600,18 @@ fn apply_route_middlewares(route: &Route, req: &mut Request<Incoming>) {
     }
 }
 
-/// The route's `cors` middleware, if it has one.
-fn cors_policy(route: &Route) -> Option<&cl_config::CorsPolicy> {
+/// The route's `headers` middleware, if it has one.
+fn headers_config(route: &Route) -> Option<&cl_config::Headers> {
     route.middlewares.iter().find_map(|m| match m {
-        cl_config::Middleware::Cors(policy) => Some(policy),
+        cl_config::Middleware::Headers(cfg) => Some(cfg),
         _ => None,
     })
 }
 
-/// The route's `forward_auth` middleware, if it has one.
-fn forward_auth_config(route: &Route) -> Option<&cl_config::ForwardAuth> {
+/// The route's `cors` middleware, if it has one.
+fn cors_policy(route: &Route) -> Option<&cl_config::CorsPolicy> {
     route.middlewares.iter().find_map(|m| match m {
-        cl_config::Middleware::ForwardAuth(cfg) => Some(cfg),
+        cl_config::Middleware::Cors(policy) => Some(policy),
         _ => None,
     })
 }
@@ -634,22 +622,6 @@ fn authenticated_policy(route: &Route) -> Option<&cl_config::Authenticated> {
         cl_config::Middleware::Authenticated(policy) => Some(policy),
         _ => None,
     })
-}
-
-/// Turns a `forward_auth::Outcome::Deny` into the response sent to the
-/// client, relaying the auth endpoint's own status/headers/body verbatim.
-fn deny_response(
-    status: StatusCode,
-    headers: hyper::HeaderMap,
-    body: Bytes,
-) -> Response<ProxyBody> {
-    let mut builder = Response::builder().status(status);
-    if let Some(map) = builder.headers_mut() {
-        *map = headers;
-    }
-    builder
-        .body(Full::new(body).map_err(|never| match never {}).boxed())
-        .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
 async fn proxy(
@@ -688,23 +660,8 @@ async fn proxy(
         }
     }
 
-    if let Some(cfg) = forward_auth_config(route) {
-        match forward_auth::check(
-            &backends.forward_auth_client,
-            cfg,
-            req.method(),
-            req.uri(),
-            req.headers(),
-        )
-        .await
-        {
-            forward_auth::Outcome::Deny(status, headers, body) => {
-                return deny_response(status, headers, body)
-            }
-            forward_auth::Outcome::Allow(allowed) => {
-                forward_auth::apply_auth_response_headers(req.headers_mut(), cfg, allowed);
-            }
-        }
+    if let Some(cfg) = headers_config(route) {
+        middleware::apply_headers(req.headers_mut(), &cfg.request, &cfg.remove_request);
     }
 
     let cors = cors_policy(route);
@@ -804,6 +761,9 @@ async fn proxy(
         Err(e) => return bad_gateway(format!("{} unreachable: {}", picked.addr, with_causes(&e))),
     };
 
+    if let Some(cfg) = headers_config(route) {
+        middleware::apply_headers(resp.headers_mut(), &cfg.response, &cfg.remove_response);
+    }
     if let Some(value) = picked.set_cookie {
         if let Ok(v) = HeaderValue::from_str(&format!("{STICKY_COOKIE}={value}; Path=/; HttpOnly"))
         {

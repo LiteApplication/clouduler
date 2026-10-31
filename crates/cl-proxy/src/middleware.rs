@@ -8,17 +8,9 @@
 //!    listener. Driven by `route.tls`, not by this list; see `server.rs`.
 //! 2. `strip_prefix` — removes the route's own `path_prefix` from the request
 //!    path before it reaches the backend.
-//! 3. `basic_auth` — challenges the request; short circuits with 401 on failure.
-//! 4. `headers` — adds/removes headers on the proxied request.
+//! 3. `headers` — adds/removes headers on the proxied request.
 //!
-//! `basic_auth` credentials and custom `headers` are not yet modeled in
-//! `cl-config` (the `Middleware` enum carries no per-route config), so both
-//! take their configuration as explicit arguments here. Until a config
-//! channel exists, `server.rs` wires them up as a no-op when nothing has been
-//! supplied, and logs that the middleware was requested but has nothing to do.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use cl_config::CorsPolicy;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 
@@ -87,60 +79,26 @@ pub fn strip_prefix(path: &str, prefix: &str) -> String {
     }
 }
 
-/// Username/password `basic_auth` checks against.
-#[derive(Debug, Clone)]
-pub struct BasicAuthCreds {
-    pub username: String,
-    pub password: String,
-}
-
-/// Checks the `Authorization` header against `creds`. `None` on the header
-/// means "not authenticated", same as a mismatch.
-pub fn check_basic_auth(headers: &HeaderMap, creds: &BasicAuthCreds) -> bool {
-    let Some(value) = headers.get(http::header::AUTHORIZATION) else {
-        return false;
-    };
-    let Ok(value) = value.to_str() else {
-        return false;
-    };
-    let Some(encoded) = value.strip_prefix("Basic ") else {
-        return false;
-    };
-    let Ok(decoded) = BASE64.decode(encoded) else {
-        return false;
-    };
-    let Ok(decoded) = String::from_utf8(decoded) else {
-        return false;
-    };
-    match decoded.split_once(':') {
-        Some((user, pass)) => user == creds.username && pass == creds.password,
-        None => false,
+/// Sets and removes headers on one direction of a proxied exchange. Names or
+/// values that are not valid HTTP are skipped (the stack validator rejects
+/// them, so this only matters for configs that predate that check).
+pub fn apply_headers(
+    headers: &mut HeaderMap,
+    set: &std::collections::BTreeMap<String, String>,
+    remove: &[String],
+) {
+    for name in remove {
+        if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
+            headers.remove(name);
+        }
     }
-}
-
-/// 401 response challenging for basic auth.
-pub fn basic_auth_challenge(realm: &str) -> http::response::Builder {
-    http::Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header(
-            http::header::WWW_AUTHENTICATE,
-            format!("Basic realm=\"{realm}\""),
-        )
-}
-
-/// Static header additions/removals a route can apply to the proxied request.
-#[derive(Debug, Clone, Default)]
-pub struct HeaderOps {
-    pub set: Vec<(HeaderName, HeaderValue)>,
-    pub remove: Vec<HeaderName>,
-}
-
-pub fn apply_headers(headers: &mut HeaderMap, ops: &HeaderOps) {
-    for name in &ops.remove {
-        headers.remove(name);
-    }
-    for (name, value) in &ops.set {
-        headers.insert(name.clone(), value.clone());
+    for (name, value) in set {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
     }
 }
 
@@ -269,38 +227,6 @@ mod tests {
         assert_eq!(strip_prefix("/other", "/api"), "/other");
     }
 
-    #[test]
-    fn basic_auth_accepts_correct_credentials() {
-        let creds = BasicAuthCreds {
-            username: "admin".to_string(),
-            password: "hunter2".to_string(),
-        };
-        let mut headers = HeaderMap::new();
-        let token = BASE64.encode("admin:hunter2");
-        headers.insert(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Basic {token}")).unwrap(),
-        );
-        assert!(check_basic_auth(&headers, &creds));
-    }
-
-    #[test]
-    fn basic_auth_rejects_wrong_credentials_or_missing_header() {
-        let creds = BasicAuthCreds {
-            username: "admin".to_string(),
-            password: "hunter2".to_string(),
-        };
-        assert!(!check_basic_auth(&HeaderMap::new(), &creds));
-
-        let mut headers = HeaderMap::new();
-        let token = BASE64.encode("admin:wrong");
-        headers.insert(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Basic {token}")).unwrap(),
-        );
-        assert!(!check_basic_auth(&headers, &creds));
-    }
-
     fn cors_policy(origins: &[&str]) -> CorsPolicy {
         CorsPolicy {
             origins: origins.iter().map(|s| s.to_string()).collect(),
@@ -378,14 +304,8 @@ mod tests {
     fn header_ops_set_and_remove() {
         let mut headers = HeaderMap::new();
         headers.insert("x-drop", HeaderValue::from_static("bye"));
-        let ops = HeaderOps {
-            set: vec![(
-                HeaderName::from_static("x-added"),
-                HeaderValue::from_static("yes"),
-            )],
-            remove: vec![HeaderName::from_static("x-drop")],
-        };
-        apply_headers(&mut headers, &ops);
+        let set = [("x-added".to_string(), "yes".to_string())].into();
+        apply_headers(&mut headers, &set, &["x-drop".to_string()]);
         assert!(!headers.contains_key("x-drop"));
         assert_eq!(headers.get("x-added").unwrap(), "yes");
     }

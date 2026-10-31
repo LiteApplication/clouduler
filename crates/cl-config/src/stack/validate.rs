@@ -566,6 +566,38 @@ impl StackFile {
                         ),
                     ));
                 }
+                for m in &route.middlewares {
+                    if let crate::stack::Middleware::Headers(h) = m {
+                        {
+                            let names = h
+                                .request
+                                .keys()
+                                .chain(h.response.keys())
+                                .chain(&h.remove_request)
+                                .chain(&h.remove_response);
+                            for name in names {
+                                if name.is_empty()
+                                    || !name.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+                                    })
+                                {
+                                    return Err(ConfigError::invalid(
+                                        format!("{at}.middlewares"),
+                                        format!("headers: {name:?} is not a valid header name"),
+                                    ));
+                                }
+                            }
+                            for value in h.request.values().chain(h.response.values()) {
+                                if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+                                    return Err(ConfigError::invalid(
+                                        format!("{at}.middlewares"),
+                                        "headers: a header value cannot contain control characters",
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
                 for cors in route.middlewares.iter().filter_map(|m| match m {
                     crate::stack::Middleware::Cors(c) => Some(c),
                     _ => None,

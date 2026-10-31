@@ -24,7 +24,7 @@ pub use netalloc::{
 pub use stack::{
     validate_stack_name, AllowedHost, AllowedPorts, AllowedTarget, Authenticated, BoundPort,
     ByteSize, Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket,
-    DockerSocketMode, ExposePort, ForwardAuth, Healthcheck, HealthcheckTest, Middleware, ObjectRef,
+    DockerSocketMode, ExposePort, Headers, Healthcheck, HealthcheckTest, Middleware, ObjectRef,
     Placement, PortMapping, PortRange, Protocol, ProxyRoute, PublishMode, RedirectRegex,
     ResourceSpec, Resources, RestartPolicy, Service, ServiceAction, ServiceExtensions, StackConfig,
     StackDefaults, StackFile, StackNetwork, StackRequirements, StackSecret, StackVolume,

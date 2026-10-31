@@ -117,7 +117,7 @@ describe('stackSpecCompletionSource', () => {
       '            - |',
     ].join('\n');
     expect(complete(doc)).toEqual(
-      expect.arrayContaining(['redirect_https', 'strip_prefix', 'authenticated', 'basic_auth:', 'headers:']),
+      expect.arrayContaining(['redirect_https', 'strip_prefix', 'authenticated', 'headers:']),
     );
   });
 
