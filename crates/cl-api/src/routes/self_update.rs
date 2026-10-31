@@ -226,7 +226,14 @@ async fn internal_restart(
     let current_exe = std::env::current_exe().map_err(ApiError::internal)?;
     cl_update::install::install_binary(&state.self_update_artifact_path, &current_exe)
         .map_err(ApiError::internal)?;
-    let _ = state.shutdown.send(());
+    // Shut down only after the response has had time to leave: when the
+    // leader restarts itself, the caller is this same process, and exiting
+    // first would turn a successful restart into a failed request.
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let _ = shutdown.send(());
+    });
     Ok(StatusCode::ACCEPTED)
 }
 
