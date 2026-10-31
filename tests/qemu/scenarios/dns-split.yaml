@@ -1,0 +1,74 @@
+# The client dns server answers by the network the asking machine is on.
+#
+# One L2 mesh carries three address ranges, standing in for three networks:
+#   cluster  10.10.0.0/24     internal, every node
+#   lan      192.168.50.0/24  private, n1 and n2 only
+#   wan      203.0.113.0/24   public, every node (the node's public address)
+# A probe script in each guest asks the next node's dns server over each range
+# they share, so the server sees a cluster, lan or public client, and the
+# test checks each one gets exactly the answer its network is entitled to.
+name: dns-split
+description: the client dns server answers each machine according to the network it is on.
+
+networks:
+  lan: { type: private, subnet: 192.168.50.0/24, domain: lan.test }
+
+wan_on_mesh: true
+
+# Run in every guest, see the script for what it asks.
+guest_probe: dns-split-probe.sh
+
+proxy:
+  dns_server:
+    enabled: true
+    networks: [cluster, lan, wan]
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1, addresses: { lan: 192.168.50.1 } }
+  - { name: n2, role: manager, ip: 10.10.0.2, addresses: { lan: 192.168.50.2 } }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/dns-split.yaml, name: dns-split }
+  - wait_running: { stack: dns-split, service: site, timeout: 150 }
+
+  # n1 asks n2. Over the cluster range it is a cluster client: the public
+  # host and the cluster host resolve to every node's cluster address, the
+  # lan host is refused.
+  - assert_serial: { node: n1, contains: "net=cluster name=app.wan.test -> 10.10.0.1,10.10.0.2,10.10.0.3,", timeout: 120 }
+  - assert_serial: { node: n1, contains: "net=cluster name=admin.cl.test -> 10.10.0.1,10.10.0.2,10.10.0.3,", timeout: 60 }
+  - assert_serial: { node: n1, contains: "net=cluster name=intranet.lan.test -> REFUSED", timeout: 60 }
+  # Over the lan range it is a lan client: the lan host and the public host
+  # resolve to the lan addresses of the nodes that have one (the public host
+  # falls back to n3's public address, n3 being off the lan), the cluster host
+  # is refused.
+  - assert_serial: { node: n1, contains: "net=lan name=intranet.lan.test -> 192.168.50.1,192.168.50.2,", timeout: 60 }
+  - assert_serial: { node: n1, contains: "net=lan name=app.wan.test -> 192.168.50.1,192.168.50.2,203.0.113.3,", timeout: 60 }
+  - assert_serial: { node: n1, contains: "net=lan name=admin.cl.test -> REFUSED", timeout: 60 }
+  # Over the public range it is a public client: public addresses, and the
+  # names of the two private networks are refused outright, as is anything
+  # the cluster does not own (no open resolver).
+  - assert_serial: { node: n1, contains: "net=wan name=app.wan.test -> 203.0.113.1,203.0.113.2,203.0.113.3,", timeout: 60 }
+  - assert_serial: { node: n1, contains: "net=wan name=intranet.lan.test -> REFUSED", timeout: 60 }
+  - assert_serial: { node: n1, contains: "net=wan name=admin.cl.test -> REFUSED", timeout: 60 }
+  - assert_serial: { node: n1, contains: "net=wan name=nope.invalid -> REFUSED", timeout: 60 }
+
+  # n2 is the same shape as n1 (asking n3, and n1 over the lan).
+  - assert_serial: { node: n2, contains: "net=lan name=app.wan.test -> 192.168.50.1,192.168.50.2,203.0.113.3,", timeout: 60 }
+  - assert_serial: { node: n2, contains: "net=wan name=app.wan.test -> 203.0.113.1,203.0.113.2,203.0.113.3,", timeout: 60 }
+  - assert_serial: { node: n2, contains: "net=wan name=intranet.lan.test -> REFUSED", timeout: 60 }
+
+  # n3 has no lan address, so it only ever is a cluster or public client.
+  - assert_serial: { node: n3, contains: "net=cluster name=app.wan.test -> 10.10.0.1,10.10.0.2,10.10.0.3,", timeout: 60 }
+  - assert_serial: { node: n3, contains: "net=cluster name=intranet.lan.test -> REFUSED", timeout: 60 }
+  - assert_serial: { node: n3, contains: "net=wan name=admin.cl.test -> REFUSED", timeout: 60 }
+
+  # Nothing leaked, ever: a lan name never resolved for a non-lan client, a
+  # cluster name never for a non-cluster one, and a public client never got a
+  # private address.
+  - assert_serial_absent: { node: n1, regex: "net=(cluster|wan) name=intranet.lan.test -> [0-9]" }
+  - assert_serial_absent: { node: n1, regex: "net=(lan|wan) name=admin.cl.test -> [0-9]" }
+  - assert_serial_absent: { node: n1, regex: "net=wan name=app.wan.test -> .*(10\\.10\\.|192\\.168\\.)" }
+  - assert_serial_absent: { node: n2, regex: "net=(cluster|wan) name=intranet.lan.test -> [0-9]" }
+  - assert_serial_absent: { node: n3, regex: "net=wan name=(intranet.lan|admin.cl).test -> [0-9]" }

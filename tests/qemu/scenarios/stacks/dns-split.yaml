@@ -1,0 +1,23 @@
+# The hostnames the dns-split scenario resolves, one per network kind: a public
+# network's, a private network's and the internal network's. The nginx behind
+# them is incidental; the point is that the proxy has routes, so the client dns
+# server has names to answer. The asking is done from the guests themselves
+# (scenarios/dns-split-probe.sh): a container's traffic leaves its node
+# unmasqueraded and so is never a dns client of a node.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  site:
+    image: nginx:1.27-alpine
+    restart: always
+    networks: [cluster]
+    x-clouduler:
+      proxy:
+        # A public network's host: everyone may resolve it.
+        - { host: app, network: wan, port: 80, tls: false }
+        # Subnetted networks' hosts: only their own clients may.
+        - { host: intranet, network: lan, port: 80, tls: false }
+        - { host: admin, network: cluster, port: 80, tls: false }

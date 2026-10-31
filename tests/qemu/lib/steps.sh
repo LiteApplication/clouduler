@@ -565,6 +565,55 @@ step_assert_logs() {
   log "$stack.$svc logged '$contains'"
 }
 
+# assert_serial: { node: n1, contains: "...", timeout: 60 }
+#
+# For what a guest itself printed on its console rather than a container
+# (a scenario's probe script, see guest-init.sh). Every VM's console is its
+# serial log on the host.
+step_assert_serial() {
+  local node contains timeout
+  node="$(echo "$1" | jq -r '.node')"
+  contains="$(echo "$1" | jq -r '.contains')"
+  timeout="$(echo "$1" | jq -r '.timeout // 60')"
+  wait_for "$node's console shows '$contains'" "$timeout" \
+    "grep -qF -- '$contains' '$RUN_DIR/$node.serial.log'"
+  log "$node printed '$contains'"
+}
+
+# assert_serial_absent: { node: n1, regex: "..." }
+step_assert_serial_absent() {
+  local node regex
+  node="$(echo "$1" | jq -r '.node')"
+  regex="$(echo "$1" | jq -r '.regex')"
+  if grep -Eq -- "$regex" "$RUN_DIR/$node.serial.log"; then
+    grep -E -- "$regex" "$RUN_DIR/$node.serial.log" | head -5 | sed 's/^/    /'
+    die "$node's console matched /$regex/"
+  fi
+  log "$node never printed /$regex/"
+}
+
+# assert_logs_absent: { stack: dns-probe, service: probe1, regex: "net=wan .* -> [0-9]" }
+#
+# The converse of assert_logs, for leaks: fails if any line of any replica's
+# buffered log matches the extended regex.
+step_assert_logs_absent() {
+  local stack svc regex node id logs
+  stack="$(echo "$1" | jq -r '.stack')"
+  svc="$(echo "$1" | jq -r '.service')"
+  regex="$(echo "$1" | jq -r '.regex')"
+  node="$(any_manager)"
+  for id in $(instances_everywhere | jq -r --arg s "$stack" --arg v "$svc" \
+      '.[] | select(.id | startswith($s + "." + $v + ".")) | .id'); do
+    logs="$(api_get "$node" "/api/instances/$id/logs?tail=500" 2>/dev/null)" || true
+    if grep -Eq -- "$regex" <<<"$logs"; then
+      log "unexpected line in $id's log:"
+      grep -E -- "$regex" <<<"$logs" | head -5 | sed 's/^/    /'
+      die "$id logged something matching /$regex/"
+    fi
+  done
+  log "$stack.$svc never logged /$regex/"
+}
+
 # Prints what the service did log, so a failed assert_logs shows why.
 _dump_logs() {
   local stack="$1" svc="$2" node id

@@ -44,9 +44,12 @@ unshare --user --map-root-user --mount -- bash -c '
   # to read a key file anyone else could read, so the mode matters.
   install -D -m 0600 "$7" "$2/etc/clouduler/secrets.key"
   install -D -m 0755 "$8" "$2/sbin/init-clouduler"
+  # Optional per-scenario script the guest runs in the background (see
+  # guest-init.sh); empty when the scenario has none.
+  if [ -n "$9" ]; then install -D -m 0755 "$9" "$2/etc/clouduler/probe.sh"; fi
   echo "$5" > "$2/etc/hostname"
   # rootfs is ~370M, plus the clouduler binary (a debug build can be over
   # 100M) and headroom for docker image layers pulled during a scenario.
   mke2fs -q -t ext4 -d "$2" -F "$6" 1536M
 ' _ "$ROOTFS_CACHE" "$STAGE" "$CLOUDULER_BIN" "$CLUSTER_YAML" "$NODE" "$OUT_IMAGE" "$CLUSTER_KEY" \
-    "$GUEST_INIT"
+    "$GUEST_INIT" "${GUEST_PROBE:-}"

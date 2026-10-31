@@ -68,6 +68,18 @@ if [ -n "$ADDR" ]; then
   ip addr add "$ADDR" dev "$IFACE"
 fi
 
+# Extra addresses on the cluster nic, comma separated (claliases=a/24,b/24).
+# A scenario uses them to put this node "on" more networks than the cluster
+# one (a lan, a public range) over the same mesh: a peer reaching one of them
+# is on-link, and the kernel sources the packet from its own address in that
+# same range, which is how a client ends up on a specific network.
+ALIASES="$(get_arg claliases)"
+if [ -n "$ALIASES" ] && [ -n "$ADDR" ]; then
+  for a in $(echo "$ALIASES" | tr ',' ' '); do
+    ip addr add "$a" dev "$IFACE"
+  done
+fi
+
 if [ -e "/sys/class/net/$HOST_IFACE" ]; then
   ip link set "$HOST_IFACE" up
   ip addr add "$HOST_ADDR" dev "$HOST_IFACE"
@@ -210,6 +222,13 @@ if [ -S /var/run/docker.sock ]; then
 else
   echo "init-clouduler: WARNING docker never came up, last lines of its log:"
   tail -n 30 /var/log/dockerd.log 2>/dev/null | sed 's/^/init-clouduler:   dockerd: /'
+fi
+
+# A scenario's own probe, run alongside the daemon with its output on the
+# console, which the host reads back from the serial log.
+if [ -x /etc/clouduler/probe.sh ]; then
+  /etc/clouduler/probe.sh &
+  echo "init-clouduler: scenario probe started"
 fi
 
 echo "init-clouduler: starting clouduler daemon"

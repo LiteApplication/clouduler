@@ -51,22 +51,29 @@ python3 "$QEMU_DIR/lib/scenario_prep.py" "$SCENARIO_FILE" \
 
 mkdir -p "$RUN_DIR/cli-scratch"
 
+# A script some scenarios have every guest run, relative to scenarios/.
+probe="$(jq -r '.guest_probe // ""' "$RUN_DIR/topology.json")"
+GUEST_PROBE=""
+[[ -n "$probe" ]] && GUEST_PROBE="$QEMU_DIR/scenarios/$probe"
+export GUEST_PROBE
+
 log "booting $(jq '[.nodes[] | select((.join // false) != true)] | length' "$RUN_DIR/topology.json") of $(jq '.nodes | length' "$RUN_DIR/topology.json") nodes now (the rest join later, per the scenario's steps)"
 idx=0
 vpn_mcast="$(jq -r '.vpn_mcast_group // ""' "$RUN_DIR/topology.json")"
-while IFS=$'\t' read -r name join ip web_port rpc_port host_ip http_port expose_port vpn_ip vpn_canary; do
+while IFS=$'\t' read -r name join ip web_port rpc_port host_ip http_port expose_port aliases vpn_ip vpn_canary; do
+  [[ "$aliases" == "-" ]] && aliases=""
   if [[ "$join" != "true" ]]; then
     vm_start "$name" "$ip" "$web_port" "$rpc_port" \
       "$(jq -r '.mcast_group' "$RUN_DIR/topology.json")" "$idx" "$host_ip" \
       "$http_port" "$expose_port" "$vpn_ip" "$vpn_canary" \
-      "$([[ -n "$vpn_ip$vpn_canary" ]] && echo "$vpn_mcast" || echo "")"
+      "$([[ -n "$vpn_ip$vpn_canary" ]] && echo "$vpn_mcast" || echo "")" "$aliases"
   fi
   idx=$((idx + 1))
 # `join` is read right after `name`, before any field that can be empty
 # (vpn_ip/vpn_canary): IFS-whitespace `read` collapses consecutive tab
 # delimiters, so two adjacent empty fields ahead of `join` would silently
 # swallow it and misalign every field after.
-done < <(jq -r '.nodes[] | [.name, ((.join // false) | tostring), .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port, (.vpn_ip // ""), (.vpn_canary // "")] | @tsv' "$RUN_DIR/topology.json")
+done < <(jq -r '.nodes[] | [.name, ((.join // false) | tostring), .ip, .web_port, .rpc_port, .control_ip, .http_port, .expose_port, (.aliases | if . == "" then "-" else . end), (.vpn_ip // ""), (.vpn_canary // "")] | @tsv' "$RUN_DIR/topology.json")
 
 log "waiting for daemons to come up"
 sleep 5

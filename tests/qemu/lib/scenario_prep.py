@@ -71,6 +71,8 @@ def main():
         vpn_ips[vpn["canary_node"]] = "172.31.0.2/24"
         egress_networks_block[vpn["network"]] = {"type": "egress"}
 
+    extra_networks = scenario.get("networks") or {}
+
     node_summaries = []
     # Built for every node, including ones that `join: true` marks as joining
     # after the cluster is already up - `cluster_nodes`/`control_nodes` below
@@ -105,6 +107,19 @@ def main():
         # network address just needs to exist for placement/gating purposes
         # in these scenarios, since nothing here does real DNS/ACME with it.
         node_network = {"cluster": n["ip"], "wan": {"ipv4": f"203.0.113.{index + 1}"}}
+        # Scenario-declared extra networks (`networks:` at the top level) this
+        # node sits on, as `addresses: {lan: 192.168.50.1}`. Each such address,
+        # and the wan one when `wan_on_mesh` is set, is also configured on the
+        # node's cluster nic (eth0) as an alias, so VMs can reach each other
+        # "on" those networks and a client's source address is the one of the
+        # network it used. See lib/guest-init.sh's `claliases`.
+        aliases = []
+        for net_name, addr in (n.get("addresses") or {}).items():
+            node_network[net_name] = addr
+            prefix = extra_networks[net_name]["subnet"].split("/")[1]
+            aliases.append(f"{addr}/{prefix}")
+        if scenario.get("wan_on_mesh"):
+            aliases.append(f"203.0.113.{index + 1}/24")
         if vpn and name == vpn["egress_node"]:
             # A bare non-IP string is the third `NodeAddress` form: a host
             # interface name, naming eth2 (the vpn-segment netdev) rather
@@ -130,6 +145,7 @@ def main():
             "vpn_ip": vpn_ips.get(name, ""),
             "vpn_canary": "1" if vpn and name == vpn["canary_node"] else "",
             "join": name in join_names,
+            "aliases": ",".join(aliases),
         })
 
     # One cluster key for the whole run, generated here and installed into
@@ -181,12 +197,14 @@ def main():
                 # externally-facing route use this instead of "cluster".
                 "wan": {"type": "public", "domain": "wan.test"},
                 **egress_networks_block,
+                **extra_networks,
             },
             "drives": drives_block,
             "nodes": nodes_block,
             "web": {"address": "api", "network": "cluster", "port": 8443},
             "failover": failover,
             "secrets": {"key_file": key_file, "generate_if_missing": False},
+            **({"proxy": scenario["proxy"]} if scenario.get("proxy") else {}),
         }
 
     # Nodes marked `join: true` are left out of the run's *initial* config -
@@ -223,6 +241,7 @@ def main():
         "mcast_group": f"230.10.{mcast_id}.1",
         "vpn_mcast_group": f"230.11.{mcast_id}.1" if vpn else "",
         "nodes": node_summaries,
+        "guest_probe": scenario.get("guest_probe", ""),
         "key_file": key_path,
         "steps": scenario.get("steps", []),
     }

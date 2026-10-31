@@ -191,6 +191,21 @@ deploys one stack carrying all three paths and asserts each of them:
   no exec channel into a guest, so the container's own healthcheck is the test
   and the api's health reporting is how the result gets back out.
 
+`dns-split` covers the client dns server (`proxy.dns_server`, see
+`docs/proxy.md`). The mesh carries three address ranges standing in for three
+networks: `cluster` (internal), `lan` (private, n1 and n2 only) and `wan`
+(public). A script installed in every guest (`scenarios/dns-split-probe.sh`,
+run by `guest-init.sh`) asks another node's server for a public-, a private-
+and an internal-network hostname over each range it shares with it. The
+kernel sources the query from its own address in that range, so the server
+sees a client of that network. Each answer is printed on the console and the
+scenario reads it back with `assert_serial`: a lan client gets lan addresses,
+a public one public addresses, a cluster one cluster addresses, a private
+network's names are refused to everyone else, and `assert_serial_absent`
+proves no private address ever reached the wrong network. The probe runs in
+the guest rather than a container because a container's traffic leaves a node
+unmasqueraded and is never a dns client of one.
+
 ACME issuance is not covered end to end. It needs a Pebble server and a mock
 Cloudflare api in the harness; until then only the pure parts (renewal window,
 zone selection, leaf expiry parsing) are unit tested.

@@ -36,8 +36,9 @@ qemu_accel() {
 #
 # clnode/clip are read back off /proc/cmdline by that init.
 kernel_cmdline() {
-  local node="$1" ip="$2" vpn_ip="${3:-}" vpn_canary="${4:-}"
+  local node="$1" ip="$2" vpn_ip="${3:-}" vpn_canary="${4:-}" aliases="${5:-}"
   local extra=""
+  [[ -n "$aliases" ]] && extra="$extra claliases=$aliases"
   [[ -n "$vpn_ip" ]] && extra="$extra clvpnip=$vpn_ip"
   [[ -n "$vpn_canary" ]] && extra="$extra clvpncanary=1"
   echo "console=ttyS0 root=/dev/vda rootfstype=ext4" \
@@ -73,7 +74,7 @@ vm_start() {
   # scenario_prep.py's "vpn_segment" handling): a third netdev standing in
   # for a VPN tunnel. Empty vpn_mcast means no third device at all, so every
   # other scenario's VM shape is unchanged.
-  local vpn_ip="${10:-}" vpn_canary="${11:-}" vpn_mcast="${12:-}"
+  local vpn_ip="${10:-}" vpn_canary="${11:-}" vpn_mcast="${12:-}" aliases="${13:-}"
   local disk="$RUN_DIR/$node.img"
   local serial="$RUN_DIR/$node.serial.log"
   local pidfile="$RUN_DIR/$node.pid"
@@ -100,7 +101,7 @@ vm_start() {
     -m 512 -smp 1 \
     -accel "$accel" \
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
-    -append "$(kernel_cmdline "$node" "$ip" "$vpn_ip" "$vpn_canary")" \
+    -append "$(kernel_cmdline "$node" "$ip" "$vpn_ip" "$vpn_canary" "$aliases")" \
     -drive file="$disk",if=virtio,format=raw \
     -netdev socket,mcast="$mcast":4321,localaddr="$MCAST_LOCALADDR",id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
     -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \
