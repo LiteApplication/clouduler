@@ -248,7 +248,10 @@ once a second (`docker network inspect`, joined to the `clouduler.stack` label).
   routes on a `public` network are answered by the resolver's own override
   records (`proxy_overrides`, the node's proxy address on the internal
   network) before the forwarder is reached, so they never produce a wan grant.
-  They are governed by the `public` list through the proxy instead. Their
+  They are governed by the `public` list through the proxy instead, even for a
+  stack that is not attached to `public` (it only needs an overlay network, so
+  the proxy can identify it); such a stack can run on a node with no public
+  address and still reach them. Their
   non-proxy ports (a mail submission port exposed by another stack, say) are
   not covered by either list: a `host:port` firewall entry is resolved by the
   node's own resolver, which returns the public address, not the override.

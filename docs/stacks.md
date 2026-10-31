@@ -61,9 +61,9 @@ networks:
     allowed:
       - cloud.home.liteapp.fr          # hostname: checked by the reverse proxy
       - "service.home.liteapp.fr:22"   # host:port: checked by the firewall
-  wan:
+  public:
     allowed:
-      - auth.liteapp.fr
+      - auth.liteapp.fr               # a public route of this cluster: proxy check
 ```
 
 | Entry | Enforced by | Meaning |
@@ -169,6 +169,44 @@ networks:
   private network (only `public` plus the egress network) has no pinned route
   to the proxy, so the proxy sees it as an unrestricted caller and the list is
   not enforced against it; the entry is still the right place for it.
+
+#### Reaching a route of this cluster from an egress stack
+
+A stack does not have to join a `public` network to call a hostname the
+cluster publishes on one (an identity provider, say). The cluster resolver
+answers every such name with the local node's proxy over the internal network,
+for any container, so the call never leaves through the egress bridge. That
+gives two separate controls, and a stack that only calls such routes needs no
+egress access at all:
+
+```yaml
+networks:
+  tailscale:                          # internal: the stack's overlay
+    allowed: []
+  wan:                                # egress: the outside world
+    allowed: []                       # nothing leaves directly
+  public:                             # declared only to carry the proxy list
+    allowed:
+      - auth.example.org              # the only public route it may call
+
+services:
+  app:
+    networks: [tailscale, wan]        # not `public`
+```
+
+* The `public` list is enforced by the proxy, so it works although no service
+  attaches to `public`. A network used only by an `allowed` list does not add
+  a placement requirement: the service can run on a node with no `public`
+  address.
+* Put the route's hostname in the `public` list, never in the egress list:
+  the egress list only governs names resolved upstream, so an entry there for
+  a cluster-published route does nothing.
+* Whatever is not a route of this cluster (the open internet) is governed by
+  the egress list alone. `allowed: []` there blocks it; add hostnames,
+  wildcards or `host:port` entries to open specific destinations.
+* The stack needs an internal or private network (`tailscale` above), both
+  for the resolver and so the proxy can identify the stack by its overlay
+  subnet and apply the `public` list to it.
 
 ## Services
 
