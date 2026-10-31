@@ -1,10 +1,45 @@
 # clouduler
 
-A small container orchestrator for home and small-office clusters. Nodes form a raft cluster, replicate stacks, configs and secrets, and run Docker containers with compose-style stack files. It includes a web UI, an overlay network, a reverse proxy with Let's Encrypt, replicated drives, backups, and an MCP endpoint for AI clients.
+An opinionated, turnkey alternative to Docker Swarm, built for clusters where the network is secure but unreliable, and where nodes are very different from each other.
 
-It ships as one binary (`clouduler`) with the UI embedded.
+It was designed around one real setup:
+
+- a secure but unstable network;
+- a cluster that depends on the network, and a network that depends on the cluster;
+- a scattered topology with several public IPs of different capabilities;
+- heterogeneous storage, RAM and CPU.
+
+The goal was to beat the stability of Swarm + Traefik + GlusterFS/Ceph/SeaweedFS on that infrastructure, and it has been met: no crash or downtime caused by clouduler since. Every crash found during development got a regression test where one could apply, and an end-to-end test harness based on QEMU replays failures on clusters of different sizes to check that they always recover.
+
+It ships as one binary (`clouduler`, about 65 MB on arm64) with the web UI embedded. Few external dependencies: Docker, `restic` for backups, and the `nfsv4` kernel module to access remote volumes without a local copy.
 
 ![Cluster overview](docs/.images/overview.png)
+
+## Features
+
+- **Containers.** Swarm-like orchestration with better docker compose compatibility, plus Swarm-only features missing from compose (configs). Most behaviour is configurable per stack or per container.
+- **Replicated drives.** A drive is a folder of volumes, replicated in full across the nodes that implement it (a node implements a drive by designating a folder, usually on its own storage). Data stays local whenever possible.
+- **Reverse proxy.** Uses Cloudflare DNS for Let's Encrypt DNS-01 certificates and routes each request to the right node, since nodes can have different public and internal addresses. It can also expose services that clouduler does not manage, such as a box admin page.
+- **Networks.** Access to web services is governed by networks: one public network, and any number of private ones, each tied to a subnet and its own domain (for example `liteapp.fr` and `home.liteapp.fr`). Someone outside the subnet cannot reach `home.liteapp.fr`. The same rule applies to containers: one that is not on the internal network cannot reach its services.
+- **Backups.** Per-drive restic backups to one or more cluster nodes, SSH (scp) or S3, with the usual retention policies. Each backup server has its own encryption key, usable with plain restic. Restore a volume from the web UI.
+- **GitOps.** Configuration is pushed to and pulled from git. Configs are part of it, so they can be restored without any data, and editing a config inside a container can commit automatically.
+- **Updates.** Quick updates from Docker Hub or private registries.
+- **Management.** Web UI (OIDC or API key) for almost everything, and a CLI that can `docker exec` from any node and reach advanced features like freezing a volume so replication does not interfere while you work on it.
+
+![Stack detail](docs/.images/stack.png)
+
+![Storage](docs/.images/storage.png)
+
+## Security
+
+The network the nodes share is assumed to be secure (VPN or internal VLAN), so there is no extra encryption layer. Container traffic is plain text (VXLAN), and node-to-node administration traffic is plain text too, but authenticated with signatures.
+
+- **Secrets** are stored in raft, encrypted with XChaCha20-Poly1305 under a cluster key. The key is only shared at pairing, encrypted to the joining node's public key, and each node keeps it in a mode 600 file.
+- **Secrets in git** are encrypted with age to a public key provided at setup, so clouduler only ever holds the public key.
+- **Per-stack access control.** Each stack declares which networks it can reach (private, public, internet) and can restrict each one, for example only `auth.liteapp.fr` for OIDC and `*.github.com` for updates. Clouduler is the containers' DNS resolver: when a container asks for `api.github.com`, the firewall rule is added before the answer is returned.
+- **Internal HTTP(S)** requests go through the reverse proxy, which enforces access. Other protocols (mail, for instance) must be allowed explicitly and are added to the firewall at start.
+
+The aim is to treat stacks as small, well-guarded islands that are hard to move out of.
 
 > **Security model:** the internal network is expected to be secure. Most traffic between nodes (raft, replication, overlay) is not encrypted, because clouduler is designed to run over an already encrypted VPN such as Tailscale or Headscale. Do not expose the cluster subnet to untrusted networks.
 
@@ -58,8 +93,6 @@ journalctl -u clouduler | grep -i -E "api key|fingerprint"
 
 6. Set up Cloudflare (recommended), in the web UI, before adding other nodes. Put your domain's DNS on Cloudflare and create an API token with `Zone:DNS:Edit` on that zone. In the UI, set the Cloudflare zones and the ACME settings (contact email; start on the staging directory and switch to production once it works), and enter the API token in the Cloudflare settings. Clouduler then gets real certificates through ACME DNS-01, which needs no inbound access, so the UI and API serve a trusted certificate and you never need `--tls-fingerprint` when joining nodes. Config changes apply live, no restart needed. Wait for the certificate before continuing. Without Cloudflare the cluster keeps its self-signed certificate and joins should be pinned by fingerprint.
 
-   ![Configuration page](docs/.images/configuration.png)
-
    The file equivalent, in `/etc/clouduler/cluster.yaml` (see `examples/cluster.yaml`):
 
 ```
@@ -81,10 +114,6 @@ Use at least 3 managers for a fault-tolerant cluster (`--role manager`). The clu
 8. Check health: `clouduler check` (parse config), `clouduler status` (live problems, ends with `all clear`).
 
 9. Deploy something: `clouduler stack deploy` with a file like `examples/stacks/simple.yaml`, or use the UI.
-
-The Updates page shows which running images are behind and lets you update or pin them:
-
-![Updates page](docs/.images/updates.png)
 
 ## Keys and credentials to set up
 

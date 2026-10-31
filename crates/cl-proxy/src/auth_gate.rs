@@ -719,7 +719,7 @@ impl AuthGate {
 
         let identity = match self.exchange(settings, portal, code, &pending).await {
             Ok(i) => i,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
         let now = now_unix() as i64;
@@ -771,13 +771,13 @@ impl AuthGate {
         portal: &str,
         code: String,
         pending: &PendingLogin,
-    ) -> Result<Identity, Response<ProxyBody>> {
+    ) -> Result<Identity, Box<Response<ProxyBody>>> {
         let metadata = self.metadata(&settings.issuer).await.map_err(|e| {
             warn!(error = %e, "oidc discovery failed while finishing a login");
-            bad_gateway("oidc discovery failed")
+            Box::new(bad_gateway("oidc discovery failed"))
         })?;
         let redirect = RedirectUrl::new(format!("https://{portal}/callback"))
-            .map_err(|_| bad_gateway("invalid redirect url"))?;
+            .map_err(|_| Box::new(bad_gateway("invalid redirect url")))?;
         let secret = self.client_secret().await;
         let client = build_client!(metadata, settings, secret, redirect);
 
@@ -785,7 +785,7 @@ impl AuthGate {
             .exchange_code(AuthorizationCode::new(code))
             .map_err(|e| {
                 warn!(error = %e, "oidc token endpoint not configured");
-                bad_gateway("token endpoint not configured")
+                Box::new(bad_gateway("token endpoint not configured"))
             })?;
         let token_response = token_request
             .set_pkce_verifier(PkceCodeVerifier::new(pending.pkce_verifier.clone()))
@@ -793,13 +793,16 @@ impl AuthGate {
             .await
             .map_err(|e| {
                 warn!(error = %e, "oidc token exchange failed");
-                status_response(StatusCode::UNAUTHORIZED, "token exchange failed")
+                Box::new(status_response(
+                    StatusCode::UNAUTHORIZED,
+                    "token exchange failed",
+                ))
             })?;
         let id_token = token_response.id_token().ok_or_else(|| {
-            status_response(
+            Box::new(status_response(
                 StatusCode::UNAUTHORIZED,
                 "provider did not return an id token",
-            )
+            ))
         })?;
         let nonce = Nonce::new(pending.nonce.clone());
         let subject = match id_token
@@ -824,7 +827,10 @@ impl AuthGate {
                 };
                 retried.map_err(|second| {
                     warn!(first = %first, second = %second, "oidc id token verification failed");
-                    status_response(StatusCode::UNAUTHORIZED, "id token verification failed")
+                    Box::new(status_response(
+                        StatusCode::UNAUTHORIZED,
+                        "id token verification failed",
+                    ))
                 })?
             }
         };
