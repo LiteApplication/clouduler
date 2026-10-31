@@ -221,6 +221,8 @@ proxy:
     title: Sign in to continue
     palette: grape         # login page colours: grape, sunset, ocean, forest
     accent: "#e5603c"      # optional: overrides the palette's main colour
+    remember_ip: [public]  # networks whose login page offers "remember this IP address" (default: none)
+    remember_ip_ttl: 30d   # how long a saved address skips the login (default 30d)
 
 # stack file
 proxy:
@@ -262,7 +264,20 @@ a 403 page with a "use another account" link (portal logout).
 logins survive restarts; only a hash of each cookie/token is stored. A token
 is valid for 60 seconds and can be spent once, cluster-wide. Cookies are
 host-only and bound to their hostname; an app cookie never outlives the portal
-session that produced it (`session_ttl`, fixed at login). Groups are read at
+session that produced it (`session_ttl`, fixed at login).
+
+**Remembering an IP address.** On the networks listed in `remember_ip`, the
+login page shows a "Remember this IP address" checkbox, and ticking it asks for
+confirmation before logging in. The checkbox only appears when the visitor's
+TCP peer address belongs to that network: inside its subnet for an internal or
+private network, a globally routable address for a public one (never a header,
+so it cannot be spoofed). A network not listed offers nothing, and a saved
+address stops working if its network is removed from the list. The saved
+address skips the login on that network for `remember_ip_ttl`, independent of
+`session_ttl`, with the groups the user had at that login. Signing out at the
+portal forgets the address. Anyone behind the same address, for example a
+router doing NAT, is let in too, so turn it on only for networks where that is
+acceptable. Groups are read at
 login: a change at the provider applies from the next login. Signing out
 (the portal's `/logout`, or `/.well-known/clouduler-logout` on any protected
 host) removes the portal session and every app session handed out from it, so

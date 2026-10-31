@@ -23,6 +23,7 @@ pub mod registries;
 pub mod restic;
 pub mod self_update;
 pub mod stacks;
+pub mod remembered_ips;
 pub mod static_routes;
 pub mod updates;
 pub mod wireguard;
@@ -35,6 +36,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .merge(auth::router())
         .merge(auth_keys::router())
+        .merge(remembered_ips::router())
         .merge(cluster::router())
         .merge(links::router())
         .merge(nodes::router())

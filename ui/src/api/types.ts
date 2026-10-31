@@ -842,6 +842,22 @@ export interface ProxyAuthConfig {
   title: string;
   palette: PortalPalette;
   accent?: string | null;
+  /** Networks (a subset of `networks`) whose login page offers "remember this
+   *  IP address". Absent or empty means none. */
+  remember_ip?: string[];
+  /** How long a saved address skips the login, e.g. `30d`. */
+  remember_ip_ttl?: string;
+}
+
+/** One row of GET /api/proxy/remembered-ips (admin only). */
+export interface RememberedIp {
+  id: string;
+  network: string;
+  ip: string;
+  username: string;
+  groups: string[];
+  /** Unix seconds. */
+  expires_at: number;
 }
 
 export interface ProxyConfig {

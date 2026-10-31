@@ -786,6 +786,20 @@ pub struct ProxyAuthConfig {
     /// as a CSS hex colour like `#e5603c`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
+    /// Networks (a subset of `networks`) whose login page offers "remember
+    /// this IP address": a visitor whose address sits inside that network
+    /// may tick it, after which that address skips the login until
+    /// `remember_ip_ttl` passes. Empty means no network offers it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remember_ip: Vec<String>,
+    /// How long a remembered address stays trusted, counted from the login
+    /// that saved it and independent of `session_ttl`.
+    #[serde(with = "humantime_serde", default = "default_remember_ip_ttl")]
+    pub remember_ip_ttl: Duration,
+}
+
+fn default_remember_ip_ttl() -> Duration {
+    Duration::from_secs(30 * 24 * 3600)
 }
 
 /// Colour sets for the login page. Each is a dark background with a few loud
@@ -837,6 +851,62 @@ impl ProxyAuthConfig {
     /// Does this network offer the login?
     pub fn covers(&self, network: &str) -> bool {
         self.networks.iter().any(|n| n == network)
+    }
+
+    /// Does `network` let visitors save their IP address at login?
+    pub fn remembers_ip(&self, network: &str) -> bool {
+        self.covers(network) && self.remember_ip.iter().any(|n| n == network)
+    }
+}
+
+impl ClusterConfig {
+    /// Is `ip` an address of `network`'s own clients? A subnetted network
+    /// owns the addresses inside its subnet; a public network owns every
+    /// globally routable address, i.e. one that is not private, loopback,
+    /// link-local, CGNAT or inside any configured subnet. Other kinds have no
+    /// clients of their own.
+    pub fn ip_in_network(&self, network: &str, ip: std::net::IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        let Some(net) = self.networks.get(network) else {
+            return false;
+        };
+        match net.kind {
+            NetworkKind::Internal | NetworkKind::Private => {
+                net.subnet.is_some_and(|s| s.contains(&ip))
+            }
+            NetworkKind::Public => {
+                !self
+                    .networks
+                    .values()
+                    .filter_map(|n| n.subnet)
+                    .any(|s| s.contains(&ip))
+                    && is_globally_routable(ip)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn is_globally_routable(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || (o[0] == 100 && (64..128).contains(&o[1])))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
     }
 }
 

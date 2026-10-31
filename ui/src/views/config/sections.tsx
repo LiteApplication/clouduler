@@ -25,6 +25,7 @@ import type {
 } from '../../api/types';
 import { HelpTip, Tag, useConfirm } from '../../ds';
 import { Icon } from '../../components/Icon';
+import { RememberedIps } from './RememberedIps';
 import {
   CheckboxField,
   CidrField,
@@ -1872,6 +1873,8 @@ const DEFAULT_SERVICE_LOGIN: ProxyAuthConfig = {
   groups_claim: 'groups',
   username_claim: 'preferred_username',
   session_ttl: '12h',
+  remember_ip: [],
+  remember_ip_ttl: '30d',
   title: 'Sign in to continue',
   palette: 'grape',
   accent: null,
@@ -1912,6 +1915,19 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
       />
       {a && (
         <div className="card" style={{ marginTop: 8 }}>
+          {(a.remember_ip ?? []).length > 0 && <RememberedIps />}
+          {(a.remember_ip ?? []).length > 0 && (
+            <DurationField
+              id="svclogin-remember-ttl"
+              label="Remember an IP address for"
+              value={a.remember_ip_ttl ?? '30d'}
+              onChange={(remember_ip_ttl) => patch({ remember_ip_ttl })}
+              hint="e.g. 30d. Counted from the login that saved it, separate from the session length."
+              help="On the networks ticked above, a visitor can save their IP address after logging in; that address then skips the login until this long has passed. Only offered to visitors whose address is inside the network, and anyone behind a shared address (a router doing NAT) is let in too."
+              configKey="proxy.auth.remember_ip_ttl"
+              disabled={disabled}
+            />
+          )}
           <TextField
             id="svclogin-host"
             label="Portal host"
@@ -1941,11 +1957,29 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
                     onChange={(e) =>
                       patch({
                         networks: e.target.checked ? [...a.networks, name] : a.networks.filter((n) => n !== name),
+                        remember_ip: e.target.checked ? a.remember_ip : (a.remember_ip ?? []).filter((n) => n !== name),
                       })
                     }
                   />{' '}
                   {name}
                   {!hasDomain && <span className="muted"> (no DNS domain, set one on the Networks page)</span>}
+                  {checked && ['internal', 'private', 'public'].includes(net.type) && (
+                    <label style={{ display: 'block', marginLeft: 24 }}>
+                      <input
+                        type="checkbox"
+                        checked={(a.remember_ip ?? []).includes(name)}
+                        disabled={disabled}
+                        onChange={(e) =>
+                          patch({
+                            remember_ip: e.target.checked
+                              ? [...(a.remember_ip ?? []), name]
+                              : (a.remember_ip ?? []).filter((n) => n !== name),
+                          })
+                        }
+                      />{' '}
+                      Let visitors remember their IP address
+                    </label>
+                  )}
                 </label>
               );
             })}

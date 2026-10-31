@@ -40,6 +40,7 @@
 //! the `auth.oidc` that logs operators into the dashboard.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -100,6 +101,48 @@ struct PendingLogin {
     /// The protected url the user was after; empty for a direct portal visit.
     callback: String,
     started_at_unix: u64,
+    /// The client address the visitor agreed to save, confirmed on the
+    /// portal. Honoured at the callback only if it is still the peer.
+    #[serde(default)]
+    remember_ip: Option<String>,
+}
+
+/// What the login page offers when the visitor's address may be saved.
+struct RememberOffer {
+    ip: IpAddr,
+    network: String,
+    /// "30 days", for the checkbox and the confirmation page.
+    lasts: String,
+    /// The protected url the visitor was after, if any.
+    callback: Option<String>,
+}
+
+/// Key of a saved address in `proxy_sessions`. Saved addresses ride the same
+/// replicated map and expiry as sessions, under a key no cookie value can
+/// reach: a lookup also requires `host` to equal [`trusted_host`], which no
+/// real hostname does.
+fn trusted_key(network: &str, ip: IpAddr) -> String {
+    hash_id(&format!("trusted-ip|{network}|{}", ip.to_canonical()))
+}
+
+fn trusted_host(network: &str, ip: IpAddr) -> String {
+    format!(
+        "{}{network}:{}",
+        cl_raft::state::REMEMBERED_IP_HOST_PREFIX,
+        ip.to_canonical()
+    )
+}
+
+fn human_duration(d: Duration) -> String {
+    let days = d.as_secs() / 86_400;
+    let hours = d.as_secs() / 3_600;
+    match (days, hours) {
+        (0, 0) => "less than an hour".to_string(),
+        (0, 1) => "1 hour".to_string(),
+        (0, h) => format!("{h} hours"),
+        (1, _) => "1 day".to_string(),
+        (d, _) => format!("{d} days"),
+    }
 }
 
 /// Who the identity provider says logged in.
@@ -199,6 +242,49 @@ impl AuthGate {
 
     fn key(&self) -> Option<Arc<ClusterKey>> {
         self.key_rx.borrow().clone()
+    }
+
+    /// Whether `ip` may be saved on `network` right now: the network offers
+    /// it and the address is one of that network's own clients.
+    fn can_remember(&self, network: &str, ip: IpAddr) -> bool {
+        let cfg = self.config_rx.borrow();
+        cfg.proxy
+            .auth
+            .as_ref()
+            .is_some_and(|a| a.remembers_ip(network))
+            && cfg.ip_in_network(network, ip)
+    }
+
+    fn remember_offer(
+        &self,
+        settings: &ProxyAuthConfig,
+        network: &str,
+        peer: IpAddr,
+        callback: Option<&str>,
+    ) -> Option<RememberOffer> {
+        self.can_remember(network, peer).then(|| RememberOffer {
+            ip: peer.to_canonical(),
+            network: network.to_string(),
+            lasts: human_duration(settings.remember_ip_ttl),
+            callback: callback.map(str::to_string),
+        })
+    }
+
+    /// The saved login for `ip` on `network`, if it is still valid and the
+    /// network still offers saving addresses.
+    async fn trusted_ip(&self, network: &str, ip: IpAddr) -> Option<ProxySessionRecord> {
+        if !self.can_remember(network, ip) {
+            return None;
+        }
+        let key = trusted_key(network, ip);
+        let host = trusted_host(network, ip);
+        let now = now_unix() as i64;
+        self.cluster
+            .read(|state| {
+                let r = state.proxy_sessions.get(&key)?;
+                (r.expires_at > now && r.host == host).then(|| r.clone())
+            })
+            .await
     }
 
     /// Whether `host` (a `Host` header value) is the login portal.
@@ -305,6 +391,7 @@ impl AuthGate {
         policy: &Authenticated,
         network: Option<&str>,
         internal: bool,
+        peer: IpAddr,
     ) -> GateOutcome {
         let Some(portal) = network.and_then(|n| self.portal_for_network(n)) else {
             return GateOutcome::Respond(status_response(
@@ -315,7 +402,7 @@ impl AuthGate {
         let Portal {
             auth: settings,
             fqdn: portal,
-            ..
+            network,
         } = portal;
         let Some(host) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
             return GateOutcome::Respond(status_response(
@@ -347,6 +434,11 @@ impl AuthGate {
                 &portal,
                 &format!("{scheme}://{host}{}", return_target(req.uri())),
             ));
+        }
+        if let Some(saved) = self.trusted_ip(&network, peer).await {
+            if permitted(policy, &saved.groups) {
+                return GateOutcome::Allow;
+            }
         }
         if !wants_redirect(req) {
             return GateOutcome::Respond(status_response(
@@ -442,6 +534,7 @@ impl AuthGate {
         req: &Request<Incoming>,
         routes: &RouteTable,
         scheme: &str,
+        peer: IpAddr,
     ) -> Response<ProxyBody> {
         let Some(portal) = req
             .headers()
@@ -463,27 +556,53 @@ impl AuthGate {
         let params = form_urlencoded_parse(req.uri().query().unwrap_or(""));
         let callback = params.get("callback").map(String::as_str);
         let safe_callback = callback.and_then(|c| parse_callback(c, routes, &network));
+        let offer = self.remember_offer(
+            &settings,
+            &network,
+            peer,
+            safe_callback.as_ref().map(|c| c.url.as_str()),
+        );
 
         let mut resp = match (req.method(), req.uri().path()) {
-            (&Method::GET | &Method::HEAD, "/") => self.portal_home(req, &settings, &portal).await,
-            (&Method::GET | &Method::HEAD, "/login") => {
-                self.portal_login(req, &settings, &portal, callback, safe_callback)
+            (&Method::GET | &Method::HEAD, "/") => {
+                self.portal_home(req, &settings, &portal, offer.as_ref())
                     .await
             }
-            (&Method::GET | &Method::HEAD, "/start") => {
-                self.start_login(
+            (&Method::GET | &Method::HEAD, "/login") => {
+                self.portal_login(
+                    req,
                     &settings,
                     &portal,
-                    safe_callback.as_ref().map(|c| c.url.clone()),
+                    callback,
+                    safe_callback,
+                    offer.as_ref(),
                 )
                 .await
             }
+            (&Method::GET | &Method::HEAD, "/start") => {
+                let wants = params.get("remember").is_some_and(|v| v == "1");
+                let confirmed = params.get("confirm").is_some_and(|v| v == "1");
+                // The checkbox is only a request: whether this address may be
+                // saved is decided again here, from the socket peer.
+                match offer.as_ref().filter(|_| wants) {
+                    Some(offer) if !confirmed => confirm_remember_page(&settings, offer),
+                    remember => {
+                        self.start_login(
+                            &settings,
+                            &portal,
+                            safe_callback.as_ref().map(|c| c.url.clone()),
+                            remember.map(|o| o.ip.to_string()),
+                        )
+                        .await
+                    }
+                }
+            }
             (&Method::GET | &Method::HEAD, "/callback") => {
-                self.finish_login(req, routes, &settings, &portal, &network)
+                self.finish_login(req, routes, &settings, &portal, &network, peer)
                     .await
             }
             (&Method::GET | &Method::HEAD | &Method::POST, "/logout") => {
-                self.portal_logout(req, &portal, safe_callback.map(|c| c.url))
+                self.portal_logout(req, &portal, safe_callback.map(|c| c.url), &network, peer)
                     .await
             }
             _ => status_response(StatusCode::NOT_FOUND, "not found"),
@@ -498,13 +617,14 @@ impl AuthGate {
         req: &Request<Incoming>,
         settings: &ProxyAuthConfig,
         portal: &str,
+        offer: Option<&RememberOffer>,
     ) -> Response<ProxyBody> {
         match self
             .session(req.headers(), PORTAL_COOKIE_NAME, portal)
             .await
         {
             Some((_, s)) => signed_in_page(settings, &s.username),
-            None => login_page(settings, None, "/start", None),
+            None => login_page(settings, None, "/start", None, offer),
         }
     }
 
@@ -515,6 +635,7 @@ impl AuthGate {
         portal: &str,
         raw_callback: Option<&str>,
         callback: Option<Callback>,
+        offer: Option<&RememberOffer>,
     ) -> Response<ProxyBody> {
         if raw_callback.is_some() && callback.is_none() {
             return message_page(
@@ -543,6 +664,7 @@ impl AuthGate {
                     callback.as_ref().map(|c| c.host.as_str()),
                     &start,
                     None,
+                    offer,
                 )
             }
         }
@@ -593,7 +715,16 @@ impl AuthGate {
         req: &Request<Incoming>,
         portal: &str,
         callback: Option<String>,
+        network: &str,
+        peer: IpAddr,
     ) -> Response<ProxyBody> {
+        // Signing out also forgets this address, or "sign out" on a shared
+        // machine would leave the door open.
+        let _ = self
+            .submit(RaftRequest::RemoveProxySession {
+                key: trusted_key(network, peer),
+            })
+            .await;
         if let Some(id) = extract_cookie(req.headers(), PORTAL_COOKIE_NAME) {
             if id.len() == ID_LEN {
                 let _ = self
@@ -615,6 +746,7 @@ impl AuthGate {
         settings: &ProxyAuthConfig,
         portal: &str,
         callback: Option<String>,
+        remember_ip: Option<String>,
     ) -> Response<ProxyBody> {
         let Some(key) = self.key() else {
             return status_response(
@@ -652,6 +784,7 @@ impl AuthGate {
             pkce_verifier: pkce_verifier.secret().clone(),
             callback: callback.unwrap_or_default(),
             started_at_unix: now_unix(),
+            remember_ip,
         };
         let Some(sealed) = seal_login(&key, &pending) else {
             return bad_gateway("cannot seal login state");
@@ -675,6 +808,7 @@ impl AuthGate {
         settings: &ProxyAuthConfig,
         portal: &str,
         network: &str,
+        peer: IpAddr,
     ) -> Response<ProxyBody> {
         let Some(key) = self.key() else {
             return status_response(
@@ -738,6 +872,33 @@ impl AuthGate {
                 return bad_gateway("cannot store session");
             }
         };
+
+        // Save the address only if it is the one the visitor agreed to and is
+        // still allowed to be saved: the browser may have moved networks, or
+        // the network's setting may have changed, during the round trip.
+        if pending.remember_ip.as_deref() == Some(peer.to_canonical().to_string().as_str())
+            && self.can_remember(network, peer)
+        {
+            let saved = ProxySessionRecord {
+                host: trusted_host(network, peer),
+                expires_at: now
+                    + settings
+                        .remember_ip_ttl
+                        .as_secs()
+                        .min(i64::MAX as u64 / 2) as i64,
+                ..record.clone()
+            };
+            if let Err(e) = self
+                .submit(RaftRequest::PutProxySession {
+                    key: trusted_key(network, peer),
+                    session: saved,
+                    now,
+                })
+                .await
+            {
+                warn!(error = %e, "cannot save the visitor's ip address");
+            }
+        }
 
         // The callback was validated when the login started, but routes may
         // have changed in the meantime; check again.
@@ -1270,9 +1431,12 @@ border:2px solid var(--line);word-break:break-all;font-size:.92em}}
 a.btn{{display:block;padding:14px 18px;border-radius:16px;background:var(--brand);color:var(--on-brand);
 border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);font-weight:800;font-size:17px;text-decoration:none;
 transition:transform .08s,box-shadow .08s}}
-a.btn:hover{{transform:translate(-1px,-1px);box-shadow:6px 6px 0 var(--ink)}}
-a.btn:active{{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink)}}
-a.btn:focus-visible{{outline:3px solid var(--pop);outline-offset:3px}}
+button.btn{{display:block;width:100%;font:inherit;cursor:pointer}}
+.remember{{display:block;margin:0 0 16px;font-size:14px;text-align:left}}
+.remember input{{margin-right:8px;width:18px;height:18px;vertical-align:middle}}
+a.btn:hover,button.btn:hover{{transform:translate(-1px,-1px);box-shadow:6px 6px 0 var(--ink)}}
+a.btn:active,button.btn:active{{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink)}}
+a.btn:focus-visible,button.btn:focus-visible{{outline:3px solid var(--pop);outline-offset:3px}}
 .note{{margin:20px 0 0;font-size:13px;color:var(--muted)}}
 @media (max-width:520px){{.s1{{width:240px;height:240px}}.s3,.s6{{display:none}}}}
 </style></head><body>
@@ -1313,6 +1477,7 @@ fn login_page(
     app_host: Option<&str>,
     start_href: &str,
     error: Option<&str>,
+    offer: Option<&RememberOffer>,
 ) -> Response<ProxyBody> {
     let lead = match app_host {
         Some(host) => format!("to open <code>{}</code>", html_escape(host)),
@@ -1325,9 +1490,63 @@ fn login_page(
         StatusCode::OK,
         settings,
         &settings.title,
+        &match offer {
+            // A form rather than a link, so the checkbox travels with the
+            // click. No script: the page's CSP forbids it, and the
+            // confirmation is the next page.
+            Some(offer) => format!(
+                "<p>Use your account {lead}.</p>{error}\
+                 <form method=\"get\" action=\"/start\">{}\
+                 <label class=\"remember\"><input type=\"checkbox\" name=\"remember\" value=\"1\"> \
+                 Remember this IP address (<code>{}</code>) for {}</label>\
+                 <button class=\"btn\" type=\"submit\">Continue</button></form>",
+                callback_input(offer.callback.as_deref()),
+                offer.ip,
+                html_escape(&offer.lasts),
+            ),
+            None => format!(
+                "<p>Use your account {lead}.</p>{error}<a class=\"btn\" href=\"{}\">Continue</a>",
+                html_escape(start_href)
+            ),
+        },
+    )
+}
+
+fn callback_input(callback: Option<&str>) -> String {
+    callback
+        .map(|c| {
+            format!(
+                "<input type=\"hidden\" name=\"callback\" value=\"{}\">",
+                html_escape(c)
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// The confirmation step for "remember this IP address".
+fn confirm_remember_page(settings: &ProxyAuthConfig, offer: &RememberOffer) -> Response<ProxyBody> {
+    let skip = match &offer.callback {
+        Some(cb) => format!("/start?callback={}", urlencode(cb)),
+        None => "/start".to_string(),
+    };
+    page(
+        StatusCode::OK,
+        settings,
+        "Remember this IP address?",
         &format!(
-            "<p>Use your account {lead}.</p>{error}<a class=\"btn\" href=\"{}\">Continue</a>",
-            html_escape(start_href)
+            "<p>Anyone using <code>{ip}</code> on the {network} network will open protected apps \
+             as you, without signing in, for {lasts}. Only do this on a connection you trust, \
+             not a shared or public one. Signing out here forgets it.</p>\
+             <form method=\"get\" action=\"/start\">{cb}\
+             <input type=\"hidden\" name=\"remember\" value=\"1\">\
+             <input type=\"hidden\" name=\"confirm\" value=\"1\">\
+             <button class=\"btn\" type=\"submit\">Remember it and continue</button></form>\
+             <p class=\"note\"><a href=\"{skip}\">Continue without remembering</a></p>",
+            ip = offer.ip,
+            network = html_escape(&offer.network),
+            lasts = html_escape(&offer.lasts),
+            cb = callback_input(offer.callback.as_deref()),
+            skip = html_escape(&skip),
         ),
     )
 }
@@ -1532,6 +1751,7 @@ mod tests {
             pkce_verifier: "v".into(),
             callback: "https://app.example.com/x?y=1".into(),
             started_at_unix: 5,
+            remember_ip: Some("192.168.1.5".into()),
         };
         let sealed = seal_login(&key, &pending).unwrap();
         assert!(sealed
@@ -1540,6 +1760,7 @@ mod tests {
         let back = open_login(&key, &sealed).unwrap();
         assert_eq!(back.state, "s");
         assert_eq!(back.callback, "https://app.example.com/x?y=1");
+        assert_eq!(back.remember_ip.as_deref(), Some("192.168.1.5"));
         assert!(open_login(&ClusterKey::generate(), &sealed).is_none());
         assert!(open_login(&key, "garbage").is_none());
     }
@@ -1586,5 +1807,24 @@ mod tests {
         assert_eq!(on_color("#ffffff"), "#1a0f12");
         assert_eq!(on_color("#000"), "#ffffff");
         assert_eq!(on_color("#ffd23d"), "#1a0f12");
+    }
+
+    #[test]
+    fn a_saved_address_key_is_per_network_and_per_address() {
+        let a: IpAddr = "203.0.113.7".parse().unwrap();
+        let b: IpAddr = "203.0.113.8".parse().unwrap();
+        assert_ne!(trusted_key("public", a), trusted_key("public", b));
+        assert_ne!(trusted_key("public", a), trusted_key("private", a));
+        assert_ne!(trusted_host("public", a), "app.example.com");
+        // The v4-mapped form of an address is the same client.
+        let mapped: IpAddr = "::ffff:203.0.113.7".parse().unwrap();
+        assert_eq!(trusted_key("public", a), trusted_key("public", mapped));
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(human_duration(Duration::from_secs(30 * 86_400)), "30 days");
+        assert_eq!(human_duration(Duration::from_secs(86_400)), "1 day");
+        assert_eq!(human_duration(Duration::from_secs(3 * 3_600)), "3 hours");
     }
 }

@@ -2721,3 +2721,78 @@ async fn an_expired_session_is_ignored_and_then_pruned() {
     h.state.sessions.prune_expired().await;
     assert!(h.state.cluster.state().await.sessions.is_empty());
 }
+
+/// Saved client addresses are listed and revoked by admins only, a delete
+/// cannot reach an ordinary login session, and `/api/state` never shows them.
+#[tokio::test]
+async fn remembered_ips_are_admin_only_and_hidden_from_the_state() {
+    use cl_raft::{ProxySessionRecord, Request as Raft};
+    let h = harness().await;
+    let far = i64::MAX / 4;
+    let record = |host: &str| ProxySessionRecord {
+        host: host.into(),
+        subject: "sub".into(),
+        username: "alice".into(),
+        groups: vec!["family".into()],
+        expires_at: far,
+        parent: String::new(),
+    };
+    for (key, host) in [("saved", "ip:public:203.0.113.7"), ("cookie", "app.example.com")] {
+        let r = h
+            .state
+            .cluster
+            .submit(Raft::PutProxySession { key: key.into(), session: record(host), now: 0 })
+            .await
+            .unwrap();
+        assert!(r.error.is_none());
+    }
+    let call = |method: &str, uri: &str, auth: (&str, String)| {
+        h.router.clone().oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(auth.0, auth.1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let admin = ("authorization", format!("Bearer {}", h.admin_key));
+
+    let viewer = ("cookie", viewer_cookie(&h.state).await);
+    assert_eq!(
+        call("GET", "/api/proxy/remembered-ips", viewer).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let listed = call("GET", "/api/proxy/remembered-ips", admin.clone()).await.unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let rows: serde_json::Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(listed.into_body()).await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["network"], "public");
+    assert_eq!(rows[0]["ip"], "203.0.113.7");
+    assert_eq!(rows[0]["username"], "alice");
+
+    // The full state, as any signed-in viewer receives it, carries none of it.
+    let state = call("GET", "/api/state", admin.clone()).await.unwrap();
+    let text = String::from_utf8(
+        http_body_util::BodyExt::collect(state.into_body()).await.unwrap().to_bytes().to_vec(),
+    )
+    .unwrap();
+    assert!(!text.contains("203.0.113.7"), "{text}");
+
+    // An ordinary login session is not a remembered address.
+    assert_eq!(
+        call("DELETE", "/api/proxy/remembered-ips/cookie", admin.clone()).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call("DELETE", "/api/proxy/remembered-ips/saved", admin.clone()).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let after = h.state.cluster.state().await;
+    assert!(!after.proxy_sessions.contains_key("saved"));
+    assert!(after.proxy_sessions.contains_key("cookie"));
+}

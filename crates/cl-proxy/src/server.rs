@@ -480,7 +480,7 @@ async fn handle_http(
         .as_ref()
         .filter(|g| g.is_portal_host(&host))
     {
-        return Ok(gate.handle_portal(&req, &routes, "http").await);
+        return Ok(gate.handle_portal(&req, &routes, "http", peer.ip()).await);
     }
 
     let Some(route) = route_for(&routes, &req) else {
@@ -553,7 +553,7 @@ async fn handle_https(
         .as_ref()
         .filter(|g| g.is_portal_host(&host))
     {
-        return Ok(gate.handle_portal(&req, &routes, "https").await);
+        return Ok(gate.handle_portal(&req, &routes, "https", peer.ip()).await);
     }
 
     let Some(route) = route_for(&routes, &req) else {
@@ -676,6 +676,7 @@ async fn proxy(
                 policy,
                 route.options.network.as_deref(),
                 internal,
+                peer.ip(),
             )
             .await
         {

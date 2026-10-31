@@ -33,6 +33,7 @@ import type {
   NodeMetrics,
   PendingOAuthRequest,
   ProxyRoute,
+  RememberedIp,
   SelfUpdateLatest,
   OidcClientSecretStatus,
   PendingConfig,
@@ -345,6 +346,8 @@ export const api = {
   oidcClientSecret: () => get<OidcClientSecretStatus>('/api/oidc/client-secret'),
   setOidcClientSecret: (clientSecret: string) =>
     put<void>('/api/oidc/client-secret', { client_secret: clientSecret }),
+  rememberedIps: () => get<RememberedIp[]>('/api/proxy/remembered-ips'),
+  forgetRememberedIp: (id: string) => del<void>(`/api/proxy/remembered-ips/${encodeURIComponent(id)}`),
   proxyAuthClientSecret: () => get<OidcClientSecretStatus>('/api/proxy-auth/client-secret'),
   setProxyAuthClientSecret: (clientSecret: string) =>
     put<void>('/api/proxy-auth/client-secret', { client_secret: clientSecret }),

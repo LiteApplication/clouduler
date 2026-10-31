@@ -843,6 +843,10 @@ pub struct SessionRecord {
     pub expires_at: i64,
 }
 
+/// `ProxySessionRecord::host` of a saved client address (`ip:<network>:<ip>`)
+/// rather than of a cookie session. No real hostname starts with it.
+pub const REMEMBERED_IP_HOST_PREFIX: &str = "ip:";
+
 /// Who a reverse proxy login cookie belongs to, on which hostname.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxySessionRecord {
@@ -2815,6 +2819,11 @@ impl ClusterState {
         for cert in copy.certificates.values_mut() {
             cert.key_pem = String::new();
         }
+        // Login material, including the client addresses visitors saved. The
+        // ui never needs it, and an address plus a username is not for every
+        // viewer to read; the admin list reads the unredacted state.
+        copy.proxy_sessions.clear();
+        copy.proxy_tokens.clear();
         copy
     }
 
@@ -4361,6 +4370,25 @@ mod tests {
                 .sealed
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn redacted_drops_login_sessions_and_the_addresses_saved_in_them() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::PutProxySession {
+            key: "k".into(),
+            session: ProxySessionRecord {
+                host: format!("{REMEMBERED_IP_HOST_PREFIX}public:203.0.113.7"),
+                subject: "s".into(),
+                username: "alice".into(),
+                groups: vec![],
+                expires_at: i64::MAX / 4,
+                parent: String::new(),
+            },
+            now: 0,
+        });
+        assert_eq!(state.proxy_sessions.len(), 1);
+        assert!(state.redacted().proxy_sessions.is_empty());
     }
 
     #[test]

@@ -582,6 +582,29 @@ impl ClusterConfig {
                     ));
                 }
             }
+            for network in &auth.remember_ip {
+                if !auth.covers(network) {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.remember_ip",
+                        format!("{network} is not listed in proxy.auth.networks"),
+                    ));
+                }
+                if !matches!(
+                    self.networks[network].kind,
+                    NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
+                ) {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.remember_ip",
+                        format!("{network} has no clients of its own to recognise by address"),
+                    ));
+                }
+            }
+            if auth.remember_ip_ttl.is_zero() {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.remember_ip_ttl",
+                    "must be greater than zero",
+                ));
+            }
             if auth.session_ttl.is_zero() {
                 return Err(ConfigError::invalid(
                     "proxy.auth.session_ttl",
@@ -1207,6 +1230,47 @@ cloudflare:
                 .count(),
             0
         );
+    }
+
+    const AUTH: &str = "\nproxy:\n  auth:\n    host: login\n    networks: [lan, wan]\n    issuer: https://id.example.com\n    client_id: c\n";
+
+    #[test]
+    fn a_client_belongs_to_the_network_its_address_is_in() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert!(cfg.ip_in_network("lan", ip("192.168.1.40")));
+        assert!(!cfg.ip_in_network("lan", ip("203.0.113.9")));
+        assert!(cfg.ip_in_network("wan", ip("203.0.113.9")));
+        assert!(cfg.ip_in_network("wan", ip("2001:db8::9")));
+        // A private, tailnet or overlay address is never a public client.
+        assert!(!cfg.ip_in_network("wan", ip("192.168.1.40")));
+        assert!(!cfg.ip_in_network("wan", ip("10.10.0.7")));
+        assert!(!cfg.ip_in_network("wan", ip("100.64.0.1")));
+        assert!(!cfg.ip_in_network("wan", ip("127.0.0.1")));
+        assert!(!cfg.ip_in_network("wan", ip("fd00::1")));
+        assert!(cfg.ip_in_network("lan", ip("::ffff:192.168.1.40")));
+    }
+
+    #[test]
+    fn saving_addresses_is_opt_in_per_network() {
+        let base = format!("{BASE}{AUTH}");
+        let cfg = ClusterConfig::parse(&base).unwrap();
+        let auth = cfg.proxy.auth.unwrap();
+        assert!(!auth.remembers_ip("lan") && !auth.remembers_ip("wan"));
+
+        let on = format!("{base}    remember_ip: [wan]\n");
+        let auth = ClusterConfig::parse(&on).unwrap().proxy.auth.unwrap();
+        assert!(auth.remembers_ip("wan") && !auth.remembers_ip("lan"));
+        assert_eq!(auth.remember_ip_ttl, std::time::Duration::from_secs(30 * 86_400));
+    }
+
+    #[test]
+    fn a_network_without_a_login_cannot_save_addresses() {
+        let bad = format!("{BASE}{AUTH}    remember_ip: [tailscale]\n");
+        let err = ClusterConfig::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("remember_ip"), "{err}");
+        let zero = format!("{BASE}{AUTH}    remember_ip_ttl: 0s\n");
+        assert!(ClusterConfig::parse(&zero).is_err());
     }
 
     #[test]
