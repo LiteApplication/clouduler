@@ -391,6 +391,7 @@ export const api = {
   selfUpdateGithubToken: () => get<SelfUpdateGithubTokenStatus>('/api/self-update/github-token'),
   setSelfUpdateGithubToken: (token: string) => put<void>('/api/self-update/github-token', { token }),
   setSelfUpdateRepo: (body: SelfUpdateConfig) => put<void>('/api/self-update/repo', body),
+  setSelfUpdateCheck: (body: { enabled: boolean; interval?: string }) => put<void>('/api/self-update/check', body),
   selfUpdateLatest: () => get<SelfUpdateLatest>('/api/self-update/latest'),
   selfUpdateRepo: () => get<SelfUpdateConfig | null>('/api/self-update/repo'),
   startSelfUpdate: () => post<SelfUpdateRunState>('/api/self-update/run'),

@@ -3,12 +3,13 @@
 
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../../api/client';
-import type { SelfUpdateConfig, SelfUpdateGithubTokenStatus, SelfUpdateLatest, SelfUpdateNodePhase, SelfUpdateRunState } from '../../api/types';
+import type { SelfUpdateCheck, SelfUpdateConfig, SelfUpdateGithubTokenStatus, SelfUpdateLatest, SelfUpdateNodePhase, SelfUpdateRunState } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { Banner, Button, KV, Panel, Tag, TextField, useConfirm, useToast, type TagTone } from '../../ds';
 import { useClusterState } from '../../state/store';
 
 const RUN_CONFIG = '_clouduler_self_update_run';
+const CHECK_CONFIG = '_clouduler_self_update_check';
 const DEFAULT_RELEASE_URL = 'https://github.com/LiteApplication/clouduler';
 
 /** The run state rides `ClusterState.configs` as base64 json. */
@@ -16,6 +17,15 @@ function decodeRun(content: string | undefined): SelfUpdateRunState | null {
   if (!content) return null;
   try {
     return JSON.parse(atob(content)) as SelfUpdateRunState;
+  } catch {
+    return null;
+  }
+}
+
+function decodeCheck(content: string | undefined): SelfUpdateCheck | null {
+  if (!content) return null;
+  try {
+    return JSON.parse(atob(content)) as SelfUpdateCheck;
   } catch {
     return null;
   }
@@ -56,6 +66,9 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
 
   const run = decodeRun(cluster?.configs[RUN_CONFIG]?.content);
   const inProgress = !!run && !run.finished_at;
+  const check = decodeCheck(cluster?.configs[CHECK_CONFIG]?.content);
+  const checking = repo?.check_updates ?? true;
+  const [interval, setInterval_] = useState('');
 
   const attempt = async (fn: () => Promise<unknown>, fallback: string) => {
     setError(null);
@@ -141,6 +154,52 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
           </>
         )}
       </Panel>
+
+      {repo && (
+        <Panel title="Automatic checks" actions={<Tag tone={checking ? 'ok' : undefined}>{checking ? 'on' : 'off'}</Tag>}>
+          <p className="cl-sm cl-muted">
+            The leader looks up the latest release every {repo.check_interval ?? '24h'} and records it, so a new
+            version shows up here without anyone asking. Nothing is installed automatically.
+          </p>
+          {check && (
+            <p className="cl-sm cl-muted">
+              Last checked {new Date(check.checked_at * 1000).toLocaleString()}
+              {check.tag ? <>: {check.tag}</> : <>, failed: {check.error}</>}
+            </p>
+          )}
+          {isAdmin && (
+            <>
+              <TextField label="Check every" mono placeholder={repo.check_interval ?? '24h'} value={interval} onChange={(e) => setInterval_(e.target.value)} />
+              <Button
+                variant="secondary"
+                disabled={busy || !interval.trim()}
+                onClick={() =>
+                  void attempt(async () => {
+                    await api.setSelfUpdateCheck({ enabled: checking, interval: interval.trim() });
+                    setRepo(await api.selfUpdateRepo());
+                    setInterval_('');
+                    toast('Saved the check interval.');
+                  }, 'Could not save the interval.')
+                }
+              >
+                Save interval
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() =>
+                  void attempt(async () => {
+                    await api.setSelfUpdateCheck({ enabled: !checking });
+                    setRepo(await api.selfUpdateRepo());
+                  }, 'Could not change the setting.')
+                }
+              >
+                {checking ? 'Turn off' : 'Turn on'}
+              </Button>
+            </>
+          )}
+        </Panel>
+      )}
 
       <Panel
         title="Update"

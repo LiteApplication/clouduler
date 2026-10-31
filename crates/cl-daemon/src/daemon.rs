@@ -350,6 +350,7 @@ pub async fn run(
         &data_dir,
         internal_http.clone(),
         key_rx.clone(),
+        config_rx.clone(),
     );
 
     // The api records a move and returns; this is what carries it out. It
@@ -625,6 +626,7 @@ fn start_self_update(
     data_dir: &Path,
     http: reqwest::Client,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
 ) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
     cfg.node(node_name)?;
 
@@ -638,6 +640,7 @@ fn start_self_update(
         http: http.clone(),
         cluster_config: cfg.clone(),
         cluster_key: key_rx.clone(),
+        config_rx,
     };
     let worker = cl_update::worker::Worker {
         node_name: node_name.to_string(),

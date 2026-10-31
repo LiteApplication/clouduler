@@ -970,6 +970,18 @@ export interface LogLine {
  *  `cloudflare`. */
 export interface SelfUpdateConfig {
   release_url: string;
+  /** Whether the leader periodically looks up the latest release. */
+  check_updates?: boolean;
+  /** How often, as a duration such as `24h`. */
+  check_interval?: string;
+}
+
+/** The leader's last periodic release check, stored in the reserved config
+ *  `_clouduler_self_update_check` as base64 json. */
+export interface SelfUpdateCheck {
+  checked_at: number;
+  tag: string | null;
+  error: string | null;
 }
 
 /** GET /api/self-update/github-token. The token itself is write-only, like

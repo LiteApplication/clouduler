@@ -912,6 +912,17 @@ pub struct SelfUpdateConfig {
     /// that repo's latest release, or a specific release's url
     /// (`https://github.com/OWNER/REPO/releases/tag/TAG`), which pins it.
     pub release_url: String,
+    /// Whether the leader periodically looks up the latest release, so the
+    /// ui can say an update is available without anyone opening settings.
+    #[serde(default = "default_true_bool")]
+    pub check_updates: bool,
+    /// How often that lookup runs.
+    #[serde(with = "humantime_serde", default = "default_update_check_interval")]
+    pub check_interval: Duration,
+}
+
+fn default_update_check_interval() -> Duration {
+    Duration::from_secs(24 * 60 * 60)
 }
 
 /// Where and how the cluster mirrors its own state into git.

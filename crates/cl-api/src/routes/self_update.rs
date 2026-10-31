@@ -25,7 +25,7 @@ use crate::server::AppState;
 /// Config names this feature owns and never shows through the generic
 /// config/secret listing routes, mirroring `auth::keys::API_KEYS_CONFIG`.
 pub fn is_reserved_config(name: &str) -> bool {
-    name == RUN_CONFIG
+    name == RUN_CONFIG || name == cl_update::plan::CHECK_CONFIG
 }
 
 pub fn is_reserved_secret(name: &str) -> bool {
@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
             get(github_token_status).put(set_github_token),
         )
         .route("/api/self-update/repo", put(set_repo).get(get_repo))
+        .route("/api/self-update/check", put(set_check))
         .route("/api/self-update/latest", get(latest))
         .route("/api/self-update/run", post(start_run).get(get_run))
         .route("/api/self-update/cancel", post(cancel_run))
@@ -128,7 +129,44 @@ async fn set_repo(
 
     config.self_update = Some(SelfUpdateConfig {
         release_url: body.release_url.trim().to_string(),
+        check_updates: true,
+        check_interval: std::time::Duration::from_secs(24 * 60 * 60),
     });
+    super::config::apply_config(&state, &config).await?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct SetCheckRequest {
+    enabled: bool,
+    /// A humantime duration such as `24h`; unchanged when absent.
+    #[serde(default)]
+    interval: Option<String>,
+}
+
+/// Unlike the release url, the periodic check is freely editable.
+async fn set_check(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<SetCheckRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut config = state.cluster_config.read().await.clone();
+    let Some(self_update) = config.self_update.as_mut() else {
+        return Err(ApiError::Conflict(
+            "no self-update release is configured".into(),
+        ));
+    };
+    if let Some(interval) = body.interval.as_deref() {
+        let parsed = humantime::parse_duration(interval.trim())
+            .map_err(|e| ApiError::BadRequest(format!("interval: {e}")))?;
+        if parsed < std::time::Duration::from_secs(60 * 60) {
+            return Err(ApiError::BadRequest(
+                "interval must be at least 1h; GitHub rate-limits unauthenticated requests".into(),
+            ));
+        }
+        self_update.check_interval = parsed;
+    }
+    self_update.check_updates = body.enabled;
     super::config::apply_config(&state, &config).await?;
     Ok(StatusCode::OK)
 }

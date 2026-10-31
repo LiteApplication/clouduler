@@ -15,6 +15,24 @@ use crate::release::ReleaseAsset;
 /// the generic `/api/configs` routes.
 pub const RUN_CONFIG: &str = "_clouduler_self_update_run";
 
+/// Reserved config name the latest periodic release check is stored under, so
+/// every node and the ui see the same answer and a new leader knows when the
+/// last check ran.
+pub const CHECK_CONFIG: &str = "_clouduler_self_update_check";
+
+/// What the leader's periodic release check found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCheck {
+    /// Unix seconds the check ran, whether or not it succeeded.
+    pub checked_at: i64,
+    /// The release tag the source resolved to; absent when the check failed.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Why the check failed.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Reserved secret name the sealed GitHub API token is stored under. Never
 /// exposed through the generic `/api/secrets` routes. Optional: only needed
 /// for a private repo, or to avoid GitHub's low unauthenticated rate limit.

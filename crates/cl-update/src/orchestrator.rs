@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::internal_client;
 use crate::peers;
-use crate::plan::{NodePhase, UpdateRunState, GITHUB_TOKEN_SECRET, RUN_CONFIG};
+use crate::plan::{NodePhase, UpdateCheck, UpdateRunState, CHECK_CONFIG, GITHUB_TOKEN_SECRET, RUN_CONFIG};
 use crate::release;
 
 /// How often the leader checks the run's progress. Same order of magnitude
@@ -65,6 +65,9 @@ pub struct Orchestrator {
     /// held across an `.await` (the restart request), which a `watch::Ref`
     /// guard cannot safely do.
     pub cluster_key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    /// Live config, so toggling the periodic check or its interval takes
+    /// effect without a restart (`cluster_config` above is a boot snapshot).
+    pub config_rx: tokio::sync::watch::Receiver<Arc<cl_config::ClusterConfig>>,
 }
 
 impl Orchestrator {
@@ -80,6 +83,65 @@ impl Orchestrator {
             if let Err(e) = self.tick().await {
                 warn!(error = %e, "self-update orchestration pass failed");
             }
+            if let Err(e) = self.check_for_update().await {
+                warn!(error = %e, "self-update release check failed");
+            }
+        }
+    }
+
+    /// Look up the latest release when the configured interval has passed
+    /// since the last stored check, and record the answer in raft. Driven by
+    /// the stored timestamp rather than a local timer so a leader change or a
+    /// restart does not trigger an extra GitHub request.
+    async fn check_for_update(&self) -> Result<(), String> {
+        let cfg = self.config_rx.borrow().clone();
+        let Some(self_update) = cfg.self_update.as_ref() else {
+            return Ok(());
+        };
+        if !self_update.check_updates {
+            return Ok(());
+        }
+
+        let state = self.cluster.state().await;
+        let stored = state.configs.get(CHECK_CONFIG);
+        let revision = stored.map(|e| e.revision).unwrap_or(0);
+        let last = stored
+            .and_then(|e| e.decode().ok())
+            .and_then(|raw| serde_json::from_slice::<UpdateCheck>(&raw).ok());
+        if let Some(last) = &last {
+            if now() - last.checked_at < self_update.check_interval.as_secs() as i64 {
+                return Ok(());
+            }
+        }
+        // A rollout resolves the release itself; do not compete with it.
+        if load_run(&state).is_some_and(|run| run.in_progress()) {
+            return Ok(());
+        }
+
+        let token = self.unseal_github_token().await;
+        let check = match release::resolve(&self_update.release_url, token.as_deref()).await {
+            Ok(resolved) => {
+                info!(tag = %resolved.tag, "checked for a self-update release");
+                UpdateCheck { checked_at: now(), tag: Some(resolved.tag), error: None }
+            }
+            Err(e) => UpdateCheck { checked_at: now(), tag: None, error: Some(e) },
+        };
+        let content = cl_raft::base64_encode(
+            &serde_json::to_vec(&check).map_err(|e| format!("encoding the check: {e}"))?,
+        );
+        let response = self
+            .cluster
+            .submit(Request::PutConfigCas {
+                name: CHECK_CONFIG.to_string(),
+                content,
+                owner: None,
+                expect_revision: revision,
+            })
+            .await
+            .map_err(|e| format!("storing the check: {e}"))?;
+        match response.error {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
