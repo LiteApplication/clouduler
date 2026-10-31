@@ -766,7 +766,9 @@ fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<String, bool
     hosts.entry(cfg.web_fqdn()).or_insert(false);
     // The proxy login portal is a hostname of its own, answered by the proxy.
     if let Some(auth) = &cfg.proxy.auth {
-        hosts.entry(auth.fqdn(cfg)).or_insert(false);
+        for (_, fqdn) in auth.portals(cfg) {
+            hosts.entry(fqdn).or_insert(false);
+        }
     }
     hosts
 }
@@ -1157,10 +1159,12 @@ pub fn desired_dns_hosts(
     }
     // Any node can answer the login portal.
     if let Some(auth) = &cfg.proxy.auth {
-        hosts
-            .entry((auth.host.clone(), auth.network.clone()))
-            .or_default()
-            .extend(all_nodes.clone());
+        for network in &auth.networks {
+            hosts
+                .entry((auth.host.clone(), network.clone()))
+                .or_default()
+                .extend(all_nodes.clone());
+        }
     }
     hosts
 }

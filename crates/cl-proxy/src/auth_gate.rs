@@ -3,8 +3,10 @@
 //!
 //! # Shape
 //!
-//! One hostname, the *portal* (`proxy.auth.host`), runs the OIDC login. A
-//! protected app never talks to the identity provider itself:
+//! A *portal* hostname per network (`proxy.auth.host` under each of
+//! `proxy.auth.networks`' domains) runs the OIDC login, so a login is once per
+//! network and a network that is not listed offers none. A protected app
+//! never talks to the identity provider itself:
 //!
 //! 1. A request with no valid `cl_proxy_auth` cookie is redirected (302) to
 //!    `https://<portal>/login?callback=<the url it asked for>`.
@@ -28,7 +30,9 @@
 //! different node and a forged callback carries no matching cookie.
 //!
 //! The cookie is host-only, so each protected hostname has its own session,
-//! bound to that host in the stored record. The proxy strips its own cookies
+//! bound to that host in the stored record and to the portal session it came
+//! from (`ProxySessionRecord::parent`): signing out at the portal removes the
+//! portal session and with it every app session handed out from it. The proxy strips its own cookies
 //! from requests before forwarding, so a backend never sees a session.
 //!
 //! This uses its own identity provider client (`proxy.auth`, secret
@@ -40,7 +44,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use cl_config::{Authenticated, ClusterConfig, ProxyAuthConfig};
+use cl_config::{Authenticated, ClusterConfig, PortalPalette, ProxyAuthConfig};
 use cl_raft::node::ClusterNode;
 use cl_raft::{ProxySessionRecord, ProxyTokenRecord, Request as RaftRequest};
 use cl_secret::{ClusterKey, Sealed};
@@ -68,6 +72,8 @@ const OIDC_CLIENT_SECRET: &str = "_clouduler_proxy_oidc_client_secret";
 
 /// Answered on every protected hostname: spends a token, sets the cookie.
 pub const COOKIE_PATH: &str = "/.well-known/clouduler-cookie";
+/// Answered on every protected hostname: signs out at the portal.
+pub const LOGOUT_PATH: &str = "/.well-known/clouduler-logout";
 /// Prefix of every path the gate answers itself on a protected hostname.
 const RESERVED_PREFIX: &str = "/.well-known/clouduler-";
 /// Cookie carrying a protected hostname's session id.
@@ -101,6 +107,14 @@ struct Identity {
     subject: String,
     username: String,
     groups: Vec<String>,
+}
+
+/// One network's login portal.
+struct Portal {
+    auth: ProxyAuthConfig,
+    network: String,
+    /// Portal hostname on that network.
+    fqdn: String,
 }
 
 /// What a request should get in response to the `authenticated` middleware.
@@ -157,11 +171,30 @@ impl AuthGate {
         }
     }
 
-    fn settings(&self) -> Option<(ProxyAuthConfig, String)> {
+    /// The portal serving `network`, if `proxy.auth` lists it.
+    fn portal_for_network(&self, network: &str) -> Option<Portal> {
         let cfg = self.config_rx.borrow();
-        let auth = cfg.proxy.auth.clone()?;
-        let portal = auth.fqdn(&cfg);
-        Some((auth, portal))
+        let auth = cfg.proxy.auth.as_ref().filter(|a| a.covers(network))?;
+        Some(Portal {
+            fqdn: auth.fqdn(&cfg, network),
+            network: network.to_string(),
+            auth: auth.clone(),
+        })
+    }
+
+    /// The portal whose hostname is `host`.
+    fn portal_for_host(&self, host: &str) -> Option<Portal> {
+        let host = normalize_host(host);
+        let cfg = self.config_rx.borrow();
+        let auth = cfg.proxy.auth.as_ref()?;
+        auth.portals(&cfg)
+            .into_iter()
+            .find(|(_, fqdn)| *fqdn == host)
+            .map(|(network, fqdn)| Portal {
+                auth: auth.clone(),
+                network,
+                fqdn,
+            })
     }
 
     fn key(&self) -> Option<Arc<ClusterKey>> {
@@ -170,8 +203,7 @@ impl AuthGate {
 
     /// Whether `host` (a `Host` header value) is the login portal.
     pub fn is_portal_host(&self, host: &str) -> bool {
-        self.settings()
-            .is_some_and(|(_, portal)| normalize_host(host) == portal)
+        self.portal_for_host(host).is_some()
     }
 
     async fn client_secret(&self) -> Option<String> {
@@ -223,7 +255,7 @@ impl AuthGate {
         headers: &HeaderMap,
         name: &str,
         host: &str,
-    ) -> Option<ProxySessionRecord> {
+    ) -> Option<(String, ProxySessionRecord)> {
         let id = extract_cookie(headers, name)?;
         if id.len() != ID_LEN {
             return None;
@@ -234,7 +266,7 @@ impl AuthGate {
         self.cluster
             .read(|state| {
                 let s = state.proxy_sessions.get(&key)?;
-                (s.expires_at > now && s.host == host).then(|| s.clone())
+                (s.expires_at > now && s.host == host).then(|| (key.clone(), s.clone()))
             })
             .await
     }
@@ -271,14 +303,20 @@ impl AuthGate {
         req: &Request<Incoming>,
         scheme: &str,
         policy: &Authenticated,
+        network: Option<&str>,
         internal: bool,
     ) -> GateOutcome {
-        let Some((settings, portal)) = self.settings() else {
+        let Some(portal) = network.and_then(|n| self.portal_for_network(n)) else {
             return GateOutcome::Respond(status_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "this route requires login, but the cluster has no proxy.auth configured",
+                "this route requires login, but proxy.auth does not offer it on this network",
             ));
         };
+        let Portal {
+            auth: settings,
+            fqdn: portal,
+            ..
+        } = portal;
         let Some(host) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
             return GateOutcome::Respond(status_response(
                 StatusCode::BAD_REQUEST,
@@ -288,12 +326,18 @@ impl AuthGate {
         let host = host.to_string();
 
         if req.uri().path() == COOKIE_PATH {
-            return GateOutcome::Respond(self.redeem(req, scheme, &host, &portal).await);
+            return GateOutcome::Respond(self.redeem(req, scheme, &host, &portal, &settings).await);
+        }
+        if req.uri().path() == LOGOUT_PATH {
+            return GateOutcome::Respond(redirect_response(&format!(
+                "https://{portal}/logout?callback={}",
+                urlencode(&format!("{scheme}://{host}/"))
+            )));
         }
         if policy.allow_internal && internal {
             return GateOutcome::Allow;
         }
-        if let Some(session) = self.session(req.headers(), COOKIE_NAME, &host).await {
+        if let Some((_, session)) = self.session(req.headers(), COOKIE_NAME, &host).await {
             if permitted(policy, &session.groups) {
                 return GateOutcome::Allow;
             }
@@ -325,6 +369,7 @@ impl AuthGate {
         scheme: &str,
         host: &str,
         portal: &str,
+        settings: &ProxyAuthConfig,
     ) -> Response<ProxyBody> {
         let params = form_urlencoded_parse(req.uri().query().unwrap_or(""));
         let target = match params.get("redirect") {
@@ -338,6 +383,7 @@ impl AuthGate {
         let Some(token) = params.get("token").filter(|t| t.len() == ID_LEN) else {
             return message_page(
                 StatusCode::BAD_REQUEST,
+                settings,
                 "Sign-in link incomplete",
                 "This address is missing its sign-in token.",
                 Some(("Sign in again", &retry)),
@@ -359,6 +405,7 @@ impl AuthGate {
             warn!(error = %e, host, "proxy login token refused");
             return message_page(
                 StatusCode::FORBIDDEN,
+                settings,
                 "Sign-in link expired",
                 "This link was already used or has expired.",
                 Some(("Sign in again", &retry)),
@@ -396,16 +443,26 @@ impl AuthGate {
         routes: &RouteTable,
         scheme: &str,
     ) -> Response<ProxyBody> {
-        let Some((settings, portal)) = self.settings() else {
+        let Some(portal) = req
+            .headers()
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| self.portal_for_host(h))
+        else {
             return status_response(StatusCode::NOT_FOUND, "no login portal configured");
         };
+        let Portal {
+            auth: settings,
+            fqdn: portal,
+            network,
+        } = portal;
         if scheme != "https" {
             let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
             return permanent_redirect(&format!("https://{portal}{pq}"));
         }
         let params = form_urlencoded_parse(req.uri().query().unwrap_or(""));
         let callback = params.get("callback").map(String::as_str);
-        let safe_callback = callback.and_then(|c| parse_callback(c, routes));
+        let safe_callback = callback.and_then(|c| parse_callback(c, routes, &network));
 
         let mut resp = match (req.method(), req.uri().path()) {
             (&Method::GET | &Method::HEAD, "/") => self.portal_home(req, &settings, &portal).await,
@@ -422,7 +479,8 @@ impl AuthGate {
                 .await
             }
             (&Method::GET | &Method::HEAD, "/callback") => {
-                self.finish_login(req, routes, &settings, &portal).await
+                self.finish_login(req, routes, &settings, &portal, &network)
+                    .await
             }
             (&Method::GET | &Method::HEAD | &Method::POST, "/logout") => {
                 self.portal_logout(req, &portal, safe_callback.map(|c| c.url))
@@ -445,7 +503,7 @@ impl AuthGate {
             .session(req.headers(), PORTAL_COOKIE_NAME, portal)
             .await
         {
-            Some(s) => signed_in_page(settings, &s.username),
+            Some((_, s)) => signed_in_page(settings, &s.username),
             None => login_page(settings, None, "/start", None),
         }
     }
@@ -461,6 +519,7 @@ impl AuthGate {
         if raw_callback.is_some() && callback.is_none() {
             return message_page(
                 StatusCode::BAD_REQUEST,
+                settings,
                 "Unknown destination",
                 "The page you were sent from is not protected by this login.",
                 None,
@@ -470,8 +529,8 @@ impl AuthGate {
             .session(req.headers(), PORTAL_COOKIE_NAME, portal)
             .await
         {
-            Some(session) => match callback {
-                Some(cb) => self.hand_over(&cb, &session).await,
+            Some((key, session)) => match callback {
+                Some(cb) => self.hand_over(&cb, &key, &session).await,
                 None => signed_in_page(settings, &session.username),
             },
             None => {
@@ -491,7 +550,12 @@ impl AuthGate {
 
     /// Mints a one-time token for `cb`'s host and redirects to its cookie
     /// endpoint. The session it will create ends with the portal session.
-    async fn hand_over(&self, cb: &Callback, session: &ProxySessionRecord) -> Response<ProxyBody> {
+    async fn hand_over(
+        &self,
+        cb: &Callback,
+        session_key: &str,
+        session: &ProxySessionRecord,
+    ) -> Response<ProxyBody> {
         let token = random_id();
         let now = now_unix() as i64;
         let stored = self
@@ -504,6 +568,7 @@ impl AuthGate {
                     groups: session.groups.clone(),
                     session_expires_at: session.expires_at,
                     expires_at: now + TOKEN_TTL.as_secs() as i64,
+                    parent: session_key.to_string(),
                 },
                 now,
             })
@@ -609,6 +674,7 @@ impl AuthGate {
         routes: &RouteTable,
         settings: &ProxyAuthConfig,
         portal: &str,
+        network: &str,
     ) -> Response<ProxyBody> {
         let Some(key) = self.key() else {
             return status_response(
@@ -621,6 +687,7 @@ impl AuthGate {
             warn!(error = %err, "identity provider refused the proxy login");
             return message_page(
                 StatusCode::UNAUTHORIZED,
+                settings,
                 "Sign-in refused",
                 "The identity provider did not let you in.",
                 Some(("Try again", "/")),
@@ -633,6 +700,7 @@ impl AuthGate {
         let unknown = || {
             message_page(
                 StatusCode::UNAUTHORIZED,
+                settings,
                 "Sign-in expired",
                 "This sign-in attempt is unknown or took too long.",
                 Some(("Start again", "/")),
@@ -661,6 +729,7 @@ impl AuthGate {
             username: identity.username,
             groups: identity.groups,
             expires_at: now + settings.session_ttl.as_secs().min(i64::MAX as u64 / 2) as i64,
+            parent: String::new(),
         };
         let id = match self.create_session(record.clone()).await {
             Ok(id) => id,
@@ -672,8 +741,8 @@ impl AuthGate {
 
         // The callback was validated when the login started, but routes may
         // have changed in the meantime; check again.
-        let mut resp = match parse_callback(&pending.callback, routes) {
-            Some(cb) => self.hand_over(&cb, &record).await,
+        let mut resp = match parse_callback(&pending.callback, routes, network) {
+            Some(cb) => self.hand_over(&cb, &hash_id(&id), &record).await,
             None => redirect_response("/"),
         };
         append_cookie(
@@ -787,9 +856,10 @@ struct Callback {
 }
 
 /// Accepts a callback only when it names a host whose matching route carries
-/// the `authenticated` middleware, so the portal is not an open redirect, and
-/// only when its path is an ordinary page of that app.
-fn parse_callback(raw: &str, routes: &RouteTable) -> Option<Callback> {
+/// the `authenticated` middleware on this portal's `network`, so the portal is
+/// not an open redirect and never signs anyone in on a network it does not
+/// serve, and only when its path is an ordinary page of that app.
+fn parse_callback(raw: &str, routes: &RouteTable, network: &str) -> Option<Callback> {
     if raw.is_empty() || raw.len() > 4096 || raw.contains(['\r', '\n', '\\']) {
         return None;
     }
@@ -808,6 +878,9 @@ fn parse_callback(raw: &str, routes: &RouteTable) -> Option<Callback> {
     }
     let host = authority.as_str().to_ascii_lowercase();
     let route = routes.lookup(&host, uri.path())?;
+    if route.options.network.as_deref() != Some(network) {
+        return None;
+    }
     route
         .middlewares
         .iter()
@@ -1078,18 +1151,83 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// A hex colour validated by config; anything else falls back so a stale
-/// stored value can never break out of the stylesheet.
-fn safe_accent(accent: &str) -> &str {
-    let hex = accent.strip_prefix('#').unwrap_or("");
-    if matches!(hex.len(), 3 | 6) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        accent
-    } else {
-        "#e5603c"
+/// The colours a page is drawn with.
+struct Colors {
+    bg: &'static str,
+    surface: &'static str,
+    line: &'static str,
+    ink: &'static str,
+    muted: &'static str,
+    brand: String,
+    on_brand: &'static str,
+    pop: &'static str,
+    third: &'static str,
+}
+
+/// Palette plus the optional accent override. The accent is re-validated
+/// here so a stale stored value can never break out of the stylesheet.
+fn colors(settings: &ProxyAuthConfig) -> Colors {
+    let (bg, surface, line, ink, muted, brand, pop, third) = match settings.palette {
+        PortalPalette::Grape => (
+            "#150f1f", "#1f1830", "#3a2f57", "#f6f0ff", "#b9acd6", "#ff5cae", "#c8f542", "#2fd0a8",
+        ),
+        PortalPalette::Sunset => (
+            "#1c1008", "#2a1a0e", "#4d3220", "#fff3e6", "#d6bfa6", "#ff8a3d", "#5cc8ff", "#ffd23d",
+        ),
+        PortalPalette::Ocean => (
+            "#08161f", "#0f2533", "#1f4256", "#e8f6ff", "#9cc2d6", "#2fd0e8", "#ff7a5c", "#ffd23d",
+        ),
+        PortalPalette::Forest => (
+            "#0c1a12", "#12281b", "#24472f", "#eefaf0", "#a6c9b0", "#ffd23d", "#ff5cae", "#7be0a0",
+        ),
+    };
+    let accent = settings.accent.as_deref().and_then(valid_hex);
+    Colors {
+        bg,
+        surface,
+        line,
+        ink,
+        muted,
+        on_brand: accent.map_or("#1a0f12", on_color),
+        brand: accent.map_or_else(|| brand.to_string(), str::to_string),
+        pop,
+        third,
     }
 }
 
-fn page(status: StatusCode, accent: &str, heading: &str, body: &str) -> Response<ProxyBody> {
+/// `#rgb` or `#rrggbb`, nothing else.
+fn valid_hex(value: &str) -> Option<&str> {
+    let hex = value.strip_prefix('#')?;
+    (matches!(hex.len(), 3 | 6) && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(value)
+}
+
+/// Dark or light text, whichever reads on `hex`.
+fn on_color(hex: &str) -> &'static str {
+    let digits = hex.trim_start_matches('#');
+    let expand = |i: usize| -> f32 {
+        let v = if digits.len() == 3 {
+            u8::from_str_radix(&digits[i..=i].repeat(2), 16)
+        } else {
+            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
+        }
+        .unwrap_or(0);
+        f32::from(v) / 255.0
+    };
+    let luminance = 0.2126 * expand(0) + 0.7152 * expand(1) + 0.0722 * expand(2);
+    if luminance > 0.55 {
+        "#1a0f12"
+    } else {
+        "#ffffff"
+    }
+}
+
+fn page(
+    status: StatusCode,
+    settings: &ProxyAuthConfig,
+    heading: &str,
+    body: &str,
+) -> Response<ProxyBody> {
+    let c = colors(settings);
     let html = format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1097,31 +1235,58 @@ fn page(status: StatusCode, accent: &str, heading: &str, body: &str) -> Response
 <meta name="robots" content="noindex">
 <title>{title}</title>
 <style>
-:root{{--accent:{accent}}}
+:root{{--bg:{bg};--surface:{surface};--line:{line};--ink:{ink};--muted:{muted};
+--brand:{brand};--on-brand:{on_brand};--pop:{pop};--third:{third}}}
 *{{box-sizing:border-box}}
-body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
-font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#f4efe6;
-background:radial-gradient(1200px 600px at 20% -10%,color-mix(in srgb,var(--accent) 35%,#14110f),#14110f 60%)}}
-main{{width:100%;max-width:400px;padding:40px 32px;border-radius:20px;
-background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);
-backdrop-filter:blur(14px);box-shadow:0 30px 80px rgba(0,0,0,.45);text-align:center}}
-.mark{{width:44px;height:44px;margin:0 auto 20px;border-radius:14px;background:var(--accent);
-display:grid;place-items:center;font-size:22px;color:#14110f}}
-h1{{margin:0 0 8px;font-size:22px;font-weight:650;letter-spacing:-.01em}}
-p{{margin:0 0 24px;color:#c9c1b3}}
-code{{color:#f4efe6;word-break:break-all}}
-a.btn{{display:block;padding:13px 18px;border-radius:12px;background:var(--accent);color:#14110f;
-font-weight:650;text-decoration:none}}
-a.btn:hover{{filter:brightness(1.08)}}
-a.btn:focus-visible{{outline:3px solid #fff;outline-offset:2px}}
-a.quiet{{display:inline-block;margin-top:16px;color:#c9c1b3;font-size:14px}}
-</style></head><body><main>
-<div class="mark" aria-hidden="true">&#128274;</div>
+body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;overflow:hidden;position:relative;
+font:16px/1.5 ui-rounded,"Arial Rounded MT Bold",system-ui,-apple-system,"Segoe UI",sans-serif;
+color:var(--ink);background:var(--bg)}}
+.shape{{position:absolute;border:3px solid var(--ink);animation:bob 7s ease-in-out infinite}}
+.s1{{width:340px;height:340px;border-radius:50%;background:var(--brand);left:-90px;top:-80px}}
+.s2{{width:190px;height:190px;border-radius:50%;background:var(--pop);right:6%;bottom:-60px;animation-delay:-2s}}
+.s3{{width:140px;height:140px;border-radius:28px;background:var(--surface);right:-30px;top:14%;transform:rotate(14deg);animation-delay:-4s}}
+.s4{{width:84px;height:84px;border-radius:50%;border-color:var(--muted);background:none;left:10%;bottom:12%;animation-delay:-1s}}
+.s5{{width:70px;height:70px;background:var(--third);left:38%;top:7%;transform:rotate(-12deg);animation-delay:-3s}}
+.s6{{width:0;height:0;border:0;border-left:44px solid transparent;border-right:44px solid transparent;
+border-bottom:76px solid var(--pop);right:24%;top:9%;animation-delay:-5s}}
+@keyframes bob{{50%{{translate:0 -14px}}}}
+@media (prefers-reduced-motion:reduce){{.shape{{animation:none}}}}
+main{{position:relative;width:100%;max-width:420px;padding:36px 32px 32px;border-radius:28px;
+background:var(--surface);border:3px solid var(--ink);box-shadow:8px 8px 0 var(--pop);text-align:center}}
+.mark{{position:relative;width:56px;height:56px;margin:-62px auto 18px;border-radius:18px;
+background:var(--brand);border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink)}}
+.mark::after{{content:"";position:absolute;width:20px;height:20px;border-radius:50%;
+background:var(--pop);border:3px solid var(--ink);right:-12px;bottom:-12px}}
+h1{{margin:0 0 8px;font-size:28px;line-height:1.15;font-weight:800;letter-spacing:-.02em}}
+p{{margin:0 0 24px;color:var(--muted)}}
+code{{color:var(--ink);background:var(--bg);padding:2px 8px;border-radius:999px;
+border:2px solid var(--line);word-break:break-all;font-size:.92em}}
+a.btn{{display:block;padding:14px 18px;border-radius:16px;background:var(--brand);color:var(--on-brand);
+border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);font-weight:800;font-size:17px;text-decoration:none;
+transition:transform .08s,box-shadow .08s}}
+a.btn:hover{{transform:translate(-1px,-1px);box-shadow:6px 6px 0 var(--ink)}}
+a.btn:active{{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink)}}
+a.btn:focus-visible{{outline:3px solid var(--pop);outline-offset:3px}}
+.note{{margin:20px 0 0;font-size:13px;color:var(--muted)}}
+@media (max-width:520px){{.s1{{width:240px;height:240px}}.s3,.s6{{display:none}}}}
+</style></head><body>
+<div aria-hidden="true"><i class="shape s1"></i><i class="shape s2"></i><i class="shape s3"></i>
+<i class="shape s4"></i><i class="shape s5"></i><i class="shape s6"></i></div>
+<main>
+<div class="mark" aria-hidden="true"></div>
 <h1>{heading}</h1>
 {body}
 </main></body></html>"#,
         title = html_escape(heading),
-        accent = safe_accent(accent),
+        bg = c.bg,
+        surface = c.surface,
+        line = c.line,
+        ink = c.ink,
+        muted = c.muted,
+        brand = c.brand,
+        on_brand = c.on_brand,
+        pop = c.pop,
+        third = c.third,
         heading = html_escape(heading),
     );
     Response::builder()
@@ -1152,7 +1317,7 @@ fn login_page(
         .unwrap_or_default();
     page(
         StatusCode::OK,
-        &settings.accent,
+        settings,
         &settings.title,
         &format!(
             "<p>Use your account {lead}.</p>{error}<a class=\"btn\" href=\"{}\">Continue</a>",
@@ -1164,7 +1329,7 @@ fn login_page(
 fn signed_in_page(settings: &ProxyAuthConfig, username: &str) -> Response<ProxyBody> {
     page(
         StatusCode::OK,
-        &settings.accent,
+        settings,
         "You are signed in",
         &format!(
             "<p>Signed in as <code>{}</code>.</p><a class=\"btn\" href=\"/logout\">Sign out</a>",
@@ -1182,7 +1347,7 @@ fn forbidden_page(
     let switch = format!("https://{portal}/logout?callback={}", urlencode(return_to));
     page(
         StatusCode::FORBIDDEN,
-        &settings.accent,
+        settings,
         "No access",
         &format!(
             "<p><code>{}</code> is not in a group allowed to open this page.</p>\
@@ -1195,6 +1360,7 @@ fn forbidden_page(
 
 fn message_page(
     status: StatusCode,
+    settings: &ProxyAuthConfig,
     heading: &str,
     text: &str,
     action: Option<(&str, &str)>,
@@ -1210,7 +1376,7 @@ fn message_page(
         .unwrap_or_default();
     page(
         status,
-        "#e5603c",
+        settings,
         heading,
         &format!("<p>{}</p>{button}", html_escape(text)),
     )
@@ -1223,7 +1389,7 @@ mod tests {
 
     fn routes() -> RouteTable {
         let protected = |host: &str| {
-            Route::new(
+            let mut route = Route::new(
                 host,
                 None,
                 true,
@@ -1233,20 +1399,32 @@ mod tests {
                 false,
                 "t",
                 vec![],
-            )
+            );
+            route.options.network = Some("public".into());
+            route
         };
         let open = Route::new("open.example.com", None, true, vec![], false, "t", vec![]);
-        RouteTable::new(vec![protected("app.example.com"), open])
+        let mut private = protected("lan.example.com");
+        private.options.network = Some("private".into());
+        RouteTable::new(vec![protected("app.example.com"), private, open])
     }
 
     #[test]
     fn callback_must_name_a_protected_host() {
         let routes = routes();
-        let cb = parse_callback("https://app.example.com/library?x=1", &routes).unwrap();
+        let cb = parse_callback("https://app.example.com/library?x=1", &routes, "public").unwrap();
         assert_eq!(cb.host, "app.example.com");
         assert_eq!(cb.path_and_query, "/library?x=1");
-        assert!(parse_callback("https://open.example.com/", &routes).is_none());
-        assert!(parse_callback("https://evil.example.net/", &routes).is_none());
+        assert!(parse_callback("https://open.example.com/", &routes, "public").is_none());
+        assert!(parse_callback("https://evil.example.net/", &routes, "public").is_none());
+    }
+
+    #[test]
+    fn callback_must_be_on_the_portals_own_network() {
+        let routes = routes();
+        assert!(parse_callback("https://lan.example.com/", &routes, "public").is_none());
+        assert!(parse_callback("https://lan.example.com/", &routes, "private").is_some());
+        assert!(parse_callback("https://app.example.com/", &routes, "private").is_none());
     }
 
     #[test]
@@ -1261,13 +1439,13 @@ mod tests {
             "https://app.example.com//evil.com",
             "ftp://app.example.com/",
         ] {
-            assert!(parse_callback(bad, &routes).is_none(), "{bad}");
+            assert!(parse_callback(bad, &routes, "public").is_none(), "{bad}");
         }
     }
 
     #[test]
     fn callback_host_is_lowercased() {
-        let cb = parse_callback("https://APP.example.com/", &routes()).unwrap();
+        let cb = parse_callback("https://APP.example.com/", &routes(), "public").unwrap();
         assert_eq!(cb.host, "app.example.com");
     }
 
@@ -1392,7 +1570,15 @@ mod tests {
     fn pages_escape_what_they_show() {
         let s = html_escape("<script>\"x\"&'");
         assert_eq!(s, "&lt;script&gt;&quot;x&quot;&amp;&#39;");
-        assert_eq!(safe_accent("#abc"), "#abc");
-        assert_eq!(safe_accent("red;}</style>"), "#e5603c");
+        assert_eq!(valid_hex("#abc"), Some("#abc"));
+        assert_eq!(valid_hex("red;}</style>"), None);
+        assert_eq!(valid_hex("#12345"), None);
+    }
+
+    #[test]
+    fn text_on_the_accent_stays_readable() {
+        assert_eq!(on_color("#ffffff"), "#1a0f12");
+        assert_eq!(on_color("#000"), "#ffffff");
+        assert_eq!(on_color("#ffd23d"), "#1a0f12");
     }
 }

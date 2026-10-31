@@ -85,6 +85,7 @@ export const CONFIG_SLUG_TAB: Record<string, string> = {
   cloudflare: 'network',
   drives: 'storage',
   auth: 'security',
+  'service-login': 'security',
   mcp: 'security',
   'git-backup': 'security',
   secrets: 'security',

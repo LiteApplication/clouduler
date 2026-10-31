@@ -7,7 +7,7 @@ import { useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthContext';
 import { Banner, Button, Icon, Panel, Tag, TextField, useConfirm, useToast } from '../../ds';
-import { useConfigApply, useConfigDraft, changesFor } from '../config/draft';
+import { useConfigApply, useConfigDraft } from '../config/draft';
 import { CONFIG_PAGES, nodePathTarget, pageForPath } from '../config/pages';
 import type { SectionProps } from '../config/sections';
 import type { DiffEntry } from '../../lib/configDiff';
@@ -15,8 +15,12 @@ import { CONFIG_SLUG_TAB } from './settingsTabs';
 
 /** Unsaved-field count for one settings tab. */
 export function tabChanges(diff: DiffEntry[], tab: string): number {
-  const keys = CONFIG_PAGES.filter((p) => CONFIG_SLUG_TAB[p.slug] === tab).flatMap((p) => p.keys);
-  return changesFor(diff, keys);
+  // Attribute each diff to its single owning page, so `proxy.auth.*` counts
+  // under Service login only, not also under Proxy.
+  return diff.filter((d) => {
+    const page = pageForPath(d.path);
+    return !!page && CONFIG_SLUG_TAB[page.slug] === tab;
+  }).length;
 }
 
 export function useSettingsConfig() {

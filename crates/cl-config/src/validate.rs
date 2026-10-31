@@ -545,11 +545,42 @@ impl ClusterConfig {
             if auth.host.trim().is_empty() {
                 return Err(ConfigError::invalid("proxy.auth.host", "must not be empty"));
             }
-            if !self.networks.contains_key(&auth.network) {
+            if auth.networks.is_empty() {
                 return Err(ConfigError::invalid(
-                    "proxy.auth.network",
-                    format!("no network named {}", auth.network),
+                    "proxy.auth.networks",
+                    "list at least one network that offers the login",
                 ));
+            }
+            let mut portals = std::collections::BTreeSet::new();
+            for network in &auth.networks {
+                let Some(net) = self.networks.get(network) else {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.networks",
+                        format!("no network named {network}"),
+                    ));
+                };
+                if net.domain.is_none() {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.networks",
+                        format!("network {network} has no domain, so it cannot serve a login page"),
+                    ));
+                }
+                let fqdn = auth.fqdn(self, network);
+                if fqdn == self.web_fqdn() {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.host",
+                        "must differ from the dashboard hostname",
+                    ));
+                }
+                if !portals.insert(fqdn.clone()) {
+                    return Err(ConfigError::invalid(
+                        "proxy.auth.networks",
+                        format!(
+                            "{network} and another listed network resolve the login to the same hostname {fqdn}; \
+                             use networks with different domains"
+                        ),
+                    ));
+                }
             }
             if auth.session_ttl.is_zero() {
                 return Err(ConfigError::invalid(
@@ -557,17 +588,16 @@ impl ClusterConfig {
                     "must be greater than zero",
                 ));
             }
-            let accent = auth.accent.strip_prefix('#').unwrap_or("");
-            if !matches!(accent.len(), 3 | 6) || !accent.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let accent = auth
+                .accent
+                .as_deref()
+                .map(|a| a.strip_prefix('#').unwrap_or(""));
+            if accent.is_some_and(|a| {
+                !matches!(a.len(), 3 | 6) || !a.bytes().all(|b| b.is_ascii_hexdigit())
+            }) {
                 return Err(ConfigError::invalid(
                     "proxy.auth.accent",
                     "must be a hex colour like #e5603c",
-                ));
-            }
-            if auth.fqdn(self) == self.web_fqdn() {
-                return Err(ConfigError::invalid(
-                    "proxy.auth.host",
-                    "must differ from the dashboard hostname",
                 ));
             }
         }

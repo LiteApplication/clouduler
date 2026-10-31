@@ -212,14 +212,15 @@ Protects an app that has no login of its own, optionally for some groups only.
 # cluster.yaml
 proxy:
   auth:
-    host: login            # the login portal's hostname, on `network`
-    network: wan
+    host: login            # portal label, one hostname per network below
+    networks: [wan, lan]   # networks that offer the login (login.<wan domain>, login.<lan domain>)
     issuer: https://sso.example.com/application/o/apps/
     client_id: clouduler-apps
     groups_claim: groups   # default
     session_ttl: 7d        # how long a login lasts (default 12h)
     title: Sign in to continue
-    accent: "#e5603c"      # login page colour
+    palette: grape         # login page colours: grape, sunset, ocean, forest
+    accent: "#e5603c"      # optional: overrides the palette's main colour
 
 # stack file
 proxy:
@@ -234,10 +235,17 @@ proxy:
 
 This is a separate identity provider client and group namespace from
 `auth.oidc` (which logs operators into the dashboard). Create the client with
-the redirect URI `https://<portal host>/callback`, then store its secret:
+one redirect URI per listed network, `https://<portal host>/callback`, then
+store its secret (also under Settings, Service login in the dashboard):
 `PUT /api/proxy-auth/client-secret` with `{"client_secret": "…"}` (admin; write
-only, like `/api/oidc/client-secret`). The portal hostname gets DNS and a
+only, like `/api/oidc/client-secret`). The portal hostnames get DNS and a
 certificate like any proxied host.
+
+**Per network.** A login is once per network: each listed network has its own
+portal and its own sessions, so signing in on `lan` does not sign anyone in on
+`wan`. A route may only use `authenticated` on a network listed in
+`proxy.auth.networks`; a stack asking for a login on any other network (or with
+no `proxy.auth` at all) fails validation.
 
 **Flow.** A request with no valid `cl_proxy_auth` cookie gets a 302 to
 `https://<portal>/login?callback=<url>`. If the browser already has a portal
@@ -255,8 +263,10 @@ logins survive restarts; only a hash of each cookie/token is stored. A token
 is valid for 60 seconds and can be spent once, cluster-wide. Cookies are
 host-only and bound to their hostname; an app cookie never outlives the portal
 session that produced it (`session_ttl`, fixed at login). Groups are read at
-login: a change at the provider applies from the next login. Signing out at
-the portal (`/logout`) ends the portal session, not app cookies already issued.
+login: a change at the provider applies from the next login. Signing out
+(the portal's `/logout`, or `/.well-known/clouduler-logout` on any protected
+host) removes the portal session and every app session handed out from it, so
+all those cookies stop working at once.
 The proxy strips its cookies before forwarding, so backends never see them.
 
 **Callbacks.** The portal only redirects to a hostname whose route has

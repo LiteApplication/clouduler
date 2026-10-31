@@ -856,6 +856,11 @@ pub struct ProxySessionRecord {
     pub groups: Vec<String>,
     /// Unix seconds after which the session no longer counts.
     pub expires_at: i64,
+    /// Key of the portal session this one was handed out from, empty for a
+    /// portal session itself. Removing the parent removes it too, which is
+    /// how signing out at the portal ends every app cookie.
+    #[serde(default)]
+    pub parent: String,
 }
 
 /// A one-time pass from the login portal to one protected hostname: whoever
@@ -872,6 +877,9 @@ pub struct ProxyTokenRecord {
     pub session_expires_at: i64,
     /// The token itself is worthless after this.
     pub expires_at: i64,
+    /// Key of the portal session that issued it; must still exist to redeem.
+    #[serde(default)]
+    pub parent: String,
 }
 
 /// One instance's last-observed docker state, as reported by the node that
@@ -2569,6 +2577,8 @@ impl ClusterState {
 
             Request::RemoveProxySession { key } => {
                 self.proxy_sessions.remove(key);
+                self.proxy_sessions.retain(|_, s| &s.parent != key);
+                self.proxy_tokens.retain(|_, t| &t.parent != key);
                 Ok(())
             }
 
@@ -2596,6 +2606,14 @@ impl ClusterState {
                 if token.session_expires_at <= *now {
                     return Err("login expired".into());
                 }
+                if !token.parent.is_empty()
+                    && self
+                        .proxy_sessions
+                        .get(&token.parent)
+                        .is_none_or(|p| p.expires_at <= *now)
+                {
+                    return Err("signed out".into());
+                }
                 let token = self.proxy_tokens.remove(token_key).expect("checked above");
                 self.sweep_proxy_auth(*now);
                 self.proxy_sessions.insert(
@@ -2606,6 +2624,7 @@ impl ClusterState {
                         username: token.username,
                         groups: token.groups,
                         expires_at: token.session_expires_at,
+                        parent: token.parent,
                     },
                 );
                 Ok(())
@@ -3235,6 +3254,7 @@ mod tests {
                     username: "u".into(),
                     groups: vec!["g".into()],
                     expires_at: 10,
+                    parent: String::new(),
                 },
                 now: 1,
             },
@@ -3248,6 +3268,7 @@ mod tests {
                     groups: Vec::new(),
                     session_expires_at: 10,
                     expires_at: 5,
+                    parent: String::new(),
                 },
                 now: 1,
             },
@@ -3790,6 +3811,7 @@ mod tests {
                     groups: vec!["staff".into()],
                     session_expires_at: 1000,
                     expires_at,
+                    parent: String::new(),
                 },
                 now: 0,
             });
@@ -3823,6 +3845,65 @@ mod tests {
             .error
             .is_some());
         assert!(!state.proxy_sessions.contains_key("s3"));
+    }
+
+    #[test]
+    fn signing_out_ends_the_app_sessions_it_handed_out() {
+        let mut state = ClusterState::default();
+        let portal = ProxySessionRecord {
+            host: "login.example.com".into(),
+            subject: "sub".into(),
+            username: "alice".into(),
+            groups: Vec::new(),
+            expires_at: 1000,
+            parent: String::new(),
+        };
+        state.apply(&Request::PutProxySession {
+            key: "portal".into(),
+            session: portal,
+            now: 0,
+        });
+        let token = |parent: &str| ProxyTokenRecord {
+            host: "a.example.com".into(),
+            subject: "sub".into(),
+            username: "alice".into(),
+            groups: Vec::new(),
+            session_expires_at: 1000,
+            expires_at: 60,
+            parent: parent.into(),
+        };
+        for key in ["t1", "t2"] {
+            state.apply(&Request::PutProxyToken {
+                key: key.into(),
+                token: token("portal"),
+                now: 0,
+            });
+        }
+        let redeem = |state: &mut ClusterState, t: &str, s: &str| {
+            state.apply(&Request::RedeemProxyToken {
+                token_key: t.into(),
+                host: "a.example.com".into(),
+                session_key: s.into(),
+                now: 1,
+            })
+        };
+        assert!(redeem(&mut state, "t1", "app").error.is_none());
+        assert_eq!(state.proxy_sessions["app"].parent, "portal");
+
+        state.apply(&Request::RemoveProxySession {
+            key: "portal".into(),
+        });
+        assert!(state.proxy_sessions.is_empty());
+        // A token minted before the sign-out is gone too, and a late one
+        // naming the dead portal session cannot mint anything.
+        assert!(state.proxy_tokens.is_empty());
+        state.apply(&Request::PutProxyToken {
+            key: "t3".into(),
+            token: token("portal"),
+            now: 2,
+        });
+        assert!(redeem(&mut state, "t3", "late").error.is_some());
+        assert!(state.proxy_sessions.is_empty());
     }
 
     #[test]

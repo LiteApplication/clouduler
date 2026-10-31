@@ -669,7 +669,16 @@ async fn proxy(
             );
         };
         let internal = backends.peers.is_internal(peer.ip());
-        match gate.evaluate(&req, scheme, policy, internal).await {
+        match gate
+            .evaluate(
+                &req,
+                scheme,
+                policy,
+                route.options.network.as_deref(),
+                internal,
+            )
+            .await
+        {
             GateOutcome::Allow => {
                 // The backend has no business holding a replayable session.
                 crate::auth_gate::strip_gate_cookies(req.headers_mut());

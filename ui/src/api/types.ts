@@ -821,12 +821,36 @@ export interface AcmeConfig {
 /** Who a proxied hostname's DNS record names. */
 export type DnsPublishMode = "all-nodes" | "owning-node";
 
+export type PortalPalette = 'grape' | 'sunset' | 'ocean' | 'forest';
+
+/**
+ * `proxy.auth`: the "service login" that protects apps carrying the
+ * `authenticated` route middleware. Separate from the dashboard sign-in
+ * (`auth.oidc`). Absent or null means the feature is off.
+ */
+export interface ProxyAuthConfig {
+  /** Label, qualified with each listed network's domain. */
+  host: string;
+  /** Networks that offer the login; one portal per network. */
+  networks: string[];
+  issuer: string;
+  client_id: string;
+  scopes: string[];
+  groups_claim: string;
+  username_claim: string;
+  session_ttl: string;
+  title: string;
+  palette: PortalPalette;
+  accent?: string | null;
+}
+
 export interface ProxyConfig {
   enabled: boolean;
   http_port: number;
   https_port: number;
   acme: AcmeConfig;
   dns_publish: DnsPublishMode;
+  auth?: ProxyAuthConfig | null;
 }
 
 /** A UI-managed redirect. Not part of cluster.yaml; see /api/redirects. */

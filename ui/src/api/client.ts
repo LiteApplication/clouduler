@@ -345,6 +345,9 @@ export const api = {
   oidcClientSecret: () => get<OidcClientSecretStatus>('/api/oidc/client-secret'),
   setOidcClientSecret: (clientSecret: string) =>
     put<void>('/api/oidc/client-secret', { client_secret: clientSecret }),
+  proxyAuthClientSecret: () => get<OidcClientSecretStatus>('/api/proxy-auth/client-secret'),
+  setProxyAuthClientSecret: (clientSecret: string) =>
+    put<void>('/api/proxy-auth/client-secret', { client_secret: clientSecret }),
 
   // redirects: UI-managed, not part of cluster.yaml — see docs/proxy.md
   listRedirects: () => get<RedirectRule[]>('/api/redirects'),

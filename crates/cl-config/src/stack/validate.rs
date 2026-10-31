@@ -543,6 +543,29 @@ impl StackFile {
                         ),
                     ));
                 }
+                if route
+                    .middlewares
+                    .iter()
+                    .any(|m| matches!(m, crate::stack::Middleware::Authenticated(_)))
+                    && !cluster
+                        .proxy
+                        .auth
+                        .as_ref()
+                        .is_some_and(|a| a.covers(&route.network))
+                {
+                    return Err(ConfigError::invalid(
+                        format!("{at}.middlewares"),
+                        format!(
+                            "authenticated asks for a login on network {}, but proxy.auth does not list it in networks{}",
+                            route.network,
+                            if cluster.proxy.auth.is_none() {
+                                " (the cluster has no proxy.auth at all)"
+                            } else {
+                                ""
+                            }
+                        ),
+                    ));
+                }
                 for cors in route.middlewares.iter().filter_map(|m| match m {
                     crate::stack::Middleware::Cors(c) => Some(c),
                     _ => None,
@@ -1144,6 +1167,35 @@ services:
         assert!(err
             .to_string()
             .contains("services.a.x-clouduler.proxy[0].network"));
+    }
+
+    #[test]
+    fn a_login_can_only_be_asked_for_on_a_network_that_offers_it() {
+        let raw = |network: &str| {
+            format!(
+                "networks:\n  tailscale: {{}}\nservices:\n  a:\n    image: x\n    networks: [tailscale]\n    x-clouduler:\n      proxy:\n        - host: a\n          network: {network}\n          port: 80\n          middlewares: [authenticated]\n"
+            )
+        };
+        let with_auth = |networks: &str| {
+            let yaml = CLUSTER_YAML.replace(
+                "proxy:\n  enabled: true\n",
+                &format!(
+                    "proxy:\n  enabled: true\n  auth:\n    host: login\n    networks: {networks}\n    issuer: https://sso.example.com/\n    client_id: apps\n"
+                ),
+            );
+            ClusterConfig::parse(&yaml).expect("cluster with proxy.auth is valid")
+        };
+
+        // No proxy.auth at all.
+        let err = stack(&raw("lan")).validate(&cluster()).unwrap_err();
+        assert!(err.to_string().contains("authenticated"), "{err}");
+        assert!(err.to_string().contains("no proxy.auth"), "{err}");
+
+        // Offered on lan only: wan is refused, lan is fine.
+        let lan_only = with_auth("[lan]");
+        let err = stack(&raw("wan")).validate(&lan_only).unwrap_err();
+        assert!(err.to_string().contains("does not list it"), "{err}");
+        assert!(stack(&raw("lan")).validate(&lan_only).is_ok());
     }
 
     #[test]

@@ -5,6 +5,7 @@
 import { type IconName } from '../../components/Icon';
 import {
   AuthSection,
+  ServiceLoginSection,
   CloudflareSection,
   ClusterSection,
   DrivesSection,
@@ -108,6 +109,15 @@ export const CONFIG_PAGES: ConfigPage[] = [
     Component: AuthSection,
   },
   {
+    slug: 'service-login',
+    label: 'Service login',
+    icon: 'lock',
+    blurb: 'Log visitors of your apps in, for routes with the authenticated middleware.',
+    group: 'Security',
+    keys: ['proxy.auth'],
+    Component: ServiceLoginSection,
+  },
+  {
     slug: 'secrets',
     label: 'Cluster key',
     icon: 'key',
@@ -141,8 +151,18 @@ export const CONFIG_PAGES: ConfigPage[] = [
  *  the node's own detail page, so it never matches here; see
  *  `nodePathTarget` for that case. */
 export function pageForPath(path: string): ConfigPage | undefined {
-  const top = path.split('.')[0];
-  return CONFIG_PAGES.find((p) => p.keys.includes(top));
+  // Longest key wins, so `proxy.auth.*` lands on Service login, not Proxy.
+  let best: ConfigPage | undefined;
+  let bestLen = -1;
+  for (const p of CONFIG_PAGES) {
+    for (const k of p.keys) {
+      if ((path === k || path.startsWith(`${k}.`)) && k.length > bestLen) {
+        best = p;
+        bestLen = k.length;
+      }
+    }
+  }
+  return best;
 }
 
 /** The node detail route owning a `nodes.<name>.*` diff path, if any. */

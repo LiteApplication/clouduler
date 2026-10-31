@@ -736,7 +736,11 @@ pub struct ProxyConfig {
 
 /// The login portal behind the `authenticated` route middleware.
 ///
-/// The portal is one hostname the proxy answers itself. A protected app that
+/// The portal is a hostname the proxy answers itself, one per network in
+/// `networks` (the same label under each network's domain). A login is per
+/// network: signing in on one network's portal does not sign anyone in on
+/// another's, and a route may only ask for a login on a network listed here.
+/// A protected app that
 /// sees no valid cookie redirects the browser there; the portal runs the OIDC
 /// login (or, when the browser already has a portal session, skips straight
 /// on), then sends the browser back to the app through a one-time-token URL
@@ -745,12 +749,15 @@ pub struct ProxyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyAuthConfig {
-    /// Portal hostname. A bare label gets `network`'s domain appended. Needs
-    /// DNS and a certificate like any proxied host, which the proxy arranges.
+    /// Portal hostname. A bare label gets each network's domain appended, so
+    /// `login` on networks `public` and `private` serves `login.<public
+    /// domain>` and `login.<private domain>`. Needs DNS and a certificate like
+    /// any proxied host, which the proxy arranges.
     pub host: String,
-    /// Network the portal hostname is published on; must be reachable by the
-    /// people logging in (normally a public network).
-    pub network: String,
+    /// Networks that offer the login. A route with the `authenticated`
+    /// middleware must be published on one of these, and its users log in on
+    /// that network's portal, once per network.
+    pub networks: Vec<String>,
     pub issuer: String,
     pub client_id: String,
     /// The client secret is a sealed cluster secret named
@@ -772,9 +779,29 @@ pub struct ProxyAuthConfig {
     /// Heading of the login page.
     #[serde(default = "default_portal_title")]
     pub title: String,
-    /// Accent colour of the login page, as a CSS hex colour.
-    #[serde(default = "default_portal_accent")]
-    pub accent: String,
+    /// Colour set of the login page's shapes and background.
+    #[serde(default)]
+    pub palette: PortalPalette,
+    /// Overrides the palette's main colour (buttons and the biggest shape),
+    /// as a CSS hex colour like `#e5603c`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+}
+
+/// Colour sets for the login page. Each is a dark background with a few loud
+/// shapes in it, like the dashboard's own sign-in screen.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortalPalette {
+    /// Deep grape with pink and lime.
+    #[default]
+    Grape,
+    /// Warm night with orange and sky blue.
+    Sunset,
+    /// Deep sea with cyan and coral.
+    Ocean,
+    /// Pine green with yellow and pink.
+    Forest,
 }
 
 fn default_proxy_auth_scopes() -> Vec<String> {
@@ -790,19 +817,26 @@ fn default_portal_title() -> String {
     "Sign in to continue".to_string()
 }
 
-fn default_portal_accent() -> String {
-    "#e5603c".to_string()
-}
-
 impl ProxyAuthConfig {
-    /// The portal's fully qualified, lowercase hostname.
-    pub fn fqdn(&self, cfg: &ClusterConfig) -> String {
+    /// The portal's fully qualified, lowercase hostname on `network`.
+    pub fn fqdn(&self, cfg: &ClusterConfig, network: &str) -> String {
         qualify(
             &self.host,
-            cfg.networks
-                .get(&self.network)
-                .and_then(|n| n.domain.as_deref()),
+            cfg.networks.get(network).and_then(|n| n.domain.as_deref()),
         )
+    }
+
+    /// Every portal hostname with the network it serves.
+    pub fn portals(&self, cfg: &ClusterConfig) -> Vec<(String, String)> {
+        self.networks
+            .iter()
+            .map(|n| (n.clone(), self.fqdn(cfg, n)))
+            .collect()
+    }
+
+    /// Does this network offer the login?
+    pub fn covers(&self, network: &str) -> bool {
+        self.networks.iter().any(|n| n == network)
     }
 }
 

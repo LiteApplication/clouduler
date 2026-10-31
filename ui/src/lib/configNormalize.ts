@@ -84,6 +84,7 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
         directory_url: nullable(cfg.proxy.acme.directory_url),
         contact_email: nullable(cfg.proxy.acme.contact_email),
       },
+      auth: cfg.proxy.auth ? { ...cfg.proxy.auth, accent: nullable(cfg.proxy.auth.accent) } : cfg.proxy.auth,
     },
   };
 }
