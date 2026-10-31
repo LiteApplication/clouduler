@@ -119,3 +119,42 @@ export function Toggle({
     </div>
   );
 }
+
+/**
+ * One pick in a choose-any-of-these list. A switch reads as "on/off setting";
+ * this reads as "include this one". The real checkbox stays in the DOM (hidden
+ * but focusable) so keyboard and screen readers behave natively.
+ */
+export function CheckOption({
+  checked,
+  disabled,
+  onChange,
+  children,
+  hint,
+  className,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (on: boolean) => void;
+  children: ReactNode;
+  /** Muted trailing text, e.g. why the option is unavailable. */
+  hint?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={cx('cl-check', checked && 'cl-check--on', disabled && 'cl-check--disabled', className)}>
+      <input
+        type="checkbox"
+        className="cl-check__input"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="cl-check__box" aria-hidden="true">
+        {checked && <Icon name="check" size={12} />}
+      </span>
+      <span className="cl-check__label">{children}</span>
+      {hint && <span className="cl-sm cl-muted">{hint}</span>}
+    </label>
+  );
+}

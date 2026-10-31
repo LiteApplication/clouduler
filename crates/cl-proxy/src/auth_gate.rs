@@ -1385,6 +1385,9 @@ fn on_color(hex: &str) -> &'static str {
     }
 }
 
+/// Shell shared by every gate page; `{{NAME}}` tokens are filled in by `page`.
+const PAGE_TEMPLATE: &str = include_str!("auth_gate_page.html");
+
 fn page(
     status: StatusCode,
     settings: &ProxyAuthConfig,
@@ -1392,70 +1395,20 @@ fn page(
     body: &str,
 ) -> Response<ProxyBody> {
     let c = colors(settings);
-    let html = format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex">
-<title>{title}</title>
-<style>
-:root{{--bg:{bg};--surface:{surface};--line:{line};--ink:{ink};--muted:{muted};
---brand:{brand};--on-brand:{on_brand};--pop:{pop};--third:{third}}}
-*{{box-sizing:border-box}}
-body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;overflow:hidden;position:relative;
-font:16px/1.5 ui-rounded,"Arial Rounded MT Bold",system-ui,-apple-system,"Segoe UI",sans-serif;
-color:var(--ink);background:var(--bg)}}
-.shape{{position:absolute;border:3px solid var(--ink);animation:bob 7s ease-in-out infinite}}
-.s1{{width:340px;height:340px;border-radius:50%;background:var(--brand);left:-90px;top:-80px}}
-.s2{{width:190px;height:190px;border-radius:50%;background:var(--pop);right:6%;bottom:-60px;animation-delay:-2s}}
-.s3{{width:140px;height:140px;border-radius:28px;background:var(--surface);right:-30px;top:14%;transform:rotate(14deg);animation-delay:-4s}}
-.s4{{width:84px;height:84px;border-radius:50%;border-color:var(--muted);background:none;left:10%;bottom:12%;animation-delay:-1s}}
-.s5{{width:70px;height:70px;background:var(--third);left:38%;top:7%;transform:rotate(-12deg);animation-delay:-3s}}
-.s6{{width:0;height:0;border:0;border-left:44px solid transparent;border-right:44px solid transparent;
-border-bottom:76px solid var(--pop);right:24%;top:9%;animation-delay:-5s}}
-@keyframes bob{{50%{{translate:0 -14px}}}}
-@media (prefers-reduced-motion:reduce){{.shape{{animation:none}}}}
-main{{position:relative;width:100%;max-width:420px;padding:36px 32px 32px;border-radius:28px;
-background:var(--surface);border:3px solid var(--ink);box-shadow:8px 8px 0 var(--pop);text-align:center}}
-.mark{{position:relative;width:56px;height:56px;margin:-62px auto 18px;border-radius:18px;
-background:var(--brand);border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink)}}
-.mark::after{{content:"";position:absolute;width:20px;height:20px;border-radius:50%;
-background:var(--pop);border:3px solid var(--ink);right:-12px;bottom:-12px}}
-h1{{margin:0 0 8px;font-size:28px;line-height:1.15;font-weight:800;letter-spacing:-.02em}}
-p{{margin:0 0 24px;color:var(--muted)}}
-code{{color:var(--ink);background:var(--bg);padding:2px 8px;border-radius:999px;
-border:2px solid var(--line);word-break:break-all;font-size:.92em}}
-a.btn{{display:block;padding:14px 18px;border-radius:16px;background:var(--brand);color:var(--on-brand);
-border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);font-weight:800;font-size:17px;text-decoration:none;
-transition:transform .08s,box-shadow .08s}}
-button.btn{{display:block;width:100%;font:inherit;cursor:pointer}}
-.remember{{display:block;margin:0 0 16px;font-size:14px;text-align:left}}
-.remember input{{margin-right:8px;width:18px;height:18px;vertical-align:middle}}
-a.btn:hover,button.btn:hover{{transform:translate(-1px,-1px);box-shadow:6px 6px 0 var(--ink)}}
-a.btn:active,button.btn:active{{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink)}}
-a.btn:focus-visible,button.btn:focus-visible{{outline:3px solid var(--pop);outline-offset:3px}}
-.note{{margin:20px 0 0;font-size:13px;color:var(--muted)}}
-@media (max-width:520px){{.s1{{width:240px;height:240px}}.s3,.s6{{display:none}}}}
-</style></head><body>
-<div aria-hidden="true"><i class="shape s1"></i><i class="shape s2"></i><i class="shape s3"></i>
-<i class="shape s4"></i><i class="shape s5"></i><i class="shape s6"></i></div>
-<main>
-<div class="mark" aria-hidden="true"></div>
-<h1>{heading}</h1>
-{body}
-</main></body></html>"#,
-        title = html_escape(heading),
-        bg = c.bg,
-        surface = c.surface,
-        line = c.line,
-        ink = c.ink,
-        muted = c.muted,
-        brand = c.brand,
-        on_brand = c.on_brand,
-        pop = c.pop,
-        third = c.third,
-        heading = html_escape(heading),
-    );
+    let html = PAGE_TEMPLATE
+        .replace("{{TITLE}}", &html_escape(heading))
+        .replace("{{HEADING}}", &html_escape(heading))
+        .replace("{{BG}}", c.bg)
+        .replace("{{SURFACE}}", c.surface)
+        .replace("{{LINE}}", c.line)
+        .replace("{{INK}}", c.ink)
+        .replace("{{MUTED}}", c.muted)
+        .replace("{{BRAND}}", &c.brand)
+        .replace("{{ON_BRAND}}", c.on_brand)
+        .replace("{{POP}}", c.pop)
+        .replace("{{THIRD}}", c.third)
+        // Last, so nothing in the body is mistaken for a placeholder.
+        .replace("{{BODY}}", body);
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")

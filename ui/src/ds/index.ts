@@ -7,7 +7,7 @@ export { Button, type ButtonProps } from './Button';
 export { Meter, type MeterTone } from './Meter';
 export { NodeCard, StackCard, ContainerRow, type RaftRole } from './cards';
 export { HelpTip } from './HelpTip';
-export { TextField, Toggle, type TextFieldProps } from './forms';
+export { TextField, Toggle, CheckOption, type TextFieldProps } from './forms';
 export { LogView, type LogViewLine, type LogLevel } from './LogView';
 export { BottomNav, SideRail, Tabs, Chip, type BottomNavItem, type SideRailEntry, type TabItem } from './nav';
 export { DataTable, type Column } from './DataTable';

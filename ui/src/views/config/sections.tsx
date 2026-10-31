@@ -24,7 +24,7 @@ import type {
   ProxyAuthConfig,
   PublicAddress,
 } from '../../api/types';
-import { HelpTip, Tag, useConfirm } from '../../ds';
+import { CheckOption, HelpTip, Tag, useConfirm } from '../../ds';
 import { Icon } from '../../components/Icon';
 import { RememberedIps } from './RememberedIps';
 import {
@@ -104,14 +104,26 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
   const [renameBusy, setRenameBusy] = useState(false);
 
   const updateNetwork = (name: string, patch: Partial<NetworkConfig>) => {
-    setDraft({ ...draft, networks: { ...draft.networks, [name]: { ...draft.networks[name], ...patch } } });
+    setDraft({
+      ...draft,
+      networks: {
+        ...draft.networks,
+        [name]: { ...draft.networks[name], ...patch },
+      },
+    });
   };
 
   const addNetwork = () => {
     let name = 'network';
     let i = 1;
     while (draft.networks[name]) name = `network${i++}`;
-    setDraft({ ...draft, networks: { ...draft.networks, [name]: { type: 'private', subnet: null, domain: null } } });
+    setDraft({
+      ...draft,
+      networks: {
+        ...draft.networks,
+        [name]: { type: 'private', subnet: null, domain: null },
+      },
+    });
   };
 
   const removeNetwork = (name: string) => {
@@ -260,15 +272,15 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
           )}
           {net.type === 'egress' && (
             <p className="field-hint">
-              Not addressable by subnet: pick a host interface per node below. Clouduler does not
-              manage the interface itself — it must already exist and be up.
+              Not addressable by subnet: pick a host interface per node below. Clouduler does not manage the interface
+              itself — it must already exist and be up.
             </p>
           )}
           {net.type === 'nat' && (
             <p className="field-hint">
-              Not addressable, and nothing to configure per node: every node implements it the
-              same way, NAT-ing a service's outbound traffic out whatever interface its own
-              routing table picks, instead of a single fixed interface.
+              Not addressable, and nothing to configure per node: every node implements it the same way, NAT-ing a
+              service's outbound traffic out whatever interface its own routing table picks, instead of a single fixed
+              interface.
             </p>
           )}
         </div>
@@ -313,7 +325,10 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
   const [renameBusy, setRenameBusy] = useState(false);
 
   const update = (name: string, patch: Partial<ClusterConfig['drives'][string]>) => {
-    setDraft({ ...draft, drives: { ...draft.drives, [name]: { ...draft.drives[name], ...patch } } });
+    setDraft({
+      ...draft,
+      drives: { ...draft.drives, [name]: { ...draft.drives[name], ...patch } },
+    });
   };
 
   const add = () => {
@@ -322,7 +337,10 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
     while (draft.drives[name]) name = `drive${i++}`;
     setDraft({
       ...draft,
-      drives: { ...draft.drives, [name]: { sync_interval: '15m', mode: 'replicated', served_by: [] } },
+      drives: {
+        ...draft.drives,
+        [name]: { sync_interval: '15m', mode: 'replicated', served_by: [] },
+      },
     });
   };
 
@@ -491,16 +509,9 @@ function ServedByField({
         The active server is the first reachable candidate; the rest keep a synced backup copy.
       </span>
       {nodeNames.map((node) => (
-        <label className="flex-row" key={node} htmlFor={`${id}-${node}`}>
-          <input
-            id={`${id}-${node}`}
-            type="checkbox"
-            checked={servedBy.includes(node)}
-            onChange={() => toggle(node)}
-            disabled={disabled}
-          />
+        <CheckOption key={node} checked={servedBy.includes(node)} onChange={() => toggle(node)} disabled={disabled}>
           {node}
-        </label>
+        </CheckOption>
       ))}
       {servedBy.length > 0 && (
         <ol style={{ marginTop: 8 }}>
@@ -662,7 +673,11 @@ export function NodeCard({
             ? 'inherit'
             : String(node.generate_secret_key)
         }
-        onChange={(choice) => onChange({ generate_secret_key: choice === 'inherit' ? null : choice === 'true' })}
+        onChange={(choice) =>
+          onChange({
+            generate_secret_key: choice === 'inherit' ? null : choice === 'true',
+          })
+        }
         options={[
           { value: 'inherit', label: 'Follow the cluster setting' },
           { value: 'true', label: 'Yes, this node may create it' },
@@ -703,7 +718,10 @@ export function NodeCard({
             typeof addr === 'string'
               ? { interface: addr, open_ports: [] }
               : addr && 'interface' in addr
-                ? { interface: addr.interface, open_ports: addr.open_ports ?? [] }
+                ? {
+                    interface: addr.interface,
+                    open_ports: addr.open_ports ?? [],
+                  }
                 : null;
           return (
             <WireguardAddressField
@@ -789,7 +807,11 @@ export function NodeCard({
             typeof addr === 'string'
               ? { interface: addr, open_ports: [], fallback: null }
               : addr && 'interface' in addr
-                ? { interface: addr.interface, open_ports: addr.open_ports ?? [], fallback: addr.fallback ?? null }
+                ? {
+                    interface: addr.interface,
+                    open_ports: addr.open_ports ?? [],
+                    fallback: addr.fallback ?? null,
+                  }
                 : { interface: '', open_ports: [], fallback: null };
           return (
             <EgressInterfaceField
@@ -845,7 +867,10 @@ export function NodeCard({
               onChange={setAddingNetwork}
               options={[
                 { value: '', label: '(choose a network)' },
-                ...joinableNetworks.map(([netName]) => ({ value: netName, label: netName })),
+                ...joinableNetworks.map(([netName]) => ({
+                  value: netName,
+                  label: netName,
+                })),
               ]}
               disabled={disabled}
             />
@@ -1004,11 +1029,20 @@ function EgressInterfaceField({
 
   const toggleFallback = (enabled: boolean) => {
     setFallbackEnabled(enabled);
-    onChange({ ...addr, fallback: enabled ? { interface: '', health_check_ip: '' } : null });
+    onChange({
+      ...addr,
+      fallback: enabled ? { interface: '', health_check_ip: '' } : null,
+    });
   };
 
   const updateFallback = (patch: Partial<EgressFallback>) => {
-    onChange({ ...addr, fallback: { ...(addr.fallback ?? { interface: '', health_check_ip: '' }), ...patch } });
+    onChange({
+      ...addr,
+      fallback: {
+        ...(addr.fallback ?? { interface: '', health_check_ip: '' }),
+        ...patch,
+      },
+    });
   };
 
   return (
@@ -1228,7 +1262,9 @@ function WireguardAddressField({
           rows={8}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={'[Interface]\nPrivateKey = ...\nAddress = ...\n\n[Peer]\nPublicKey = ...\nEndpoint = ...\nAllowedIPs = 0.0.0.0/0'}
+          placeholder={
+            '[Interface]\nPrivateKey = ...\nAddress = ...\n\n[Peer]\nPublicKey = ...\nEndpoint = ...\nAllowedIPs = 0.0.0.0/0'
+          }
           disabled={disabled}
         />
       </div>
@@ -1263,7 +1299,10 @@ export function WebSection({ draft, setDraft, disabled }: SectionProps) {
         label="Address network"
         value={draft.web.network}
         onChange={(network) => setDraft({ ...draft, web: { ...draft.web, network } })}
-        options={Object.keys(draft.networks).map((n) => ({ value: n, label: n }))}
+        options={Object.keys(draft.networks).map((n) => ({
+          value: n,
+          label: n,
+        }))}
         hint="Which node address DNS points at."
         help="Picks which node address the dashboard's DNS record points at, and whose domain the Address label is qualified with. Doesn't restrict which hostname you can use."
         configKey="web.network"
@@ -1418,7 +1457,10 @@ async function generateAndDownloadAgeKey(): Promise<string> {
 export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
   const b = draft.backup;
   const set = (patch: Partial<NonNullable<ClusterConfig['backup']>>) =>
-    setDraft({ ...draft, backup: b ? { ...b, ...patch } : { ...DEFAULT_GIT_BACKUP, ...patch } });
+    setDraft({
+      ...draft,
+      backup: b ? { ...b, ...patch } : { ...DEFAULT_GIT_BACKUP, ...patch },
+    });
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
 
@@ -1474,9 +1516,9 @@ export function GitBackupSection({ draft, setDraft, disabled }: SectionProps) {
               <Icon name="download" /> {generating ? 'Generating...' : 'Generate age key'}
             </button>
             <span className="field-hint">
-              Generates a keypair in your browser and downloads the private key - it is never sent to the server.
-              The public recipient above is filled in automatically; store the downloaded file somewhere safe, it is
-              the only copy.
+              Generates a keypair in your browser and downloads the private key - it is never sent to the server. The
+              public recipient above is filled in automatically; store the downloaded file somewhere safe, it is the
+              only copy.
             </span>
           </div>
           {generateError && (
@@ -1512,8 +1554,14 @@ function GitBackupDeployKey() {
   const [tokenError, setTokenError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.gitBackupStatus().then(setStatus).catch(() => setStatus(null));
-    api.gitBackupWebhookSecret().then(setWebhookSecret).catch(() => setWebhookSecret(null));
+    api
+      .gitBackupStatus()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+    api
+      .gitBackupWebhookSecret()
+      .then(setWebhookSecret)
+      .catch(() => setWebhookSecret(null));
   }, []);
 
   const copy = async () => {
@@ -1582,10 +1630,10 @@ function GitBackupDeployKey() {
       <label style={{ marginTop: 16 }}>Webhook (git &rarr; cluster)</label>
       <span className="field-hint">
         Point the repository's webhook at <code>/api/git-backup/webhook/&lt;token&gt;</code>, with the token below
-        pasted directly into the url - most webhook integrations offer no way to attach a custom header, but every
-        one of them accepts an arbitrary url, so the token lives there instead. Treat the full url as the secret: it
-        grants the same access a header token would have. A push notification pulls the branch above; a commit that
-        fails to parse or validate is never applied - it is preserved on its own
+        pasted directly into the url - most webhook integrations offer no way to attach a custom header, but every one
+        of them accepts an arbitrary url, so the token lives there instead. Treat the full url as the secret: it grants
+        the same access a header token would have. A push notification pulls the branch above; a commit that fails to
+        parse or validate is never applied - it is preserved on its own
         <code> rejected/...</code> branch and the branch above is force-pushed back to a tree reflecting what the
         cluster is currently running. Use <code>clouduler git-backup pull</code> to trigger the same pull by hand.
       </span>
@@ -1650,9 +1698,7 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
 
   return (
     <div className="card">
-      <p className="muted">
-        This is how people sign in to Clouduler itself. Looking for app login? See Service login.
-      </p>
+      <p className="muted">This is how people sign in to Clouduler itself. Looking for app login? See Service login.</p>
       <CheckboxField
         id="auth-apikeys"
         label="Allow API keys"
@@ -1680,13 +1726,13 @@ export function AuthSection({ draft, setDraft, disabled }: SectionProps) {
           set({
             oidc: enabled
               ? {
-                issuer: '',
-                client_id: '',
-                scopes: ['openid', 'profile', 'email'],
-                admin_claim: 'groups',
-                admin_value: null,
-                username_claim: 'preferred_username',
-              }
+                  issuer: '',
+                  client_id: '',
+                  scopes: ['openid', 'profile', 'email'],
+                  admin_claim: 'groups',
+                  admin_value: null,
+                  username_claim: 'preferred_username',
+                }
               : null,
           })
         }
@@ -1805,7 +1851,9 @@ function ClientSecretForm({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    load().then(setStatus).catch(() => setStatus(null));
+    load()
+      .then(setStatus)
+      .catch(() => setStatus(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1871,10 +1919,26 @@ function ClientSecretForm({
 }
 
 const PORTAL_PALETTES: Record<PortalPalette, { label: string; colors: [string, string, string]; bg: string }> = {
-  grape: { label: 'Grape', colors: ['#ff5cae', '#c8f542', '#2fd0a8'], bg: '#150f1f' },
-  sunset: { label: 'Sunset', colors: ['#ff8a3d', '#5cc8ff', '#ffd23d'], bg: '#1c1008' },
-  ocean: { label: 'Ocean', colors: ['#2fd0e8', '#ff7a5c', '#ffd23d'], bg: '#08161f' },
-  forest: { label: 'Forest', colors: ['#ffd23d', '#ff5cae', '#7be0a0'], bg: '#0c1a12' },
+  grape: {
+    label: 'Grape',
+    colors: ['#ff5cae', '#c8f542', '#2fd0a8'],
+    bg: '#150f1f',
+  },
+  sunset: {
+    label: 'Sunset',
+    colors: ['#ff8a3d', '#5cc8ff', '#ffd23d'],
+    bg: '#1c1008',
+  },
+  ocean: {
+    label: 'Ocean',
+    colors: ['#2fd0e8', '#ff7a5c', '#ffd23d'],
+    bg: '#08161f',
+  },
+  forest: {
+    label: 'Forest',
+    colors: ['#ffd23d', '#ff5cae', '#7be0a0'],
+    bg: '#0c1a12',
+  },
 };
 
 const DEFAULT_SERVICE_LOGIN: ProxyAuthConfig = {
@@ -1903,7 +1967,7 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
   const setAuth = (next: ProxyAuthConfig | null) => setDraft({ ...draft, proxy: { ...draft.proxy, auth: next } });
   const patch = (p: Partial<ProxyAuthConfig>) => a && setAuth({ ...a, ...p });
   const nets = Object.entries(draft.networks);
-  const palette = a ? PORTAL_PALETTES[a.palette] ?? PORTAL_PALETTES.grape : PORTAL_PALETTES.grape;
+  const palette = a ? (PORTAL_PALETTES[a.palette] ?? PORTAL_PALETTES.grape) : PORTAL_PALETTES.grape;
   const validAccent = !!a?.accent && /^#[0-9a-fA-F]{6}$/.test(a.accent);
 
   return (
@@ -1962,38 +2026,37 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
               const hasDomain = !!net.domain;
               const checked = a.networks.includes(name);
               return (
-                <label key={name} style={{ display: 'block', opacity: hasDomain || checked ? 1 : 0.6 }}>
-                  <input
-                    type="checkbox"
+                <div key={name}>
+                  <CheckOption
                     checked={checked}
                     disabled={disabled || (!hasDomain && !checked)}
-                    onChange={(e) =>
+                    hint={!hasDomain && '(no DNS domain, set one on the Networks page)'}
+                    onChange={(on) =>
                       patch({
-                        networks: e.target.checked ? [...a.networks, name] : a.networks.filter((n) => n !== name),
-                        remember_ip: e.target.checked ? a.remember_ip : (a.remember_ip ?? []).filter((n) => n !== name),
+                        networks: on ? [...a.networks, name] : a.networks.filter((n) => n !== name),
+                        remember_ip: on ? a.remember_ip : (a.remember_ip ?? []).filter((n) => n !== name),
                       })
                     }
-                  />{' '}
-                  {name}
-                  {!hasDomain && <span className="muted"> (no DNS domain, set one on the Networks page)</span>}
+                  >
+                    {name}
+                  </CheckOption>
                   {checked && ['internal', 'private', 'public'].includes(net.type) && (
-                    <label style={{ display: 'block', marginLeft: 24 }}>
-                      <input
-                        type="checkbox"
-                        checked={(a.remember_ip ?? []).includes(name)}
-                        disabled={disabled}
-                        onChange={(e) =>
-                          patch({
-                            remember_ip: e.target.checked
-                              ? [...(a.remember_ip ?? []), name]
-                              : (a.remember_ip ?? []).filter((n) => n !== name),
-                          })
-                        }
-                      />{' '}
+                    <CheckOption
+                      className="cl-check--nested"
+                      checked={(a.remember_ip ?? []).includes(name)}
+                      disabled={disabled}
+                      onChange={(on) =>
+                        patch({
+                          remember_ip: on
+                            ? [...(a.remember_ip ?? []), name]
+                            : (a.remember_ip ?? []).filter((n) => n !== name),
+                        })
+                      }
+                    >
                       Let visitors remember their IP address
-                    </label>
+                    </CheckOption>
                   )}
-                </label>
+                </div>
               );
             })}
             {a.networks.length === 0 && (
@@ -2015,7 +2078,10 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
                       {a.host}.{draft.networks[n]?.domain ?? '?'}
                     </code>
                     {' → '}
-                    <code>https://{a.host}.{draft.networks[n]?.domain ?? '?'}/callback</code>
+                    <code>
+                      https://{a.host}.{draft.networks[n]?.domain ?? '?'}
+                      /callback
+                    </code>
                   </li>
                 ))}
               </ul>
@@ -2133,7 +2199,14 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
             </div>
             <div
               data-testid="svclogin-preview"
-              style={{ display: 'flex', gap: 6, padding: 8, borderRadius: 6, background: palette.bg, marginTop: 8 }}
+              style={{
+                display: 'flex',
+                gap: 6,
+                padding: 8,
+                borderRadius: 6,
+                background: palette.bg,
+                marginTop: 8,
+              }}
             >
               {palette.colors.map((c, i) => (
                 <span
@@ -2223,22 +2296,27 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
       )}
       <DnsServerFields draft={draft} setDraft={setDraft} disabled={disabled} />
       <p className="field-hint">
-        Static/external backends and redirects apply immediately from the Redirects page, since
-        they live outside cluster.yaml. See docs/proxy.md.
+        Static/external backends and redirects apply immediately from the Redirects page, since they live outside
+        cluster.yaml. See docs/proxy.md.
       </p>
     </div>
   );
 }
 
-const DEFAULT_DNS_SERVER: DnsServerConfig = { enabled: false, networks: [], port: 53 };
+const DEFAULT_DNS_SERVER: DnsServerConfig = {
+  enabled: false,
+  networks: [],
+  port: 53,
+};
 
-function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, "draft" | "setDraft" | "disabled">) {
+function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, 'draft' | 'setDraft' | 'disabled'>) {
   const d = draft.proxy.dns_server ?? DEFAULT_DNS_SERVER;
   const set = (patch: Partial<DnsServerConfig>) =>
-    setDraft({ ...draft, proxy: { ...draft.proxy, dns_server: { ...d, ...patch } } });
-  const nets = Object.entries(draft.networks).filter(([, n]) =>
-    ['internal', 'private', 'public'].includes(n.type),
-  );
+    setDraft({
+      ...draft,
+      proxy: { ...draft.proxy, dns_server: { ...d, ...patch } },
+    });
+  const nets = Object.entries(draft.networks).filter(([, n]) => ['internal', 'private', 'public'].includes(n.type));
   return (
     <>
       <CheckboxField
@@ -2256,21 +2334,23 @@ function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, "draf
           <div className="field">
             <label>DNS server networks</label>
             <span className="field-hint">
-              Leave all unchecked to serve every internal/private network the node has an address on; a public
-              network is served only if listed.
+              Leave all unchecked to serve every internal/private network the node has an address on; a public network
+              is served only if listed.
             </span>
             {nets.map(([name, net]) => (
-              <label key={name} style={{ display: 'block' }}>
-                <input
-                  type="checkbox"
-                  checked={d.networks.includes(name)}
-                  disabled={disabled}
-                  onChange={(e) =>
-                    set({ networks: e.target.checked ? [...d.networks, name] : d.networks.filter((n) => n !== name) })
-                  }
-                />{' '}
-                {name} <span className="muted">({net.type})</span>
-              </label>
+              <CheckOption
+                key={name}
+                checked={d.networks.includes(name)}
+                disabled={disabled}
+                hint={`(${net.type})`}
+                onChange={(on) =>
+                  set({
+                    networks: on ? [...d.networks, name] : d.networks.filter((n) => n !== name),
+                  })
+                }
+              >
+                {name}
+              </CheckOption>
             ))}
           </div>
           <PortField
@@ -2311,7 +2391,13 @@ export function CloudflareSection({ draft, setDraft, disabled }: SectionProps) {
           onChange={(v) =>
             setDraft({
               ...draft,
-              cloudflare: { ...cf, zones: v.split(',').map((z) => z.trim()).filter(Boolean) },
+              cloudflare: {
+                ...cf,
+                zones: v
+                  .split(',')
+                  .map((z) => z.trim())
+                  .filter(Boolean),
+              },
             })
           }
           hint="Comma separated, e.g. example.com."
@@ -2345,7 +2431,10 @@ function CloudflareToken({ disabled }: { disabled: boolean }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.cloudflareToken().then(setStatus).catch(() => setStatus(null));
+    api
+      .cloudflareToken()
+      .then(setStatus)
+      .catch(() => setStatus(null));
   }, []);
 
   const save = async () => {

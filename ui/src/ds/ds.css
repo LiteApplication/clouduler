@@ -239,3 +239,13 @@ textarea.cl-input{padding:var(--space-2) var(--space-3);min-height:96px;resize:v
 .cl-bnav__badge{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;padding:0 5px;border-radius:var(--radius-pill);background:var(--danger);color:var(--on-danger);text-align:center}
 .cl-rail__item--indent{padding-left:var(--space-8);min-height:40px}
 .cl-rail__list{overflow-y:auto}
+
+/* CheckOption */
+.cl-check{position:relative;display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-2);border-radius:var(--radius-md);cursor:pointer;width:fit-content;max-width:100%}
+.cl-check:hover:not(.cl-check--disabled){background:var(--surface-2)}
+.cl-check__input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.cl-check__box{flex:none;width:20px;height:20px;border-radius:6px;border:2px solid var(--line-strong);background:var(--surface-1);color:var(--on-brand-fill);display:flex;align-items:center;justify-content:center;transition:background .1s,border-color .1s}
+.cl-check--on .cl-check__box{background:var(--brand-fill);border-color:var(--ink)}
+.cl-check__input:focus-visible+.cl-check__box{outline:2px solid var(--brand);outline-offset:2px}
+.cl-check--disabled{opacity:.5;cursor:not-allowed}
+.cl-check--nested{margin-left:var(--space-5)}
