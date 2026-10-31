@@ -19,11 +19,10 @@ use std::path::Path;
 /// because the old inode is still linked). Only one generation is kept: each
 /// install replaces the previous `.old`.
 ///
-/// To roll a node back by hand after a bad release, on that node:
+/// `rollback` swaps the previous binary back in automatically when the new
+/// one keeps crashing or does not rejoin the cluster. By hand, on that node:
 /// `mv /usr/local/bin/clouduler.old /usr/local/bin/clouduler && systemctl
-/// restart clouduler`. Nothing swaps it back automatically: the unit is
-/// `Restart=always` and has no notion of a "known good" binary, so a crash
-/// loop on the new one needs this done by an operator.
+/// restart clouduler`.
 pub fn install_binary(source: &Path, destination: &Path) -> std::io::Result<()> {
     if same_file(source, destination) {
         return Ok(());

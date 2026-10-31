@@ -262,8 +262,23 @@ async fn internal_restart(
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
     let current_exe = std::env::current_exe().map_err(ApiError::internal)?;
-    cl_update::install::install_binary(&state.self_update_artifact_path, &current_exe)
-        .map_err(ApiError::internal)?;
+    let artifact = state.self_update_artifact_path.clone();
+    // A binary that cannot run would never reach the code that rolls it back.
+    let staged = artifact.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("preparing the downloaded binary: {e}"))?;
+        cl_update::rollback::verify_runnable(&staged)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::Conflict)?;
+    cl_update::install::install_binary(&artifact, &current_exe).map_err(ApiError::internal)?;
+    // The new binary is on probation until it has rejoined the cluster.
+    if let Some(dir) = artifact.parent() {
+        cl_update::rollback::arm(dir, &current_exe, now()).map_err(ApiError::internal)?;
+    }
     // Shut down only after the response has had time to leave: when the
     // leader restarts itself, the caller is this same process, and exiting
     // first would turn a successful restart into a failed request.

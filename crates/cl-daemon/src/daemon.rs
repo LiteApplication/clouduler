@@ -68,6 +68,24 @@ pub async fn run(
     // flag stays as an override for running a second daemon out of the way.
     let data_dir = data_dir_override.unwrap_or_else(|| node.data_dir(&cfg).to_path_buf());
 
+    // Before anything slow: a new binary that keeps dying here is swapped for
+    // the one it replaced, and this process exits so that one is started.
+    let update_dir = self_update_artifact_path(&data_dir)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.clone());
+    let probation = match cl_update::rollback::on_boot(&update_dir, unix_now() as i64) {
+        cl_update::rollback::Boot::RolledBack(reason) => {
+            tracing::error!(%reason, "rolled back to the previous binary");
+            bail!("rolled back to the previous binary: {reason}");
+        }
+        cl_update::rollback::Boot::Confirming => true,
+        cl_update::rollback::Boot::Normal => false,
+    };
+    if let Some(reason) = cl_update::rollback::take_note(&update_dir) {
+        warn!(%reason, "the last update was rolled back, this is the previous version");
+    }
+
     let rpc_addr = cfg
         .rpc_addr(node)
         .context("node has no address on the internal network")?;
@@ -221,6 +239,7 @@ pub async fn run(
     // self-update restart route can trigger it programmatically after
     // swapping in a new binary.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
+    let rollback_shutdown = shutdown_tx.clone();
 
     // Shared by the api's cross-node forwarding and by self-update's peer
     // calls. Accepts invalid certs for both: peers are authenticated by an
@@ -353,6 +372,16 @@ pub async fn run(
         key_rx.clone(),
         config_rx.clone(),
     );
+
+    if probation {
+        tokio::spawn(cl_update::rollback::watch(
+            cluster.clone(),
+            node_name.clone(),
+            update_dir.clone(),
+            rollback_shutdown,
+            || unix_now() as i64,
+        ));
+    }
 
     // The api records a move and returns; this is what carries it out. It
     // needs both halves of the job, a docker to stop the container with and a
