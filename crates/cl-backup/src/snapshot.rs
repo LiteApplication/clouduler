@@ -33,7 +33,13 @@ pub fn is_bookkeeping_config(name: &str) -> bool {
         || name == DEPLOY_KEY_PUBLIC_CONFIG
         || name == LAST_PULL_CONFIG
         || name == MCP_CLIENTS_CONFIG
+        || name == UPDATE_CHECK_CONFIG
 }
+
+/// The self-update release check (`cl_update::plan::CHECK_CONFIG`), rewritten
+/// on every periodic check; it is observation, not configuration, so it stays
+/// out of git.
+const UPDATE_CHECK_CONFIG: &str = "_clouduler_self_update_check";
 
 /// The MCP oauth client store (`cl-api::auth::oauth::MCP_CLIENTS_CONFIG`).
 /// Kept out of git because every token refresh rewrites it, which would turn
@@ -181,6 +187,11 @@ fn describe(change: &Change) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_update_check_is_bookkeeping_not_exported_content() {
+        assert!(super::is_bookkeeping_config("_clouduler_self_update_check"));
+    }
+
     use super::*;
     use cl_raft::state::ConfigEntry;
 
