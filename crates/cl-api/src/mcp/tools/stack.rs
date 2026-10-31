@@ -8,7 +8,7 @@ use cl_config::StackFile;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
-use super::{api, instance_line, parse_instance, Ctx, ToolResult};
+use super::{api, instance_line, parse_instance, secrets, Ctx, ToolResult};
 use crate::mcp::problems::{self, Problem};
 use crate::routes::instances::{self, InstanceSummary};
 use crate::routes::stacks;
@@ -62,7 +62,7 @@ pub struct ValidateArgs {
 pub struct DeployArgs {
     /// The stack file, as YAML text. Secrets are referenced by name, never inlined.
     pub spec: String,
-    /// Config file contents the stack mounts, as `{config name: text}`. A config that already exists and is not listed keeps its value.
+    /// Config contents the stack mounts, as `{config name: text}`, whether the spec bundles them with `file:` or only references an existing config. A config that already exists and is not listed keeps its value.
     #[serde(default)]
     pub configs: Option<BTreeMap<String, String>>,
     /// How long to wait for instances to come up and report their states (default 20, max 120). 0 returns immediately.
@@ -255,10 +255,27 @@ pub(super) async fn deploy_stack(ctx: &Ctx, args: DeployArgs) -> ToolResult {
         }
     }
 
-    let configs: BTreeMap<String, Vec<u8>> = configs
-        .into_iter()
-        .map(|(k, v)| (k, v.into_bytes()))
-        .collect();
+    // Only configs the spec bundles with `file:` travel with the deploy. The
+    // rest (`name: {}`) are plain cluster objects, so their content is stored
+    // directly, before the deploy checks that they exist. A name the stack
+    // does not use at all is an error instead of being silently dropped.
+    let requirements = StackFile::parse(&args.spec)
+        .map_err(|e| e.to_string())?
+        .requirements();
+    let mut bundled: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (config_name, content) in configs {
+        if requirements.file_configs.contains(&config_name) {
+            bundled.insert(config_name, content.into_bytes());
+        } else if requirements.configs.contains(&config_name) {
+            secrets::store_config(ctx, &config_name, &content).await?;
+        } else {
+            return Err(format!(
+                "config {config_name} is not used by this stack, so its content would be dropped: \
+                 mount it from a service's `configs:` or remove it from `configs`"
+            ));
+        }
+    }
+    let configs = bundled;
     stacks::deploy_stack(&ctx.state, &name, args.spec, configs, BTreeMap::new())
         .await
         .map_err(api)?;

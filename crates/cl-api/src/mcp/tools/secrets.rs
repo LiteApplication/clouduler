@@ -208,35 +208,45 @@ pub(super) async fn inspect_secret(ctx: &Ctx, args: NameArgs) -> ToolResult {
 }
 
 pub(super) async fn put_config(ctx: &Ctx, args: PutConfigArgs) -> ToolResult {
+    store_config(ctx, &args.name, &args.content).await?;
+    Ok(format!(
+        "stored config {} ({} bytes). Mount it from a service's `configs:` and deploy_stack.",
+        args.name,
+        args.content.len()
+    ))
+}
+
+/// Stores one config on behalf of the focused stack, under the same rules as
+/// `put_config`: it keeps an existing owner and refuses another stack's.
+pub(super) async fn store_config(ctx: &Ctx, name: &str, content: &str) -> Result<(), String> {
     let focus = ctx.require_focus()?;
-    valid_object_name(&args.name)?;
-    if is_reserved(&args.name) {
-        return Err(format!("{} is a reserved name", args.name));
+    valid_object_name(name)?;
+    if is_reserved(name) {
+        return Err(format!("{name} is a reserved name"));
     }
-    if ctx.redactor.redact(&args.content) != args.content {
+    if ctx.redactor.redact(content) != content {
         return Err(
             "refusing to store this config: it contains a secret's plaintext. Reference the \
              secret from the stack instead of copying its value."
                 .into(),
         );
     }
-    if args.content.len() > MAX_OBJECT_BYTES {
+    if content.len() > MAX_OBJECT_BYTES {
         return Err(format!("config is over the {MAX_OBJECT_BYTES} byte limit"));
     }
     let state = ctx.state.cluster.state().await;
-    let owner = state.configs.get(&args.name).and_then(|c| c.owner.clone());
+    let owner = state.configs.get(name).and_then(|c| c.owner.clone());
     if let Some(o) = owner.as_deref().filter(|o| *o != focus) {
         return Err(format!(
-            "config {} is owned by stack {o}, not the focused stack {focus}; focus {o} to change it",
-            args.name
+            "config {name} is owned by stack {o}, not the focused stack {focus}; focus {o} to change it"
         ));
     }
     let response = ctx
         .state
         .cluster
         .submit(ClusterRequest::PutConfig {
-            name: args.name.clone(),
-            content: cl_raft::base64_encode(args.content.as_bytes()),
+            name: name.to_string(),
+            content: cl_raft::base64_encode(content.as_bytes()),
             owner,
         })
         .await
@@ -244,11 +254,7 @@ pub(super) async fn put_config(ctx: &Ctx, args: PutConfigArgs) -> ToolResult {
     if let Some(msg) = response.error {
         return Err(msg);
     }
-    Ok(format!(
-        "stored config {} ({} bytes). Mount it from a service's `configs:` and deploy_stack.",
-        args.name,
-        args.content.len()
-    ))
+    Ok(())
 }
 
 pub(super) async fn generate_secret(ctx: &Ctx, args: GenerateSecretArgs) -> ToolResult {
