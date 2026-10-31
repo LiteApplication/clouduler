@@ -1,94 +1,89 @@
-//! `authenticated` middleware: gate a route behind clouduler's own OIDC
-//! login, independent of `forward_auth`.
+//! `authenticated` middleware: gate a route behind a login, so an app with no
+//! login of its own can still be protected, optionally for some groups only.
 //!
-//! Every node runs its own proxy listener with no shared session store (see
-//! `server.rs`'s module doc: routes are reachable from every node over the
-//! overlay), so a session cannot be an opaque id looked up in a per-node map
-//! the way the web ui's login works — a browser can land on any node for a
-//! route published on every node. Instead the session cookie carries its own
-//! HMAC signature under the cluster key (`cl_secret::internal_auth`), so any
-//! node holding the key verifies it without asking anyone else or sharing
-//! state.
+//! # Shape
 //!
-//! The OIDC dance itself (redirect to the provider, exchange the code) is
-//! synthesized here rather than forwarded to a backend, the same way
-//! `redirect_regex` and static routes never touch a container. The in-flight
-//! login state (csrf state, nonce, pkce verifier, return target) is likewise
-//! kept out of any per-node map: it travels in a short-lived `cl_proxy_login`
-//! cookie sealed under the cluster key, so the callback can land on a
-//! different node than the redirect did, and the state is bound to the browser
-//! that started the login (a forged callback link carries no matching cookie).
-//! It reuses the
-//! same `auth.oidc` cluster config and client secret as the web ui's own
-//! login (`_clouduler_oidc_client_secret`), so there is one identity
-//! provider client, not one per protected app — only its list of allowed
-//! redirect URIs in the provider grows, one per protected hostname.
+//! One hostname, the *portal* (`proxy.auth.host`), runs the OIDC login. A
+//! protected app never talks to the identity provider itself:
 //!
-//! Deliberately does not attempt cross-app single sign-on: the cookie is
-//! host-only (no `Domain=` attribute), so each protected hostname's session
-//! is independent. Simpler and smaller blast radius than a zone-wide cookie,
-//! at the cost of a separate login per app. The signed session label includes
-//! the host, so a cookie minted for one app does not verify on another, and
-//! the proxy strips its own cookies from requests before forwarding them so a
-//! backend never sees a replayable session.
+//! 1. A request with no valid `cl_proxy_auth` cookie is redirected (302) to
+//!    `https://<portal>/login?callback=<the url it asked for>`.
+//! 2. If the browser already has a portal session, the portal answers with a
+//!    302 straight back to `https://<app>/.well-known/clouduler-cookie?token=…
+//!    &redirect=…`. Otherwise it shows a login page; after the OIDC round trip
+//!    it does the same.
+//! 3. The app's cookie endpoint spends the single-use token, which mints a
+//!    session for that host, sets the cookie and redirects to the original
+//!    page. Nothing in steps 1-3 after the first visit needs a click or any
+//!    javascript: it is three redirects.
+//!
+//! # State
+//!
+//! Sessions and tokens live in raft (`ClusterState::proxy_sessions`,
+//! `proxy_tokens`), keyed by a SHA-256 of the cookie value / token, so any
+//! node accepts any login, a login survives restarts, and a token cannot be
+//! spent twice even by two nodes at once (`Request::RedeemProxyToken` is
+//! applied atomically). Only the in-flight OIDC state (csrf, nonce, pkce) is
+//! kept in a short-lived sealed cookie instead, so the callback can land on a
+//! different node and a forged callback carries no matching cookie.
+//!
+//! The cookie is host-only, so each protected hostname has its own session,
+//! bound to that host in the stored record. The proxy strips its own cookies
+//! from requests before forwarding, so a backend never sees a session.
+//!
+//! This uses its own identity provider client (`proxy.auth`, secret
+//! `_clouduler_proxy_oidc_client_secret`) and its own groups, separate from
+//! the `auth.oidc` that logs operators into the dashboard.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use cl_config::ClusterConfig;
+use cl_config::{Authenticated, ClusterConfig, ProxyAuthConfig};
 use cl_raft::node::ClusterNode;
-use cl_secret::{internal_auth, ClusterKey, Sealed};
+use cl_raft::{ProxySessionRecord, ProxyTokenRecord, Request as RaftRequest};
+use cl_secret::{ClusterKey, Sealed};
 use http::{HeaderValue, Uri};
 use hyper::body::Incoming;
-use hyper::header::{COOKIE, HOST, LOCATION, SET_COOKIE};
+use hyper::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST, LOCATION, SET_COOKIE};
 use hyper::HeaderMap;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::route::RouteTable;
 use crate::server::{empty_body, text_body, ProxyBody};
 
-/// Reserved name for the sealed cluster secret holding the OIDC client
-/// secret. Same value as `cl_api::oidc::OIDC_CLIENT_SECRET` deliberately: one
-/// Authentik (or any OIDC provider) client backs both the web ui and every
-/// `authenticated` route, so there is exactly one secret to configure.
-const OIDC_CLIENT_SECRET: &str = "_clouduler_oidc_client_secret";
+/// Reserved name of the sealed cluster secret holding the proxy login's OIDC
+/// client secret. Distinct from the dashboard's `_clouduler_oidc_client_secret`.
+const OIDC_CLIENT_SECRET: &str = "_clouduler_proxy_oidc_client_secret";
 
-/// Path this middleware answers itself rather than proxying, starting a
-/// login. Under the route's own hostname, so no extra dns or certificate is
-/// needed beyond what the protected route already has.
-pub const LOGIN_PATH: &str = "/.clouduler/oidc/login";
-/// Where the provider redirects back to after the user authenticates.
-pub const CALLBACK_PATH: &str = "/.clouduler/oidc/callback";
-/// Cookie carrying the signed session.
+/// Answered on every protected hostname: spends a token, sets the cookie.
+pub const COOKIE_PATH: &str = "/.well-known/clouduler-cookie";
+/// Prefix of every path the gate answers itself on a protected hostname.
+const RESERVED_PREFIX: &str = "/.well-known/clouduler-";
+/// Cookie carrying a protected hostname's session id.
 pub const COOKIE_NAME: &str = "cl_proxy_auth";
-/// Cookie carrying the sealed in-flight login state between the redirect to
-/// the provider and its callback.
+/// Cookie carrying the portal's own session id.
+pub const PORTAL_COOKIE_NAME: &str = "cl_proxy_portal";
+/// Cookie carrying the sealed in-flight OIDC state on the portal.
 pub const LOGIN_COOKIE_NAME: &str = "cl_proxy_login";
-/// Path scope of the login cookie: only the callback needs it.
-const LOGIN_COOKIE_PATH: &str = "/.clouduler/oidc/";
-/// Context (aad) the login cookie is sealed under, so a sealed value of any
-/// other kind cannot be replayed as a login cookie.
+const LOGIN_COOKIE_PATH: &str = "/callback";
 const LOGIN_SEAL_CONTEXT: &str = "proxy-login";
-/// How long cached provider discovery (including its JWKS) is trusted before
-/// being refetched, so a rotated signing key does not break logins forever.
 const METADATA_TTL: Duration = Duration::from_secs(3600);
-
-/// How long an in-flight login may sit between redirect and callback.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// How long a session cookie is valid for once issued.
-const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
-/// Signature label prefix, scoping this HMAC use away from any other signed
-/// value the cluster key might back (see `cl_secret::internal_auth`).
-const LABEL_PREFIX: &str = "proxyauth";
+/// How long a portal-to-app token may wait to be spent. It only has to
+/// survive one redirect.
+const TOKEN_TTL: Duration = Duration::from_secs(60);
+const ID_LEN: usize = 32;
 
 /// In-flight login state, sealed into the `cl_proxy_login` cookie.
 #[derive(Serialize, Deserialize)]
@@ -96,23 +91,29 @@ struct PendingLogin {
     state: String,
     nonce: String,
     pkce_verifier: String,
-    return_to: String,
+    /// The protected url the user was after; empty for a direct portal visit.
+    callback: String,
     started_at_unix: u64,
+}
+
+/// Who the identity provider says logged in.
+struct Identity {
+    subject: String,
+    username: String,
+    groups: Vec<String>,
 }
 
 /// What a request should get in response to the `authenticated` middleware.
 pub enum GateOutcome {
     /// The session is valid; proceed to the backend.
     Allow,
-    /// Answer directly: a login/callback step, a redirect to start one, or a
-    /// hard failure (e.g. no oidc configured at all).
+    /// Answer directly: a redirect to log in, a cookie hand-out, or a refusal.
     Respond(Response<ProxyBody>),
 }
 
-/// Runtime state for the `authenticated` middleware, shared across every
-/// route that uses it. Reads config and the cluster key live on each
-/// request rather than needing a rebuild on change, since both can change
-/// independently of the proxy's listeners.
+/// Runtime state for the login portal and the `authenticated` middleware.
+/// Reads config and the cluster key live on each request, since both can
+/// change independently of the proxy's listeners.
 pub struct AuthGate {
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
@@ -121,6 +122,20 @@ pub struct AuthGate {
     /// Cached discovery, invalidated whenever the configured issuer changes
     /// or the entry is older than `METADATA_TTL`.
     metadata: RwLock<Option<(String, Instant, CoreProviderMetadata)>>,
+}
+
+/// Builds a client from discovery, a secret and a redirect. A macro because
+/// `CoreClient`'s type-state parameters change with each setter and are not
+/// worth spelling out for a helper's return type.
+macro_rules! build_client {
+    ($metadata:expr, $settings:expr, $secret:expr, $redirect:expr) => {
+        CoreClient::from_provider_metadata(
+            $metadata,
+            ClientId::new($settings.client_id.clone()),
+            $secret.clone().map(ClientSecret::new),
+        )
+        .set_redirect_uri($redirect.clone())
+    };
 }
 
 impl AuthGate {
@@ -142,22 +157,38 @@ impl AuthGate {
         }
     }
 
-    fn settings(&self) -> Option<cl_config::OidcConfig> {
-        self.config_rx.borrow().auth.oidc.clone()
+    fn settings(&self) -> Option<(ProxyAuthConfig, String)> {
+        let cfg = self.config_rx.borrow();
+        let auth = cfg.proxy.auth.clone()?;
+        let portal = auth.fqdn(&cfg);
+        Some((auth, portal))
     }
 
     fn key(&self) -> Option<Arc<ClusterKey>> {
         self.key_rx.borrow().clone()
     }
 
+    /// Whether `host` (a `Host` header value) is the login portal.
+    pub fn is_portal_host(&self, host: &str) -> bool {
+        self.settings()
+            .is_some_and(|(_, portal)| normalize_host(host) == portal)
+    }
+
     async fn client_secret(&self) -> Option<String> {
         let key = self.key()?;
-        let state = self.cluster.state().await;
-        let entry = state.secrets.get(OIDC_CLIENT_SECRET)?;
-        match Sealed::from_blob(entry.sealed.clone()).open(&key, OIDC_CLIENT_SECRET) {
+        let sealed = self
+            .cluster
+            .read(|state| {
+                state
+                    .secrets
+                    .get(OIDC_CLIENT_SECRET)
+                    .map(|e| e.sealed.clone())
+            })
+            .await?;
+        match Sealed::from_blob(sealed).open(&key, OIDC_CLIENT_SECRET) {
             Ok(plaintext) => String::from_utf8(plaintext).ok(),
             Err(e) => {
-                warn!(error = %e, "cannot open the oidc client secret for the authenticated middleware");
+                warn!(error = %e, "cannot open the proxy login's oidc client secret");
                 None
             }
         }
@@ -172,7 +203,6 @@ impl AuthGate {
         self.refresh_metadata(issuer).await
     }
 
-    /// Fetch discovery unconditionally and cache it.
     async fn refresh_metadata(&self, issuer: &str) -> Result<CoreProviderMetadata, String> {
         let issuer_url =
             IssuerUrl::new(issuer.to_string()).map_err(|e| format!("bad issuer url: {e}"))?;
@@ -184,14 +214,69 @@ impl AuthGate {
         Ok(discovered)
     }
 
-    /// Decide what a request to an `authenticated` route should get: the
-    /// login start, the provider's callback, a valid session let through, or
-    /// a redirect to start a new login.
-    pub async fn evaluate(&self, req: &Request<Incoming>, scheme: &str) -> GateOutcome {
-        let Some(settings) = self.settings() else {
+    // ---- sessions and tokens (raft) ----
+
+    /// The live session for the cookie `name` on this request, if it was
+    /// issued for `host`.
+    async fn session(
+        &self,
+        headers: &HeaderMap,
+        name: &str,
+        host: &str,
+    ) -> Option<ProxySessionRecord> {
+        let id = extract_cookie(headers, name)?;
+        if id.len() != ID_LEN {
+            return None;
+        }
+        let key = hash_id(&id);
+        let now = now_unix() as i64;
+        let host = normalize_host(host);
+        self.cluster
+            .read(|state| {
+                let s = state.proxy_sessions.get(&key)?;
+                (s.expires_at > now && s.host == host).then(|| s.clone())
+            })
+            .await
+    }
+
+    /// Stores a session and returns the cookie value naming it.
+    async fn create_session(&self, record: ProxySessionRecord) -> Result<String, String> {
+        let id = random_id();
+        let request = RaftRequest::PutProxySession {
+            key: hash_id(&id),
+            session: record,
+            now: now_unix() as i64,
+        };
+        self.submit(request).await.map(|()| id)
+    }
+
+    async fn submit(&self, request: RaftRequest) -> Result<(), String> {
+        let response = self
+            .cluster
+            .submit(request)
+            .await
+            .map_err(|e| e.to_string())?;
+        match response.error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    // ---- the middleware ----
+
+    /// Decide what a request to an `authenticated` route should get.
+    /// `internal` says the TCP peer is a container or node of this cluster.
+    pub async fn evaluate(
+        &self,
+        req: &Request<Incoming>,
+        scheme: &str,
+        policy: &Authenticated,
+        internal: bool,
+    ) -> GateOutcome {
+        let Some((settings, portal)) = self.settings() else {
             return GateOutcome::Respond(status_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "this route requires login, but the cluster has no auth.oidc configured",
+                "this route requires login, but the cluster has no proxy.auth configured",
             ));
         };
         let Some(host) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
@@ -201,56 +286,289 @@ impl AuthGate {
             ));
         };
         let host = host.to_string();
-        let path = req.uri().path();
 
-        if path == CALLBACK_PATH {
-            return self.finish_login(req, scheme, &host, &settings).await;
+        if req.uri().path() == COOKIE_PATH {
+            return GateOutcome::Respond(self.redeem(req, scheme, &host, &portal).await);
         }
-        if self.valid_session(req, &host).is_some() {
+        if policy.allow_internal && internal {
             return GateOutcome::Allow;
         }
-        if path == LOGIN_PATH {
-            return self.start_login(req, scheme, &host, &settings).await;
+        if let Some(session) = self.session(req.headers(), COOKIE_NAME, &host).await {
+            if permitted(policy, &session.groups) {
+                return GateOutcome::Allow;
+            }
+            return GateOutcome::Respond(forbidden_page(
+                &settings,
+                &session.username,
+                &portal,
+                &format!("{scheme}://{host}{}", return_target(req.uri())),
+            ));
         }
-        GateOutcome::Respond(redirect_to_login(scheme, &host, req.uri()))
+        if !wants_redirect(req) {
+            return GateOutcome::Respond(status_response(
+                StatusCode::UNAUTHORIZED,
+                "login required",
+            ));
+        }
+        let target = format!("{scheme}://{host}{}", return_target(req.uri()));
+        GateOutcome::Respond(redirect_response(&format!(
+            "https://{portal}/login?callback={}",
+            urlencode(&target)
+        )))
     }
 
-    fn valid_session(&self, req: &Request<Incoming>, host: &str) -> Option<String> {
-        let key = self.key()?;
-        let cookie = extract_cookie(req.headers(), COOKIE_NAME)?;
-        verify_cookie(&key, host, &cookie)
-    }
-
-    async fn start_login(
+    /// `/.well-known/clouduler-cookie?token=…&redirect=…`: spend the token,
+    /// set this host's cookie, go to the page the user wanted.
+    async fn redeem(
         &self,
         req: &Request<Incoming>,
         scheme: &str,
         host: &str,
-        settings: &cl_config::OidcConfig,
-    ) -> GateOutcome {
+        portal: &str,
+    ) -> Response<ProxyBody> {
+        let params = form_urlencoded_parse(req.uri().query().unwrap_or(""));
+        let target = match params.get("redirect") {
+            Some(r) if is_safe_return(r) => r.clone(),
+            _ => "/".to_string(),
+        };
+        let retry = format!(
+            "https://{portal}/login?callback={}",
+            urlencode(&format!("{scheme}://{host}{target}"))
+        );
+        let Some(token) = params.get("token").filter(|t| t.len() == ID_LEN) else {
+            return message_page(
+                StatusCode::BAD_REQUEST,
+                "Sign-in link incomplete",
+                "This address is missing its sign-in token.",
+                Some(("Sign in again", &retry)),
+            );
+        };
+
+        let id = random_id();
+        let session_key = hash_id(&id);
+        let now = now_unix() as i64;
+        let spent = self
+            .submit(RaftRequest::RedeemProxyToken {
+                token_key: hash_id(token),
+                host: normalize_host(host),
+                session_key: session_key.clone(),
+                now,
+            })
+            .await;
+        if let Err(e) = spent {
+            warn!(error = %e, host, "proxy login token refused");
+            return message_page(
+                StatusCode::FORBIDDEN,
+                "Sign-in link expired",
+                "This link was already used or has expired.",
+                Some(("Sign in again", &retry)),
+            );
+        }
+        let Some(expires_at) = self
+            .cluster
+            .read(|s| s.proxy_sessions.get(&session_key).map(|r| r.expires_at))
+            .await
+        else {
+            return status_response(StatusCode::BAD_GATEWAY, "session was not stored");
+        };
+
+        let mut resp = redirect_response(&target);
+        append_cookie(
+            &mut resp,
+            COOKIE_NAME,
+            &id,
+            "/",
+            Some((expires_at - now).max(1) as u64),
+            scheme == "https",
+        );
+        // The token is in this url; do not leak it onward.
+        resp.headers_mut()
+            .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        resp
+    }
+
+    // ---- the portal ----
+
+    /// Answers a request for the portal hostname itself.
+    pub async fn handle_portal(
+        &self,
+        req: &Request<Incoming>,
+        routes: &RouteTable,
+        scheme: &str,
+    ) -> Response<ProxyBody> {
+        let Some((settings, portal)) = self.settings() else {
+            return status_response(StatusCode::NOT_FOUND, "no login portal configured");
+        };
+        if scheme != "https" {
+            let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
+            return permanent_redirect(&format!("https://{portal}{pq}"));
+        }
+        let params = form_urlencoded_parse(req.uri().query().unwrap_or(""));
+        let callback = params.get("callback").map(String::as_str);
+        let safe_callback = callback.and_then(|c| parse_callback(c, routes));
+
+        let mut resp = match (req.method(), req.uri().path()) {
+            (&Method::GET | &Method::HEAD, "/") => self.portal_home(req, &settings, &portal).await,
+            (&Method::GET | &Method::HEAD, "/login") => {
+                self.portal_login(req, &settings, &portal, callback, safe_callback)
+                    .await
+            }
+            (&Method::GET | &Method::HEAD, "/start") => {
+                self.start_login(
+                    &settings,
+                    &portal,
+                    safe_callback.as_ref().map(|c| c.url.clone()),
+                )
+                .await
+            }
+            (&Method::GET | &Method::HEAD, "/callback") => {
+                self.finish_login(req, routes, &settings, &portal).await
+            }
+            (&Method::GET | &Method::HEAD | &Method::POST, "/logout") => {
+                self.portal_logout(req, &portal, safe_callback.map(|c| c.url))
+                    .await
+            }
+            _ => status_response(StatusCode::NOT_FOUND, "not found"),
+        };
+        resp.headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        resp
+    }
+
+    async fn portal_home(
+        &self,
+        req: &Request<Incoming>,
+        settings: &ProxyAuthConfig,
+        portal: &str,
+    ) -> Response<ProxyBody> {
+        match self
+            .session(req.headers(), PORTAL_COOKIE_NAME, portal)
+            .await
+        {
+            Some(s) => signed_in_page(settings, &s.username),
+            None => login_page(settings, None, "/start", None),
+        }
+    }
+
+    async fn portal_login(
+        &self,
+        req: &Request<Incoming>,
+        settings: &ProxyAuthConfig,
+        portal: &str,
+        raw_callback: Option<&str>,
+        callback: Option<Callback>,
+    ) -> Response<ProxyBody> {
+        if raw_callback.is_some() && callback.is_none() {
+            return message_page(
+                StatusCode::BAD_REQUEST,
+                "Unknown destination",
+                "The page you were sent from is not protected by this login.",
+                None,
+            );
+        }
+        match self
+            .session(req.headers(), PORTAL_COOKIE_NAME, portal)
+            .await
+        {
+            Some(session) => match callback {
+                Some(cb) => self.hand_over(&cb, &session).await,
+                None => signed_in_page(settings, &session.username),
+            },
+            None => {
+                let start = match &callback {
+                    Some(cb) => format!("/start?callback={}", urlencode(&cb.url)),
+                    None => "/start".to_string(),
+                };
+                login_page(
+                    settings,
+                    callback.as_ref().map(|c| c.host.as_str()),
+                    &start,
+                    None,
+                )
+            }
+        }
+    }
+
+    /// Mints a one-time token for `cb`'s host and redirects to its cookie
+    /// endpoint. The session it will create ends with the portal session.
+    async fn hand_over(&self, cb: &Callback, session: &ProxySessionRecord) -> Response<ProxyBody> {
+        let token = random_id();
+        let now = now_unix() as i64;
+        let stored = self
+            .submit(RaftRequest::PutProxyToken {
+                key: hash_id(&token),
+                token: ProxyTokenRecord {
+                    host: normalize_host(&cb.host),
+                    subject: session.subject.clone(),
+                    username: session.username.clone(),
+                    groups: session.groups.clone(),
+                    session_expires_at: session.expires_at,
+                    expires_at: now + TOKEN_TTL.as_secs() as i64,
+                },
+                now,
+            })
+            .await;
+        if let Err(e) = stored {
+            warn!(error = %e, "cannot store a proxy login token");
+            return bad_gateway("cannot store login token");
+        }
+        let mut resp = redirect_response(&format!(
+            "{}://{}{COOKIE_PATH}?token={token}&redirect={}",
+            cb.scheme,
+            cb.host,
+            urlencode(&cb.path_and_query)
+        ));
+        resp.headers_mut()
+            .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        resp
+    }
+
+    async fn portal_logout(
+        &self,
+        req: &Request<Incoming>,
+        portal: &str,
+        callback: Option<String>,
+    ) -> Response<ProxyBody> {
+        if let Some(id) = extract_cookie(req.headers(), PORTAL_COOKIE_NAME) {
+            if id.len() == ID_LEN {
+                let _ = self
+                    .submit(RaftRequest::RemoveProxySession { key: hash_id(&id) })
+                    .await;
+            }
+        }
+        let to = match callback {
+            Some(url) => format!("https://{portal}/login?callback={}", urlencode(&url)),
+            None => "/".to_string(),
+        };
+        let mut resp = redirect_response(&to);
+        append_cookie(&mut resp, PORTAL_COOKIE_NAME, "", "/", Some(0), true);
+        resp
+    }
+
+    async fn start_login(
+        &self,
+        settings: &ProxyAuthConfig,
+        portal: &str,
+        callback: Option<String>,
+    ) -> Response<ProxyBody> {
         let Some(key) = self.key() else {
-            return GateOutcome::Respond(status_response(
+            return status_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "this node holds no cluster key",
-            ));
+            );
         };
         let metadata = match self.metadata(&settings.issuer).await {
             Ok(m) => m,
             Err(e) => {
                 warn!(error = %e, "oidc discovery failed while starting a login");
-                return GateOutcome::Respond(bad_gateway("oidc discovery failed"));
+                return bad_gateway("oidc discovery failed");
             }
         };
-        let redirect_url = format!("{scheme}://{host}{CALLBACK_PATH}");
-        let Ok(redirect) = RedirectUrl::new(redirect_url) else {
-            return GateOutcome::Respond(bad_gateway("invalid redirect url"));
+        let Ok(redirect) = RedirectUrl::new(format!("https://{portal}/callback")) else {
+            return bad_gateway("invalid redirect url");
         };
-        let client = CoreClient::from_provider_metadata(
-            metadata,
-            ClientId::new(settings.client_id.clone()),
-            self.client_secret().await.map(ClientSecret::new),
-        )
-        .set_redirect_uri(redirect);
+        let secret = self.client_secret().await;
+        let client = build_client!(metadata, settings, secret, redirect);
 
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let mut request = client.authorize_url(
@@ -263,119 +581,157 @@ impl AuthGate {
         }
         let (auth_url, csrf_token, nonce) = request.set_pkce_challenge(pkce_challenge).url();
 
-        let return_to = login_return_param(req.uri());
         let pending = PendingLogin {
             state: csrf_token.secret().clone(),
             nonce: nonce.secret().clone(),
             pkce_verifier: pkce_verifier.secret().clone(),
-            return_to,
+            callback: callback.unwrap_or_default(),
             started_at_unix: now_unix(),
         };
         let Some(sealed) = seal_login(&key, &pending) else {
-            return GateOutcome::Respond(bad_gateway("cannot seal login state"));
+            return bad_gateway("cannot seal login state");
         };
-
         let mut resp = redirect_response(auth_url.as_str());
-        if let Ok(v) = HeaderValue::from_str(&format!(
-            "{LOGIN_COOKIE_NAME}={sealed}; Path={LOGIN_COOKIE_PATH}; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
-            LOGIN_TIMEOUT.as_secs()
-        )) {
-            resp.headers_mut().append(SET_COOKIE, v);
-        }
-        GateOutcome::Respond(resp)
+        append_cookie(
+            &mut resp,
+            LOGIN_COOKIE_NAME,
+            &sealed,
+            LOGIN_COOKIE_PATH,
+            Some(LOGIN_TIMEOUT.as_secs()),
+            true,
+        );
+        resp
     }
 
     async fn finish_login(
         &self,
         req: &Request<Incoming>,
-        scheme: &str,
-        host: &str,
-        settings: &cl_config::OidcConfig,
-    ) -> GateOutcome {
+        routes: &RouteTable,
+        settings: &ProxyAuthConfig,
+        portal: &str,
+    ) -> Response<ProxyBody> {
         let Some(key) = self.key() else {
-            return GateOutcome::Respond(status_response(
+            return status_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "this node holds no cluster key",
-            ));
+            );
         };
-        let query = req.uri().query().unwrap_or("");
-        let params: HashMap<String, String> = form_urlencoded_parse(query);
+        let params = form_urlencoded_parse(req.uri().query().unwrap_or(""));
+        if let Some(err) = params.get("error") {
+            warn!(error = %err, "identity provider refused the proxy login");
+            return message_page(
+                StatusCode::UNAUTHORIZED,
+                "Sign-in refused",
+                "The identity provider did not let you in.",
+                Some(("Try again", "/")),
+            );
+        }
         let (Some(code), Some(state)) = (params.get("code").cloned(), params.get("state").cloned())
         else {
-            return GateOutcome::Respond(status_response(
-                StatusCode::BAD_REQUEST,
-                "missing code or state",
-            ));
+            return status_response(StatusCode::BAD_REQUEST, "missing code or state");
         };
-
+        let unknown = || {
+            message_page(
+                StatusCode::UNAUTHORIZED,
+                "Sign-in expired",
+                "This sign-in attempt is unknown or took too long.",
+                Some(("Start again", "/")),
+            )
+        };
         let Some(pending) =
             extract_cookie(req.headers(), LOGIN_COOKIE_NAME).and_then(|v| open_login(&key, &v))
         else {
-            return GateOutcome::Respond(status_response(
-                StatusCode::UNAUTHORIZED,
-                "unknown or expired login",
-            ));
+            return unknown();
         };
-        if !constant_time_eq(pending.state.as_bytes(), state.as_bytes()) {
-            return GateOutcome::Respond(status_response(
-                StatusCode::UNAUTHORIZED,
-                "unknown or expired login",
-            ));
-        }
-        if now_unix().saturating_sub(pending.started_at_unix) > LOGIN_TIMEOUT.as_secs() {
-            return GateOutcome::Respond(status_response(
-                StatusCode::UNAUTHORIZED,
-                "login took too long",
-            ));
+        if !constant_time_eq(pending.state.as_bytes(), state.as_bytes())
+            || now_unix().saturating_sub(pending.started_at_unix) > LOGIN_TIMEOUT.as_secs()
+        {
+            return unknown();
         }
 
-        let metadata = match self.metadata(&settings.issuer).await {
-            Ok(m) => m,
+        let identity = match self.exchange(settings, portal, code, &pending).await {
+            Ok(i) => i,
+            Err(resp) => return resp,
+        };
+
+        let now = now_unix() as i64;
+        let record = ProxySessionRecord {
+            host: portal.to_string(),
+            subject: identity.subject,
+            username: identity.username,
+            groups: identity.groups,
+            expires_at: now + settings.session_ttl.as_secs().min(i64::MAX as u64 / 2) as i64,
+        };
+        let id = match self.create_session(record.clone()).await {
+            Ok(id) => id,
             Err(e) => {
-                warn!(error = %e, "oidc discovery failed while finishing a login");
-                return GateOutcome::Respond(bad_gateway("oidc discovery failed"));
+                warn!(error = %e, "cannot store the portal session");
+                return bad_gateway("cannot store session");
             }
         };
-        let redirect_url = format!("{scheme}://{host}{CALLBACK_PATH}");
-        let Ok(redirect) = RedirectUrl::new(redirect_url) else {
-            return GateOutcome::Respond(bad_gateway("invalid redirect url"));
-        };
-        let client_secret = self.client_secret().await;
-        let client = CoreClient::from_provider_metadata(
-            metadata,
-            ClientId::new(settings.client_id.clone()),
-            client_secret.clone().map(ClientSecret::new),
-        )
-        .set_redirect_uri(redirect.clone());
 
-        let token_request = match client.exchange_code(AuthorizationCode::new(code)) {
-            Ok(req) => req,
-            Err(e) => {
+        // The callback was validated when the login started, but routes may
+        // have changed in the meantime; check again.
+        let mut resp = match parse_callback(&pending.callback, routes) {
+            Some(cb) => self.hand_over(&cb, &record).await,
+            None => redirect_response("/"),
+        };
+        append_cookie(
+            &mut resp,
+            PORTAL_COOKIE_NAME,
+            &id,
+            "/",
+            Some((record.expires_at - now).max(1) as u64),
+            true,
+        );
+        append_cookie(
+            &mut resp,
+            LOGIN_COOKIE_NAME,
+            "",
+            LOGIN_COOKIE_PATH,
+            Some(0),
+            true,
+        );
+        resp
+    }
+
+    /// Code exchange and id token verification. Err is a ready response.
+    async fn exchange(
+        &self,
+        settings: &ProxyAuthConfig,
+        portal: &str,
+        code: String,
+        pending: &PendingLogin,
+    ) -> Result<Identity, Response<ProxyBody>> {
+        let metadata = self.metadata(&settings.issuer).await.map_err(|e| {
+            warn!(error = %e, "oidc discovery failed while finishing a login");
+            bad_gateway("oidc discovery failed")
+        })?;
+        let redirect = RedirectUrl::new(format!("https://{portal}/callback"))
+            .map_err(|_| bad_gateway("invalid redirect url"))?;
+        let secret = self.client_secret().await;
+        let client = build_client!(metadata, settings, secret, redirect);
+
+        let token_request = client
+            .exchange_code(AuthorizationCode::new(code))
+            .map_err(|e| {
                 warn!(error = %e, "oidc token endpoint not configured");
-                return GateOutcome::Respond(bad_gateway("token endpoint not configured"));
-            }
-        };
-        let token_response = match token_request
+                bad_gateway("token endpoint not configured")
+            })?;
+        let token_response = token_request
             .set_pkce_verifier(PkceCodeVerifier::new(pending.pkce_verifier.clone()))
             .request_async(&self.http)
             .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
+            .map_err(|e| {
                 warn!(error = %e, "oidc token exchange failed");
-                return GateOutcome::Respond(status_response(
-                    StatusCode::UNAUTHORIZED,
-                    "token exchange failed",
-                ));
-            }
-        };
-
-        let Some(id_token) = token_response.id_token() else {
-            return GateOutcome::Respond(status_response(
+                status_response(StatusCode::UNAUTHORIZED, "token exchange failed")
+            })?;
+        let id_token = token_response.id_token().ok_or_else(|| {
+            status_response(
                 StatusCode::UNAUTHORIZED,
                 "provider did not return an id token",
-            ));
-        };
+            )
+        })?;
         let nonce = Nonce::new(pending.nonce.clone());
         let subject = match id_token
             .claims(&client.id_token_verifier(), &nonce)
@@ -384,16 +740,10 @@ impl AuthGate {
             Ok(s) => s,
             Err(first) => {
                 // A rotated signing key looks exactly like a bad signature
-                // against the cached jwks, so refetch discovery once and
-                // retry before giving up.
+                // against the cached jwks: refetch discovery once and retry.
                 let retried = match self.refresh_metadata(&settings.issuer).await {
                     Ok(fresh) => {
-                        let client = CoreClient::from_provider_metadata(
-                            fresh,
-                            ClientId::new(settings.client_id.clone()),
-                            client_secret.map(ClientSecret::new),
-                        )
-                        .set_redirect_uri(redirect);
+                        let client = build_client!(fresh, settings, secret, redirect);
                         let verifier = client.id_token_verifier();
                         let result = id_token
                             .claims(&verifier, &nonce)
@@ -403,81 +753,145 @@ impl AuthGate {
                     }
                     Err(e) => Err(e),
                 };
-                match retried {
-                    Ok(s) => s,
-                    Err(second) => {
-                        warn!(first = %first, second = %second, "oidc id token verification failed");
-                        return GateOutcome::Respond(status_response(
-                            StatusCode::UNAUTHORIZED,
-                            "id token verification failed",
-                        ));
-                    }
-                }
+                retried.map_err(|second| {
+                    warn!(first = %first, second = %second, "oidc id token verification failed");
+                    status_response(StatusCode::UNAUTHORIZED, "id token verification failed")
+                })?
             }
         };
 
-        let expires_at = now_unix() + SESSION_TTL.as_secs();
-        let cookie_value = sign_cookie(&key, host, &subject, expires_at);
-        let mut resp = redirect_response(&pending.return_to);
-        if let Ok(v) = HeaderValue::from_str(&format!(
-            "{COOKIE_NAME}={cookie_value}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
-            SESSION_TTL.as_secs()
-        )) {
-            resp.headers_mut().append(SET_COOKIE, v);
-        }
-        // The login state is single-use; drop it so the browser does not keep
-        // a sealed copy around until it times out.
-        if let Ok(v) = HeaderValue::from_str(&format!(
-            "{LOGIN_COOKIE_NAME}=; Path={LOGIN_COOKIE_PATH}; Max-Age=0; Secure; HttpOnly; SameSite=Lax"
-        )) {
-            resp.headers_mut().append(SET_COOKIE, v);
-        }
-        GateOutcome::Respond(resp)
+        // `claims` verified the signature; the payload is now re-read loosely
+        // for the configurable claims `CoreClient` does not model.
+        let payload = decode_jwt_payload(&id_token.to_string()).unwrap_or_default();
+        Ok(Identity {
+            username: payload
+                .get(&settings.username_claim)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| subject.clone()),
+            groups: claim_strings(payload.get(&settings.groups_claim)),
+            subject,
+        })
     }
 }
 
-/// Where to send the browser back to once login finishes: the path and
-/// query the user actually asked for, or `/` if that was the login path
-/// itself (a user hitting `/.clouduler/oidc/login` directly).
+/// A validated destination the portal may send a browser back to.
+#[derive(Debug, PartialEq, Eq)]
+struct Callback {
+    scheme: String,
+    /// Authority as written (host and optional port).
+    host: String,
+    path_and_query: String,
+    /// The whole thing, normalized.
+    url: String,
+}
+
+/// Accepts a callback only when it names a host whose matching route carries
+/// the `authenticated` middleware, so the portal is not an open redirect, and
+/// only when its path is an ordinary page of that app.
+fn parse_callback(raw: &str, routes: &RouteTable) -> Option<Callback> {
+    if raw.is_empty() || raw.len() > 4096 || raw.contains(['\r', '\n', '\\']) {
+        return None;
+    }
+    let uri: Uri = raw.parse().ok()?;
+    let scheme = uri.scheme_str()?;
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let authority = uri.authority()?;
+    if authority.as_str().contains('@') {
+        return None;
+    }
+    let path_and_query = uri.path_and_query().map_or("/", |p| p.as_str()).to_string();
+    if !is_safe_return(&path_and_query) {
+        return None;
+    }
+    let host = authority.as_str().to_ascii_lowercase();
+    let route = routes.lookup(&host, uri.path())?;
+    route
+        .middlewares
+        .iter()
+        .any(|m| matches!(m, cl_config::Middleware::Authenticated(_)))
+        .then(|| Callback {
+            url: format!("{scheme}://{host}{path_and_query}"),
+            scheme: scheme.to_string(),
+            host,
+            path_and_query,
+        })
+}
+
+/// Does a session with `groups` satisfy the policy?
+fn permitted(policy: &Authenticated, groups: &[String]) -> bool {
+    policy.groups.is_empty() || policy.groups.iter().any(|g| groups.contains(g))
+}
+
+/// Only a navigation gets a redirect to the login page; an API client or a
+/// non-GET request gets a plain 401 instead of a surprise HTML round trip.
+fn wants_redirect(req: &Request<Incoming>) -> bool {
+    if !matches!(*req.method(), Method::GET | Method::HEAD) {
+        return false;
+    }
+    match req.headers().get(ACCEPT).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(accept) => accept.contains("text/html"),
+    }
+}
+
+/// The path and query the user actually asked for.
 fn return_target(uri: &Uri) -> String {
-    let candidate = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    if candidate.starts_with(LOGIN_PATH) {
-        "/".to_string()
-    } else {
-        candidate.to_string()
-    }
-}
-
-/// The post-login target carried in the login request's `return` query
-/// parameter, or `/` when it is absent or not a safe same-site path.
-fn login_return_param(uri: &Uri) -> String {
-    let params = form_urlencoded_parse(uri.query().unwrap_or(""));
-    match params.get("return") {
-        Some(r) if is_safe_return(r) => r.clone(),
-        _ => "/".to_string(),
-    }
+    uri.path_and_query()
+        .map(|p| p.as_str())
+        .filter(|p| is_safe_return(p))
+        .unwrap_or("/")
+        .to_string()
 }
 
 /// Accepts only a single-slash absolute path, since the value ends up in a
 /// `Location` header and anything else (`//evil`, `/\evil`, header
-/// injection, our own reserved paths) is an open redirect or a loop.
+/// injection, the gate's own reserved paths) is an open redirect or a loop.
 fn is_safe_return(r: &str) -> bool {
     r.starts_with('/')
         && !r.starts_with("//")
         && !r.starts_with("/\\")
         && !r.contains(['\\', '\r', '\n'])
-        && !r.starts_with("/.clouduler/")
+        && !r.starts_with(RESERVED_PREFIX)
 }
 
-fn redirect_to_login(scheme: &str, host: &str, original: &Uri) -> Response<ProxyBody> {
-    let return_to = return_target(original);
-    let encoded = urlencode(&return_to);
-    redirect_response(&format!("{scheme}://{host}{LOGIN_PATH}?return={encoded}"))
+fn claim_strings(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
+
+fn decode_jwt_payload(compact: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let payload = compact.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&raw)
+        .ok()?
+        .as_object()
+        .cloned()
+}
+
+// ---- responses ----
 
 fn redirect_response(location: &str) -> Response<ProxyBody> {
+    redirect_with(StatusCode::FOUND, location)
+}
+
+fn permanent_redirect(location: &str) -> Response<ProxyBody> {
+    redirect_with(StatusCode::PERMANENT_REDIRECT, location)
+}
+
+fn redirect_with(status: StatusCode, location: &str) -> Response<ProxyBody> {
     Response::builder()
-        .status(StatusCode::FOUND)
+        .status(status)
         .header(LOCATION, location)
         .body(empty_body())
         .unwrap_or_else(|_| Response::new(empty_body()))
@@ -492,6 +906,27 @@ fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 
 fn bad_gateway(reason: impl std::fmt::Display) -> Response<ProxyBody> {
     status_response(StatusCode::BAD_GATEWAY, &format!("authenticated: {reason}"))
+}
+
+/// `max_age` of `Some(0)` expires the cookie.
+fn append_cookie(
+    resp: &mut Response<ProxyBody>,
+    name: &str,
+    value: &str,
+    path: &str,
+    max_age: Option<u64>,
+    secure: bool,
+) {
+    let mut cookie = format!("{name}={value}; Path={path}; HttpOnly; SameSite=Lax");
+    if let Some(age) = max_age {
+        cookie.push_str(&format!("; Max-Age={age}"));
+    }
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().append(SET_COOKIE, v);
+    }
 }
 
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -522,7 +957,7 @@ pub fn strip_gate_cookies(headers: &mut HeaderMap) {
         .filter(|kv| !kv.is_empty())
         .filter(|kv| {
             let name = kv.split_once('=').map_or(*kv, |(k, _)| k);
-            name != COOKIE_NAME && name != LOGIN_COOKIE_NAME
+            name != COOKIE_NAME && name != LOGIN_COOKIE_NAME && name != PORTAL_COOKIE_NAME
         })
         .map(str::to_string)
         .collect();
@@ -588,128 +1023,296 @@ fn open_login(key: &ClusterKey, value: &str) -> Option<PendingLogin> {
     serde_json::from_slice(&plaintext).ok()
 }
 
-/// Lowercases the host and strips any port, so the signed label is the same
-/// however the browser spelled the authority.
+/// Lowercases the host and strips any port, so a session is bound to the same
+/// name however the browser spelled the authority.
 fn normalize_host(host: &str) -> String {
-    let host = host.trim().to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if let Some(rest) = host.strip_prefix('[') {
-        // Bracketed ipv6 literal: keep everything up to the closing bracket.
         return rest.split(']').next().unwrap_or(rest).to_string();
     }
     host.split(':').next().unwrap_or("").to_string()
 }
 
-/// Signs `host`, `subject` and `expires_at` (unix seconds) into a cookie
-/// value that any node holding `key` can verify without asking anyone else,
-/// since the signature is the only state the session carries. The host is in
-/// the signed label so a cookie minted for one app is useless on another.
-fn sign_cookie(key: &ClusterKey, host: &str, subject: &str, expires_at: u64) -> String {
-    let host = normalize_host(host);
-    let label = format!("{LABEL_PREFIX}:{host}:{subject}:{expires_at}");
-    let sig = internal_auth::sign(key, &label);
-    let subject_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(subject.as_bytes());
-    format!("{subject_b64}.{expires_at}.{sig}")
+/// Sessions and tokens are stored under this hash so the replicated state
+/// never holds a usable cookie.
+fn hash_id(id: &str) -> String {
+    Sha256::digest(id.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
-/// Verifies a cookie value produced by `sign_cookie` for `host`, returning the
-/// subject if the signature checks out and it has not expired.
-fn verify_cookie(key: &ClusterKey, host: &str, value: &str) -> Option<String> {
-    let mut parts = value.splitn(3, '.');
-    let subject_b64 = parts.next()?;
-    let expires_at: u64 = parts.next()?.parse().ok()?;
-    let sig = parts.next()?;
-
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    if now >= expires_at {
-        return None;
+fn random_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut out = String::with_capacity(ID_LEN);
+    while out.len() < ID_LEN {
+        let mut buf = [0u8; 32];
+        rand::fill(&mut buf);
+        for byte in buf {
+            if out.len() == ID_LEN {
+                break;
+            }
+            // Rejection sampling, so every character is equally likely.
+            if (byte as usize) < (256 / ALPHABET.len()) * ALPHABET.len() {
+                out.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
+            }
+        }
     }
+    out
+}
 
-    let subject_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(subject_b64)
-        .ok()?;
-    let subject = String::from_utf8(subject_bytes).ok()?;
-    let label = format!(
-        "{LABEL_PREFIX}:{}:{subject}:{expires_at}",
-        normalize_host(host)
+// ---- pages ----
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A hex colour validated by config; anything else falls back so a stale
+/// stored value can never break out of the stylesheet.
+fn safe_accent(accent: &str) -> &str {
+    let hex = accent.strip_prefix('#').unwrap_or("");
+    if matches!(hex.len(), 3 | 6) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        accent
+    } else {
+        "#e5603c"
+    }
+}
+
+fn page(status: StatusCode, accent: &str, heading: &str, body: &str) -> Response<ProxyBody> {
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{title}</title>
+<style>
+:root{{--accent:{accent}}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#f4efe6;
+background:radial-gradient(1200px 600px at 20% -10%,color-mix(in srgb,var(--accent) 35%,#14110f),#14110f 60%)}}
+main{{width:100%;max-width:400px;padding:40px 32px;border-radius:20px;
+background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);
+backdrop-filter:blur(14px);box-shadow:0 30px 80px rgba(0,0,0,.45);text-align:center}}
+.mark{{width:44px;height:44px;margin:0 auto 20px;border-radius:14px;background:var(--accent);
+display:grid;place-items:center;font-size:22px;color:#14110f}}
+h1{{margin:0 0 8px;font-size:22px;font-weight:650;letter-spacing:-.01em}}
+p{{margin:0 0 24px;color:#c9c1b3}}
+code{{color:#f4efe6;word-break:break-all}}
+a.btn{{display:block;padding:13px 18px;border-radius:12px;background:var(--accent);color:#14110f;
+font-weight:650;text-decoration:none}}
+a.btn:hover{{filter:brightness(1.08)}}
+a.btn:focus-visible{{outline:3px solid #fff;outline-offset:2px}}
+a.quiet{{display:inline-block;margin-top:16px;color:#c9c1b3;font-size:14px}}
+</style></head><body><main>
+<div class="mark" aria-hidden="true">&#128274;</div>
+<h1>{heading}</h1>
+{body}
+</main></body></html>"#,
+        title = html_escape(heading),
+        accent = safe_accent(accent),
+        heading = html_escape(heading),
     );
-    internal_auth::verify(key, &label, sig).then_some(subject)
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(
+            "content-security-policy",
+            "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+        )
+        .header("x-frame-options", "DENY")
+        .header("referrer-policy", "no-referrer")
+        .body(text_body(html))
+        .unwrap_or_else(|_| Response::new(empty_body()))
+}
+
+fn login_page(
+    settings: &ProxyAuthConfig,
+    app_host: Option<&str>,
+    start_href: &str,
+    error: Option<&str>,
+) -> Response<ProxyBody> {
+    let lead = match app_host {
+        Some(host) => format!("to open <code>{}</code>", html_escape(host)),
+        None => "to continue".to_string(),
+    };
+    let error = error
+        .map(|e| format!("<p>{}</p>", html_escape(e)))
+        .unwrap_or_default();
+    page(
+        StatusCode::OK,
+        &settings.accent,
+        &settings.title,
+        &format!(
+            "<p>Use your account {lead}.</p>{error}<a class=\"btn\" href=\"{}\">Continue</a>",
+            html_escape(start_href)
+        ),
+    )
+}
+
+fn signed_in_page(settings: &ProxyAuthConfig, username: &str) -> Response<ProxyBody> {
+    page(
+        StatusCode::OK,
+        &settings.accent,
+        "You are signed in",
+        &format!(
+            "<p>Signed in as <code>{}</code>.</p><a class=\"btn\" href=\"/logout\">Sign out</a>",
+            html_escape(username)
+        ),
+    )
+}
+
+fn forbidden_page(
+    settings: &ProxyAuthConfig,
+    username: &str,
+    portal: &str,
+    return_to: &str,
+) -> Response<ProxyBody> {
+    let switch = format!("https://{portal}/logout?callback={}", urlencode(return_to));
+    page(
+        StatusCode::FORBIDDEN,
+        &settings.accent,
+        "No access",
+        &format!(
+            "<p><code>{}</code> is not in a group allowed to open this page.</p>\
+             <a class=\"btn\" href=\"{}\">Use another account</a>",
+            html_escape(username),
+            html_escape(&switch)
+        ),
+    )
+}
+
+fn message_page(
+    status: StatusCode,
+    heading: &str,
+    text: &str,
+    action: Option<(&str, &str)>,
+) -> Response<ProxyBody> {
+    let button = action
+        .map(|(label, href)| {
+            format!(
+                "<a class=\"btn\" href=\"{}\">{}</a>",
+                html_escape(href),
+                html_escape(label)
+            )
+        })
+        .unwrap_or_default();
+    page(
+        status,
+        "#e5603c",
+        heading,
+        &format!("<p>{}</p>{button}", html_escape(text)),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::route::Route;
 
-    const HOST_A: &str = "a.example.com";
-
-    #[test]
-    fn a_cookie_verifies_against_the_key_that_signed_it() {
-        let key = ClusterKey::generate();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now + 3600);
-        assert_eq!(
-            verify_cookie(&key, HOST_A, &cookie),
-            Some("alice@example.com".to_string())
-        );
+    fn routes() -> RouteTable {
+        let protected = |host: &str| {
+            Route::new(
+                host,
+                None,
+                true,
+                vec![cl_config::Middleware::Authenticated(
+                    Authenticated::default(),
+                )],
+                false,
+                "t",
+                vec![],
+            )
+        };
+        let open = Route::new("open.example.com", None, true, vec![], false, "t", vec![]);
+        RouteTable::new(vec![protected("app.example.com"), open])
     }
 
     #[test]
-    fn an_expired_cookie_does_not_verify() {
-        let key = ClusterKey::generate();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now.saturating_sub(1));
-        assert_eq!(verify_cookie(&key, HOST_A, &cookie), None);
+    fn callback_must_name_a_protected_host() {
+        let routes = routes();
+        let cb = parse_callback("https://app.example.com/library?x=1", &routes).unwrap();
+        assert_eq!(cb.host, "app.example.com");
+        assert_eq!(cb.path_and_query, "/library?x=1");
+        assert!(parse_callback("https://open.example.com/", &routes).is_none());
+        assert!(parse_callback("https://evil.example.net/", &routes).is_none());
     }
 
     #[test]
-    fn a_cookie_signed_by_a_different_key_does_not_verify() {
-        let key = ClusterKey::generate();
-        let other = ClusterKey::generate();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now + 3600);
-        assert_eq!(verify_cookie(&other, HOST_A, &cookie), None);
+    fn callback_rejects_tricks() {
+        let routes = routes();
+        for bad in [
+            "",
+            "javascript:alert(1)",
+            "/relative",
+            "https://user@app.example.com/",
+            "https://app.example.com/.well-known/clouduler-cookie?token=x",
+            "https://app.example.com//evil.com",
+            "ftp://app.example.com/",
+        ] {
+            assert!(parse_callback(bad, &routes).is_none(), "{bad}");
+        }
     }
 
     #[test]
-    fn a_tampered_subject_does_not_verify() {
-        let key = ClusterKey::generate();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let cookie = sign_cookie(&key, HOST_A, "alice@example.com", now + 3600);
-        let (_, rest) = cookie.split_once('.').unwrap();
-        let forged = format!(
-            "{}.{rest}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mallory@example.com")
-        );
-        assert_eq!(verify_cookie(&key, HOST_A, &forged), None);
+    fn callback_host_is_lowercased() {
+        let cb = parse_callback("https://APP.example.com/", &routes()).unwrap();
+        assert_eq!(cb.host, "app.example.com");
     }
 
     #[test]
-    fn garbage_cookie_values_do_not_panic_or_verify() {
-        let key = ClusterKey::generate();
-        assert_eq!(verify_cookie(&key, HOST_A, "not-a-cookie"), None);
-        assert_eq!(verify_cookie(&key, HOST_A, ""), None);
-        assert_eq!(verify_cookie(&key, HOST_A, "a.b.c"), None);
+    fn groups_restrict_only_when_listed() {
+        let any = Authenticated::default();
+        assert!(permitted(&any, &[]));
+        let family = Authenticated {
+            groups: vec!["family".into(), "admins".into()],
+            allow_internal: true,
+        };
+        assert!(!permitted(&family, &[]));
+        assert!(!permitted(&family, &["guests".to_string()]));
+        assert!(permitted(&family, &["x".to_string(), "admins".to_string()]));
     }
 
     #[test]
-    fn return_target_defaults_to_root_for_the_login_path_itself() {
-        let uri: Uri = "/.clouduler/oidc/login?return=%2Ffoo".parse().unwrap();
+    fn group_claims_accept_a_string_or_a_list() {
+        let list = serde_json::json!(["a", "b", 3]);
+        assert_eq!(claim_strings(Some(&list)), vec!["a", "b"]);
+        let one = serde_json::json!("solo");
+        assert_eq!(claim_strings(Some(&one)), vec!["solo"]);
+        assert!(claim_strings(None).is_empty());
+    }
+
+    #[test]
+    fn ids_are_distinct_and_hashes_are_stable() {
+        let a = random_id();
+        assert_eq!(a.len(), ID_LEN);
+        assert_ne!(a, random_id());
+        assert_eq!(hash_id("x"), hash_id("x"));
+        assert_ne!(hash_id("x"), hash_id("y"));
+        assert_eq!(hash_id("x").len(), 64);
+    }
+
+    #[test]
+    fn host_case_port_and_trailing_dot_do_not_matter() {
+        assert_eq!(normalize_host("A.Example.com:8443"), "a.example.com");
+        assert_eq!(normalize_host("a.example.com."), "a.example.com");
+    }
+
+    #[test]
+    fn return_target_hides_reserved_paths() {
+        let uri: Uri = "/.well-known/clouduler-cookie?token=x".parse().unwrap();
         assert_eq!(return_target(&uri), "/");
-    }
-
-    #[test]
-    fn return_target_keeps_an_ordinary_path() {
         let uri: Uri = "/library?x=1".parse().unwrap();
         assert_eq!(return_target(&uri), "/library?x=1");
     }
@@ -722,27 +1325,18 @@ mod tests {
     }
 
     #[test]
-    fn form_urlencoded_parse_decodes_a_trailing_percent_escape() {
-        let params = form_urlencoded_parse("a=x%2F&b=%41");
-        assert_eq!(params.get("a").map(String::as_str), Some("x/"));
-        assert_eq!(params.get("b").map(String::as_str), Some("A"));
-    }
-
-    #[test]
-    fn a_cookie_does_not_verify_on_another_host() {
-        let key = ClusterKey::generate();
-        let cookie = sign_cookie(&key, HOST_A, "alice", now_unix() + 3600);
-        assert_eq!(verify_cookie(&key, "b.example.com", &cookie), None);
-    }
-
-    #[test]
-    fn host_case_and_port_do_not_matter() {
-        let key = ClusterKey::generate();
-        let cookie = sign_cookie(&key, "A.Example.com:8443", "alice", now_unix() + 3600);
-        assert_eq!(
-            verify_cookie(&key, "a.example.com", &cookie),
-            Some("alice".to_string())
-        );
+    fn safe_return_accepts_local_paths_only() {
+        assert!(is_safe_return("/a?b=1"));
+        for bad in [
+            "//evil.com",
+            "/\\evil.com",
+            "https://evil.com",
+            "evil",
+            "/a\\b",
+            "/a\r\nb",
+        ] {
+            assert!(!is_safe_return(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -752,7 +1346,7 @@ mod tests {
             state: "s".into(),
             nonce: "n".into(),
             pkce_verifier: "v".into(),
-            return_to: "/x?y=1".into(),
+            callback: "https://app.example.com/x?y=1".into(),
             started_at_unix: 5,
         };
         let sealed = seal_login(&key, &pending).unwrap();
@@ -761,7 +1355,7 @@ mod tests {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
         let back = open_login(&key, &sealed).unwrap();
         assert_eq!(back.state, "s");
-        assert_eq!(back.return_to, "/x?y=1");
+        assert_eq!(back.callback, "https://app.example.com/x?y=1");
         assert!(open_login(&ClusterKey::generate(), &sealed).is_none());
         assert!(open_login(&key, "garbage").is_none());
     }
@@ -774,32 +1368,13 @@ mod tests {
     }
 
     #[test]
-    fn login_return_param_accepts_local_paths_only() {
-        let ok = |q: &str| {
-            login_return_param(
-                &format!("/.clouduler/oidc/login?return={q}")
-                    .parse()
-                    .unwrap(),
-            )
-        };
-        assert_eq!(ok("%2Flibrary%3Fx%3D1"), "/library?x=1");
-        assert_eq!(ok("%2F%2Fevil.com"), "/");
-        assert_eq!(ok("%2F%5Cevil.com"), "/");
-        assert_eq!(ok("https%3A%2F%2Fevil.com"), "/");
-        assert_eq!(ok("%2Fa%5Cb"), "/");
-        assert_eq!(ok("%2Fa%0D%0Ab"), "/");
-        assert_eq!(ok("%2F.clouduler%2Foidc%2Fcallback"), "/");
-        assert_eq!(ok("evil"), "/");
-        let none: Uri = "/.clouduler/oidc/login".parse().unwrap();
-        assert_eq!(login_return_param(&none), "/");
-    }
-
-    #[test]
     fn strip_gate_cookies_keeps_other_cookies() {
         let mut h = HeaderMap::new();
         h.insert(
             COOKIE,
-            HeaderValue::from_static("a=1; cl_proxy_auth=zzz; cl_proxy_login=q; b=2"),
+            HeaderValue::from_static(
+                "a=1; cl_proxy_auth=zzz; cl_proxy_portal=p; cl_proxy_login=q; b=2",
+            ),
         );
         strip_gate_cookies(&mut h);
         assert_eq!(h.get(COOKIE).unwrap(), "a=1; b=2");
@@ -811,5 +1386,13 @@ mod tests {
         h.insert(COOKIE, HeaderValue::from_static("cl_proxy_auth=zzz"));
         strip_gate_cookies(&mut h);
         assert!(h.get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn pages_escape_what_they_show() {
+        let s = html_escape("<script>\"x\"&'");
+        assert_eq!(s, "&lt;script&gt;&quot;x&quot;&amp;&#39;");
+        assert_eq!(safe_accent("#abc"), "#abc");
+        assert_eq!(safe_accent("red;}</style>"), "#e5603c");
     }
 }

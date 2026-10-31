@@ -817,6 +817,17 @@ pub struct ClusterState {
     /// backup export. See `Request::PutSession`.
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionRecord>,
+    /// Sessions of the reverse proxy's `authenticated` login, keyed by a hash
+    /// of the cookie value. One per (browser, hostname): the login portal's
+    /// own session and one per protected app. Same storage rules as
+    /// `sessions`. See `Request::PutProxySession`.
+    #[serde(default)]
+    pub proxy_sessions: BTreeMap<String, ProxySessionRecord>,
+    /// Single-use tokens handed from the login portal to a protected
+    /// hostname's cookie endpoint, keyed by a hash of the token. See
+    /// `Request::RedeemProxyToken`.
+    #[serde(default)]
+    pub proxy_tokens: BTreeMap<String, ProxyTokenRecord>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -829,6 +840,37 @@ pub struct SessionRecord {
     pub username: String,
     pub admin: bool,
     /// Unix seconds after which the session no longer counts.
+    pub expires_at: i64,
+}
+
+/// Who a reverse proxy login cookie belongs to, on which hostname.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxySessionRecord {
+    /// Hostname the cookie was issued for (lowercase, no port). A cookie is
+    /// only honoured on that host.
+    pub host: String,
+    pub subject: String,
+    pub username: String,
+    /// Groups the identity provider reported at login.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Unix seconds after which the session no longer counts.
+    pub expires_at: i64,
+}
+
+/// A one-time pass from the login portal to one protected hostname: whoever
+/// presents it gets a session there. See `Request::RedeemProxyToken`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyTokenRecord {
+    /// The only hostname that may redeem it.
+    pub host: String,
+    pub subject: String,
+    pub username: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// The session it mints ends here (the portal session's own end).
+    pub session_expires_at: i64,
+    /// The token itself is worthless after this.
     pub expires_at: i64,
 }
 
@@ -1184,6 +1226,35 @@ pub enum Request {
     PruneSessions {
         now: i64,
     },
+    /// Store a reverse proxy session under `key` (hash of the cookie value).
+    /// Also sweeps expired proxy sessions and tokens, as `PutSession` does.
+    PutProxySession {
+        key: String,
+        session: ProxySessionRecord,
+        now: i64,
+    },
+    /// End a reverse proxy session.
+    RemoveProxySession {
+        key: String,
+    },
+    /// Store a one-time token (under a hash of it) for `host` to redeem.
+    PutProxyToken {
+        key: String,
+        token: ProxyTokenRecord,
+        now: i64,
+    },
+    /// Atomically spend the token under `token_key`: it must exist, be
+    /// unexpired and have been issued for `host`. On success the token is
+    /// gone and a session for `host` exists under `session_key`; on any
+    /// failure nothing changes (an expired or wrong-host token is left to
+    /// the sweep). Raft applies commands one at a time, so of two racing
+    /// redeems exactly one succeeds.
+    RedeemProxyToken {
+        token_key: String,
+        host: String,
+        session_key: String,
+        now: i64,
+    },
     /// Remember that `instance` was moved off `from` because it kept crashing
     /// there. `at` is unix seconds supplied by the caller so `apply` stays
     /// pure; entries older than `CRASH_MOVE_RETENTION_SECS` before `at` are
@@ -1279,6 +1350,10 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "PutSession",
     "RemoveSession",
     "PruneSessions",
+    "PutProxySession",
+    "RemoveProxySession",
+    "PutProxyToken",
+    "RedeemProxyToken",
     "RecordCrashMove",
     "NoOp",
     "ClearEmergency",
@@ -1497,6 +1572,25 @@ mod request_mirror {
         PruneSessions {
             now: i64,
         },
+        PutProxySession {
+            key: String,
+            session: ProxySessionRecord,
+            now: i64,
+        },
+        RemoveProxySession {
+            key: String,
+        },
+        PutProxyToken {
+            key: String,
+            token: ProxyTokenRecord,
+            now: i64,
+        },
+        RedeemProxyToken {
+            token_key: String,
+            host: String,
+            session_key: String,
+            now: i64,
+        },
         RecordCrashMove {
             instance: InstanceId,
             from: String,
@@ -1585,6 +1679,12 @@ impl Response {
 }
 
 impl ClusterState {
+    /// Drop reverse proxy sessions and tokens that ended at or before `now`.
+    fn sweep_proxy_auth(&mut self, now: i64) {
+        self.proxy_sessions.retain(|_, s| s.expires_at > now);
+        self.proxy_tokens.retain(|_, t| t.expires_at > now);
+    }
+
     /// Apply one command. Must stay deterministic, so no clocks, no randomness
     /// and no IO.
     pub fn apply(&mut self, req: &Request) -> Response {
@@ -2457,6 +2557,57 @@ impl ClusterState {
 
             Request::PruneSessions { now } => {
                 self.sessions.retain(|_, s| s.expires_at > *now);
+                self.sweep_proxy_auth(*now);
+                Ok(())
+            }
+
+            Request::PutProxySession { key, session, now } => {
+                self.sweep_proxy_auth(*now);
+                self.proxy_sessions.insert(key.clone(), session.clone());
+                Ok(())
+            }
+
+            Request::RemoveProxySession { key } => {
+                self.proxy_sessions.remove(key);
+                Ok(())
+            }
+
+            Request::PutProxyToken { key, token, now } => {
+                self.sweep_proxy_auth(*now);
+                self.proxy_tokens.insert(key.clone(), token.clone());
+                Ok(())
+            }
+
+            Request::RedeemProxyToken {
+                token_key,
+                host,
+                session_key,
+                now,
+            } => {
+                let Some(token) = self.proxy_tokens.get(token_key) else {
+                    return Err("unknown or already used token".into());
+                };
+                if token.expires_at <= *now {
+                    return Err("token expired".into());
+                }
+                if &token.host != host {
+                    return Err("token was issued for another host".into());
+                }
+                if token.session_expires_at <= *now {
+                    return Err("login expired".into());
+                }
+                let token = self.proxy_tokens.remove(token_key).expect("checked above");
+                self.sweep_proxy_auth(*now);
+                self.proxy_sessions.insert(
+                    session_key.clone(),
+                    ProxySessionRecord {
+                        host: token.host,
+                        subject: token.subject,
+                        username: token.username,
+                        groups: token.groups,
+                        expires_at: token.session_expires_at,
+                    },
+                );
                 Ok(())
             }
 
@@ -3076,6 +3227,36 @@ mod tests {
             },
             Request::RemoveSession { key: "k".into() },
             Request::PruneSessions { now: 5 },
+            Request::PutProxySession {
+                key: "k".into(),
+                session: ProxySessionRecord {
+                    host: "a.example.com".into(),
+                    subject: "s".into(),
+                    username: "u".into(),
+                    groups: vec!["g".into()],
+                    expires_at: 10,
+                },
+                now: 1,
+            },
+            Request::RemoveProxySession { key: "k".into() },
+            Request::PutProxyToken {
+                key: "t".into(),
+                token: ProxyTokenRecord {
+                    host: "a.example.com".into(),
+                    subject: "s".into(),
+                    username: "u".into(),
+                    groups: Vec::new(),
+                    session_expires_at: 10,
+                    expires_at: 5,
+                },
+                now: 1,
+            },
+            Request::RedeemProxyToken {
+                token_key: "t".into(),
+                host: "a.example.com".into(),
+                session_key: "k".into(),
+                now: 2,
+            },
             Request::RecordCrashMove {
                 instance: InstanceId::new("gitlab", "web", 0),
                 from: "n1".into(),
@@ -3594,6 +3775,54 @@ mod tests {
         assert!(state.apply(&clear).is_ok());
         assert!(state.assignments[&instance].migration.is_none());
         assert_eq!(state.assignments[&instance].node, "n1");
+    }
+
+    #[test]
+    fn a_proxy_token_is_redeemed_once_for_its_own_host_only() {
+        let mut state = ClusterState::default();
+        let put = |state: &mut ClusterState, expires_at| {
+            state.apply(&Request::PutProxyToken {
+                key: "t".into(),
+                token: ProxyTokenRecord {
+                    host: "a.example.com".into(),
+                    subject: "sub".into(),
+                    username: "alice".into(),
+                    groups: vec!["staff".into()],
+                    session_expires_at: 1000,
+                    expires_at,
+                },
+                now: 0,
+            });
+        };
+        let redeem = |state: &mut ClusterState, host: &str, key: &str, now| {
+            state.apply(&Request::RedeemProxyToken {
+                token_key: "t".into(),
+                host: host.into(),
+                session_key: key.into(),
+                now,
+            })
+        };
+
+        put(&mut state, 60);
+        assert!(redeem(&mut state, "b.example.com", "s1", 1).error.is_some());
+        assert!(state.proxy_sessions.is_empty());
+        assert!(state.proxy_tokens.contains_key("t"));
+
+        assert!(redeem(&mut state, "a.example.com", "s1", 1).error.is_none());
+        let session = &state.proxy_sessions["s1"];
+        assert_eq!(session.host, "a.example.com");
+        assert_eq!(session.groups, vec!["staff"]);
+        assert_eq!(session.expires_at, 1000);
+        // Spent: a second redeem fails and mints nothing.
+        assert!(redeem(&mut state, "a.example.com", "s2", 2).error.is_some());
+        assert!(!state.proxy_sessions.contains_key("s2"));
+
+        // Expired tokens do not redeem.
+        put(&mut state, 60);
+        assert!(redeem(&mut state, "a.example.com", "s3", 60)
+            .error
+            .is_some());
+        assert!(!state.proxy_sessions.contains_key("s3"));
     }
 
     #[test]

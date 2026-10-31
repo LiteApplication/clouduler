@@ -442,6 +442,8 @@
     },
     "overlay": null,
     "previous_image_digests": {},
+    "proxy_sessions": {},
+    "proxy_tokens": {},
     "removed": [],
     "restic_destinations": {},
     "restic_runs": {},
@@ -519,7 +521,7 @@
     {
       "id": "<volatile>",
       "image": "nginx",
-      "latest_digest": "sha256:600f7cd45e27aa13e9304c834ab7c1b0ff39df85ee1dcc5087955455d77bc83b",
+      "latest_digest": "sha256:5ab5b0b01097420873a3f3330f44248e34a3c2a3e8d5ee30658aeae8cb7435da",
       "node": "n0",
       "pin_drift": false,
       "pinned_digest": null,
@@ -531,7 +533,7 @@
     {
       "id": "<volatile>",
       "image": "nginx",
-      "latest_digest": "sha256:600f7cd45e27aa13e9304c834ab7c1b0ff39df85ee1dcc5087955455d77bc83b",
+      "latest_digest": "sha256:5ab5b0b01097420873a3f3330f44248e34a3c2a3e8d5ee30658aeae8cb7435da",
       "node": "n0",
       "pin_drift": false,
       "pinned_digest": null,

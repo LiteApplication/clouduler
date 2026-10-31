@@ -475,6 +475,14 @@ async fn handle_http(
         return Ok(http01_response(&backends.http01, token));
     }
 
+    if let Some(gate) = backends
+        .auth_gate
+        .as_ref()
+        .filter(|g| g.is_portal_host(&host))
+    {
+        return Ok(gate.handle_portal(&req, &routes, "http").await);
+    }
+
     let Some(route) = route_for(&routes, &req) else {
         return Ok(not_found(&host, &path));
     };
@@ -539,6 +547,14 @@ async fn handle_https(
         .unwrap_or("")
         .to_string();
     let path = req.uri().path().to_string();
+
+    if let Some(gate) = backends
+        .auth_gate
+        .as_ref()
+        .filter(|g| g.is_portal_host(&host))
+    {
+        return Ok(gate.handle_portal(&req, &routes, "https").await);
+    }
 
     let Some(route) = route_for(&routes, &req) else {
         return Ok(not_found(&host, &path));
@@ -612,11 +628,12 @@ fn forward_auth_config(route: &Route) -> Option<&cl_config::ForwardAuth> {
     })
 }
 
-/// Whether the route carries the `authenticated` middleware.
-fn is_authenticated_route(route: &Route) -> bool {
-    route
-        .middlewares
-        .contains(&cl_config::Middleware::Authenticated)
+/// The route's `authenticated` middleware, if it has one.
+fn authenticated_policy(route: &Route) -> Option<&cl_config::Authenticated> {
+    route.middlewares.iter().find_map(|m| match m {
+        cl_config::Middleware::Authenticated(policy) => Some(policy),
+        _ => None,
+    })
 }
 
 /// Turns a `forward_auth::Outcome::Deny` into the response sent to the
@@ -644,14 +661,15 @@ async fn proxy(
 ) -> Response<ProxyBody> {
     apply_route_middlewares(route, &mut req);
 
-    if is_authenticated_route(route) {
+    if let Some(policy) = authenticated_policy(route) {
         let Some(gate) = &backends.auth_gate else {
             return status_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "this route requires login, but the proxy has no auth gate configured",
             );
         };
-        match gate.evaluate(&req, scheme).await {
+        let internal = backends.peers.is_internal(peer.ip());
+        match gate.evaluate(&req, scheme, policy, internal).await {
             GateOutcome::Allow => {
                 // The backend has no business holding a replayable session.
                 crate::auth_gate::strip_gate_cookies(req.headers_mut());

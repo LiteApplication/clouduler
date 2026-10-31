@@ -30,6 +30,8 @@ tracing.workspace = true
 
 arc-swap = "1"
 base64 = "0.22"
+rand = "0.10"
+sha2 = "0.11"
 bytes = "1"
 http = "1"
 ipnet.workspace = true

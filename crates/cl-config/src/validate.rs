@@ -523,6 +523,54 @@ impl ClusterConfig {
                 "certificate issuance is DNS-01 only, so it needs a cloudflare section",
             ));
         }
+        if let Some(auth) = &proxy.auth {
+            if !auth.issuer.starts_with("https://") {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.issuer",
+                    "must be an https url",
+                ));
+            }
+            if auth.client_id.trim().is_empty() {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.client_id",
+                    "must not be empty",
+                ));
+            }
+            if !auth.scopes.iter().any(|s| s == "openid") {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.scopes",
+                    "must include openid",
+                ));
+            }
+            if auth.host.trim().is_empty() {
+                return Err(ConfigError::invalid("proxy.auth.host", "must not be empty"));
+            }
+            if !self.networks.contains_key(&auth.network) {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.network",
+                    format!("no network named {}", auth.network),
+                ));
+            }
+            if auth.session_ttl.is_zero() {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.session_ttl",
+                    "must be greater than zero",
+                ));
+            }
+            let accent = auth.accent.strip_prefix('#').unwrap_or("");
+            if !matches!(accent.len(), 3 | 6) || !accent.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.accent",
+                    "must be a hex colour like #e5603c",
+                ));
+            }
+            if auth.fqdn(self) == self.web_fqdn() {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.host",
+                    "must differ from the dashboard hostname",
+                ));
+            }
+        }
         Ok(())
     }
 

@@ -21,8 +21,8 @@ pub use deploy::{
     MAX_REPLICAS,
 };
 pub use extensions::{
-    CorsPolicy, DockerSocket, DockerSocketMode, ExposePort, ForwardAuth, Middleware, ProxyRoute,
-    RedirectRegex, ServiceAction, ServiceExtensions, StackDefaults, VolumeSyncOverride,
+    Authenticated, CorsPolicy, DockerSocket, DockerSocketMode, ExposePort, ForwardAuth, Middleware,
+    ProxyRoute, RedirectRegex, ServiceAction, ServiceExtensions, StackDefaults, VolumeSyncOverride,
 };
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};

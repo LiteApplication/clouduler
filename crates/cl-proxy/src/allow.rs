@@ -115,6 +115,9 @@ impl StackPolicy {
 #[derive(Default)]
 pub struct PeerPolicies {
     entries: ArcSwap<Vec<(Ipv4Net, StackPolicy)>>,
+    /// Subnets container traffic comes from, and the nodes' own addresses.
+    /// See `set_internal`.
+    internal: ArcSwap<Vec<ipnet::IpNet>>,
 }
 
 impl PeerPolicies {
@@ -128,6 +131,20 @@ impl PeerPolicies {
 
     pub fn is_empty(&self) -> bool {
         self.entries.load().is_empty()
+    }
+
+    /// Replace the set of addresses that count as "inside the cluster": the
+    /// container overlay and nat subnets, and the nodes' own addresses. Used
+    /// by the `authenticated` middleware to let service-to-service traffic
+    /// through without a login.
+    pub fn set_internal(&self, subnets: Vec<ipnet::IpNet>) {
+        self.internal.store(Arc::new(subnets));
+    }
+
+    /// Is the TCP peer a container or node of this cluster?
+    pub fn is_internal(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        self.internal.load().iter().any(|n| n.contains(&peer))
     }
 
     /// Refuse `host` on a route published on `route_network` when the peer's
@@ -194,6 +211,17 @@ mod tests {
 
     fn peer(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn internal_peers_are_matched_by_subnet() {
+        let p = PeerPolicies::new();
+        assert!(!p.is_internal(peer("10.244.1.5")));
+        p.set_internal(vec!["10.244.1.0/24".parse().unwrap()]);
+        assert!(p.is_internal(peer("10.244.1.5")));
+        assert!(p.is_internal(peer("::ffff:10.244.1.5")));
+        assert!(!p.is_internal(peer("10.244.2.5")));
+        assert!(!p.is_internal(peer("203.0.113.9")));
     }
 
     #[test]

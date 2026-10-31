@@ -727,6 +727,83 @@ pub struct ProxyConfig {
     /// How a proxied hostname's DNS record is published.
     #[serde(default)]
     pub dns_publish: DnsPublishMode,
+    /// Login for routes carrying the `authenticated` middleware. A separate
+    /// identity provider client (and group namespace) from `auth.oidc`, which
+    /// is for people operating the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProxyAuthConfig>,
+}
+
+/// The login portal behind the `authenticated` route middleware.
+///
+/// The portal is one hostname the proxy answers itself. A protected app that
+/// sees no valid cookie redirects the browser there; the portal runs the OIDC
+/// login (or, when the browser already has a portal session, skips straight
+/// on), then sends the browser back to the app through a one-time-token URL
+/// that sets the app's own cookie. Sessions are replicated in raft, so any
+/// node accepts any login.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyAuthConfig {
+    /// Portal hostname. A bare label gets `network`'s domain appended. Needs
+    /// DNS and a certificate like any proxied host, which the proxy arranges.
+    pub host: String,
+    /// Network the portal hostname is published on; must be reachable by the
+    /// people logging in (normally a public network).
+    pub network: String,
+    pub issuer: String,
+    pub client_id: String,
+    /// The client secret is a sealed cluster secret named
+    /// `_clouduler_proxy_oidc_client_secret`, never part of this file.
+    #[serde(default = "default_proxy_auth_scopes")]
+    pub scopes: Vec<String>,
+    /// Claim listing the user's groups. Routes restrict access by naming
+    /// groups from here.
+    #[serde(default = "default_admin_claim")]
+    pub groups_claim: String,
+    /// Claim shown as the user's name. Falls back to `sub`.
+    #[serde(default = "default_username_claim")]
+    pub username_claim: String,
+    /// How long a login lasts, for the portal and for every app cookie it
+    /// hands out. Fixed at login: an app cookie never outlives the portal
+    /// session it came from.
+    #[serde(with = "humantime_serde", default = "default_session_ttl")]
+    pub session_ttl: Duration,
+    /// Heading of the login page.
+    #[serde(default = "default_portal_title")]
+    pub title: String,
+    /// Accent colour of the login page, as a CSS hex colour.
+    #[serde(default = "default_portal_accent")]
+    pub accent: String,
+}
+
+fn default_proxy_auth_scopes() -> Vec<String> {
+    vec![
+        "openid".into(),
+        "profile".into(),
+        "email".into(),
+        "groups".into(),
+    ]
+}
+
+fn default_portal_title() -> String {
+    "Sign in to continue".to_string()
+}
+
+fn default_portal_accent() -> String {
+    "#e5603c".to_string()
+}
+
+impl ProxyAuthConfig {
+    /// The portal's fully qualified, lowercase hostname.
+    pub fn fqdn(&self, cfg: &ClusterConfig) -> String {
+        qualify(
+            &self.host,
+            cfg.networks
+                .get(&self.network)
+                .and_then(|n| n.domain.as_deref()),
+        )
+    }
 }
 
 impl Default for ProxyConfig {
@@ -737,6 +814,7 @@ impl Default for ProxyConfig {
             https_port: default_https_port(),
             acme: AcmeConfig::default(),
             dns_publish: DnsPublishMode::default(),
+            auth: None,
         }
     }
 }

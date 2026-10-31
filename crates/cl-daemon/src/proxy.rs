@@ -94,6 +94,36 @@ fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &
     subnets
 }
 
+/// Addresses that count as "inside the cluster" for the `authenticated`
+/// middleware's internal bypass: every container overlay subnet, every nat
+/// network's subnet, and each node's own internal address (a container on
+/// another node reaches the proxy masqueraded as its node). Deliberately not
+/// the internal/private networks' whole subnets, which other machines on the
+/// LAN may also sit in.
+fn internal_peer_subnets(cfg: &ClusterConfig, state: &ClusterState) -> Vec<IpNet> {
+    let mut subnets: Vec<IpNet> = Vec::new();
+    if let Some(allocations) = Allocations::decode(state.overlay.as_deref()) {
+        subnets.extend(
+            allocations
+                .subnets_of_overlays(allocations.network_names())
+                .map(IpNet::V4),
+        );
+    }
+    subnets.extend(
+        cfg.networks
+            .iter()
+            .filter(|(_, net)| net.kind == NetworkKind::Nat)
+            .map(|(name, _)| IpNet::V4(nat_subnet(name))),
+    );
+    subnets.extend(
+        cfg.nodes
+            .values()
+            .filter_map(|node| cfg.internal_ip(node))
+            .map(IpNet::from),
+    );
+    subnets
+}
+
 /// How often routes and certificates are rebuilt from state.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -473,6 +503,7 @@ async fn reconcile_loop(
         if let Some(stacks) = crate::restrict::restricted_stacks(&cfg, &state) {
             peers.replace(crate::restrict::proxy_policies(&stacks));
         }
+        peers.set_internal(internal_peer_subnets(&cfg, &state));
 
         // Static backends need a dns lookup each. On the first pass publish
         // what is already known rather than leaving every hostname unrouted
@@ -733,6 +764,10 @@ fn tls_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<String, bool
     // The ui is served by the api on its own port, but its certificate is
     // issued the same way and stored in the same place.
     hosts.entry(cfg.web_fqdn()).or_insert(false);
+    // The proxy login portal is a hostname of its own, answered by the proxy.
+    if let Some(auth) = &cfg.proxy.auth {
+        hosts.entry(auth.fqdn(cfg)).or_insert(false);
+    }
     hosts
 }
 
@@ -1117,6 +1152,13 @@ pub fn desired_dns_hosts(
     for rule in RedirectStore::load(state).rules {
         hosts
             .entry((rule.host, rule.network))
+            .or_default()
+            .extend(all_nodes.clone());
+    }
+    // Any node can answer the login portal.
+    if let Some(auth) = &cfg.proxy.auth {
+        hosts
+            .entry((auth.host.clone(), auth.network.clone()))
             .or_default()
             .extend(all_nodes.clone());
     }

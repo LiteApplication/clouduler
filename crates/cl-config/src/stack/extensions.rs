@@ -40,11 +40,41 @@ pub enum Middleware {
     Cors(CorsPolicy),
     ForwardAuth(ForwardAuth),
     RedirectRegex(RedirectRegex),
-    /// Requires a session established through clouduler's own OIDC login
-    /// before a request reaches the backend. Needs no settings here: the
-    /// identity provider is the cluster-wide `auth.oidc` config already used
-    /// for the web ui, not something declared per route.
-    Authenticated,
+    /// Requires a login through the cluster's `proxy.auth` portal before a
+    /// request reaches the backend, so an app with no login of its own can
+    /// still be protected. Bare `authenticated` lets any user of the identity
+    /// provider in; the map form restricts by group.
+    Authenticated(Authenticated),
+}
+
+/// Settings of the `authenticated` middleware.
+///
+/// ```yaml
+/// middlewares:
+///   - authenticated:
+///       groups: [family, admins]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Authenticated {
+    /// The user needs at least one of these groups (from the identity
+    /// provider's `proxy.auth.groups_claim`). Empty means any logged-in user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// Let requests from containers on the cluster's own networks through
+    /// without a login. On by default, since service-to-service calls cannot
+    /// do an interactive login; the check is on the real TCP peer.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub allow_internal: bool,
+}
+
+impl Default for Authenticated {
+    fn default() -> Self {
+        Self {
+            groups: Vec::new(),
+            allow_internal: true,
+        }
+    }
 }
 
 /// Wire form. serde_yaml renders an externally tagged enum as a yaml tag
@@ -65,7 +95,7 @@ impl TryFrom<RawMiddleware> for Middleware {
             RawMiddleware::Bare(name) => match name.as_str() {
                 "redirect_https" => Ok(Middleware::RedirectHttps),
                 "strip_prefix" => Ok(Middleware::StripPrefix),
-                "authenticated" => Ok(Middleware::Authenticated),
+                "authenticated" => Ok(Middleware::Authenticated(Authenticated::default())),
                 // Naming one that needs settings without giving any is a
                 // mistake worth reporting rather than defaulting.
                 "basic_auth" | "headers" | "cors" | "forward_auth" | "redirect_regex" => {
@@ -118,6 +148,20 @@ impl TryFrom<RawMiddleware> for Middleware {
                         }
                         Ok(Middleware::RedirectRegex(redirect))
                     }
+                    "authenticated" => {
+                        let auth: Authenticated = if value.is_null() {
+                            Authenticated::default()
+                        } else {
+                            serde_yaml::from_value(value)
+                                .map_err(|e| format!("authenticated: {e}"))?
+                        };
+                        if auth.groups.iter().any(|g| g.trim().is_empty()) {
+                            return Err(
+                                "authenticated: groups must not contain an empty name".into()
+                            );
+                        }
+                        Ok(Middleware::Authenticated(auth))
+                    }
                     "redirect_https" => Ok(Middleware::RedirectHttps),
                     "strip_prefix" => Ok(Middleware::StripPrefix),
                     other => Err(format!("unknown middleware {other}")),
@@ -131,9 +175,14 @@ impl From<Middleware> for RawMiddleware {
     fn from(mw: Middleware) -> Self {
         let name = mw.name().to_string();
         match mw {
-            Middleware::RedirectHttps | Middleware::StripPrefix | Middleware::Authenticated => {
+            Middleware::RedirectHttps | Middleware::StripPrefix => RawMiddleware::Bare(name),
+            Middleware::Authenticated(auth) if auth == Authenticated::default() => {
                 RawMiddleware::Bare(name)
             }
+            Middleware::Authenticated(auth) => RawMiddleware::Configured(BTreeMap::from([(
+                name,
+                serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
+            )])),
             Middleware::BasicAuth(auth) => RawMiddleware::Configured(BTreeMap::from([(
                 name,
                 serde_yaml::to_value(auth).unwrap_or(serde_yaml::Value::Null),
@@ -169,7 +218,7 @@ impl Middleware {
             Middleware::Cors(_) => "cors",
             Middleware::ForwardAuth(_) => "forward_auth",
             Middleware::RedirectRegex(_) => "redirect_regex",
-            Middleware::Authenticated => "authenticated",
+            Middleware::Authenticated(_) => "authenticated",
         }
     }
 }
@@ -890,6 +939,22 @@ proxy:
     }
 
     #[test]
+    fn authenticated_takes_groups_and_round_trips() {
+        let ext: ServiceExtensions = serde_yaml::from_str(
+            "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares:\n      - authenticated:\n          groups: [family]\n          allow_internal: false\n",
+        )
+        .unwrap();
+        let Middleware::Authenticated(auth) = &ext.proxy[0].middlewares[0] else {
+            panic!("expected authenticated");
+        };
+        assert_eq!(auth.groups, vec!["family"]);
+        assert!(!auth.allow_internal);
+        let back: ServiceExtensions =
+            serde_yaml::from_str(&serde_yaml::to_string(&ext).unwrap()).unwrap();
+        assert_eq!(back.proxy[0].middlewares, ext.proxy[0].middlewares);
+    }
+
+    #[test]
     fn bare_forward_auth_is_rejected() {
         let err = serde_yaml::from_str::<ServiceExtensions>(
             "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares: [forward_auth]\n",
@@ -904,7 +969,10 @@ proxy:
             "proxy:\n  - host: site\n    network: wan\n    port: 80\n    middlewares: [authenticated]\n",
         )
         .expect("parse");
-        assert_eq!(ext.proxy[0].middlewares, vec![Middleware::Authenticated]);
+        assert_eq!(
+            ext.proxy[0].middlewares,
+            vec![Middleware::Authenticated(Authenticated::default())]
+        );
     }
 
     #[test]

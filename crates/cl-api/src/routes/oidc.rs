@@ -20,14 +20,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
-use crate::oidc::OIDC_CLIENT_SECRET;
+use crate::oidc::{OIDC_CLIENT_SECRET, PROXY_OIDC_CLIENT_SECRET};
 use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/api/oidc/client-secret",
-        get(secret_status).put(set_secret),
-    )
+    Router::new()
+        .route(
+            "/api/oidc/client-secret",
+            get(secret_status).put(set_secret),
+        )
+        .route(
+            "/api/proxy-auth/client-secret",
+            get(proxy_secret_status).put(set_proxy_secret),
+        )
 }
 
 #[derive(Serialize)]
@@ -38,10 +43,20 @@ struct SecretStatus {
 }
 
 async fn secret_status(_identity: Identity, State(state): State<AppState>) -> Json<SecretStatus> {
-    let cluster_state = state.cluster.state().await;
-    Json(SecretStatus {
-        configured: cluster_state.secrets.contains_key(OIDC_CLIENT_SECRET),
-    })
+    status_of(&state, OIDC_CLIENT_SECRET).await
+}
+
+/// Same for the reverse proxy login portal's client (`proxy.auth`).
+async fn proxy_secret_status(
+    _identity: Identity,
+    State(state): State<AppState>,
+) -> Json<SecretStatus> {
+    status_of(&state, PROXY_OIDC_CLIENT_SECRET).await
+}
+
+async fn status_of(state: &AppState, name: &str) -> Json<SecretStatus> {
+    let configured = state.cluster.read(|s| s.secrets.contains_key(name)).await;
+    Json(SecretStatus { configured })
 }
 
 #[derive(Deserialize)]
@@ -62,6 +77,22 @@ async fn set_secret(
     State(state): State<AppState>,
     Json(body): Json<SetSecretRequest>,
 ) -> Result<StatusCode, ApiError> {
+    store_secret(&state, OIDC_CLIENT_SECRET, body).await
+}
+
+async fn set_proxy_secret(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(body): Json<SetSecretRequest>,
+) -> Result<StatusCode, ApiError> {
+    store_secret(&state, PROXY_OIDC_CLIENT_SECRET, body).await
+}
+
+async fn store_secret(
+    state: &AppState,
+    name: &str,
+    body: SetSecretRequest,
+) -> Result<StatusCode, ApiError> {
     let secret = body.client_secret.trim().to_string();
     if secret.is_empty() {
         return Err(ApiError::BadRequest("the client secret is empty".into()));
@@ -71,15 +102,14 @@ async fn set_secret(
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-    let sealed =
-        Sealed::seal(key, OIDC_CLIENT_SECRET, secret.as_bytes()).map_err(ApiError::internal)?;
+    let sealed = Sealed::seal(key, name, secret.as_bytes()).map_err(ApiError::internal)?;
     let key_fingerprint = key.fingerprint();
     drop(key_guard);
 
     let response = state
         .cluster
         .submit(ClusterRequest::PutSecret {
-            name: OIDC_CLIENT_SECRET.to_string(),
+            name: name.to_string(),
             sealed: sealed.blob,
             key_fingerprint,
             owner: None,

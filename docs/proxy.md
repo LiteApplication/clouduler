@@ -204,6 +204,70 @@ lists `basic_auth` or `headers` is accepted but currently enforces nothing
 extra. This is a known gap, not an oversight, tracked against the day
 `ProxyRoute` grows per-middleware config.
 
+### Login (`authenticated`)
+
+Protects an app that has no login of its own, optionally for some groups only.
+
+```yaml
+# cluster.yaml
+proxy:
+  auth:
+    host: login            # the login portal's hostname, on `network`
+    network: wan
+    issuer: https://sso.example.com/application/o/apps/
+    client_id: clouduler-apps
+    groups_claim: groups   # default
+    session_ttl: 7d        # how long a login lasts (default 12h)
+    title: Sign in to continue
+    accent: "#e5603c"      # login page colour
+
+# stack file
+proxy:
+  - host: wiki
+    network: wan
+    port: 80
+    middlewares:
+      - authenticated:               # bare `authenticated` = any user of the provider
+          groups: [family, admins]   # at least one of these
+          allow_internal: true       # default: containers skip the login
+```
+
+This is a separate identity provider client and group namespace from
+`auth.oidc` (which logs operators into the dashboard). Create the client with
+the redirect URI `https://<portal host>/callback`, then store its secret:
+`PUT /api/proxy-auth/client-secret` with `{"client_secret": "…"}` (admin; write
+only, like `/api/oidc/client-secret`). The portal hostname gets DNS and a
+certificate like any proxied host.
+
+**Flow.** A request with no valid `cl_proxy_auth` cookie gets a 302 to
+`https://<portal>/login?callback=<url>`. If the browser already has a portal
+session, the portal immediately 302s back to
+`https://<app>/.well-known/clouduler-cookie?token=…&redirect=…`, which spends
+the token, sets the app's own cookie and 302s to the page originally asked
+for: three redirects, no javascript, no click. With no portal session the
+portal shows a sign-in page, runs the OIDC login, then does the same.
+Non-navigation requests (non-GET, or an `Accept` without `text/html`) get a
+401 instead of a redirect. A signed-in user outside the route's `groups` gets
+a 403 page with a "use another account" link (portal logout).
+
+**State.** Sessions and tokens are in raft, so any node accepts any login and
+logins survive restarts; only a hash of each cookie/token is stored. A token
+is valid for 60 seconds and can be spent once, cluster-wide. Cookies are
+host-only and bound to their hostname; an app cookie never outlives the portal
+session that produced it (`session_ttl`, fixed at login). Groups are read at
+login: a change at the provider applies from the next login. Signing out at
+the portal (`/logout`) ends the portal session, not app cookies already issued.
+The proxy strips its cookies before forwarding, so backends never see them.
+
+**Callbacks.** The portal only redirects to a hostname whose route has
+`authenticated`, so it is not an open redirect. The reserved paths
+`/.well-known/clouduler-*` are answered by the proxy on protected hosts.
+
+**Containers skip the login** by default (`allow_internal`): the check is on
+the real TCP peer, which must be in a container overlay or nat subnet, or be a
+node's internal address. Set `allow_internal: false` to require a login from
+them too. Caveat: a host process on a node counts as internal.
+
 ### CORS
 
 Unlike `basic_auth`/`headers`, `cors` does carry its settings and is fully

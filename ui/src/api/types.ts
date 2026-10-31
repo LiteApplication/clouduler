@@ -433,6 +433,9 @@ export interface ClusterState {
   instance_updates: Record<InstanceId, InstanceUpdate>;
   /** Login sessions keyed by a hash of the cookie; the ui never needs them. */
   sessions?: Record<string, unknown>;
+  /** Reverse proxy login sessions and one-time tokens; the ui never needs them. */
+  proxy_sessions?: Record<string, unknown>;
+  proxy_tokens?: Record<string, unknown>;
   version: number;
 }
 

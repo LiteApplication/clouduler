@@ -8,6 +8,11 @@
 
 pub const OIDC_CLIENT_SECRET: &str = "_clouduler_oidc_client_secret";
 
+/// Client secret of the reverse proxy's login portal (`proxy.auth`), a
+/// different identity provider client from the dashboard's. The proxy reads
+/// it by this name (`cl_proxy::auth_gate`).
+pub const PROXY_OIDC_CLIENT_SECRET: &str = "_clouduler_proxy_oidc_client_secret";
+
 pub fn is_reserved_oidc_secret(name: &str) -> bool {
-    name == OIDC_CLIENT_SECRET
+    name == OIDC_CLIENT_SECRET || name == PROXY_OIDC_CLIENT_SECRET
 }
