@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::deploy_key::DEPLOY_KEY_PUBLIC_CONFIG;
 use crate::status::{LAST_EXPORT_CONFIG, LAST_PULL_CONFIG};
 
+const RUN_CONFIG: &str = "_clouduler_self_update_run";
+
 /// Reserved config entries this feature writes for its own bookkeeping, not
 /// user content - excluded both from change detection (this module) and
 /// from the exported tree itself (`tree::build`), and from the reverse
@@ -34,6 +36,7 @@ pub fn is_bookkeeping_config(name: &str) -> bool {
         || name == LAST_PULL_CONFIG
         || name == MCP_CLIENTS_CONFIG
         || name == UPDATE_CHECK_CONFIG
+        || name == RUN_CONFIG
 }
 
 /// The self-update release check (`cl_update::plan::CHECK_CONFIG`), rewritten
@@ -190,6 +193,7 @@ mod tests {
     #[test]
     fn the_update_check_is_bookkeeping_not_exported_content() {
         assert!(super::is_bookkeeping_config("_clouduler_self_update_check"));
+        assert!(super::is_bookkeeping_config("_clouduler_self_update_run"));
     }
 
     use super::*;

@@ -180,6 +180,7 @@ pub(crate) async fn harness() -> Harness {
         tls_fingerprint: "test:fingerprint".to_string(),
         proxy_health: cl_proxy::HealthTable::default(),
         nudges: Default::default(),
+        git_export_author: Default::default(),
         proxy_routes: Default::default(),
         internal_replay: Default::default(),
         oauth: Default::default(),

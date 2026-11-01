@@ -99,9 +99,11 @@ pub fn router() -> Router<AppState> {
 /// "check immediately" more than a forced push. The loop is leader-only, so
 /// a non-leader forwards to the leader.
 async fn export_now_admin(
-    _admin: RequireAdmin,
+    admin: RequireAdmin,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    let email = format!("{}@localhost", admin.0.username);
+    *state.git_export_author.lock().unwrap() = Some((admin.0.username.clone(), email));
     if state.cluster.is_leader() {
         state.nudges.git_export.notify_one();
         return Ok(StatusCode::ACCEPTED);
@@ -109,12 +111,22 @@ async fn export_now_admin(
     let leader = leader_node_name(&state)
         .await
         .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
-    internal_peer::post_empty(&state, &leader, "/api/git-backup/internal-export-now").await?;
+    let query = serde_urlencoded::to_string([("author", &admin.0.username)]).unwrap_or_default();
+    let path = format!("/api/git-backup/internal-export-now?{query}");
+    internal_peer::post_empty(&state, &leader, &path).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 /// Node-to-node only: what `export_now_admin` forwards to the leader.
-async fn internal_export_now(_auth: InternalAuth, State(state): State<AppState>) -> StatusCode {
+async fn internal_export_now(
+    _auth: InternalAuth,
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> StatusCode {
+    if let Some(username) = params.get("author") {
+        let email = format!("{}@localhost", username);
+        *state.git_export_author.lock().unwrap() = Some((username.clone(), email));
+    }
     state.nudges.git_export.notify_one();
     StatusCode::ACCEPTED
 }
@@ -130,10 +142,11 @@ async fn pull_now_admin(
 
 /// `reconcile_now` for a signed-in admin rather than the cli.
 async fn reconcile_now_admin(
-    _admin: RequireAdmin,
+    admin: RequireAdmin,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
-    trigger_reconcile(&state).await?;
+    let email = format!("{}@localhost", admin.0.username);
+    trigger_reconcile(&state, Some((admin.0.username.clone(), email))).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -305,27 +318,39 @@ async fn pull_now(
 
 /// Trigger a reconcile on the leader. If called on a non-leader, forwards
 /// to the leader over the internal authenticated channel.
-async fn trigger_reconcile(state: &AppState) -> Result<(), ApiError> {
+async fn trigger_reconcile(
+    state: &AppState,
+    author: Option<(String, String)>,
+) -> Result<(), ApiError> {
     if !state.cluster.is_leader() {
         let leader = leader_node_name(state)
             .await
             .ok_or_else(|| ApiError::Unavailable("no cluster leader known right now".into()))?;
+        let path = match &author {
+            Some((name, _)) => {
+                let query = serde_urlencoded::to_string([("author", name)]).unwrap_or_default();
+                format!("/api/git-backup/webhook/internal-reconcile?{query}")
+            }
+            None => "/api/git-backup/webhook/internal-reconcile".to_string(),
+        };
         return internal_peer::post_empty(
             state,
             &leader,
-            "/api/git-backup/webhook/internal-reconcile",
+            &path,
         )
         .await;
     }
-    run_reconcile(state).await
+    run_reconcile(state, author).await
 }
 
 /// Node-to-node only: what `trigger_reconcile` forwards to when this node is not the leader.
 async fn internal_reconcile(
     _auth: InternalAuth,
     State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<StatusCode, ApiError> {
-    run_reconcile(&state).await?;
+    let author = params.get("author").map(|u| (u.clone(), format!("{}@localhost", u)));
+    run_reconcile(&state, author).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -336,11 +361,11 @@ async fn reconcile_now(
     _auth: InternalAuth,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
-    trigger_reconcile(&state).await?;
+    trigger_reconcile(&state, None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
+async fn run_reconcile(state: &AppState, author: Option<(String, String)>) -> Result<(), ApiError> {
     let backup_cfg = state
         .cluster_config
         .read()
@@ -371,6 +396,7 @@ async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
     let dir = state.data_dir.join("git-backup");
     let cluster_state_for_build = cluster_state.clone();
     let mut secret_cache = std::mem::take(&mut cache_state.secret_cache);
+    let author_owned = author;
     let (commit_oid, secret_cache) = tokio::task::spawn_blocking(move || {
         let _repo_guard = cl_backup::git::lock_repo();
         let backup = cl_backup::git::GitBackup::open_or_init(
@@ -382,11 +408,12 @@ async fn run_reconcile(state: &AppState) -> Result<(), ApiError> {
             tracing::warn!(error = %e, "git backup: could not read committed secrets from the remote");
         }
         let files = cl_backup::tree::build(&cluster_state_for_build, &key, &recipient, &mut secret_cache);
+        let author_ref = author_owned.as_ref().map(|(n, e)| (n.as_str(), e.as_str()));
         let oid = backup.reconcile(
             &files,
             "reconcile: mirror cluster state",
             &private_key_pem,
-            None,
+            author_ref,
         )?;
         Ok::<_, cl_backup::error::BackupError>((oid, secret_cache))
     })

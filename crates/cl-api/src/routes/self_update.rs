@@ -202,7 +202,12 @@ async fn start_run(
     }
 
     let id = format!("run-{}", now());
-    let run = UpdateRunState::new(id, cluster_state.nodes.keys().cloned(), now());
+    let nodes_to_update = cluster_state
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.availability == cl_raft::state::Availability::Active)
+        .map(|(name, _)| name.clone());
+    let run = UpdateRunState::new(id, nodes_to_update, now());
     submit_run(&state, &run, revision).await?;
     Ok(Json(run))
 }

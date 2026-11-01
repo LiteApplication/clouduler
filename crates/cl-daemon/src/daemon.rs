@@ -1028,6 +1028,7 @@ async fn watch_git_backup(
         // it either way.
         let state = cluster.state().await;
 
+        let author = api_state.as_ref().and_then(|a| a.git_export_author.lock().unwrap().take());
         let (result, updated_cache) = run_git_export_blocking(
             state.clone(),
             key,
@@ -1035,6 +1036,7 @@ async fn watch_git_backup(
             dir.clone(),
             message.clone(),
             secret_cache,
+            author,
         )
         .await;
         secret_cache = updated_cache;
@@ -1095,6 +1097,7 @@ fn run_git_export(
     dir: &Path,
     message: &str,
     secret_cache: &mut cl_backup::tree::SecretCache,
+    author: Option<(String, String)>,
 ) -> anyhow::Result<Option<String>> {
     let recipient = cl_backup::age::parse_recipient(&backup_cfg.age_recipient)?;
     let private_key_pem = cl_backup::deploy_key::load_private(state, key)
@@ -1109,7 +1112,8 @@ fn run_git_export(
         tracing::warn!(error = %e, "git backup: could not read committed secrets from the remote");
     }
     let files = cl_backup::tree::build(state, key, &recipient, secret_cache);
-    let oid = repo.sync(&files, message, &private_key_pem, None)?;
+    let author_ref = author.as_ref().map(|(n, e)| (n.as_str(), e.as_str()));
+    let oid = repo.sync(&files, message, &private_key_pem, author_ref)?;
     Ok(oid.map(|oid| oid.to_string()))
 }
 
@@ -1124,11 +1128,12 @@ async fn run_git_export_blocking(
     dir: PathBuf,
     message: String,
     secret_cache: cl_backup::tree::SecretCache,
+    author: Option<(String, String)>,
 ) -> (anyhow::Result<Option<String>>, cl_backup::tree::SecretCache) {
     let cache_before_attempt = secret_cache.clone();
     match tokio::task::spawn_blocking(move || {
         let mut secret_cache = secret_cache;
-        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message, &mut secret_cache);
+        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message, &mut secret_cache, author);
         (result, secret_cache)
     })
     .await
