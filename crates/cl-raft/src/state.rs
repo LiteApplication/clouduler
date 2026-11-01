@@ -3240,6 +3240,7 @@ mod tests {
                 error: None,
                 attempts: 1,
                 phase: "opened".into(),
+                message_id: None,
             });
         }
         state.apply(&Request::PutAlert(rec));

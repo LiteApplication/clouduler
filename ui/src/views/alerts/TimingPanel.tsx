@@ -72,6 +72,12 @@ export function TimingPanel({ settings, reload }: { settings: AlertSettingsRespo
       <div className="grid" style={{ gap: 12 }}>
         <Toggle label="Notify again when an alert gets worse" description="A warning that turns critical sends a new message." checked={d.renotify_on_escalation} onChange={(v) => set({ renotify_on_escalation: v })} />
         <Toggle label="Tell me when it is resolved" description="Sent to the destinations that heard about it opening." checked={d.notify_resolved} onChange={(v) => set({ notify_resolved: v })} />
+        <Toggle
+          label="Display warnings during debounce"
+          description="Show warnings immediately in the in-app feed, but delete them if they resolve before the debounce expires."
+          checked={d.display_pending_warnings ?? false}
+          onChange={(v) => set({ display_pending_warnings: v })}
+        />
       </div>
       <details className="al-adv">
         <summary>Thresholds</summary>

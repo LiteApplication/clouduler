@@ -52,6 +52,10 @@ pub struct AlertDelivery {
     /// `opened`, `escalated`, `resolved`, `event` or `digest`.
     #[serde(default)]
     pub phase: String,
+    /// Provider-specific message identifier (e.g. Discord message ID)
+    /// captured on delivery so future transitions can edit the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// One entry of the in-app feed.

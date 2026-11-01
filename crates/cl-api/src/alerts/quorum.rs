@@ -129,7 +129,7 @@ impl QuorumReporter {
             let sink = deliveries.clone();
             tokio::spawn(async move {
                 let o: Outcome = sender
-                    .deliver_with_retries(Vec::new(), dest, "opened", &n)
+                    .deliver_with_retries(Vec::new(), dest, "opened", &n, None)
                     .await;
                 sink.lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -140,6 +140,7 @@ impl QuorumReporter {
                         error: o.error,
                         attempts: o.attempts,
                         phase: o.phase.to_string(),
+                        message_id: o.message_id,
                     });
             });
         }

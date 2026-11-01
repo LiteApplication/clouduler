@@ -275,6 +275,7 @@ export interface DestForm {
   mention: string;
   notify: DiscordNotifyLevels;
   buttons: boolean;
+  edit_resolved: boolean;
   username: string;
   /** One per line or comma separated. */
   to: string;
@@ -299,6 +300,7 @@ export function newForm(kind: DestKind): DestForm {
     mention: '',
     notify: { ...DEFAULT_NOTIFY },
     buttons: true,
+    edit_resolved: false,
     username: '',
     to: '',
     severities: ['critical', 'warning'],
@@ -322,6 +324,7 @@ export function formFrom(d: AlertDestination): DestForm {
     f.mention = d.mention ?? '';
     f.notify = { ...d.notify };
     f.buttons = d.buttons;
+    f.edit_resolved = d.edit_resolved ?? false;
     f.username = d.username ?? '';
   } else if (d.kind === 'email') {
     f.to = d.to.join('\n');
@@ -352,6 +355,7 @@ export function formToDestination(f: DestForm): AlertDestination {
       ...(f.mention.trim() ? { mention: f.mention.trim() } : {}),
       notify: f.notify,
       buttons: f.buttons,
+      edit_resolved: f.edit_resolved,
       ...(f.username.trim() ? { username: f.username.trim() } : {}),
     };
   }

@@ -1257,6 +1257,7 @@ export interface AlertDelivery {
   ok: boolean;
   error?: string;
   attempts: number;
+  message_id?: string;
 }
 
 export interface AlertView {
@@ -1335,6 +1336,7 @@ export interface DiscordDestination extends AlertDestinationBase {
   mention?: string;
   notify: DiscordNotifyLevels;
   buttons: boolean;
+  edit_resolved?: boolean;
   username?: string;
 }
 export interface WebhookDestination extends AlertDestinationBase {
@@ -1371,6 +1373,7 @@ export interface AlertSettings {
   timezone?: string;
   renotify_on_escalation: boolean;
   notify_resolved: boolean;
+  display_pending_warnings?: boolean;
   retention: string;
   public_url?: string;
   destinations: AlertDestination[];

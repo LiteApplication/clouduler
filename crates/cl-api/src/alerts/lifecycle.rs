@@ -520,6 +520,7 @@ mod tests {
                 error: None,
                 attempts: 1,
                 phase: "opened".into(),
+                message_id: None,
             });
         l.resolve("d", 50, false);
         let jobs = l.collect_sends(&settings());

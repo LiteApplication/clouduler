@@ -68,6 +68,10 @@ pub struct AlertSettings {
     /// Send a message when an alert that was delivered resolves.
     #[serde(default = "default_true")]
     pub notify_resolved: bool,
+    /// Display warnings in the UI immediately without waiting for the debounce.
+    /// If they resolve before the debounce expires, they are deleted without a trace.
+    #[serde(default)]
+    pub display_pending_warnings: bool,
     /// How long resolved and one-shot alerts are kept in the in-app feed.
     #[serde(default = "default_retention", with = "humantime_serde")]
     pub retention: Duration,
@@ -96,6 +100,7 @@ impl Default for AlertSettings {
             timezone: None,
             renotify_on_escalation: true,
             notify_resolved: true,
+            display_pending_warnings: false,
             retention: default_retention(),
             public_url: None,
             destinations: Vec::new(),
@@ -156,6 +161,10 @@ pub struct DiscordOptions {
     /// Link buttons under the message (open in Clouduler, logs).
     #[serde(default = "default_true")]
     pub buttons: bool,
+    /// When an alert resolves, edit the original alert message in-place
+    /// instead of sending a new message.
+    #[serde(default)]
+    pub edit_resolved: bool,
     /// Overrides the webhook's own name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
@@ -168,6 +177,7 @@ impl Default for DiscordOptions {
             mention: None,
             notify: DiscordNotifyLevels::default(),
             buttons: true,
+            edit_resolved: false,
             username: None,
         }
     }

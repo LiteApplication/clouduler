@@ -47,6 +47,8 @@ struct DeliveryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -114,6 +116,7 @@ impl From<&AlertRecord> for AlertView {
                     ok: d.ok,
                     error: d.error.clone(),
                     attempts: d.attempts,
+                    message_id: d.message_id.clone(),
                 })
                 .collect(),
         }
@@ -138,18 +141,24 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<AlertL
     Json(
         state
             .cluster
-            .read(|st| build_list(st.alerts.values()))
+            .read(|st| {
+                let s = settings::load(st);
+                build_list(st.alerts.values(), s.display_pending_warnings)
+            })
             .await,
     )
 }
 
-fn build_list<'a>(records: impl Iterator<Item = &'a AlertRecord>) -> AlertList {
+fn build_list<'a>(
+    records: impl Iterator<Item = &'a AlertRecord>,
+    include_pending: bool,
+) -> AlertList {
     let mut active: Vec<&AlertRecord> = Vec::new();
     let mut recent: Vec<&AlertRecord> = Vec::new();
     for r in records {
-        if r.state.is_open() {
+        if r.state == AlertState::Active || (include_pending && r.state == AlertState::Pending) {
             active.push(r);
-        } else {
+        } else if r.state != AlertState::Pending {
             recent.push(r);
         }
     }
@@ -785,13 +794,23 @@ mod tests {
             rec("done-old", AlertSeverity::Warning, Resolved, 2),
             rec("done-new", AlertSeverity::Info, Event, 9),
         ];
-        let l = build_list(all.iter());
+        // When include_pending is false, Pending alerts are hidden completely
+        let l = build_list(all.iter(), false);
         let ids: Vec<_> = l.active.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, vec!["c", "w-new", "w-old"]);
+        assert_eq!(ids, vec!["c", "w-old"]);
         assert_eq!(
             (l.counts.critical, l.counts.warning, l.counts.info),
-            (1, 2, 0)
+            (1, 1, 0)
         );
         assert_eq!(l.recent[0].id, "done-new");
+
+        // When include_pending is true, Pending alerts are displayed in active
+        let l_pending = build_list(all.iter(), true);
+        let ids_pending: Vec<_> = l_pending.active.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids_pending, vec!["c", "w-new", "w-old"]);
+        assert_eq!(
+            (l_pending.counts.critical, l_pending.counts.warning, l_pending.counts.info),
+            (1, 2, 0)
+        );
     }
 }

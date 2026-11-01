@@ -281,6 +281,12 @@ export function DestinationSheet({
               checked={f.buttons}
               onChange={(buttons) => set({ buttons })}
             />
+            <Toggle
+              label="Edit resolved messages"
+              description="Update the original alert message in-place when resolved instead of sending a new message."
+              checked={f.edit_resolved}
+              onChange={(edit_resolved) => set({ edit_resolved })}
+            />
             <TextField
               label="Sender name"
               placeholder="Clouduler"

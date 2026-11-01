@@ -137,6 +137,7 @@ impl Engine {
                     error: o.error.clone(),
                     attempts: o.attempts,
                     phase: o.phase.to_string(),
+                    message_id: o.message_id.clone(),
                 });
             }
             if o.counts_for_health
@@ -389,11 +390,21 @@ impl Engine {
                 ui_url: url.clone(),
                 body: Body::Alert(msg),
             };
+            let edit_message_id = if job.kind == Kind::Resolved {
+                rec.deliveries
+                    .iter()
+                    .rev()
+                    .find(|d| d.ok && d.destination == job.destination && d.message_id.is_some())
+                    .and_then(|d| d.message_id.clone())
+            } else {
+                None
+            };
             self.sender.spawn(
                 vec![job.record],
                 job.destination,
                 job.kind.label(),
                 n,
+                edit_message_id,
                 self.tx.clone(),
             );
         }
@@ -413,7 +424,7 @@ impl Engine {
                 body: Body::Digest { alerts },
             };
             self.sender
-                .spawn(d.records, d.destination, "digest", n, self.tx.clone());
+                .spawn(d.records, d.destination, "digest", n, None, self.tx.clone());
         }
     }
 
@@ -791,5 +802,46 @@ mod tests {
         assert_eq!(m.links[0].url, "https://c.example/instances/a");
         let m = message(&r, Kind::Opened, None, None);
         assert!(m.links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_outcomes_records_message_id_on_alert_deliveries() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcome = Outcome {
+            records: vec!["rec1".into()],
+            destination: "discord1".into(),
+            phase: "opened",
+            at: 100,
+            ok: true,
+            error: None,
+            attempts: 1,
+            counts_for_health: true,
+            message_id: Some("discord-msg-999".into()),
+        };
+        tx.send(outcome).unwrap();
+
+        let mut st = ClusterState::default();
+        let mut rec = missing("rec1");
+        rec.id = "rec1".into();
+        st.alerts.insert("rec1".into(), rec);
+
+        // Verify the outcome drained into delivery retains message_id
+        let o = rx.recv().await.unwrap();
+        let r = st.alerts.get_mut("rec1").unwrap();
+        r.deliveries.push(AlertDelivery {
+            destination: o.destination.clone(),
+            at: o.at,
+            ok: o.ok,
+            error: o.error.clone(),
+            attempts: o.attempts,
+            phase: o.phase.to_string(),
+            message_id: o.message_id.clone(),
+        });
+
+        assert_eq!(r.deliveries.len(), 1);
+        assert_eq!(
+            r.deliveries[0].message_id.as_deref(),
+            Some("discord-msg-999")
+        );
     }
 }

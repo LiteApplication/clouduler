@@ -570,6 +570,7 @@
         }
       ],
       "digest_at": "09:00",
+      "display_pending_warnings": false,
       "enabled": true,
       "events": {},
       "notify_resolved": true,

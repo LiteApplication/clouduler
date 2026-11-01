@@ -525,16 +525,77 @@ pub async fn send(
     url: &str,
     opts: &DiscordOptions,
     n: &Notification,
-) -> Result<(), DeliveryError> {
-    for message in messages(opts, n) {
+    edit_message_id: Option<&str>,
+) -> Result<Option<String>, DeliveryError> {
+    let is_resolved = matches!(&n.body, Body::Alert(m) if m.phase == Phase::Resolved);
+    let msgs = messages(opts, n);
+    let mut returned_id: Option<String> = None;
+
+    for (idx, message) in msgs.iter().enumerate() {
+        let should_patch = opts.edit_resolved && is_resolved && idx == 0 && edit_message_id.is_some();
+
+        if should_patch {
+            let msg_id = edit_message_id.unwrap();
+            let base = url.trim_end_matches('/');
+            let patch_url = format!("{base}/messages/{msg_id}");
+            let mut req = http.patch(&patch_url).timeout(TIMEOUT).header(
+                USER_AGENT,
+                format!("clouduler/{}", env!("CARGO_PKG_VERSION")),
+            );
+            if message.has_components() {
+                req = req.query(&[("with_components", "true")]);
+            }
+            // Discord webhook PATCH rejects username/avatar_url fields.
+            let mut payload = message.payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.remove("username");
+                obj.remove("avatar_url");
+            }
+            let resp = req
+                .json(&payload)
+                .send()
+                .await
+                .map_err(transport_error)?;
+            let status = resp.status();
+            if status.is_success() {
+                returned_id = Some(msg_id.to_string());
+                continue;
+            }
+            // If the original message was deleted (404), fall back to posting a new message
+            if status.as_u16() != 404 {
+                let header_wait = retry_after(resp.headers());
+                let body = resp.text().await.unwrap_or_default();
+                let wait = header_wait.or_else(|| {
+                    serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|v| v["retry_after"].as_f64())
+                        .filter(|s| s.is_finite() && *s >= 0.0)
+                        .map(|s| Duration::from_secs_f64(s.min(3600.0)))
+                });
+                let code = status.as_u16();
+                return Err(DeliveryError {
+                    message: if code == 429 {
+                        "Discord is rate limiting this webhook".to_string()
+                    } else {
+                        explain(code, &body)
+                    },
+                    retryable: code == 429 || code == 408 || status.is_server_error(),
+                    retry_after: wait,
+                });
+            }
+            // 404: fall through to post below
+        }
+
         let mut req = http.post(url).timeout(TIMEOUT).header(
             USER_AGENT,
             format!("clouduler/{}", env!("CARGO_PKG_VERSION")),
         );
+        let mut query: Vec<(&str, &str)> = vec![("wait", "true")];
         // Link buttons are only accepted on a webhook when asked for.
         if message.has_components() {
-            req = req.query(&[("with_components", "true")]);
+            query.push(("with_components", "true"));
         }
+        req = req.query(&query);
         let resp = req
             .json(&message.payload)
             .send()
@@ -542,6 +603,15 @@ pub async fn send(
             .map_err(transport_error)?;
         let status = resp.status();
         if status.is_success() {
+            if idx == 0 {
+                if let Ok(body_text) = resp.text().await {
+                    if let Ok(v) = serde_json::from_str::<Value>(&body_text) {
+                        if let Some(id) = v["id"].as_str() {
+                            returned_id = Some(id.to_string());
+                        }
+                    }
+                }
+            }
             continue;
         }
         let header_wait = retry_after(resp.headers());
@@ -564,7 +634,7 @@ pub async fn send(
             retry_after: wait,
         });
     }
-    Ok(())
+    Ok(returned_id)
 }
 
 #[cfg(test)]
@@ -951,5 +1021,125 @@ mod tests {
             ),
             "Discord answered HTTP 400"
         );
+    }
+
+    #[tokio::test]
+    async fn discord_send_captures_message_id_and_patches_when_edit_resolved() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook/token", l.local_addr().unwrap());
+
+        let h = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap();
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                requests.push(text);
+
+                let body = "{\"id\":\"1122334455\"}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                s.write_all(resp.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+
+        let opts = DiscordOptions { edit_resolved: true, ..Default::default() };        let client = reqwest::Client::new();
+
+        // 1. Send opened alert - should POST with ?wait=true and return message id
+        let open_n = notification(Body::Alert(alert(Severity::Critical, Phase::Opened)));
+        let returned_id = send(&client, &url, &opts, &open_n, None).await.unwrap();
+        assert_eq!(returned_id, Some("1122334455".to_string()));
+
+        // 2. Send resolved alert with edit_message_id - should PATCH /messages/1122334455
+        let resolved_n = notification(Body::Alert(alert(Severity::Critical, Phase::Resolved)));
+        let edit_id = send(
+            &client,
+            &url,
+            &opts,
+            &resolved_n,
+            returned_id.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(edit_id, Some("1122334455".to_string()));
+
+        let reqs = h.await.unwrap();
+        assert!(reqs[0].starts_with("POST /hook/token?wait=true&with_components=true "));
+        assert!(reqs[1].starts_with("PATCH /hook/token/messages/1122334455?with_components=true "));
+        // Verify PATCH body does not have username or avatar_url
+        assert!(!reqs[1].contains("\"username\""));
+        assert!(!reqs[1].contains("\"avatar_url\""));
+    }
+
+    #[tokio::test]
+    async fn discord_patch_404_falls_back_to_post() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook/token", l.local_addr().unwrap());
+
+        let h = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for i in 0..2 {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0;
+                loop {
+                    let r = s.read(&mut buf[n..]).await.unwrap();
+                    n += r;
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    if let Some(pos) = text.find("\r\n\r\n") {
+                        let clen = text[..pos]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if n >= pos + 4 + clen || r == 0 {
+                            break;
+                        }
+                    } else if r == 0 {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                if i == 0 {
+                    let not_found = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n";
+                    s.write_all(not_found.as_bytes()).await.unwrap();
+                } else {
+                    let body = "{\"id\":\"99887766\"}";
+                    let ok = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    s.write_all(ok.as_bytes()).await.unwrap();
+                }
+            }
+            requests
+        });
+
+        let opts = DiscordOptions { edit_resolved: true, ..Default::default() };        let client = reqwest::Client::new();
+        let resolved_n = notification(Body::Alert(alert(Severity::Critical, Phase::Resolved)));
+
+        let res = send(&client, &url, &opts, &resolved_n, Some("deleted-msg-id"))
+            .await
+            .unwrap();
+        assert_eq!(res, Some("99887766".to_string()));
+
+        let reqs = h.await.unwrap();
+        assert!(reqs[0].starts_with("PATCH /hook/token/messages/deleted-msg-id?with_components=true "));
+        assert!(reqs[1].starts_with("POST /hook/token?wait=true&with_components=true "));
     }
 }

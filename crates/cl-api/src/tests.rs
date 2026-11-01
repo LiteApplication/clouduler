@@ -2465,6 +2465,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                     error: Some("HTTP 500".into()),
                     attempts: 5,
                     phase: "opened".into(),
+                    message_id: None,
                 }],
             }))
             .await

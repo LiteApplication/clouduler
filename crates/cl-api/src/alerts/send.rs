@@ -46,6 +46,8 @@ pub struct Outcome {
     pub attempts: u32,
     /// Count towards the destination's health.
     pub counts_for_health: bool,
+    /// Provider message ID (e.g. from Discord webhook ?wait=true)
+    pub message_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -85,11 +87,11 @@ impl Sender {
     ) -> Result<(), DeliveryError> {
         match tokio::time::timeout(
             ATTEMPT_TIMEOUT + Duration::from_secs(2),
-            deliver(&self.http, dest, secrets, smtp, n),
+            deliver(&self.http, dest, secrets, smtp, n, None),
         )
         .await
         {
-            Ok(r) => r.map_err(scrub_error),
+            Ok(r) => r.map(|_| ()).map_err(scrub_error),
             Err(_) => Err(DeliveryError {
                 message: "timed out after 10 seconds".into(),
                 retryable: true,
@@ -122,12 +124,13 @@ impl Sender {
         destination: String,
         phase: &'static str,
         notification: Notification,
+        edit_message_id: Option<String>,
         tx: mpsc::UnboundedSender<Outcome>,
     ) {
         let this = self.clone();
         tokio::spawn(async move {
             let outcome = this
-                .deliver_with_retries(records, destination, phase, &notification)
+                .deliver_with_retries(records, destination, phase, &notification, edit_message_id.as_deref())
                 .await;
             let _ = tx.send(outcome);
         });
@@ -139,6 +142,7 @@ impl Sender {
         destination: String,
         phase: &'static str,
         notification: &Notification,
+        edit_message_id: Option<&str>,
     ) -> Outcome {
         let mut outcome = Outcome {
             records,
@@ -149,6 +153,7 @@ impl Sender {
             error: None,
             attempts: 0,
             counts_for_health: true,
+            message_id: None,
         };
         if !self.allow(&destination) {
             outcome.error =
@@ -162,12 +167,13 @@ impl Sender {
         };
         for attempt in 1..=MAX_ATTEMPTS {
             outcome.attempts = attempt;
-            let result = self.attempt(&destination, notification).await;
+            let result = self.attempt(&destination, notification, edit_message_id).await;
             outcome.at = unix_now();
             match result {
-                Ok(()) => {
+                Ok(msg_id) => {
                     outcome.ok = true;
                     outcome.error = None;
+                    outcome.message_id = msg_id;
                     return outcome;
                 }
                 Err(e) => {
@@ -184,7 +190,7 @@ impl Sender {
         outcome
     }
 
-    async fn attempt(&self, name: &str, n: &Notification) -> Result<(), DeliveryError> {
+    async fn attempt(&self, name: &str, n: &Notification, edit_message_id: Option<&str>) -> Result<Option<String>, DeliveryError> {
         let fatal = |m: &str| DeliveryError {
             message: m.to_string(),
             retryable: false,
@@ -205,7 +211,7 @@ impl Sender {
             ));
         };
         let secrets = unseal_for(&state, &key, dest, &settings).map_err(|m| fatal(&m))?;
-        let fut = deliver(&self.http, dest, &secrets, settings.smtp.as_ref(), n);
+        let fut = deliver(&self.http, dest, &secrets, settings.smtp.as_ref(), n, edit_message_id);
         match tokio::time::timeout(ATTEMPT_TIMEOUT + Duration::from_secs(2), fut).await {
             Ok(r) => r.map_err(scrub_error),
             Err(_) => Err(DeliveryError {

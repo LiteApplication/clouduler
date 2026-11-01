@@ -45,7 +45,7 @@ function settings(over: Partial<AlertSettings> = {}): AlertSettings {
 const discord = (over: Partial<AlertDestination> = {}): AlertDestination =>
   ({
     name: 'home', enabled: true, kind: 'discord', style: 'embed', notify: { critical: 'ping', warning: 'normal', info: 'silent', resolved: 'silent' },
-    buttons: true, severities: ['critical', 'warning'], digest: false, ...over,
+    buttons: true, edit_resolved: false, severities: ['critical', 'warning'], digest: false, ...over,
   }) as AlertDestination;
 
 describe('active order', () => {

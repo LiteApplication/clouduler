@@ -52,7 +52,8 @@ pub async fn deliver(
     secrets: &DestinationSecrets,
     smtp: Option<&SmtpSettings>,
     n: &Notification,
-) -> Result<(), DeliveryError> {
+    edit_message_id: Option<&str>,
+) -> Result<Option<String>, DeliveryError> {
     let missing_url = || DeliveryError {
         message: "the destination has no URL".into(),
         retryable: false,
@@ -61,14 +62,18 @@ pub async fn deliver(
     match &dest.kind {
         DestinationKind::Webhook => {
             let url = secrets.url.as_deref().ok_or_else(missing_url)?;
-            webhook::send(http, url, secrets.auth.as_deref(), n).await
+            webhook::send(http, url, secrets.auth.as_deref(), n)
+                .await
+                .map(|()| None)
         }
         DestinationKind::Discord(opts) => {
             let url = secrets.url.as_deref().ok_or_else(missing_url)?;
-            discord::send(http, url, opts, n).await
+            discord::send(http, url, opts, n, edit_message_id).await
         }
         DestinationKind::Email { to } => {
-            email::send(smtp, secrets.smtp_password.as_deref(), to, n).await
+            email::send(smtp, secrets.smtp_password.as_deref(), to, n)
+                .await
+                .map(|()| None)
         }
     }
 }
@@ -150,6 +155,7 @@ mod tests {
             &secrets,
             None,
             &n,
+            None,
         )
         .await
         .unwrap();
@@ -181,6 +187,7 @@ mod tests {
             &secrets,
             None,
             &n,
+            None,
         )
         .await
         .unwrap_err();
@@ -190,7 +197,7 @@ mod tests {
         let req = h.await.unwrap().remove(0);
         // Link buttons are on by default, so the execute call must ask for them.
         assert!(
-            req.starts_with("POST /hook/token-123?with_components=true "),
+            req.starts_with("POST /hook/token-123?wait=true&with_components=true "),
             "{}",
             &req[..60]
         );
@@ -210,6 +217,7 @@ mod tests {
             &secrets,
             None,
             &n,
+            None,
         )
         .await
         .unwrap_err();
@@ -229,6 +237,7 @@ mod tests {
             &secrets,
             None,
             &n,
+            None,
         )
         .await
         .unwrap_err();
@@ -247,6 +256,7 @@ mod tests {
             &secrets,
             None,
             &notification(Body::Test),
+            None,
         )
         .await
         .unwrap_err();
@@ -266,6 +276,7 @@ mod tests {
             &DestinationSecrets::default(),
             None,
             &notification(Body::Test),
+            None,
         )
         .await
         .unwrap_err();
