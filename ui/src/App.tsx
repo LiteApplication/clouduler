@@ -3,6 +3,8 @@ import { useAuth } from './auth/AuthContext';
 import { ClusterStoreProvider } from './state/store';
 import { InstanceProgressProvider } from './state/progressStore';
 import { InstancesProvider } from './state/instancesStore';
+import { AlertsProvider } from './state/alertsStore';
+import { Alerts } from './views/alerts/Alerts';
 import { ConfirmProvider, ToastProvider } from './ds';
 import { Layout } from './components/Layout';
 import { PhoneMore } from './views/PhoneMore';
@@ -73,6 +75,7 @@ function Shell() {
     <ClusterStoreProvider>
       <InstanceProgressProvider>
         <InstancesProvider>
+          <AlertsProvider>
           <ConfigDraftProvider>
             <Layout>
               <Routes>
@@ -84,6 +87,7 @@ function Shell() {
                 <Route path="/instances" element={<Instances />} />
                 <Route path="/instances/:id" element={<ContainerDetail />} />
                 <Route path="/logs" element={<Logs />} />
+                <Route path="/alerts/:tab?" element={<Alerts />} />
                 <Route path="/updates" element={<Updates />} />
                 <Route path="/nodes" element={<Nodes />} />
                 <Route path="/nodes/:name" element={<NodeDetail />} />
@@ -109,6 +113,7 @@ function Shell() {
               </Routes>
             </Layout>
           </ConfigDraftProvider>
+          </AlertsProvider>
         </InstancesProvider>
       </InstanceProgressProvider>
     </ClusterStoreProvider>

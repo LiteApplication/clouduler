@@ -197,7 +197,7 @@ See [failover](docs/failover.md). Disaster recovery: `clouduler emergency` resto
 - [proxy](docs/proxy.md): reverse proxy, DNS, certificates
 - [networking](docs/networking.md): overlay, egress networks
 - [drives](docs/drives.md), [served drives](docs/served-drives.md), [volume backups](docs/backups.md), [git backup](docs/git-backup.md)
-- [failover](docs/failover.md), [live config](docs/live-config.md)
+- [failover](docs/failover.md), [live config](docs/live-config.md), [alerts](docs/alerts.md)
 - [api](docs/api.md), [mcp](docs/mcp.md), [ui](docs/ui.md), [testing](docs/testing.md)
 
 ## Building from source

@@ -655,6 +655,28 @@ member alone would break the group). Conflicting constraints across a group
 (e.g. two members pinned to different nodes) leave the group unplaceable
 rather than silently splitting it across nodes.
 
+### `alerts`
+
+```yaml
+x-clouduler:
+  alerts:
+    mute: [instance.unhealthy, volume.*]
+    severity: {instance.exited: critical}
+    logs:
+      - match: "FATAL"
+        severity: critical
+```
+
+Per-stack control over alerts (`docs/alerts.md`). Valid at stack level and
+inside a service's own `x-clouduler`; the service block is merged over the
+stack block. `alerts: false` disables every alert of the stack or service.
+`mute` lists catalog event keys or a category prefix ending in `.*`;
+`severity` overrides an event's severity; `logs` are rules that raise
+`log.match` when a container prints a matching line (`match` or `regex`,
+`ignore_case`, `severity`, `title`, `cooldown`, `stream`, and at stack level
+`services`). Unknown event keys, bad regexes and `services` on a service's own
+rule are rejected when the stack is validated.
+
 ## Validation
 
 `StackFile::parse` runs syntax-only checks that don't need a cluster:

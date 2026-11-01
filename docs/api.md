@@ -344,6 +344,37 @@ shapes, matching the three ways the ui offers to make one:
 The server seals the value with the cluster key before writing it. If this node
 holds no key, the request fails with `409` and a message saying so.
 
+## Alerts
+
+```
+GET    /api/alerts                      read    active alerts and the recent history
+GET    /api/alerts/catalog              read    every event with its effective severity and routes
+GET    /api/alerts/settings             read    settings, secret presence, destination health
+PUT    /api/alerts/settings             admin   replace the settings; secrets are write-only
+POST   /api/alerts/test                 admin   send a test message to one destination
+```
+
+`GET /api/alerts` returns `{active, recent, counts}`. `active` holds pending
+and active alerts, worst first then newest; `recent` holds resolved alerts and
+one-shot events, newest first, at most 300. Each alert carries `id, event,
+category, severity, state, title, detail, subject, stack?, instance?, node?,
+opened_at, last_at, resolved_at?, count, escalated_from?, links, excerpt,
+deliveries`.
+
+`GET /api/alerts/settings` returns `{settings, secrets, smtp_password,
+health}`. `secrets.<destination>` is `{url, auth_set}` where `url` is only the
+scheme and host (`"https://discord.com/..."`, null when unset); the value is
+never returned. `PUT` takes `{settings, secrets?: {<destination>: {url?,
+auth?}}, smtp_password?}`: an absent field keeps the stored secret, `null`
+deletes it, a string replaces it, and the masked string from a GET is treated
+as "keep". Errors name the field (`destinations[1].url`). A concurrent edit
+answers 409.
+
+`POST /api/alerts/test` takes `{name}` for a saved destination, or
+`{destination, secrets, smtp?, smtp_password?}` for an unsaved one (blank
+secrets fall back to the stored ones of the same name), and answers `{ok,
+error?}` after one attempt of at most 10 seconds.
+
 ## Cluster key
 
 ```

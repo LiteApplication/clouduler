@@ -82,7 +82,8 @@ pub async fn run(
         cl_update::rollback::Boot::Confirming => true,
         cl_update::rollback::Boot::Normal => false,
     };
-    if let Some(reason) = cl_update::rollback::take_note(&update_dir) {
+    let rolled_back = cl_update::rollback::take_note(&update_dir);
+    if let Some(reason) = &rolled_back {
         warn!(%reason, "the last update was rolled back, this is the previous version");
     }
 
@@ -292,6 +293,15 @@ pub async fn run(
     })
     .await;
 
+    if let Some(state) = &api_state {
+        cl_api::alerts::producers::spawn_self_update_report(
+            state.clone(),
+            update_dir.clone(),
+            probation,
+            rolled_back,
+        );
+    }
+
     let drives = crate::drives::start(
         &cfg,
         &node_name,
@@ -436,6 +446,11 @@ pub async fn run(
         warn!("restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed");
     }
     let backup_due_checker = tokio::spawn(crate::backup_runner::start_due_checker(cluster.clone()));
+    let log_alerts = tokio::spawn(crate::log_alerts::run(
+        cluster.clone(),
+        docker.clone(),
+        node_name.clone(),
+    ));
     let backup_runner = crate::backup_runner::start_runner(
         cluster.clone(),
         node_name.clone(),
@@ -478,6 +493,7 @@ pub async fn run(
     reaper.abort();
     git_backup.abort();
     backup_due_checker.abort();
+    log_alerts.abort();
     backup_runner.abort();
     restore_watcher.abort();
     config_writer.abort();

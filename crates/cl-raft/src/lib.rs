@@ -1,6 +1,7 @@
 //! Cluster consensus: the replicated state, its raft storage, the node RPC
 //! transport and the quorum gate the rest of the daemon consults.
 
+pub mod alerts;
 pub mod backup_validate;
 pub mod client;
 pub mod contact;

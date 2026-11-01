@@ -61,6 +61,10 @@ pointer and a generation counter) or reacts instantly with `.changed().await`.
   connects, and all four are now always spawned regardless of whether docker
   was reachable at boot.
 
+- **Alert settings** (`docs/alerts.md`): destinations, SMTP, timing, overrides
+  and thresholds are read from raft on every engine pass, delivery attempt and
+  node-side check; secrets are opened per attempt, no client is built at boot.
+
 ## What still needs a restart
 
 - **Raft's own listen address, data dir, and cluster identity**

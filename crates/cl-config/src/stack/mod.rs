@@ -1,6 +1,7 @@
 //! Stack files: the Docker Swarm / Compose v3 subset clouduler schedules from,
 //! plus the `x-clouduler` extensions documented in `docs/stacks.md`.
 
+mod alerts;
 mod allowed;
 mod bytesize;
 mod de;
@@ -14,6 +15,7 @@ mod requirements;
 mod validate;
 mod volume;
 
+pub use alerts::{mute_matches, AlertSeverity, LogRule, LogStream, StackAlerts};
 pub use allowed::{AllowedHost, AllowedPorts, AllowedTarget};
 pub use bytesize::ByteSize;
 pub use deploy::{

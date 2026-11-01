@@ -2123,7 +2123,14 @@ const API_SHAPES_FIXTURE: &str = "../../ui/src/api/__fixtures__/api-shapes.json"
 /// "erase every leaf".
 fn normalize(value: &mut serde_json::Value, tempdir: &str) {
     /// Random per run: generated ids, hashes, key fingerprints, ephemeral ports.
-    const VOLATILE_STRINGS: &[&str] = &["fingerprint", "subject", "rpc_addr", "content", "id"];
+    const VOLATILE_STRINGS: &[&str] = &[
+        "fingerprint",
+        "key_fingerprint",
+        "subject",
+        "rpc_addr",
+        "content",
+        "id",
+    ];
     const VOLATILE_NUMBERS: &[&str] = &[
         "state_version",
         // Live readings of the machine the test happens to run on.
@@ -2372,9 +2379,104 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         .await
         .expect("submit pending dns");
 
+    // Alerts: one open record with a delivery, one destination with its
+    // sealed url and a health reading, so every field of the three alert
+    // responses is present at least once.
+    {
+        use cl_alert::{Destination, DestinationKind};
+        let mut settings = cl_alert::AlertSettings::default();
+        settings.destinations.push(Destination {
+            name: "main".into(),
+            enabled: true,
+            kind: DestinationKind::Webhook,
+            severities: [cl_alert::Severity::Critical].into(),
+            digest: false,
+            categories: vec![],
+            stacks: vec![],
+        });
+        h.state
+            .cluster
+            .submit(cl_raft::Request::PutConfig {
+                name: cl_alert::settings::SETTINGS_CONFIG.into(),
+                content: crate::alerts::settings::encode(&settings),
+                owner: None,
+            })
+            .await
+            .expect("submit alert settings");
+        let key = h.state.key.read().await.clone().expect("harness key");
+        let name = cl_alert::settings::url_secret("main");
+        let sealed =
+            cl_secret::Sealed::seal(&key, &name, b"https://hooks.example.test/path/TOKEN").unwrap();
+        h.state
+            .cluster
+            .submit(cl_raft::Request::PutSecret {
+                name,
+                sealed: sealed.blob,
+                key_fingerprint: key.fingerprint(),
+                owner: None,
+            })
+            .await
+            .expect("submit alert secret");
+        h.state
+            .cluster
+            .submit(cl_raft::Request::SetDestinationHealth {
+                name: "main".into(),
+                health: cl_raft::alerts::DestinationHealth {
+                    ok: false,
+                    at: 5,
+                    error: Some("HTTP 500".into()),
+                    consecutive_failures: 2,
+                },
+            })
+            .await
+            .expect("submit destination health");
+        h.state
+            .cluster
+            .submit(cl_raft::Request::PutAlert(cl_raft::alerts::AlertRecord {
+                id: "a1".into(),
+                event: "node.disk_low".into(),
+                dedupe: "node.disk_low:n0".into(),
+                category: "nodes".into(),
+                severity: cl_config::AlertSeverity::Critical,
+                state: cl_raft::alerts::AlertState::Active,
+                title: "Disk almost full".into(),
+                detail: "95% used".into(),
+                subject: "n0".into(),
+                stack: Some("web".into()),
+                instance: Some("web.app.0".into()),
+                node: Some("n0".into()),
+                opened_at: 1,
+                last_at: 2,
+                resolved_at: Some(3),
+                count: 2,
+                escalated_from: Some(cl_config::AlertSeverity::Warning),
+                sent_severity: Some(cl_config::AlertSeverity::Critical),
+                resolved_sent: false,
+                digested: false,
+                links: vec![cl_raft::alerts::AlertLink {
+                    label: "Open node".into(),
+                    path: "/nodes/n0".into(),
+                }],
+                excerpt: vec!["line".into()],
+                deliveries: vec![cl_raft::alerts::AlertDelivery {
+                    destination: "main".into(),
+                    at: 2,
+                    ok: false,
+                    error: Some("HTTP 500".into()),
+                    attempts: 5,
+                    phase: "opened".into(),
+                }],
+            }))
+            .await
+            .expect("submit alert");
+    }
+
     let mut shapes = serde_json::Map::new();
     for (name, uri) in [
         ("status", "/api/status"),
+        ("alerts", "/api/alerts"),
+        ("alertCatalog", "/api/alerts/catalog"),
+        ("alertSettings", "/api/alerts/settings"),
         ("state", "/api/state"),
         ("identity", "/auth/me"),
         ("pendingConfig", "/api/config/pending"),
@@ -2822,4 +2924,89 @@ async fn remembered_ips_are_admin_only_and_hidden_from_the_state() {
     let after = h.state.cluster.state().await;
     assert!(!after.proxy_sessions.contains_key("saved"));
     assert!(after.proxy_sessions.contains_key("cookie"));
+}
+
+/// The alert settings API never returns a destination's URL, and a client that
+/// echoes the masked form back cannot overwrite the stored one.
+#[tokio::test]
+async fn alert_settings_mask_urls_and_a_masked_echo_keeps_the_secret() {
+    use tower::ServiceExt;
+    let h = harness().await;
+    let call = |method: &'static str, uri: &'static str, body: String| {
+        let router = h.router.clone();
+        let key = h.admin_key.clone();
+        async move {
+            let resp = router
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {key}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let dest = serde_json::json!({"name": "main", "kind": "webhook", "severities": ["critical"]});
+    let url = "https://hooks.example.test/path/SECRETTOKEN";
+    let (status, body) = call(
+        "PUT",
+        "/api/alerts/settings",
+        serde_json::json!({"settings": {"destinations": [dest]}, "secrets": {"main": {"url": url, "auth": "Bearer AUTHVALUE"}}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["secrets"]["main"]["url"],
+        "https://hooks.example.test/…"
+    );
+    assert_eq!(body["secrets"]["main"]["auth_set"], true);
+    let (_, got) = call("GET", "/api/alerts/settings", String::new()).await;
+    let text = got.to_string();
+    assert!(
+        !text.contains("SECRETTOKEN") && !text.contains("AUTHVALUE"),
+        "{text}"
+    );
+
+    // Echo the masked url back: accepted, and the stored one survives.
+    let (status, _) = call(
+        "PUT",
+        "/api/alerts/settings",
+        serde_json::json!({"settings": {"destinations": [dest]}, "secrets": {"main": {"url": "https://hooks.example.test/…"}}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let st = h.state.cluster.state().await;
+    let key = h.state.key.read().await.clone().unwrap();
+    let stored =
+        crate::alerts::send::open(&st, &key, &cl_alert::settings::url_secret("main")).unwrap();
+    assert_eq!(stored.as_deref(), Some(url));
+
+    // Removing the destination removes its secrets.
+    let (status, _) = call(
+        "PUT",
+        "/api/alerts/settings",
+        serde_json::json!({"settings": {}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let st = h.state.cluster.state().await;
+    assert!(!st
+        .secrets
+        .contains_key(&cl_alert::settings::url_secret("main")));
+    assert!(!st
+        .secrets
+        .contains_key(&cl_alert::settings::auth_secret("main")));
 }

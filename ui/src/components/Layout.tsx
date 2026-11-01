@@ -11,6 +11,7 @@ import { api } from '../api/client';
 import { BottomNav, SideRail, Tag, type BottomNavItem, type IconName, type SideRailEntry } from '../ds';
 import { Icon } from '../ds/Icon';
 import { UpdateBanner } from './UpdateBanner';
+import { useAlertBadge } from '../state/alertsStore';
 import { useTheme, type ThemeChoice } from '../theme';
 
 const THEMES: { value: ThemeChoice; icon: IconName; label: string }[] = [
@@ -48,6 +49,7 @@ export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
   const badges = useNavBadges();
+  const alertBadge = useAlertBadge();
   const [clusterName, setClusterName] = useState<string | null>(null);
   const [networks, setNetworks] = useState<string[]>([]);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -83,6 +85,7 @@ export function Layout({ children }: { children: ReactNode }) {
       { id: '/stacks', label: 'Stacks', icon: 'stack', badge: badges.stacks },
       { id: '/nodes', label: 'Nodes', icon: 'node', badge: badges.nodes },
       { id: '/logs', label: 'Logs', icon: 'terminal' },
+      { id: '/alerts', label: 'Alerts', icon: 'alert', badge: alertBadge.count, badgeTone: alertBadge.critical ? 'danger' : undefined },
       { heading: 'Network & data' },
       { id: '/proxy', label: 'Proxy', icon: 'proxy' },
       { id: '/dns', label: 'DNS', icon: 'globe' },
@@ -93,7 +96,7 @@ export function Layout({ children }: { children: ReactNode }) {
       { id: '/more-group', label: 'More', icon: 'more', expanded: moreOpen },
       ...(moreOpen ? more : []),
     ];
-  }, [badges, networks, moreOpen, mcpEnabled]);
+  }, [badges, alertBadge, networks, moreOpen, mcpEnabled]);
 
   const ids = items.flatMap((i) => ('id' in i && i.id !== '/more-group' ? [i.id] : []));
   const active = activeFor(location.pathname, ids);
@@ -108,7 +111,7 @@ export function Layout({ children }: { children: ReactNode }) {
     { id: '/stacks', label: 'Stacks', icon: 'stack', badge: badges.stacks },
     { id: '/nodes', label: 'Nodes', icon: 'node', badge: badges.nodes },
     { id: '/logs', label: 'Logs', icon: 'terminal' },
-    { id: '/more', label: 'More', icon: 'more', badge: badges.updates },
+    { id: '/more', label: 'More', icon: 'more', badge: badges.updates + alertBadge.count },
   ];
   const bottomActive = activeFor(location.pathname, bottom.map((b) => b.id)) ?? '/more';
 

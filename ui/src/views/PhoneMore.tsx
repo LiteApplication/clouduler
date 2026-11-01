@@ -7,6 +7,7 @@ import { api } from '../api/client';
 import { Button, Icon, KV, PageHeader, Panel, Tag, type IconName } from '../ds';
 import { useNavBadges } from '../components/Layout';
 import { useClusterState } from '../state/store';
+import { useAlertBadge } from '../state/alertsStore';
 import { useTheme, type ThemeChoice } from '../theme';
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -33,6 +34,7 @@ export function PhoneMore() {
   const { identity, isAdmin, refresh } = useAuth();
   const { choice, setChoice } = useTheme();
   const badges = useNavBadges();
+  const alertBadge = useAlertBadge();
   const cluster = useClusterState();
   const mcpEnabled = identity?.mcp_enabled !== false;
   const nodeCount = Object.keys(cluster?.nodes ?? {}).length;
@@ -57,6 +59,13 @@ export function PhoneMore() {
           System
         </h2>
         <div className="list more-list">
+          <Row
+            to="/alerts"
+            icon="alert"
+            name="Alerts"
+            meta="What needs you, and where it is sent"
+            tag={alertBadge.count > 0 ? <Tag tone={alertBadge.critical ? 'danger' : 'warn'}>{alertBadge.count} active</Tag> : undefined}
+          />
           <Row
             to="/updates"
             icon="sync"

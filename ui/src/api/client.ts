@@ -3,6 +3,12 @@
 // in exactly one place.
 
 import type {
+  AlertCatalogEntry,
+  AlertSettingsResponse,
+  AlertSettingsUpdate,
+  AlertTestRequest,
+  AlertTestResult,
+  AlertsResponse,
   ExecRunResult,
   ApiErrorBody,
   ApiKey,
@@ -193,6 +199,12 @@ function del<T>(path: string): Promise<T> {
 }
 
 export const api = {
+  // alerts
+  alerts: () => get<AlertsResponse>('/api/alerts'),
+  alertCatalog: () => get<AlertCatalogEntry[]>('/api/alerts/catalog'),
+  alertSettings: () => get<AlertSettingsResponse>('/api/alerts/settings'),
+  putAlertSettings: (body: AlertSettingsUpdate) => put<void>('/api/alerts/settings', body),
+  testAlert: (body: AlertTestRequest) => post<AlertTestResult>('/api/alerts/test', body),
   // auth
   me: () => get<Identity>('/auth/me'),
   loginWithKey: (key: string) => post<Identity>('/auth/login', { key }),

@@ -192,6 +192,7 @@
 .cl-rail__item:hover{background:var(--surface-2);color:var(--ink)}
 .cl-rail__item--on,.cl-rail__item--on:hover{background:var(--brand-bg);color:var(--brand);border-color:var(--brand)}
 .cl-rail__badge{padding:0 8px;border-radius:var(--radius-pill);background:var(--surface-2);color:var(--ink)}
+.cl-rail__badge--danger{background:var(--danger);color:var(--on-danger)}
 .cl-rail__foot{margin-top:auto}
 @media (max-width:839px){.cl-rail{display:none}}
 

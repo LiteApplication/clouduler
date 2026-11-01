@@ -1,6 +1,7 @@
 //! One module per section of docs/api.md. Handlers stay thin: parse,
 //! authorize, call into the cluster or docker, serialize.
 
+pub mod alerts;
 pub mod auth;
 pub mod auth_keys;
 pub mod certs;
@@ -34,6 +35,7 @@ use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(alerts::router())
         .merge(auth::router())
         .merge(auth_keys::router())
         .merge(remembered_ips::router())

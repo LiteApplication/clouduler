@@ -469,6 +469,10 @@ pub struct ServiceExtensions {
     /// one click. The key is the button's label.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub actions: BTreeMap<String, ServiceAction>,
+    /// Alert muting, severity overrides and log watches for this service's
+    /// containers, merged over the stack's. See [`super::StackAlerts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<super::StackAlerts>,
 }
 
 /// A predefined command, run in a container when its action is triggered.
@@ -518,6 +522,9 @@ pub struct StackDefaults {
     pub volume_sync: BTreeMap<String, VolumeSyncOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupOverride>,
+    /// `alerts: false` or a map. See [`super::StackAlerts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<super::StackAlerts>,
 }
 
 #[cfg(test)]

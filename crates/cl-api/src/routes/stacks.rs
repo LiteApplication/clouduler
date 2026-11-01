@@ -411,6 +411,20 @@ pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> 
         };
     }
     match StackFile::parse(spec) {
+        Ok(parsed) if !crate::alerts::settings::stack_key_errors(&parsed).is_empty() => {
+            ValidateResponse {
+                valid: false,
+                errors: crate::alerts::settings::stack_key_errors(&parsed)
+                    .into_iter()
+                    .map(|message| ValidationError {
+                        path: String::new(),
+                        message,
+                    })
+                    .collect(),
+                requirements: None,
+                per_service: BTreeMap::new(),
+            }
+        }
         Ok(parsed) => {
             let mut requirements = parsed.requirements();
             let cfg = state.cluster_config.read().await;

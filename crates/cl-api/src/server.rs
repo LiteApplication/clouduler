@@ -269,6 +269,10 @@ impl ApiServer {
         // again, pending logins only when the cap is hit.
         spawn_prune_expired(state.clone());
 
+        // Alerts: the leader's engine and this node's own producers.
+        crate::alerts::spawn(state.clone());
+        crate::alerts::producers::spawn(state.clone());
+
         Ok(Self {
             router: build_router(state.clone()),
             listen_addr: options.listen_addr,

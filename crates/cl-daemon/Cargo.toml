@@ -33,6 +33,7 @@ ipnet.workspace = true
 nix = { workspace = true, features = ["time", "fs"] }
 openraft.workspace = true
 rcgen.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 serde_urlencoded.workspace = true
 rtnetlink.workspace = true

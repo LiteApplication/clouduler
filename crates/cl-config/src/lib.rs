@@ -22,12 +22,12 @@ pub use netalloc::{
     EGRESS_TABLE_BASE, IFNAME_MAX_BYTES, NAT_POOL_BASE,
 };
 pub use stack::{
-    validate_stack_name, AllowedHost, AllowedPorts, AllowedTarget, Authenticated, BoundPort,
-    ByteSize, Command, CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket,
-    DockerSocketMode, ExposePort, Headers, Healthcheck, HealthcheckTest, Middleware, ObjectRef,
-    Placement, PortMapping, PortRange, Protocol, ProxyRoute, PublishMode, RedirectRegex,
-    ResourceSpec, Resources, RestartPolicy, Service, ServiceAction, ServiceExtensions, StackConfig,
-    StackDefaults, StackFile, StackNetwork, StackRequirements, StackSecret, StackVolume,
-    TmpfsOptions, UpdateConfig, VolumeMount, VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
-    MAX_REPLICAS, SECRET_DIR,
+    mute_matches, validate_stack_name, AlertSeverity, AllowedHost, AllowedPorts, AllowedTarget,
+    Authenticated, BoundPort, ByteSize, Command, CorsPolicy, Deploy, DeployMode,
+    DeployRestartPolicy, DockerSocket, DockerSocketMode, ExposePort, Headers, Healthcheck,
+    HealthcheckTest, LogRule, LogStream, Middleware, ObjectRef, Placement, PortMapping, PortRange,
+    Protocol, ProxyRoute, PublishMode, RedirectRegex, ResourceSpec, Resources, RestartPolicy,
+    Service, ServiceAction, ServiceExtensions, StackAlerts, StackConfig, StackDefaults, StackFile,
+    StackNetwork, StackRequirements, StackSecret, StackVolume, TmpfsOptions, UpdateConfig,
+    VolumeMount, VolumeSyncOverride, DEFAULT_SYNC_INTERVAL, MAX_REPLICAS, SECRET_DIR,
 };

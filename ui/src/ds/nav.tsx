@@ -51,6 +51,8 @@ export type SideRailEntry =
       label: string;
       icon: IconName;
       badge?: number | string | null;
+      /** `danger` paints the badge red: something needs a person now. */
+      badgeTone?: 'danger';
       indent?: boolean;
       /** Set on an item that opens and closes a group. */
       expanded?: boolean;
@@ -97,7 +99,7 @@ export function SideRail({
               >
                 <Icon name={it.icon} size={20} />
                 <span>{it.label}</span>
-                {it.badge != null && it.badge !== 0 && <span className="cl-rail__badge cl-code-sm">{it.badge}</span>}
+                {it.badge != null && it.badge !== 0 && <span className={cx('cl-rail__badge cl-code-sm', it.badgeTone && `cl-rail__badge--${it.badgeTone}`)}>{it.badge}</span>}
               </button>
             </li>
           );

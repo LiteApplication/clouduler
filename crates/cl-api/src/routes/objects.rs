@@ -30,6 +30,7 @@ pub(crate) fn is_reserved(name: &str) -> bool {
         || name == REDIRECTS_CONFIG
         || name == STATIC_ROUTES_CONFIG
         || name == WIREGUARD_INGRESS_CONFIG
+        || name == cl_alert::settings::SETTINGS_CONFIG
         || super::self_update::is_reserved_config(name)
         || super::git_backup::is_reserved_config(name)
 }
@@ -37,7 +38,8 @@ pub(crate) fn is_reserved(name: &str) -> bool {
 /// Secret names clouduler itself owns and never shows through the generic
 /// secret listing route.
 pub(crate) fn is_reserved_secret(name: &str) -> bool {
-    super::self_update::is_reserved_secret(name)
+    name.starts_with("_clouduler_alert_")
+        || super::self_update::is_reserved_secret(name)
         || cl_sched::registries::is_registry_secret(name)
         || is_reserved_wireguard_secret(name)
         || is_reserved_cloudflare_secret(name)

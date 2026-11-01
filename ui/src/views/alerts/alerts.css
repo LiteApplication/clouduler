@@ -1,0 +1,73 @@
+/* Alerts page. Rows follow the redesign's `.al` pattern: severity on the
+   left, the story in the middle, time and the action on the right. */
+
+.al{display:flex;flex-wrap:wrap;gap:var(--space-2) var(--space-4);align-items:flex-start;padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line)}
+.al:last-child{border-bottom:0}
+.al--new{background:var(--brand-bg)}
+.al__sev{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-1);flex:0 0 112px;padding-top:2px}
+.al__main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 280px}
+.al__t{font:600 16px/22px var(--font-sans);color:var(--ink);overflow-wrap:anywhere}
+.al__key{font:500 12px/16px var(--font-mono);color:var(--ink-muted);overflow-wrap:anywhere}
+.al__to{display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-2);align-items:center;margin-top:var(--space-1)}
+.al__side{display:flex;flex-direction:column;align-items:flex-end;gap:var(--space-2);flex:0 0 auto;margin-left:auto}
+.al__when{font:500 13px/18px var(--font-mono);color:var(--ink-muted);white-space:nowrap}
+.al__excerpt{margin:var(--space-2) 0 0;max-height:132px;font-size:12px;line-height:18px}
+.al__more{align-self:flex-start;margin-top:var(--space-1);padding:0;border:0;background:none;color:var(--brand);font:600 13px/18px var(--font-sans);cursor:pointer}
+.al__more:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.al--pending{opacity:.85}
+
+.al-metric{display:flex;flex-direction:column;gap:var(--space-1)}
+.al-metric .metric--crit{color:var(--danger)}
+
+.al-dest{display:flex;flex-direction:column;gap:var(--space-3)}
+.al-dest--off{opacity:.7}
+.al-dest__problem{margin:0;color:var(--danger)}
+
+.al-seg{display:inline-flex;gap:2px;padding:3px;border:2px solid var(--line);border-radius:var(--radius-pill);background:var(--surface-2)}
+.al-seg button{min-height:32px;padding:0 var(--space-3);border:0;border-radius:var(--radius-pill);background:transparent;color:var(--ink-muted);font:600 13px/18px var(--font-sans);cursor:pointer}
+.al-seg button:hover{color:var(--ink)}
+.al-seg button[aria-pressed=true]{background:var(--brand-bg);color:var(--brand)}
+.al-seg button:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+
+.al-notify{display:grid;grid-template-columns:minmax(80px,max-content) 1fr;gap:var(--space-2) var(--space-3);align-items:center}
+.al-notify .cl-label{margin:0}
+
+.al-test{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.al-testres{font:500 13px/18px var(--font-sans);display:inline-flex;gap:var(--space-1);align-items:center}
+.al-testres--ok{color:var(--ok)}
+.al-testres--bad{color:var(--danger)}
+
+.al-adv{border:1px solid var(--line);border-radius:var(--radius-md);padding:var(--space-2) var(--space-3)}
+.al-adv>summary{cursor:pointer;font:600 14px/20px var(--font-sans);color:var(--ink);min-height:var(--tap-min);display:flex;align-items:center}
+.al-adv[open]>summary{margin-bottom:var(--space-3)}
+
+/* The Discord message mock-up. It is a picture of what arrives, not Discord's CSS. */
+.dc{display:flex;gap:var(--space-3);padding:var(--space-3);border-radius:var(--radius-md);background:#313338;color:#dbdee1;font:400 14px/20px 'gg sans','Hanken Grotesk',system-ui,sans-serif}
+.dc__av{flex:none;width:36px;height:36px;border-radius:50%;background:#150f1f;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.dc__av img{width:36px;height:36px}
+.dc__body{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}
+.dc__head{display:flex;gap:var(--space-2);align-items:baseline;flex-wrap:wrap}
+.dc__name{font-weight:600;color:#f2f3f5}
+.dc__bot{padding:0 4px;border-radius:3px;background:#5865f2;color:#fff;font:600 10px/15px sans-serif;text-transform:uppercase}
+.dc__time{font-size:12px;color:#949ba4}
+.dc__ping{background:#5865f24d;color:#c9cdfb;border-radius:3px;padding:0 2px}
+.dc__embed{display:flex;max-width:420px;border-radius:4px;background:#2b2d31;border-left:4px solid var(--dc-color,#8e8a9c);overflow:hidden}
+.dc__embed-in{padding:8px 12px 12px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.dc__title{font-weight:600;color:#f2f3f5;overflow-wrap:anywhere}
+.dc__desc{font-size:13.5px;line-height:18px;color:#dbdee1;overflow-wrap:anywhere}
+.dc__code{margin:2px 0 0;padding:6px 8px;border-radius:4px;background:#1e1f22;font:12px/16px ui-monospace,Menlo,monospace;color:#dbdee1;white-space:pre-wrap;overflow-wrap:anywhere}
+.dc__fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 12px;font-size:12.5px}
+.dc__fields b{display:block;font-size:12px;color:#f2f3f5}
+.dc__foot{font-size:11.5px;color:#949ba4}
+.dc__btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+.dc__btn{display:inline-flex;align-items:center;gap:4px;padding:2px 14px;border-radius:3px;background:#4e5058;color:#fff;font:500 13px/28px sans-serif}
+.dc__silent{display:inline-flex;gap:4px;align-items:center;font-size:12px;color:#949ba4}
+.dc a,.dc__link{color:#00a8fc}
+
+@media (max-width:559px){
+  .al__sev{flex:1 1 100%;flex-direction:row;flex-wrap:wrap;align-items:center}
+  .al__side{flex:1 1 100%;flex-direction:row;align-items:center;justify-content:space-between;margin-left:0}
+  .dc__fields{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+.al-sealed{display:inline-flex;align-items:center;gap:var(--space-2);padding:6px 12px;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--surface-2);color:var(--ink)}

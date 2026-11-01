@@ -29,6 +29,31 @@ impl StackFile {
         self.validate_replicas()?;
         self.validate_memory_sizes()?;
         self.validate_docker_sockets()?;
+        self.validate_alerts()?;
+        Ok(())
+    }
+
+    /// `x-clouduler.alerts`: patterns compile, `services` only at stack level
+    /// and naming real services, mute keys well formed.
+    fn validate_alerts(&self) -> Result<()> {
+        if let Some(alerts) = self.x_clouduler.as_ref().and_then(|x| x.alerts.as_ref()) {
+            alerts.validate("x-clouduler.alerts", false)?;
+            for (i, rule) in alerts.logs.iter().enumerate() {
+                for name in &rule.services {
+                    if !self.services.contains_key(name) {
+                        return Err(ConfigError::invalid(
+                            format!("x-clouduler.alerts.logs[{i}].services"),
+                            format!("no service named {name:?} in this stack"),
+                        ));
+                    }
+                }
+            }
+        }
+        for (name, svc) in &self.services {
+            if let Some(alerts) = svc.x_clouduler.as_ref().and_then(|x| x.alerts.as_ref()) {
+                alerts.validate(&format!("services.{name}.x-clouduler.alerts"), true)?;
+            }
+        }
         Ok(())
     }
 

@@ -19,6 +19,7 @@ members = [
     "crates/cl-secret",
     "crates/cl-api",
     "crates/cl-update",
+    "crates/cl-alert",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ license = "MIT"
 repository = "https://github.com/LiteApplication/clouduler"
 
 [workspace.dependencies]
+cl-alert = { path = "crates/cl-alert" }
 cl-api = { path = "crates/cl-api" }
 cl-backup = { path = "crates/cl-backup" }
 cl-cli = { path = "crates/cl-cli" }

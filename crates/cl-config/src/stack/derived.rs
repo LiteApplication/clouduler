@@ -96,6 +96,20 @@ impl StackFile {
             .or_else(|| self.stack_backup_stop_before())
     }
 
+    /// The alert settings for one service's containers: the stack block with
+    /// the service's own block merged over it. Log rules limited to other
+    /// services are left out.
+    pub fn effective_alerts(&self, service: &str) -> super::StackAlerts {
+        super::StackAlerts::merged(
+            self.x_clouduler.as_ref().and_then(|x| x.alerts.as_ref()),
+            self.services
+                .get(service)
+                .and_then(|s| s.x_clouduler.as_ref())
+                .and_then(|x| x.alerts.as_ref()),
+            service,
+        )
+    }
+
     /// Whether `:latest` images are followed automatically for this service:
     /// the service's own setting, else the stack wide default, else false.
     pub fn effective_auto_update(&self, service: &str) -> bool {

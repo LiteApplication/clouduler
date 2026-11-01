@@ -1239,3 +1239,179 @@ export interface LastRebalance extends RebalanceResponse {
   /** Unix seconds. */
   at: number;
 }
+
+// ---------------------------------------------------------------- alerts ---
+
+export type AlertSeverity = 'info' | 'warning' | 'critical';
+export type AlertState = 'pending' | 'active' | 'resolved' | 'event';
+
+export interface AlertLink {
+  label: string;
+  /** UI-relative path, e.g. `/stacks/media`. */
+  path: string;
+}
+
+export interface AlertDelivery {
+  destination: string;
+  at: number;
+  ok: boolean;
+  error?: string;
+  attempts: number;
+}
+
+export interface AlertView {
+  id: string;
+  event: string;
+  category: string;
+  severity: AlertSeverity;
+  state: AlertState;
+  title: string;
+  detail: string;
+  subject: string;
+  stack?: string;
+  instance?: string;
+  node?: string;
+  opened_at: number;
+  last_at: number;
+  resolved_at?: number;
+  count: number;
+  escalated_from?: AlertSeverity;
+  links: AlertLink[];
+  excerpt: string[];
+  deliveries: AlertDelivery[];
+}
+
+export interface AlertsResponse {
+  active: AlertView[];
+  recent: AlertView[];
+  counts: { critical: number; warning: number; info: number };
+}
+
+/** `muted`, `in_app`, or `{ destinations: [...] }` (the Rust enum, snake_case). */
+export type AlertRoute = 'muted' | 'in_app' | { destinations: string[] };
+
+export interface AlertEventOverride {
+  severity?: AlertSeverity;
+  route?: AlertRoute;
+}
+
+export interface AlertCatalogEntry {
+  key: string;
+  category: string;
+  title: string;
+  severity: AlertSeverity;
+  note: string;
+  stateful: boolean;
+  stack_scoped: boolean;
+  override: AlertEventOverride | null;
+  effective_severity: AlertSeverity;
+  /** Destination names this event goes to by default, `in-app` first. */
+  routes: string[];
+}
+
+export type DiscordNotify = 'ping' | 'normal' | 'silent';
+export type DiscordStyle = 'embed' | 'short';
+export type SmtpSecurity = 'starttls' | 'tls' | 'none';
+
+export interface DiscordNotifyLevels {
+  critical: DiscordNotify;
+  warning: DiscordNotify;
+  info: DiscordNotify;
+  resolved: DiscordNotify;
+}
+
+interface AlertDestinationBase {
+  name: string;
+  enabled: boolean;
+  severities: AlertSeverity[];
+  digest: boolean;
+  categories?: string[];
+  stacks?: string[];
+}
+
+export interface DiscordDestination extends AlertDestinationBase {
+  kind: 'discord';
+  style: DiscordStyle;
+  mention?: string;
+  notify: DiscordNotifyLevels;
+  buttons: boolean;
+  username?: string;
+}
+export interface WebhookDestination extends AlertDestinationBase {
+  kind: 'webhook';
+}
+export interface EmailDestination extends AlertDestinationBase {
+  kind: 'email';
+  to: string[];
+}
+export type AlertDestination = DiscordDestination | WebhookDestination | EmailDestination;
+
+export interface AlertSmtp {
+  host: string;
+  port: number;
+  security: SmtpSecurity;
+  username?: string;
+  from: string;
+}
+
+export interface AlertThresholds {
+  disk_warning_percent: number;
+  disk_critical_percent: number;
+  memory_percent: number;
+  memory_for: string;
+  cert_warning_days: number;
+  cert_critical_days: number;
+}
+
+export interface AlertSettings {
+  enabled: boolean;
+  /** humantime, e.g. `5m`. */
+  warning_debounce: string;
+  digest_at: string;
+  timezone?: string;
+  renotify_on_escalation: boolean;
+  notify_resolved: boolean;
+  retention: string;
+  public_url?: string;
+  destinations: AlertDestination[];
+  smtp?: AlertSmtp;
+  events: Record<string, AlertEventOverride>;
+  thresholds: AlertThresholds;
+}
+
+export interface DestinationHealth {
+  ok: boolean | null;
+  at?: number;
+  error?: string;
+  consecutive_failures: number;
+}
+
+export interface AlertSettingsResponse {
+  settings: AlertSettings;
+  /** Per destination: the saved URL cut to its domain (`https://discord.com/…`),
+   *  never the whole thing, and whether an Authorization header is saved. */
+  secrets: Record<string, { url?: string | null; auth_set: boolean }>;
+  smtp_password: boolean;
+  health: Record<string, DestinationHealth>;
+}
+
+/** Secret edits: absent keeps, null deletes, a string replaces. */
+export interface AlertSettingsUpdate {
+  settings: AlertSettings;
+  secrets?: Record<string, { url?: string | null; auth?: string | null }>;
+  smtp_password?: string | null;
+}
+
+export type AlertTestRequest =
+  | { name: string }
+  | {
+      destination: AlertDestination;
+      secrets: { url?: string; auth?: string };
+      smtp?: AlertSmtp;
+      smtp_password?: string;
+    };
+
+export interface AlertTestResult {
+  ok: boolean;
+  error?: string;
+}

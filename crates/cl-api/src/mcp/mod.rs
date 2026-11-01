@@ -17,7 +17,7 @@
 //! * a follower relays `/mcp` to the leader (see [`forward_to_leader`]),
 //!   because sessions and focus live in the serving node's memory.
 
-mod problems;
+pub(crate) mod problems;
 pub mod redact;
 mod resources;
 mod session;

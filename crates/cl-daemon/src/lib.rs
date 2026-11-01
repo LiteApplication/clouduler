@@ -14,6 +14,7 @@ pub mod drives;
 pub mod egress;
 pub mod expose;
 pub mod internal_dns;
+pub mod log_alerts;
 pub mod migration;
 pub mod overlay;
 pub mod placement;

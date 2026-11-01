@@ -11,6 +11,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::{
+    AlertRecord, AlertSignal, DestinationHealth, MAX_ALERT_INBOX, MAX_ALERT_RECORDS,
+    MAX_RECORD_DELIVERIES,
+};
 use crate::ids::{InstanceId, VolumeId};
 
 /// Whether a node may take new work.
@@ -828,6 +832,17 @@ pub struct ClusterState {
     /// `Request::RedeemProxyToken`.
     #[serde(default)]
     pub proxy_tokens: BTreeMap<String, ProxyTokenRecord>,
+    /// The in-app alert feed (open alerts plus history), keyed by record id.
+    /// Written only by the leader's alert engine. Not part of the git backup.
+    #[serde(default)]
+    pub alerts: BTreeMap<String, AlertRecord>,
+    /// Signals nodes pushed for the engine to turn into records. Bounded by
+    /// `MAX_ALERT_INBOX`; the leader drains it.
+    #[serde(default)]
+    pub alert_inbox: BTreeMap<String, AlertSignal>,
+    /// Last delivery outcome per alert destination, keyed by name.
+    #[serde(default)]
+    pub alert_destinations: BTreeMap<String, DestinationHealth>,
     /// Incremented on every applied command. Cheap way for watchers to notice
     /// a change without diffing.
     pub version: u64,
@@ -1238,6 +1253,32 @@ pub enum Request {
     PruneSessions {
         now: i64,
     },
+    /// Queue something a node saw for the leader's alert engine. The inbox is
+    /// bounded: the oldest signals go first.
+    PushAlertSignal(AlertSignal),
+    /// Remove signals the engine has processed.
+    TakeAlertSignals {
+        ids: Vec<String>,
+    },
+    /// Insert or replace an alert record.
+    PutAlert(AlertRecord),
+    /// Delete one alert record.
+    RemoveAlert {
+        id: String,
+    },
+    /// Delete resolved and one-shot records last touched before `before`, then
+    /// the oldest of those (and finally of any) until at most `max` remain.
+    PruneAlerts {
+        before: i64,
+        max: usize,
+    },
+    SetDestinationHealth {
+        name: String,
+        health: DestinationHealth,
+    },
+    RemoveDestinationHealth {
+        name: String,
+    },
     /// Store a reverse proxy session under `key` (hash of the cookie value).
     /// Also sweeps expired proxy sessions and tokens, as `PutSession` does.
     PutProxySession {
@@ -1362,6 +1403,13 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "PutSession",
     "RemoveSession",
     "PruneSessions",
+    "PushAlertSignal",
+    "TakeAlertSignals",
+    "PutAlert",
+    "RemoveAlert",
+    "PruneAlerts",
+    "SetDestinationHealth",
+    "RemoveDestinationHealth",
     "PutProxySession",
     "RemoveProxySession",
     "PutProxyToken",
@@ -1584,6 +1632,25 @@ mod request_mirror {
         PruneSessions {
             now: i64,
         },
+        PushAlertSignal(AlertSignal),
+        TakeAlertSignals {
+            ids: Vec<String>,
+        },
+        PutAlert(AlertRecord),
+        RemoveAlert {
+            id: String,
+        },
+        PruneAlerts {
+            before: i64,
+            max: usize,
+        },
+        SetDestinationHealth {
+            name: String,
+            health: DestinationHealth,
+        },
+        RemoveDestinationHealth {
+            name: String,
+        },
         PutProxySession {
             key: String,
             session: ProxySessionRecord,
@@ -1691,6 +1758,28 @@ impl Response {
 }
 
 impl ClusterState {
+    /// Keep at most `max` alert records: resolved and one-shot ones go first,
+    /// oldest first, and open ones only when nothing else is left.
+    fn trim_alerts(&mut self, max: usize) {
+        while self.alerts.len() > max {
+            let victim = self
+                .alerts
+                .values()
+                .min_by(|a, b| {
+                    (a.state.is_open(), a.last_at, &a.id).cmp(&(
+                        b.state.is_open(),
+                        b.last_at,
+                        &b.id,
+                    ))
+                })
+                .map(|a| a.id.clone());
+            match victim {
+                Some(id) => self.alerts.remove(&id),
+                None => break,
+            };
+        }
+    }
+
     /// Drop reverse proxy sessions and tokens that ended at or before `now`.
     fn sweep_proxy_auth(&mut self, now: i64) {
         self.proxy_sessions.retain(|_, s| s.expires_at > now);
@@ -2634,6 +2723,63 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::PushAlertSignal(signal) => {
+                self.alert_inbox.insert(signal.id.clone(), signal.clone());
+                while self.alert_inbox.len() > MAX_ALERT_INBOX {
+                    let oldest = self
+                        .alert_inbox
+                        .iter()
+                        .min_by(|a, b| (a.1.at, a.0).cmp(&(b.1.at, b.0)))
+                        .map(|(id, _)| id.clone());
+                    match oldest {
+                        Some(id) => self.alert_inbox.remove(&id),
+                        None => break,
+                    };
+                }
+                Ok(())
+            }
+
+            Request::TakeAlertSignals { ids } => {
+                for id in ids {
+                    self.alert_inbox.remove(id);
+                }
+                Ok(())
+            }
+
+            Request::PutAlert(record) => {
+                let mut record = record.clone();
+                let excess = record
+                    .deliveries
+                    .len()
+                    .saturating_sub(MAX_RECORD_DELIVERIES);
+                record.deliveries.drain(..excess);
+                self.alerts.insert(record.id.clone(), record);
+                self.trim_alerts(MAX_ALERT_RECORDS);
+                Ok(())
+            }
+
+            Request::RemoveAlert { id } => {
+                self.alerts.remove(id);
+                Ok(())
+            }
+
+            Request::PruneAlerts { before, max } => {
+                self.alerts
+                    .retain(|_, a| a.state.is_open() || a.last_at >= *before);
+                self.trim_alerts(*max);
+                Ok(())
+            }
+
+            Request::SetDestinationHealth { name, health } => {
+                self.alert_destinations.insert(name.clone(), health.clone());
+                Ok(())
+            }
+
+            Request::RemoveDestinationHealth { name } => {
+                self.alert_destinations.remove(name);
+                Ok(())
+            }
+
             Request::RecordCrashMove { instance, from, at } => {
                 if !self.assignments.contains_key(instance) {
                     return Err(format!("unknown instance {instance}"));
@@ -2942,6 +3088,130 @@ impl ClusterState {
 
 #[cfg(test)]
 mod tests {
+    use crate::alerts::{AlertState, SignalAction};
+    use cl_config::AlertSeverity;
+
+    fn sample_signal(id: &str) -> AlertSignal {
+        AlertSignal {
+            id: id.into(),
+            event: "node.disk_low".into(),
+            dedupe: "node.disk_low:n1:/data".into(),
+            action: SignalAction::Open,
+            severity: Some(AlertSeverity::Warning),
+            title: "t".into(),
+            detail: String::new(),
+            subject: "n1".into(),
+            stack: None,
+            instance: None,
+            node: Some("n1".into()),
+            at: 1,
+            excerpt: Vec::new(),
+            count: 1,
+        }
+    }
+
+    fn sample_alert(id: &str, state: AlertState, last_at: i64) -> AlertRecord {
+        AlertRecord {
+            id: id.into(),
+            event: "node.disk_low".into(),
+            dedupe: format!("d-{id}"),
+            category: "nodes".into(),
+            severity: AlertSeverity::Warning,
+            state,
+            title: "t".into(),
+            detail: String::new(),
+            subject: "n1".into(),
+            stack: None,
+            instance: None,
+            node: None,
+            opened_at: last_at,
+            last_at,
+            resolved_at: None,
+            count: 1,
+            escalated_from: None,
+            sent_severity: None,
+            resolved_sent: false,
+            digested: false,
+            links: Vec::new(),
+            excerpt: Vec::new(),
+            deliveries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn alert_inbox_is_bounded_and_drops_the_oldest() {
+        let mut state = ClusterState::default();
+        for i in 0..(MAX_ALERT_INBOX + 5) {
+            let mut sig = sample_signal(&format!("s{i:04}"));
+            sig.at = i as i64;
+            assert!(state.apply(&Request::PushAlertSignal(sig)).is_ok());
+        }
+        assert_eq!(state.alert_inbox.len(), MAX_ALERT_INBOX);
+        assert!(!state.alert_inbox.contains_key("s0000"));
+        assert!(state.alert_inbox.contains_key("s0504"));
+        state.apply(&Request::TakeAlertSignals {
+            ids: vec!["s0504".into(), "nope".into()],
+        });
+        assert_eq!(state.alert_inbox.len(), MAX_ALERT_INBOX - 1);
+    }
+
+    #[test]
+    fn pruning_alerts_keeps_open_ones_and_trims_oldest_resolved_first() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::PutAlert(sample_alert(
+            "open",
+            AlertState::Active,
+            1,
+        )));
+        state.apply(&Request::PutAlert(sample_alert(
+            "old",
+            AlertState::Resolved,
+            2,
+        )));
+        state.apply(&Request::PutAlert(sample_alert(
+            "mid",
+            AlertState::Event,
+            50,
+        )));
+        state.apply(&Request::PutAlert(sample_alert(
+            "new",
+            AlertState::Resolved,
+            90,
+        )));
+        state.apply(&Request::PruneAlerts {
+            before: 10,
+            max: 10,
+        });
+        assert!(state.alerts.contains_key("open"));
+        assert!(!state.alerts.contains_key("old"));
+        state.apply(&Request::PruneAlerts { before: 0, max: 2 });
+        assert_eq!(
+            state.alerts.keys().cloned().collect::<Vec<_>>(),
+            vec!["new".to_string(), "open".to_string()]
+        );
+        state.apply(&Request::RemoveAlert { id: "new".into() });
+        assert_eq!(state.alerts.len(), 1);
+    }
+
+    #[test]
+    fn put_alert_caps_the_delivery_log() {
+        let mut state = ClusterState::default();
+        let mut rec = sample_alert("a", AlertState::Active, 1);
+        for i in 0..30 {
+            rec.deliveries.push(crate::alerts::AlertDelivery {
+                destination: "d".into(),
+                at: i,
+                ok: true,
+                error: None,
+                attempts: 1,
+                phase: "opened".into(),
+            });
+        }
+        state.apply(&Request::PutAlert(rec));
+        let kept = &state.alerts["a"].deliveries;
+        assert_eq!(kept.len(), MAX_RECORD_DELIVERIES);
+        assert_eq!(kept.last().unwrap().at, 29);
+    }
     use super::*;
 
     #[test]
@@ -3255,6 +3525,25 @@ mod tests {
             },
             Request::RemoveSession { key: "k".into() },
             Request::PruneSessions { now: 5 },
+            Request::PushAlertSignal(sample_signal("s1")),
+            Request::TakeAlertSignals {
+                ids: vec!["s1".into()],
+            },
+            Request::PutAlert(sample_alert("a1", AlertState::Active, 10)),
+            Request::RemoveAlert { id: "a1".into() },
+            Request::PruneAlerts { before: 5, max: 10 },
+            Request::SetDestinationHealth {
+                name: "discord".into(),
+                health: DestinationHealth {
+                    ok: false,
+                    at: 3,
+                    error: Some("boom".into()),
+                    consecutive_failures: 2,
+                },
+            },
+            Request::RemoveDestinationHealth {
+                name: "discord".into(),
+            },
             Request::PutProxySession {
                 key: "k".into(),
                 session: ProxySessionRecord {

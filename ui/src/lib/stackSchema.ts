@@ -169,7 +169,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.deploy.update_config': ['parallelism', 'delay', 'order', 'failure_action'],
   'services.*.x-clouduler': [
     'proxy', 'expose', 'volume_sync', 'auto_update', 'node', 'docker_socket', 'colocate', 'backup',
-    'actions',
+    'actions', 'alerts',
   ],
   'services.*.x-clouduler.proxy': [
     'host', 'network', 'port', 'path_prefix', 'tls', 'middlewares', 'sticky', 'max_body_size',
@@ -185,7 +185,11 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
-  'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup'],
+  'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup', 'alerts'],
+  'x-clouduler.alerts': ['enabled', 'mute', 'severity', 'logs'],
+  'x-clouduler.alerts.logs': ['match', 'regex', 'ignore_case', 'severity', 'title', 'cooldown', 'stream', 'services'],
+  'services.*.x-clouduler.alerts': ['enabled', 'mute', 'severity', 'logs'],
+  'services.*.x-clouduler.alerts.logs': ['match', 'regex', 'ignore_case', 'severity', 'title', 'cooldown', 'stream'],
   'x-clouduler.volume_sync.*': ['interval', 'enabled'],
   'x-clouduler.backup': ['stop_before'],
   'configs.*': ['file'],
@@ -196,7 +200,7 @@ const SCHEMA: Record<string, string[]> = {
  *  none of them collide with a differently-typed field of the same name. */
 const BOOLEAN_KEYS = new Set([
   'tls', 'sticky', 'websockets', 'preserve_host', 'proxy_protocol', 'allow_credentials', 'permanent',
-  'stop_before', 'auto_update', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui',
+  'stop_before', 'auto_update', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui', 'ignore_case',
 ]);
 
 const BARE_MIDDLEWARES = ['redirect_https', 'strip_prefix', 'authenticated'];
@@ -222,6 +226,8 @@ function valueNamesFor(
   if (key === 'image') return dedupe([...localImages(doc), ...known.images]);
   if (key === 'restart') return RESTART_VALUES;
   if (key === 'protocol') return ['tcp', 'udp'];
+  if (key === 'stream' && path.includes('alerts')) return ['both', 'stdout', 'stderr'];
+  if (key === 'severity' && path.includes('alerts')) return ['info', 'warning', 'critical'];
   if (key === 'mode' && container === 'deploy') return ['replicated', 'global'];
   if (key === 'condition' && container === 'restart_policy') return ['none', 'on-failure', 'any'];
   if (key === 'order' && container === 'update_config') return ['start-first', 'stop-first'];

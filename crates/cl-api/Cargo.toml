@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cl-alert.workspace = true
 cl-backup.workspace = true
 cl-config.workspace = true
 cl-docker.workspace = true
@@ -50,6 +51,8 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 bollard = "0.21"
 cookie = "0.18"
 humantime = "2"
+jiff = "0.2"
+url = "2"
 humantime-serde.workspace = true
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"] }
 # For `git2::Oid` only, in `routes::git_backup` - the git2 IO itself all lives
