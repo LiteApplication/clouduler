@@ -1236,6 +1236,12 @@ pub enum Request {
     ClearInstanceUpdate {
         instance: InstanceId,
     },
+    /// Drops every recorded failure: failed backup runs, restore requests,
+    /// image updates and migrations, certificate/DNS errors and failed alert
+    /// deliveries. These only linger as history, so an operator who has dealt
+    /// with the cause (or does not care) uses this to stop them showing up as
+    /// problems. Running, pending and succeeded records are left alone.
+    ClearErrors,
     /// Store a login session under `key` (a hash of the session id, never the
     /// id itself). `now` is unix seconds supplied by the caller so `apply`
     /// stays pure; sessions already expired at `now` are dropped at the same
@@ -1400,6 +1406,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "ReportContainerStatus",
     "SetInstanceUpdate",
     "ClearInstanceUpdate",
+    "ClearErrors",
     "PutSession",
     "RemoveSession",
     "PruneSessions",
@@ -1621,6 +1628,7 @@ mod request_mirror {
         ClearInstanceUpdate {
             instance: InstanceId,
         },
+        ClearErrors,
         PutSession {
             key: String,
             session: SessionRecord,
@@ -2645,6 +2653,33 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::ClearErrors => {
+                self.restic_runs
+                    .retain(|_, r| !matches!(r.outcome, BackupRunOutcome::Failed { .. }));
+                self.restore_requests
+                    .retain(|_, r| !matches!(r.status, RestoreStatus::Failed { .. }));
+                self.instance_updates
+                    .retain(|_, u| !matches!(u.phase, UpdatePhase::Failed));
+                for assignment in self.assignments.values_mut() {
+                    if matches!(
+                        assignment.migration,
+                        Some(Migration {
+                            phase: MigrationPhase::Failed { .. },
+                            ..
+                        })
+                    ) {
+                        assignment.migration = None;
+                    }
+                }
+                // A reconciler that is still failing writes its error back on
+                // its next pass, so this only clears stale ones.
+                for statuses in [&mut self.cert_status, &mut self.dns_status] {
+                    statuses.retain(|_, s| !matches!(s, ReconcileStatus::Error { .. }));
+                }
+                self.alert_destinations.retain(|_, h| h.ok);
+                Ok(())
+            }
+
             Request::PutSession { key, session, now } => {
                 self.sessions.retain(|_, s| s.expires_at > *now);
                 self.sessions.insert(key.clone(), session.clone());
@@ -3513,6 +3548,7 @@ mod tests {
             Request::ClearInstanceUpdate {
                 instance: InstanceId::new("gitlab", "web", 0),
             },
+            Request::ClearErrors,
             Request::PutSession {
                 key: "k".into(),
                 session: SessionRecord {
@@ -5157,6 +5193,35 @@ mod tests {
             status: RestoreStatus::Pending,
             requested_by: "tester".into(),
         }
+    }
+
+    #[test]
+    fn clear_errors_drops_failures_and_keeps_everything_else() {
+        let mut state = cluster_with_known_drive();
+        for id in ["failed", "pending"] {
+            assert!(state
+                .apply(&Request::PutRestoreRequest(restore_request(id, "fast")))
+                .is_ok());
+        }
+        state.restore_requests.get_mut("failed").unwrap().status =
+            RestoreStatus::Failed { error: "x".into() };
+        state.cert_status.insert(
+            "a.example.com".into(),
+            ReconcileStatus::Error {
+                message: "x".into(),
+                at: 1,
+            },
+        );
+        state
+            .dns_status
+            .insert("b.example.com".into(), ReconcileStatus::Pending);
+
+        assert!(state.apply(&Request::ClearErrors).is_ok());
+
+        assert!(!state.restore_requests.contains_key("failed"));
+        assert!(state.restore_requests.contains_key("pending"));
+        assert!(state.cert_status.is_empty());
+        assert!(state.dns_status.contains_key("b.example.com"));
     }
 
     #[test]

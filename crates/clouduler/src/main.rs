@@ -368,6 +368,7 @@ async fn main() -> Result<()> {
                 .await
             }
         },
+        Command::ClearErrors { via } => cl_cli::clear_errors::run(&cfg, via.as_deref()).await,
         Command::GitBackup { command } => match command {
             GitBackupCommand::Pull { via } => {
                 cl_cli::git_backup_cli::pull(&cfg, via.as_deref()).await

@@ -341,6 +341,14 @@ pub enum Command {
         #[command(subcommand)]
         command: GitBackupCommand,
     },
+    /// Forget every recorded failure so it stops showing up as a problem:
+    /// failed backup runs, restores, image updates and migrations,
+    /// certificate/DNS errors and failed alert deliveries. A failure that is
+    /// still happening is reported again by its next attempt.
+    ClearErrors {
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
     /// Pull and recreate containers whose running image is behind what its
     /// registry currently serves - the same trigger the web ui's Updates
     /// page runs. Talks to a running daemon.
