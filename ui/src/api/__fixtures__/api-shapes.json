@@ -571,6 +571,7 @@
       ],
       "digest_at": "09:00",
       "enabled": true,
+      "events": {},
       "notify_resolved": true,
       "renotify_on_escalation": true,
       "retention": "30days",

@@ -75,12 +75,13 @@ pub struct AlertSettings {
     /// Absent means the cluster's web address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always serialised, even empty: the UI reads it unconditionally.
+    #[serde(default)]
     pub destinations: Vec<Destination>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpSettings>,
     /// Per-event overrides, keyed by catalog event key (`instance.unhealthy`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub events: BTreeMap<String, EventOverride>,
     #[serde(default)]
     pub thresholds: Thresholds,
@@ -349,6 +350,13 @@ fn default_cert_crit() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_settings_keep_the_lists_the_ui_reads() {
+        let v = serde_json::to_value(AlertSettings::default()).unwrap();
+        assert_eq!(v["destinations"], serde_json::json!([]));
+        assert_eq!(v["events"], serde_json::json!({}));
+    }
 
     #[test]
     fn every_destination_kind_round_trips() {
