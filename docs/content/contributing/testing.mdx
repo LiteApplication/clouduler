@@ -5,6 +5,154 @@ sidebar_position: 2
 
 # Testing
 
-One-line summary of testing goes here.
+Four layers, cheapest first. Run the first three on every change; run the qemu suite before anything that touches failover, replication or scheduling.
 
-TODO
+```bash
+cargo test --workspace            # unit and in-process cluster tests
+cargo clippy --workspace --all-targets -- -D warnings
+cd ui && npx vitest run           # UI component, reducer and contract tests
+cd ui && npm run build            # typechecks the UI against the API types
+tests/qemu/run.sh --all           # real VMs, real docker, real network faults
+```
+
+## Unit and in-process tests
+
+Every crate carries its own tests. The ones worth knowing about:
+
+- `cl-raft`: state machine transitions, and `tests/cluster.rs`, which stands up a 3-node openraft cluster in one process to cover election, forwarding, membership change and config replication.
+- `cl-config`: parsing and validation, including rules that would otherwise only fail at runtime (fence ordering, addresses inside their subnet, drives nobody implements).
+- `cl-drive`: the delta engine against large files, sparse edits, renames and deletions.
+- `cl-init`: init's planning and prompting, plus `init/tests.rs`, which serves a real HTTPS API and runs the join client against it end to end.
+
+Run one crate with `cargo test -p cl-drive`.
+
+:::warning Clippy is mandatory
+`cargo clippy --workspace --all-targets -- -D warnings` must pass before you submit. CI runs exactly that command first and fails the build on any warning.
+:::
+
+## UI tests
+
+```bash
+cd ui
+npx vitest run     # same as npm test
+npm run build      # tsc && vite build: typechecks against src/api/types
+```
+
+The tests sit next to the code (`*.test.ts`, `*.test.tsx`) and cover helpers in `src/lib`, the API client and layout components.
+
+## The api/ui contract
+
+The UI and the Rust API cannot be renamed independently. The mechanism:
+
+1. A Rust test in `crates/cl-api/src/tests.rs` (`api_shapes_match_the_fixture_the_ui_typechecks_against`) calls real endpoints and compares the response shapes with `ui/src/api/__fixtures__/api-shapes.json`. It fails when the server's output drifts.
+2. `ui/src/api/contract.test.ts` assigns each fixture to the TypeScript interface the UI uses, so `tsc` fails when an interface declares a field the server does not send. At runtime it also catches the opposite direction, a field the server sends that the UI has not declared.
+
+After an intentional API change, regenerate the fixture and rerun the UI checks:
+
+```bash
+UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
+cd ui && npx vitest run && npm run build
+```
+
+CI regenerates the fixture in the Rust job and hands it to the UI job, and `release.sh` regenerates it before tagging. Endpoints that return arrays keyed by cluster contents the harness does not have (stacks, instances, certificates) are deliberately not covered, because an empty array proves nothing about the item shape.
+
+## The docs mock contract
+
+The docs site renders the real UI against an in-memory fake backend in `ui/src/mock`. `ui/src/mock/contract.test.ts` holds that fake to the same contract: every endpoint covered by `api-shapes.json` is requested from the mock, in every scenario, and the response must have the fixture's shape (rules in `ui/src/mock/shape.ts`) and be assignable to the UI's interface. A server-side rename therefore breaks the fixture, which breaks this test, which points at the mock to update. `ui/src/mock/coverage.test.tsx` is the sibling render test. An unmocked route logs `[mock]` and answers 501.
+
+It runs with the rest of `npx vitest run`. See [Docs screens](/docs/contributing/docs-screens) for adding scenarios.
+
+## The qemu harness
+
+`tests/qemu` boots real Linux VMs with real docker, wires them into a private network, and drives the cluster through its HTTP API and CLI as an operator would. It is the only layer that can test a node losing power, a network partition, or a kernel that will not mount what you told it to.
+
+```bash
+tests/qemu/build-image.sh        # once, or after changing the base image
+tests/qemu/run.sh --list
+tests/qemu/run.sh formation      # one scenario
+tests/qemu/run.sh --all          # everything, one summary at the end
+```
+
+Needs `qemu-system-x86_64`, `qemu-img`, `mke2fs`, `unshare`, `jq`, `python3` with PyYAML, and either a musl toolchain or docker. It needs no root: the rootfs is built inside a user namespace and the networking is qemu's own. Without `/dev/kvm` it falls back to TCG emulation, which works but is roughly ten times slower, and the runner warns instead of failing.
+
+### How a run is put together
+
+```text
+build-image.sh   ->  cache/rootfs      Alpine + docker, built once, reused
+build-binary.sh  ->  a musl clouduler  rebuilt from the working tree each run
+lib/mkdisk.sh    ->  work/<node>.img   rootfs + binary + this run's cluster.yaml
+lib/scenario-run.sh                    boots them, runs the steps, tears down
+```
+
+The base image is cached because installing Alpine and docker takes minutes. The binary is not, so a run always exercises your working tree.
+
+### The binary has to be musl
+
+The guest is Alpine. A plain glibc build will not start there: the symptom is a VM that boots and then scrolls `Error relocating` on the serial console. `build-binary.sh` picks, in order: `$CLOUDULER_BIN` if you already have a musl binary, `musl-gcc` on `PATH` (`musl-tools` on Debian and Ubuntu, `musl` on Arch), or docker with a small `rust:alpine` image. The musl Rust target alone is not enough because `ring` and `aws-lc-rs` need a C compiler targeting musl.
+
+### Networking
+
+Each VM has two interfaces. `eth0` is the cluster network, a qemu socket mesh shared by every node, used by raft, drive sync and the overlay; `partition` and `heal` steps cut and restore it through QMP `set_link`. `eth1` is qemu user-mode networking, which lets the host reach each node's API on a forwarded `127.0.0.<n>:<port>` and lets image pulls reach a registry. Four ports are forwarded per node: the API, the RPC channel, the proxy's plain HTTP listener and port 2222 (the published port the `publishing` scenario declares).
+
+### Writing a scenario
+
+A scenario is a YAML file in `tests/qemu/scenarios/`: a topology, optional failover timings and a list of steps.
+
+```yaml title="tests/qemu/scenarios/worker-outage.yaml"
+name: worker-outage
+description: a worker dies and its containers land somewhere else.
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+  - { name: n4, role: worker,  ip: 10.10.0.4, drives: { fast: {} } }
+
+failover:
+  probe_interval: 2s
+  fence_timeout: 6s
+  node_timeout: 12s
+
+steps:
+  - wait_quorum: { timeout: 40 }
+  - deploy_stack: { file: stacks/simple.yaml, name: simple }
+  - wait_running: { stack: simple, service: app, timeout: 30 }
+  - kill_service_node: { service: app, save_as: victim }
+  - assert_unreachable: "${victim}"
+  - assert_rescheduled: { service: app, not_on: "${victim}" }
+```
+
+`save_as` stores a value that a later step reads as `${name}`. The failover timings are tightened from the defaults so a scenario does not sleep through a real `node_timeout`, while the ordering that matters (fence before reschedule) is kept. Step verbs live in `tests/qemu/lib/steps.sh`, one `step_<verb>` function each; adding a verb means adding a function.
+
+Current scenarios in `tests/qemu/scenarios/`: `config-secret-propagation`, `dns-split`, `egress-network`, `formation`, `full-restart`, `image-scan`, `leader-failover-write`, `manager-outage`, `network-partition`, `online-node-join`, `publishing`, `quorum-loss-fencing`, `served-drive-nfs`, `served-drive`, `volume-migration` and `worker-outage`.
+
+### Reading a failure
+
+The runner prints the tail of every serial log on failure and leaves the run directory behind:
+
+```text
+tests/qemu/work/<scenario>-<pid>/
+  cluster.yaml        what the nodes were given
+  control.yaml        what the CLI was given: the same cluster via forwarded ports
+  topology.json       names, addresses and ports for this run
+  <node>.serial.log   the guest console, which is also the daemon's log
+```
+
+Start with `<node>.serial.log`: kernel messages, the guest init's output and the daemon's tracing output are all in it, in order.
+
+### Not covered
+
+ACME issuance is not tested end to end; it would need a Pebble server and a mock Cloudflare API. Only the pure parts (renewal window, zone selection, leaf expiry parsing) are unit tested.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes to `main` and `master`, on pull requests and on manual dispatch:
+
+- `rust`: `cargo clippy --workspace --all-targets -- -D warnings`, then regenerates the API fixture, then `cargo test --workspace`.
+- `ui`: installs with `npm ci`, runs `npm run build` and `npx vitest run` against the fixture the Rust job generated.
+- `examples`: builds the binary and runs `clouduler --config <file> check` on every `examples/*.yaml`, so the first thing a new user copies stays valid.
+- `qemu`: the whole suite, run only on manual dispatch because it boots VMs. It uses `musl-tools` and falls back to TCG when the runner has no `/dev/kvm`, with a long timeout (a healthy emulated run looks like a broken scenario if it is cut short). It uploads the serial logs as an artifact on failure.
+
+## Related
+
+- [Building](/docs/contributing/building), [Docs screens](/docs/contributing/docs-screens)

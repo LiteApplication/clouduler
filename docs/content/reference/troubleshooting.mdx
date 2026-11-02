@@ -3,8 +3,368 @@ title: Troubleshooting
 sidebar_position: 7
 ---
 
-# Troubleshooting
+# Troubleshooting and FAQ
 
-One-line summary of troubleshooting goes here.
+Find the symptom, check the likely causes in order, apply the fix, and follow the link for the full feature page. Every message quoted here is an exact string the product prints.
 
-TODO
+Two commands answer most questions before you read anything else:
+
+```bash
+clouduler status              # live problems, ends with "all clear" when there are none
+clouduler stack unhealthy --all   # unhealthy instances with node, uptime, placement and last 10 log lines
+```
+
+In the web UI the same information is on the dashboard problem list and on each stack's **Placement** tab. On a node, the daemon's own log is `sudo journalctl -u clouduler -f`.
+
+:::note
+`status`, `stack unhealthy` and `rebalance` exit 0 whether or not they found problems. In scripts, search the text output for `unhealthy` or `issue(s)`. See [CLI](/docs/reference/cli).
+:::
+
+## I can't reach the web UI
+
+| Check | Fix |
+|---|---|
+| The page does not load at all | Check that the name resolves (`ping cloud.<your internal domain>`) and that port 8443 answers: `curl -k https://<node ip>:8443`. A host firewall on the node must allow 8443/tcp. |
+| Connection refused or times out on 80/443 | `sudo ss -ltnp \| grep -E ':(80\|443) '` should show `clouduler`. If another program holds 80 or 443 the proxy cannot listen, but the daemon keeps running (look for `proxy listener stopped` in `journalctl -u clouduler`). Stop the other program. |
+| The service is `failed` | `sudo journalctl -u clouduler -b --no-pager \| tail -50`. Usual causes: Docker not running (`Cannot connect to the Docker daemon`, check `sudo systemctl status docker`) or ports 80/443 taken. |
+| `Failed to determine group credentials` or `status=216/GROUP` | The unit names `Group=clouduler` and nothing creates it. Run `sudo groupadd -f clouduler` then `sudo systemctl enable --now clouduler.service`. |
+| `this machine is not running systemd` | `init` installed no unit; you have to start the daemon yourself. |
+| Browser certificate warning | Expected until ACME issues a certificate; the proxy serves a self-signed fallback (`no issued certificate yet, serving a self-signed fallback`). See [Certificate not issued](#a-certificate-is-not-issued). |
+| 403 on a route | Routes on a subnetted network only answer clients whose address is inside the subnet; a VPN client outside it gets 403. Publish through a public network instead. See [502 and 403 from the proxy](#502-and-403-from-the-proxy). |
+
+### Sign-in problems
+
+| Symptom | Cause and fix |
+|---|---|
+| `That key was not accepted` | A character or a space was lost when copying. Copy it again from the log. The session lasts 12 hours by default. |
+| I never saved the first API key | `journalctl -u clouduler.service` on the leader, whole journal (no `-b`). The key is logged only once, in a banner ("no api keys exist yet: generated one for initial access ... save it now, it will not be shown again"), and only when the cluster has a leader and no keys exist. Without a second sign-in method (OIDC) the only way back is the emergency tools. |
+| You log in with OIDC but are only a viewer | `auth.oidc.scopes` defaults to `openid profile email` while `admin_claim` defaults to `groups`. Add `groups` to the scopes in the file (no UI control) and match **Admin group value** exactly. |
+| `unknown or expired login state` | The login started on another node, or the daemon restarted in between. Start the login again. |
+| `login state does not match this browser, start the login again` | The state cookie is missing or differs. Start again in the same browser; avoid mixing hostnames. |
+| `invalid redirect_uri` at the provider | The redirect URI must be exactly `https://<dashboard address>/auth/oidc/callback`. After changing `web.address`, update it at the provider and restart the daemon. |
+| `Sign-in link expired` (403) | The one-time token was used or timed out (60 seconds). Reload the app page. |
+| `this route requires login, but proxy.auth does not offer it on this network` (503) | Add the route's network to `proxy.auth.networks`. |
+| A wrong issuer locked you out | Edits to `auth` apply at once with no rollback timer. Use an API key to fix it, and keep one until OIDC is proven. |
+
+Details: [Access and login](/docs/features/access-and-login), [Authentik guide](/docs/guides/authentik), [Keycloak guide](/docs/guides/keycloak).
+
+## A node will not join
+
+Run these on the joining node unless noted: `sudo systemctl status clouduler` and `sudo journalctl -u clouduler -f`.
+
+| Message | Cause and fix |
+|---|---|
+| `error sending request for url` | The joining node could not resolve the name in the join command. Fix the name, or use the CLI form which takes the IP. |
+| `the cluster rejected the api key` | The key is wrong, was deleted, or has a stray space. Generate a new command from **Nodes**. |
+| `the cluster has no leader right now` | The node you joined through is not in a quorum yet. Check `sudo systemctl status clouduler` on it and retry. |
+| `... is outside the internal subnet` | The joining node's `--ip` is not inside the subnet chosen at `init`. Use an address in that subnet. |
+| `the cluster already has a node called ...` | Pick another name, or add `--force` if you are deliberately replacing its entry. |
+| `certificate fingerprint ... does not match the pinned ...` | The certificate changed between generating the command and running it (a real certificate was issued meanwhile). Generate a fresh command. |
+| `could not fetch the cluster key` | The node joined the roster but is half set up. Copy `/etc/clouduler/secrets.key` from a working node (`scp -p`), `chmod 640` it, then `sudo systemctl enable --now clouduler.service`. |
+| The node shows as unreachable | Check from that node that the cluster ports are open, in particular 7373/tcp, in both directions between every pair of nodes. See [Ports and firewall](/docs/reference/ports-and-firewall). |
+| The node refuses to rejoin after removal | A removed node wipes its cluster key, node key and local raft data the next time it boots. Re-provision it as a new join. |
+
+Join keys named `join <name>` are admin keys and are never removed automatically. Delete them after the node has joined. See [Node lifecycle](/docs/features/node-lifecycle) and [Join a node (LAN quick start)](/docs/quickstart/lan-cluster).
+
+## Quorum is lost
+
+Quorum needs more than half of the voters. Only managers vote.
+
+| Symptom | Cause and fix |
+|---|---|
+| Every container stops about 15 seconds after one manager dies | You run two managers. Both are needed. Run three. |
+| A node logs `no quorum, stopping local containers` | The node is fenced: it was cut off for longer than `failover.fence_timeout`. It starts again on the next pass once quorum returns. The leader's view just shows it unreachable; a fenced worker's own Nodes page shows only a "No quorum" banner. |
+| Containers stop on a flaky link | The fence clock resets whenever quorum returns, but one outage longer than `fence_timeout` fences the node. Raise `fence_timeout` and `node_timeout` with it. These two and `probe_interval` are read at daemon start; restart the daemons after changing them. |
+| The daemon logs `failover.fence_timeout (15s) plus the default stop grace (30s) reaches node_timeout (30s)` | Expected with defaults. Raise `node_timeout` to `60s` to quiet it. |
+| Managers are permanently gone | If a majority is still up, use `clouduler node remove` for the dead ones. If the majority is gone for good, use `clouduler emergency STACK` (below). |
+
+To check, run `clouduler node list` and `clouduler status` from a node with quorum. A cut-off worker cannot answer.
+
+`clouduler emergency` is **not** for ordinary outages: if the lost managers will come back with their data intact, a returning manager would conflict with the one you made sole voter. Stop the daemon on the node first, then:
+
+```bash
+sudo systemctl stop clouduler
+sudo clouduler emergency STACK --yes
+sudo systemctl start clouduler
+```
+
+Recent writes can be lost, no other stack is scheduled while it is on, and it ends on its own when another manager reconnects. Details: [Failover](/docs/features/failover), [Emergency mode](/docs/features/emergency-mode).
+
+## After a blackout
+
+If every machine lost power at once, the daemons start by themselves (the service is enabled) and rejoin as soon as quorum is reachable. The trap is a cluster that hosts its own network, for example Headscale as a stack: no tailnet without Headscale, no Headscale without quorum, no quorum without the tailnet. Recover with `clouduler emergency headscale --yes` on one manager that still has its local data, with the daemon stopped, then start the daemon again. The other managers are promoted back to voters and emergency mode ends on its own. If the stack content itself is gone, run `clouduler restore` from the git backup afterwards.
+
+Also expect:
+
+- Replicated volumes may have lost the writes made since the last sync, up to `sync_interval` (15 minutes by default). See [Drives and volumes](/docs/features/drives-and-volumes#data-loss-window).
+- A tailnet outage is a cluster outage: after `failover.fence_timeout` without quorum a node stops its own containers.
+- Keep `/var/lib/tailscale` and the Headscale volume on every node, or machines come back with new identities and addresses.
+
+Full walkthrough: [Multi-site quick start](/docs/quickstart/multi-site-headscale#after-a-blackout-recovering-with-clouduler-emergency).
+
+## A stack is stuck pending or placement is refused
+
+Open the stack's **Placement** tab. It lists, per node, the rule that rejected it. From a shell: `clouduler stack unhealthy --placement`.
+
+| Reason shown | Meaning and fix |
+|---|---|
+| `no such drive`, `not on network`, `pinned to NODE` on every column | The web UI deploy only checks syntax, so a typo in a drive, network or node pin is accepted and then rejects every node (for example `atlas does not implement drive fats`). Fix the name, or deploy from the CLI, which runs the full cluster check first. |
+| `holds no current copy of volume` | A replica one generation behind is not used unless no reachable node holds a current copy. This reason is not shown as a row on the Placement tab. See [Volume not syncing](#a-volume-is-not-syncing-or-a-database-wont-start). |
+| Not enough memory, missing drive on that node | The constraint table says which. A stack on a `public` network needs a node with a public address. |
+| Rejects every node after a config change | Stacks are stored separately from `cluster.yaml`. Removing a drive or network from the config can make a stored stack unplaceable without any change to the stack. |
+| `cannot place instance` in the log | An instance on a drained or unreachable node with nowhere else to go stays where it is. |
+| A service started on an unexpected node | Placement does not prefer the primary of a volume. A usable non-primary copy qualifies. |
+| A restarted container moved | `stack restart` and the UI's **Restart** unassign and let the scheduler place again. A stopped stack stays stopped. |
+| A flapping service keeps moving | Crash-loop rescheduling moves a repeatedly killed instance, with a 30 minute memory. Each move is a full stop, sync and start. |
+
+Other deploy errors:
+
+| Message | Fix |
+|---|---|
+| A red "Not deployed" banner | Read the sentence after it; it names the failed step. Usual first-time causes are a network or drive name that does not exist, or a volume typo. |
+| `this stack has secrets, so the cluster key at PATH is needed. Deploy from a node that holds it, or use the web ui` | Deploy from a node that has `/etc/clouduler/secrets.key`. |
+| `this node holds no cluster key` (web UI) | The node the UI is connected to has no key. Use a node that has one. |
+| `stack NAME has no running instances` | Raised by `stack stop`, `start`, `restart` and `logs` when there is nothing to act on. |
+| `secret NAME was sealed with key X, this node holds Y` or `no cluster key on this node, cannot mount secret NAME for INSTANCE` | That node skips the object (`cannot prepare objects, skipping`) and cannot start containers needing it. Copy the correct key and restart the daemon. |
+
+Details: [Placement](/docs/features/placement), [Stacks](/docs/features/stacks), [Configs and secrets](/docs/features/configs-and-secrets).
+
+## A stack is running but acts wrong
+
+| Symptom | Cause and fix |
+|---|---|
+| Changed a secret or config, the container still sees the old value | The file is rewritten within about 10 seconds but the container is not recreated. Redeploy the stack or restart the instance. Rotating a database password this way locks the service out until both sides match. |
+| A password is rejected | A bundled `file:` secret keeps its trailing newline; `secret set --file` strips one. Use `printf '%s'` or a generated secret. |
+| Container cannot reach the internet | Overlay Docker networks have masquerade off. Add an `egress`, `wireguard` or `nat` network (`nat` is simplest). |
+| Service on an `egress` network stays down | The interface (for example `wg0`) must already exist on the node; Clouduler never creates an `egress` interface. `wireguard` networks are created by Clouduler. |
+| Containers on the stack overlay silently drop traffic | `ethtool` is not installed on the node. `clouduler init` warns about it. |
+| A `ports:` entry is open on one node only | It binds on the node running the container. For a port open on every node use `x-clouduler.expose`, and firewall it yourself: it binds `0.0.0.0` on every node regardless of network. |
+| Network collision refused (`rename one of them`) | Two egress or wireguard networks hash to the same bridge subnet or routing table. Rename one. |
+| Config keys like `deploy.restart_policy`, `x-clouduler.auto_update` do nothing | They are accepted but not acted on. Use the service-level `restart:` key and update containers yourself. |
+
+Details: [Networking](/docs/features/networking), [Stack spec](/docs/reference/stack-spec).
+
+## 502 and 403 from the proxy
+
+| Response | Cause and fix |
+|---|---|
+| `bad gateway: {reason}` or `backend {addr} unreachable` | The container is down or listens on another port. The backend connect timeout is 5 seconds. Check `clouduler stack unhealthy` and the route's target port. |
+| `no route matches {host}{path}` | No route fits the request. Check the stack's `x-clouduler.proxy` entries and the hostname. |
+| 403 | The route is on a subnetted network and the client's TCP peer is outside the subnet, including a VPN. Use a public network to publish externally; a public route is open to the whole internet. |
+| 503 `this route requires login, but proxy.auth does not offer it on this network` | Add the network to `proxy.auth.networks`. |
+| 401 `login required` | The route has a login gate and you have no session. |
+| `403 "this route is only reachable from its own network"` on `/mcp` | The dashboard is on a private network and the client is outside. Use a public network for the web route. |
+| Internal containers reach a protected app without login | `allow_internal` defaults to true. Set it false on routes where that matters. |
+
+An exact host does not always win: if it has no route for the requested path the proxy falls through to a wildcard route. Details: [Proxy and TLS](/docs/features/proxy-and-tls).
+
+## A certificate is not issued
+
+Open **DNS > Certificates** in the UI, or run `clouduler status`. The ACME pass runs about every 5 minutes, so the first certificate takes minutes.
+
+| Message | Cause and fix |
+|---|---|
+| `no issued certificate yet, serving a self-signed fallback` | Normal until issuance succeeds. |
+| `no cloudflare zone covers this name, not issuing` / status `no cloudflare zone covers this hostname` | The hostname is outside every listed zone. Add the zone to **DNS zones**. Certificates need the Cloudflare section and token even for HTTP-01. |
+| `no cloudflare token yet, ... will not run` in the log | ACME is on but no token is saved. Save it. |
+| `cloudflare auth failed: ...` | Bad token, or it lacks Zone / DNS / Edit. Create a new token and use **Rotate token**. |
+| `zone X not found` | The zone name is not in the account behind the token. |
+| `this node holds no cluster key` when saving the token | Save it from a node that has `/etc/clouduler/secrets.key`. |
+| Let's Encrypt rate limiting | Production rate-limits failures. Set **ACME directory URL** to the staging address while testing, then clear the field to switch. Leaving it empty uses production. |
+| Ports 80 and 443 not reaching the node | Check the host firewall and, for public apps, router port forwarding plus the node's `open_ports`. |
+
+Details: [Proxy and TLS](/docs/features/proxy-and-tls), [Cloudflare API token guide](/docs/guides/cloudflare-api-token).
+
+## DNS records are not published
+
+| Symptom | Cause and fix |
+|---|---|
+| `cloudflare api error CODE: MESSAGE` or `N records failed to apply: ...` | Cloudflare refused a record. Read the code in the message. |
+| No records after a leader change | DNS and certificate work run only on the raft leader. Expect a short pause. |
+| Records missing after switching `proxy.dns_publish` to `owning-node` | The switch changes placement rules and deletes records for nodes that no longer own a service. Change it while nothing is mid-failover. |
+| `vault.lan.example.com` appears in public DNS pointing at a 192.168.x.x address | `publish_dns` defaults to true on internal and private networks. Set `publish_dns: false` on them. |
+| Names or addresses wrong | A bare IP on a public network is an error (`a public network takes an ipv4, ipv6 and/or domain block`), as is a map with only `open_ports` (`set at least one of ipv4, ipv6 or domain`). |
+
+Details: [DNS publishing](/docs/features/dns-publishing).
+
+## A volume is not syncing, or a database won't start
+
+Open **Storage**, **Volumes** tab. State badges are **In sync**, **Syncing**, **Sync refused**, **Frozen** and **Looks empty**. From a shell: `clouduler drive list`.
+
+| Symptom | Cause and fix |
+|---|---|
+| `` `fast/vaultwarden` refused to sync `` | Clouduler refuses a sync that would wipe a populated copy (an empty source over a populated destination, or a destination of 200 or more files where the source has less than a twentieth of them). Use **Inspect** to compare file counts, bytes and newest file per node, decide which copy is right, and fix it with freeze and unfreeze. There is deliberately no "pick the winner" button. |
+| **Looks empty** | Shown after two consecutive empty scans. Same procedure as above. |
+| **Sync** does nothing visible | The button only bumps the generation. Data moves at the next scheduled sync. To push now, run `clouduler volume unfreeze` on the node with the copy you want, or use [folder import](/docs/features/folder-import). |
+| New writes missing after a node died | Replication is periodic (`sync_interval`, default 15 minutes) and pauses while the cluster has no quorum. Shorten `sync_interval` for drives that matter and take backups. |
+| `holds no current copy of volume` | A replica one generation behind is not used unless no reachable node holds a current copy. |
+| Per-volume `x-clouduler.volume_sync` interval is ignored | Only the drive-level `sync_interval` applies. |
+| `volume freeze` refuses | Containers on other nodes use the volume. Use `--force` on the CLI; the UI never sends it. Served volumes cannot be frozen. |
+| Unfreeze seems to end early in the UI | The UI waits 120 seconds for replicas and then starts containers even if some are behind. The CLI waits up to one hour. |
+| Files imported are not writable by the container | Imported files belong to the user who ran the command (root under `sudo`) and that replicates. `chown` on the node and let it sync. |
+| A failed `folder-import -r -f` left services stopped | Run `clouduler stack unhealthy --all`, fix the problem, and start them again. |
+| Served drive unavailable on a node | The node needs root and the `nfsv4` kernel module. Containers that need it do not start there. |
+| I/O errors on a served mount | Soft mount with 3 retries: a server unreachable for a few seconds returns errors instead of hanging. Use a replicated drive for applications that cannot tolerate this. |
+| Disk alert `node.disk_low` | Fires at 90% (warning) and 95% (critical). There are no quotas. |
+
+For a database that does not start on a replicated drive, check first that the volume is **In sync** on the node the container landed on and that nothing shows **Sync refused** or **Looks empty**. Do not copy files into a drive folder by hand: they are not announced to the cluster until the generation changes. Use freeze and unfreeze, or folder import.
+
+Details: [Drives and volumes](/docs/features/drives-and-volumes), [Served drives](/docs/features/served-drives), [Folder import](/docs/features/folder-import).
+
+## Alerts are not delivered
+
+Open **Alerts** (the destination status shows **Working** after a success) and use the test-send button.
+
+| Symptom | Cause and fix |
+|---|---|
+| Banner `NAME has failed N deliveries in a row` | Sends keep failing. Fix the cause below; the status returns to **Working** after a success. |
+| Nothing arrives from a cut-off node | Only the leader sends. Alerts from other nodes are fed to the leader. |
+| Info alerts never arrive | Info is only delivered in the daily digest, unless the destination lists Info among its severities with `digest` off. Tick **Info, as a daily digest**. |
+| A resolved message is missing | It goes only to destinations that received the opening. |
+| An alert lingers after the value recovered | Disk and memory alerts use hysteresis. |
+| `Discord says the webhook does not exist (HTTP 404); it was probably deleted or the URL is wrong` | Recreate the webhook. Also shown for 401; not retried. |
+| `Discord is rate limiting this webhook` | HTTP 429, retried automatically. |
+| Nobody is pinged on Discord | The mention is empty or the severity is not set to `ping`. Normal and Silent messages never mention. |
+| `the mail server refused the message: <reason>` | Wrong credentials or sender not allowed. Not retried. Check that **From** matches the account. |
+| `could not send the email: <reason>` | Connection or TLS problem. Retried. Check host, port and security pair up. |
+| `the mail server did not answer in time` | Port blocked or wrong host (20 second limit). Many ISPs block 25. |
+| `no email server is configured` | The SMTP panel was not saved. |
+| `add at least one recipient` / `not an email address` | Fix the **Recipients** list. |
+| `a secret value is empty` | A masked URL (`https://discord.com/...`) means "keep what is stored". To clear a secret use the Remove action. |
+| `the alert settings were changed by someone else, reload and try again` | Two admins saved at once. Reload and redo. |
+
+Details: [Alerts](/docs/features/alerts), [Discord guide](/docs/guides/discord-alerts), [SMTP guide](/docs/guides/smtp).
+
+## A backup is failing
+
+| Symptom | Cause and fix |
+|---|---|
+| `restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed` | Install restic on the node. |
+| The schedule never runs | The target was created or re-saved without `--enabled`. `backup target set` disables the target unless you pass `--enabled` every time. |
+| Retention prunes almost everything | `--keep-within 0s` on the CLI is sent as a real value and restic is told to keep snapshots within `1h`. Omit the flag instead of passing zero; likewise omit `--keep-last`. |
+| Bad repository string or failure at the start | For S3 the **Endpoint** needs `https://`. |
+| Access denied / 403 from the bucket | The key is scoped to another bucket or is read-only. Create it with Read and Write on that bucket. |
+| `backup snapshots` fails for S3 or SSH | The CLI does not pass those credentials to restic. Use the **Snapshots** section in the UI. |
+| Repository unreadable after re-adding a destination | `destination add` without `--password` rotated the password. Restore the old one from the cluster key or git backup. |
+| `volume` or `backup restore-*` runs on the wrong node | They have no `--node` flag and ignore `CLOUDULER_NODE`. Run them on the machine whose hostname matches its node name. |
+| A scheduled run sits as Running | Use `clouduler clear-errors` for failed runs you have dealt with. |
+| Restore left old files | Restores overlay; they do not wipe. Delete leftovers by hand. |
+
+Never `secret set` a name starting `_clouduler_`: it can overwrite a repository password. Details: [Backups](/docs/features/backups), [Backup targets guide](/docs/guides/backup-targets).
+
+### Git backup
+
+| Message | Fix |
+|---|---|
+| `remote ssh host key for HOST does not match the one pinned on first connection - possible man-in-the-middle, or the remote rotated its key (delete KNOWN_HOSTS to re-pin)` | If the rotation is genuine, delete the known_hosts file named in the message to re-pin. |
+| `push rejected by remote: ...` | Shown after one automatic retry. Fix the remote side (permissions, branch protection). |
+| `no git deploy key yet - it is generated after the first export` | Reconcile ran before any export. Run an export first. |
+| `git backup is not configured` / `invalid age recipient: ...` | Configure the section / fix the age public key. |
+| A webhook answers 401 `bad webhook token` | Wrong token in the URL. |
+| A commit moved to `rejected/...` | Pull validation failed, for example `secret S does not already exist in the cluster - git cannot supply new secret content, create it through the api first`. Secret values never come from Git. |
+
+Details: [Git backup](/docs/features/git-backup), [Git webhooks guide](/docs/guides/git-webhooks).
+
+## Updates
+
+| Symptom | Cause and fix |
+|---|---|
+| **Updates** shows **Unknown** | A locally built container or a missing registry answer never shows as behind; a node that cannot be scanned in 25 seconds shows Unknown until the next check. Use the **Unknown** filter. |
+| **Unknown** with **Add registry login** / authentication errors | Store the registry login. See the [private registries guide](/docs/guides/private-registries). |
+| Docker Hub 429 | Anonymous pulls are rate limited. Store a Docker Hub login. Lookups back off automatically. |
+| Batch stopped midway | It stops at the first failure and later instances are marked cancelled. |
+| `stalled: queued but never started` / `stalled: no progress for an hour` | Progress records stuck for 15 minutes in the queue or an hour in another phase fail with these. |
+| Mixed versions after a failed self-update | Nodes that already restarted are not rolled back; only the node that failed to rejoin rolls itself back. |
+| Two copies of the binary after a manual upgrade | `init` copies the binary to `/usr/bin/clouduler` and leaves yours. `which -a clouduler` shows both; replace both. |
+
+Details: [Updates](/docs/features/updates).
+
+## Config changes did nothing, or were reverted
+
+| Symptom | Cause and fix |
+|---|---|
+| A hand edit of `cluster.yaml` was reverted | The replicated copy wins and a restart does not help. Use the web UI or `clouduler config reload`. |
+| `config reload` lost a UI change | It sends the file loaded from `--config`, not the cluster's copy. Compare before reloading. |
+| Success reported but behaviour is unchanged | The key is restart-only; the new value is stored and used after the next restart. |
+| Two admins overwrite each other | Last writer wins and saves strip comments. |
+| Confirm or rollback answers 503 | The rollback timer lives on the leader that took your edit; send it there. |
+| `node add` was forgotten after a restart | It only touches the live roster. Edit the config and run `config reload`. |
+| `removed boreas from the live roster, but could not drop it from the config: ...` | Remove it from the config by hand and run `clouduler config reload`. |
+| `cluster rejected the removal: node boreas still runs INSTANCE` | Retire or drain the node first. Draining does not do a final volume sync, so writes since the last sync may be lost. |
+
+When changing node addresses, the leader tests reachability only from itself, so check follower to follower first. A new address that never answers leaves membership untouched; revert the config (the old address is still served). With two voters a bad move takes quorum with it, so run three managers before re-addressing.
+
+Details: [Live config](/docs/features/live-config), [Node lifecycle](/docs/features/node-lifecycle), [cluster.yaml](/docs/reference/cluster-yaml).
+
+## MCP and AI clients
+
+| Response | Cause and fix |
+|---|---|
+| `404 {"error":"mcp access is disabled"}` | `mcp.enabled` is false. Switch on **Allow AI clients**. |
+| `401` on `/mcp` | No token yet. Run the client's login and approve. |
+| TLS or certificate errors | The node serves the self-signed fallback. Use the real hostname after ACME issues a certificate. |
+| `only an admin can grant admin access` | A viewer asked for Admin. Approve as an admin or choose Read-only. |
+| `needs an admin grant; this connection is read-only...` | Re-approve with Admin. |
+| Approval page loses the request | Pending approvals live in memory on the leader. Start the connection again. |
+| `too many unapproved clients registered` (429) | Wait; unapproved ones expire after 24 hours. |
+| Tools refuse with a missing cluster key | Connect through a node that holds `/etc/clouduler/secrets.key`. |
+| `[REDACTED secret:NAME]` in output | Expected. Output is redacted. |
+
+Details: [MCP server](/docs/features/mcp), [MCP clients guide](/docs/guides/mcp-clients).
+
+## FAQ
+
+**Do I need Cloudflare?** For certificates and public DNS, yes: the whole ACME pass is gated on the Cloudflare section and token. Without it the cluster keeps its self-signed certificate and joins are pinned by fingerprint.
+
+**Is the cluster traffic encrypted?** No. Raft, replication and the overlay are authenticated with the cluster key but plain TCP afterwards, so run them over a trusted network or a VPN. See [Ports and firewall](/docs/reference/ports-and-firewall).
+
+**What happens if I lose `secrets.key`?** If every copy is lost, every stored secret is unrecoverable and the backups cannot be opened (unless you have the age identity for the git backup). Back it up offline.
+
+**Is a fresh drive volume created where the service lands?** Yes. If no record of the volume exists, any node that implements the drive qualifies.
+
+**Why does a power loss lose data?** Replicated drives copy on a timer, not on every write. See [Drives and volumes](/docs/features/drives-and-volumes#data-loss-window).
+
+**Why is `-v` not giving debug output?** The default `--log` ends in a bare `info`, which replaces it. Pass your own, for example `--log debug`.
+
+## Collecting information for a bug report
+
+There is no single "report" command in the CLI. Gather the following; every command is documented in [CLI](/docs/reference/cli). Remove anything private before pasting. Container logs and the state stream are not redacted.
+
+1. The version and what you ran: `clouduler --help` shows the binary, and `which -a clouduler` shows whether an older copy shadows the service's (`/usr/bin/clouduler`).
+2. Health summary:
+
+   ```bash
+   clouduler check                   # parses the config
+   clouduler status                  # live problems, ends with "all clear"
+   clouduler node list
+   clouduler drive list
+   clouduler stack unhealthy --all   # --node --uptime --placement --logs 10
+   ```
+
+3. Logs of the affected workload and of the daemon:
+
+   ```bash
+   clouduler stack logs STACK -n 200          # merged and timestamp-ordered
+   clouduler logs STACK.SERVICE.0 -n 200      # one instance (a bare stack name is not sorted)
+   sudo journalctl -u clouduler -b --no-pager | tail -200   # the node's own daemon log, on that node
+   ```
+
+   `logs` and `stack logs` print `INSTANCE: <error text>` to stderr for an unreachable instance and still exit 0. Add `--via NODE` to ask a specific node. Add `-v` or `--log debug` for more detail on the daemon.
+
+4. A packet capture if the problem is network related (needs no root; the daemon runs `tcpdump` on the instance's node):
+
+   ```bash
+   clouduler capture STACK.SERVICE.0 -w /tmp/capture.pcap -- port 443
+   ```
+
+   It defaults to the network the reverse proxy forwards to; use `--network NAME` to choose another. Open the file in Wireshark.
+
+5. The stack's spec: `clouduler stack show NAME`, and the Placement tab if it is a scheduling problem.
+6. The failing message verbatim, the node it came from, the time, and whether the cluster had quorum (`clouduler node list`).
+
+Do not paste the cluster key, API keys (`clk_...`), secret values, the Discord or webhook URLs, or raw raft dumps (certificate private keys are stored in raft).
+
+## Related
+
+- [CLI](/docs/reference/cli), [Ports and firewall](/docs/reference/ports-and-firewall), [File locations](/docs/reference/file-locations)
+- [Failover](/docs/features/failover), [Emergency mode](/docs/features/emergency-mode), [Placement](/docs/features/placement)

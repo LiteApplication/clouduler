@@ -3,8 +3,117 @@ title: Building
 sidebar_position: 1
 ---
 
-# Building
+# Building from source
 
-One-line summary of building goes here.
+Clouduler is a Rust workspace that produces one binary, `clouduler`, with the web UI embedded in it. This page covers a local build, the cross-build for aarch64, the repository layout and the release process.
 
-TODO
+## Requirements
+
+- A stable Rust toolchain (the CI uses `dtolnay/rust-toolchain@stable`).
+- Node.js 20 and npm, for the web UI.
+- Docker and `restic` are runtime dependencies of a node, not of the build.
+
+## Build
+
+The UI is built first because `cl-api` embeds it into the binary with `rust-embed`.
+
+```bash
+cd ui && npm ci && npm run build && cd ..
+cargo build --release -p clouduler
+```
+
+The binary is `target/release/clouduler`. `npm run build` runs `tsc && vite build`, so it also typechecks the UI against the API types.
+
+How `cl-api` finds the UI is decided by `crates/cl-api/build.rs`:
+
+- If `ui/node_modules` exists, the build script runs `npm run build` itself and embeds that output.
+- Otherwise it uses a prebuilt `ui/dist` that contains an `index.html`.
+- Otherwise it embeds a placeholder page, so the crate still compiles with no UI build. A binary built this way serves the placeholder instead of the dashboard.
+
+That last fallback is why the CI Rust jobs and the aarch64 recipe below can skip `npm ci`: they build with a separately produced `ui/dist` or a placeholder.
+
+### Local build speed (optional)
+
+`.cargo/config.toml` is a local speed tweak: it selects `clang` with `mold` as the linker for x86_64, an `aarch64-linux-gnu-gcc` linker for aarch64, and `sccache` as the rustc wrapper. It is untracked on purpose. Without it Cargo falls back to the default linker, which is slower but correct. If you keep a copy, install `mold` and `sccache`, or remove those lines.
+
+## Cross-compiling for aarch64
+
+Release binaries for `aarch64-unknown-linux-gnu` are built on an x86_64 host with the system cross toolchain (no `cross` or docker). This is what `.github/workflows/release.yml` does:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y gcc-aarch64-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+
+cd ui && npm ci && npm run build && cd ..
+
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
+cargo build --release --target aarch64-unknown-linux-gnu -p clouduler
+```
+
+The result is `target/aarch64-unknown-linux-gnu/release/clouduler`. The C compiler matters because `ring` and `aws-lc-rs` contain C.
+
+:::note glibc floor
+Both release binaries are dynamically linked against glibc and are built on the `ubuntu-latest` runner, so the floor is that runner's glibc, not the oldest distribution you can think of. The single-node quick start notes that the binary runs on Debian 13 but not Debian 12. If you need to run on an older system, build from source on that system. {/* TODO verify: exact glibc floor of the release binary; check with objdump -T on a downloaded asset */}
+:::
+
+The test VMs are different: the qemu harness needs a **musl** binary. See [Testing](/docs/contributing/testing#the-qemu-harness).
+
+## Repository layout
+
+```text
+crates/       the Rust workspace, one crate per subsystem
+ui/           the React + TypeScript web UI (Vite), embedded into the binary
+docs/         this documentation site (Docusaurus)
+examples/     example cluster.yaml files and stacks, validated in CI
+tests/qemu/   the end-to-end VM harness
+old_docs/     earlier markdown notes, kept as source material
+release.sh    version bump, tag and push
+```
+
+### Crates
+
+| Crate | What it does |
+|---|---|
+| `clouduler` | The binary: `main.rs` wires the CLI to the daemon. |
+| `cl-api` | The HTTP API and the web UI it serves, plus the alert engine and MCP server. |
+| `cl-alert` | The alert catalog, settings model and delivery to webhooks, Discord and email. |
+| `cl-backup` | Mirrors config, stacks, configs and secrets into an admin-owned git repository and rebuilds a node from one. |
+| `cl-cli` | CLI commands and shell completion. |
+| `cl-config` | Cluster configuration: the file that describes the topology, nodes and drives, and its validation. |
+| `cl-daemon` | The daemon: bootstrap loop and every background job it spawns. |
+| `cl-dns` | Cloudflare DNS client and the reconciler that owns Clouduler's records. |
+| `cl-docker` | Docker engine access, with Clouduler's container types and ownership labels. |
+| `cl-dockerapi` | A read-only, docker-compatible unix socket for image scanners. |
+| `cl-drive` | Drives and volumes: local implementations, delta replication, served mounts and migration handoff. |
+| `cl-init` | `clouduler init`: set a machine up as a node. |
+| `cl-net` | Overlay networking: VXLAN links, IPAM and the internal DNS resolver. |
+| `cl-proxy` | Reverse proxy, TLS termination and ACME certificate management. |
+| `cl-raft` | Consensus: the replicated state, raft storage, node RPC transport and quorum gate. |
+| `cl-restic` | Restic-based volume backups: destinations, schedules, retention. |
+| `cl-sched` | Placement and the per-node reconcile loop. |
+| `cl-secret` | Encryption of the secrets held in the cluster database. |
+| `cl-update` | GitHub-release-based cluster self-update. |
+
+## Release process
+
+`release.sh` cuts a release from a clean tree:
+
+```bash
+./release.sh 0.9.11
+```
+
+It refuses to run unless the version looks like `x.y.z` (an optional `-suffix` is allowed), the working tree is clean and the tag `vX.Y.Z` does not exist. Then it:
+
+1. Sets the version in the root `Cargo.toml` and in `ui/package.json`, and refreshes `Cargo.lock` and `ui/package-lock.json`.
+2. Regenerates the API fixture with `UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes` (see [Testing](/docs/contributing/testing#the-apiui-contract)).
+3. Commits as `release: vX.Y.Z`, tags `vX.Y.Z`, and pushes the branch and the tag.
+
+Pushing a `v*` tag triggers the `release` workflow, which builds the UI and then the binary for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, and publishes both as `clouduler-<target>` on a GitHub release with generated notes. The in-product self-update flow downloads those assets; see [Updates](/docs/features/updates).
+
+## Related
+
+- [Testing](/docs/contributing/testing), [Docs screens](/docs/contributing/docs-screens)
+- [File locations](/docs/reference/file-locations)
