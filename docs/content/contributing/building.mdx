@@ -56,7 +56,7 @@ cargo build --release --target aarch64-unknown-linux-gnu -p clouduler
 The result is `target/aarch64-unknown-linux-gnu/release/clouduler`. The C compiler matters because `ring` and `aws-lc-rs` contain C.
 
 :::note glibc floor
-Both release binaries are dynamically linked against glibc and are built on the `ubuntu-latest` runner, so the floor is that runner's glibc, not the oldest distribution you can think of. The single-node quick start notes that the binary runs on Debian 13 but not Debian 12. If you need to run on an older system, build from source on that system. {/* TODO verify: exact glibc floor of the release binary; check with objdump -T on a downloaded asset */}
+Both release binaries are dynamically linked against glibc and are built on the `ubuntu-latest` runner, so the floor is the newest GLIBC symbol version the binary needs, not the runner's glibc itself. For the aarch64 release that is 2.39; check it with `objdump -T clouduler | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`. I measured only the aarch64 build. The single-node quick start notes that the binary runs on Debian 13 but not Debian 12 (glibc 2.36). If you need to run on an older system, build from source on that system.
 :::
 
 The test VMs are different: the qemu harness needs a **musl** binary. See [Testing](/docs/contributing/testing#the-qemu-harness).

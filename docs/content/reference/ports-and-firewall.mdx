@@ -38,7 +38,7 @@ A raw `x-clouduler.expose` port is bound on `0.0.0.0` on **every** node, whateve
 </Quirk>
 
 <Quirk title="Port 80 or 443 already taken" severity="info">
-If another program holds 80 or 443, the proxy cannot listen, but the daemon keeps running. Check with `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`. The daemon logs a `proxy listener stopped` warning with the bind error. The systemd socket unit that holds 80/443 is only written when the proxy is enabled at `init` time. {/* TODO verify: not reproduced on a live host. */}
+If another program holds 80 or 443, the proxy cannot listen, but the daemon keeps running. Check with `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`. The daemon logs a `proxy listener stopped` warning with the bind error. The systemd socket unit that holds 80/443 is only written when the proxy is enabled at `init` time.
 </Quirk>
 
 <Quirk title="Raft and drive traffic is authenticated but not encrypted" severity="warn">
@@ -149,7 +149,7 @@ sudo firewall-cmd --reload
 </UiCli>
 
 <Quirk title="Docker bypasses ufw for published ports" severity="warn">
-Docker writes its own iptables rules, so a plain `docker -p` publish is reachable even if `ufw` says deny. Clouduler's proxy ports are bound by the daemon itself and obey your firewall, but anything you publish with `ports:` in a stack does not. {/* TODO verify: ufw interaction with Clouduler's own chains on a live host. */}
+Docker writes its own iptables rules, so a plain `docker -p` publish is reachable even if `ufw` says deny. Clouduler's proxy ports are bound by the daemon itself and obey your firewall, but anything you publish with `ports:` in a stack does not. Clouduler adds no host firewall of its own for these ports: its `CLDR-IN` chain only limits what containers can reach on the host, so on a node without a firewall of your own, 80, 443 and 8443 are open to anyone who can reach it.
 </Quirk>
 
 <Quirk title="Router port forwarding for public apps" severity="info">

@@ -40,7 +40,7 @@ docker run --rm codeberg.org/forgejo/forgejo:10 forgejo generate secret LFS_JWT_
   | clouduler secret set forgejo_lfs_jwt_secret
 ```
 
-{/* TODO verify: the forgejo generate secret subcommand output shape was not run against the image. */}
+{/* TODO verify: the output shape of forgejo generate secret (the subcommand exists; it was not run because it prints a secret) */}
 
 **Configs.** None.
 
@@ -238,7 +238,7 @@ clouduler stack deploy ./forgejo.yaml
      --admin --username admin --email admin@example.com --random-password
    ```
 
-   {/* TODO verify: flags follow the upstream Gitea-style CLI and were not run here. */}
+   The flags match `forgejo admin user create --help` in Forgejo 10.
 
 3. Run **Doctor check** and read the output before you run either regenerate action.
 4. Add your public key in the web UI, then test SSH from a tailnet device: `ssh -p 2222 git@forgejo.home.example.com`.

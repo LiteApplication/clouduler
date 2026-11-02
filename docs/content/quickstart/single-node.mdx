@@ -56,7 +56,7 @@ Everything below is written with my example values. Fill this in once and every 
 - Optional, for the last part: a domain on Cloudflare and ports 80 and 443 forwarded to this machine.
 
 :::note Raspberry Pi OS on Debian 12 (bookworm)
-I would not use it. The release binary is built on a recent glibc, and a binary built that way runs on Debian 13 but not on Debian 12. {/* TODO verify: exact glibc floor of the release binary; the release is built on the CI runner image, so the floor follows it. Check with objdump -T on a downloaded asset */}
+I would not use it. The release binary needs glibc 2.39 or newer (checked on the aarch64 build), so it runs on Debian 13 but not on Debian 12, which ships glibc 2.36.
 :::
 
 ## 1. Prepare the machine
@@ -69,7 +69,7 @@ I connect to the machine and install what Clouduler leans on. Docker runs the co
 [arch] sudo pacman -S --needed docker iproute2 iptables ethtool restic
 sudo systemctl enable --now docker`}</Cmd>
 
-{/* TODO verify: package names per distro (docker.io on Debian, docker on Arch) */}
+`docker.io` is Debian's own Docker package. If you use Docker's vendor repository instead, install `docker-ce` rather than `docker.io`.
 
 Why `enable --now`? Clouduler starts after Docker and needs its socket. If Docker is not up at boot, the daemon waits up to two minutes for it and keeps retrying, but nothing works until Docker answers.
 
@@ -80,7 +80,7 @@ Now I check that Docker is really up.
 **What I should see:** a version number.
 
 :::warning If you see `Cannot connect to the Docker daemon`
-Docker is not running. Run `sudo systemctl status docker` to see why. On a Raspberry Pi, the usual cause of a Docker that starts but shows no memory limits is a missing kernel flag: add `cgroup_enable=memory cgroup_memory=1` to `/boot/firmware/cmdline.txt` and reboot. {/* TODO verify: Raspberry Pi cgroup flags */}
+Docker is not running. Run `sudo systemctl status docker` to see why. On a Raspberry Pi, the usual cause of a Docker that starts but shows no memory limits is a missing kernel flag: add `cgroup_enable=memory cgroup_memory=1` to `/boot/firmware/cmdline.txt` and reboot.
 :::
 
 Stacks that have their own network use a VXLAN device (on a single node, public networks do not), so I load that kernel module and check it. If I later serve a drive over NFS, the `nfsv4` module is needed too.
@@ -164,8 +164,6 @@ atlas is a manager in cluster homelab at 192.168.1.10
 the web ui is at https://cloud.lan.example.com:8443
 ```
 
-{/* TODO verify: exact init output; this is reconstructed from the code, not captured */}
-
 It also prints a reminder that the daemon will generate the cluster key at `/etc/clouduler/secrets.key`. I'll come back to that key in a minute because it is the one thing I must back up.
 
 :::warning If you see a warning that `ethtool` or `restic` is not on PATH
@@ -234,7 +232,7 @@ The UI lives at <code>https://cloud.<Var plain name="domain" fallback="lan.examp
 
 <Cmd lang="text" title="/etc/hosts on my laptop">{`{{ip}}   cloud.{{domain}}`}</Cmd>
 
-I expect the raw IP (<code>https://<Var plain name="ip" fallback="192.168.1.10" />:8443</code>) to work too. {/* TODO verify: sign in by IP when an internal domain is set (cookie scope not traced) */}
+Use the name rather than the raw IP (<code>https://<Var plain name="ip" fallback="192.168.1.10" />:8443</code>) to sign in. If I later set up single sign-on, its callback is fixed to the dashboard name and the login cookie is only valid for the host I typed, so a login started on the IP fails.
 
 ### Sign in
 
@@ -317,7 +315,7 @@ Read the sentence after it. It names the step that failed. The usual first-time 
 :::
 
 :::warning If the container stays in "pending placement"
-Open the stack's **Placement** tab. It lists each rule and which one failed for <code><Var plain name="hostname" fallback="atlas" /></code>. {/* TODO verify: how a first-time user sees the rejection reason */}
+Open the stack's **Placement** tab. It lists each rule and which one failed for <code><Var plain name="hostname" fallback="atlas" /></code>.
 :::
 
 ## 7. Reach it on the LAN

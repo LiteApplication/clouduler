@@ -252,7 +252,7 @@ The whole ACME pass is gated on the Cloudflare section and token. A hostname out
 </Quirk>
 
 <Quirk title="Port 80 or 443 already in use" severity="warn">
-If another program holds 80 or 443 the proxy cannot listen, but the daemon keeps running. Check `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`; the daemon logs `proxy listener stopped` as a warning with the bind error. {/* TODO verify: log text not yet reproduced on a live host. */}
+If another program holds 80 or 443 the proxy cannot listen, but the daemon keeps running. Check `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`; the daemon logs `proxy listener stopped` as a warning with the bind error.
 </Quirk>
 
 <Quirk title="proxy.enabled and ports: live or restart?" severity="info">

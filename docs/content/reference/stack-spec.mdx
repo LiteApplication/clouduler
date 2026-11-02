@@ -395,8 +395,7 @@ The spec is stored first, then bundled files are written, and the object list is
 </Quirk>
 
 <Quirk title="An empty services map parses">
-`services: {}` passes the syntax check, and no other validation step rejects it. What the scheduler does with such a stack was not traced.
-{/* TODO verify: scheduler behaviour for a stack with no services. */}
+`services: {}` passes the syntax check, and no other validation step rejects it. The scheduler creates no instances for it, so it shows 0 instances and raises no problem.
 </Quirk>
 
 ## Related

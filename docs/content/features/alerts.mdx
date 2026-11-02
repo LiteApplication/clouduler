@@ -357,9 +357,7 @@ Both use hysteresis to avoid flapping, so an alert can stay open a little after 
 </Quirk>
 
 <Quirk title="Not covered">
-{/* TODO verify: whether muted events leave any trace in the Recent tab */}
-{/* TODO verify: whether an empty digest is sent when nothing qualifies */}
-Alerts cannot be paused at night and are not exposed to the MCP server.
+A muted event is neither recorded nor sent, so it leaves nothing in the Recent tab. A digest is only sent to a destination that has at least one qualifying event, so there are no empty digests. Alerts cannot be paused at night and are not exposed to the MCP server.
 </Quirk>
 
 ## Related

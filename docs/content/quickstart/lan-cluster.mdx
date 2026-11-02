@@ -84,7 +84,7 @@ sudo ufw allow in on {{iface}} from {{subnet}} to any port 8443 proto tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp`}</Cmd>
 
-{/* TODO verify: the ufw rules are an example, not tested against a real cluster. */}
+These rules are an example, so adapt the interface and subnet to yours. The ports are the ones a running node listens on: raft and drive sync on 7373 to 7375 over the tailnet or LAN address, VXLAN on 4789/udp, and the dashboard on 8443.
 
 If you never installed a firewall, there is nothing to do. See [Ports and firewall](/docs/reference/ports-and-firewall) for the complete list.
 
@@ -230,20 +230,18 @@ sudo systemctl enable --now clouduler.service
 
 <Cmd>{`sudo clouduler status`}</Cmd>
 
-**What I should see:** a `raft:` line with `quorum=yes` and `voters=3/3`, three nodes marked `up` and `active`, then `all clear: no unhealthy instances or cluster faults`. The shape is:
+**What I should see:** a `raft:` line with `quorum=yes` and `voters=3/3`, three nodes marked `up` and `active`, a summary of the stacks, then `all clear: no unhealthy instances or cluster faults`. Each node line is tab-separated: name, role, reachability, availability, instance count and CPU architecture. The shape is:
 
 ```text
 cluster home
   raft: leader=atlas quorum=yes voters=3/3 state_version=... (answered by atlas)
 nodes
-  atlas   up  active  instances=0 ...
-  boreas  up  active  instances=0 ...
-  cirrus  up  active  instances=0 ...
-...
+  atlas	Manager	up	active	instances=0	x86_64
+  boreas	Manager	up	active	instances=0	x86_64
+  cirrus	Manager	up	active	instances=0	x86_64
+stacks 0 deployed, 0/0 instances assigned to run
 all clear: no unhealthy instances or cluster faults
 ```
-
-{/* TODO verify: exact live status output; the format comes from crates/cl-cli/src/status.rs, not a captured run */}
 
 In the web UI, **Nodes** shows three healthy nodes:
 
@@ -326,11 +324,11 @@ Then I pull the power on that node (or `sudo poweroff` if I'm squeamish). From a
 | After the power-off | What happens |
 |---|---|
 | a few seconds | nothing visible yet; the node just stops answering |
-| about 30 s | the leader decides the node is unreachable (`failover.node_timeout` is 30 s) and `status` shows it as `UNREACHABLE` |
+| about 30 s | the leader decides the node is unreachable (`failover.node_timeout` is 30 s) and `status` shows it as `UNREACHABLE` (the UI badge reads **Unreachable**) |
 | a bit later | the scheduler places Vaultwarden on a surviving node, which pulls the image if it is not cached |
 | a minute or so in total | `clouduler stack unhealthy` goes quiet and the app answers again |
 
-{/* TODO verify: timeline is derived from the default timers, not measured on real hardware; also the exact UI badge texts */}
+The timings come from the default timers, so expect them to vary a little.
 
 In the web UI the Overview shows the node as unreachable and the stack's container with its new node:
 
@@ -339,7 +337,7 @@ In the web UI the Overview shows the node as unreachable and the stack's contain
 My cluster is still working, with two of three managers. If I now lose a second node, the quorum is gone and the cluster can no longer change anything; the remaining node is read-only until a second one returns. That is by design.
 
 :::warning What about my data?
-A replicated drive is copied on a timer (every 15 minutes by default), not on every write. If the failed node had written data in the last interval that no other node received, that data is not on the survivors. Lower **Resync every** on the drive (Settings, Storage) for apps where that matters, and keep [backups](/docs/features/backups). {/* TODO verify: whether the app starts from the older replica or refuses to start when the replica is behind */}
+A replicated drive is copied on a timer (every 15 minutes by default), not on every write. If the failed node had written data in the last interval that no other node received, that data is not on the survivors. Lower **Resync every** on the drive (Settings, Storage) for apps where that matters, and keep [backups](/docs/features/backups). If a surviving node holds only an older copy, the app is refused a start while any node with the current copy is reachable. It starts from the freshest older copy only when no current copy can be reached, and then the writes since that copy are gone.
 :::
 
 :::warning If the app does not move

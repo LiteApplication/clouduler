@@ -45,7 +45,7 @@ The issuer for this realm is:
 https://id.example.com/realms/clouduler
 ```
 
-Open `https://id.example.com/realms/clouduler/.well-known/openid-configuration` and check the `issuer` value; Clouduler compares it exactly. Older Keycloak versions put `/auth` before `/realms`. {/* TODO verify: whether the /auth prefix applies to the Keycloak version you run */}
+Open `https://id.example.com/realms/clouduler/.well-known/openid-configuration` and check the `issuer` value; Clouduler compares it exactly. Keycloak 17 and later (the Quarkus distribution) has no `/auth` prefix unless it was started with `--http-relative-path /auth`; older versions and upgraded setups that kept that option put `/auth` before `/realms`.
 
 ## 2. Tell Clouduler
 

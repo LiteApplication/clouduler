@@ -25,7 +25,7 @@ The whole certificate pass is gated on the Cloudflare section and token, even fo
 
 1. Open [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens). That is **My Profile**, then **API Tokens**. (An account-owned token under **Manage Account**, then **API Tokens** works too; the user token is simpler for one operator.)
 2. Click **Create Token**.
-3. Skip the template list and choose **Create Custom Token**. {/* TODO verify: the button sits below the templates and may read "Get started" next to "Create Custom Token" in the current dashboard */}
+3. Skip the template list and create a custom token.
 4. **Token name**: `clouduler-dns`, or any label that says what it is for.
 5. Under **Permissions**, set the three dropdowns of the first row to **Zone**, **DNS**, **Edit**. DNS Edit is enough for TXT, A, AAAA and CNAME records. {/* TODO verify: the dropdown labels on screen */}
 6. Under **Zone Resources**, set the dropdowns to **Include**, **Specific zone**, and then pick your zone, for example `example.com`. Do not pick **All zones**: a token scoped to one zone is the point.

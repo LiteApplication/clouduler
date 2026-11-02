@@ -263,7 +263,7 @@ sudo clouduler stack unhealthy --placement --node
 
 <Cmd>{`curl -sS -o /dev/null -w '%{http_code}\\n' https://{{hs}}.{{zone}}/health`}</Cmd>
 
-prints `200`. {/* TODO verify: Headscale's /health path (upstream behaviour) */} If the certificate is still being issued, I wait a minute and retry rather than using `-k`.
+prints `200`. If the certificate is still being issued, I wait a minute and retry rather than using `-k`.
 
 :::warning If it does not start
 `sudo clouduler stack unhealthy` and `clouduler stack logs headscale` tell me. The usual causes: the config file has a typo, the DERP map could not be downloaded (`public` must be allowed to reach the internet; see the [Headscale example](/docs/examples/headscale), which adds an egress network for it), or the Placement tab says the node has no address on `public`.
@@ -283,7 +283,7 @@ clouduler exec headscale.headscale.0 -- headscale users list`}</Cmd>
 
 Replace `1` with the ID from the list. A key printed here is a secret: I copy it straight to the machine that needs it, I never put it in `cluster.yaml` or a stack file, and I do not use `--reusable` (a reusable key is a standing invitation). A single-use key that a failed attempt consumed is gone; I create another.
 
-{/* TODO verify: the Headscale CLI flags for this release (users create, preauthkeys create --user ID --expiration); they changed between versions. Check headscale preauthkeys create --help in the container. */}
+These flags match Headscale 0.29. They have changed between versions, so run `headscale preauthkeys create --help` in the container if yours differs.
 
 ## 4. Power on the network
 
@@ -296,7 +296,7 @@ Now every machine, including `atlas`, joins the tailnet. I install tailscale on 
 
 - `--login-server` points the client at Headscale instead of Tailscale's own service.
 - `--auth-key` logs in without a browser. The flag is spelled `--auth-key`.
-- `--accept-dns=false` stops MagicDNS from rewriting the resolver on a cluster node, which Clouduler's own DNS and the node rely on. {/* TODO verify: this is a recommendation from reasoning, not a live test */}
+- `--accept-dns=false` stops MagicDNS from rewriting the resolver on a cluster node, which Clouduler's own DNS and the node rely on. That is a precaution, not something I tested.
 
 :::warning Flags are not remembered
 Tailscale does not keep these flags. A later `tailscale up` without `--login-server` silently goes back to the default control server. Repeat all three flags every time, including in scripts. If a machine was logged into another control server before, add `--force-reauth`.
@@ -436,11 +436,11 @@ I can now deploy apps as in the other quick starts. Headscale stays pinned to `a
 
 ### MTU, before the first overlay network
 
-The overlay's MTU is the MTU of the link that holds the node's internal address, minus 50 bytes. On a tailnet node that link is `tailscale0`, which by default has an MTU of 1280, so the overlay gets 1230. Docker overlay networks fix their MTU when they are **created**, so if I change the tailscale MTU later, existing networks keep the old value and break.
+The overlay's MTU is the MTU of the link that holds the node's internal address, minus 50 bytes. On a tailnet node that link is `tailscale0`, which has an MTU of 1280 by default, so the overlay gets 1230. Docker overlay networks fix their MTU when they are **created**, so if I change the tailscale MTU later, existing networks keep the old value and break.
 
 <Cmd>{`ip link show tailscale0`}</Cmd>
 
-I check that it shows the MTU I want on every node, and I change it, if I want to, before the first stack gets its own network. Both the node join in step 6 and the stacks I deploy afterwards create networks, so the best time is right after step 4. {/* TODO verify: the default tailscale0 MTU of 1280 (a Tailscale default, not read from its docs), and how to change it persistently */}
+I check that it shows the MTU I want on every node, and I change it, if I want to, before the first stack gets its own network. Both the node join in step 6 and the stacks I deploy afterwards create networks, so the best time is right after step 4. {/* TODO verify: how to change the tailscale0 MTU persistently; tailscale up and tailscaled have no MTU option, so it is a link setting outside tailscale */}
 
 ### Ports
 

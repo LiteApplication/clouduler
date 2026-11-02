@@ -15,7 +15,7 @@ sidebar_position: 8
 ## Prerequisites
 
 - A GitHub account or a Forgejo instance (for example `forgejo.example.com`).
-- A Clouduler dashboard reachable by the Git host for the webhook part. {/* TODO verify: how the proxy exposes /api/git-backup/webhook/ to the public internet; test from outside the LAN */}
+- A Clouduler dashboard reachable by the Git host for the webhook part. By default the dashboard (and so the webhook) is only reachable on the network chosen as `web.network`; if that is a LAN or tailnet network, the Git host cannot reach it until you publish the dashboard on a public network or forward the port.
 - An age key: Clouduler can generate one in the browser, or run `age-keygen` yourself.
 
 ## 1. Create the repository

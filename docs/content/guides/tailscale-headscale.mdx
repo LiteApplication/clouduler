@@ -32,7 +32,7 @@ sudo pacman -S tailscale
 sudo systemctl enable --now tailscaled
 ```
 
-{/* TODO verify: the Arch package name and unit name (expected tailscale and tailscaled) */}
+{/* TODO verify: the Arch package name (expected tailscale); the unit name tailscaled is confirmed */}
 
 **You should now see** `tailscaled` running: `systemctl status tailscaled`.
 
@@ -115,7 +115,7 @@ See [Multi-site with Headscale](/docs/quickstart/multi-site-headscale) for the w
 
 - `tailscale status` lists the other machines.
 - `ping 100.64.0.2` from another enrolled machine answers.
-- On the Headscale side, `headscale nodes list` shows the node. {/* TODO verify: the nodes subcommand name for your Headscale version */}
+- On the Headscale side, `headscale nodes list` shows the node.
 - Behind a NAT, direct connections need UDP 41641 outbound; otherwise Tailscale falls back to relays over outbound 443.
 
 ## Troubleshooting

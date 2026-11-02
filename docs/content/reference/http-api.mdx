@@ -8,7 +8,7 @@ sidebar_position: 3
 Every node serves one HTTPS API and the web UI on `web.address:web.port` (default port 8443). The web UI uses exactly this API, so anything you can click you can script. All paths are under `/api`, `/auth`, `/oauth`, `/.well-known` or `/mcp`; any other `GET` returns the web UI. Examples use `cloud.example.com` and a key in `$KEY`.
 
 :::note
-This page was written from reading the code. Nothing was called against a running cluster. {/* TODO verify: live check of relay and remote-instance behaviour on a two-node cluster */}
+This page was written from reading the code. Only unauthenticated requests were tried against a running node: API paths answer `401` with JSON, and any other `GET` returns the web UI. {/* TODO verify: live check of write relay to the leader and remote-instance behaviour on a two-node cluster */}
 :::
 
 ## Authentication

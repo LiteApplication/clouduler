@@ -87,7 +87,9 @@ clouduler git-backup reconcile          # rebuild the repo from cluster state, c
 </UiCli.Cli>
 </UiCli>
 
-The webhook accepts any request with the right token (no event filtering, no signature). A wrong token returns 401 `bad webhook token`. The token is in the URL, so it can end up in proxy and access logs. {/* TODO verify: needs a live cluster; the code shows no proxy exposure for the webhook route by default. */}
+The webhook accepts any request with the right token (no event filtering, no signature). A wrong token returns 401 `bad webhook token`. The token is in the URL, so it can end up in the access logs of any reverse proxy in front of the dashboard.
+
+The webhook is part of the dashboard API, so it is reachable wherever the dashboard is. With the default `web.through_proxy: true`, that is the dashboard hostname on the `web.network` you chose, plus the direct dashboard port (8443 by default) on every address of the node. A Git host on the internet can only reach it if the dashboard is on a public network or that port is forwarded to it. The daemon's own log does not record request URLs at the default log level.
 
 ### What a pull does
 
