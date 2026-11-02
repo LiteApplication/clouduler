@@ -84,6 +84,8 @@ const OPTIONS: Record<string, ShapeOptions> = {
     optional: [
       '.health.*.error', '.health.*.at', '.settings.timezone', '.settings.public_url', '.settings.smtp',
       '.secrets.*.url', '.settings.destinations[].categories', '.settings.destinations[].stacks',
+      // the fixture harness only had a webhook destination; these belong to the discord and email kinds
+      '.settings.destinations[].style', '.settings.destinations[].notify', '.settings.destinations[].buttons', '.settings.destinations[].to',
     ],
     any: ['.settings.events'],
   },

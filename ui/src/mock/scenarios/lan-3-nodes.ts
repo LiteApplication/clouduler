@@ -104,6 +104,86 @@ export default function lan3Nodes() {
     db.backupRuns.push(run);
     db.state.restic_runs['run-1'] = run;
     db.snapshots.push({ id: '4f1a9c2e', time: new Date((db.now - 7100) * 1000).toISOString(), tags: ['fast'] });
+
+    // A second schedule whose last run failed, a manual run, an older snapshot and a restore.
+    db.state.restic_targets.t2 = { id: 't2', drive: 'bulk', destination_id: 'nas', enabled: true, frequency_secs: 604800, time_of_day: '04:30', keep_last: 8, last_run: db.now - 5400 };
+    const failed = {
+      id: 'run-2',
+      target_id: 't2',
+      drive: 'bulk',
+      destination_id: 'nas',
+      started_at: db.now - 5400,
+      finished_at: db.now - 5340,
+      outcome: { Failed: { error: 'ssh: connect to host nas.home.example.com port 22: Connection timed out' } },
+      triggered_by: 'Schedule' as const,
+    };
+    const manual = {
+      id: 'run-0',
+      target_id: 't1',
+      drive: 'fast',
+      destination_id: 'nas',
+      started_at: db.now - 86400 * 2,
+      finished_at: db.now - 86400 * 2 + 95,
+      outcome: { Succeeded: { snapshot_id: '81c0d7b3', bytes: 2_310_000_000 } },
+      triggered_by: { Manual: { by: 'demo' } },
+    };
+    for (const r of [failed, manual]) {
+      db.backupRuns.push(r);
+      db.state.restic_runs[r.id] = r;
+    }
+    db.snapshots.push({ id: '81c0d7b3', time: new Date((db.now - 86400 * 2 + 95) * 1000).toISOString(), tags: ['fast'] });
+    const restore = {
+      id: 'restore-1',
+      scope: { Volume: { volume: 'fast/vaultwarden' } },
+      destination_id: 'nas',
+      snapshot: '81c0d7b3',
+      requested_at: db.now - 86400,
+      finished_at: db.now - 86400 + 140,
+      status: 'Succeeded' as const,
+      requested_by: 'demo',
+    };
+    db.restoreRequests.push(restore);
+    db.state.restore_requests[restore.id] = restore;
+
+    // Image updates: one row in each state, and one mid-update (step 2 of 4).
+    const row = (id: string) => db.updates.find((u) => u.id === id)!;
+    row('immich.server.0').pin_drift = true;
+    row('immich.machine-learning.0').error = 'registry ghcr.io answered 401 unauthorized';
+    row('nextcloud.redis.0').update_available = true;
+    row('nextcloud.redis.0').latest_digest = 'sha256:' + 'c'.repeat(64);
+    db.state.instance_updates['nextcloud.redis.0'] = { node: 'atlas', phase: 'stopping', started_at: db.now - 20, at: db.now - 8 };
+
+    // Access: two connected AI clients and one waiting for consent.
+    db.apiKeys.length = 0;
+    db.apiKeys.push(
+      { id: 'key-1', name: 'bootstrap', created_at: new Date((db.now - 86400 * 40) * 1000).toISOString() },
+      { id: 'key-2', name: 'ci-deploy', created_at: new Date((db.now - 86400 * 12) * 1000).toISOString() },
+    );
+    db.mcpClients.push(
+      { client_id: 'mcp-1', client_name: 'Claude Code', grant: 'admin', approved_by: 'demo', created_at: db.now - 86400 * 6 },
+      { client_id: 'mcp-2', client_name: 'Cursor', grant: 'read', approved_by: 'demo', created_at: db.now - 86400 * 2 },
+    );
+    db.oauthRequests.push({ id: 'oauth-1', client_name: 'Zed', redirect_host: '127.0.0.1', scope: 'mcp', requested_grant: 'read', expires_in: 540, node: 'atlas' });
+
+    // Alerts destinations: Discord (working), generic webhook (failing), email, and SMTP.
+    const as = db.alertSettings;
+    const sev = ['critical', 'warning'] as ('critical' | 'warning')[];
+    as.settings.destinations = [
+      { name: 'discord-ops', kind: 'discord', enabled: true, severities: sev, digest: false, style: 'embed', notify: { critical: 'ping', warning: 'normal', info: 'silent', resolved: 'silent' }, buttons: true },
+      { name: 'ops', kind: 'webhook', enabled: true, severities: sev, digest: false },
+      { name: 'oncall', kind: 'email', enabled: true, severities: ['critical'], digest: false, to: ['oncall@example.com'] },
+    ];
+    as.settings.smtp = { host: 'smtp.example.com', port: 587, security: 'starttls', username: 'alerts@example.com', from: 'clouduler@example.com' };
+    as.smtp_password = true;
+    as.secrets = {
+      'discord-ops': { url: 'https://discord.com/…', auth_set: false },
+      ops: { url: 'https://hooks.example.com/…', auth_set: false },
+    };
+    as.health = {
+      'discord-ops': { ok: true, at: db.now - 900, consecutive_failures: 0 },
+      ops: { ok: false, at: db.now - 300, error: 'POST https://hooks.example.com/…: connection refused', consecutive_failures: 4 },
+      oncall: { ok: true, at: db.now - 86400, consecutive_failures: 0 },
+    };
   });
   return b.build();
 }

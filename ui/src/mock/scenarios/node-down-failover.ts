@@ -78,6 +78,68 @@ export default function nodeDownFailover() {
     };
     db.alerts.active.push({ id: 'alert-node-boreas', ...alert });
     db.alerts.counts.critical += 1;
+
+    // A warning still inside its debounce window, and resolved/past entries.
+    db.alertSettings.settings.display_pending_warnings = true;
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const dayStart = Math.floor(startOfDay.getTime() / 1000);
+    db.alerts.active.push({
+      id: 'alert-mem-atlas',
+      event: 'node.memory_high',
+      category: 'nodes',
+      severity: 'warning',
+      state: 'pending',
+      title: 'Memory is high on atlas',
+      detail: 'Memory at 94% for 3m, after taking over boreas workloads.',
+      subject: 'node:atlas',
+      node: 'atlas',
+      opened_at: db.now - 180,
+      last_at: db.now - 10,
+      count: 1,
+      links: [{ label: 'Open node', path: '/nodes/atlas' }],
+      excerpt: [],
+      deliveries: [],
+    });
+    db.alerts.recent.push(
+      {
+        id: 'alert-cert-resolved',
+        event: 'cert.expiring',
+        category: 'certificates',
+        severity: 'warning',
+        state: 'resolved',
+        title: 'Certificate for photos.home.example.com renewed',
+        detail: 'The certificate had 12 days left and was renewed.',
+        subject: 'cert:photos.home.example.com',
+        opened_at: db.now - 7200,
+        last_at: db.now - 3600,
+        resolved_at: db.now - 3600,
+        count: 1,
+        links: [],
+        excerpt: [],
+        deliveries: [{ destination: 'ops', at: db.now - 7190, ok: true, attempts: 1 }],
+      },
+      {
+        id: 'alert-oom-yesterday',
+        event: 'instance.oom_killed',
+        category: 'instances',
+        severity: 'critical',
+        state: 'resolved',
+        title: 'immich.redis.0 was killed for running out of memory',
+        detail: 'The container hit its 128M limit and was restarted twice.',
+        subject: 'instance:immich.redis.0',
+        stack: 'immich',
+        instance: 'immich.redis.0',
+        node: 'cirrus',
+        opened_at: dayStart - 5 * 3600,
+        last_at: dayStart - 4 * 3600,
+        resolved_at: dayStart - 4 * 3600,
+        count: 2,
+        links: [{ label: 'Open instance', path: '/instances/immich.redis.0' }],
+        excerpt: ['1:M 01 Jan 03:12:07.101 # Out Of Memory', 'redis: killed by signal 9'],
+        deliveries: [{ destination: 'ops', at: dayStart - 5 * 3600 + 2, ok: true, attempts: 1 }],
+      },
+    );
   });
   return b.build();
 }
