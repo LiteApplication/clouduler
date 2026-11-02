@@ -43,14 +43,17 @@ const config: Config = {
     ],
   ],
   themeConfig: {
+    image: 'img/social-card.png',
+    metadata: [{name: 'twitter:card', content: 'summary_large_image'}],
     colorMode: {defaultMode: 'dark', respectPrefersColorScheme: true},
     navbar: {
       title: 'Clouduler',
       logo: {alt: 'Clouduler', src: 'img/logo.svg'},
       items: [
-        {type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs'},
         {to: '/docs/quickstart/single-node', label: 'Quick start', position: 'left'},
+        {to: '/docs/intro/what-is-clouduler', label: 'Docs', position: 'left', activeBaseRegex: '/docs/(intro|features|guides|examples|contributing)'},
         {to: '/docs/reference/cluster-yaml', label: 'Reference', position: 'left'},
+        {href: 'https://github.com/LiteApplication/clouduler', label: 'GitHub', position: 'right', className: 'navbar-github'},
       ],
     },
     footer: {
@@ -77,6 +80,7 @@ const config: Config = {
           items: [
             {label: 'Examples', to: '/docs/examples'},
             {label: 'Troubleshooting', to: '/docs/reference/troubleshooting'},
+            {label: 'GitHub', href: 'https://github.com/LiteApplication/clouduler'},
           ],
         },
       ],

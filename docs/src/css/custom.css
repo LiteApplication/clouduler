@@ -180,3 +180,64 @@ table tr:last-child td { border-bottom: 0; }
 
 .footer { border-top: 2px solid var(--cl-line); }
 .footer__title { font-family: var(--cl-font-display); }
+
+/* ---- polish pass ---- */
+:root { --cl-code-bg: #fff9ec; --cl-footer-bg: #1d1230; }
+html[data-theme='dark'] { --cl-code-bg: #0f0a18; --cl-footer-bg: #0e0916; }
+.footer--dark { --ifm-footer-background-color: var(--cl-footer-bg); --ifm-footer-link-color: #d8cdf0; --ifm-footer-title-color: #ff5cae; }
+.footer__copyright { color: #9c8fbd; font-size: 0.85rem; }
+.footer { border-top: 2px solid var(--cl-line); }
+
+/* code block contrast */
+pre.prism-code, [class*='codeBlockContent'] pre { background-color: var(--cl-code-bg) !important; }
+[class*='codeBlockContainer'] { background: var(--cl-code-bg) !important; }
+[class*='codeBlockTitle'] { background: var(--cl-surface-2) !important; color: var(--cl-ink) !important; }
+html[data-theme='dark'] .token.comment, html[data-theme='dark'] .token.prolog { color: #9a8fc0 !important; }
+html:not([data-theme='dark']) .token.comment { color: #6a5d84 !important; }
+
+/* navbar */
+.navbar { backdrop-filter: blur(10px); }
+.navbar__item.navbar__link { padding: 0.35rem 0.75rem; border-radius: 8px; }
+.navbar__link--active { color: var(--cl-brand); }
+.navbar-github::before {
+  content: ''; display: inline-block; width: 1.25rem; height: 1.25rem; vertical-align: middle; margin-right: 0.35rem;
+  background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 .5a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z'/%3E%3C/svg%3E") center/contain no-repeat;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 .5a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
+/* typography */
+.markdown { font-size: 1.04rem; }
+.markdown h2 { font-size: 1.85rem; }
+.markdown h3 { font-size: 1.35rem; margin-top: 1.8rem; }
+.markdown > p, .markdown li { max-width: 72ch; }
+.theme-doc-sidebar-menu > .menu__list-item { margin-top: 0.35rem; }
+.theme-doc-sidebar-menu > .menu__list-item > .menu__list-item-collapsible > .menu__link {
+  font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cl-ink-muted);
+}
+.menu__list .menu__list { border-left: 2px solid var(--cl-line); margin-left: 0.6rem; padding-left: 0.3rem; }
+.breadcrumbs__link { border-radius: 8px; }
+.pagination-nav__link { border: 2px solid var(--cl-line); border-radius: 12px; }
+.pagination-nav__link:hover { border-color: var(--cl-brand); }
+.table-of-contents__link--active { color: var(--cl-brand); font-weight: 700; }
+.alert .admonitionHeading, [class*='admonitionHeading'] { font-family: var(--cl-font-display); letter-spacing: 0.04em; }
+[class*='admonitionContent'] > :last-child { margin-bottom: 0; }
+.tabs__item { padding: 0.55rem 1rem; }
+.tabs-container { margin-bottom: 1.25rem; }
+.tabs__item:hover { background: var(--cl-surface-2); }
+
+/* mobile */
+@media (max-width: 996px) {
+  .markdown table { display: block; overflow-x: auto; width: 100%; -webkit-overflow-scrolling: touch; }
+  .markdown table th, .markdown table td { min-width: 7rem; }
+  .markdown h1:first-child { font-size: 2rem; }
+  .markdown h2 { font-size: 1.55rem; }
+  pre { overflow-x: auto; }
+  .container { max-width: 100vw; }
+}
+.markdown { overflow-wrap: break-word; }
+.markdown :where(p, li) code { overflow-wrap: anywhere; }
+
+/* 404 */
+.nf-wrap { text-align: center; padding: 5rem 1rem 6rem; }
+.nf-code { font-family: var(--cl-font-display); font-weight: 800; font-size: clamp(5rem, 18vw, 10rem); line-height: 1; letter-spacing: -0.05em; color: var(--cl-brand); text-shadow: 6px 6px 0 var(--cl-pop-fill); margin: 0; }
+.navbar-github svg { display: none; }
