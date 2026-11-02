@@ -1,10 +1,409 @@
 ---
 title: Stack spec
-sidebar_position: 2
+sidebar_position: 1
 ---
 
 # Stack spec
 
-One-line summary of stack spec goes here.
+A stack is one YAML file that describes a group of containers (called services) for Clouduler to run across your cluster. This page lists every field the file accepts. It is a subset of Docker Swarm / Compose v3 plus an `x-clouduler` block for things Compose has no concept of: reverse-proxy routes, drive-backed volumes, node pins, actions and alert rules.
 
-TODO
+For the task-oriented view, see [Stacks](/docs/features/stacks). Terms like drive, overlay and placement are explained in the [glossary](/docs/intro/glossary).
+
+Three rules to know before the tables:
+
+- **Unknown keys are an error.** A typo fails the parse instead of being ignored, and `build:` is not supported.
+- **Everything takes effect on redeploy.** The spec is stored as text. A change applies when you deploy a new revision, so the Reload column below reads `n/a` for every field.
+- **Types.** `duration` is a humantime value (`30s`, `2m`, `1h30m`). `size` is a byte size (`10MB`, `64MiB`, `512M`, or a plain number of bytes).
+
+## How validation works
+
+Validation runs in two layers.
+
+1. **Syntax** runs on every save in the web UI and on every deploy. It needs no cluster: names, shapes, port collisions, dependency cycles, and so on.
+2. **Cluster checks** ask whether the network, drive and node you named actually exist and whether the service can be placed. The CLI (`clouduler stack deploy`) and the git-backup pull run them.
+
+<Quirk title="The web UI deploy does not run the cluster checks" severity="warn">
+Currently the web UI and the HTTP API (and therefore the MCP tools) only parse the stack. A spec that names a drive, network or node pin that does not exist still shows "Spec is valid" and deploys. The problem appears later, as a placement reason on the stack's Placement tab (for example `atlas does not implement drive bogus`). If you want the full check before anything is stored, deploy from the CLI.
+</Quirk>
+
+Because the UI errors come back without a path, the message carries the whole location, for example `invalid config at services.web.env_file: ...`, and the editor does not highlight a line for it.
+
+## A full example
+
+This file touches most of the common fields. Comments explain each part.
+
+```yaml title="gitlab.yaml"
+version: "3.8"                         # ignored, optional
+
+networks:
+  wan: {}                              # a cluster network with a domain, used by the proxy route
+  tailscale: {}                        # a second network, used by the SSH expose
+
+secrets:
+  db_password:
+    file: ./secrets/db.txt             # read at deploy time, sealed with the cluster key
+configs:
+  gitlab_rb:
+    file: ./conf/gitlab.rb             # bundled at deploy time
+
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:16.9.1-ce.0
+    restart: unless-stopped            # the real restart policy lives here
+    networks: [wan, tailscale]         # must be declared above
+    environment:
+      GITLAB_OMNIBUS_CONFIG: "external_url 'https://gitlab.example.com'"
+    volumes:
+      - fast/gitlab-data:/var/opt/gitlab    # drive/volume:/target
+      - fast/gitlab-config:/etc/gitlab
+      - bulk/gitlab-logs:/var/log/gitlab
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs: { size: 64m }
+    secrets:
+      - source: db_password
+        env: DB_PASSWORD               # exposed as an env var instead of a file
+    configs:
+      - source: gitlab_rb
+        target: /etc/gitlab/gitlab.rb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/-/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    stop_grace_period: 2m
+    deploy:
+      replicas: 1
+      resources:
+        limits: { cpus: "2.0", memory: 4G }
+    x-clouduler:
+      node: atlas                      # hard pin, optional
+      proxy:
+        - host: gitlab                 # becomes gitlab.<domain of wan>
+          network: wan
+          port: 80
+          tls: true
+          middlewares: [redirect_https]
+          max_body_size: 2GiB
+          preserve_host: true
+          response_timeout: 120s
+      expose:
+        - port: 22                     # container port
+          published: 2222              # host port, bound on every node
+          protocol: tcp
+          network: tailscale
+      backup:
+        stop_before: true              # stop the service during a restic backup
+```
+
+## Top level
+
+<OptionTable rows={[
+  {"key": "version", "type": "str", "reload": "n/a", "description": "Compose schema version. Accepted and ignored."},
+  {"key": "services", "type": "map", "reload": "n/a", "required": true, "description": "The containers of the stack, keyed by service name. Each key must be a DNS label."},
+  {"key": "networks", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster networks this stack uses. Clouduler does not create Docker networks from this block. Each name must exist in the cluster and be implemented by some node (nat networks excepted)."},
+  {"key": "networks.<name>.allowed", "type": "list of str", "default": "unrestricted", "reload": "n/a", "description": "Restricts what the stack can reach through that network. Entries: host, *.suffix, host:port, host:lo-hi, host:port/udp, or an IPv4 literal. See Networking.", "quirks": "A bare allowed: with no value is an error. Write allowed: [] to deny everything."},
+  {"key": "volumes", "type": "map", "default": "{}", "reload": "n/a", "description": "Accepted for Compose compatibility but not used. Services reference drives directly.", "quirks": "Parsed but currently not acted on."},
+  {"key": "configs", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster configs. With file: the content is bundled at deploy time (path relative to the stack file, or absolute). Without file: the config must already exist in the cluster."},
+  {"key": "secrets", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster secrets. Same rules as configs. The content is sealed with the cluster key."},
+  {"key": "x-clouduler", "type": "map", "reload": "n/a", "description": "Stack-wide defaults that services inherit: auto_update, node, volume_sync, backup, alerts. Other keys are rejected here.", "quirks": "proxy, expose, colocate, actions and docker_socket are service-level only."}
+]} />
+
+### Stack names and service names
+
+The stack name is not a spec key. It comes from the file name (CLI, without the extension) or the **Stack name** field in the web UI. It must be 1 to 63 bytes, start and end with a lowercase letter or digit, and use only `a-z`, `0-9`, `-` and `_`. The UI hint says "Lowercase letters, numbers and dashes", but the server also accepts underscores.
+
+Each key under `services:` must be a DNS label (lowercase letters, digits and hyphens, not starting or ending with a hyphen, at most 63 characters). It is the service's hostname on the overlay and part of the container name `STACK_SERVICE_INDEX`.
+
+## Service
+
+<OptionTable rows={[
+  {"key": "image", "type": "str", "reload": "n/a", "required": true, "description": "Container image reference.", "quirks": "build: is rejected as an unknown key."},
+  {"key": "hostname", "type": "str", "reload": "n/a", "description": "Container hostname. Independent of the service name."},
+  {"key": "command", "type": "string or list", "default": "image default", "reload": "n/a", "description": "Overrides the image CMD. A string is split like Docker does, a list is exec form."},
+  {"key": "entrypoint", "type": "string or list", "default": "image default", "reload": "n/a", "description": "Overrides the image ENTRYPOINT."},
+  {"key": "environment", "type": "map or list of KEY=value", "reload": "n/a", "description": "Environment variables.", "quirks": "List entries must contain =. Numbers and booleans in a map are stringified, null becomes empty. Secret environment variables come from secrets with env:."},
+  {"key": "env_file", "type": "path or list", "reload": "n/a", "description": "Not supported.", "quirks": "Always rejected. Move the entries into environment."},
+  {"key": "labels", "type": "map or list of key=value", "reload": "n/a", "description": "Docker labels on the container. Clouduler adds its own revision label."},
+  {"key": "volumes", "type": "list", "reload": "n/a", "description": "Mounts from drives, or in-memory tmpfs. See Volumes below."},
+  {"key": "ports", "type": "list", "reload": "n/a", "description": "Ports published on the node that runs the container. See Ports below."},
+  {"key": "networks", "type": "list of names", "reload": "n/a", "description": "Networks this service attaches to. Each must be declared in the stack's top-level networks.", "quirks": "At most one egress, wireguard or nat network per service."},
+  {"key": "depends_on", "type": "list of service names", "reload": "n/a", "description": "Start-order gate: an instance is not first created until every dependency has at least one instance running on any node.", "quirks": "Waits for running, not healthy. Cycles and self-references are errors."},
+  {"key": "healthcheck", "type": "map", "reload": "n/a", "description": "Docker healthcheck. See Healthcheck below.", "quirks": "Without test: the whole block is silently dropped."},
+  {"key": "restart", "type": "str", "default": "no", "reload": "n/a", "description": "Docker restart policy: no, always, on-failure, on-failure:N, unless-stopped."},
+  {"key": "user", "type": "str", "default": "image default", "reload": "n/a", "description": "Process user: uid or uid:gid."},
+  {"key": "working_dir", "type": "str", "default": "image default", "reload": "n/a", "description": "Working directory."},
+  {"key": "cap_add", "type": "list of str", "reload": "n/a", "description": "Extra Linux capabilities."},
+  {"key": "cap_drop", "type": "list of str", "reload": "n/a", "description": "Dropped capabilities."},
+  {"key": "sysctls", "type": "map or list of key=value", "reload": "n/a", "description": "Kernel parameters for the container."},
+  {"key": "read_only", "type": "bool", "default": "false", "reload": "n/a", "description": "Read-only root filesystem. Writes outside declared volumes fail."},
+  {"key": "stop_grace_period", "type": "duration", "default": "cluster failover.stop_grace (30s)", "reload": "n/a", "description": "How long a graceful stop may take before the kill.", "quirks": "Must be greater than zero and at most 600s."},
+  {"key": "stop_signal", "type": "str", "default": "image STOPSIGNAL", "reload": "n/a", "description": "Signal for the graceful stop, for example SIGINT.", "quirks": "Must be SIG plus uppercase letters, or digits. Lowercase sigint fails."},
+  {"key": "configs", "type": "list", "reload": "n/a", "description": "Cluster configs mounted into this service. Name or long form, see Configs and secrets in services."},
+  {"key": "secrets", "type": "list", "reload": "n/a", "description": "Cluster secrets mounted at /run/secrets/NAME. Name or long form.", "quirks": "write: true on a secret is rejected."},
+  {"key": "deploy", "type": "map", "reload": "n/a", "description": "Replicas, placement, resources. See Deploy."},
+  {"key": "x-clouduler", "type": "map", "reload": "n/a", "description": "Clouduler extensions for this service. See Proxy and x-clouduler per service."}
+]} />
+
+### Volumes
+
+Volumes come from drives, from tmpfs, or are anonymous container paths. Host binds are not supported. See [Drives and volumes](/docs/features/drives-and-volumes).
+
+<OptionTable rows={[
+  {"key": "drive/volume:/target", "type": "str", "reload": "n/a", "description": "Mount a volume from a drive, read-write. The reference is split on the first slash."},
+  {"key": "drive/volume:/target:ro", "type": "str", "default": "rw", "reload": "n/a", "description": "Read-only mount. Mode must be ro or rw."},
+  {"key": "/target", "type": "str", "reload": "n/a", "description": "Anonymous container path with no drive behind it."},
+  {"key": "drive/.:/target", "type": "str", "reload": "n/a", "description": "Mount the drive's whole root directory.", "quirks": "Allowed only when the drive has exactly one holder and the service is pinned to it with x-clouduler.node. See Drives and volumes."},
+  {"key": "source", "type": "str", "reload": "n/a", "description": "Long form. Same syntax as the short form source."},
+  {"key": "target", "type": "absolute path", "reload": "n/a", "required": true, "description": "Long form. Container path."},
+  {"key": "read_only", "type": "bool", "default": "false", "reload": "n/a", "description": "Long form. Read-only mount."},
+  {"key": "type: tmpfs", "type": "str", "reload": "n/a", "description": "Long form. In-memory mount. Contents are lost on restart and never replicated.", "quirks": "A tmpfs cannot have a source."},
+  {"key": "tmpfs.size", "type": "size", "default": "Docker default", "reload": "n/a", "description": "Size cap of the tmpfs, for example 64m."},
+  {"key": "type: bind / host paths", "type": "n/a", "reload": "n/a", "description": "Not supported.", "quirks": "Bind mounts and host paths are rejected: volumes must live on a drive so they can be replicated and migrated."}
+]} />
+
+### Ports
+
+<OptionTable rows={[
+  {"key": "\"target\"", "type": "str", "reload": "n/a", "description": "Container port only, nothing published."},
+  {"key": "\"published:target\"", "type": "str", "reload": "n/a", "description": "Publish on the node that runs the container. Ranges like 8080-8090:80-90 are allowed when both sides are ranges of equal length."},
+  {"key": "\"host_ip:published:target\"", "type": "str", "reload": "n/a", "description": "Bind to a specific host address."},
+  {"key": "\"published:target/udp\"", "type": "str", "default": "tcp", "reload": "n/a", "description": "Suffix /tcp or /udp selects the transport."},
+  {"key": "target", "type": "int or range", "reload": "n/a", "required": true, "description": "Long form. Container port."},
+  {"key": "published", "type": "int or range", "reload": "n/a", "description": "Long form. Host port."},
+  {"key": "host_ip", "type": "IP", "reload": "n/a", "description": "Long form. Bind address."},
+  {"key": "protocol", "type": "tcp or udp", "default": "tcp", "reload": "n/a", "description": "Long form. Transport."},
+  {"key": "mode", "type": "host or ingress", "default": "host", "reload": "n/a", "description": "Long form. Only host is supported.", "quirks": "ingress is rejected: Clouduler has no Swarm-style ingress mesh. Use x-clouduler.expose for a port that follows the container across nodes."}
+]} />
+
+A published port is bound on the node that runs the container and moves with it. For a port that follows the container across nodes, use `x-clouduler.expose`. Two services in the same stack cannot publish the same port. Collisions between different stacks are not checked.
+
+### Healthcheck
+
+<OptionTable rows={[
+  {"key": "test", "type": "string or list", "reload": "n/a", "required": true, "description": "CMD, CMD-SHELL, NONE list forms, or a shell string.", "quirks": "If absent, the whole healthcheck block is ignored."},
+  {"key": "interval", "type": "duration", "default": "Docker default", "reload": "n/a", "description": "Time between checks."},
+  {"key": "timeout", "type": "duration", "default": "Docker default", "reload": "n/a", "description": "Per-check timeout."},
+  {"key": "start_period", "type": "duration", "default": "Docker default", "reload": "n/a", "description": "Grace period before failures count."},
+  {"key": "retries", "type": "int", "default": "Docker default", "reload": "n/a", "description": "Failures before the container is unhealthy."},
+  {"key": "disable", "type": "bool", "default": "false", "reload": "n/a", "description": "true removes the healthcheck entirely."}
+]} />
+
+### Configs and secrets in services
+
+<OptionTable rows={[
+  {"key": "name (short form)", "type": "str", "reload": "n/a", "description": "Mount the object at its default path.", "quirks": "An empty name is an error."},
+  {"key": "source", "type": "str", "reload": "n/a", "required": true, "description": "Name of the cluster config or secret."},
+  {"key": "target", "type": "absolute path", "default": "secrets: /run/secrets/NAME, configs: /NAME", "reload": "n/a", "description": "Where it appears in the container."},
+  {"key": "mode", "type": "octal", "default": "0444 (writable configs 0644)", "reload": "n/a", "description": "File permissions. 0444 written unquoted works."},
+  {"key": "uid / gid", "type": "str", "reload": "n/a", "description": "File owner."},
+  {"key": "env", "type": "str", "reload": "n/a", "description": "Expose the value as an environment variable instead of a file.", "quirks": "Cannot be combined with target, mode, uid, gid or write."},
+  {"key": "write", "type": "bool", "default": "false", "reload": "n/a", "description": "Configs only. Container edits feed back to the cluster's copy.", "quirks": "Only one service may hold a writable config, and not with replicas above 1. A secret with write: true is rejected."}
+]} />
+
+## Deploy
+
+<OptionTable rows={[
+  {"key": "deploy.replicas", "type": "int", "default": "1", "reload": "n/a", "description": "Number of instances, named STACK_SERVICE_INDEX. 0 is allowed.", "quirks": "At most 1000. Ignored when mode is global. A service with more than one replica cannot hold a writable config."},
+  {"key": "deploy.mode", "type": "replicated or global", "default": "replicated", "reload": "n/a", "description": "global runs one instance on every eligible node."},
+  {"key": "deploy.placement.constraints", "type": "list of str", "reload": "n/a", "description": "Swarm-style node filters: KEY==VALUE or KEY!=VALUE with keys node.hostname, node.id, node.role (manager or worker), node.labels.KEY.", "quirks": "node.hostname==NAME and node==NAME are checked against cluster nodes by the CLI. An unknown key never matches."},
+  {"key": "deploy.resources.limits.cpus", "type": "str (float)", "reload": "n/a", "description": "CPU cap, for example \"1.0\".", "quirks": "A value that does not parse is silently ignored."},
+  {"key": "deploy.resources.limits.memory", "type": "size", "reload": "n/a", "description": "Memory cap. Also used by the rebalancer.", "quirks": "An unparseable value is silently ignored (no cap). A digit string that overflows is an error."},
+  {"key": "deploy.resources.reservations.*", "type": "same as limits", "reload": "n/a", "description": "Parsed but currently not acted on. No consumer outside the config parser."},
+  {"key": "deploy.restart_policy.*", "type": "map", "reload": "n/a", "description": "Parsed but currently not acted on. Use the service-level restart key instead.", "quirks": "The shipped gitlab.yaml example sets max_attempts: 3 here and it does nothing."},
+  {"key": "deploy.update_config.*", "type": "map", "reload": "n/a", "description": "Parsed but currently not acted on. Rolling updates are not controlled from the spec."}
+]} />
+
+<Quirk title="Fields that are parsed but currently not acted on" severity="info">
+`deploy.restart_policy`, `deploy.update_config`, `deploy.resources.reservations`, `x-clouduler.auto_update`, and `x-clouduler.volume_sync.VOL.interval` / `enabled` are validated but nothing in the scheduler or daemon reads them today. Use the service-level `restart:` for restart behaviour. Per-volume replication uses the drive's own `sync_interval`. Image updates are applied from the Updates page, not by `auto_update`.
+{/* TODO verify: confirm with the owner whether volume_sync interval/enabled and auto_update are meant to be wired up, and whether the 300s action timeout cap is enforced at run time. */}
+</Quirk>
+
+## Proxy and x-clouduler per service
+
+`x-clouduler` is the Clouduler-specific block on a service.
+
+<OptionTable rows={[
+  {"key": "x-clouduler.node", "type": "str", "reload": "n/a", "description": "Hard pin to one node. Must be a cluster node.", "quirks": "Inherited from the stack-level default. A stack-wide node can break drive/. whole-drive mounts."},
+  {"key": "x-clouduler.colocate", "type": "list of services", "reload": "n/a", "description": "Pins this group of services to the same node. Transitive.", "quirks": "Must name other services in the stack, not itself."},
+  {"key": "x-clouduler.proxy", "type": "list of routes", "reload": "n/a", "description": "HTTP routes published through the reverse proxy. See the proxy table below."},
+  {"key": "x-clouduler.expose", "type": "list", "reload": "n/a", "description": "Non-HTTP ports routed over the overlay (SSH and similar). See the expose table below."},
+  {"key": "x-clouduler.volume_sync.VOL.before", "type": "str", "reload": "n/a", "description": "Name of an action of this service, run in the container on the primary node before each scheduled replication. If it fails, that replication is skipped.", "quirks": "Service level only. Runs on scheduled replication, not on migrations or manual syncs."},
+  {"key": "x-clouduler.volume_sync.VOL.after", "type": "str", "reload": "n/a", "description": "Name of an action run after each replication attempt.", "quirks": "Service level only."},
+  {"key": "x-clouduler.volume_sync.VOL.interval", "type": "duration", "default": "drive sync_interval", "reload": "n/a", "description": "Per-volume replication interval override. Parsed but currently not acted on.", "quirks": "Only the drive's own sync_interval is used today."},
+  {"key": "x-clouduler.volume_sync.VOL.enabled", "type": "bool", "default": "true", "reload": "n/a", "description": "Per-volume replication on/off. Parsed but currently not acted on."},
+  {"key": "x-clouduler.auto_update", "type": "bool", "default": "false", "reload": "n/a", "description": "Meant to follow :latest. Parsed but currently not acted on.", "quirks": "Image updates are applied from the Updates page."},
+  {"key": "x-clouduler.backup.stop_before", "type": "bool", "default": "drive backup target decides (stop)", "reload": "n/a", "description": "Whether a restic backup stops this service first."},
+  {"key": "x-clouduler.docker_socket.target", "type": "path", "reload": "n/a", "required": true, "description": "Path inside the container where the Docker socket appears."},
+  {"key": "x-clouduler.docker_socket.mode", "type": "local or clouduler", "default": "local", "reload": "n/a", "description": "local is the node's real socket (root-equivalent on the host). clouduler is a read-only endpoint for image queries."},
+  {"key": "x-clouduler.docker_socket.read_only", "type": "bool", "default": "false", "reload": "n/a", "description": "Read-only socket.", "quirks": "mode: clouduler requires true."},
+  {"key": "x-clouduler.actions.LABEL", "type": "map", "reload": "n/a", "description": "Named commands runnable in the container from the UI or as sync hooks. The label is the button text."},
+  {"key": "actions.LABEL.cmd", "type": "str or list", "reload": "n/a", "required": true, "description": "Command. A string runs as sh -c, a list is exec form."},
+  {"key": "actions.LABEL.user", "type": "str", "default": "container user", "reload": "n/a", "description": "Run as this user."},
+  {"key": "actions.LABEL.timeout", "type": "duration", "default": "30s", "reload": "n/a", "description": "Time limit.", "quirks": "The source comment says at most 300s, but no enforcement was found."},
+  {"key": "actions.LABEL.confirm", "type": "bool", "default": "false", "reload": "n/a", "description": "The UI asks before running."},
+  {"key": "actions.LABEL.show_in_ui", "type": "bool", "default": "true", "reload": "n/a", "description": "false hides the button and refuses UI/API runs. The action is then only usable as a sync hook."},
+  {"key": "x-clouduler.alerts", "type": "false or map", "default": "enabled", "reload": "n/a", "description": "Alert control for the service's containers, merged over the stack-level block. See Alerts below."}
+]} />
+
+### Proxy routes
+
+Each entry of `x-clouduler.proxy`. See [Proxy and TLS](/docs/features/proxy-and-tls).
+
+<OptionTable rows={[
+  {"key": "host", "type": "str", "reload": "n/a", "required": true, "description": "Hostname of the route. A bare label gets the network's domain appended, a name with a dot is used as is."},
+  {"key": "network", "type": "str", "reload": "n/a", "required": true, "description": "Network that publishes the route. Must be declared in the stack and have a domain in the cluster."},
+  {"key": "port", "type": "int", "reload": "n/a", "required": true, "description": "Container port the proxy forwards to."},
+  {"key": "path_prefix", "type": "str", "reload": "n/a", "description": "The route only matches under this prefix."},
+  {"key": "tls", "type": "bool", "default": "true", "reload": "n/a", "description": "HTTPS on the route."},
+  {"key": "middlewares", "type": "list", "reload": "n/a", "description": "Behaviours layered on the route. See Middlewares."},
+  {"key": "sticky", "type": "bool", "reload": "n/a", "description": "Session affinity."},
+  {"key": "max_body_size", "type": "size", "default": "unlimited", "reload": "n/a", "description": "Upload cap. The proxy answers 413 above it."},
+  {"key": "websockets", "type": "bool", "default": "true", "reload": "n/a", "description": "Allow Upgrade requests."},
+  {"key": "preserve_host", "type": "bool", "default": "false", "reload": "n/a", "description": "Forward the client's Host header."},
+  {"key": "response_timeout", "type": "duration", "default": "none (waits forever)", "reload": "n/a", "description": "Maximum wait for the backend's response headers."}
+]} />
+
+### Expose
+
+Each entry of `x-clouduler.expose`. See [Networking](/docs/features/networking#publishing-a-service).
+
+<OptionTable rows={[
+  {"key": "port", "type": "int", "reload": "n/a", "required": true, "description": "Container port."},
+  {"key": "published", "type": "int", "reload": "n/a", "required": true, "description": "Host port bound on every node. Must not collide with ports in the same stack."},
+  {"key": "protocol", "type": "tcp or udp", "default": "tcp", "reload": "n/a", "description": "Transport."},
+  {"key": "network", "type": "str", "reload": "n/a", "required": true, "description": "Declared cluster network. On a public or wireguard network, some node must list the port in open_ports.", "quirks": "Error: no node has PORT/PROTO open on network NET, this port could never be reached."},
+  {"key": "proxy_protocol", "type": "bool", "default": "false", "reload": "n/a", "description": "Send a PROXY v2 header so the backend sees the real client address. TCP only.", "quirks": "Enable PROXY v2 on the backend first or the connection breaks."}
+]} />
+
+### Middlewares
+
+Written under `middlewares:` of a route, either as a bare name (`redirect_https`) or as a one-key map (`cors: {origins: [...]}`).
+
+<OptionTable rows={[
+  {"key": "redirect_https", "type": "bare", "default": "", "reload": "n/a", "description": "Answer plain HTTP with a redirect to HTTPS."},
+  {"key": "strip_prefix", "type": "bare", "default": "", "reload": "n/a", "description": "Remove the route's path_prefix before forwarding."},
+  {"key": "authenticated", "type": "bare or map", "default": "", "reload": "n/a", "description": "Require an IdP login. Needs proxy.auth in the cluster config covering that network.", "quirks": "Error: authenticated asks for a login on network NET, but proxy.auth does not list it in networks."},
+  {"key": "authenticated.groups", "type": "list", "default": "any logged-in user", "reload": "n/a", "description": "Restrict by IdP group. Empty names are rejected."},
+  {"key": "authenticated.allow_internal", "type": "bool", "default": "true", "reload": "n/a", "description": "Let containers on the cluster's own networks through without a login."},
+  {"key": "headers.request / response", "type": "map", "reload": "n/a", "description": "Set headers on the request to the container or the response to the client.", "quirks": "Header names must be valid tokens, values cannot contain control characters. A bare headers entry is rejected: use a map."},
+  {"key": "headers.remove_request / remove_response", "type": "list", "reload": "n/a", "description": "Headers to remove."},
+  {"key": "cors.origins", "type": "list", "reload": "n/a", "required": true, "description": "Allowed origins.", "quirks": "* cannot be combined with allow_credentials."},
+  {"key": "cors.methods", "type": "list", "default": "GET HEAD POST PUT PATCH DELETE OPTIONS", "reload": "n/a", "description": "Allowed methods."},
+  {"key": "cors.headers", "type": "list", "default": "echo the request", "reload": "n/a", "description": "Allowed request headers."},
+  {"key": "cors.allow_credentials", "type": "bool", "default": "false", "reload": "n/a", "description": "Allow credentials."},
+  {"key": "cors.max_age", "type": "duration", "reload": "n/a", "description": "Preflight cache time."},
+  {"key": "redirect_regex.regex", "type": "str", "reload": "n/a", "required": true, "description": "Matched against the full URL including host and query. Must compile."},
+  {"key": "redirect_regex.replacement", "type": "str", "reload": "n/a", "required": true, "description": "Replacement with $1, $2 from capture groups."},
+  {"key": "redirect_regex.permanent", "type": "bool", "default": "true", "reload": "n/a", "description": "true gives 301/308, false gives 302/307."}
+]} />
+
+### Alerts
+
+Allowed at the stack level and the service level under `x-clouduler.alerts`. See [Alerts](/docs/features/alerts).
+
+<OptionTable rows={[
+  {"key": "alerts: false", "type": "bool", "default": "true (enabled)", "reload": "n/a", "description": "Nothing about this stack or service is sent. Log rules still parse but never run."},
+  {"key": "alerts.mute", "type": "list", "reload": "n/a", "description": "Alert keys like instance.unhealthy, or a prefix like instance.*, to mute."},
+  {"key": "alerts.severity.EVENT", "type": "info, warning or critical", "default": "per event", "reload": "n/a", "description": "Override the severity of an event.", "quirks": "An unknown event key is rejected."},
+  {"key": "alerts.logs[].match", "type": "str", "reload": "n/a", "description": "Plain substring to look for in the logs. Exactly one of match and regex."},
+  {"key": "alerts.logs[].regex", "type": "str", "reload": "n/a", "description": "Rust regex."},
+  {"key": "alerts.logs[].ignore_case", "type": "bool", "default": "false", "reload": "n/a", "description": "Case-insensitive match."},
+  {"key": "alerts.logs[].severity", "type": "enum", "default": "warning", "reload": "n/a", "description": "Severity of the alert."},
+  {"key": "alerts.logs[].title", "type": "str", "default": "SERVICE logged \"PATTERN\"", "reload": "n/a", "description": "Alert title."},
+  {"key": "alerts.logs[].cooldown", "type": "duration", "default": "5m", "reload": "n/a", "description": "After a match, repeats inside the window are counted, not raised."},
+  {"key": "alerts.logs[].stream", "type": "both, stdout or stderr", "default": "both", "reload": "n/a", "description": "Which stream to watch."},
+  {"key": "alerts.logs[].services", "type": "list", "default": "all", "reload": "n/a", "description": "Stack level only. Limits a stack-level rule to named services."}
+]} />
+
+## Common validation errors
+
+The format is `invalid config at PATH: MESSAGE`, where PATH is a dotted path such as `services.web.volumes[0]`.
+
+**Syntax errors (UI and CLI)**
+
+- `service name must be a valid DNS label (lowercase letters, digits, hyphens, not starting or ending with a hyphen) since it becomes an overlay hostname`
+- `env_file is not supported yet, move its entries into environment`
+- `network NET is not declared in this stack's top-level networks`
+- `no service named DEP in this stack`, `a service cannot depend on itself`, `dependency cycle: a -> b -> a`
+- `port P/PROTO is already published by services.X.ports[I]`
+- `bind mounts are not supported, volumes must live on a drive so they can be replicated and migrated`
+- `"SRC" must use drive/volume syntax, e.g. fast/gitlab-data`
+- `mode: ingress is not supported, clouduler has no swarm-style ingress mesh; ...`
+- `unknown restart policy "X", expected no, always, on-failure[:N] or unless-stopped`
+- `"sigint" is not a signal name (e.g. SIGINT) or number`
+- `must be greater than zero` or `must be at most 600s` (stop_grace_period)
+- `write is not allowed on a secret, only on a config`
+- `CFG is writable but this service runs N replicas; only one instance may write a config`
+- `N is more than the maximum of 1000` (replicas)
+- `expected KEY=value, got "ENTRY"` (list-form environment or labels)
+- `mode: clouduler is read-only; set read_only: true`
+- `allowed must be a list (write allowed: [] to deny everything, or drop the key)`
+- `invalid stack name "NAME": must be 1 to 63 bytes long`, `must start and end with a lowercase letter or digit`, `only lowercase letters, digits, - and _ are allowed`
+
+**Cluster errors (CLI and git sync only)**
+
+- `no network named NET declared in the cluster`
+- `no node implements network NET, this service could never be placed`
+- `only one egress network is allowed per service, found A and B`
+- `no drive named DRIVE declared in the cluster`
+- `no node named NODE in the cluster`
+- `network NET has no domain, so it cannot serve an HTTP route`
+- `no node has P/PROTO open on network NET, this port could never be reached`
+- `drive D can be served by more than one node (...), so mounting D/. (its whole root) is not allowed: pin a specific volume under it instead`
+
+**Deploy errors (UI and API)**
+
+- `config NAME needs content: it has no existing value to keep` (and the same for a secret)
+- `this node holds no cluster key` (the node you are connected to cannot seal secrets)
+- `stacks A and B would both use the overlay network ... which would break isolation between them: rename one of the stacks or networks`
+
+**Deploy errors (CLI)**
+
+- `this stack has secrets, so the cluster key at PATH is needed. Deploy from a node that holds it, or use the web ui`
+- `NAME is N bytes, over the 1048576 byte limit` (each bundled config or secret file is capped at 1 MiB)
+
+## Quirks and gotchas
+
+<Quirk title="healthcheck without test is dropped">
+A `healthcheck:` block with no `test:` is silently ignored. Other keys in it do nothing.
+</Quirk>
+
+<Quirk title="Bad cpus or memory values are ignored">
+`cpus: "abc"` gives no CPU limit and no error. An unparseable `memory` gives no cap. Only a digit string too large for a 64-bit count is rejected.
+</Quirk>
+
+<Quirk title="deploy.mode: global ignores replicas">
+You get one instance on every eligible node.
+</Quirk>
+
+<Quirk title="A stack-wide node pin is inherited">
+`x-clouduler.node` at the stack level applies to every service that does not set its own. A whole-drive mount (`drive/.`) needs the pin to be the drive's sole holder, so adding a stack-wide pin can break a mount that worked before.
+</Quirk>
+
+<Quirk title="Redeploying an identical spec still bumps the revision">
+The revision goes up by one on every deploy. The previous spec shown in "Changes since last deploy" stays at the last real change.
+</Quirk>
+
+<Quirk title="Redeploy keeps the name">
+The name field is disabled when you redeploy. To rename a stack, deploy a new one and remove the old one. Removing a stack keeps its volumes.
+</Quirk>
+
+<Quirk title="Failed deploys can leave a stored spec">
+The spec is stored first, then bundled files are written, and the object list is recorded last. If a step fails midway, retrying is safe.
+</Quirk>
+
+<Quirk title="An empty services map parses">
+`services: {}` passes the syntax check.
+{/* TODO verify: whether a stack with no services is refused anywhere else. */}
+</Quirk>
+
+## Related
+
+- [Stacks](/docs/features/stacks)
+- [Networking](/docs/features/networking)
+- [Placement](/docs/features/placement)
+- [Configs and secrets](/docs/features/configs-and-secrets)
+- [Drives and volumes](/docs/features/drives-and-volumes)
+- [CLI reference](/docs/reference/cli)

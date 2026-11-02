@@ -5,6 +5,360 @@ sidebar_position: 3
 
 # CLI
 
-One-line summary of cli goes here.
+`clouduler` is one binary that is both the node daemon and your command line. This page lists every command, subcommand and flag. For task-oriented walkthroughs see [Stacks](/docs/features/stacks) and the other feature pages.
 
-TODO
+## How the CLI finds the cluster and logs in
+
+The CLI does not discover anything on the network. It reads one YAML file, the cluster config, and talks to a node named in it.
+
+| Source | Setting | Default |
+|---|---|---|
+| `--config PATH` or env `CLOUDULER_CONFIG` | Cluster config path | `/etc/clouduler/cluster.yaml` |
+| `--via NODE` (per command) | Node to talk to | first manager in the config (alphabetical by name) |
+| `--node NAME` or env `CLOUDULER_NODE` | Which node this machine is | the system hostname |
+| `--data-dir PATH` or env `CLOUDULER_DATA` | Node data directory override | the node's `data_dir`, else `/var/lib/clouduler` |
+
+There is no CLI login and no API key. **Access means being able to read `cluster.yaml` and the cluster key file** (`/etc/clouduler/secrets.key` by default). The daemon makes both files `root:clouduler` with group read on every start, so add yourself to that group on a node:
+
+```bash
+sudo usermod -aG clouduler $(whoami)
+```
+
+Treat the key file as root-equivalent: whoever reads it can seal secrets and read registry logins.
+
+Most commands connect to the node's raft port (default `7373`), prove they hold the key, and submit writes. The node forwards writes to the leader, so `--via` does not need to be the leader. Container-level commands (`logs`, `exec`, `capture`, `update`, `git-backup`, `status`, `stack unhealthy`) look up the instance's node, then call that node's internal HTTPS API on the web port, signed with the key. The CLI accepts the node's self-signed certificate on that channel; the signature is the authentication.
+
+Some commands never contact a daemon: `init`, `daemon`, `check`, `node list`, `drive list`, `completions`, `emergency`, `restore` and `folder-import` (which pushes data to other nodes after working locally).
+
+### Output and exit codes
+
+- Success goes to stdout, one line per action.
+- Errors go to stderr as `Error: MESSAGE` with exit code 1. Usage errors exit 2. `daemon` exits 78 when this node was removed from the cluster while it was down.
+- Several commands report findings or partial failures and still exit 0. See the warnings at the end.
+
+## Global flags
+
+| Flag | Default | Env | Notes |
+|---|---|---|---|
+| `--config PATH` | `/etc/clouduler/cluster.yaml` | `CLOUDULER_CONFIG` | No short form (`-c` belongs to `folder-import --copy`). |
+| `--data-dir PATH` | unset | `CLOUDULER_DATA` | Only `daemon`, `emergency` and `restore` read it. |
+| `--log FILTER` | `info,openraft=warn,hickory_server=warn` | `CLOUDULER_LOG` | `RUST_LOG` syntax. |
+| `-v`, `--verbose` | off | none | Prefixes the filter with `debug,`. May not do anything with the default filter, see warnings. |
+| `--version` | | | Prints the version. |
+
+The common per-command option `--via NODE` is a node name from `nodes:` in the config. If it does not exist you get `no node named X in the config`.
+
+## Setup and node
+
+### init
+
+Sets this machine up as a node: either a new cluster or a join. Asks about each step, or runs unattended with flags. See the [quick starts](/docs/quickstart/single-node) for the full walkthrough.
+
+```bash
+sudo clouduler init --yes --node atlas --cluster-name homelab --subnet 192.168.1.0/24 --web-address cloud.example.com
+sudo clouduler init --yes --join 192.168.1.10 --token-file /run/clouduler.token --role worker --key-file /root/secrets.key
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `-y`, `--yes` | off | Do not ask. A question with no default fails: `QUESTION: no answer and no default, pass it as an argument`. |
+| `--force` | off | Overwrite an existing `cluster.yaml`. Without it: `PATH already exists. This machine looks set up already; pass --force to start over`. |
+| `--node NAME` | hostname | This node's name in the config. |
+| `--role manager\|worker` | new cluster: manager. Join: asked, default worker | |
+| `--ip IP` | detected from the routing table | This node's address on the internal network. |
+| `--rpc-port PORT` | `7373` | Node-to-node RPC port. |
+| `--drive NAME=PATH` | none | Repeatable. A drive this node implements, with its local absolute path. |
+| `--drive-mode replicated\|served` | `replicated` | For drives declared for the first time (new cluster only). |
+| `--join HOST[:PORT]` | none | A node already in the cluster. Port defaults to 8443; a full URL is accepted. Without it, init forms a new cluster. |
+| `--token KEY` | none | API key of the node you join through. Conflicts with `--token-file`. Prefer the file. |
+| `--token-file PATH` | none | File holding that key. |
+| `--key-file PATH` | none | Copy of the cluster key to install instead of fetching it. Joining only. |
+| `--tls-fingerprint SHA256` | none | Expected certificate fingerprint of the joined node. Without it the certificate is accepted and its fingerprint printed. |
+| `--cluster-name NAME` | `home` (suggested) | New cluster only. |
+| `--subnet CIDR` | `10.10.0.0/24` (suggested) | New cluster only. The internal network. |
+| `--internal-domain DOMAIN` | blank | New cluster only. |
+| `--web-address HOST` | `cloud` with `--internal-domain`, else `cloud.example.com` | New cluster only. Set it on real installs. |
+| `--web-port PORT` | `8443` | New cluster only. |
+| `--node-data-dir PATH` | `/var/lib/clouduler` | This node's database and working files. |
+| `--docker-data-dir PATH` | Docker's default | Sets dockerd `data-root`. Docker is not restarted. |
+| `--systemd` / `--no-systemd` | asked, default yes | Install the systemd unit. |
+| `--start` / `--no-start` | asked, default yes | Enable and start the unit now. |
+
+### daemon
+
+`clouduler daemon [--node NAME]` runs the node. systemd runs it for you; you rarely call it by hand. It exits 78 if the node was removed from the cluster, and the unit does not restart on 78.
+
+### check
+
+`clouduler check` loads the config (failing on a bad file) and prints a summary. It does not contact the cluster.
+
+```text
+cluster homelab
+  3 nodes, 3 managers, quorum 2
+  network internal (subnet) 192.168.1.0/24 example.com
+  web https://cloud.example.com:8443
+```
+
+### completions
+
+| Command | What it does |
+|---|---|
+| `completions print SHELL` | Prints the one registration line, for `bash`, `zsh`, `fish`, `elvish` or `powershell`. |
+| `completions install [SHELL]` | Appends the line to your shell rc file (or writes the fish completion file). Detects the shell from `$SHELL`. Does nothing if already installed. PowerShell is not supported (prints the line). |
+
+Completion is dynamic. Node and drive names come from the config. Stack, instance, volume and destination names come from a live manager with a 400 ms timeout, and silently return nothing if the key or config is unreadable.
+
+### config reload
+
+`clouduler config reload [--via NODE]` pushes the on-disk config into the cluster's replicated config. It sends the file's content with the current generation, so it is rejected if someone changed the config in between (`cluster rejected the config: ...`). Output: `reloaded config into the cluster, generation N`.
+
+### node
+
+| Command | What it does |
+|---|---|
+| `node list` | Local, reads the config only. One line per node: name, role, rpc address, `nets=`, `drives=`. |
+| `node add NAME --role manager\|worker --rpc-addr HOST:PORT [--drive NAME=PATH]... [--label KEY=VALUE]... [--via NODE]` | Adds a node to the live roster. Does not touch `cluster.yaml`. A node normally registers itself with `init --join`. |
+| `node remove NAME [--via NODE]` | Removes the node from the roster and from the live config. The removed node's daemon wipes itself on its next start. Output `removed NAME`. |
+| `node set-availability NAME active\|drain [--via NODE]` | `drain` keeps what runs but takes nothing new. Output `NAME is now Active` or `NAME is now Drain`. |
+
+### drive list
+
+`clouduler drive list` is local. It prints `DRIVE`, `sync=DURATION`, `nodes=LIST`, for example `bulk	sync=900s	nodes=atlas,boreas`.
+
+## Stacks
+
+| Command | What it does |
+|---|---|
+| `stack deploy FILE [--name NAME] [--via NODE]` | Creates a stack or updates it. Name defaults to the file stem. |
+| `stack list [--via NODE]` | `NAME revision=N configs=N secrets=N instances=N`, or `no stacks deployed`. |
+| `stack show NAME [--files] [--via NODE]` | Prints the stored YAML. `--files` lists bundled config and secret names instead (never values). |
+| `stack source NAME [get]` | Prints the stored YAML (the default action). |
+| `stack source NAME set [FILE] [--via NODE]` | Replaces the YAML from FILE or stdin. The stack must exist. |
+| `stack remove NAME [--via NODE]` | Removes the stack and everything it runs. No confirmation prompt. Output `removed NAME`. |
+| `stack stop NAME [--via NODE]` | Sets every instance to stopped. Assignments are kept. |
+| `stack start NAME [--via NODE]` | Sets every instance back to running. |
+| `stack restart NAME [--via NODE]` | Unassigns each instance so the scheduler places it again. |
+| `stack logs NAME [-f] [-n N] [--via NODE]` | Merged, timestamp-ordered logs of every instance. `-n` defaults to 200. |
+| `stack unhealthy [--node] [--uptime] [--placement] [--logs N] [--all] [--via NODE]` | Lists instances whose real state differs from the desired one, plus cluster warnings. |
+
+`stack deploy` validates the stack against the cluster config before submitting (see [Stack spec](/docs/reference/stack-spec#how-validation-works)), bundles `file:` configs and secrets relative to the stack file, seals secrets with the cluster key, and prints `deployed NAME revision N, S services, F bundled files`.
+
+`stack unhealthy` flags:
+
+| Flag | Meaning |
+|---|---|
+| `--node` | Show the node each instance is on. |
+| `--uptime` | Show how long each has been up. |
+| `--placement` | Show why a pending instance could not be placed or a migration failed. |
+| `--logs N` | Print the last N log lines under each unhealthy container. |
+| `--all` | `--node --uptime --placement --logs 10`. An explicit `--logs` wins. |
+
+Output looks like this, and prints `no unhealthy instances` when all is well:
+
+```text
+site	2 unhealthy instance(s)
+  site.web.0	state=restarting	health=none	node=atlas	reason=restarting - usually a container crashing and being restarted in a loop
+    | panic: missing DATABASE_URL
+```
+
+Round trip without a local copy:
+
+```bash
+clouduler stack source web > web.yaml
+$EDITOR web.yaml
+clouduler stack source web set web.yaml
+```
+
+## Instances
+
+| Command | What it does |
+|---|---|
+| `status [--via NODE]` | Cluster health in one screen. See below. |
+| `logs TARGET [-f] [-n N] [--via NODE]` | Streams one instance, or every instance of a stack. `-n` defaults to 200. |
+| `exec TARGET [-u USER] [--via NODE] [CMD...]` | Runs a command in a running container, like `docker exec -it`. |
+| `capture TARGET [--network NAME] [-w FILE] [--via NODE] [FILTER...]` | Runs `tcpdump` on the overlay bridge on the instance's node. |
+| `update [INSTANCE...] [--via NODE]` | Pulls and recreates containers whose image is behind the registry. No arguments means all. |
+| `rebalance [--yes] [--via NODE]` | Moves instances to even out the load. Asks to confirm unless `--yes`. |
+| `clear-errors [--via NODE]` | Forgets recorded failures so they stop being reported. |
+
+TARGET is an instance id (`stack.service.index`, for example `immich.server.0`) or a stack name. The id is split from the right, so the last number is the index.
+
+- **status** prints the cluster name, raft state (`leader`, `quorum=yes|LOST`, voters), an `EMERGENCY MODE` line if active, one line per node (`up|UNREACHABLE`, `active|drain|decommissioned`, instance count), the stack and instance counts, then problem sections: unhealthy instances, updates (in-flight and likely stuck), backups, certificates and DNS. With no problems: `all clear: no unhealthy instances or cluster faults`.
+- **logs** with an instance prints the lines unprefixed. With a stack name each line is prefixed `INSTANCE | ` and streams are not sorted. Use `stack logs` for an ordered merge.
+- **exec** with no command runs `sh -c "exec bash 2>/dev/null || exec sh"`. A command with its own flags needs `--` first: `clouduler exec site.web.0 -- sh -c "ls -la"`. A tty is used when stdin and stdout are terminals. A stack name only works when it has exactly one running instance. The exit code is the command's.
+- **capture** defaults to the network the reverse proxy forwards to. Without `-w` it prints decoded text. With `-w FILE` it writes pcap (open it in Wireshark). Give the BPF filter after `--`: `clouduler capture immich.server.0 -- port 2283`. You do not need root; the daemon runs `tcpdump`.
+- **update** answers when the work is scheduled, not when it is done. Output: `updating N instance(s):` or `nothing to update`. Same action as the Updates page.
+- **rebalance** never moves instances pinned to a node, published on a proxy hostname, already migrating, or with nowhere else to go. Prints `N move(s) planned:` and `INSTANCE : FROM -> TO`, or `already balanced, nothing to move`.
+- **clear-errors** clears failed backup runs, restores, image updates, migrations, certificate and DNS errors, and failed alert deliveries. A failure that is still happening is reported again by its next attempt.
+
+## Secrets and registry logins
+
+| Command | What it does |
+|---|---|
+| `secret set NAME [--value V \| --file PATH] [--no-trim] [--via NODE]` | Seals a value and stores it. With neither flag, reads stdin. |
+| `secret list [--via NODE]` | `NAME revision=N owner=STACK\|-`. Names only. |
+| `registry login SERVER -u USER [--password P \| --password-stdin] [--via NODE]` | Like `docker login`. Verifies against the registry, then stores it sealed. With neither flag, prompts without echo. |
+| `registry list [--via NODE]` | `SERVER USERNAME` per stored login. |
+| `registry test SERVER [--via NODE]` | Re-checks a stored login. |
+| `registry remove SERVER [--via NODE]` (alias `rm`) | Removes a stored login. Idempotent. |
+
+`secret set` removes one trailing newline from `--file` and stdin input unless you pass `--no-trim`. There is no `secret remove` or `rotate`: run `secret set` again to replace a value. Keep values out of shell history:
+
+```bash
+printf '%s' "$VALUE" | clouduler secret set db-password
+```
+
+## Storage
+
+### volume
+
+| Command | What it does |
+|---|---|
+| `volume freeze DRIVE/VOLUME [--force] [--via NODE]` | Pauses replication of a volume so you can edit it on this node. `--force` stops containers using it on other nodes. |
+| `volume unfreeze DRIVE/VOLUME [--no-start] [--via NODE]` | Resumes replication, waits (up to an hour) until every replica has caught up, then restarts the containers `freeze --force` stopped, unless `--no-start`. |
+
+Both must run on a node that implements the drive, identified by the machine's hostname (there is no `--node`). `unfreeze` must run on the node that froze it. Served drives are refused.
+
+### folder-import
+
+```bash
+sudo clouduler folder-import ~/Downloads/dataset bulk/imports
+sudo clouduler folder-import -m --replace ./new-site bulk/site --force
+```
+
+Copies, moves or links a local file or folder into a drive volume, then pushes it to every other node holding the drive immediately.
+
+| Flag | Notes |
+|---|---|
+| `SOURCE` | Must exist. |
+| `TARGET` | `drive/volume[/subpath]`. With `--replace` it must be exactly `drive/volume`. |
+| `-c`, `--copy` | Copy. The default. |
+| `-m`, `--move` | Move (falls back to copy then delete across filesystems). |
+| `-l`, `--link` | Symlink into the volume. The link text is the source path, so it works on other nodes only if that path exists there. |
+| `-r`, `--replace` | Replace the whole volume with the source. |
+| `-f`, `--force` | With `--replace`: stop instances mounting the volume, replace, start them again. |
+| `--node NAME` | Node this runs as. Default `CLOUDULER_NODE`, else hostname. |
+| `--via NODE` | Where to submit volume bookkeeping. |
+
+Without `--replace`, an existing `TARGET/SOURCE_NAME` stops the command. Run it with `sudo` since it writes into the drive directory. It is refused on a standby of a served drive.
+
+### backup
+
+Backups of drives with restic. See [Backups](/docs/features/backups).
+
+| Command | Purpose |
+|---|---|
+| `backup destination add ID --name N --kind node-local\|ssh\|s3 ...` | Add or replace a destination. |
+| `backup destination list` | `ID NAME KIND`. |
+| `backup destination remove ID` | Refused while a target uses it. |
+| `backup target set ID --drive D --destination DEST --frequency F [...]` | Add or update a target. |
+| `backup target list` / `backup target remove ID` | List or remove. |
+| `backup run TARGET_ID` | Start a backup now. Returns once the run is recorded. |
+| `backup history [--target ID]` | Recent runs, newest first. |
+| `backup snapshots DEST_ID` | Lists restic snapshots. Runs restic on this machine. |
+| `backup restore-drive DRIVE --restore-from DEST [--snapshot ID] [--yes]` | Restore a whole drive. |
+| `backup restore-volume DRIVE/VOLUME --restore-from DEST [--snapshot ID] [--yes]` | Restore one volume. |
+| `backup restore-service STACK SERVICE [--restore-from DEST] [--snapshot ID] [--yes]` | Restore every volume a service uses. |
+
+All accept `--via NODE`. `backup destination add` flags:
+
+| Flag | Required for | Notes |
+|---|---|---|
+| `ID`, `--name`, `--kind` | always | `--kind` is `node-local`, `ssh` or `s3`. |
+| `--password P` | never | Restic repository password. If omitted, 64 random hex characters are generated and sealed. It is never printed, so keep a copy elsewhere. |
+| `--node NAME` | node-local | Node holding the directory. |
+| `--path DIR` | node-local, ssh | Directory on that node or the remote host. |
+| `--host HOST`, `--user USER` | ssh | |
+| `--port N` | never | SSH port, default 22. |
+| `--ssh-key-file PATH` | never | Private key. Conflicts with the S3 secret key. |
+| `--bucket NAME`, `--endpoint HOST[:PORT]` | s3 | |
+| `--region R`, `--prefix P` | never | |
+| `--s3-access-key-id ID`, `--s3-secret-access-key KEY` | never | Must be given together. |
+
+`backup target set` flags: `--drive` (required), `--destination` (required), `--frequency` (required, for example `1d` or `12h`), `--time-of-day HH:MM` (UTC), `--keep-last N`, `--keep-within DURATION`, `--stop-containers true|false`, `--enabled`.
+
+The restore commands ask for confirmation unless `--yes`, stop the affected containers, and restart them. They answer `aborted` if you say no. `--snapshot` defaults to `latest`.
+
+### git-backup
+
+`clouduler git-backup pull [--via NODE]` triggers the same git-to-cluster pull the webhook runs, now. `clouduler git-backup reconcile [--via NODE]` rebuilds the git repo from the cluster state and pushes. Both print `triggered a git backup pull` (or `reconcile`) and do not wait for the job. See [Git backup](/docs/features/git-backup).
+
+## Disaster recovery
+
+Both commands rewrite this node's own raft database. **Stop the daemon on that node first.** They use no `--via` and `emergency` needs no key. See [Emergency mode](/docs/features/emergency-mode).
+
+| Command | What it does |
+|---|---|
+| `emergency STACK [--node NAME] [--yes]` | For a cluster that lost quorum for good. Makes this node the only voter and brings up only STACK. Asks to confirm. |
+| `restore SOURCE [--age-identity-file PATH \| --age-identity-stdin] [--branch B] [--node NAME] [--yes]` | Restores cluster config, stacks, configs and secrets from the git backup repo. SOURCE is a local clone or a `git@` / `ssh://` URL. `--branch` defaults to `main` and is ignored for local paths. |
+
+`restore` requires one of the age identity flags (`pass the admin's age identity with --age-identity-file or --age-identity-stdin`), decrypts secrets in memory and reseals them under this node's key, skips secrets it cannot open, and does not change raft membership. Run `emergency` first if quorum is also gone.
+
+## Examples
+
+```bash
+# First node
+sudo clouduler init --yes --node atlas --cluster-name homelab --subnet 192.168.1.0/24
+clouduler check
+clouduler status
+
+# Deploy and inspect
+clouduler stack deploy ./site.yaml
+clouduler stack unhealthy --all
+clouduler stack logs site -n 100
+
+# Container shell and a packet capture
+clouduler exec site.web.0 -- sh -c "ls -la /app"
+clouduler capture site.web.0 -w /tmp/site.pcap -- port 443
+```
+
+## Quirks and gotchas
+
+<Quirk title="Findings do not change the exit code" severity="warn">
+`status`, `stack unhealthy` and `rebalance` exit 0 whether or not they found problems. `logs` and `stack logs` print `INSTANCE: ERROR` to stderr for an unreachable instance and still exit 0. In scripts, search the text output for `unhealthy` or `issue(s)`.
+</Quirk>
+
+<Quirk title="stack restart may move instances" severity="warn">
+The help text says "in place", but the command unassigns each instance and the scheduler places it again, possibly on another node. A stopped stack stays stopped.
+</Quirk>
+
+<Quirk title="backup target set disables the target unless you pass --enabled" severity="danger">
+`--enabled` is a plain flag read from each call. Re-running `set` to change a schedule turns an enabled target off unless you pass `--enabled` again.
+</Quirk>
+
+<Quirk title="volume and backup restore use the hostname, not --node" severity="warn">
+`volume freeze|unfreeze` and `backup restore-*` have no `--node` flag and ignore `CLOUDULER_NODE`. Run them on the machine whose hostname matches its node name. `folder-import`, `emergency` and `restore` do accept `--node`.
+</Quirk>
+
+<Quirk title="config reload replaces the cluster config with your file" severity="danger">
+It sends the file loaded from `--config`, not the cluster's copy. A change made in the web UI that is not in the file is lost. The UI writes edits back to `cluster.yaml` on each node, so they usually match, but compare before you reload.
+</Quirk>
+
+<Quirk title="node add does not persist and node remove can half-succeed" severity="warn">
+`node add` only touches the live roster: a restarted manager forgets it unless you edit the config and run `config reload`. `node remove` removes from the roster first; if the config update then fails, the error tells you to fix the config and run `config reload`.
+</Quirk>
+
+<Quirk title="Secrets on the command line are visible" severity="warn">
+`secret set --value`, `registry login --password`, `backup destination add --password` and `--s3-secret-access-key` end up in shell history and the process list. Use stdin, `--file`, `--password-stdin` or the prompt. The restic password generated by `backup destination add` is never shown.
+</Quirk>
+
+<Quirk title="-v may not raise the log level" severity="info">
+It prepends `debug,` to the filter, but with the default `--log` the trailing `info` may override it.
+{/* TODO verify: run `clouduler -v status` against a build and check for debug lines. */}
+</Quirk>
+
+<Quirk title="Joining with --yes" severity="info">
+Without `--role`, an unattended join becomes a worker. Joining with `--yes` and no token fails because the API key question has no default. `init --force` only rewrites the config file; it does not clear raft data or stop a running daemon. Without `--web-address`, a new cluster gets the placeholder `cloud.example.com`.
+</Quirk>
+
+<Quirk title="Other small things" severity="info">
+`backup run` returns before the backup runs: check `backup history`. `update` returns before images are pulled: check `status`. `backup destination list` prints SSH destinations as `ssh USER@HOST:22/path` with no separator between port and path. `stack logs -f` lags up to 400 ms because lines are sorted before printing. `folder-import --replace` clears the whole volume first. `backup snapshots` briefly writes the repository password to a 0600 file in the system temp directory.
+</Quirk>
+
+## Related
+
+- [Stack spec](/docs/reference/stack-spec)
+- [Stacks](/docs/features/stacks)
+- [Node lifecycle](/docs/features/node-lifecycle)
+- [Emergency mode](/docs/features/emergency-mode)
+- [File locations](/docs/reference/file-locations)
