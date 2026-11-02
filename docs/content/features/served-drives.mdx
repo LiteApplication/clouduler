@@ -18,7 +18,7 @@ flowchart LR
   S["boreas: standby candidate"] -. "synced copy" .- A
 ```
 
-1. You list candidate servers in `served_by`, in priority order. Every candidate exports the drive over NFSv4 with the kernel NFS server (`exportfs`), restricted to the internal subnet, read-write, port 2049.
+1. You list candidate servers in `served_by`, in priority order. Every candidate exports the drive over NFSv4 with the kernel NFS server (`exportfs`), restricted to the internal subnet, read-write with `no_root_squash` (root on a mounting node is root on the exported copy), port 2049.
 2. The **active server** is the first candidate in the list that is reachable. Only that node's copy is live. The other candidates keep a standby copy, synced from the active server on the drive's `sync_interval`.
 3. Nodes that are not candidates mount the active server at `<data_dir>/volume-mounts/<drive>/<volume>` (NFS 4.2 over TCP, soft mount, no file locking). Containers see the volume at the path you mounted.
 4. Every 10 seconds each node checks who the active server is. If it changes, the node unmounts and remounts against the new one. Each mount is health-checked every 30 seconds with a 3 second timeout.
@@ -37,7 +37,7 @@ Moving a served volume between nodes on purpose (a manual move or a rebalance) g
 <UiCli>
 <UiCli.Ui>
 
-Open **Settings**, **Storage** (`/settings/storage`). Add a drive (or open an existing card), set **Storage mode** to **Served**, and choose the **Served by** nodes. The order matters: use **move atlas up** and **move atlas down** to set priority. **Resync every** is hidden for served drives in the UI. {/* TODO verify: UI hides "Resync every" for served drives (R8 says shown for replicated only) while the config still accepts sync_interval */}
+Open **Settings**, **Storage** (`/settings/storage`). Add a drive (or open an existing card), set **Storage mode** to **Served**, and choose the **Served by** nodes. The order matters: use **move atlas up** and **move atlas down** to set priority. **Resync every** is hidden for served drives in the UI; the config file still accepts `sync_interval` for them.
 
 On the drive page (`/storage/drives/media`) the **Nodes** table has a **Priority** column and **About** shows the active server.
 
@@ -97,7 +97,7 @@ There is no replica set. The standby candidate only holds data as of the last sy
 </Quirk>
 
 <Quirk title="The old server coming back">
-When the original active server returns, it becomes the active server again because it is first in `served_by`. {/* TODO verify: whether the reclaim path can overwrite data written on the standby while it was serving (open question in R8, not covered by a test) */} Avoid writing to the standby for long periods without checking `served_by` order.
+When the original active server returns, it becomes the active server again because it is first in `served_by`. {/* TODO verify: needs a live cluster; whether the reclaim path can overwrite data written on the standby while it was serving is untested. */} Avoid writing to the standby for long periods without checking `served_by` order.
 </Quirk>
 
 <Quirk title="Missing root or nfsv4" severity="info">

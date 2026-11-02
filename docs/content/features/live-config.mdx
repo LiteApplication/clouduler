@@ -37,7 +37,7 @@ graph LR
 | `nodes.<n>.network`, `drives`, `labels`, `last_resort`, `role` | Live | Reaches the scheduler within one `probe_interval`. |
 | `nodes.<n>.rpc_port` | **Restart** | Peers learn the new port live, but the node keeps listening on the old one. |
 | `nodes.<n>.data_dir`, `data_dir` | **Restart** | Clouduler does not move your data. |
-| `nodes.<n>.generate_secret_key`, `secrets.*` | **Restart** | Read when the key is loaded at boot. `systemctl reload` re-reads only the key file. |
+| `nodes.<n>.generate_secret_key`, `secrets.*` | **Restart** | Read when the key is loaded at boot. `systemctl reload` re-reads the key file and also forces the node to re-sync `cluster.yaml` from the cluster. |
 | `nodes.<n>.docker_data_dir` | Neither | Not applied by the daemon. Only `clouduler init` writes `daemon.json`. |
 | `web.address` | **Restart** for the direct listener | The proxy route and DNS follow live; the direct HTTPS listener's certificate is built at boot. |
 | `web.port`, `web.backend_port` | **Restart** | Bound at boot. A changed `backend_port` leaves the proxy route pointing at a port with nothing bound until restart. |
@@ -45,7 +45,7 @@ graph LR
 | `failover.node_timeout`, `fence_timeout`, `probe_interval` | **Restart** | The UI does not tell you. |
 | `failover.stop_grace` | Live | The UI says "Applies live." |
 | `auth.*` (OIDC, session_ttl, api_keys) | Live | The OIDC client is rebuilt on every node within about 5 seconds. Existing sessions keep their expiry. |
-| `proxy.enabled`, `http_port`, `https_port` | Live | Listener group is rebuilt. {/* TODO verify: the systemd socket unit written at install still names the install-time ports; confirm a port change survives a restart cleanly. */} |
+| `proxy.enabled`, `http_port`, `https_port` | Live | Listener group is rebuilt live and the daemon binds new ports itself. The systemd socket unit written by `init` still names the install-time ports, so systemd keeps holding those. {/* TODO verify: needs a live cluster; confirm a port change survives a restart cleanly. */} |
 | `proxy.acme.*`, `cloudflare.*` | Live | Certificate pass runs about every 5 minutes. |
 | `proxy.dns_publish` | Live | Placement change applies on the next scheduler pass. |
 | `proxy.dns_server.*` | Live | Client DNS re-reads config every 5 seconds. |
@@ -118,7 +118,7 @@ For a restart-only key the UI and `config reload` both report success, and the n
 </Quirk>
 
 <Quirk title="Rollback timer is per node" severity="info">
-The countdown lives in memory on the node that took your edit. If that node restarts first, the edit stays. A confirm sent to another node answers `no config edit is pending`. {/* TODO verify: multi-node behaviour of pending edits. */}
+The countdown lives in memory on the node that took your edit. If that node restarts first, the edit stays. An edit can only be armed on the leader (a `PUT` to a follower is not forwarded; it gets `503`), so the countdown sits on the node that was leader when you edited. A confirm or rollback sent to any other node gets `503` (not the leader). `no config edit is pending` comes only from the leader when no edit is armed.
 </Quirk>
 
 <Quirk title="Lockout from sign-in edits" severity="danger">

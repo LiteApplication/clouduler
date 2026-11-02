@@ -18,17 +18,13 @@ The CLI does not discover anything on the network. It reads one YAML file, the c
 | `--node NAME` or env `CLOUDULER_NODE` | Which node this machine is | the system hostname |
 | `--data-dir PATH` or env `CLOUDULER_DATA` | Node data directory override | the node's `data_dir`, else `/var/lib/clouduler` |
 
-There is no CLI login and no API key. **Access means being able to read `cluster.yaml` and the cluster key file** (`/etc/clouduler/secrets.key` by default). The daemon makes both files `root:clouduler` with group read on every start, so add yourself to that group on a node:
-
-```bash
-sudo usermod -aG clouduler $(whoami)
-```
+There is no CLI login and no API key. **Access means being able to read `cluster.yaml` and the cluster key file** (`/etc/clouduler/secrets.key` by default). The key file is created with mode `0640`, owned by root and by the group of the process that created it. The daemon does not change file ownership on start, so adding yourself to a `clouduler` group does not grant read access. Run the CLI with `sudo`, or give your own user read access to the two files yourself.
 
 Treat the key file as root-equivalent: whoever reads it can seal secrets and read registry logins.
 
-Most commands connect to the node's raft port (default `7373`), prove they hold the key, and submit writes. The node forwards writes to the leader, so `--via` does not need to be the leader. Container-level commands (`logs`, `exec`, `capture`, `update`, `git-backup`, `status`, `stack unhealthy`) look up the instance's node, then call that node's internal HTTPS API on the web port, signed with the key. The CLI accepts the node's self-signed certificate on that channel; the signature is the authentication.
+Most commands connect to the node's raft port (default `7373`), prove they hold the key, and submit writes. The node forwards writes to the leader, so `--via` does not need to be the leader. Container-level commands (`logs`, `exec`, `capture`, `status`, `stack unhealthy`) look up the instance's node, then call that node's internal HTTPS API on the web port, signed with the key. `update` and `git-backup` call the node named by `--via` (else the first manager). The CLI accepts the node's self-signed certificate on that channel; the signature is the authentication.
 
-Some commands never contact a daemon: `init`, `daemon`, `check`, `node list`, `drive list`, `completions`, `emergency`, `restore` and `folder-import` (which pushes data to other nodes after working locally).
+Some commands never contact a daemon: `init`, `daemon`, `check`, `node list`, `drive list`, `completions`, `emergency`, `restore`. `folder-import` works on local files but does contact the cluster to find the volume, stop instances and push the data to the other nodes.
 
 ### Output and exit codes
 
@@ -79,7 +75,7 @@ sudo clouduler init --yes --join 192.168.1.10 --token-file /run/clouduler.token 
 | `--internal-domain DOMAIN` | blank | New cluster only. |
 | `--web-address HOST` | `cloud` with `--internal-domain`, else `cloud.example.com` | New cluster only. Set it on real installs. |
 | `--web-port PORT` | `8443` | New cluster only. |
-| `--node-data-dir PATH` | `/var/lib/clouduler` | This node's database and working files. |
+| `--node-data-dir PATH` | new cluster: `/var/lib/clouduler`; join: the cluster's value | This node's database and working files. |
 | `--docker-data-dir PATH` | Docker's default | Sets dockerd `data-root`. Docker is not restarted. |
 | `--systemd` / `--no-systemd` | asked, default yes | Install the systemd unit. |
 | `--start` / `--no-start` | asked, default yes | Enable and start the unit now. |
@@ -104,7 +100,7 @@ cluster homelab
 | Command | What it does |
 |---|---|
 | `completions print SHELL` | Prints the one registration line, for `bash`, `zsh`, `fish`, `elvish` or `powershell`. |
-| `completions install [SHELL]` | Appends the line to your shell rc file (or writes the fish completion file). Detects the shell from `$SHELL`. Does nothing if already installed. PowerShell is not supported (prints the line). |
+| `completions install [SHELL]` | Appends the line to your shell rc file (or writes the fish completion file). Detects the shell from `$SHELL`. Does nothing if already installed. PowerShell is not supported: the command exits 1 with the line to add yourself. It also warns if you are not in the `clouduler` group; that warning is misleading, see the access note at the top of this page. |
 
 Completion is dynamic. Node and drive names come from the config. Stack, instance, volume and destination names come from a live manager with a 400 ms timeout, and silently return nothing if the key or config is unreadable.
 
@@ -123,7 +119,7 @@ Completion is dynamic. Node and drive names come from the config. Stack, instanc
 
 ### drive list
 
-`clouduler drive list` is local. It prints `DRIVE`, `sync=DURATION`, `nodes=LIST`, for example `bulk	sync=900s	nodes=atlas,boreas`.
+`clouduler drive list` is local. It prints one tab-separated row per drive with no header (`NAME`, `sync=DURATION`, `nodes=LIST`), for example `bulk	sync=900s	nodes=atlas,boreas`.
 
 ## Stacks
 
@@ -153,7 +149,7 @@ Completion is dynamic. Node and drive names come from the config. Stack, instanc
 | `--logs N` | Print the last N log lines under each unhealthy container. |
 | `--all` | `--node --uptime --placement --logs 10`. An explicit `--logs` wins. |
 
-Output looks like this, and prints `no unhealthy instances` when all is well:
+Output looks like this (from `stack unhealthy --node --placement --logs 1`; `node=` only prints with `--node`, `reason=` only with `--placement` and the `|` log lines only with `--logs N`), and prints `no unhealthy instances` when all is well:
 
 ```text
 site	2 unhealthy instance(s)
@@ -215,7 +211,7 @@ printf '%s' "$VALUE" | clouduler secret set db-password
 | Command | What it does |
 |---|---|
 | `volume freeze DRIVE/VOLUME [--force] [--via NODE]` | Pauses replication of a volume so you can edit it on this node. `--force` stops containers using it on other nodes. |
-| `volume unfreeze DRIVE/VOLUME [--no-start] [--via NODE]` | Resumes replication, waits (up to an hour) until every replica has caught up, then restarts the containers `freeze --force` stopped, unless `--no-start`. |
+| `volume unfreeze DRIVE/VOLUME [--no-start] [--via NODE]` | Resumes replication, waits (up to an hour) until every replica has caught up, then restarts the containers `freeze --force` stopped, unless `--no-start`. If replicas are still behind after the hour it prints `<nodes> had not received <volume> after 3600s; N container(s) were left stopped` and exits 0 without starting them. |
 
 Both must run on a node that implements the drive, identified by the machine's hostname (there is no `--node`). `unfreeze` must run on the node that froze it. Served drives are refused.
 
@@ -236,7 +232,7 @@ Copies, moves or links a local file or folder into a drive volume, then pushes i
 | `-m`, `--move` | Move (falls back to copy then delete across filesystems). |
 | `-l`, `--link` | Symlink into the volume. The link text is the source path, so it works on other nodes only if that path exists there. |
 | `-r`, `--replace` | Replace the whole volume with the source. |
-| `-f`, `--force` | With `--replace`: stop instances mounting the volume, replace, start them again. |
+| `-f`, `--force` | With `--replace`: stop instances mounting the volume, replace, start them again. Without it, `--replace` on a mounted volume refuses with `<volume> is mounted by <instances>; pass --force to stop them`. |
 | `--node NAME` | Node this runs as. Default `CLOUDULER_NODE`, else hostname. |
 | `--via NODE` | Where to submit volume bookkeeping. |
 
@@ -315,7 +311,7 @@ clouduler capture site.web.0 -w /tmp/site.pcap -- port 443
 ## Quirks and gotchas
 
 <Quirk title="Findings do not change the exit code" severity="warn">
-`status`, `stack unhealthy` and `rebalance` exit 0 whether or not they found problems. `logs` and `stack logs` print `INSTANCE: ERROR` to stderr for an unreachable instance and still exit 0. In scripts, search the text output for `unhealthy` or `issue(s)`.
+`status`, `stack unhealthy` and `rebalance` exit 0 whether or not they found problems. `logs` and `stack logs` print `INSTANCE: <error text>` (for example `node atlas answered 500`) to stderr for an unreachable instance and still exit 0. In scripts, search the text output for `unhealthy` or `issue(s)`.
 </Quirk>
 
 <Quirk title="stack restart may move instances" severity="warn">
@@ -342,17 +338,16 @@ It sends the file loaded from `--config`, not the cluster's copy. A change made 
 `secret set --value`, `registry login --password`, `backup destination add --password` and `--s3-secret-access-key` end up in shell history and the process list. Use stdin, `--file`, `--password-stdin` or the prompt. The restic password generated by `backup destination add` is never shown.
 </Quirk>
 
-<Quirk title="-v may not raise the log level" severity="info">
-It prepends `debug,` to the filter, but with the default `--log` the trailing `info` may override it.
-{/* TODO verify: run `clouduler -v status` against a build and check for debug lines. */}
+<Quirk title="-v does nothing with the default --log" severity="info">
+`-v` prepends `debug,` to the filter, but the default `--log` already ends in a bare `info`, which replaces it. Pass your own `--log` (for example `--log debug`) to get debug output. The `--help` text says otherwise; it is wrong.
 </Quirk>
 
 <Quirk title="Joining with --yes" severity="info">
-Without `--role`, an unattended join becomes a worker. Joining with `--yes` and no token fails because the API key question has no default. `init --force` only rewrites the config file; it does not clear raft data or stop a running daemon. Without `--web-address`, a new cluster gets the placeholder `cloud.example.com`.
+Without `--role`, an unattended join becomes a worker. Joining with `--yes` and no token fails because the API key question has no default. `init --force` only rewrites the config file; it does not clear raft data or stop a running daemon. Without `--web-address` and without `--internal-domain`, a new cluster gets the placeholder `cloud.example.com`; with `--internal-domain` the default is `cloud`. `--role` and `--key-file` are ignored when creating a new cluster (a founder is always a manager and generates the key).
 </Quirk>
 
 <Quirk title="Other small things" severity="info">
-`backup run` returns before the backup runs: check `backup history`. `update` returns before images are pulled: check `status`. `backup destination list` prints SSH destinations as `ssh USER@HOST:22/path` with no separator between port and path. `stack logs -f` lags up to 400 ms because lines are sorted before printing. `folder-import --replace` clears the whole volume first. `backup snapshots` briefly writes the repository password to a 0600 file in the system temp directory.
+`stack stop`, `start`, `restart` and `logs` on a stack with no running instances fail with `stack NAME has no running instances`. Success lines are short: `stopped N instance(s) of NAME`, `started ...`, `restarted ...`, `set NAME` (`secret set`), `logged in to SERVER as USER` (`registry login`). `stack source NAME set` with stdin bundles `file:` paths relative to the current directory; with a file argument, relative to that file's directory. `backup run` returns before the backup runs: check `backup history`. `update` returns before images are pulled: check `status`. `backup destination list` prints SSH destinations as `ssh USER@HOST:22/path` with no separator between port and path. `stack logs -f` lags up to 400 ms because lines are sorted before printing. `folder-import --replace` clears the whole volume first. `backup snapshots` briefly writes the repository password to a 0600 file in the system temp directory.
 </Quirk>
 
 ## Related

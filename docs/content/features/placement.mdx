@@ -34,11 +34,11 @@ The tests, in the order the scheduler applies them:
 | Reachability | the cluster considers the node unreachable | `unreachable` |
 | Node pin | the service is pinned with `x-clouduler.node` to another node | `pinned to NODE` |
 | Drives | the node does not implement a drive the service mounts | `no such drive` |
-| Volume copy | the node implements the drive but holds no current copy of the volume | see [drive holders](#drive-holders) |
+| Volume copy | the node implements the drive but holds no current copy of the volume | scheduler-side only: not shown as a row on the Placement tab, see [drive holders](#drive-holders) |
 | Egress network | the service uses an egress or wireguard network the node has no interface for | `not on network` |
 | Other networks | the node does not implement a network the service names (nat networks always pass) | `not on network` |
 | Open ports | an `x-clouduler.expose` port on a public or wireguard network is not listed in the node's `open_ports` | `port closed` |
-| Constraints | the node fails a `deploy.placement.constraints` entry | `no match` or `unparseable` |
+| Constraints | the node fails a `deploy.placement.constraints` entry | `NODE fails constraint KEY == VALUE` |
 | Configs and secrets | a config or secret the service needs is missing, or the node has no cluster key to open a secret | `missing`, `no cluster key` |
 
 ## Where to see it
@@ -186,7 +186,9 @@ If there is no record of a volume yet, any node that implements the drive qualif
 Stacks are stored separately from `cluster.yaml`. Removing a drive or network from the cluster config can make a stored stack unplaceable without any change to the stack. The Placement tab shows it.
 </Quirk>
 
-{/* TODO verify: the exact text and layout of the UI's folded rows ("rows every node passes are folded away") from ui/src/ds/PlacementTable.tsx foldLabel. */}
+Rows that every node passes are folded behind a toggle labelled `N constraint(s) met on all M servers`; the table then shows the remaining rows with each node marked Eligible, Blocked or Picked.
+
+The rebalancer never moves instances that are pinned, global, anchor/colocate members, on the proxy host, or mid-migration.
 
 ## Related
 

@@ -118,7 +118,7 @@ Clouduler uses ACME (Let's Encrypt by default). There are two ways an ACME serve
 | **HTTP-01** | The CA fetches a token from `http://host/.well-known/acme-challenge/...` on port 80. | The hostname reachable from the internet on port 80. Cannot issue wildcards. |
 | **DNS-01** | Clouduler writes a `_acme-challenge` TXT record (TTL 60) through the Cloudflare API and removes it afterwards. | A Cloudflare API token. Works for hosts that are not reachable from the internet, and for wildcards. |
 
-Clouduler's validation states that certificate issuance is DNS-01 only: `proxy.acme.enabled` is refused without a `cloudflare` section. The proxy code also contains an HTTP-01 path. {/* TODO verify: whether HTTP-01 is actually used for ordinary public hostnames in 0.9.10 or whether every certificate goes through DNS-01. The research summary says HTTP-01 for ordinary hostnames and DNS-01 for wildcards; the validation message says DNS-01 only. */} Either way the whole ACME pass needs the Cloudflare zone list and token, even for HTTP-01. Without a token the daemon logs `no cloudflare token yet, ... will not run`.
+Clouduler's validation states that certificate issuance is DNS-01 only: `proxy.acme.enabled` is refused without a `cloudflare` section. Every name inside one of your configured Cloudflare zones is issued with DNS-01. HTTP-01 is an opt-in fallback used only for a route host written with a **trailing dot** (`host: foo.example.net.`) that no zone covers. Ordinary hostnames never use HTTP-01. The trailing dot is otherwise stripped, and `@` means the zone apex. Either way the whole ACME pass needs the Cloudflare zone list and token, even for HTTP-01. Without a token the daemon logs `no cloudflare token yet, ... will not run`.
 
 ### Connect Cloudflare
 
@@ -149,7 +149,7 @@ cloudflare:
 
 ### Wildcard certificates
 
-A route host such as `*.apps.example.com` matches exactly one label (`a.apps.example.com`, not `a.b.apps.example.com`). Wildcards need DNS-01, which is why the Cloudflare setup is required. {/* TODO verify: that a wildcard route host results in a wildcard certificate (versus one certificate per concrete hostname). */}
+A route host such as `*.apps.example.com` matches exactly one label (`a.apps.example.com`, not `a.b.apps.example.com`). Wildcards need DNS-01, which is why the Cloudflare setup is required. A wildcard route host gets one wildcard certificate (not one per concrete hostname), and a request for `a.apps.example.com` is served from it.
 
 ### Check and renew certificates
 
@@ -185,7 +185,7 @@ A route on an **internal** or **private** network is private by design. The prox
 403: this route is only reachable from its own network
 ```
 
-Other trusted overlay subnets (for example your Tailscale or Headscale network) also pass. A route on a **public** network is never gated.
+Two other sources also pass: the overlay subnets of stacks published on that route's network, and every nat network's subnet (so a container on the same node reaching the route through the host is not blocked). There is no special case for Tailscale or Headscale; to reach a private route over a VPN, the VPN address must be inside the network's subnet. A stack whose `allowed:` list does not include the host gets `403: stack X may not reach H through network N: it is not in the network's allowed list`. A route on a **public** network is never gated.
 
 To publish a service on the internet, put its route on a `public` network. To keep it LAN-only, use a private network and expect the 403 from outside. See [Networking](/docs/features/networking).
 
@@ -213,7 +213,7 @@ On **Proxy**, the **Redirects** tab sends a hostname to another URL (**New redir
 </UiCli.Ui>
 <UiCli.Cli>
 
-No CLI. Use the web UI or the HTTP API (`/api/redirects`, `/api/static-routes`). {/* TODO verify: exact API paths for redirects and static routes. */}
+No CLI. Use the web UI or the HTTP API (`/api/redirects`, `/api/redirects/{id}`, `/api/static-routes`, `/api/static-routes/{id}`; all admin CRUD).
 
 </UiCli.Cli>
 </UiCli>
@@ -252,11 +252,11 @@ The whole ACME pass is gated on the Cloudflare section and token. A hostname out
 </Quirk>
 
 <Quirk title="Port 80 or 443 already in use" severity="warn">
-If another program holds 80 or 443 the proxy cannot listen, but the daemon keeps running. Check `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`. {/* TODO verify: reproduced behaviour when the ports are taken. */}
+If another program holds 80 or 443 the proxy cannot listen, but the daemon keeps running. Check `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`; the daemon logs `proxy listener stopped` as a warning with the bind error. {/* TODO verify: log text not yet reproduced on a live host. */}
 </Quirk>
 
 <Quirk title="proxy.enabled and ports: live or restart?" severity="info">
-The config research says `proxy.enabled` and the ports are rebuilt live; the proxy research says they need a restart because the systemd socket unit is written at install. {/* TODO verify: which is right, and whether the socket unit is updated after a port change. */} If a port change does not seem to apply, restart the daemon.
+The listeners are rebuilt live when `proxy.enabled` or the ports change, and the daemon binds a new port itself. The systemd socket unit is only written by `clouduler init`, so it keeps naming the install-time ports and systemd keeps holding them. {/* TODO verify: needs a live cluster to see what happens to the old port. */} If a port change does not seem to apply, restart the daemon.
 </Quirk>
 
 <Quirk title="Exact host does not always win over a wildcard" severity="info">

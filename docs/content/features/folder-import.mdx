@@ -15,7 +15,7 @@ sidebar_position: 9
 
 ## Import a folder
 
-Run it as root so it can write the drive folder and set ownership:
+Run it with enough privileges to write the drive folder (usually `sudo`). The CLI does not check for root and does not change ownership: copied and moved files keep your user's ownership, and that replicates to the other nodes.
 
 ```bash
 # Copy (the default)
@@ -49,7 +49,7 @@ Without `-f`, `-r` refuses to touch a volume that is in use. With `-f`, Cloudule
   {key: '<source>', type: 'path', reload: 'n/a', required: true, description: 'File or folder to import.'},
   {key: '<drive>/<volume>[/sub/path]', type: 'string', reload: 'n/a', required: true, description: 'Target inside the cluster.'},
   {key: '-c, --copy', type: 'flag', default: 'on', reload: 'n/a', description: 'Copy the source in. The default.', quirks: 'Mutually exclusive with -m and -l.'},
-  {key: '-m, --move', type: 'flag', default: 'off', reload: 'n/a', description: 'Move the source in. Across filesystems it falls back to hard link or copy, then removes the source.', quirks: 'Mutually exclusive with -c and -l.'},
+  {key: '-m, --move', type: 'flag', default: 'off', reload: 'n/a', description: 'Move the source in. Across filesystems it copies, then removes the source.', quirks: 'Mutually exclusive with -c and -l.'},
   {key: '-l, --link', type: 'flag', default: 'off', reload: 'n/a', description: 'Create an absolute symlink inside the volume instead of duplicating.', quirks: 'The link replicates as a path string. It only resolves on other nodes if that path exists there too.'},
   {key: '-r, --replace', type: 'flag', default: 'off', reload: 'n/a', description: 'Replace the whole volume with the source.', quirks: 'No sub-path allowed.'},
   {key: '-f, --force', type: 'flag', default: 'off', reload: 'n/a', description: 'With -r: stop instances mounting the volume first and start them after.', quirks: 'Requires -r.'},
@@ -59,12 +59,16 @@ Without `-f`, `-r` refuses to touch a volume that is in use. With `-f`, Cloudule
 
 ## Quirks and gotchas
 
+<Quirk title="One broken stack blocks --replace --force" severity="info">
+The in-use check matches exact volume names across every stored stack. If any stack in the cluster cannot be parsed, the command stops instead of guessing.
+</Quirk>
+
 <Quirk title="Imported files are owned by whoever ran the command" severity="danger">
 Copied and moved files belong to the user running the CLI (root under `sudo`), and that ownership replicates to every node. A container running as a non-root user may not be able to write the imported files. Change ownership after the import (`chown` on the node, then let it sync) if the service needs it.
 </Quirk>
 
 <Quirk title="A failed -r can leave services stopped">
-With `-r -f`, if clearing succeeds and the import then fails, the command returns before restarting the instances it stopped. They stay stopped. Check `clouduler stack unhealthy --all`, fix the problem, and start them again. {/* TODO verify: confirm folder_import.rs still returns before the restart on a failed --replace */}
+With `-r -f`, if clearing succeeds and the import then fails, the command returns before restarting the instances it stopped. They stay stopped. Check `clouduler stack unhealthy --all`, fix the problem, and start them again.
 </Quirk>
 
 <Quirk title="Whole-drive mounts are not detected as in use">

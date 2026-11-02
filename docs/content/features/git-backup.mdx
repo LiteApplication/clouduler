@@ -21,6 +21,8 @@ The leader pushes after every change, to the branch you configure:
 | `secrets/<name>.age` | Each secret, encrypted with [age](https://age-encryption.org) to your recipient key. |
 | `.clouduler-secret-revisions.json` | Bookkeeping. |
 
+Only the cluster config, stacks, configs and secrets are exported. Backup destinations and schedules are not. Export runs on the leader only and pulls first; a commit that fails validation is parked on a branch named `rejected/<branch>-<sha12>`. The deploy key is a reserved secret named `_clouduler_git_deploy_key`.
+
 Nothing is committed when nothing changed. Files in the repository that Clouduler does not manage are kept. **Keep the repository private**: configs and stack files are readable by anyone with access.
 
 Secrets are encrypted to a key whose private half you keep. Clouduler never stores the age identity, so without it the secret values in Git cannot be recovered (stack and config files still can).
@@ -85,7 +87,7 @@ clouduler git-backup reconcile          # rebuild the repo from cluster state, c
 </UiCli.Cli>
 </UiCli>
 
-The webhook accepts any request with the right token (no event filtering, no signature). A wrong token returns 401 `bad webhook token`. The token is in the URL, so it can end up in proxy and access logs. {/* TODO verify: whether the webhook endpoint is reachable from the public internet on a default install */}
+The webhook accepts any request with the right token (no event filtering, no signature). A wrong token returns 401 `bad webhook token`. The token is in the URL, so it can end up in proxy and access logs. {/* TODO verify: needs a live cluster; the code shows no proxy exposure for the webhook route by default. */}
 
 ### What a pull does
 

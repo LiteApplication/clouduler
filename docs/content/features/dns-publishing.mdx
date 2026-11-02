@@ -88,7 +88,7 @@ must share a node with {keys} already placed on {anchors}
 
 Pins, constraints, drives or capacity that rule out that node make the stack unplaceable. See [Placement](/docs/features/placement). Switch back to `all-nodes` if you want services with a shared hostname to spread across nodes.
 
-{/* TODO verify: what happens to existing records when switching modes mid-flight (stale-record deletion path was not traced). */}
+Switching modes is safe: records that are no longer wanted are deleted first on the next reconcile pass (every 60 seconds, leader only). Switching to `owning-node` deletes the records of nodes that do not run the service; switching back creates them again.
 
 ## Reconcile behaviour
 
@@ -98,7 +98,7 @@ Pins, constraints, drives or capacity that rule out that node make the stack unp
 - **Order.** Deletes first, then creates, then updates. Benign duplicate errors from Cloudflare (codes 81057, 81044, 81058) are treated as "already there".
 - **Error attribution.** A failure that affects the whole zone (for example bad credentials) is shown against the zone. A per-record failure is shown against the affected hostnames only.
 - **The dashboard hostname** is published from the leader.
-- **Retries.** The Cloudflare client retries 429 and 5xx responses up to 5 times.
+- **Retries.** The Cloudflare client makes at most 5 attempts (4 retries, with exponential backoff) on 429 and 5xx responses.
 
 ## Names for clients without Cloudflare
 
@@ -125,7 +125,7 @@ proxy:
 </UiCli.Cli>
 </UiCli>
 
-The server answers according to the network the client is on. It returns `REFUSED` for unknown or unreachable clients. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
+The server answers according to the network the client is on. A client on a subnetted network gets the node's own LAN address for a public hostname (so LAN traffic does not hairpin through your router), and names the cluster does not own are forwarded upstream. It returns `REFUSED` to clients outside the configured networks, and for names it does not own to clients outside a subnetted network, so a public listener cannot be used as an open resolver. `networks` defaults to every subnetted network. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
 
 ## Options
 

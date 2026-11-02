@@ -217,7 +217,7 @@ A published port is bound on the node that runs the container and moves with it.
 
 <Quirk title="Fields that are parsed but currently not acted on" severity="info">
 `deploy.restart_policy`, `deploy.update_config`, `deploy.resources.reservations`, `x-clouduler.auto_update`, and `x-clouduler.volume_sync.VOL.interval` / `enabled` are validated but nothing in the scheduler or daemon reads them today. Use the service-level `restart:` for restart behaviour. Per-volume replication uses the drive's own `sync_interval`. Image updates are applied from the Updates page, not by `auto_update`.
-{/* TODO verify: confirm with the owner whether volume_sync interval/enabled and auto_update are meant to be wired up, and whether the 300s action timeout cap is enforced at run time. */}
+{/* TODO verify: confirm with the owner whether volume_sync interval/enabled and auto_update are meant to be wired up (code confirms they are not read today). */}
 </Quirk>
 
 ## Proxy and x-clouduler per service
@@ -241,7 +241,7 @@ A published port is bound on the node that runs the container and moves with it.
   {"key": "x-clouduler.actions.LABEL", "type": "map", "reload": "n/a", "description": "Named commands runnable in the container from the UI or as sync hooks. The label is the button text."},
   {"key": "actions.LABEL.cmd", "type": "str or list", "reload": "n/a", "required": true, "description": "Command. A string runs as sh -c, a list is exec form."},
   {"key": "actions.LABEL.user", "type": "str", "default": "container user", "reload": "n/a", "description": "Run as this user."},
-  {"key": "actions.LABEL.timeout", "type": "duration", "default": "30s", "reload": "n/a", "description": "Time limit.", "quirks": "The source comment says at most 300s, but no enforcement was found."},
+  {"key": "actions.LABEL.timeout", "type": "duration", "default": "30s", "reload": "n/a", "description": "Time limit.", "quirks": "Capped at 300s: longer values are clamped."},
   {"key": "actions.LABEL.confirm", "type": "bool", "default": "false", "reload": "n/a", "description": "The UI asks before running."},
   {"key": "actions.LABEL.show_in_ui", "type": "bool", "default": "true", "reload": "n/a", "description": "false hides the button and refuses UI/API runs. The action is then only usable as a sync hook."},
   {"key": "x-clouduler.alerts", "type": "false or map", "default": "enabled", "reload": "n/a", "description": "Alert control for the service's containers, merged over the stack-level block. See Alerts below."}
@@ -339,7 +339,7 @@ The format is `invalid config at PATH: MESSAGE`, where PATH is a dotted path suc
 - `N is more than the maximum of 1000` (replicas)
 - `expected KEY=value, got "ENTRY"` (list-form environment or labels)
 - `mode: clouduler is read-only; set read_only: true`
-- `allowed must be a list (write allowed: [] to deny everything, or drop the key)`
+- ``allowed must be a list (write `allowed: []` to deny everything, or drop the key)``
 - `invalid stack name "NAME": must be 1 to 63 bytes long`, `must start and end with a lowercase letter or digit`, `only lowercase letters, digits, - and _ are allowed`
 
 **Cluster errors (CLI and git sync only)**
@@ -395,8 +395,8 @@ The spec is stored first, then bundled files are written, and the object list is
 </Quirk>
 
 <Quirk title="An empty services map parses">
-`services: {}` passes the syntax check.
-{/* TODO verify: whether a stack with no services is refused anywhere else. */}
+`services: {}` passes the syntax check, and no other validation step rejects it. What the scheduler does with such a stack was not traced.
+{/* TODO verify: scheduler behaviour for a stack with no services. */}
 </Quirk>
 
 ## Related

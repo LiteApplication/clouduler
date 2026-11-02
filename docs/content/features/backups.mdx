@@ -24,7 +24,7 @@ Nodes that run backups need `restic` on their `PATH`. If at least one schedule i
 
 ### The restic password
 
-Every destination has a repository password, generated automatically (64 hex characters) and sealed in the cluster. It is never shown. It is recoverable only through the [cluster key](/docs/features/configs-and-secrets#what-to-back-up) or from a [git backup](/docs/features/git-backup) (age-encrypted, reserved secret `_clouduler_restic_password_<destination>`). **If you lose the cluster key and the age identity, every backup in that repository is unreadable.** Keep both safe.
+Every destination has a repository password, generated automatically by the CLI (64 hex characters) and sealed in the cluster. It is never shown. It is recoverable only through the [cluster key](/docs/features/configs-and-secrets#what-to-back-up) or from a [git backup](/docs/features/git-backup) (age-encrypted, reserved secret `_clouduler_restic_password_<destination>`). **If you lose the cluster key and the age identity, every backup in that repository is unreadable.** Keep both safe.
 
 ## Add a destination
 
@@ -37,7 +37,7 @@ Open **Storage**, tab **Backups** (`/storage/backups`). With none configured, a 
 - **SSH server**: **Host**, **Port**, **User**, **Path** and the **Private key** (sealed, never shown again).
 - **S3 bucket**: **Bucket**, **Endpoint**, **Region**, **Prefix**, **Access key ID**, **Secret access key**.
 
-Name it, then click **Create destination**. The form says to leave **Repository password** blank to generate one, but the server currently rejects a blank password for a new destination with `password is required for a new destination`. {/* TODO verify: confirm put_destination still requires a password and the UI hint is still "Leave blank to generate one." */} If you hit that, create the destination with the CLI.
+Name it, then click **Create destination**. The form says to leave **Repository password** blank to generate one, but the server currently rejects a blank password for a new destination with `password is required for a new destination`. If you hit that, create the destination with the CLI.
 
 <UiScreen scenario="lan-3-nodes" route="/storage/backups" caption="Backups: schedules, recent runs, destinations, restores and snapshots." alt="Backups tab with a Backup NAS destination" height={640} />
 
@@ -121,7 +121,7 @@ clouduler clear-errors # forget recorded failures
 </UiCli.Cli>
 </UiCli>
 
-A run that stops reporting is marked failed only after three times the frequency (minimum 12 hours, maximum 72 hours), so a dead run can look "Running" for a long time. Failed runs are shown as outcomes; whether they also raise an alert is not confirmed. {/* TODO verify: does a failed scheduled backup raise an alert, and on which channel? */}
+A run that stops reporting is marked failed only after three times the frequency (minimum 12 hours, maximum 72 hours), so a dead run can look "Running" for a long time. Failed runs are shown as outcomes, and they also raise the `backup.failed` alert (see [Alerts](/docs/features/alerts)). The UI shows only the 20 most recent runs, and each target keeps at most 50.
 
 ## Restore drill
 
@@ -139,7 +139,7 @@ Restoring overlays the snapshot onto the live data. It **stops** every container
 
    Click **Restore from backup** (on **Backups**, or the drive page). Choose the scope, **Drive** (and **Volume**, or **Stack** and **Service**), **Destination** (**Resolve automatically** for services with one destination) and **Snapshot** (**Latest** or a dated one). The sheet warns "Restoring overwrites what is there now." Type the target name, then click **Restore fast**. A toast says "Restoring fast. Follow it under Restores."
 
-   For a single volume, the UI currently sends `drive/volume` where the server expects only the volume name, so it fails or targets the wrong volume. Use the CLI for single-volume restores. {/* TODO verify: UI restoreVolume call site in BackupForms.tsx still sends `${drive}/${volume}` */}
+   For a single volume, the UI currently sends `drive/volume` where the server expects only the volume name, so it fails or targets the wrong volume. Use the CLI for single-volume restores.
 
    </UiCli.Ui>
    <UiCli.Cli>
@@ -164,7 +164,7 @@ Restoring onto a replica is refused, since the next sync would overwrite it: `dr
 ### Restoring after losing the whole cluster
 
 1. Install a new cluster and restore its configuration from [git backup](/docs/features/git-backup#disaster-recovery); that also brings back the sealed restic passwords, re-sealed under the new key.
-2. Make sure the backup destinations exist again. {/* TODO verify: git backup exports cluster.yaml, stacks, configs and secrets but not backup destination or schedule records; confirm they must be re-added by hand with the same id so the restored password is used */}
+2. Make sure the backup destinations exist again. Git backup does not export destination or schedule records, so you re-add them by hand.
 3. Add each destination with the same id and run the restore commands above.
 
 ## Options

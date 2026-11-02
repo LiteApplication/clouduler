@@ -159,7 +159,7 @@ There is no CLI command for networks themselves.
   {"key": "nodes.N.network.NET.interface (egress, map form)", "type": "str", "reload": "live", "required": true, "description": "Same as the bare form, when you also need open_ports or fallback."},
   {"key": "nodes.N.network.NET.fallback.interface", "type": "str", "reload": "live", "description": "Interface to route out of when the primary stops answering. Must differ from the primary."},
   {"key": "nodes.N.network.NET.fallback.health_check_ip", "type": "IP", "reload": "live", "description": "Address pinged out of the primary interface every tick (ping -I, 2 s wait).", "quirks": "Required with fallback. A missing ping binary counts as unreachable, so the fallback is used. Ignored on wireguard."},
-  {"key": "nodes.N.network.NET (wireguard)", "type": "set by import", "reload": "live", "description": "The tunnel interface wg-NETWORK, stored when you import a wg-quick config. open_ports works as for egress.", "quirks": "Not written by hand."},
+  {"key": "nodes.N.network.NET (wireguard)", "type": "set by import", "reload": "live", "description": "The tunnel interface wg-NETWORK (the network name is shortened if needed to fit Linux's 15-byte interface name limit), stored when you import a wg-quick config. open_ports works as for egress.", "quirks": "Set by the import flow. A hand-written bare host interface name is also accepted, the same shape as egress, but use the import."},
   {"key": "nodes.N.network.NET (nat)", "type": "forbidden", "reload": "live", "description": "A nat network takes no node address.", "quirks": "Any entry is rejected."},
   {"key": "nodes.N.rpc_port", "type": "u16", "default": "7373", "reload": "restart", "description": "Raft port. The drive transport uses +1 and the container relay +2."}
 ]} />
@@ -179,11 +179,11 @@ services:
     networks: [lan, home]      # one overlay plus at most one egress, wireguard or nat
 ```
 
-Clouduler picks the stack's **overlay network** (the one that provides DNS and an overlay address) as the first declared `internal` or `private` network, otherwise the first `public` network, otherwise none. A stack that only uses egress, wireguard and nat networks has no overlay: no internal DNS, no proxy gating, and Docker's default resolver.
+Clouduler picks the stack's **overlay network** (the one that provides DNS and an overlay address) as the first `internal` or `private` network **in alphabetical order of network name** (not declaration order), otherwise the first `public` network, otherwise none. A stack that only uses egress, wireguard and nat networks has no overlay: no internal DNS, no proxy gating, and Docker's default resolver.
 
 <OptionTable rows={[
   {"key": "networks.NAME", "type": "map or empty", "reload": "n/a", "description": "Declares a cluster network the stack's services may use.", "quirks": "Must exist in the cluster."},
-  {"key": "networks.NAME.allowed", "type": "list of str", "default": "unrestricted", "reload": "n/a", "description": "Restricts what the stack's containers can reach."},
+  {"key": "networks.NAME.allowed", "type": "list of str", "default": "unrestricted", "reload": "n/a", "description": "Restricts what the stack's containers can reach.", "quirks": "`host:port` entries are rejected on networks that are not overlay networks."},
   {"key": "services.SVC.networks", "type": "list of names", "default": "overlay only", "reload": "n/a", "description": "Attaches the service to the networks.", "quirks": "At most one egress, wireguard or nat network per service. Each must be implemented by some node (nat excepted)."},
   {"key": "services.SVC.x-clouduler.proxy[].network", "type": "name", "reload": "n/a", "required": true, "description": "Network a route is published on. Decides gating.", "quirks": "Must have a domain."},
   {"key": "services.SVC.x-clouduler.expose[].network", "type": "name", "reload": "n/a", "required": true, "description": "Network whose reachability gates placement.", "quirks": "For public or wireguard, some node must list the port in open_ports."},
@@ -241,7 +241,7 @@ services:
 
 <Quirk title="expose opens the port on every node, whatever the network" severity="warn">
 `expose` binds `0.0.0.0:PUBLISHED` on every node. The `network:` only controls placement and validation. Even for an `internal` or `egress` network the port is open on all of each node's host addresses. Firewall it yourself if it should not be reachable.
-{/* TODO verify: confirm with the owner whether binding on every node regardless of network is intended. */}
+{/* TODO verify: code confirms `expose` binds 0.0.0.0 on every node regardless of network; ask the owner whether that is intended. */}
 </Quirk>
 
 `expose` forwards in user space, so the backend sees the node's bridge address as the client. Use `proxy_protocol: true` (TCP only) and enable PROXY protocol v2 on the backend first, or the connection breaks. A published port with no running instance stays bound and refuses connections.
@@ -294,7 +294,7 @@ A `wireguard` network lets Clouduler bring up a tunnel for you on each node, and
 
 In the node settings the network appears as a card titled `NETWORK (wireguard)` with **Config source** (**Paste** or **File**), a text area and an import button. After import it reads "Imported. Tunnel interface: wg-NETWORK", with an **Open ports** editor and a **Remove** button. The import applies immediately, like a secret.
 
-To let a port in through the tunnel, open **Proxy**, tab **Ingress** (`/proxy/ingress`), click **New ingress rule**, and fill in **Network**, **Port (on the tunnel)**, **Protocol** and **Target port (on this node)**. The target is a host port that a container publishes with `ports:`.
+To let a port in through the tunnel, open **Proxy**, tab **Ingress rules** (`/proxy/ingress`), click **New ingress rule**, and fill in **Network**, **Port (on the tunnel)**, **Protocol** and **Target port (on this node)**. The target is a host port that a container publishes with `ports:`.
 
 <UiScreen scenario="multisite-headscale" route="/proxy/ingress" caption="Proxy, Ingress tab." alt="Proxy ingress rules" height={420} />
 
@@ -362,6 +362,10 @@ The config changes first, then each stack is redeployed, then redirects, routes 
 </Quirk>
 
 ## Quirks and gotchas
+
+<Quirk title="A public network on a single node has no overlay" severity="info">
+When only one node implements a public network, Clouduler creates no VXLAN overlay for it.
+</Quirk>
 
 <Quirk title="Overlay Docker networks keep their subnet and MTU">
 Docker cannot change a network's subnet in place. After changing a network's kind or subnet, remove and redeploy the affected stacks. A VXLAN device whose id, local IP or underlay link no longer matches is recreated, and containers on it lose connectivity briefly.

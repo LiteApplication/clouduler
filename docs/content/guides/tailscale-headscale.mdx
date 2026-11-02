@@ -106,7 +106,7 @@ The [Headscale example](/docs/examples/headscale) has the full stack (Headscale 
 Read each node's tailnet address with `tailscale ip -4` and use it as the internal address in `cluster.yaml`; do not guess it, because Headscale hands addresses out sequentially. All three cluster ports (7373, 7374, 7375 by default) then run over `tailscale0`.
 
 :::danger Order matters
-The internal network has to exist before the cluster forms, but a tailnet hosted by a stack on the cluster does not exist until the cluster does. Do not change a running manager's internal address in place. The multi-site quick start walks through the safe order. {/* TODO verify: link to the quickstart section once that page is written */}
+The internal network has to exist before the cluster forms, but a tailnet hosted by a stack on the cluster does not exist until the cluster does. A running node's internal address can be changed with a config edit (see [Changing a node's address](/docs/features/node-lifecycle#changing-a-nodes-address)), but only in the order the [multi-site quick start](/docs/quickstart/multi-site-headscale#5-move-the-first-node-onto-the-tailnet) walks through: the new network must be up on every node first.
 :::
 
 See [Multi-site with Headscale](/docs/quickstart/multi-site-headscale) for the whole path, including what happens after a total outage. Change the tailscale MTU before the first stack deploy: Docker overlay networks pin their MTU when created, and `tailscale0` defaults to 1280.

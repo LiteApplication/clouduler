@@ -151,11 +151,11 @@ An identical redeploy still bumps the revision. To pull newer container images w
 <UiCli>
 <UiCli.Ui>
 
-The UI controls individual containers. Open the **Containers** tab, or click an instance to open `/instances/vaultwarden.app.0`, and use **Restart**, **Stop** and **Start** there. Stopping asks for confirmation and the container stays stopped until you start it again.
+The UI controls individual containers. Open the **Containers** tab, or click an instance to open `/instances/vaultwarden.app.0`, and use the **Restart**, **Stop** and **Start** buttons there (each label includes the instance id, for example `Restart vaultwarden.app.0`). Stopping asks for confirmation and the container stays stopped until you start it again.
 
 <UiScreen scenario="lan-3-nodes" route="/instances/vaultwarden.app.0" caption="One instance: state, logs and actions." alt="Instance detail for vaultwarden.app.0" />
 
-{/* TODO verify: whether the UI has a stack-wide stop/start button; the stack page source only shows per-instance actions. */}
+The stack page (tabs Containers, Placement, Spec, Settings) has no stack-wide stop or start button. To stop every instance at once, use `clouduler stack stop NAME` on the CLI.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -193,7 +193,7 @@ There is no confirmation prompt on the CLI.
 </UiCli.Cli>
 </UiCli>
 
-Removing a stack keeps its volumes on the drives. {/* TODO verify: the remove dialog in the UI does not say that volumes are kept; this comes from the research notes on RemoveStack. */}
+Removing a stack keeps its volumes on the drives, but it also deletes the stack's configs and secrets that no other stack uses. The remove dialog does not mention volumes; it asks you to type the stack name.
 
 ## Logs
 
@@ -232,7 +232,7 @@ It works from any machine that holds the cluster key, wherever the container run
 A stack is healthy when every instance runs as asked. Clouduler looks at the container state, the Docker healthcheck from your spec (`healthcheck:`), and the proxy's active check for routed services.
 
 - In the UI, open the stack page. A failing instance shows a tag such as `Restart 3 of 5` or a placement problem,.
-- On the CLI, `clouduler stack unhealthy` lists instances that are restarting, exited when they should run, failing a health check, stopped by `stack stop`, or waiting for placement. Add `--placement` for the reason and `--logs 10` for the last lines.
+- On the CLI, `clouduler stack unhealthy` lists instances that are restarting, exited when they should run, failing a health check, stopped by `stack stop`, or waiting for placement. Add `--placement` for the reason (the `reason=` part of the line below only appears with that flag) and `--logs 10` for the last lines. `stack stop`, `start`, `restart` and `logs` on a stack with no running instances fail with `stack NAME has no running instances`.
 
 ```text
 vaultwarden	1 unhealthy instance(s)
@@ -249,7 +249,7 @@ Every instance runs on one node. The scheduler picks a node that can hold everyt
 
 <Quirk title="Fields that do nothing today" severity="info">
 `deploy.restart_policy`, `deploy.update_config`, `deploy.resources.reservations`, `x-clouduler.auto_update` and the per-volume `volume_sync` interval and enabled keys are accepted but currently not acted on. Use the service-level `restart:` key. See the [stack spec](/docs/reference/stack-spec#deploy).
-{/* TODO verify: confirm with the owner that these are intentionally unused. */}
+{/* TODO verify: code confirms none of these is read; ask the owner whether that is intentional. */}
 </Quirk>
 
 <Quirk title="Published ports follow the container, but only on its own node">

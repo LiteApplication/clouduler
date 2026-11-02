@@ -52,7 +52,7 @@ clouduler status    # EMERGENCY MODE: only stack site is being scheduled
   {key: '--data-dir PATH', type: 'path', default: 'data_dir from config (/var/lib/clouduler)', reload: 'n/a', description: 'Where raft/raft.redb is found (global flag, also CLOUDULER_DATA).'},
 ]} />
 
-If the daemon is still running, the command fails because the database is locked. {/* TODO verify: exact error text when emergency runs while the daemon is up */}
+If the daemon is still running, the command fails with the database error `Database already open. Cannot acquire lock.` Stop the daemon first.
 
 ## How it ends
 
@@ -65,8 +65,8 @@ The Nodes page shows the **No quorum** banner with "Emergency mode is on for STA
 1. **Recent writes are lost.** The rescued node's copy of each volume is trusted as current. It may be behind the primary that died (replicas sync every 15 minutes by default), and whatever was never synced is gone.
 2. **Old managers can conflict.** They are demoted, not deleted. If one returns with its old state intact it conflicts with the new log.
 3. **It does not end if the lost manager never returns.** Removing the dead manager does not end it. Add a new voting manager (a manager join, see [Node lifecycle](/docs/features/node-lifecycle#add-a-node)). Two voters tolerate no failure, so add a third quickly.
-4. **Other stacks stop.** No other stack is scheduled anywhere until it ends: no new deploys, moves or restarts. Their desired state is untouched. As currently implemented, a container of another stack still running on this node (or on any node that has the emergency state) is stopped and removed, not just left alone, and is created again afterwards. Volume data is not deleted. The command's own warning says other stacks' desired state is "left exactly as it was" but does not mention the containers. {/* TODO verify: confirm on a live cluster that other stacks' containers are removed during emergency mode (derived from run.rs and reconcile.rs) */}
-5. **`node remove` of the dead manager can fail.** It is refused while that node still owns instances, and emergency mode does not reschedule other stacks, so their instances stay assigned to it. The command's closing message suggests removing the lost manager, which can fail for this reason. Stop and remove those stacks first, or wait for a replacement manager. {/* TODO verify: derived from state.rs, not run on a live cluster */}
+4. **Other stacks stop.** No other stack is scheduled anywhere until it ends: no new deploys, moves or restarts. Their desired state is untouched. As currently implemented, a container of another stack still running on this node (or on any node that has the emergency state) is stopped and removed, not just left alone, and is created again afterwards. Volume data is not deleted. The command's own warning says other stacks' desired state is "left exactly as it was" but does not mention the containers. The reconcile diff does stop running instances of stacks outside the emergency set. {/* TODO verify: live confirmation that other stacks' containers are removed. */}
+5. **`node remove` of the dead manager can fail.** It is refused while that node still owns instances, and emergency mode does not reschedule other stacks, so their instances stay assigned to it (the refusal reads `node X still runs INSTANCE`). The command's closing message suggests removing the lost manager, which can fail for this reason. Stop and remove those stacks first, or wait for a replacement manager.
 6. Served drives the stack uses now point at this node, and every other node is marked unreachable until it answers.
 
 The success message ends with a garbled sentence about promotion; it means a returning manager is re-added as a voter automatically once its daemon answers.

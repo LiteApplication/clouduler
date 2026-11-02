@@ -89,7 +89,7 @@ services:
 
 `fast/.` mounts the whole drive. A whole-drive mount must be pinned with `x-clouduler.node` to the drive's single real holder (for a replicated drive, every node that implements it, so in practice only a drive held by one node). See the [stack spec](/docs/reference/stack-spec).
 
-Anonymous volumes (a bare `/path` with no drive) are silently dropped. {/* TODO verify: confirm anonymous volume mounts are still skipped in crates/cl-sched/src/spec.rs */}
+Anonymous volumes (a bare `/path` with no drive) are silently dropped (confirmed in the scheduler's spec conversion).
 
 ## Look at drives and volumes
 
@@ -116,7 +116,7 @@ clouduler drive list        # drives, sync interval, nodes
 clouduler status            # lagging volumes appear in the problem list
 ```
 
-There is no CLI command to list volumes. {/* TODO verify: confirm no `volume list` subcommand exists (cli.rs VolumeCommand has only freeze and unfreeze) */}
+There is no CLI command to list volumes (`volume` has only `freeze` and `unfreeze`).
 
 </UiCli.Cli>
 </UiCli>
@@ -127,12 +127,12 @@ There is no CLI command to list volumes. {/* TODO verify: confirm no `volume lis
 
 ## Freeze a volume to edit it by hand
 
-Freezing pauses replication of one volume so you can change its files on this node without a sync overwriting them. Containers that use the volume on other nodes are stopped. You cannot freeze a served volume.
+Freezing pauses replication of one volume so you can change its files on this node without a sync overwriting them. If containers on other nodes use the volume, `volume freeze` refuses; add `--force` to stop them. You cannot freeze a served volume.
 
 <UiCli>
 <UiCli.Ui>
 
-On the volumes table, click **Freeze** on the row and confirm **Freeze fast/vaultwarden?** ("Containers using it are stopped so you can edit its files by hand. Unfreeze it to resume replication."). A **is frozen** banner appears with **Unfreeze**.
+On the volumes table, click **Freeze** on the row and confirm **Freeze fast/vaultwarden?** ("Containers using it are stopped so you can edit its files by hand. Unfreeze it to resume replication."). The UI does not send `--force`, so freezing a volume that is in use on another node fails from the UI and nothing is stopped. Use the CLI with `--force` in that case.. A **is frozen** banner appears with **Unfreeze**.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -150,7 +150,7 @@ clouduler volume unfreeze fast/vaultwarden --no-start   # leave the containers -
 </UiCli.Cli>
 </UiCli>
 
-Unfreezing bumps the generation with the frozen node as primary, then waits for the other nodes to catch up before starting containers. The CLI waits up to one hour. The web UI waits only 120 seconds, so a large volume can time out in the UI while the CLI succeeds.
+Unfreezing bumps the generation with the frozen node as primary, then waits for the other nodes to catch up before starting containers. The CLI waits up to one hour. The web UI returns immediately and finishes in the background: it waits 120 seconds for replicas, then starts the containers even if some nodes are still behind. If replicas are still behind after the CLI's hour, the CLI prints how many containers it left stopped and exits 0.
 
 ## Data-loss window
 
@@ -166,7 +166,7 @@ Clouduler refuses a sync that would wipe a populated copy: a source that is empt
 
 ## Disk space
 
-Each node reports disk use every 60 seconds. The alert `node.disk_low` fires at 90% (warning) and 95% (critical) of the disk holding a served drive. {/* TODO verify: R8 says local_drives only lists served drives on candidate nodes, so replicated drives may not be covered by the disk alert */} There are no quotas: nothing limits how much a drive or volume can grow. See [Alerts](/docs/features/alerts).
+Each node reports disk use every 60 seconds. The alert `node.disk_low` fires at 90% (warning) and 95% (critical) of the disk holding any drive the node holds data for, replicated drives included (not the mountpoint of a served drive that lives on another node). There are no quotas: nothing limits how much a drive or volume can grow. See [Alerts](/docs/features/alerts).
 
 ## Options
 
@@ -197,7 +197,7 @@ A `fast/.` mount is recorded as a volume named `.`. [Folder import](/docs/featur
 </Quirk>
 
 <Quirk title="Stale replicas are not used">
-A replica one generation behind is not a candidate unless no reachable node holds a current copy. The reason shows on the **Placement** tab as `holds no current copy of volume`.
+A replica one generation behind is not a candidate unless no reachable node holds a current copy. The scheduler rejects the node with `holds no current copy of volume`; this reason is not shown as a row on the Placement tab.
 </Quirk>
 
 ## Related

@@ -158,11 +158,11 @@ The validator refuses `api_keys: false` without OIDC, but nothing reads the flag
 </Quirk>
 
 <Quirk title="Dashboard sign-in uses https only, and one node's memory" severity="info">
-The `cl_session` cookie is always `Secure`. A pending OIDC login is kept in memory on the node that started it; if the callback arrives at a different node, or the daemon restarts in between, you see `unknown or expired login state`. Just start again. {/* TODO verify: how the dashboard hostname resolves across several nodes, and whether the callback can reach another node. */}
+The `cl_session` cookie is always `Secure`. A pending OIDC login is kept in memory on the node that started it; if the callback arrives at a different node, or the daemon restarts in between, you see `unknown or expired login state`. Just start again. The dashboard hostname is published from the leader only, so the callback normally lands on the leader; after a leader change the record moves on the next 60-second DNS pass, and a callback in that window fails this way. Other follower requests behave differently: `/oauth/authorize` is redirected to the leader, and `/oauth/token`, `/oauth/register` and every `/mcp` call are relayed to it.
 </Quirk>
 
 <Quirk title="Changed the dashboard address?" severity="info">
-The redirect URI is built when OIDC is set up. After changing `web.address` or the web network's domain, update the redirect URI at your provider and restart the daemon to be safe. {/* TODO verify by test. */}
+The redirect URI is built when OIDC is set up. After changing `web.address` or the web network's domain, update the redirect URI at your provider and restart the daemon to be safe. The redirect URI is only rebuilt at boot or when `auth.oidc` changes, so a change to `web.address` alone does not update it.
 </Quirk>
 
 ## Service login: protect apps that have no login
@@ -288,7 +288,7 @@ Work down this list:
 
 1. **An API key still exists somewhere.** Use it on the login screen.
 2. **OIDC works at the provider, but admin is missing.** Check that the ID token contains the `admin_claim` with the `admin_value`, and that `scopes` includes what releases it. Log in as a viewer, then ask another admin.
-3. **You deleted every API key and OIDC does not work.** The bootstrap key task runs when the API server starts and mints a key named `bootstrap` only if the leader finds the key store empty. Restarting the daemon on the leader (`sudo systemctl restart clouduler`) should therefore log a new bootstrap key in `journalctl -u clouduler.service`. {/* TODO verify: confirm on a live cluster that a restart re-mints the key and that the CLI has no key command. The research could not confirm any other recovery path. */}
+3. **You deleted every API key and OIDC does not work.** The bootstrap key task runs when the API server starts and mints a key named `bootstrap` only if the leader finds the key store empty. Restarting the daemon on the leader (`sudo systemctl restart clouduler`) logs a new bootstrap key in `journalctl -u clouduler.service` (the task retries every 2 seconds until the key is stored). The CLI has no key command, so this is the recovery path.
 4. **A bad OIDC edit.** Use the key from step 1 or 3 and fix **Settings > Sign-in and backup**. There is no rollback timer for `auth` edits.
 5. **Wrong `proxy` or `web` edit.** The rollback timer reverts it after the countdown, or run `clouduler config reload` with a known-good file on a manager.
 

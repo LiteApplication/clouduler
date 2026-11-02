@@ -79,7 +79,7 @@ clouduler stack unhealthy --all  # what is not running as asked
 clouduler stack unhealthy --placement   # why instances cannot be placed
 ```
 
-Placement reasons you may see: `NODE is unreachable`, `NODE is Drain`, `NODE is pinned`, `NODE holds no current copy of volume VOLUME`, `NODE does not implement drive DRIVE`.
+Placement reasons you may see: `NODE is unreachable`, `NODE is Drain`, `NODE is not the pinned node PIN`, `NODE holds no current copy of volume VOLUME`, `NODE does not implement drive DRIVE`.
 
 </UiCli.Cli>
 </UiCli>
@@ -149,6 +149,8 @@ The `failover` block rejects unknown keys, so a typo fails config loading with `
 
 ## Quirks and gotchas
 
+The failover timers `node_timeout` (30s), `fence_timeout` (15s) and `probe_interval` (5s by default) are read when the daemon starts; `stop_grace` (30s) is live. The leader's failure detector uses a 500 ms heartbeat and a 1.5 s quorum acknowledgement window, and the scheduler sweeps every 10 seconds.
+
 <Quirk title="The default config trips the margin warning">
 It is expected with defaults. Raise `node_timeout` to `60s` to quiet it, or accept it if your containers stop quickly.
 </Quirk>
@@ -162,11 +164,11 @@ The fence clock resets whenever quorum returns. A link that is down for longer t
 </Quirk>
 
 <Quirk title="Fenced nodes are not obvious in the UI">
-A fenced node logs `no quorum, stopping local containers`. The leader's view just shows it as unreachable. {/* TODO verify: whether a fenced worker shows anywhere in the UI besides Unreachable */}
+A fenced node logs `no quorum, stopping local containers`. The leader's view just shows it as unreachable. A fenced worker's own Nodes page shows only a "No quorum" banner.
 </Quirk>
 
 <Quirk title="Two managers" severity="danger">
-Losing one of two managers stops every container in the cluster after about 15 seconds. Run three.
+Quorum needs more than half of the voters, so two managers need both. Losing either one stops every container in the cluster after about 15 seconds. Workers never vote. Run three managers.
 </Quirk>
 
 ## Related

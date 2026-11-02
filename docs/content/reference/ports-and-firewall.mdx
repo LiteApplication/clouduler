@@ -23,7 +23,7 @@ Clouduler does not open ports on your host firewall. If you run `ufw`, `firewall
 | 7375 (`rpc_port` + 2) | TCP | Relay: connections to containers that run on another node | Internal IP | Other nodes | Other nodes only |
 | 4789 | UDP | VXLAN overlay for stack networks | Internal IP | Other nodes | Other nodes only |
 | 8443 (`web.port`) | TCP, HTTPS | Dashboard and API | All addresses | Admin browsers, `clouduler init --join`, MCP clients | Your admin networks |
-| 8444 (`web.backend_port`) | TCP, HTTP | Proxy to dashboard | 127.0.0.1 only | The local proxy | Nobody (loopback) |
+| 8444 (`web.backend_port`) | TCP, HTTP | Proxy to dashboard (bound only when the dashboard is served through the proxy) | 127.0.0.1 only | The local proxy | Nobody (loopback) |
 | 80 (`proxy.http_port`) | TCP, HTTP | Reverse proxy: redirects, ACME HTTP-01, `tls: false` routes | All addresses | Clients of published hostnames | Clients, and the internet for public apps |
 | 443 (`proxy.https_port`) | TCP, HTTPS | Reverse proxy | All addresses | Clients of published hostnames | Clients, and the internet for public apps |
 | 2049 | TCP | NFSv4, served drives only | Exported to the internal subnet | Nodes that mount a served drive | Other nodes only |
@@ -38,7 +38,7 @@ A raw `x-clouduler.expose` port is bound on `0.0.0.0` on **every** node, whateve
 </Quirk>
 
 <Quirk title="Port 80 or 443 already taken" severity="info">
-If another program holds 80 or 443, the proxy cannot listen, but the daemon keeps running. Check with `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`. {/* TODO verify: reproduced behaviour. */}
+If another program holds 80 or 443, the proxy cannot listen, but the daemon keeps running. Check with `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`. The daemon logs a `proxy listener stopped` warning with the bind error. The systemd socket unit that holds 80/443 is only written when the proxy is enabled at `init` time. {/* TODO verify: not reproduced on a live host. */}
 </Quirk>
 
 <Quirk title="Raft and drive traffic is authenticated but not encrypted" severity="warn">
@@ -158,7 +158,7 @@ For apps reachable from the internet, forward 80 and 443 on your router to your 
 
 ## Outbound access
 
-Each node needs outbound TCP 443 to: Let's Encrypt (when `proxy.acme.enabled`), the Cloudflare API (when `cloudflare` is set), GitHub (when `self_update` is set), and your container registries. Git backup uses SSH to your repository host. {/* TODO verify: outbound port for git backup and the default registries. */}
+Each node needs outbound TCP 443 to: Let's Encrypt (when `proxy.acme.enabled`), the Cloudflare API (when `cloudflare` is set), GitHub (when `self_update` is set), and your container registries. Git backup uses SSH to your repository host. The default registry is `registry-1.docker.io` over HTTPS 443; git backup uses SSH (port 22 unless your URL says otherwise).
 
 ## The CLDR chains Clouduler manages
 
@@ -191,7 +191,7 @@ Containers on a stack's own overlay network silently drop real request and respo
 </Quirk>
 
 <Quirk title="MTU on the overlay" severity="info">
-VXLAN adds 50 bytes of overhead. Clouduler derives the overlay MTU from the underlay interface (1500 if the kernel reports none), so a VPN underlay with a smaller MTU is accounted for. {/* TODO verify: overlay MTU behaviour when the underlay is a tunnel. */}
+VXLAN adds 50 bytes of overhead. Clouduler derives the overlay MTU from the underlay interface (1500 if the kernel reports none), so a VPN underlay with a smaller MTU is accounted for.
 </Quirk>
 
 ## Related

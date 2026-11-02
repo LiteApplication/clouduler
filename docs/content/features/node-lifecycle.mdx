@@ -28,7 +28,7 @@ clouduler node add dione --role worker --rpc-addr 192.168.1.14:7373 --drive fast
 clouduler config reload
 ```
 
-Also add the node to `cluster.yaml` and reload, or it will not get raft membership. {/* TODO verify: derived from seed_roster iterating the config, not checked live */} `clouduler node list` shows nodes from the config file, not the live roster.
+Also add the node to `cluster.yaml` and reload, or it will not get raft membership. `clouduler node list` shows nodes from the config file, not the live roster.
 
 </UiCli.Cli>
 </UiCli>
@@ -83,6 +83,8 @@ clouduler node remove boreas
 ```
 
 `node remove` first validates the config without the node, then removes it from the roster, records a tombstone so a stale config cannot re-add it, and drops it from `cluster.yaml`. The leader then evicts it from raft. A removed machine wipes its cluster key, node key and local raft data the next time it starts and exits; to reuse it, run `init` again. Keep an offline copy of the cluster key first if you might want it back.
+
+A node removed while it was down finds out when it next starts and wipes itself as described above; if you later re-provision a machine under the same name, a retired-ID check keeps the old identity from coming back.
 
 Errors: `cluster rejected the removal: node boreas still runs INSTANCE`; or, if only the last step failed, `removed boreas from the live roster, but could not drop it from the config: ... Remove it by hand and run clouduler config reload`.
 
@@ -145,6 +147,26 @@ Clearing a failed move does not move the instance; it stays on whichever node it
   {key: 'rebalance [--yes] [--via NODE]', type: 'command', reload: 'n/a', description: 'Plan and submit load-evening moves.'},
   {key: 'clear-errors [--via NODE]', type: 'command', reload: 'n/a', description: 'Forget recorded failures.'},
 ]} />
+
+## Changing a node's address
+
+You can change the internal subnet and every node's internal IP, managers included, by editing `cluster.yaml` once. Nothing needs a restart. This is how the [multi-site quick start](/docs/quickstart/multi-site-headscale#5-move-the-first-node-onto-the-tailnet) moves the first node from a public address onto a tailnet address.
+
+How it works: the leader dials each node's new address, requires it to answer as that node, and only then commits a raft membership change that keeps the same voters at the new address. The other nodes are moved first and the leader last. If the new address is unreachable or answers as a different node, membership is left untouched. Each node serves both its old and new address for 120 seconds, so the move does not cut anyone off. The leader logs `moved a member to a new rpc address` for each node.
+
+Live after the edit, with no restart: raft membership and peer dialling, the rpc listeners, the VXLAN device (recreated for the new local IP, with its forwarding entries), internal DNS, the iptables rules, node and drive addresses, relay routes, and the drive listener and NFS exports. Mounts of [served drives](/docs/features/served-drives) over NFS unmount once while they are rebuilt, and drive syncs and relay routes can be briefly inconsistent during the move.
+
+To do it:
+
+1. Bring the new network up on every node and check that the nodes reach each other on it, **follower to follower**. The leader only tests reachability from itself.
+2. Edit `cluster.yaml` once: the new `subnet` on the internal network and the new IP for every node, in the same edit. See [cluster.yaml](/docs/reference/cluster-yaml#editing-the-config).
+3. Confirm the edit within the 60 second rollback window.
+4. Watch the leader's logs (`journalctl -u clouduler -f`) for one `moved a member to a new rpc address` line per node, then check that all nodes are healthy.
+5. If one node never moves, revert the config. The old address is still served.
+
+:::warning Two-voter clusters
+With two voters, a moved voter whose new address stops working takes quorum with it. Recover with [`clouduler emergency`](/docs/features/emergency-mode). Run three managers before re-addressing.
+:::
 
 ## Quirks and gotchas
 
