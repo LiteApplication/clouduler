@@ -5,6 +5,211 @@ sidebar_position: 14
 
 # Backups
 
-One-line summary of backups goes here.
+Clouduler backs up **drives** with [restic](https://restic.net), an encrypted, deduplicating backup tool. You define a **destination** (where the backup repository lives), then a **schedule** (a drive, a destination, how often, how long to keep snapshots). The cluster runs the backups on its own, keeps a history, and can restore a whole drive, one volume, or everything a service uses.
 
-TODO
+Drive backups are separate from [git backup](/docs/features/git-backup), which saves the cluster's configuration and secrets. You want both: git backup rebuilds the cluster, restic brings your data back.
+
+:::info restic must be installed
+Nodes that run backups need `restic` on their `PATH`. If at least one schedule is enabled and it is missing, the daemon logs `restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed`.
+:::
+
+## How it works
+
+- A **destination** is a restic repository: a folder on a **cluster node**, an **SSH server**, or an **S3 bucket**.
+- A **schedule** (called a *target* in the CLI) ties one drive to one destination. Its id is `DRIVE-DESTINATION`, for example `fast-nas`.
+- The leader checks for due schedules every 30 seconds and queues a run. The node that holds the drive runs restic: it optionally stops the containers using the drive, backs up, restarts them, then applies retention (`forget --prune`). Failures in retention are logged as warnings and do not fail the run. A run waits up to 120 seconds for the drive to finish syncing first.
+- A schedule is due when the frequency has elapsed and, if you set a **time of day** (UTC), the clock has reached it.
+- The run history keeps the last 50 runs per schedule.
+- A restore request is planned by the cluster and executed on the node that is the drive's authority, so you can ask from any node.
+
+### The restic password
+
+Every destination has a repository password, generated automatically (64 hex characters) and sealed in the cluster. It is never shown. It is recoverable only through the [cluster key](/docs/features/configs-and-secrets#what-to-back-up) or from a [git backup](/docs/features/git-backup) (age-encrypted, reserved secret `_clouduler_restic_password_<destination>`). **If you lose the cluster key and the age identity, every backup in that repository is unreadable.** Keep both safe.
+
+## Add a destination
+
+<UiCli>
+<UiCli.Ui>
+
+Open **Storage**, tab **Backups** (`/storage/backups`). With none configured, a banner says "No destinations yet. Add one under Destinations, then schedule a drive to back up to it." Under **Destinations** click **New destination** and choose a kind:
+
+- **Cluster node**: pick the **Node** and a **Path** (default `/srv/backups`, no spaces). If the node does not hold the drive, the drive is synced there once before each backup.
+- **SSH server**: **Host**, **Port**, **User**, **Path** and the **Private key** (sealed, never shown again).
+- **S3 bucket**: **Bucket**, **Endpoint**, **Region**, **Prefix**, **Access key ID**, **Secret access key**.
+
+Name it, then click **Create destination**. The form says to leave **Repository password** blank to generate one, but the server currently rejects a blank password for a new destination with `password is required for a new destination`. {/* TODO verify: confirm put_destination still requires a password and the UI hint is still "Leave blank to generate one." */} If you hit that, create the destination with the CLI.
+
+<UiScreen scenario="lan-3-nodes" route="/storage/backups" caption="Backups: schedules, recent runs, destinations, restores and snapshots." alt="Backups tab with a Backup NAS destination" height={640} />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+# Folder on a cluster node. The password is generated and sealed, never printed.
+clouduler backup destination add nas --name "NAS local" --kind node-local \
+  --node atlas --path /srv/backups
+
+# SSH server (non-default port, key file sealed as the credential)
+clouduler backup destination add offsite --name "Offsite SSH" --kind ssh \
+  --host backup.example.com --port 2222 --user backup \
+  --path /srv/restic/clouduler --ssh-key-file ~/.ssh/clouduler_backup
+
+# S3-compatible bucket
+clouduler backup destination add s3main --name "S3 main" --kind s3 \
+  --bucket example-bucket --endpoint s3.example.com --region eu-west-1 --prefix clouduler \
+  --s3-access-key-id EXAMPLEKEYID --s3-secret-access-key 'example-secret'
+
+clouduler backup destination list
+clouduler backup destination remove nas     # refused while a schedule uses it
+```
+
+Do not re-run `destination add` for an existing id without `--password`: the CLI generates a new password, and the repository can no longer be opened. See the [backup targets guide](/docs/guides/backup-targets) for setting up the server side.
+
+</UiCli.Cli>
+</UiCli>
+
+## Schedule a backup
+
+<UiCli>
+<UiCli.Ui>
+
+Under **Schedules** click **New schedule** (disabled until there is a drive and a destination). Fields: **Drive**, **Destination**, **Frequency (hours)** (default 24), **Time of day (UTC)** (optional), **Keep last N snapshots** (default 7), **Keep snapshots within (days)**, **Stop containers before backup** (**Use the stack's setting (default: yes)**, **Always stop**, **Never stop**) and **Enabled** (default on). Click **Create schedule**.
+
+Use **Run NAME now** on the row to test, then check **Recent runs**. A failed latest run shows a banner, "The last fast backup failed".
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler backup target set fast-nas --drive fast --destination nas \
+  --frequency 24h --time-of-day 03:00 \
+  --keep-last 7 --keep-within 30d --enabled
+
+clouduler backup target list
+clouduler backup run fast-nas          # run now (works even if disabled)
+clouduler backup history               # newest first; --target ID to filter
+clouduler backup snapshots nas         # list what a destination holds
+```
+
+`--enabled` is a flag, and **without it the schedule is created disabled** and never runs on its own. `--frequency` is required (`1d`, `12h`). `--time-of-day` is UTC `HH:MM`. `--stop-containers true|false` overrides the default.
+
+</UiCli.Cli>
+</UiCli>
+
+Containers that use the drive are stopped during the backup by default so the files are consistent, then restarted. A stack can set its own preference; the schedule can force it either way. For databases, consider a dump job in addition.
+
+<Quirk title="keep-within 0 is not 'no limit' in the CLI" severity="danger">
+In the UI, leaving **Keep snapshots within** at 0 stores no age limit. On the CLI, `--keep-within 0s` is sent as a real value, and restic is then told to keep snapshots within `1h`, so retention can prune almost everything. Omit the flag instead of passing zero. Likewise omit `--keep-last` for no count limit.
+</Quirk>
+
+## History
+
+<UiCli>
+<UiCli.Ui>
+
+**Recent runs** shows the latest 20: drive, destination, start time, who started it (schedule or `manual (user)`), and the outcome (snapshot short id, size, any warning, or failed). The **Schedules** table shows each schedule's last run and a **paused** or **enabled** tag. The drive page (`/storage/drives/fast`) lists that drive's schedules too.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler backup history --target fast-nas
+clouduler status       # failed backups and restores are in the problem list
+clouduler clear-errors # forget recorded failures
+```
+
+</UiCli.Cli>
+</UiCli>
+
+A run that stops reporting is marked failed only after three times the frequency (minimum 12 hours, maximum 72 hours), so a dead run can look "Running" for a long time. Failed runs are shown as outcomes; whether they also raise an alert is not confirmed. {/* TODO verify: does a failed scheduled backup raise an alert, and on which channel? */}
+
+## Restore drill
+
+Restoring overlays the snapshot onto the live data. It **stops** every container that uses the data, **overwrites** the files, replaces the copy on every node, then **starts** the containers again. Files that exist now but not in the snapshot are kept, not deleted. Rehearse this on something you can afford to lose before you need it.
+
+1. **Check the backup exists.** In **Storage**, **Backups**, scroll to **Snapshots**, choose the destination chip and find a recent snapshot. On the CLI, `clouduler backup snapshots nas` (this may fail for S3 and key-based SSH destinations because the CLI does not pass those credentials to restic; use the UI there).
+2. **Pick the scope.**
+   - *Whole drive*: every volume on the drive.
+   - *Single volume*: one `drive/volume`.
+   - *A service's volumes*: every volume a service mounts; the service restarts once.
+3. **Start the restore.**
+
+   <UiCli>
+   <UiCli.Ui>
+
+   Click **Restore from backup** (on **Backups**, or the drive page). Choose the scope, **Drive** (and **Volume**, or **Stack** and **Service**), **Destination** (**Resolve automatically** for services with one destination) and **Snapshot** (**Latest** or a dated one). The sheet warns "Restoring overwrites what is there now." Type the target name, then click **Restore fast**. A toast says "Restoring fast. Follow it under Restores."
+
+   For a single volume, the UI currently sends `drive/volume` where the server expects only the volume name, so it fails or targets the wrong volume. Use the CLI for single-volume restores. {/* TODO verify: UI restoreVolume call site in BackupForms.tsx still sends `${drive}/${volume}` */}
+
+   </UiCli.Ui>
+   <UiCli.Cli>
+
+   ```bash
+   clouduler backup restore-drive fast --restore-from nas --snapshot latest
+   clouduler backup restore-volume fast/vaultwarden --restore-from nas
+   clouduler backup restore-service vaultwarden app          # --restore-from only if the drive backs up to several destinations
+   ```
+
+   Each asks first ("this stops the affected containers and overwrites their data with the restored snapshot"); add `--yes` to skip. `--snapshot` is `latest` or 4 to 64 hex characters of a snapshot id. If the node you run it on cannot restore by itself, you see `this node cannot restore ... itself; handed to the cluster as request ID`.
+
+   </UiCli.Cli>
+   </UiCli>
+
+4. **Watch it.** The **Restores** section lists the request with its status (`Failed: ERROR` on failure).
+5. **Verify.** Check the containers are running (`clouduler stack unhealthy --all`), open the app, and look at the data.
+6. **If it fails.** Midway failures leave containers **stopped** on purpose: `restoring fast failed; N container(s) were left STOPPED because fast may be half-restored - check the data, re-run the restore, then start them again`. Fix the cause, re-run the restore, then start the stack. If it fails before changing anything: `restore aborted before changing any data; containers were restarted`.
+
+Restoring onto a replica is refused, since the next sync would overwrite it: `drive X is served by Y; restoring must run there` or `... is not the primary of ID (the primary is NODE) ...`. Requests sent through the web UI are handed to the right node automatically.
+
+### Restoring after losing the whole cluster
+
+1. Install a new cluster and restore its configuration from [git backup](/docs/features/git-backup#disaster-recovery); that also brings back the sealed restic passwords, re-sealed under the new key.
+2. Make sure the backup destinations exist again. {/* TODO verify: git backup exports cluster.yaml, stacks, configs and secrets but not backup destination or schedule records; confirm they must be re-added by hand with the same id so the restored password is used */}
+3. Add each destination with the same id and run the restore commands above.
+
+## Options
+
+<OptionTable rows={[
+  {key: 'destination add ID --kind', type: 'node-local | ssh | s3', reload: 'n/a', required: true, description: 'Destination type.', quirks: 'node-local needs --node and --path; ssh needs --host, --user, --path; s3 needs --bucket, --endpoint.'},
+  {key: '--name', type: 'string', reload: 'n/a', required: true, description: 'Human-readable name.'},
+  {key: '--port', type: 'int', default: '22', reload: 'n/a', description: 'SSH port.'},
+  {key: '--region / --prefix', type: 'string', reload: 'n/a', description: 'S3 region and key prefix.'},
+  {key: '--password', type: 'string', default: 'generated', reload: 'n/a', description: 'Repository password. Omit to generate and seal one.', quirks: 'Re-adding an existing id without it rotates the password and locks you out of the repository.'},
+  {key: '--ssh-key-file', type: 'path', reload: 'n/a', description: 'SSH private key sealed as the credential.', quirks: 'Conflicts with the S3 key flags.'},
+  {key: '--s3-access-key-id / --s3-secret-access-key', type: 'string', reload: 'n/a', description: 'S3 credentials, sealed. Must be given together.'},
+  {key: 'target set ID --drive', type: 'drive', reload: 'n/a', required: true, description: 'Drive to back up.'},
+  {key: '--destination', type: 'destination id', reload: 'n/a', required: true, description: 'Destination to back up to.', quirks: 'Only one enabled schedule per drive and destination.'},
+  {key: '--frequency', type: 'duration', reload: 'n/a', required: true, description: 'How often to run, e.g. 12h, 1d. Minimum 1 second.'},
+  {key: '--time-of-day', type: 'HH:MM (UTC)', default: 'any time', reload: 'n/a', description: 'Earliest time of day to run once due.', quirks: 'A malformed value is rejected by the CLI.'},
+  {key: '--keep-last', type: 'int', default: 'no limit', reload: 'n/a', description: 'Keep at least this many recent snapshots.'},
+  {key: '--keep-within', type: 'duration', default: 'no limit', reload: 'n/a', description: 'Keep every snapshot within this age, e.g. 30d.', quirks: 'Do not pass 0s (becomes 1h).'},
+  {key: '--stop-containers', type: 'bool', default: 'stack setting, then true', reload: 'n/a', description: 'Stop containers using the drive during the backup.'},
+  {key: '--enabled', type: 'flag', default: 'off', reload: 'n/a', description: 'Enable the schedule. Without it, it is created disabled.', quirks: 'The UI form defaults to enabled.'},
+  {key: 'restore-* --restore-from', type: 'destination id', reload: 'n/a', description: 'Destination to restore from. alias --destination.', quirks: 'Optional for restore-service when only one exists. Errors: drive X has no backup target on record; pass --restore-from explicitly / drive X backs up to N destinations (...); pass --restore-from to pick one.'},
+  {key: 'restore-* --snapshot', type: 'latest | id', default: 'latest', reload: 'n/a', description: 'Snapshot to restore.', quirks: 'Errors: snapshot ID is not a snapshot of drive X in this repository; this repository has no snapshots of drive X yet; snapshot id ID is ambiguous; give more characters.'},
+  {key: 'restore-* --yes', type: 'flag', default: 'off', reload: 'n/a', description: 'Skip the confirmation prompt.'},
+  {key: 'all backup subcommands --via', type: 'node name', reload: 'n/a', description: 'Send the request through this node.'},
+]} />
+
+## Quirks and gotchas
+
+<Quirk title="Restores overlay, they do not wipe">
+Files that exist now but are absent from the snapshot stay. After a restore, delete leftovers by hand if you need an exact copy.
+</Quirk>
+
+<Quirk title="Treat the restic password as the keys to the backups" severity="danger">
+Nothing shows it. If the cluster key is lost and you have no age identity for the git backup, the backups cannot be opened.
+</Quirk>
+
+<Quirk title="secret set can overwrite a backup password">
+The CLI does not guard reserved names, so `clouduler secret set _clouduler_restic_password_nas ...` replaces the repository password. Never use that prefix.
+</Quirk>
+
+<Quirk title="Scheduled runs may sit as Running" severity="info">
+See the stale window above. Use `clear-errors` for failed runs you have dealt with.
+</Quirk>
+
+## Related
+
+- [Git backup](/docs/features/git-backup), [Configs and secrets](/docs/features/configs-and-secrets), [Drives and volumes](/docs/features/drives-and-volumes)
+- [Backup targets guide](/docs/guides/backup-targets), [Node lifecycle](/docs/features/node-lifecycle#clear-recorded-errors)

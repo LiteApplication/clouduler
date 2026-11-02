@@ -5,6 +5,161 @@ sidebar_position: 12
 
 # Node lifecycle
 
-One-line summary of node lifecycle goes here.
+A node joins the cluster, runs containers, may be drained for maintenance, and is eventually removed. This page covers each step, plus `rebalance`, automatic crash-loop rescheduling and `clear-errors`. For unplanned failures see [Failover](/docs/features/failover).
 
-TODO
+## Add a node
+
+<UiCli>
+<UiCli.Ui>
+
+Open **Nodes** (`/nodes`) and click **Add node**. In the **Add a node** sheet enter **Node name**, choose **Worker** or **Manager**, optionally an **Address**, and click **Create join command**. Copy the command under **Run this on the new node** and run it on the new machine. The key in the command is shown once; if you do not use it, delete the key under Settings, Access.
+
+<UiScreen scenario="lan-3-nodes" route="/nodes" caption="Nodes. Rebalance cluster and Add node are top right." alt="Nodes page with three healthy nodes" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+The easy path is the join command above. The [LAN cluster quick start](/docs/quickstart/lan-cluster) walks through joining nodes.
+
+`clouduler node add` only writes an entry to the live roster; it does not edit the config file:
+
+```bash
+clouduler node add dione --role worker --rpc-addr 192.168.1.14:7373 --drive fast=/srv/fast --label zone=a
+clouduler config reload
+```
+
+Also add the node to `cluster.yaml` and reload, or it will not get raft membership. {/* TODO verify: derived from seed_roster iterating the config, not checked live */} `clouduler node list` shows nodes from the config file, not the live roster.
+
+</UiCli.Cli>
+</UiCli>
+
+A manager becomes a voter only after the leader pings it, so a dead node is never promoted. Remember the quorum rules: [Failover](/docs/features/failover#raft-and-quorum-in-plain-words).
+
+## Drain a node and set availability
+
+A node is **active** (can receive containers) or **drain** (nothing new is placed on it, and its containers move off).
+
+<UiCli>
+<UiCli.Ui>
+
+Open the node page (`/nodes/boreas`) and click **Drain boreas**. Confirm: "Its containers move to other nodes and nothing new is placed here." To bring it back, click **Activate boreas** ("New containers can be placed here again.").
+
+<UiScreen scenario="lan-3-nodes" route="/nodes/boreas" caption="Node detail with the Drain button." alt="Node detail page for boreas" height={560} />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler node set-availability boreas drain
+clouduler stack unhealthy --node       # watch instances leave
+clouduler node set-availability boreas active
+```
+
+Output: `boreas is now Drain` or `boreas is now Active`. Only `active` and `drain` are accepted. The API also accepts `decommissioned`, which the scheduler treats like drain; nothing in the CLI sets it.
+
+</UiCli.Cli>
+</UiCli>
+
+What happens: on the next scheduling pass (within 10 seconds) each instance on the drained node is assigned to another eligible node. The old container is stopped and removed, the new one starts. Activating does not move anything back. An instance with no other eligible node stays where it is, still running.
+
+:::warning Drain does not do a final volume sync
+Drain re-assigns instances; it does not use the move pipeline (stop, final sync, verify, switch, start). If a drained node is the primary for a replicated volume, writes made since the last sync may be lost when the new node takes over. {/* TODO verify: derived from the code, not tested on a live cluster. Needs a test with a long sync_interval and a drained primary. */} For stateful services, move each instance first with **Move** on its page (this does a final sync), then drain. The CLI help text "Keeps running what it has" for drain is wrong.
+:::
+
+## Remove a node
+
+<UiCli>
+<UiCli.Ui>
+
+On the node page, panel **Retire this node**, click **Remove boreas**. The button is disabled while the node still runs containers ("boreas still runs N containers. Drain it first."). Confirm "Remove boreas?" ("This takes the node out of the cluster for good. To use the machine again, run init on it.") and type the node name.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler node set-availability boreas drain
+# when it has no instances left:
+clouduler node remove boreas
+```
+
+`node remove` first validates the config without the node, then removes it from the roster, records a tombstone so a stale config cannot re-add it, and drops it from `cluster.yaml`. The leader then evicts it from raft. A removed machine wipes its cluster key, node key and local raft data the next time it starts and exits; to reuse it, run `init` again. Keep an offline copy of the cluster key first if you might want it back.
+
+Errors: `cluster rejected the removal: node boreas still runs INSTANCE`; or, if only the last step failed, `removed boreas from the live roster, but could not drop it from the config: ... Remove it by hand and run clouduler config reload`.
+
+</UiCli.Cli>
+</UiCli>
+
+If the node is unreachable, failover reschedules its instances and removal then works. Stopped stacks still count as assignments. Removing a node also hands each volume it was primary for to the most up-to-date remaining replica, which may be behind: data written only on the removed node is gone, and removal does not check.
+
+## Rebalance
+
+`rebalance` moves already-placed instances to even out load. The normal scheduler never moves a healthy instance, and a returning node gets nothing back on its own, so this is how you spread work out again. It runs only on request.
+
+<UiCli>
+<UiCli.Ui>
+
+On **Nodes** click **Rebalance cluster** and confirm ("Instances may move between nodes to even out load. Each move restarts that instance."). The last run appears under **History**.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler rebalance          # prints the plan and asks "submit these moves?"
+clouduler rebalance --yes
+```
+
+Output: `already balanced, nothing to move`, or `N move(s) planned:` followed by `  INSTANCE : FROM -> TO` lines.
+
+</UiCli.Cli>
+</UiCli>
+
+It skips instances pinned to a node, global services, instances that share a proxy hostname or colocate group, ones already mid-move, and ones with only one eligible node. Load is memory pressure first (share of node memory taken by instances with a memory limit), then instance count. A move happens only if the gap is at least one percentage point (or counts differ by 2) and the target would not end up busier than the source was. Each move goes through the full move pipeline: stop, final volume sync, verify, switch, start. Moves use the cluster `failover.stop_grace`, not a service's own `stop_grace_period`, so a database with a long grace period can be killed mid-write; raise `failover.stop_grace` to cover your slowest service.
+
+## Crash-loop rescheduling
+
+An instance restarted 3 times within 120 seconds on one node is a crash loop. Instead of restarting forever, Clouduler moves it to the least-loaded eligible node it has not been moved away from in the last 30 minutes, through the same move pipeline. Log: `instance keeps restarting here, moving it to another node`.
+
+If it cannot be moved (pinned, global, anchored by a proxy hostname or colocate group, or every node already tried), it restarts in place with a delay that starts at 30 seconds, doubles, and caps at 10 minutes (`keeps restarting here but cannot be safely moved (pinned, global, or anchored), restarting in place`). Redeploying with a changed spec gives every node another try.
+
+A crash loop caused by a too-small memory limit does not get fixed by moving; the same limit applies everywhere. Raise the limit.
+
+A failed move shows on the instance page with buttons **Try moving to NODE again**, **Dismiss**, **Move to another node** and **Restart on NODE**.
+
+## Clear recorded errors
+
+`clear-errors` forgets recorded failures so they stop being reported as problems: failed backup runs and restores, failed image updates, failed migrations, certificate and DNS errors, and alert destinations whose last delivery failed. Running, pending and succeeded records stay. A failure that is still happening is reported again by its next attempt. CLI only.
+
+```bash
+clouduler clear-errors      # cleared 3 failed backup runs, 1 failed migrations
+                            # or: no recorded errors to clear
+```
+
+Clearing a failed move does not move the instance; it stays on whichever node it is on.
+
+## Options
+
+<OptionTable rows={[
+  {key: 'node add NAME --role {manager|worker}', type: 'command', reload: 'n/a', required: true, description: 'Writes a roster entry only.', quirks: 'Also needs --rpc-addr HOST:PORT. Optional: --drive NAME=PATH (repeatable), --label KEY=VALUE (repeatable), --via NODE.'},
+  {key: 'node remove NAME', type: 'command', reload: 'n/a', description: 'Removes a node that runs no instances.', quirks: '--via NODE optional.'},
+  {key: 'node set-availability NAME {active|drain}', type: 'command', reload: 'n/a', description: 'Set whether the node can take work.', quirks: '--via NODE optional.'},
+  {key: 'rebalance [--yes] [--via NODE]', type: 'command', reload: 'n/a', description: 'Plan and submit load-evening moves.'},
+  {key: 'clear-errors [--via NODE]', type: 'command', reload: 'n/a', description: 'Forget recorded failures.'},
+]} />
+
+## Quirks and gotchas
+
+<Quirk title="Restart on an instance can move it" severity="info">
+The UI's **Restart** on an instance re-rolls its placement and may put it on a different node. `clouduler stack restart` restarts in place.
+</Quirk>
+
+<Quirk title="Rebalance reads the local config on the CLI">
+The CLI plans from the local config for served drives and NAT networks, the UI from the live config. Right after a config change they can disagree.
+</Quirk>
+
+<Quirk title="A flapping stateful service can be moved repeatedly">
+Each crash-loop move is a full stop, sync and start. A large volume means a long outage. The 30 minute memory prevents bouncing straight back.
+</Quirk>
+
+## Related
+
+- [Failover](/docs/features/failover), [Emergency mode](/docs/features/emergency-mode), [Placement](/docs/features/placement), [Drives and volumes](/docs/features/drives-and-volumes)

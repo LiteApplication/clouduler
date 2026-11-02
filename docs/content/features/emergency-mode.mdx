@@ -5,6 +5,73 @@ sidebar_position: 11
 
 # Emergency mode
 
-One-line summary of emergency mode goes here.
+Emergency mode is the last resort when the cluster has lost quorum for good: enough managers are gone, with their data, that a normal membership change can never be agreed again because that itself needs the missing majority. `clouduler emergency` makes one surviving manager the cluster's only voter, brings back **one** stack you name, and holds every other stack off until a second manager returns.
 
-TODO
+It bypasses consensus by rewriting the node's own database. Read [Dangers](#dangers) before running it.
+
+:::danger Not for ordinary outages
+If the lost managers will come back with their data intact, do not use it: a returning manager would conflict with the one you made sole voter. If a majority of managers is still up, do not use it either; use [`clouduler node remove`](/docs/features/node-lifecycle#remove-a-node) for the dead ones.
+:::
+
+## When to use it
+
+- A blackout or dead disks took out most managers and their raft state is gone with no usable backup.
+- A multi-site partition left one site with a minority of managers and the other site is not coming back.
+- You need one important stack (say, your DNS or password manager) running again right now.
+
+## What it does
+
+1. Reads the stack's spec from this node's own local database and works out which volumes it mounts. If the stack is not in the local state (deployed after this node last replicated), it refuses.
+2. Shows a warning and asks for confirmation.
+3. Rewrites the local raft membership so this node is the **only voter**. The other nodes stay known as learners, not dropped, so they can rejoin.
+4. Records the named stack as the **emergency stack**.
+5. Marks every other node unreachable, so served drives the stack uses fail over to this node.
+6. Marks each volume the stack uses as current on this node: this node becomes the primary. Nothing is pulled from elsewhere.
+7. Writes the state back. Assignments and every stack's desired state are not changed.
+
+Then you start the daemon. Only the emergency stack is scheduled.
+
+## Run it
+
+There is no web UI for this. It runs on the node you are rescuing, with its daemon **stopped**, because it writes straight to the node's database.
+
+```bash
+sudo systemctl stop clouduler.service
+sudo clouduler --config /etc/clouduler/cluster.yaml emergency site --node atlas
+sudo systemctl start clouduler.service
+clouduler status    # EMERGENCY MODE: only stack site is being scheduled
+```
+
+`--node` defaults to the hostname (or `CLOUDULER_NODE`), `--yes` skips the confirmation. There is no dry run. `emergency` does not accept `--via`.
+
+<OptionTable rows={[
+  {key: '<STACK>', type: 'stack name', reload: 'n/a', required: true, description: 'The one stack to bring back, trusting this node\'s local data.', quirks: 'Error: STACK is not a stack this node\'s own local state knows about - check the name, or deploy it once quorum is otherwise recovered.'},
+  {key: '--node NAME', type: 'node name', default: 'hostname', reload: 'n/a', description: 'Name of this node in the config. Also read from CLOUDULER_NODE.'},
+  {key: '--yes', type: 'flag', default: 'off', reload: 'n/a', description: 'Skip the confirmation prompt. Declining prints "aborted".'},
+  {key: '--config PATH', type: 'path', default: '/etc/clouduler/cluster.yaml', reload: 'n/a', description: 'Cluster config file (global flag, also CLOUDULER_CONFIG).'},
+  {key: '--data-dir PATH', type: 'path', default: 'data_dir from config (/var/lib/clouduler)', reload: 'n/a', description: 'Where raft/raft.redb is found (global flag, also CLOUDULER_DATA).'},
+]} />
+
+If the daemon is still running, the command fails because the database is locked. {/* TODO verify: exact error text when emergency runs while the daemon is up */}
+
+## How it ends
+
+Emergency mode clears **by itself** when the leader sees another **voting manager** reachable again (log: `another manager is reachable again, ending emergency mode`). Every stack then resumes from its own desired state; nothing needs restoring by hand. A worker coming back does not end it. A demoted manager does, once its daemon answers and it is re-added as a voter automatically. You cannot turn it off by hand.
+
+The Nodes page shows the **No quorum** banner with "Emergency mode is on for STACK. It clears when the managers reconnect."
+
+## Dangers
+
+1. **Recent writes are lost.** The rescued node's copy of each volume is trusted as current. It may be behind the primary that died (replicas sync every 15 minutes by default), and whatever was never synced is gone.
+2. **Old managers can conflict.** They are demoted, not deleted. If one returns with its old state intact it conflicts with the new log.
+3. **It does not end if the lost manager never returns.** Removing the dead manager does not end it. Add a new voting manager (a manager join, see [Node lifecycle](/docs/features/node-lifecycle#add-a-node)). Two voters tolerate no failure, so add a third quickly.
+4. **Other stacks stop.** No other stack is scheduled anywhere until it ends: no new deploys, moves or restarts. Their desired state is untouched. As currently implemented, a container of another stack still running on this node (or on any node that has the emergency state) is stopped and removed, not just left alone, and is created again afterwards. Volume data is not deleted. The command's own warning says other stacks' desired state is "left exactly as it was" but does not mention the containers. {/* TODO verify: confirm on a live cluster that other stacks' containers are removed during emergency mode (derived from run.rs and reconcile.rs) */}
+5. **`node remove` of the dead manager can fail.** It is refused while that node still owns instances, and emergency mode does not reschedule other stacks, so their instances stay assigned to it. The command's closing message suggests removing the lost manager, which can fail for this reason. Stop and remove those stacks first, or wait for a replacement manager. {/* TODO verify: derived from state.rs, not run on a live cluster */}
+6. Served drives the stack uses now point at this node, and every other node is marked unreachable until it answers.
+
+The success message ends with a garbled sentence about promotion; it means a returning manager is re-added as a voter automatically once its daemon answers.
+
+## Related
+
+- [Failover](/docs/features/failover), [Node lifecycle](/docs/features/node-lifecycle), [Git backup](/docs/features/git-backup)
+- To refill lost content (stacks, configs, secrets) after recovery, see disaster recovery in [Git backup](/docs/features/git-backup#disaster-recovery). `restore` refills content only; `emergency` is the membership step.

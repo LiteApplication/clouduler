@@ -5,6 +5,76 @@ sidebar_position: 9
 
 # Folder import
 
-One-line summary of folder import goes here.
+`clouduler folder-import` gets a file or folder that already exists on a node into a drive volume, then pushes it to every other node holding a copy right away. Use it to load an existing photo library, dataset or database dump into Clouduler without waiting for the next scheduled sync. It is a CLI command; the web UI has no equivalent.
 
-TODO
+## How it works
+
+1. The command runs on a node that implements the target drive. For a replicated drive that is any node holding it. For a [served drive](/docs/features/served-drives) it is the active server or a node that mounts it. A standby candidate is refused, because the next sync from the real server would erase what you wrote.
+2. It places the source into `<drive>/<volume>` (or a sub-path inside it) as a copy, move or link.
+3. It records the volume in the cluster and marks this node as primary, then pushes the data to the peers immediately instead of waiting for the sync timer.
+
+## Import a folder
+
+Run it as root so it can write the drive folder and set ownership:
+
+```bash
+# Copy (the default)
+sudo clouduler folder-import ~/Downloads/dataset bulk/imports
+
+# Move instead of copy (falls back to copy + delete across filesystems)
+sudo clouduler folder-import -m /mnt/usb/photos bulk/photos
+
+# Symlink instead of duplicating
+sudo clouduler folder-import -l /mnt/usb/photos bulk/photos
+
+# Put the source inside a sub-path of the volume
+sudo clouduler folder-import ~/notes.txt bulk/docs/inbox
+```
+
+The target is `<drive>/<volume>[/path inside volume]`. Without `-r`, the source lands inside the volume (a folder keeps its name).
+
+### Replace a whole volume
+
+`-r` replaces the entire volume with the source. It takes no sub-path: the target must be exactly `drive/volume`.
+
+```bash
+sudo clouduler folder-import -r -f ./restored-db fast/postgres
+```
+
+Without `-f`, `-r` refuses to touch a volume that is in use. With `-f`, Clouduler stops the instances that mount the volume, clears it, imports, syncs, and starts them again.
+
+## Options
+
+<OptionTable rows={[
+  {key: '<source>', type: 'path', reload: 'n/a', required: true, description: 'File or folder to import.'},
+  {key: '<drive>/<volume>[/sub/path]', type: 'string', reload: 'n/a', required: true, description: 'Target inside the cluster.'},
+  {key: '-c, --copy', type: 'flag', default: 'on', reload: 'n/a', description: 'Copy the source in. The default.', quirks: 'Mutually exclusive with -m and -l.'},
+  {key: '-m, --move', type: 'flag', default: 'off', reload: 'n/a', description: 'Move the source in. Across filesystems it falls back to hard link or copy, then removes the source.', quirks: 'Mutually exclusive with -c and -l.'},
+  {key: '-l, --link', type: 'flag', default: 'off', reload: 'n/a', description: 'Create an absolute symlink inside the volume instead of duplicating.', quirks: 'The link replicates as a path string. It only resolves on other nodes if that path exists there too.'},
+  {key: '-r, --replace', type: 'flag', default: 'off', reload: 'n/a', description: 'Replace the whole volume with the source.', quirks: 'No sub-path allowed.'},
+  {key: '-f, --force', type: 'flag', default: 'off', reload: 'n/a', description: 'With -r: stop instances mounting the volume first and start them after.', quirks: 'Requires -r.'},
+  {key: '--node NAME', type: 'node name', default: 'hostname', reload: 'n/a', description: 'Name of this node in the config. Also read from CLOUDULER_NODE.'},
+  {key: '--via NODE', type: 'node name', default: 'any manager', reload: 'n/a', description: 'Node to submit the volume bookkeeping through.'},
+]} />
+
+## Quirks and gotchas
+
+<Quirk title="Imported files are owned by whoever ran the command" severity="danger">
+Copied and moved files belong to the user running the CLI (root under `sudo`), and that ownership replicates to every node. A container running as a non-root user may not be able to write the imported files. Change ownership after the import (`chown` on the node, then let it sync) if the service needs it.
+</Quirk>
+
+<Quirk title="A failed -r can leave services stopped">
+With `-r -f`, if clearing succeeds and the import then fails, the command returns before restarting the instances it stopped. They stay stopped. Check `clouduler stack unhealthy --all`, fix the problem, and start them again. {/* TODO verify: confirm folder_import.rs still returns before the restart on a failed --replace */}
+</Quirk>
+
+<Quirk title="Whole-drive mounts are not detected as in use">
+The in-use check matches volumes by exact name, so a service that mounts `drive/.` is missed. `-r` can then replace a volume under a running service. Stop that service yourself first.
+</Quirk>
+
+<Quirk title="Why not just copy into the folder?" severity="info">
+Files you drop straight into a drive folder are not announced to the cluster, so replicas only learn about them when the volume's generation changes. `folder-import` bumps the generation and pushes at once.
+</Quirk>
+
+## Related
+
+- [Drives and volumes](/docs/features/drives-and-volumes), [Served drives](/docs/features/served-drives), [Backups](/docs/features/backups)
