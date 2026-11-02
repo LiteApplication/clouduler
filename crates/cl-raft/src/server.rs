@@ -1,7 +1,6 @@
 //! The RPC listener. Serves raft messages and forwarded writes on the internal
 //! network address.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use cl_secret::stream_auth;
@@ -37,11 +36,13 @@ pub struct Context {
     pub keys: KeyWatch,
 }
 
-/// Accept connections until the task is dropped. Each connection handles
-/// requests sequentially, matching how the client side uses one socket per peer.
-pub async fn serve(addr: SocketAddr, ctx: Context) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    debug!(%addr, "rpc listening");
+/// Accept connections on an already bound listener until the task is dropped.
+/// Each connection handles requests sequentially, matching how the client side
+/// uses one socket per peer.
+pub async fn serve_listener(listener: TcpListener, ctx: Context) -> std::io::Result<()> {
+    if let Ok(addr) = listener.local_addr() {
+        debug!(%addr, "rpc listening");
+    }
 
     loop {
         let (stream, peer) = listener.accept().await?;

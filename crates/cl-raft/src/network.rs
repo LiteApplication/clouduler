@@ -73,10 +73,17 @@ impl Network {
 
     async fn peer(&self, id: NodeId, node: &BasicNode) -> Arc<Peer> {
         let mut peers = self.peers.lock().await;
-        peers
-            .entry(id)
-            .or_insert_with(|| Arc::new(Peer::new(node.addr.clone(), self.keys.clone())))
-            .clone()
+        // Keyed by the address as well as the id: a node re-addressed through
+        // a membership change keeps its id, and a cached connection to its old
+        // address would otherwise be handed out forever.
+        match peers.get(&id) {
+            Some(peer) if peer.addr == node.addr => peer.clone(),
+            _ => {
+                let peer = Arc::new(Peer::new(node.addr.clone(), self.keys.clone()));
+                peers.insert(id, peer.clone());
+                peer
+            }
+        }
     }
 }
 

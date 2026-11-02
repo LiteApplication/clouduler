@@ -66,6 +66,9 @@ pub struct ClusterNode {
     keys: crate::network::KeyWatch,
     shared: Arc<RwLock<StateMachine>>,
     quorum: QuorumWatch,
+    /// The address the config currently gives this node, which the rpc server
+    /// listens on in addition to the one raft membership holds for it.
+    listen: watch::Sender<SocketAddr>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -180,11 +183,13 @@ impl ClusterNode {
             contact: contact.clone(),
             keys: options.keys.clone(),
         };
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = server::serve(addr, ctx).await {
-                warn!(%addr, error = %e, "rpc server stopped");
-            }
-        }));
+        let (listen, listen_rx) = watch::channel(addr);
+        tasks.push(tokio::spawn(supervise_listeners(
+            id,
+            raft.clone(),
+            ctx,
+            listen_rx,
+        )));
 
         let mut metrics = raft.metrics();
         let gate_contact = contact.clone();
@@ -229,6 +234,7 @@ impl ClusterNode {
             keys: options.keys,
             shared,
             quorum,
+            listen,
             tasks: Mutex::new(tasks),
         })
     }
@@ -377,6 +383,83 @@ impl ClusterNode {
         Ok(())
     }
 
+    /// Tell the rpc server which address the config now gives this node. It
+    /// starts listening there at once, and keeps answering on the address raft
+    /// membership holds until the leader has moved membership over (see
+    /// [`crate::listeners`]). Safe to call with an address that is not up yet:
+    /// the bind is retried.
+    pub fn set_rpc_addr(&self, addr: SocketAddr) {
+        self.listen.send_if_modified(|current| {
+            let changed = *current != addr;
+            *current = addr;
+            changed
+        });
+    }
+
+    /// The address raft membership currently holds for `id`, which is the one
+    /// every peer dials.
+    pub fn member_addr(&self, id: NodeId) -> Option<String> {
+        self.raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .membership()
+            .get_node(&id)
+            .map(|node| node.addr.clone())
+    }
+
+    /// Move a member (voter or learner) to a new rpc address without changing
+    /// who votes. Leader only. A no-op when membership already holds `addr`.
+    ///
+    /// The node is first asked for its identity at `addr`, and the change is
+    /// refused unless it answers as `id`. Both halves are the point: raft
+    /// would otherwise dial an address nobody listens on (a network that is
+    /// not up yet) and lose the node, or worse an address that belongs to a
+    /// different node, which openraft documents as a split-brain risk for
+    /// `SetNodes`. Because the leader only commits an address it has itself
+    /// reached, the commit never depends on the node being reachable any other
+    /// way, and an unreachable new address leaves membership untouched: the
+    /// error is returned and the caller retries, or the config is edited back.
+    pub async fn readdress(&self, id: NodeId, addr: SocketAddr) -> Result<()> {
+        let Some(current) = self.member_addr(id) else {
+            return Err(ClusterError::Membership(format!(
+                "{id} is not a member, nothing to re-address"
+            )));
+        };
+        if current == addr.to_string() {
+            return Ok(());
+        }
+
+        let client = crate::client::Client::connect(addr.to_string(), self.keys.clone());
+        match timeout(CONNECT_PROBE_TIMEOUT, client.status()).await {
+            Ok(Ok(status)) if status.id == id => {}
+            Ok(Ok(status)) => {
+                return Err(ClusterError::Membership(format!(
+                    "{addr} answers as {}, not as {id}, refusing to move {id} there",
+                    status.id
+                )))
+            }
+            _ => {
+                return Err(ClusterError::Membership(format!(
+                    "{addr} did not answer, keeping {id} at {current}"
+                )))
+            }
+        }
+
+        self.raft
+            .change_membership(
+                openraft::ChangeMembers::SetNodes(BTreeMap::from([(
+                    id,
+                    BasicNode::new(addr.to_string()),
+                )])),
+                false,
+            )
+            .await
+            .map_err(ClusterError::membership)?;
+        info!(node = %id, from = %current, to = %addr, "moved a member to a new rpc address");
+        Ok(())
+    }
+
     /// Add a worker. Workers replicate state so they can reconcile locally, but
     /// they do not vote.
     pub async fn add_worker(&self, id: NodeId, addr: SocketAddr) -> Result<()> {
@@ -522,5 +605,82 @@ impl ClusterNode {
             .await
             .map_err(|e| ClusterError::Shutdown(e.to_string()))?;
         Ok(())
+    }
+}
+
+/// How often the listener set is reconciled when nothing wakes it: a bind that
+/// failed (the address is not on an interface yet) is retried at this pace.
+const LISTEN_RETRY: Duration = Duration::from_secs(5);
+
+/// Serve rpc on the address the config gives this node and on the one raft
+/// membership holds for it, binding each as it becomes possible. See
+/// [`crate::listeners`] for why both are needed while a node is re-addressed.
+async fn supervise_listeners(
+    id: NodeId,
+    raft: Arc<Raft>,
+    ctx: server::Context,
+    mut configured: watch::Receiver<SocketAddr>,
+) {
+    let mut wanted = crate::listeners::Wanted::default();
+    let mut tasks = crate::listeners::Tasks::default();
+    let mut metrics = raft.metrics();
+    // Metrics change far more often than the retry pace, and a failed bind
+    // must not be retried (and logged) on every one of them.
+    let mut tried: BTreeMap<SocketAddr, Instant> = BTreeMap::new();
+
+    loop {
+        let mut desired = BTreeSet::new();
+        desired.insert(*configured.borrow());
+        let from_membership = metrics
+            .borrow()
+            .membership_config
+            .membership()
+            .get_node(&id)
+            .and_then(|node| node.addr.parse::<SocketAddr>().ok());
+        desired.extend(from_membership);
+
+        let plan = wanted.plan(&desired, Instant::now());
+        for addr in plan.drop {
+            if let Some(task) = tasks.0.remove(&addr) {
+                task.abort();
+            }
+            info!(%addr, "no longer serving rpc on this address");
+        }
+        for addr in plan.bind {
+            if tried.get(&addr).is_some_and(|at| at.elapsed() < LISTEN_RETRY) {
+                continue;
+            }
+            tried.insert(addr, Instant::now());
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    info!(%addr, "serving rpc");
+                    wanted.bound(addr);
+                    let ctx = ctx.clone();
+                    tasks.0.insert(
+                        addr,
+                        tokio::spawn(async move {
+                            if let Err(e) = server::serve_listener(listener, ctx).await {
+                                warn!(%addr, error = %e, "rpc server stopped");
+                            }
+                        }),
+                    );
+                }
+                Err(e) => warn!(%addr, error = %e, "cannot bind the rpc address yet, retrying"),
+            }
+        }
+
+        tokio::select! {
+            changed = configured.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            changed = metrics.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(LISTEN_RETRY) => {}
+        }
     }
 }

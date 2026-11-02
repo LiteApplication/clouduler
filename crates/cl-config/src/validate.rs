@@ -835,6 +835,28 @@ cloudflare:
     }
 
     #[test]
+    fn the_internal_subnet_and_every_node_address_can_move_in_one_edit() {
+        // The use case: a cluster bootstrapped on LAN addresses and later put
+        // on a tailnet. Nothing about the old addresses may be required.
+        let cfg = parse(&[
+            ("subnet: 10.10.0.0/24, ", "subnet: 100.64.0.0/10, "),
+            ("tailscale: 10.10.0.1", "tailscale: 100.64.0.11"),
+            ("tailscale: 10.10.0.2", "tailscale: 100.64.0.12"),
+        ])
+        .expect("a consistent re-addressing is valid");
+        assert_eq!(
+            cfg.rpc_addr(&cfg.nodes["n1"]).unwrap().ip().to_string(),
+            "100.64.0.11"
+        );
+    }
+
+    #[test]
+    fn moving_only_the_subnet_leaves_the_old_addresses_inconsistent() {
+        let err = parse(&[("subnet: 10.10.0.0/24, ", "subnet: 100.64.0.0/10, ")]).unwrap_err();
+        assert!(err.to_string().contains("outside the tailscale subnet"));
+    }
+
+    #[test]
     fn internal_ips_must_be_unique() {
         let err = parse(&[("tailscale: 10.10.0.2", "tailscale: 10.10.0.1")]).unwrap_err();
         assert!(err.to_string().contains("used by another node"));

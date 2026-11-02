@@ -1235,6 +1235,16 @@ async fn watch_cluster_config(
 
         match ClusterConfig::parse(&entry.yaml) {
             Ok(parsed) => {
+                // The address this node is to be reached at may have moved.
+                // The rpc server starts answering there at once, next to the
+                // address raft membership still holds, so the leader can
+                // verify it and move membership over.
+                if let Some(addr) = parsed
+                    .node(&cluster.name)
+                    .and_then(|node| parsed.rpc_addr(node))
+                {
+                    cluster.set_rpc_addr(addr);
+                }
                 let _ = config_tx.send(Arc::new(parsed));
             }
             Err(e) => {
@@ -1529,7 +1539,13 @@ async fn seed_config(config_path: &Path, cluster: &ClusterNode) -> Result<()> {
 async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
     let known = cluster.state().await;
 
-    for (name, node) in &cfg.nodes {
+    // This node last: when the leader is itself being re-addressed, every
+    // other member is moved first, while it can still lead them all at the
+    // addresses they were verified on.
+    let mut ordered: Vec<(&String, &Node)> = cfg.nodes.iter().collect();
+    ordered.sort_by_key(|(_, node)| node_id(node.id) == cluster.id);
+
+    for (name, node) in ordered {
         // Deleted through the API: the config file still lists it until an
         // operator edits it out, but the roster must not resurrect it just
         // because this leader's in-memory config is stale. Keyed by id, not
@@ -1590,6 +1606,21 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
             }
         }
 
+        // A member whose configured address no longer matches the one raft
+        // holds was re-addressed (moved onto another network or subnet).
+        // Peers dial the membership address, so it has to follow the config,
+        // for voters and learners alike and without changing who votes. The
+        // move is only committed once the node answers as itself at the new
+        // address; until then membership, and with it the roster entry
+        // below, keeps the old one, and this pass retries every tick. A
+        // config edited back lands in the same place.
+        if needs_readdress(cluster.member_addr(id).as_deref(), rpc_addr) {
+            if let Err(e) = cluster.readdress(id, rpc_addr).await {
+                warn!(node = %name, to = %rpc_addr, error = %e, "could not move the node to its new address yet");
+                continue;
+            }
+        }
+
         let desired = to_state(name, node, rpc_addr, known.nodes.get(name));
         if known.nodes.get(name) != Some(&desired) {
             let response = cluster.submit(Request::UpsertNode(desired)).await?;
@@ -1600,6 +1631,12 @@ async fn seed_roster(cfg: &ClusterConfig, cluster: &ClusterNode) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Whether raft membership holds a different address than the config gives.
+/// `None` means not a member (yet), which adding handles, not this.
+fn needs_readdress(member_addr: Option<&str>, configured: std::net::SocketAddr) -> bool {
+    member_addr.is_some_and(|held| held != configured.to_string())
 }
 
 /// Drop nodes removed through the API from actual raft membership.
@@ -1808,6 +1845,15 @@ async fn warn_fence_margin(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn readdress_is_only_needed_for_a_member_at_another_address() {
+        let want: std::net::SocketAddr = "100.64.0.2:7373".parse().unwrap();
+        assert!(super::needs_readdress(Some("10.10.0.2:7373"), want));
+        assert!(!super::needs_readdress(Some("100.64.0.2:7373"), want));
+        // Not a member yet: adding it is a different path.
+        assert!(!super::needs_readdress(None, want));
+    }
+
     use super::*;
     use cl_raft::state::{ClusterConfigEntry, ClusterState};
 

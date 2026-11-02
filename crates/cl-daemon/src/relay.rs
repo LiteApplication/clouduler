@@ -41,6 +41,24 @@ impl Relay {
     }
 }
 
+/// Where this node's relay listens: its internal address at the relay port.
+fn relay_addr(cfg: &ClusterConfig, node_name: &str) -> Option<SocketAddr> {
+    let node = cfg.node(node_name)?;
+    Some(SocketAddr::new(
+        cfg.internal_ip(node)?,
+        relay_port(node.rpc_port),
+    ))
+}
+
+/// Stops the task it holds when dropped.
+struct StopOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
@@ -50,16 +68,10 @@ pub fn start(
     let dialer = Dialer::new(keys.clone());
     let mut tasks = Vec::new();
 
-    match cfg.node(node_name).and_then(|node| {
-        Some(SocketAddr::new(
-            cfg.internal_ip(node)?,
-            relay_port(node.rpc_port),
-        ))
-    }) {
-        Some(addr) => tasks.push(tokio::spawn(listen(addr, keys))),
+    if relay_addr(cfg, node_name).is_none() {
         // The other nodes then cannot reach this node's containers from the
         // host side, but nothing else here depends on it.
-        None => warn!("this node has no internal address, not serving the container relay"),
+        warn!("this node has no internal address, not serving the container relay");
     }
 
     let refreshed = dialer.clone();
@@ -67,12 +79,24 @@ pub fn start(
     let boot_cfg = cfg.clone();
     let node_name = node_name.to_string();
     tasks.push(tokio::spawn(async move {
+        // The listener follows the live config, so a node moved onto another
+        // network is reachable at its new address without a restart. Dropped
+        // with this task, which is what `Relay::abort` stops.
+        let mut listener: Option<(SocketAddr, StopOnDrop)> = None;
         let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
         loop {
             ticker.tick().await;
             let state = cluster.state().await;
             let live = crate::daemon::live_config(&state, &boot_cfg);
             refreshed.set_relays(crate::placement::relay_routes(&state, &live, &node_name));
+
+            let wanted = relay_addr(&live, &node_name);
+            if listener.as_ref().map(|(addr, _)| *addr) != wanted {
+                listener = wanted.map(|addr| {
+                    info!(%addr, "container relay address set");
+                    (addr, StopOnDrop(tokio::spawn(listen(addr, keys.clone()))))
+                });
+            }
         }
     }));
 
@@ -96,5 +120,37 @@ async fn listen(addr: SocketAddr, keys: KeyWatch) {
             Err(e) => warn!(%addr, error = %e, "cannot bind the container relay, retrying"),
         }
         tokio::time::sleep(BIND_RETRY).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(subnet: &str, ip: &str) -> ClusterConfig {
+        ClusterConfig::parse(&format!(
+            r#"
+cluster: {{ name: home }}
+networks:
+  internal: {{ type: internal, subnet: {subnet}, domain: int.example.com }}
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: {{ internal: {ip} }}
+web: {{ address: cloud, network: internal }}
+"#
+        ))
+        .expect("valid config")
+    }
+
+    #[test]
+    fn the_relay_address_follows_the_internal_address() {
+        let before = relay_addr(&cfg("10.10.0.0/24", "10.10.0.1"), "n1").unwrap();
+        let after = relay_addr(&cfg("100.64.0.0/10", "100.64.0.7"), "n1").unwrap();
+        assert_eq!(before.ip().to_string(), "10.10.0.1");
+        assert_eq!(after.ip().to_string(), "100.64.0.7");
+        assert_eq!(before.port(), after.port());
+        assert_eq!(relay_addr(&cfg("10.10.0.0/24", "10.10.0.1"), "gone"), None);
     }
 }

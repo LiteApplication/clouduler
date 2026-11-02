@@ -370,3 +370,147 @@ async fn a_raw_connection_cannot_submit_a_write_without_authenticating() {
     );
     assert_eq!(cluster.nodes[leader].state().await.version, before);
 }
+
+fn id_of(i: usize) -> cl_raft::ids::NodeId {
+    node_id(test_id(&format!("n{i}")))
+}
+
+/// Move `index` to a fresh address through the leader, waiting for the node to
+/// have bound it.
+async fn move_node(cluster: &Harness, index: usize) -> SocketAddr {
+    let new = free_addr();
+    cluster.nodes[index].set_rpc_addr(new);
+    let leader = cluster.leader().await;
+    for _ in 0..50 {
+        if cluster.nodes[leader]
+            .readdress(id_of(index), new)
+            .await
+            .is_ok()
+        {
+            return new;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("could not move n{index} to {new}");
+}
+
+#[tokio::test]
+async fn a_voter_can_be_moved_to_a_new_address_without_losing_quorum() {
+    let cluster = Harness::start(3).await;
+    let leader = cluster.leader().await;
+    let follower = (leader + 1) % 3;
+
+    let new = move_node(&cluster, follower).await;
+
+    // Everyone, the moved node included, now holds the new address, and the
+    // same three nodes still vote.
+    for node in &cluster.nodes {
+        for _ in 0..50 {
+            if node.member_addr(id_of(follower)) == Some(new.to_string()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(node.member_addr(id_of(follower)), Some(new.to_string()));
+        assert!(node.is_voter(id_of(follower)).await);
+    }
+
+    // The old address is gone from the picture, yet writes still commit and
+    // reach the moved node over its new one.
+    let leader = cluster.leader().await;
+    let response = cluster.nodes[leader]
+        .submit(Request::UpsertNode(node_state("n0", cluster.addrs[0])))
+        .await
+        .expect("submit");
+    assert!(response.is_ok());
+    cluster.await_version(1).await;
+}
+
+#[tokio::test]
+async fn the_leader_can_move_itself() {
+    let cluster = Harness::start(3).await;
+    let leader = cluster.leader().await;
+
+    let new = move_node(&cluster, leader).await;
+
+    for node in &cluster.nodes {
+        for _ in 0..50 {
+            if node.member_addr(id_of(leader)) == Some(new.to_string()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(node.member_addr(id_of(leader)), Some(new.to_string()));
+    }
+
+    // Writes sent to a follower are forwarded to the leader at its new address.
+    let follower = (leader + 1) % 3;
+    let response = cluster.nodes[follower]
+        .submit(Request::UpsertNode(node_state("n0", cluster.addrs[0])))
+        .await
+        .expect("submit");
+    assert!(response.is_ok());
+    cluster.await_version(1).await;
+}
+
+#[tokio::test]
+async fn an_address_nobody_answers_on_is_refused_and_membership_is_untouched() {
+    let cluster = Harness::start(3).await;
+    let leader = cluster.leader().await;
+    let follower = (leader + 1) % 3;
+
+    let nowhere = free_addr();
+    let result = cluster.nodes[leader]
+        .readdress(id_of(follower), nowhere)
+        .await;
+    assert!(result.is_err(), "moved a node to an address nobody serves");
+    assert_eq!(
+        cluster.nodes[leader].member_addr(id_of(follower)),
+        Some(cluster.addrs[follower].to_string())
+    );
+
+    // Still healthy, so nothing is wedged by the refusal.
+    let response = cluster.nodes[leader]
+        .submit(Request::UpsertNode(node_state("n0", cluster.addrs[0])))
+        .await
+        .expect("submit");
+    assert!(response.is_ok());
+}
+
+#[tokio::test]
+async fn a_node_cannot_be_moved_onto_another_nodes_address() {
+    let cluster = Harness::start(3).await;
+    let leader = cluster.leader().await;
+    let a = (leader + 1) % 3;
+    let b = (leader + 2) % 3;
+
+    let result = cluster.nodes[leader]
+        .readdress(id_of(a), cluster.addrs[b])
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        cluster.nodes[leader].member_addr(id_of(a)),
+        Some(cluster.addrs[a].to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_node_moved_and_moved_back_still_works() {
+    let cluster = Harness::start(3).await;
+    let leader = cluster.leader().await;
+    let follower = (leader + 1) % 3;
+
+    move_node(&cluster, follower).await;
+    // Editing the config back: the original address is served again at once
+    // because it was never closed.
+    cluster.nodes[follower].set_rpc_addr(cluster.addrs[follower]);
+    let leader = cluster.leader().await;
+    cluster.nodes[leader]
+        .readdress(id_of(follower), cluster.addrs[follower])
+        .await
+        .expect("move back");
+    assert_eq!(
+        cluster.nodes[leader].member_addr(id_of(follower)),
+        Some(cluster.addrs[follower].to_string())
+    );
+}

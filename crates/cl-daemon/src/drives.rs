@@ -60,6 +60,13 @@ use tracing::{debug, info, warn};
 struct Topology {
     drives: BTreeMap<String, std::path::PathBuf>,
     served_by: BTreeMap<String, Vec<String>>,
+    /// Where this node's drive transport listens, and which addresses the
+    /// served drives are exported to and mounted from: all of it is bound or
+    /// written once per build, so moving the cluster onto another network or
+    /// subnet has to rebuild.
+    listen: Option<(std::net::IpAddr, u16)>,
+    internal_subnet: Option<ipnet::IpNet>,
+    server_ips: BTreeMap<String, std::net::IpAddr>,
 }
 
 fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
@@ -67,13 +74,27 @@ fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
         .node(node_name)
         .map(|n| n.drives.clone())
         .unwrap_or_default();
-    let served_by = cfg
+    let served_by: BTreeMap<String, Vec<String>> = cfg
         .drives
         .iter()
         .filter(|(_, d)| d.is_served())
         .map(|(name, d)| (name.clone(), d.served_by.clone()))
         .collect();
-    Topology { drives, served_by }
+    let listen = cfg
+        .node(node_name)
+        .and_then(|n| Some((cfg.internal_ip(n)?, drive_port(n.rpc_port))));
+    let server_ips = served_by
+        .values()
+        .flatten()
+        .filter_map(|name: &String| Some((name.clone(), cfg.internal_ip(cfg.node(name)?)?)))
+        .collect();
+    Topology {
+        drives,
+        served_by,
+        listen,
+        internal_subnet: cfg.internal_network().1.subnet,
+        server_ips,
+    }
 }
 
 /// How often the supervisor checks the live config for a topology change, on
@@ -889,5 +910,17 @@ web: { address: cloud, network: internal }
             .drives
             .insert("new".to_string(), "/srv/new".into());
         assert_ne!(topology_of(&config(), "n1"), topology_of(&added, "n1"));
+    }
+
+    #[test]
+    fn topology_changes_when_the_cluster_is_re_addressed() {
+        let mut moved = config();
+        moved.networks.get_mut("internal").unwrap().subnet = Some("100.64.0.0/10".parse().unwrap());
+        moved.nodes.get_mut("n1").unwrap().network.insert(
+            "internal".to_string(),
+            cl_config::NodeAddress::Ip("100.64.0.1".parse().unwrap()),
+        );
+        moved.validate().expect("the re-addressed config is valid");
+        assert_ne!(topology_of(&config(), "n1"), topology_of(&moved, "n1"));
     }
 }
