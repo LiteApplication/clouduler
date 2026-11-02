@@ -5,6 +5,304 @@ sidebar_position: 3
 
 # Glossary
 
-One-line summary of glossary goes here.
+Every term used across the documentation, in alphabetical order. Each entry links to the page that explains it in full.
 
-TODO
+## A
+
+### Alert {#alert}
+
+A notification that something needs attention (node down, disk full, crash loop). Has a severity: Critical, Warning or Info. [Read more](/docs/features/alerts).
+
+### API key {#api-key}
+
+A secret starting with `clk_` that identifies a script or person and always has admin rights. Shown once when created. [Read more](/docs/features/access-and-login).
+
+### Assignment {#assignment}
+
+The record saying that an instance runs on a given node, including its image pin. [Read more](/docs/features/placement).
+
+### Availability {#availability}
+
+A node setting: `active` (can receive containers) or `drain` (its containers are moved away and none are added). [Read more](/docs/features/node-lifecycle).
+
+## B
+
+### Backup destination {#backup-destination}
+
+A restic repository (a node path, an SSH server or an S3 bucket) that backups are written to. A backup target ties a drive to a destination on a schedule. [Read more](/docs/features/backups).
+
+## C
+
+### Cluster key {#cluster-key}
+
+The key that seals every secret and signs node-to-node requests. Lose the key file and every secret is lost. [Read more](/docs/features/configs-and-secrets).
+
+### cluster.yaml {#cluster-yaml}
+
+The file that describes the whole cluster: networks, drives, nodes, web UI, failover timers, proxy, sign-in. Its authoritative copy lives in raft. [Read more](/docs/reference/cluster-yaml).
+
+### Config (object) {#config-object}
+
+A named file stored in the cluster and mounted into containers. Not secret. Different from `cluster.yaml`. [Read more](/docs/features/configs-and-secrets).
+
+### Consent page {#consent-page}
+
+The dashboard page where you approve or deny an AI client's access request. [Read more](/docs/features/mcp).
+
+### Container {#container}
+
+A running Docker container. In Clouduler every container is an instance of a service. [Read more](/docs/features/stacks).
+
+### Crash loop {#crash-loop}
+
+An instance that keeps dying and restarting. After repeated kills the cluster moves it to another node. [Read more](/docs/features/placement).
+
+## D
+
+### Debounce {#debounce}
+
+The wait before a warning alert is sent. A warning that clears inside the window is never sent. Default 5 minutes. [Read more](/docs/features/alerts).
+
+### Digest (alerts) {#digest-alerts}
+
+One daily message that collects Info alerts. [Read more](/docs/features/alerts).
+
+### Digest (image) {#digest-image}
+
+The fingerprint of an exact image build. Pin, running and latest digests are different things. [Read more](/docs/features/updates).
+
+### Drain {#drain}
+
+Set a node's availability to `drain` so its containers move elsewhere, for example before maintenance. [Read more](/docs/features/node-lifecycle).
+
+### Drive {#drive}
+
+A named, cluster-wide storage area. Each node maps the name to a local directory. [Read more](/docs/features/drives-and-volumes).
+
+## E
+
+### Egress network {#egress-network}
+
+A node-local network that forces a service's outbound traffic out one named host interface. [Read more](/docs/features/networking).
+
+### Emergency mode {#emergency-mode}
+
+A disaster-recovery state started with `clouduler emergency <stack>` when the managers' data is gone. One manager becomes the only voter and only the named stack runs. [Read more](/docs/features/emergency-mode).
+
+## F
+
+### Fencing {#fencing}
+
+A node with no quorum for `fence_timeout` stops its own containers so the cluster can safely start them elsewhere. [Read more](/docs/features/failover).
+
+### Focus (MCP) {#focus-mcp}
+
+The one stack an AI assistant is working on. Writes, exec and file reads only apply to it. [Read more](/docs/features/mcp).
+
+### Folder import {#folder-import}
+
+Bringing an existing host folder into a volume by moving, linking or copying. [Read more](/docs/features/folder-import).
+
+### Freeze (volume) {#freeze-volume}
+
+Pausing a volume's replication so it can be edited on one node. [Read more](/docs/features/drives-and-volumes).
+
+## G
+
+### Generation {#generation}
+
+A counter on a volume that rises when its authoritative copy changes. A replica one generation behind is stale. [Read more](/docs/features/drives-and-volumes).
+
+### Git backup {#git-backup}
+
+An export of `cluster.yaml`, stacks, configs and age-encrypted secrets to a git repository. [Read more](/docs/features/git-backup).
+
+### Grant (MCP) {#grant-mcp}
+
+What an AI client may do: `read` (read-only tools) or `admin` (all tools). [Read more](/docs/features/mcp).
+
+## H
+
+### Holder {#holder}
+
+A node that has a usable copy of a volume. Only holders can run instances that mount it. [Read more](/docs/features/drives-and-volumes).
+
+## I
+
+### Instance {#instance}
+
+One running copy of a service, with an id like `notes.web.0`. [Read more](/docs/features/stacks).
+
+### Internal network {#internal-network}
+
+The single network that carries raft, drive sync and the container overlay between nodes. [Read more](/docs/features/networking).
+
+## L
+
+### Leader {#leader}
+
+The manager that currently coordinates the cluster. Runs the scheduler, the alert engine and certificate issuance. Elected by raft. [Read more](/docs/features/failover).
+
+### Log watcher {#log-watcher}
+
+The part of the daemon that raises an alert when a line matching your rule appears in a container's output. [Read more](/docs/features/alerts).
+
+## M
+
+### Manager {#manager}
+
+A node that votes in raft and holds the cluster database. Also runs containers. [Read more](/docs/features/node-lifecycle).
+
+### MCP {#mcp}
+
+Model Context Protocol: a standard for AI assistants to call tools. Clouduler runs an MCP server at `/mcp`. [Read more](/docs/features/mcp).
+
+### Migration (move) {#migration-move}
+
+Moving an instance, and its volume primaries, to another node. [Read more](/docs/features/placement).
+
+## N
+
+### NAT network {#nat-network}
+
+A network kind with no per-node address, for outbound access that needs no per-node address. [Read more](/docs/features/networking).
+
+### Network kinds {#network-kinds}
+
+`internal` (exactly one, node-to-node), `private` (extra trusted subnet), `public` (no subnet, reachable from outside), `egress`, `wireguard`. [Read more](/docs/features/networking).
+
+### Node {#node}
+
+One machine in the cluster running the `clouduler` daemon. [Read more](/docs/features/node-lifecycle).
+
+## O
+
+### OIDC {#oidc}
+
+OpenID Connect: sign in to the dashboard with an external identity provider such as Authentik or Keycloak. [Read more](/docs/features/access-and-login).
+
+### Overlay network {#overlay-network}
+
+The VXLAN network that lets containers on different nodes reach each other by name. [Read more](/docs/features/networking).
+
+## P
+
+### Pin (image) {#pin-image}
+
+A digest an instance is locked to. Recreated containers use it. [Read more](/docs/features/updates).
+
+### Pin (node) {#pin-node}
+
+A stack setting that forces a service to run on a named node. [Read more](/docs/features/placement).
+
+### Placement {#placement}
+
+Choosing which node runs each instance, based on checks and load. [Read more](/docs/features/placement).
+
+### Primary / replica {#primary-replica}
+
+For a replicated volume, the primary is the node whose copy is authoritative and is pushed to the replicas on a timer. [Read more](/docs/features/drives-and-volumes).
+
+### Probation {#probation}
+
+After a self-update restart, the period in which the new binary must rejoin the cluster or the node rolls back. [Read more](/docs/features/updates).
+
+### Proxy {#proxy}
+
+The built-in reverse proxy on every node (ports 80 and 443) that sends host names to containers and terminates HTTPS. [Read more](/docs/features/proxy-and-tls).
+
+## Q
+
+### Quorum {#quorum}
+
+A majority of the managers. Without it the cluster pauses changes. [Read more](/docs/features/failover).
+
+## R
+
+### Raft {#raft}
+
+The algorithm that keeps the cluster database identical on every manager. [Read more](/docs/intro/how-it-works).
+
+### Rebalance {#rebalance}
+
+Moving already-placed instances to even out load. [Read more](/docs/features/node-lifecycle).
+
+### Reconciler {#reconciler}
+
+The loop on each node that makes Docker match what should run there. [Read more](/docs/intro/how-it-works).
+
+### Redaction {#redaction}
+
+Replacing secret values with `[REDACTED secret:NAME]` in MCP output. [Read more](/docs/features/mcp).
+
+### Registry login {#registry-login}
+
+Credentials for a private image registry, stored as a sealed secret. [Read more](/docs/features/updates).
+
+### Rescheduling {#rescheduling}
+
+The leader assigning an unreachable node's instances to other nodes. [Read more](/docs/features/failover).
+
+### Revision {#revision}
+
+A stack's version number; it rises on each deploy. [Read more](/docs/features/stacks).
+
+### Route {#route}
+
+A rule that sends a host name (and optional path) to a service port on a network. [Read more](/docs/features/proxy-and-tls).
+
+## S
+
+### Scheduler {#scheduler}
+
+The leader's logic that places instances. [Read more](/docs/features/placement).
+
+### Secret {#secret}
+
+A value stored sealed with the cluster key and delivered to containers. Never shown after saving. [Read more](/docs/features/configs-and-secrets).
+
+### Self-update {#self-update}
+
+Replacing the Clouduler binary on every node from a GitHub release, one node at a time. [Read more](/docs/features/updates).
+
+### Served drive {#served-drive}
+
+A drive with one active copy on one node, shared with other nodes over NFSv4. [Read more](/docs/features/served-drives).
+
+### Service {#service}
+
+One component of a stack, such as `web` or `db`. Has an image and one or more instances. [Read more](/docs/features/stacks).
+
+### Stack {#stack}
+
+A Compose-style file describing services, networks, volumes and routes. The unit you deploy. [Read more](/docs/features/stacks).
+
+### Sync {#sync}
+
+Copying a volume's primary to its replicas. Every 15 minutes by default. [Read more](/docs/features/drives-and-volumes).
+
+## U
+
+### Unreachable {#unreachable}
+
+A node the leader could not ping for `node_timeout`. Its instances are rescheduled. [Read more](/docs/features/failover).
+
+## V
+
+### Volume {#volume}
+
+A folder inside a drive, mounted into a container. Written `drive/volume`. [Read more](/docs/features/drives-and-volumes).
+
+### VXLAN {#vxlan}
+
+A standard way to tunnel Ethernet frames inside normal packets; the technology behind the overlay network. [Read more](/docs/features/networking).
+
+## W
+
+### WireGuard network {#wireguard-network}
+
+A network kind where Clouduler brings up a WireGuard tunnel from a config you import, and can forward ports in through it. [Read more](/docs/features/networking).
+
+### Worker {#worker}
+
+A node that runs containers and receives all changes but never votes in raft. [Read more](/docs/features/node-lifecycle).

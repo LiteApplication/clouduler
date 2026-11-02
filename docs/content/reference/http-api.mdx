@@ -1,10 +1,362 @@
 ---
 title: HTTP API
-sidebar_position: 4
+sidebar_position: 3
 ---
 
 # HTTP API
 
-One-line summary of http api goes here.
+Every node serves one HTTPS API and the web UI on `web.address:web.port` (default port 8443). The web UI uses exactly this API, so anything you can click you can script. All paths are under `/api`, `/auth`, `/oauth`, `/.well-known` or `/mcp`; any other `GET` returns the web UI. Examples use `cloud.example.com` and a key in `$KEY`.
 
-TODO
+:::note
+This page was written from reading the code. Nothing was called against a running cluster. {/* TODO verify: live check of relay and remote-instance behaviour on a two-node cluster */}
+:::
+
+## Authentication
+
+There are two ways in.
+
+- **API key.** Send `Authorization: Bearer clk_<id>_<secret>`. An API key is always an admin. Only a hash is stored; the plaintext is returned once by `POST /api/keys`. The first key of a new cluster is called `bootstrap` and is printed to the log once.
+- **Session cookie.** `POST /auth/login` with `{"key": "clk_..."}` returns the identity and sets the `cl_session` cookie (`HttpOnly; Secure; SameSite=Lax`). An OIDC login ([access and login](/docs/features/access-and-login)) sets the same cookie. The cookie is how browser `EventSource` streams authenticate, because they cannot send headers.
+
+In the tables below, **Auth** means:
+
+| Value | Meaning |
+|---|---|
+| none | Public. |
+| user | Any signed-in caller: an API key or a session. |
+| admin | An API key, or an OIDC session whose admin claim matches. A viewer gets `403` `admin role required`. |
+| token | A secret token in the URL path. |
+| internal | Node-to-node, signed with the cluster key. Not usable from scripts. |
+
+A malformed `Authorization` header (for example `Basic ...`) is a `401` even if a valid cookie is also sent. The `Bearer ` prefix is optional on the dashboard API but required on `/mcp`.
+
+```bash title="Check your key"
+curl -s -H "Authorization: Bearer $KEY" https://cloud.example.com/auth/me
+# {"subject":"...","username":"...","role":"admin","mcp_enabled":true}
+```
+
+CORS is permissive, so keep keys and cookies secret; do not rely on the browser's same-origin policy for this API.
+
+## Which node answers
+
+Send requests to any node. You do not need to know the leader.
+
+| Request on a follower | Result |
+|---|---|
+| `GET` under `/api` | Answered from that node's replicated state. It may lag; compare `state_version` from `/api/status`. Live container, usage and daemon-log data comes from the node that owns it. |
+| `POST`, `PUT`, `PATCH`, `DELETE` under `/api` or `/auth` | Relayed to the leader (method, headers and a body up to 32 MiB). The leader's status, headers and body come back to you. |
+| `/auth/oidc/*` | Served locally, so login works from any node. |
+| `/api/git-backup/webhook`, `/webhook/internal-trigger`, any path containing `/internal/` | Served locally. |
+| `GET /oauth/authorize` | `307` redirect to the leader. |
+| `POST /oauth/token`, `POST /oauth/register` | Relayed to the leader. |
+| `/mcp` | Relayed to the leader (body up to 5 MiB). |
+| No leader known | `503`. |
+
+:::info The not-leader 503 with Location
+Older documentation says a follower answers a write with `503` and a `Location` header pointing at the leader. The current code relays the write instead, and never sends a `Location` header, so clients do not need to follow redirects. The error type `not the leader` still exists (status `503`) but is only built without a leader address.
+:::
+
+## Errors
+
+An error is `{"error": "<message>"}`. Read only `error`; a `detail` field exists in the type but is never filled in.
+
+| Status | Meaning |
+|---|---|
+| 400 | Bad request (validation failed, bad body). |
+| 401 | Not authenticated. On `/mcp` it adds `WWW-Authenticate`. |
+| 403 | Forbidden (for example `admin role required`). |
+| 404 | Not found (for example `no instance <id>`). |
+| 409 | Conflict (for example an update already in progress, a stale settings save, this node holds no cluster key). |
+| 429 | Too many requests. |
+| 503 | Unavailable or not leader. |
+| 500 | Internal error. |
+
+Two 503s are not JSON: the plain text `no cluster leader elected yet` (a follower with no known leader), and the JSON `could not reach the leader: ...` when the relay fails. Scripts that parse JSON errors must handle the plain-text one.
+
+## Live streams (SSE)
+
+Five endpoints stream `text/event-stream`. With curl add `-N`:
+
+```bash title="Follow a container's logs"
+curl -N -H "Authorization: Bearer $KEY" \
+  "https://cloud.example.com/api/instances/vaultwarden.web.0/logs?follow=true&tail=50"
+```
+
+| Endpoint | Event | Data | Notes |
+|---|---|---|---|
+| `GET /api/events` | `state` | The redacted cluster state (no secret values) | Sent on connect, then whenever the state version changes (polled every 500 ms). |
+| `GET /api/instances/events` | `progress` | `{instance_id, state, reason, step}`; `step` is `[n, m]` or null | First event per instance is its current value, then only changes (polled every 1 s). |
+| `GET /api/instances/{id}/logs` | `stdout`, `stderr`, `error` | `{timestamp, text}` per line; `error` carries a message string | Query: `follow` (default false), `tail` (default 200), `since` (unix seconds). Without `follow` the stream ends after the tail. Relayed for remote instances. |
+| `GET /api/instances/{id}/stats` | `stats` | `{cpu_percent, memory_used_bytes, memory_limit_bytes, network_rx_bytes, network_tx_bytes, io_read_bytes, io_write_bytes}` | One sample per tick until you disconnect. Relayed for remote instances. |
+| `GET /api/nodes/{name}/logs` (admin) | `log` | `{seq, timestamp (unix ms), level, target, message}` | Query: `tail` (default 200, up to the 2000-line ring) and `follow` (default true). An unreachable node answers 503. |
+
+## Endpoints
+
+### Auth and session
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| POST | `/auth/login` | none | `{"key":"clk_..."}` | 200 identity, sets `cl_session` | 401 `that is not an api key` or `invalid api key`. Expects the bare key. |
+| POST | `/auth/logout` | none | none | 200, clears cookie | |
+| GET | `/auth/me` | user | none | `{subject, username, role, mcp_enabled}` | `role` is `admin` or `viewer`. |
+| GET | `/auth/oidc/login?return_to=` | none | none | 303 to the provider | 400 `oidc is not configured`. `return_to` must be a same-origin path. |
+| GET | `/auth/oidc/callback?code&state` | none | none | 303 to the return path, sets cookie | |
+| GET | `/api/keys` | user | none | `[{id, name, created_at}]` | Never secrets. |
+| POST | `/api/keys` | admin | `{"name"?: string}` | `{id, key}` | `key` is shown once. |
+| DELETE | `/api/keys/{id}` | admin | none | 204 | 404 `no key <id>`. |
+
+### Cluster
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/status` | user | none | `{node, is_leader, has_quorum, leader, voters, reachable, managers_total, managers_reachable, version, state_version}` | Answered by this node. |
+| GET | `/api/state` | user | none | Redacted cluster state | |
+| GET | `/api/events` | user | none | SSE `state` | |
+| GET | `/api/nodes/connectivity` | user | none | Connectivity JSON | |
+| GET | `/api/tls-fingerprint` | user | none | Fingerprint of the certificate this node serves | |
+| GET | `/api/config` | user | none | Cluster config JSON | |
+| PUT | `/api/config` | admin | `{"config": {...}, "rollback_after": "60s"}` | 200 | Applies the config and arms a rollback timer; call confirm before it expires. |
+| POST | `/api/config/validate` | user | `{"config": {...}}` | `{valid, errors: [{path, message}]}` | |
+| POST | `/api/config/confirm` | admin | none | 200 | Keeps the pending config. |
+| POST | `/api/config/rollback` | admin | none | 200 | Restores the previous config now. |
+| GET | `/api/config/pending` | user | none | `{armed, seconds_left}` | |
+| POST | `/api/config/networks/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks, redirects, static routes and WireGuard. |
+| POST | `/api/config/drives/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks' volume mounts. |
+
+### Nodes
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/nodes` | user | none | `[{name, role, availability, reachable, container_count}]` | |
+| POST | `/api/nodes` | admin | `{name, role, rpc_addr, drives, labels}` | 201 | `role` is `manager` or `worker`; `rpc_addr` is `ip:port`. Upserts the node. |
+| GET | `/api/nodes/metrics` | user | none | `[{name, container_count, usage}]` | Unreachable nodes skipped. |
+| GET | `/api/nodes/{name}` | user | none | `{name, role, availability, reachable, drives, container_count, usage}` | |
+| PATCH | `/api/nodes/{name}` | admin | `{"availability": "active"}` or `"drain"` | empty on success | |
+| DELETE | `/api/nodes/{name}` | admin | none | empty on success | Removes the node from the config and validates the result. |
+| POST | `/api/nodes/join-command` | admin | `{name, role?, address?}` | `{command, key_id, address, fingerprint}` | Mints a key named `join <name>`, shown in the command once. |
+| GET | `/api/nodes/{name}/metrics/history` | user | none | `[{at, cpu_percent, memory_used_bytes}]` | Last 120 samples, 5 s apart. |
+| GET | `/api/nodes/{name}/interfaces` | user | none | `["eth0", ...]` | |
+| GET | `/api/nodes/{name}/logs` | admin | none | SSE `log` | Daemon logs. |
+
+### Stacks
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/stacks` | user | none | `[{name, revision, deployed_at}]` | |
+| GET | `/api/stacks/{name}` | user | none | `{name, spec, revision, configs, secrets, used_configs, used_secrets, requirements, deployed_at, previous_spec}` | 404 if missing. |
+| PUT | `/api/stacks/{name}` | admin | `{"spec": "<yaml>", "configs": {name: base64}, "secrets": {name: base64}}` | 200 | The server seals `secrets`; unreferenced ones are ignored. |
+| DELETE | `/api/stacks/{name}` | admin | none | 204 | |
+| POST | `/api/stacks/{name}/validate` | user | `{"spec": "<yaml>"}` | `{valid, errors: [{path, message}], requirements, per_service}` | Does not deploy. |
+| GET | `/api/stacks/{name}/update-webhook` | admin | none | `{"path": "/api/stacks/<name>/update-webhook/<token>"}` | Issues a token on first call. |
+| POST | `/api/stacks/{name}/update-webhook/regenerate` | admin | none | `{"path": ...}` | The old token stops working. |
+| POST | `/api/stacks/{name}/update-webhook/{token}` | token | none | 202 `{"accepted": [ids]}` | Rolling update of every instance. 401 `bad webhook token`. |
+
+### Instances
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/instances` | user | none | `[InstanceSummary]` | Includes pending placements. |
+| GET | `/api/instances/events` | user | none | SSE `progress` | |
+| GET | `/api/instances/{id}` | user | none | InstanceSummary | 404 `no instance <id>`. |
+| PATCH | `/api/instances/{id}` | admin | `{"desired": "running"}` or `"stopped"` | 200 | 409 if raft rejects. |
+| POST | `/api/instances/{id}/restart` | admin | none | 200 | Re-places the instance; it may move. |
+| POST | `/api/instances/{id}/move` | admin | `{"node": "<name>"}` | 200 | Starts a migration. |
+| POST | `/api/instances/{id}/update` | admin | none | 200 | Pull and recreate. 409 if already in progress. |
+| POST | `/api/instances/{id}/migration/retry` | admin | none | 200 | 409 `... has no failed move`, `... is still moving`. |
+| POST | `/api/instances/{id}/migration/dismiss` | admin | none | 200 | Clears a failed move. |
+| GET | `/api/instances/{id}/actions` | user | none | `[{name, confirm}]` | Actions with `show_in_ui` only. |
+| POST | `/api/instances/{id}/actions/{name}` | admin | none | `{stdout, stderr, exit_code, timed_out, stdout_truncated, stderr_truncated, duration_ms}` | Runs the action's argv in the container. |
+| GET | `/api/instances/{id}/logs` | user | none | SSE | See streams. |
+| GET | `/api/instances/{id}/stats` | user | none | SSE `stats` | |
+| POST | `/api/rebalance` | admin | none | `{moves: [{instance, from, to}]}` | Starts the planned moves. |
+| GET | `/api/rebalance/last` | user | none | `{at, moves}` or null | |
+
+`InstanceSummary` includes `id, node, desired, state, running, health, image, image_digest, running_digest, started_at, migration, migration_problem`. {/* TODO verify: the full InstanceSummary struct */} Instances on another node are forwarded to their owner, not rejected; if that node is unreachable the state falls back to `unknown`.
+
+### Updates {#updates}
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/updates` | user | none | `[{id, stack, service, node, image, running_digest, latest_digest, pinned_digest, update_available, pin_drift, error?}]` | One registry call per distinct image. Do not poll. |
+| POST | `/api/updates/pin` | admin | `{"instances": []}` | `[{id, ok, error?}]` | Empty list means all unpinned. |
+| POST | `/api/updates/apply` | admin | `{"instances": []}` | 202 `{"accepted": [...]}` | Empty list means all that are behind. Rolling; watch `/api/instances/events`. |
+
+### Configs, secrets and the cluster key
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/configs` | user | none | `[{name, size, revision, owner}]` | Reserved names hidden. |
+| GET | `/api/configs/{name}` | user | none | `{name, content, revision, owner}` | `content` is base64. |
+| PUT | `/api/configs/{name}` | admin | `{"content": "<base64>"}` | 200 | |
+| DELETE | `/api/configs/{name}` | admin | none | 204 | |
+| GET | `/api/secrets` | user | none | `[{name, revision, owner, key_fingerprint}]` | Never values. |
+| PUT | `/api/secrets/{name}` | admin | `{"value": "..."}`, `{"content": "<base64>"}` or `{"generate": {"length": 32, "charset": "alphanumeric"}}` | 200 | Charsets: `alphanumeric`, `hex`, `base64`, `printable`. 409 if this node holds no cluster key; 400 for reserved names or over 1 MiB. |
+| DELETE | `/api/secrets/{name}` | admin | none | 204 | |
+| GET | `/api/secrets/key` | user | none | `{held, fingerprint}` | |
+| POST | `/api/secrets/key` | admin | `{"key": "<base64>"}` | 200 | Refused if a key is already present. |
+| POST | `/api/secrets/key/wrap` | admin | `{node, public_key}` | WrapResponse | Used when a node joins. |
+
+### Drives and volumes
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/drives` | user | none | `[DriveSummary]` | |
+| GET | `/api/volumes` | user | none | `[VolumeSummary]` | |
+| GET | `/api/volumes/{drive}/{volume}/inspect?node=` | user | none | VolumeInspection | Files of the copy on `node`. |
+| POST | `/api/volumes/{drive}/{volume}/sync` | admin | none | 202 | Bumps the generation, which triggers a sync. |
+| POST | `/api/volumes/{drive}/{volume}/freeze` | admin | none | 202 | Pauses replication. |
+| POST | `/api/volumes/{drive}/{volume}/unfreeze` | admin | none | 202 | |
+| DELETE | `/api/volumes/{drive}/{volume}` | admin | none | 204 | |
+
+### Certificates, DNS and proxy
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/certificates` | user | none | `[CertificateSummary]` | No keys. |
+| POST | `/api/certificates/{fqdn}/renew` | admin | none | 202 | Removes the stored certificate so it is reissued. |
+| GET | `/api/dns` | user | none | `[DnsRecordSummary]` | |
+| POST | `/api/dns/reconcile` | admin | none | 2xx | Wakes the DNS and ACME loops. |
+| GET | `/api/proxy/routes` | user | none | `[RouteRow]` | What the proxy serves. |
+| GET | `/api/proxy/remembered-ips` | admin | none | `[RememberedIp]` | |
+| DELETE | `/api/proxy/remembered-ips/{id}` | admin | none | 204 | |
+| GET, PUT | `/api/cloudflare/token` | user, admin | PUT: `{"token": "..."}` | status, 204 | Write-only token. |
+| GET, PUT | `/api/oidc/client-secret` | user, admin | PUT: `{"client_secret": "..."}` | status, 204 | Write-only. |
+| GET, PUT | `/api/proxy-auth/client-secret` | user, admin | PUT: `{"client_secret": "..."}` | status, 204 | Write-only. |
+
+### Redirects, static routes and WireGuard
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET, POST | `/api/redirects` | user, admin | POST: RedirectRule | list, rule | Managed in the UI, not in `cluster.yaml`. |
+| PUT, DELETE | `/api/redirects/{id}` | admin | PUT: RedirectRule | rule, 204 | |
+| GET, POST | `/api/static-routes` | user, admin | POST: StaticRoute | list, route | |
+| PUT, DELETE | `/api/static-routes/{id}` | admin | PUT: StaticRoute | route, 204 | |
+| GET, POST | `/api/wireguard-ingress` | user, admin | POST: ingress rule | list, rule | |
+| PUT, DELETE | `/api/wireguard-ingress/{id}` | admin | PUT: ingress rule | rule, 204 | |
+| PUT, DELETE | `/api/wireguard/{network}/{node}` | admin | PUT: `{"content": "<wg conf>"}` | `{"interface": "..."}`, 204 | The config is sealed like a secret. |
+
+### Registries
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/registries` | user | none | `[{server, username}]` | Never passwords. |
+| PUT | `/api/registries` | admin | `{server, username, password}` | 204 | Verifies the login before storing. |
+| POST | `/api/registries/verify` | admin | same | 204 | Check only. |
+| DELETE | `/api/registries/{server}` | admin | none | 204 | |
+
+### Git backup
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/git-backup/status` | user | none | GitBackupStatus | |
+| GET | `/api/git-backup/webhook-secret` | user | none | `{configured}` | |
+| PUT | `/api/git-backup/webhook-secret` | admin | `{"token": "..."}` | 204 | |
+| POST | `/api/git-backup/webhook/{token}` | token | none | 204 | Called by your git host. 401 `bad webhook token`. |
+| POST | `/api/git-backup/export-now` | admin | none | 202 or 204 | |
+| POST | `/api/git-backup/pull-now` | admin | none | 202 or 204 | |
+| POST | `/api/git-backup/reconcile-now` | admin | none | 202 or 204 | |
+
+### Restic backups and restore
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/restic/destinations` | user | none | `[{id, name, kind, has_credentials}]` | |
+| PUT | `/api/restic/destinations` | admin | `{id, name, kind, password?, ssh_private_key?, s3_access_key_id?, s3_secret_access_key?}` | 204 | Create or edit by `id`. Secrets are sealed and never returned. |
+| DELETE | `/api/restic/destinations/{id}` | admin | none | 204 | |
+| GET | `/api/restic/destinations/{id}/snapshots` | user | none | `[SnapshotInfo]` | |
+| GET | `/api/restic/targets` | user | none | `[DriveBackupTarget]` | |
+| PUT | `/api/restic/targets` | admin | `{id, drive, destination_id, enabled, frequency_secs, time_of_day?, keep_last?, keep_within_secs?, stop_containers?}` | 204 | |
+| DELETE | `/api/restic/targets/{id}` | admin | none | 204 | |
+| POST | `/api/restic/targets/{id}/run` | admin | none | run id | Runs outside the schedule. |
+| GET | `/api/restic/runs?target=` | user | none | `[BackupRun]` | Newest first. |
+| POST | `/api/restic/restore/drive` | admin | `{drive, destination_id, snapshot?}` | request id | Returns at once; a node claims and runs it. |
+| POST | `/api/restic/restore/volume` | admin | `{drive, volume, destination_id, snapshot?}` | request id | |
+| POST | `/api/restic/restore/service` | admin | `{stack, service, destination_id?, snapshot?}` | request id | |
+| GET | `/api/restic/restore-requests` | user | none | `[RestoreRequest]` | Poll for progress. |
+
+### Self-update {#self-update}
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET, PUT | `/api/self-update/github-token` | user, admin | PUT: `{"token": "..."}` | status, 204 | Write-only. |
+| GET, PUT | `/api/self-update/repo` | user, admin | `{"release_url": "..."}` | config or null, 204 | Write-once. |
+| PUT | `/api/self-update/check` | admin | `{"enabled": bool, "interval"?: string}` | 204 | Interval at least 1h. |
+| GET | `/api/self-update/latest` | user | none | `{tag, architectures, source, running_version, fetched_at}` | Cached 5 minutes. |
+| GET | `/api/self-update/run` | user | none | run state or null | |
+| POST | `/api/self-update/run` | admin | none | 202 run state | |
+| POST | `/api/self-update/cancel` | admin | none | 204 | |
+
+### Alerts {#alerts}
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/api/alerts` | user | none | `{active, recent, counts}` | `recent` has at most 300 entries. |
+| GET | `/api/alerts/catalog` | user | none | `[CatalogEntry]` | |
+| GET | `/api/alerts/settings` | user | none | `{settings, secrets: {dest: {url, auth_set}}, smtp_password, health}` | URLs masked to scheme and host. |
+| PUT | `/api/alerts/settings` | admin | `{settings, secrets?, smtp_password?}` | SettingsView | A key left out keeps the value, null deletes, a string replaces. A masked URL keeps the stored one. 409 on a concurrent edit. |
+| POST | `/api/alerts/test` | admin | `{name}` or `{destination, secrets, smtp?, smtp_password?}` | `{ok, error?}` | One attempt, 10 s limit. Giving both fails with `give either name or destination`. |
+
+See [Alerts](/docs/features/alerts).
+
+### OAuth and MCP {#oauth-and-mcp}
+
+| Method | Path | Auth | Body | Success | Notes |
+|---|---|---|---|---|---|
+| GET | `/.well-known/oauth-protected-resource` | none | none | RFC 9728 JSON | Also with a `/mcp` suffix. 404 when MCP is disabled. |
+| GET | `/.well-known/oauth-authorization-server` | none | none | RFC 8414 JSON | Also with a `/mcp` suffix. |
+| POST | `/oauth/register` | none | RFC 7591 body | 201 client metadata | Public clients only. |
+| GET | `/oauth/authorize` | none | query parameters | 303 to `/oauth/consent?req=<id>` | PKCE S256 required. |
+| POST | `/oauth/token` | none | form: `grant_type`, `code`, `client_id`, `code_verifier`, `redirect_uri`, or `refresh_token` | token JSON | |
+| GET | `/api/oauth/requests` | admin | none | pending consents on this node | |
+| GET | `/api/oauth/requests/{id}` | user | none | `{client_name, redirect_host, scope, requested_grant, allowed_grants}` | 404 when expired. |
+| POST | `/api/oauth/requests/{id}/approve` | user | `{"grant": "read"}` or `"admin"` | `{"redirect": "..."}` | Admin grant needs an admin: `only an admin can grant admin access`. |
+| POST | `/api/oauth/requests/{id}/deny` | user | none | `{"redirect": "..."}` | |
+| GET | `/api/mcp/clients` | user | none | `[{client_id, client_name, ...}]` | |
+| DELETE | `/api/mcp/clients/{id}` | admin | none | 204 | Revokes; tokens stop immediately. |
+| ANY | `/mcp` | bearer `cmt_` or `clk_` | JSON-RPC over Streamable HTTP | JSON or SSE | See [MCP](/docs/features/mcp). |
+
+### Internal routes
+
+Paths containing `/internal/`, plus `/api/links/...`, are for nodes and the `clouduler` CLI. They are signed with the cluster key (HMAC over method, path, query, timestamp, nonce and body hash), accepted once within a time window, and cannot be called from a script. Do not expose them.
+
+## Examples
+
+```bash title="Deploy a stack"
+curl -X PUT https://cloud.example.com/api/stacks/notes \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d "{\"spec\": $(jq -Rs . < notes.yaml), \"configs\": {}, \"secrets\": {}}"
+```
+
+```bash title="Drain a node"
+curl -X PATCH https://cloud.example.com/api/nodes/cirrus \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"availability": "drain"}'
+```
+
+```bash title="Cluster status from any node"
+curl -s -H "Authorization: Bearer $KEY" https://cloud.example.com/api/status
+```
+
+## Quirks and gotchas
+
+<Quirk title="API keys are always admin" severity="danger">
+There is no read-only API key. For read-only access use an OIDC viewer account or a read-only MCP grant.
+</Quirk>
+
+<Quirk title="Reads on a follower can be stale" severity="info">
+Compare `state_version` in `/api/status` between nodes to see how far behind a node is.
+</Quirk>
+
+<Quirk title="Webhook tokens are in the URL">
+`/api/git-backup/webhook/{token}` and `/api/stacks/{name}/update-webhook/{token}` check a token in the path, not a header, and need no other login. Anyone with the token can call them. Rotate with the regenerate endpoint.
+</Quirk>
+
+<Quirk title="Self-signed certificate until ACME">
+A node serves a self-signed certificate until a real one is issued for its address. Scripts that verify TLS will refuse it until then.
+</Quirk>
+
+## Related
+
+- [Access and login](/docs/features/access-and-login), [MCP](/docs/features/mcp), [Alerts](/docs/features/alerts), [Updates](/docs/features/updates)
+- [CLI reference](/docs/reference/cli)
+- [Glossary](/docs/intro/glossary)

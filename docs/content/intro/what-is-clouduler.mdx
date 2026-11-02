@@ -5,6 +5,88 @@ sidebar_position: 1
 
 # What is Clouduler?
 
-One-line summary of what is clouduler? goes here.
+Clouduler is a small program that turns the machines you already own (a Raspberry Pi, an old mini PC, a cheap VPS) into one cluster that runs your Docker containers. You describe an app once in a file, and Clouduler decides which machine runs it, gives it storage that follows it around, puts it behind HTTPS on a real domain name, and moves it to another machine if the first one dies.
 
-TODO
+It is aimed at people who already run a few things with Docker and want the next step without learning Kubernetes.
+
+<UiScreen scenario="lan-3-nodes" route="/" caption="The Overview page of a three-node cluster: nodes, stacks and problems at a glance." alt="Clouduler overview page" />
+
+## The problem
+
+A homelab usually starts with one machine and a `docker-compose.yml`. It works, until:
+
+- the machine dies and everything you self-host is down until you fix it,
+- you add a second machine and now have to remember which app lives where,
+- you want a nice `https://notes.example.com` instead of `http://192.168.1.10:8080`,
+- the data of a database sits on one disk, and nobody has tested the backup,
+- you update a container and hope it still starts.
+
+Each of these has a solution, but the solutions are separate tools you have to learn, install and keep alive. Clouduler is those pieces, designed together.
+
+## What you get
+
+- **One binary.** `clouduler` is the whole thing: the daemon, the web UI and the command line. No database server and no separate control plane to install. It runs under systemd on Linux.
+- **A web UI.** See nodes, stacks, containers, logs, storage, certificates and alerts. Deploy and edit stacks from the browser, or use the CLI and plain files if you prefer. The UI uses the same [HTTP API](/docs/reference/http-api) you can script.
+- **Stacks that look like Compose.** A [stack](/docs/features/stacks) is a Compose-style YAML file with a few `x-clouduler` extras for routes, placement and volumes.
+- **Replicated storage.** [Drives and volumes](/docs/features/drives-and-volumes) keep copies of your data on several machines, so a container that moves finds its files already there.
+- **Automatic HTTPS.** The [built-in proxy](/docs/features/proxy-and-tls) routes hostnames to containers and gets Let's Encrypt certificates for you. [DNS records](/docs/features/dns-publishing) can be published through Cloudflare.
+- **Failover.** If a machine disappears, its containers are started on the others and the dead machine stops its own copies first, so a volume is never written twice. See [Failover](/docs/features/failover).
+- **Backups.** Scheduled [restic backups](/docs/features/backups) of drives to a NAS, an SSH server or S3, and a [git export](/docs/features/git-backup) of your configuration.
+- **Alerts.** [Discord, webhook or email](/docs/features/alerts) when a node goes offline, a disk fills up or a container crash-loops.
+- **AI access, if you want it.** An [MCP server](/docs/features/mcp) lets an assistant such as Claude Code inspect and debug the cluster, with secrets redacted.
+
+## What it is not
+
+Clouduler is deliberately smaller than the tools it is sometimes compared with.
+
+- **Not Kubernetes.** There are no pods, operators, custom resources or YAML dialects to learn. It runs plain Docker containers on a handful of nodes. It is built for a homelab, not for a data center.
+- **Not a hosting company.** It does not create machines or give you a public IP. You bring the hardware and the network.
+- **Not magic.** Replicated storage is copied on a timer (15 minutes by default), not written to all machines at the same instant, so a failover can lose the changes since the last sync. Read [Drives and volumes](/docs/features/drives-and-volumes) before you put a database on one.
+
+### How it compares
+
+| | What it is good at | Where Clouduler differs |
+|---|---|---|
+| **Docker Compose alone** | The simplest way to run containers on one machine. Everything fits in a file. | Compose does not span machines, move containers on failure, replicate volumes or manage certificates. If you have one machine and no need for failover, Compose is perfectly fine. A single-node Clouduler is still useful for the UI, HTTPS and backups. |
+| **Portainer** | A friendly UI over one or several Docker hosts. | Portainer manages Docker hosts you set up; it does not decide placement, replicate storage or fail over. Clouduler treats the machines as one pool. |
+| **Docker Swarm** | Compose-like stacks over several machines. | Swarm does not replicate storage or issue certificates for you. Clouduler adds both. |
+| **k3s / Kubernetes** | Powerful, standard, huge ecosystem, scales far beyond a homelab. | The price is complexity. Clouduler gives up the ecosystem in exchange for far fewer concepts. |
+
+## What hardware does it run on?
+
+Anything that runs Linux with systemd and Docker, on `x86_64` or `aarch64`:
+
+- Raspberry Pis (64-bit Raspberry Pi OS),
+- mini PCs and old laptops,
+- a small VPS, which makes a good public entry point,
+- a mix of all of the above, even in different houses, joined by a VPN such as Tailscale or Headscale (see [the multi-site quick start](/docs/quickstart/multi-site-headscale)).
+
+You need root on each machine and Docker running. Clouduler is a single binary plus a systemd unit. {/* TODO verify: minimum RAM and CPU figures; the research gives none */}
+
+## Where to go next
+
+<div className="row">
+  <div className="col col--4">
+    <div className="card">
+      <div className="card__header"><h3>Single node</h3></div>
+      <div className="card__body">Start with one machine. Install, open the UI, deploy your first stack.</div>
+      <div className="card__footer"><a className="button button--primary button--block" href="/docs/quickstart/single-node">Start here</a></div>
+    </div>
+  </div>
+  <div className="col col--4">
+    <div className="card">
+      <div className="card__header"><h3>LAN cluster</h3></div>
+      <div className="card__body">Three machines at home with replicated storage and failover.</div>
+      <div className="card__footer"><a className="button button--secondary button--block" href="/docs/quickstart/lan-cluster">Build a cluster</a></div>
+    </div>
+  </div>
+  <div className="col col--4">
+    <div className="card">
+      <div className="card__header"><h3>Multi-site</h3></div>
+      <div className="card__body">Join home machines and a VPS over Headscale.</div>
+      <div className="card__footer"><a className="button button--secondary button--block" href="/docs/quickstart/multi-site-headscale">Connect sites</a></div>
+    </div>
+  </div>
+</div>
+
+Want to understand the moving parts first? Read [How it works](/docs/intro/how-it-works), and keep the [glossary](/docs/intro/glossary) open for unfamiliar words.
