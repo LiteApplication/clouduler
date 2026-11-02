@@ -189,6 +189,20 @@ async fn deploy(
     Ok(StatusCode::OK)
 }
 
+/// The cluster-aware half of validation (networks, drives, node pins, domains
+/// exist): the same check the CLI runs before it sends a deploy. Every
+/// caller of `deploy_stack` (web UI, API, MCP) goes through it.
+async fn validate_against_cluster(state: &AppState, parsed: &StackFile) -> Result<(), ApiError> {
+    let cfg = state.cluster_config.read().await;
+    cluster_check(parsed, &cfg)
+}
+
+fn cluster_check(parsed: &StackFile, cfg: &cl_config::ClusterConfig) -> Result<(), ApiError> {
+    parsed
+        .validate(cfg)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
 /// The body of `deploy`, callable in-process: validates the spec against what
 /// the cluster already holds, seals and stores the plaintext `secrets` the
 /// spec owns, then hands the rest to `deploy_from_files`. `configs` and
@@ -204,6 +218,7 @@ pub(crate) async fn deploy_stack(
     check_stack_name(state, name).await?;
     let secrets_to_write = {
         let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        validate_against_cluster(state, &parsed).await?;
         check_overlay_collision(state, name, &parsed).await?;
         let requirements = parsed.requirements();
         let cluster_state = state.cluster.state().await;
@@ -426,8 +441,19 @@ pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> 
             }
         }
         Ok(parsed) => {
-            let mut requirements = parsed.requirements();
             let cfg = state.cluster_config.read().await;
+            if let Err(e) = parsed.validate(&cfg) {
+                return ValidateResponse {
+                    valid: false,
+                    errors: vec![ValidationError {
+                        path: String::new(),
+                        message: e.to_string(),
+                    }],
+                    requirements: None,
+                    per_service: BTreeMap::new(),
+                };
+            }
+            let mut requirements = parsed.requirements();
             requirements.hosts = parsed.hosts(&cfg);
             ValidateResponse {
                 valid: true,
@@ -577,4 +603,41 @@ async fn update_webhook(
         super::updates::apply_selection(&state, super::updates::InstanceSelection { instances })
             .await,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLUSTER: &str = "\
+cluster:
+  name: t
+networks:
+  cluster:
+    type: internal
+    subnet: 10.10.0.0/24
+    domain: cl.test
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network:
+      cluster: 10.10.0.1
+web:
+  address: api
+  network: cluster
+  port: 8443
+";
+
+    #[test]
+    fn deploy_checks_the_spec_against_the_cluster() {
+        let cfg = cl_config::ClusterConfig::parse(CLUSTER).unwrap();
+        let ok = StackFile::parse("services:\n  a:\n    image: x\n").unwrap();
+        assert!(cluster_check(&ok, &cfg).is_ok());
+        let bad = StackFile::parse(
+            "services:\n  a:\n    image: x\n    volumes:\n      - nodrive/vol:/data\n",
+        )
+        .unwrap();
+        assert!(cluster_check(&bad, &cfg).is_err());
+    }
 }
