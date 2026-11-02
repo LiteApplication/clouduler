@@ -109,6 +109,11 @@ export default function UiScreen({
           </noscript>
         </div>
       </div>
+      {showFrame && (
+        <a className={styles.fullscreen} href={src} target="_blank" rel="noopener noreferrer">
+          Open full screen
+        </a>
+      )}
       {caption && <figcaption className={styles.caption}>{caption}</figcaption>}
     </figure>
   );

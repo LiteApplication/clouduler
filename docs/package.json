@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "start": "docusaurus start",
-    "build": "docusaurus build",
+    "build": "node scripts/check-ui-mock.mjs && docusaurus build",
     "build:ui-mock": "npm --prefix ../ui run build:mock",
-    "screenshots": "echo \"screenshots: not implemented yet\"",
+    "screenshots": "tsx scripts/screenshots.ts",
     "build:full": "npm run build:ui-mock && npm run screenshots && npm run build",
     "serve": "docusaurus serve",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "setup:browsers": "playwright install chromium"
   },
   "dependencies": {
     "@docusaurus/core": "^3.10.2",
@@ -29,11 +30,23 @@
     "@docusaurus/module-type-aliases": "^3.10.2",
     "@docusaurus/tsconfig": "^3.10.2",
     "@docusaurus/types": "^3.10.2",
+    "playwright": "^1.64.1",
+    "tsx": "^4.23.15",
     "typescript": "~5.6.0"
   },
   "browserslist": {
-    "production": [">0.5%", "not dead", "not op_mini all"],
-    "development": ["last 3 chrome version", "last 3 firefox version", "last 5 safari version"]
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 3 chrome version",
+      "last 3 firefox version",
+      "last 5 safari version"
+    ]
   },
-  "engines": { "node": ">=20.0" }
+  "engines": {
+    "node": ">=20.0"
+  }
 }
