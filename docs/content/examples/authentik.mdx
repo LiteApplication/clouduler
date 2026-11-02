@@ -245,12 +245,12 @@ None.
 <UiCli.Cli>
 
 ```bash
-gen() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$2" | clouduler secret set "$1" --stdin; }
+gen() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$2" | clouduler secret set "$1"; }
 gen authentik_pg_pass 48
 gen authentik_secret_key 64
 gen authentik_bootstrap_token 64
-printf '%s' 'choose-an-admin-password' | clouduler secret set authentik_bootstrap_password --stdin
-printf '%s' 'the-smtp-password'        | clouduler secret set authentik_smtp_password --stdin
+printf '%s' 'choose-an-admin-password' | clouduler secret set authentik_bootstrap_password
+printf '%s' 'the-smtp-password'        | clouduler secret set authentik_smtp_password
 
 clouduler stack deploy ./authentik.yaml
 ```
@@ -265,7 +265,7 @@ clouduler stack deploy ./authentik.yaml
 3. Send a test email from the admin settings to check the SMTP path.
 4. For each service that signs in through Authentik, create an OAuth2/OpenID provider and an application. The issuer is `https://auth.example.com/application/o/SLUG/`, where `SLUG` is the application's slug. The Headscale example uses the slug `headscale`, the Immich example uses `immich`.
 5. To use Authentik for Clouduler's own login or as a wall in front of routes, follow the [Authentik guide](/docs/guides/authentik).
-6. Run **Create recovery key** only when you need it. It prints a one-time link, so copy it straight away.
+6. Run **Create recovery key** (in **Service actions** on the server container's page) only when you need it. It prints a one-time link, so copy it straight away.
 
 ## Quirks
 

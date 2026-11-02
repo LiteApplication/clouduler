@@ -185,8 +185,8 @@ The file only tells Stalwart where its datastore is. The container reads it as `
 <UiCli.Cli>
 
 ```bash
-printf '%s' 'the-cloudflare-token' | clouduler secret set stalwart_cf_dns_token --stdin
-printf '%s' 'the-licence-key'      | clouduler secret set stalwart_license_key --stdin
+printf '%s' 'the-cloudflare-token' | clouduler secret set stalwart_cf_dns_token
+printf '%s' 'the-licence-key'      | clouduler secret set stalwart_license_key
 
 echo '{ "@type": "RocksDb", "path": "/var/lib/stalwart/" }' > config.json
 clouduler stack deploy ./stalwart.yaml

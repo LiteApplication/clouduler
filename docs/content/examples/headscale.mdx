@@ -291,7 +291,7 @@ The `prefixes.v4` range `100.64.0.0/10` is the standard tailnet address range. `
 
 ## Walkthrough
 
-- **Two services, one host.** Both routes use `host: headscale` on `public`. Headplane has `path_prefix: /admin` and Headscale has none, so `/admin` goes to Headplane and everything else goes to Headscale. See [Proxy and TLS](/docs/features/proxy-and-tls). {/* TODO verify: that the proxy picks the longest matching prefix first. */}
+- **Two services, one host.** Both routes use `host: headscale` on `public`. Headplane has `path_prefix: /admin` and Headscale has none, so `/admin` goes to Headplane and everything else goes to Headscale. See [Proxy and TLS](/docs/features/proxy-and-tls).
 - **`preserve_host: true`** forwards the client's `Host` header to Headplane, which the UI needs to build its links.
 - **`write: true` on both configs of Headplane**: Headplane can edit them and Clouduler writes the edits back to the cluster. Only one instance may hold a writable config, which is why Headplane has `replicas: 1`. Headscale mounts `headscale_config` read-only. See [Configs and secrets](/docs/features/configs-and-secrets).
 - **Secrets as `env:`** for Headplane. Headscale gets its OIDC secret as a file, and the explicit `target` matches `client_secret_path` in the config.
@@ -316,10 +316,10 @@ The `prefixes.v4` range `100.64.0.0/10` is the standard tailnet address range. `
 mkdir -p headscale/config && cd headscale
 # save headscale.yaml and the three files in config/
 
-tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set headplane_cookie_secret --stdin
-printf '%s' 'placeholder'          | clouduler secret set headplane_api_key --stdin
-printf '%s' 'the-authentik-secret' | clouduler secret set headplane_oidc_client_secret --stdin
-printf '%s' 'the-authentik-secret' | clouduler secret set headscale_oidc_client_secret --stdin
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set headplane_cookie_secret
+printf '%s' 'placeholder'          | clouduler secret set headplane_api_key
+printf '%s' 'the-authentik-secret' | clouduler secret set headplane_oidc_client_secret
+printf '%s' 'the-authentik-secret' | clouduler secret set headscale_oidc_client_secret
 
 clouduler stack deploy ./headscale.yaml
 ```
@@ -340,7 +340,7 @@ clouduler stack deploy ./headscale.yaml
 
    ```bash
    clouduler exec headscale.headscale.0 -- headscale apikeys create --expiration 90d
-   printf '%s' "THE_KEY" | clouduler secret set headplane_api_key --stdin
+   printf '%s' "THE_KEY" | clouduler secret set headplane_api_key
    ```
 
    {/* TODO verify: the --expiration flag, check headscale apikeys create --help in the container. */}

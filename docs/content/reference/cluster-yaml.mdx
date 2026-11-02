@@ -409,7 +409,7 @@ The API token is a sealed secret set from **Settings > Network > Cloudflare DNS*
 
 <OptionTable rows={[
   {"key": "self_update", "type": "object", "default": "absent", "reload": "live", "description": "Git-based cluster self-update. Written through the Updates page, not the config editor.", "quirks": "Once release_url is set it cannot be changed through the API; edit the file and run config reload."},
-  {"key": "self_update.release_url", "type": "URL", "reload": "live", "description": "A repository URL (tracks the latest release) or a release tag URL (pins it).", "quirks": "Required when self_update is set."},
+  {"key": "self_update.release_url", "type": "URL", "reload": "live", "description": "A repository URL (tracks the latest release) or a release tag URL (pins it). For the official releases use https://github.com/LiteApplication/clouduler.", "quirks": "Required when self_update is set."},
   {"key": "self_update.check_updates", "type": "bool", "default": "true", "reload": "live", "description": "Whether the leader looks up the latest release on an interval."},
   {"key": "self_update.check_interval", "type": "duration", "default": "24h", "reload": "live", "description": "How often the lookup runs.", "quirks": "The API enforces at least 1h; the file does not."},
 ]} />

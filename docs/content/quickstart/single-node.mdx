@@ -56,7 +56,7 @@ Everything below is written with my example values. Fill this in once and every 
 - Optional, for the last part: a domain on Cloudflare and ports 80 and 443 forwarded to this machine.
 
 :::note Raspberry Pi OS on Debian 12 (bookworm)
-I would not use it. The release binary is built on a recent glibc, and a binary built that way runs on Debian 13 but not on Debian 12. {/* TODO verify: exact glibc floor of the release binary; check with objdump -T on a downloaded asset */}
+I would not use it. The release binary is built on a recent glibc, and a binary built that way runs on Debian 13 but not on Debian 12. {/* TODO verify: exact glibc floor of the release binary; the release is built on the CI runner image, so the floor follows it. Check with objdump -T on a downloaded asset */}
 :::
 
 ## 1. Prepare the machine
@@ -83,7 +83,7 @@ Now I check that Docker is really up.
 Docker is not running. Run `sudo systemctl status docker` to see why. On a Raspberry Pi, the usual cause of a Docker that starts but shows no memory limits is a missing kernel flag: add `cgroup_enable=memory cgroup_memory=1` to `/boot/firmware/cmdline.txt` and reboot. {/* TODO verify: Raspberry Pi cgroup flags */}
 :::
 
-Stacks that have their own network use a VXLAN device, so I load that kernel module and check it.
+Stacks that have their own network use a VXLAN device (on a single node, public networks do not), so I load that kernel module and check it. If I later serve a drive over NFS, the `nfsv4` module is needed too.
 
 <Cmd>{`sudo modprobe vxlan
 lsmod | grep -E 'vxlan|bridge'`}</Cmd>
@@ -112,7 +112,7 @@ Clouduler is one static-ish binary that is both the CLI and the daemon. I find o
 
 **What I should see:** `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`. Anything else means there is no prebuilt binary for this machine and I would have to build from source (see the repository README).
 
-I open the [Releases page](https://github.com/LiteApplication/clouduler/releases), download the asset called `clouduler-` followed by that string, and copy it to the node. Then I install it.
+I have two ways to get it. I can compile Clouduler myself (see the repository README), or I can download the prebuilt binary from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest). I take the prebuilt one: the release asset is the bare binary called `clouduler-` followed by that string, with no archive to unpack. I download it and copy it to the node. Then I install it.
 
 <Cmd>{`# from my laptop, in the folder where I downloaded it
 scp clouduler-x86_64-unknown-linux-gnu {{user}}@{{ip}}:/tmp/clouduler
@@ -121,12 +121,10 @@ scp clouduler-x86_64-unknown-linux-gnu {{user}}@{{ip}}:/tmp/clouduler
 sudo install -m 0755 /tmp/clouduler /usr/local/bin/clouduler
 clouduler --version`}</Cmd>
 
-{/* TODO verify: whether releases ship the bare binary or an archive, and the final download command */}
-
-**What I should see:** `clouduler` and a version number. `clouduler --help` lists subcommands like `init`, `daemon`, `stack`, `status` and `check`.
+**What I should see:** `clouduler` and a version number. Once the cluster is running, I can also point its auto-update at `https://github.com/LiteApplication/clouduler` (the `self_update.release_url` key, set on the Updates page) so that new releases show up in Settings; see [Updates](/docs/features/updates). `clouduler --help` lists subcommands like `init`, `daemon`, `stack`, `status` and `check`.
 
 :::note Two copies of the binary
-`init` copies the running binary to `/usr/bin/clouduler`, and that is the copy the service runs. The one in `/usr/local/bin` stays. When I upgrade later, I replace both, or run `sudo clouduler init --force --no-start` from the new binary. `which -a clouduler` shows both.
+`init` copies the running binary to `/usr/bin/clouduler`, and that is the copy the service runs. The one in `/usr/local/bin` stays. When I upgrade later, I replace both (or let the cluster do it, see [Updates](/docs/features/updates)). I do not re-run `init` for that: it refuses to run on a machine that already has a `cluster.yaml` unless I pass `--force`, which starts over. `which -a clouduler` shows both.
 :::
 
 ## 3. Initialise the cluster
@@ -227,7 +225,7 @@ On its first start with no keys at all, the daemon mints one admin API key and p
 **What I should see:** one line like `clk_xxxxxxxxxxxx_yyyyyyyy...`. I copy it into my password manager immediately.
 
 :::warning If you see nothing
-The key is only logged when the cluster has a leader and no keys exist. Wait ten seconds and try again, and make sure you are searching the whole journal (no `-b`) in case the node rebooted. If the key was already logged and you did not save it, the only ways back in are a second sign-in method (OIDC) or the emergency tools, which this quick start does not cover. {/* TODO verify: documented recovery for a lost bootstrap key */}
+The key is only logged when the cluster has a leader and no keys exist. Wait ten seconds and try again, and make sure you are searching the whole journal (no `-b`) in case the node rebooted. If the key was already logged and you did not save it, the only way back in is a second sign-in method (OIDC) that I set up earlier; the emergency tools do not create or restore API keys. So I save the key now. A lost key with no OIDC configured has no documented recovery.
 :::
 
 ### Make the name resolve
@@ -236,7 +234,7 @@ The UI lives at <code>https://cloud.<Var plain name="domain" fallback="lan.examp
 
 <Cmd lang="text" title="/etc/hosts on my laptop">{`{{ip}}   cloud.{{domain}}`}</Cmd>
 
-I expect the raw IP (<code>https://<Var plain name="ip" fallback="192.168.1.10" />:8443</code>) to work too. {/* TODO verify: sign in by IP when an internal domain is set */}
+I expect the raw IP (<code>https://<Var plain name="ip" fallback="192.168.1.10" />:8443</code>) to work too. {/* TODO verify: sign in by IP when an internal domain is set (cookie scope not traced) */}
 
 ### Sign in
 
@@ -296,7 +294,7 @@ services:
 1. In the sidebar I open **Stacks** and click **Deploy stack**.
 2. I type `vaultwarden` as the stack name and paste the YAML above into the spec editor.
 3. On the right I watch the panels. I want the banner **Spec is valid**, and under **Where it can run** I want to see <code><Var plain name="hostname" fallback="atlas" /></code> listed.
-4. I click **Deploy** (the button stays disabled until the spec is valid). I land on the stack page, where the container goes from "pending placement" to "running" while Docker pulls the image.
+4. I click the **Deploy vaultwarden** button (it carries the stack name, and stays disabled until the spec is valid). I land on the stack page, where the container goes from "pending placement" to "running" while Docker pulls the image.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -344,7 +342,7 @@ Vaultwarden works in a browser over a self-signed certificate if I accept the wa
 
 ## 8. Give it a real domain with HTTPS
 
-To get a certificate that browsers trust, Clouduler needs to prove to Let's Encrypt that it controls the name. It does that through Cloudflare DNS, and it also creates the DNS records for me. This part needs a domain on Cloudflare and ports 80 and 443 reachable from the internet. I'm using `example.com` here; use yours.
+To get a certificate that browsers trust, Clouduler needs to prove to Let's Encrypt that it controls the name. It does that through Cloudflare DNS, and it also creates the DNS records for me. This part needs a domain on Cloudflare and port 443 reachable from the internet. The certificate check goes through DNS, so port 80 is not needed for it. I'm using `example.com` here; use yours.
 
 1. I create a Cloudflare API token with permission to edit DNS on my zone, following [Cloudflare API token](/docs/guides/cloudflare-api-token). The token is stored sealed inside the cluster, never in a file.
 2. In the web UI I open **Settings**, then **Network**, and on the **Cloudflare DNS** page turn on **Manage DNS with Cloudflare**, set **DNS zones** to `example.com`, and use **Save token** to store the token.
@@ -353,10 +351,8 @@ To get a certificate that browsers trust, Clouduler needs to prove to Let's Encr
 5. On the **Nodes** page I give <code><Var plain name="hostname" fallback="atlas" /></code> its public IPv4 address for `wan`. A service on a public network can only be placed on a node that has a public address for it.
 
 :::danger Set the staging URL first
-If I leave **ACME directory URL** empty, Clouduler uses Let's Encrypt production, which rate-limits failures. Test on staging, then clear the field to switch.
+If I leave **ACME directory URL** empty, Clouduler uses Let's Encrypt production, which rate-limits failures. Test on staging, and be aware that the ACME account Clouduler creates is remembered together with the directory it was created against. Clearing the field later does not re-point that account, so I would only use staging when I am ready to wipe the account file (`acme-account.json` in the data directory) before switching.
 :::
-
-{/* TODO verify: exact labels and layout of these Settings pages against the UI, and whether sensitive pages ask for a "Confirm config" within 60 s */}
 
 Settings pages that affect networking ask me to **confirm** the change within a minute, or they roll back. That is a safety net so I can't lock myself out. See [Live config](/docs/features/live-config).
 
@@ -376,12 +372,12 @@ services:
           port: 80
 ```
 
-and redeploy (**Deploy** in the UI, or `sudo clouduler stack deploy vaultwarden.yaml`). The route is now `vault.example.com`.
+and redeploy (**Deploy vaultwarden** in the UI, or `sudo clouduler stack deploy vaultwarden.yaml`). The route is now `vault.example.com`.
 
-**What I should see:** after a short wait the stack shows a certificate and DNS record in the **DNS** page, and `https://vault.example.com` opens with a (staging) certificate. Clearing the ACME URL and redeploying gets the trusted one.
+**What I should see:** after a short wait the stack shows a certificate and DNS record in the **DNS** page, and `https://vault.example.com` opens with a (staging) certificate. Getting the trusted certificate afterwards means clearing the ACME URL and also removing the stored account, as described in the warning above; I have not tested that switch myself.
 
 :::warning If the certificate stays pending or shows an error
-`sudo clouduler status` lists certificate and DNS problems. The common causes are a token without DNS edit rights, a zone that is not listed under **DNS zones**, or ports 80 and 443 not reaching the node. See [DNS publishing](/docs/features/dns-publishing).
+`sudo clouduler status` lists certificate and DNS problems. The common causes are a token without DNS edit rights, a zone that is not listed under **DNS zones**, or port 443 not reaching the node. See [DNS publishing](/docs/features/dns-publishing).
 :::
 
 :::warning Public means public

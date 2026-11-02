@@ -97,7 +97,7 @@ None. This stack has no `configs:` block.
 - **`secrets: [vaultwarden_admin_token]`** on the service mounts it at `/run/secrets/vaultwarden_admin_token`. `ADMIN_TOKEN_FILE` points the container at that path, so the token never appears in the environment.
 - **`apps/vaultwarden:/data`** is a drive-backed volume: `apps` is the drive, `vaultwarden` is the volume inside it. Whatever is written to `/data` is replicated to every node that holds the `apps` drive, so the container can start on another node if its node fails. See [Drives and volumes](/docs/features/drives-and-volumes).
 - **`restart: unless-stopped`** is the Docker restart policy. Without it the policy is `no`.
-- **`x-clouduler.actions.Backup`** is a named command. It shows up as a button on the stack's Containers tab, and `volume_sync` can use it as a hook.
+- **`x-clouduler.actions.Backup`** is a named command. It shows up as a Run button in the **Service actions** panel of the container's page (open it from a row in the stack's Containers tab; admins only), and `volume_sync` can use it as a hook.
 - **`volume_sync.vaultwarden.before: Backup`** runs `Backup` inside the running container before each scheduled replication of the volume named `vaultwarden`. The key is the volume name, not the drive name. If the hook fails, that replication is skipped.
 - **`x-clouduler.proxy`**: `host: vault` gets the `public` network's domain appended, so the route is `vault.example.com`. `port: 80` is the container port. See [Proxy and TLS](/docs/features/proxy-and-tls).
 
@@ -116,7 +116,7 @@ Create the secret first, then deploy.
 <UiCli.Cli>
 
 ```bash
-printf '%s' 'choose-a-long-admin-password' | clouduler secret set vaultwarden_admin_token --stdin
+printf '%s' 'choose-a-long-admin-password' | clouduler secret set vaultwarden_admin_token
 clouduler stack deploy ./vaultwarden.yaml
 clouduler stack list
 ```
@@ -128,7 +128,7 @@ clouduler stack list
 
 1. Open `https://vault.example.com` and create your account. This stack does not close sign-up, so create your account first, then check the Vaultwarden documentation for the `SIGNUPS_ALLOWED` setting to close it.
 2. Open `https://vault.example.com/admin` and enter the admin token. If you generated the token and did not copy it, set a new value (saving an existing secret name overwrites it) and restart the instance.
-3. Run the **Backup** action once from the stack's Containers tab, then confirm a snapshot exists:
+3. Open the container from the stack's Containers tab and run the **Backup** action once from **Service actions**, then confirm a snapshot exists:
 
    ```bash
    clouduler exec vaultwarden.vaultwarden.0 -- ls -1 /data

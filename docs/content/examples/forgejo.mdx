@@ -31,13 +31,13 @@ Forgejo is a self-hosted Git forge (a Gitea fork) with a PostgreSQL database, HT
 | `forgejo_internal_token` | Token for calls between Forgejo's own processes. | Generate with the image's tool, see below |
 | `forgejo_lfs_jwt_secret` | Signs LFS tokens. | Generate with the image's tool, see below |
 
-For the last two, use the generator that ships with Forgejo and pipe its output straight into Clouduler. `secret set --stdin` removes one trailing newline by default:
+For the last two, use the generator that ships with Forgejo and pipe its output straight into Clouduler. `clouduler secret set` reads the value from stdin and removes one trailing newline by default:
 
 ```bash
 docker run --rm codeberg.org/forgejo/forgejo:10 forgejo generate secret INTERNAL_TOKEN \
-  | clouduler secret set forgejo_internal_token --stdin
+  | clouduler secret set forgejo_internal_token
 docker run --rm codeberg.org/forgejo/forgejo:10 forgejo generate secret LFS_JWT_SECRET \
-  | clouduler secret set forgejo_lfs_jwt_secret --stdin
+  | clouduler secret set forgejo_lfs_jwt_secret
 ```
 
 {/* TODO verify: the forgejo generate secret subcommand output shape was not run against the image. */}
@@ -218,8 +218,8 @@ None.
 <UiCli.Cli>
 
 ```bash
-tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set forgejo_db_password --stdin
-tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64 | clouduler secret set forgejo_secret_key --stdin
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set forgejo_db_password
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64 | clouduler secret set forgejo_secret_key
 # forgejo_internal_token and forgejo_lfs_jwt_secret: see the commands above
 
 clouduler stack deploy ./forgejo.yaml

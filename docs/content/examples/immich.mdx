@@ -263,7 +263,7 @@ The proxy reads this as `/app/config.json` inside its container, set by `target:
 ```bash
 mkdir -p immich/config && cd immich
 # save the YAML as immich.yaml and the JSON as config/immich_public_proxy_config.json
-tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set immich_db_password --stdin
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set immich_db_password
 clouduler stack deploy ./immich.yaml
 ```
 
@@ -277,7 +277,7 @@ The `file:` path is read relative to the stack file, so keep `config/` next to `
 1. Open `https://immich.home.example.com` from a device on the tailnet and create the first account. Immich makes the first account the administrator.
 2. Optional, OAuth through Authentik: create an OAuth2/OpenID provider and an application with the slug `immich` in Authentik, then enter its issuer, `https://auth.example.com/application/o/immich/`, and the client details in Immich's administration settings. The stack itself does not configure OAuth. See the [Authentik example](/docs/examples/authentik).
 3. Create a share link from an album and open it at `https://immich-share.example.com/share/KEY`.
-4. If OAuth ever locks you out, run **Enable password login** from the server's Containers tab, or **Reset admin password**.
+4. If OAuth ever locks you out, run **Enable password login** or **Reset admin password** from the **Service actions** panel on the server's container page.
 5. Watch the machine-learning logs on first start (`clouduler stack logs immich`). It downloads its models once into `fast/immich-models`.
 
 ## Quirks

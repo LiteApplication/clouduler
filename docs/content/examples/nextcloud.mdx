@@ -454,7 +454,7 @@ The Nextcloud container reads it as `/usr/local/etc/php/conf.d/zz-disable-jit.in
 1. Open **Settings**, **Secrets and configs**. For each secret in the table, click **Create secret**, choose **Generate** (or **Paste string** for the admin password) and set the length and character set.
 2. Open **Stacks**, **Deploy stack**, name it `nextcloud`, paste the YAML.
 3. In **Bundled files**, fill `nextcloud_disable_jit` with `opcache.jit=disable`.
-4. When the spec is valid and **What it needs** shows no missing secrets, click **Deploy nextcloud**.
+4. When the spec is valid and the secrets listed in **What it needs** exist (Settings, Secrets and configs), click **Deploy nextcloud**.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -464,14 +464,14 @@ mkdir -p nextcloud/config && cd nextcloud
 echo 'opcache.jit=disable' > config/nextcloud_disable_jit.ini
 # save the YAML as nextcloud.yaml
 
-gen() { tr -dc "$2" </dev/urandom | head -c "$3" | clouduler secret set "$1" --stdin; }
+gen() { tr -dc "$2" </dev/urandom | head -c "$3" | clouduler secret set "$1"; }
 gen nextcloud_db_password        'A-Za-z0-9' 32
 gen nextcloud_redis_password     'A-Za-z0-9' 48
 gen nextcloud_fts_password       'A-Za-z0-9' 32
 for s in imaginary turn signaling recording whiteboard; do
-  openssl rand -hex 32 | clouduler secret set "nextcloud_${s}_secret" --stdin
+  openssl rand -hex 32 | clouduler secret set "nextcloud_${s}_secret"
 done
-printf '%s' 'choose-an-admin-password' | clouduler secret set nextcloud_admin_password --stdin
+printf '%s' 'choose-an-admin-password' | clouduler secret set nextcloud_admin_password
 
 clouduler stack deploy ./nextcloud.yaml
 ```
@@ -484,14 +484,14 @@ clouduler stack deploy ./nextcloud.yaml
 ## First run
 
 1. Open `https://nextcloud.home.example.com` from a tailnet device and sign in as `admin` with the password you set for `nextcloud_admin_password`. The first start can take a few minutes while Nextcloud installs.
-2. In the administration overview, look for warnings, then run **Add missing indices** from the Containers tab.
+2. In the administration overview, look for warnings, then run **Add missing indices** from the **Service actions** panel on the `nextcloud-aio-nextcloud` container page.
 3. After copying files into `bulk/nextcloud-data` by hand, run **Scan files** so Nextcloud sees them. Switch on **Maintenance mode on** for bulk file operations, then **Maintenance mode off**.
 4. Collabora is running, but Nextcloud's Office app still needs its connector pointed at the Collabora host. Check the Office settings after the first start.
 
 ## Quirks
 
 <Quirk title="Nine secrets, even for features you do not use" severity="info">
-Talk, Whiteboard, OnlyOffice and full-text search are off, but the Nextcloud container references their secrets. A missing secret fails the deploy, so create all nine. The unused ones are inert.
+Talk, Whiteboard, OnlyOffice and full-text search are off, but the Nextcloud container references their secrets. A missing secret stops the container that mounts it from starting, so create all nine. The unused ones are inert.
 </Quirk>
 
 <Quirk title="One domain in many places" severity="warn">

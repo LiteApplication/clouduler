@@ -112,7 +112,7 @@ REST servers (`rest:`) are not a Clouduler destination kind.
 2. Choose **S3 bucket** (or **SSH server**, **Cluster node**) and fill in the table above.
 3. Give it a name and click **Create destination**.
 
-The form says to leave **Repository password** blank to generate one. In practice the server may refuse a blank password for a new destination with `password is required for a new destination`; if you see that, use the CLI. {/* TODO verify: whether put_destination still requires a password */}
+The form says to leave **Repository password** blank to generate one. In practice the server refuses a blank password for a new destination with `password is required for a new destination`; if you see that, use the CLI.
 
 <UiScreen scenario="lan-3-nodes" route="/storage/backups" caption="Backups: destinations are listed at the bottom." alt="Backups tab" height={640} />
 
@@ -162,7 +162,7 @@ clouduler backup history --target fast-b2main
 | Access denied / 403 from the bucket | The key is scoped to a different bucket, or is read-only. | Re-create the key with **Read and Write** on that bucket. |
 | `restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed` | restic missing on the node. | Install restic. |
 | The schedule never runs | Created without `--enabled`. | Add the flag, or turn it on in the UI. |
-| `backup snapshots` fails for S3 or SSH | The CLI does not pass those credentials to restic. | Use the **Snapshots** section in the UI. |
+| `backup snapshots` fails for S3 | The CLI does not pass the S3 credentials to restic (the SSH key is passed). | Use the **Snapshots** section in the UI. |
 | Unreadable repository after re-adding | `destination add` without `--password` rotated the password. | Restore the old password from the cluster key or git backup. |
 
 ## Related

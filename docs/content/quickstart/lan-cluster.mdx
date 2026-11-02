@@ -65,7 +65,7 @@ If you filled this in for quick start 1, your values are already here.
 
 ## 1. Open the ports between the nodes
 
-Clouduler does not touch your host firewall. If you run `ufw` or `nftables`, the nodes cannot talk until you allow these. Only the LAN subnet needs the first four. Do not expose them to the internet.
+Clouduler does not touch your host firewall. If you run `ufw` or `nftables`, the nodes cannot talk until you allow these. Only the LAN subnet needs the first five (the web UI listens on every interface, so the firewall is what keeps it on the LAN). Do not expose them to the internet. The ports can be changed with `--rpc-port` and `--web-port` at `init`; I use the defaults.
 
 | Port | Protocol | Used for |
 |---|---|---|
@@ -80,11 +80,11 @@ If I use `ufw`, on every node:
 
 <Cmd title="On every node (only if you run ufw)">{`sudo ufw allow in on {{iface}} from {{subnet}} to any port 7373:7375 proto tcp
 sudo ufw allow in on {{iface}} from {{subnet}} to any port 4789 proto udp
-sudo ufw allow 8443/tcp
+sudo ufw allow in on {{iface}} from {{subnet}} to any port 8443 proto tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp`}</Cmd>
 
-{/* TODO verify: the ufw rules are an example, not tested against a real cluster */}
+{/* TODO verify: the ufw rules are an example, not tested against a real cluster. */}
 
 If you never installed a firewall, there is nothing to do. See [Ports and firewall](/docs/reference/ports-and-firewall) for the complete list.
 
@@ -100,9 +100,9 @@ sudo modprobe vxlan
 sudo groupadd -f clouduler
 sudo mkdir -p /srv/clouduler/fast`}</Cmd>
 
-{/* TODO verify: groupadd step, see single-node quick start */}
+{/* TODO verify: groupadd step, see single-node quick start (the code never creates the group, so the step stays) */}
 
-Then I install the same binary on each (see [quick start 1, step 2](/docs/quickstart/single-node#2-install-clouduler)), and check it.
+Then I install the same binary on each (see [quick start 1, step 2](/docs/quickstart/single-node#2-install-clouduler)). As there, I can compile it myself or download the prebuilt binary from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest). Then I check it.
 
 <Cmd title="Copy and install, from my laptop">{`for h in {{ip1}} {{ip2}} {{ip3}}; do
   scp clouduler-x86_64-unknown-linux-gnu {{user}}@$h:/tmp/clouduler
@@ -172,6 +172,7 @@ sudo sh -c 'printf "%s" "clk_PASTE_YOUR_KEY" > /root/join.token'
 sudo clouduler init --yes \\
   --join {{ip1}} \\
   --token-file /root/join.token \\
+  --tls-fingerprint PASTE_SHA256_PIN \\
   --role manager \\
   --node {{n2}} \\
   --ip {{ip2}} \\
@@ -179,7 +180,7 @@ sudo clouduler init --yes \\
 
 sudo shred -u /root/join.token`}</Cmd>
 
-Using <code>--join <Var plain name="ip1" fallback="192.168.1.10" /></code> with the IP avoids the name resolution requirement, because the joining node checks the certificate fingerprint rather than the name. {/* TODO verify: --join <IP> without --tls-fingerprint, not tested live */}
+Using <code>--join <Var plain name="ip1" fallback="192.168.1.10" /></code> with the IP avoids the name resolution requirement. The pin is what protects me: with `--tls-fingerprint` the joining node checks the cluster's certificate against it before sending the key. Without it the certificate is accepted unchecked and the fingerprint is only printed afterwards. The UI's **Create join command** sheet shows the pin to paste.
 
 I repeat with <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var plain name="ip3" fallback="192.168.1.12" /></code>.
 
@@ -192,7 +193,7 @@ I repeat with <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var p
 
 **What I should see on the joining node:** `the cluster accepted this node`, `installed the cluster key (...)`, and finally `the daemon is running`. Files do not need to be copied by hand: the join fetches `cluster.yaml` from the cluster and receives the cluster key wrapped for the new node's own key pair.
 
-The join key is an admin key and stays valid after the join. Once both nodes are in, I delete the one named <code>join <Var plain name="n2" fallback="boreas" /></code> (and <code>join <Var plain name="n3" fallback="cirrus" /></code>) under **Settings**, **Access**, in the API keys panel.
+The join key is an admin key and stays valid after the join. Once both nodes are in, I delete the one named <code>join <Var plain name="n2" fallback="boreas" /></code> (and <code>join <Var plain name="n3" fallback="cirrus" /></code>) under **Settings**, **API keys and AI clients**. Like every API key it has admin rights, so I do not leave it around.
 
 :::warning If you see `the cluster rejected the api key`
 The key is wrong, was deleted, or got a stray space. Generate a new command.
@@ -229,18 +230,20 @@ sudo systemctl enable --now clouduler.service
 
 <Cmd>{`sudo clouduler status`}</Cmd>
 
-**What I should see:** three nodes, all `reachable` and `active`, then `all clear: no unhealthy instances or cluster faults`. The exact wording of the leader and quorum lines is not something I can promise, but the shape is:
+**What I should see:** a `raft:` line with `quorum=yes` and `voters=3/3`, three nodes marked `up` and `active`, then `all clear: no unhealthy instances or cluster faults`. The shape is:
 
 ```text
-quorum ... (3 managers, need 2)
-  atlas     Manager  reachable  active
-  boreas    Manager  reachable  active
-  cirrus    Manager  reachable  active
+cluster home
+  raft: leader=atlas quorum=yes voters=3/3 state_version=... (answered by atlas)
+nodes
+  atlas   up  active  instances=0 ...
+  boreas  up  active  instances=0 ...
+  cirrus  up  active  instances=0 ...
 ...
 all clear: no unhealthy instances or cluster faults
 ```
 
-{/* TODO verify: exact status output from a real 3-node cluster */}
+{/* TODO verify: exact live status output; the format comes from crates/cl-cli/src/status.rs, not a captured run */}
 
 In the web UI, **Nodes** shows three healthy nodes:
 
@@ -261,7 +264,7 @@ The drive `fast` exists in the cluster, and each node that maps it holds a copy.
 On each node, this directory should exist (it will be empty until a stack uses it). In the web UI, **Storage** shows the drive `fast` as replicated, with its resync interval (every 15 minutes by default).
 
 :::note Joined without --drive?
-If a node did not get the drive, add the mapping on **Settings**, **Storage**, **Drives**, or re-run the join with `--drive`. {/* TODO verify: whether the node's drive mapping can be added after the join from the UI */}
+The web UI cannot add a drive mapping to a node after it has joined (a node's drives are shown read-only on its page). The drive has to be declared when the node is initialised, so I re-run the join with `--drive fast=/srv/clouduler/fast`. A node already in the roster needs `--force` for that.
 :::
 
 ## 7. Deploy an app with a volume
