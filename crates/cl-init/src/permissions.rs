@@ -74,29 +74,47 @@ pub fn ensure(cfg: &ClusterConfig, data_dir: &Path, config_path: &Path) {
     fixup(data_dir, gid, 0o750);
 }
 
-/// Create the group if it does not already exist.
-fn ensure_group() -> anyhow::Result<()> {
+/// The commands that can create the system group, in the order they are
+/// tried. `groupadd` (shadow-utils) is on Arch, Debian, Raspberry Pi OS and the
+/// rest of the mainstream systemd distros; `-r` makes it a system group and
+/// `-f` turns "already exists" (a second daemon or a re-run of `init` racing
+/// this one) into success. `addgroup --system` is the Debian/busybox spelling
+/// for a machine where only that is on PATH.
+fn group_commands() -> [(&'static str, Vec<&'static str>); 2] {
+    [
+        ("groupadd", vec!["-r", "-f", GROUP]),
+        ("addgroup", vec!["--system", GROUP]),
+    ]
+}
+
+/// Create the group if it does not already exist. Idempotent. Called when the
+/// systemd unit is written (the unit says `Group=clouduler`, and systemd will
+/// not start a unit whose group is missing, so the daemon cannot be relied on
+/// to create it) and again on every daemon start by `ensure`.
+pub fn ensure_group() -> anyhow::Result<()> {
     if lookup_gid().is_some() {
         return Ok(());
     }
 
-    // `groupadd` ships with shadow-utils, which every mainstream
-    // systemd-based distro clouduler targets already has (systemd itself
-    // depends on it transitively via pam/login on all of them). Shelling out
-    // is simpler and more correct than reimplementing `/etc/group` edits by
-    // hand, and `-f` makes a second daemon (or a re-run of `clouduler init`)
-    // racing this one a no-op instead of an error.
-    let output = Command::new("groupadd")
-        .args(["-f", GROUP])
-        .output()
-        .map_err(|e| anyhow::anyhow!("running groupadd: {e}"))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "groupadd -f {GROUP} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    let mut last_error = String::new();
+    for (program, args) in group_commands() {
+        match Command::new(program).args(&args).output() {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                // A concurrent creator may have won the race.
+                if lookup_gid().is_some() {
+                    return Ok(());
+                }
+                last_error = format!(
+                    "{program} {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(e) => last_error = format!("running {program}: {e}"),
+        }
     }
-    Ok(())
+    anyhow::bail!("could not create the {GROUP} group: {last_error}")
 }
 
 fn lookup_gid() -> Option<Gid> {
@@ -144,5 +162,25 @@ fn fixup(path: &Path, gid: Gid, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
         warn!(path = %path.display(), error = %e, "could not set permissions");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_creation_is_a_system_group_and_idempotent() {
+        let [(prog, args), (fallback, fargs)] = group_commands();
+        assert_eq!(prog, "groupadd");
+        assert!(args.contains(&"-r") && args.contains(&"-f") && args.contains(&GROUP));
+        assert_eq!(fallback, "addgroup");
+        assert!(fargs.contains(&"--system") && fargs.contains(&GROUP));
+    }
+
+    #[test]
+    fn ensure_group_is_a_noop_when_the_group_exists() {
+        // root always exists as a group; the lookup short-circuits creation.
+        assert!(Group::from_name("root").unwrap().is_some());
     }
 }

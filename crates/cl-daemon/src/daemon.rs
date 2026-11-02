@@ -121,8 +121,7 @@ pub async fn run(
     // just a matter of file ownership rather than a second auth mechanism.
     // Run before the key files are loaded below so a freshly chowned key is
     // what validation and the rest of startup actually see.
-    // TODO: restore permissions check when init crate is available
-    // crate::init::permissions::ensure(&cfg, &data_dir, &config_path);
+    cl_init::permissions::ensure(&cfg, &data_dir, &config_path);
 
     // `ClusterKey` is deliberately not `Clone` (see its doc comment), so it is
     // wrapped in an `Arc` the moment it is loaded: every subsystem that needs

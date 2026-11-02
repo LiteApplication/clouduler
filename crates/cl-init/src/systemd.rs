@@ -128,6 +128,9 @@ pub fn install_binary(source: &Path, destination: &Path) -> Result<()> {
 
 /// Write the unit and reload systemd so it is visible.
 pub fn install(unit: &Unit) -> Result<PathBuf> {
+    // The unit has `Group=clouduler` and systemd refuses to start a service
+    // whose group does not exist.
+    crate::permissions::ensure_group()?;
     let path = unit_path();
     let dir = path.parent().expect("unit path has a directory");
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
