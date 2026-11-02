@@ -572,8 +572,9 @@ pub enum StackCommand {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
-    /// Restart every currently running instance of a stack in place, the
-    /// same as `docker restart` on each of its containers. Unlike
+    /// Restart every currently running instance of a stack in place,
+    /// keeping each on its current node (the container is rebuilt from
+    /// the same assignment and image pin). Unlike
     /// `stack stop`+`stack start`, this never changes desired state, so a
     /// stack that was stopped stays stopped.
     Restart {

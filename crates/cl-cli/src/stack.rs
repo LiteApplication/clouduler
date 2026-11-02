@@ -349,33 +349,65 @@ async fn set_all_desired(
     Ok(())
 }
 
-/// Unassigns every currently assigned instance of the stack rather than
-/// restarting it in place, so the scheduler's next placement pass picks each
-/// one up as freshly desired: it lands back on the same node if that node is
-/// still the best fit, or on another one if it no longer is (unreachable,
-/// drained, missing a needed drive or network). An in-place restart would
-/// instead retry forever on whatever node it already happened to be on, even
-/// one that can no longer host it.
+/// Path of the node-local endpoint that stops and removes an instance's
+/// container; the reconcile loop then rebuilds it.
+fn remove_container_path(instance: &impl std::fmt::Display) -> String {
+    format!("/api/instances/internal/{instance}/remove-container")
+}
+
+/// Restarts every running instance of the stack where it already is: the
+/// owning node removes the container and its reconcile loop builds a fresh one
+/// from the same assignment. Placement, volume primaries and `stack update`
+/// image pins are untouched (an `Unassign` would drop all three), and
+/// instances of a stopped stack are skipped so they stay stopped.
 pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let instances = crate::logs::resolve_target(&state, name)?;
+    let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {} to authenticate to the nodes",
+            cfg.secrets.key_file.display()
+        )
+    })?;
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .context("building the http client")?;
 
     let mut failed = Vec::new();
+    let mut restarted = 0;
     for assignment in &instances {
-        debug!(instance = %assignment.instance, "submitting Unassign");
-        let response = client
-            .submit(Request::Unassign {
-                instance: assignment.instance.clone(),
-            })
+        if assignment.desired != DesiredState::Running {
+            continue;
+        }
+        debug!(instance = %assignment.instance, node = %assignment.node, "removing container for rebuild");
+        let result: Result<()> = async {
+            let base = cl_update::peers::base_url(cfg, &assignment.node).ok_or_else(|| {
+                anyhow!(
+                    "node {} has no address on the internal network",
+                    assignment.node
+                )
+            })?;
+            let path = remove_container_path(&assignment.instance);
+            let resp = cl_update::internal_client::authenticate(
+                http.post(format!("{base}{path}")),
+                &key,
+                "POST",
+                &path,
+                b"",
+            )
+            .send()
             .await
-            .map_err(|e| anyhow!("{e}"));
-        match response {
-            Ok(response) if response.error.is_none() => {}
-            Ok(response) => {
-                eprintln!("{}: {}", assignment.instance, response.error.unwrap());
-                failed.push(assignment.instance.to_string());
+            .with_context(|| format!("asking {}", assignment.node))?;
+            if !resp.status().is_success() {
+                bail!("{} answered {}", assignment.node, resp.status());
             }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => restarted += 1,
             Err(e) => {
                 eprintln!("{}: {e}", assignment.instance);
                 failed.push(assignment.instance.to_string());
@@ -386,6 +418,19 @@ pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resu
     if !failed.is_empty() {
         bail!("failed to restart: {}", failed.join(", "));
     }
-    println!("restarted {} instance(s) of {name}", instances.len());
+    println!("restarted {restarted} instance(s) of {name}");
     Ok(())
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::remove_container_path;
+
+    #[test]
+    fn restart_removes_the_container_on_the_owning_node_instead_of_unassigning() {
+        assert_eq!(
+            remove_container_path(&"web.app.0"),
+            "/api/instances/internal/web.app.0/remove-container"
+        );
+    }
 }
