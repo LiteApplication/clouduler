@@ -5,6 +5,171 @@ sidebar_position: 6
 
 # DNS publishing
 
-One-line summary of dns publishing goes here.
+When you publish a service as `vault.example.com`, something has to turn that name into the address of one of your nodes. Clouduler can do this for you: it writes the A, AAAA and CNAME records into your Cloudflare zone and keeps them correct as services move, nodes fail and stacks are removed.
 
-TODO
+It only ever deletes records it created itself. Everything else in your zone is left alone.
+
+## How it works
+
+1. **Desired records.** From the replicated state, Clouduler works out which hostnames exist (stack routes and the dashboard) and which node addresses each should point at.
+   - On a subnetted network (internal or private) the record is an A or AAAA pointing at the node's IP on that network, with TTL 1 (automatic) and not proxied by Cloudflare.
+   - On a public network the records come from the node's public address block: `ipv4` becomes an A record, `ipv6` an AAAA record, `domain` a CNAME.
+2. **Which nodes.** The `proxy.dns_publish` mode decides which nodes are listed (see below).
+3. **Reconcile.** Every 60 seconds the leader compares the desired records with the live zone. It deletes records it owns that are no longer wanted, creates missing ones, then updates changed ones. A "Reconcile DNS" button runs it immediately.
+4. **Ownership tag.** For each name Clouduler also writes a TXT record at `_clouduler.<fqdn>` with content like `"cluster=homelab;key=..."`, and sets the record comment to `managed by clouduler (homelab)`. Only records carrying the tag are ever deleted.
+5. **Zone matching.** The longest configured zone that covers a hostname is used. A hostname outside every zone is skipped with the status `no cloudflare zone covers this hostname`.
+
+DNS publishing and certificate issuance share the same Cloudflare token and zone list. See [Proxy and TLS](/docs/features/proxy-and-tls).
+
+### Set it up
+
+<UiCli>
+<UiCli.Ui>
+
+1. Create a Cloudflare API token ([guide](/docs/guides/cloudflare-api-token)).
+2. Open **Settings > Network** and the **Cloudflare DNS** page. Switch on **Manage DNS with Cloudflare**, list your **DNS zones**, paste the **API token** and press **Save token**.
+3. On **Settings > Network > Networks**, set a **DNS domain** on each network that serves routes. Leave **Publish to DNS provider (Cloudflare)** on for the networks whose names you want in Cloudflare.
+4. Apply. Open **DNS** (`/dns`) to watch the records.
+
+<UiScreen scenario="lan-3-nodes" route="/dns" caption="DNS: certificates, DNS records and the TLS fingerprint." alt="DNS view" />
+
+The **DNS records** panel lists every record Clouduler manages with its state. **Reconcile DNS** runs a pass now. **Copy fingerprint** under **TLS fingerprint** copies the dashboard certificate fingerprint you need for `clouduler init --join`.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/network?page=cloudflare" caption="Settings, Network, Cloudflare DNS." alt="Cloudflare DNS settings" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+cloudflare:
+  zones:
+    - example.com
+
+networks:
+  wan:
+    type: public
+    domain: example.com
+  lan:
+    type: private
+    subnet: 192.168.1.0/24
+    domain: lan.example.com
+    publish_dns: true       # default; false keeps this network's names out of Cloudflare
+
+proxy:
+  dns_publish: all-nodes    # or owning-node
+```
+
+```bash
+clouduler config reload
+clouduler status           # "certificates & dns" section lists pending and failed records
+```
+
+The token has no CLI command; set it in the UI.
+
+</UiCli.Cli>
+</UiCli>
+
+## Publish modes
+
+`proxy.dns_publish` has two values. It has no control in the web UI, so edit `cluster.yaml` and run `clouduler config reload`.
+
+| Mode | Records published for a route | Trade-off |
+|---|---|---|
+| `all-nodes` (default) | Every node that serves the route gets an A or AAAA record, whether or not it runs the container. | Simple and resilient: any node can proxy the request to wherever the container is. More records, and traffic takes an extra hop through the cluster network. |
+| `owning-node` | Only the nodes that actually run the container. Stale records are deleted. | Clients connect straight to the node that runs the service. Requires the co-location rule below. |
+
+### The co-location constraint
+
+With `owning-node`, all services that share a proxy hostname must run on the **same node**, so there is one clear owner. The scheduler enforces this. If it cannot place a service on the same node as the others it shares a host with, placement fails with:
+
+```text
+must share a node with {keys} already placed on {anchors}
+```
+
+Pins, constraints, drives or capacity that rule out that node make the stack unplaceable. See [Placement](/docs/features/placement). Switch back to `all-nodes` if you want services with a shared hostname to spread across nodes.
+
+{/* TODO verify: what happens to existing records when switching modes mid-flight (stale-record deletion path was not traced). */}
+
+## Reconcile behaviour
+
+- **Prefers an existing match.** When a live record already matches a desired one, Clouduler keeps it instead of picking an arbitrary candidate. This avoids a bug where duplicate-content errors blocked deletes forever.
+- **Hand-made records are left alone.** An identical record you created yourself is noted as unclaimed and not touched. Records Clouduler does not own are never deleted.
+- **CNAME exclusivity.** A CNAME cannot share a name with other records. If both are wanted, the address record wins over the CNAME. Conflicting records that Clouduler owns are deleted.
+- **Order.** Deletes first, then creates, then updates. Benign duplicate errors from Cloudflare (codes 81057, 81044, 81058) are treated as "already there".
+- **Error attribution.** A failure that affects the whole zone (for example bad credentials) is shown against the zone. A per-record failure is shown against the affected hostnames only.
+- **The dashboard hostname** is published from the leader.
+- **Retries.** The Cloudflare client retries 429 and 5xx responses up to 5 times.
+
+## Names for clients without Cloudflare
+
+If you do not use Cloudflare, or set `publish_dns: false` on a network, nothing is written to a public zone. Your clients still need a way to resolve `vault.lan.example.com`. Options: your own DNS, `/etc/hosts`, or Clouduler's built-in cluster DNS server.
+
+<UiCli>
+<UiCli.Ui>
+
+Open **Settings > Network > Reverse proxy**. Switch on **Run a cluster DNS server**, tick the **DNS server networks** to listen on, and optionally change the **DNS server port** (default 53). Then point your router or clients at a node's address on one of those networks.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/network?page=proxy" caption="Settings, Network, Reverse proxy: the cluster DNS server fields." alt="Cluster DNS server settings" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+proxy:
+  dns_server:
+    enabled: true
+    networks: [lan]     # empty means every subnetted network the node has an address on
+    port: 53
+```
+
+</UiCli.Cli>
+</UiCli>
+
+The server answers according to the network the client is on. It returns `REFUSED` for unknown or unreachable clients. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
+
+## Options
+
+<OptionTable rows={[
+  {"key": "proxy.dns_publish", "type": "enum", "default": "all-nodes", "reload": "live", "description": "all-nodes: every node's address is published for every proxied hostname. owning-node: only the nodes running the containers are published, stale records are deleted and the scheduler co-locates containers that share a hostname.", "quirks": "No UI control; edit the file. See DNS publishing."},
+  {"key": "proxy.dns_server.enabled", "type": "bool", "default": "false", "reload": "live", "description": "Turns on the cluster DNS server that answers by the client's network.", "quirks": "Re-read every 5 seconds."},
+  {"key": "proxy.dns_server.networks", "type": "list of network names", "default": "[] (every subnetted network the node has an address on)", "reload": "live", "description": "Networks to listen on, at the node's address on each. A public network is served only when listed.", "quirks": "Errors: no network named NAME; NAME has no node address to listen on."},
+  {"key": "proxy.dns_server.port", "type": "port", "default": "53", "reload": "live", "description": "UDP and TCP port of the cluster DNS server. Below 1024 needs root.", "quirks": "Must not be 0."},
+  {"key": "networks.<name>.publish_dns", "type": "bool", "default": "true", "reload": "live", "description": "When false, the network's names are not written to Cloudflare. Only proxy.dns_server answers them.", "quirks": "false is allowed only on internal and private networks. A public network is always published."},
+  {"key": "cloudflare", "type": "object", "default": "absent", "reload": "live", "description": "Enables Cloudflare DNS management. The API token is a sealed cluster secret set from the UI.", "quirks": "When present, zones must be non-empty."},
+  {"key": "cloudflare.zones", "type": "list of zone names", "reload": "live", "description": "Zones Clouduler may write records into. The longest matching zone wins.", "quirks": "Required when cloudflare is set. Every network domain and the dashboard hostname must sit inside one."},
+]} />
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| Record never appears | Hostname outside every `cloudflare.zones` entry, or the network has no `domain`. | Check **DNS** status for `no cloudflare zone covers this hostname`. Add the zone. |
+| `cloudflare auth failed: ...` | Bad or under-privileged token. The token is not verified when saved. | Rotate the token under **Settings > Network > Cloudflare DNS**. It needs Zone, DNS and Edit permissions. |
+| `zone X not found` | The zone name does not exist in the account behind the token. | Fix the zone list or token. |
+| `cloudflare api error CODE: MESSAGE` | Cloudflare rejected a record. | Read the code; several failures are summarised as `N records failed to apply: ...`. |
+| `this node holds no cluster key` when saving a token | The node you are using has no cluster key. | Use a node that holds the key. |
+| Old records remain | They were not created by Clouduler, or the tag is missing. | Delete them in Cloudflare yourself. |
+| Placement fails with `must share a node with ...` | `owning-node` co-location. | Free the anchor node or switch to `all-nodes`. |
+| A name resolves to the wrong place | Another record (CNAME or hand-made) conflicts. | Remove or fix the foreign record, then press **Reconcile DNS**. |
+
+## Quirks and gotchas
+
+<Quirk title="Names on private networks can end up in public DNS" severity="warn">
+Internal and private networks publish to Cloudflare by default (`publish_dns` defaults to true), so `vault.lan.example.com` becomes a public record pointing at a 192.168.x.x address. That is harmless for access (the proxy gates it, see [Proxy and TLS](/docs/features/proxy-and-tls)) but reveals your naming. Set `publish_dns: false` on those networks to keep them out. A public network cannot be set to false.
+</Quirk>
+
+<Quirk title="Only the leader publishes" severity="info">
+DNS and certificate work runs on the raft leader. After a leader change, expect a short pause before the next pass.
+</Quirk>
+
+<Quirk title="Switching dns_publish mode" severity="warn">
+Switching to `owning-node` changes placement rules and deletes records for nodes that no longer own a service. Change it while nothing is mid-failover.
+</Quirk>
+
+## Related
+
+- [Proxy and TLS](/docs/features/proxy-and-tls)
+- [Networking](/docs/features/networking)
+- [Placement](/docs/features/placement)
+- [Cloudflare API token](/docs/guides/cloudflare-api-token)
+- [cluster.yaml](/docs/reference/cluster-yaml)

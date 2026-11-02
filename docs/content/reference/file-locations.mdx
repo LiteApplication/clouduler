@@ -5,6 +5,126 @@ sidebar_position: 6
 
 # File locations
 
-One-line summary of file locations goes here.
+This page lists every file and directory Clouduler creates on a node, who creates it, and what to back up. All paths are defaults; the config keys that move them are in the table below.
 
-TODO
+## Files at a glance
+
+| Path | Created by | What it is | Back up? |
+|---|---|---|---|
+| `/etc/clouduler/cluster.yaml` | `clouduler init`; later rewritten by the daemon on every replicated config change | The cluster config. Path set by `--config` or `CLOUDULER_CONFIG`. | Optional. The cluster holds the authoritative copy, and [git backup](/docs/features/git-backup) can mirror it. Keep your own annotated copy; saves strip comments. |
+| `/etc/clouduler/secrets.key` | The first node's daemon on first start; joining nodes get it from `init` | The cluster key (base64), which opens every stored secret. Mode `0640`. | **Yes, critical.** Without it every secret is unrecoverable. |
+| `/etc/clouduler/node.key` | `init` (joining node) or the daemon | This node's own keypair, used to receive the wrapped cluster key. Mode `0640`. | Not required; it can be regenerated. |
+| `/var/lib/clouduler/` | `init` creates it; the daemon fills it | Node data dir (`data_dir`). Holds `raft/raft.redb` (raft store), `self-update/artifact` and `acme-account.json` (certificate account). | Not usually needed; the other nodes hold the state. {/* TODO verify: whether backing up raft.redb is useful or harmful, and full contents of the data dir. */} |
+| `/srv/clouduler/<drive>` | `init` (default answer in the drive prompt) | A drive's directory: the real files of your volumes. The path is yours (`nodes.<name>.drives`). | **Yes.** This is your data. See [Backups](/docs/features/backups). |
+| `/usr/bin/clouduler` | `init` copies the binary it runs | The binary the service runs. | No. |
+| `/usr/bin/clouduler.old` | Self-update / reinstall (hard link of the previous build) | Rollback copy. | No. |
+| `/usr/local/bin/clouduler` | You (the install step in the quick start) | Your own copy, usually first on `PATH`. | No. |
+| `/etc/systemd/system/clouduler.service` | `init` | The service unit. | No. |
+| `/etc/systemd/system/clouduler.socket` | `init`, only when `proxy.enabled` | Holds ports 80 and 443 across daemon restarts. Removed by `init` when the proxy is off. | No. |
+| `/etc/docker/daemon.json` | `init`, only with `--docker-data-dir` | Sets `"data-root"`. Existing keys are kept. Docker must be restarted by hand. | If you customised it. |
+
+Everything else lives in the replicated cluster state: stacks, configs, sealed secrets, certificates, sessions, API key hashes, alert settings. It is replicated to every manager, not stored as loose files. Git deploy keys, the Cloudflare token and the OIDC secrets are sealed secrets in that state.
+
+<Quirk title="Two copies of the binary" severity="warn">
+`init` copies the binary you ran to `/usr/bin/clouduler` and leaves your copy where it was. Upgrading by hand means replacing both, otherwise the `clouduler` command you type is older than the service. `which -a clouduler` shows both. The in-product update flow ([Updates](/docs/features/updates)) replaces the service binary for you.
+</Quirk>
+
+## Moving things
+
+| What | How | Needs restart |
+|---|---|---|
+| Config file | `--config` or `CLOUDULER_CONFIG` | Yes |
+| Cluster data dir | `data_dir`, or per node `nodes.<name>.data_dir`, or `--data-dir` / `CLOUDULER_DATA` for a second daemon | Yes. Clouduler does not move existing data. |
+| Cluster key | `secrets.key_file` | Yes |
+| Node key | `secrets.node_key_file` | Yes |
+| Drive directories | `nodes.<name>.drives` | No, but move the files yourself first |
+| Docker data root | `--docker-data-dir` at `init`, or edit `daemon.json` yourself | Docker restart |
+
+See [cluster.yaml](/docs/reference/cluster-yaml) for each key.
+
+## The systemd unit
+
+`init` writes this (values filled in from your node name and config path):
+
+```ini title="/etc/systemd/system/clouduler.service"
+[Unit]
+Description=Clouduler node daemon
+Documentation=https://github.com/LiteApplication/clouduler
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+Group=clouduler
+ExecStart=/usr/bin/clouduler --config /etc/clouduler/cluster.yaml daemon --node atlas
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=78
+TimeoutStartSec=300
+TimeoutStopSec=30
+WatchdogSec=120
+KillMode=mixed
+SyslogIdentifier=clouduler
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini title="/etc/systemd/system/clouduler.socket"
+[Unit]
+Description=Clouduler reverse proxy sockets
+Documentation=https://github.com/LiteApplication/clouduler
+
+[Socket]
+ListenStream=0.0.0.0:80
+ListenStream=0.0.0.0:443
+Backlog=1024
+
+[Install]
+WantedBy=sockets.target
+```
+
+Notes:
+
+- The daemon runs as root (the unit sets no `User=`).
+- Docker is `Wants=`, not `Requires=`, so the daemon still starts when Docker is broken. At boot it waits up to 120 seconds for Docker.
+- `ExecReload` sends SIGHUP: the node re-reads the cluster key file and re-syncs its config file **from** the cluster. It does not apply a hand edit.
+- Exit status 78 is not restarted. A node that was removed from the cluster while it was down wipes its own `secrets.key`, `node.key` and `raft/` on next boot, then exits 78.
+- Logs go to the journal: `journalctl -u clouduler -f`.
+
+<Quirk title="The unit names a group that nothing creates" severity="danger">
+The unit has `Group=clouduler`, but the code that would create that group is disabled in the daemon, and `init` does not call it either. On a machine without the group, systemd may refuse to start the service (`Failed to determine group credentials`, status 216/GROUP). If `init --yes` fails at `enable --now`, create it with `sudo groupadd --system clouduler` and start the unit again. {/* TODO verify: not reproduced on a clean machine; check the current release. */}
+</Quirk>
+
+## What to back up
+
+1. **`/etc/clouduler/secrets.key`.** Copy it somewhere safe and offline. It is the one file you cannot rebuild. If you lose it, secrets sealed with it (stack secrets, OIDC and Cloudflare tokens, git deploy keys) are gone and you must re-enter them.
+2. **Your drives**, the directories under `nodes.<name>.drives`. Replicated drives already have copies on each implementing node, but copies are not backups: a deleted file is deleted everywhere. Use [Backups](/docs/features/backups) (restic) to keep history.
+3. **Your annotated `cluster.yaml`**, in git or similar. Or turn on [git backup](/docs/features/git-backup) to mirror config, stacks, configs and re-encrypted secrets to a repository.
+
+Everything else rebuilds from the other managers when you add a replacement node.
+
+## Cleaning a node
+
+There is no uninstall command. After removing the node from the cluster (**Nodes > the node > Retire this node**, or `clouduler node remove <name>`):
+
+```bash
+sudo systemctl disable --now clouduler.service clouduler.socket
+sudo rm -f /etc/systemd/system/clouduler.service /etc/systemd/system/clouduler.socket
+sudo systemctl daemon-reload
+sudo rm -f /usr/bin/clouduler /usr/bin/clouduler.old /usr/local/bin/clouduler
+sudo rm -rf /etc/clouduler /var/lib/clouduler
+```
+
+Keep a copy of `secrets.key` first if the machine might rejoin or you still need the data. If `init` changed Docker's `data-root`, revert `/etc/docker/daemon.json` and restart Docker. Your drive directories under `/srv/clouduler` are not removed; delete them yourself if you no longer want the data.
+
+## Related
+
+- [cluster.yaml](/docs/reference/cluster-yaml)
+- [Ports and firewall](/docs/reference/ports-and-firewall)
+- [Backups](/docs/features/backups)
+- [Node lifecycle](/docs/features/node-lifecycle)
+- [Access and login](/docs/features/access-and-login) for what the cluster key protects

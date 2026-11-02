@@ -5,6 +5,199 @@ sidebar_position: 5
 
 # Ports and firewall
 
-One-line summary of ports and firewall goes here.
+Clouduler does not open ports on your host firewall. If you run `ufw`, `firewalld` or `nftables`, you add the rules yourself. This page lists every port, who uses it, and which ones must be open **between your nodes** versus **to the internet**. It also describes the iptables chains Clouduler manages for container traffic, so you know what not to touch.
 
-TODO
+## The short version
+
+- **Between nodes (internal network only):** TCP 7373, 7374, 7375 and UDP 4789. Never expose these to the internet. Put the internal network on a VPN (WireGuard, Tailscale, Headscale) or an isolated VLAN.
+- **To your users:** TCP 80 and 443 for published apps, and 8443 for the dashboard (can be limited to admin networks).
+- **Only if you use the feature:** TCP 2049 (served drives), port 53 (cluster DNS server), a UDP port for each WireGuard tunnel, and the ports of any raw `expose` entries.
+- **Outbound:** HTTPS to Let's Encrypt, Cloudflare, GitHub (self-update) and your image registries.
+
+## Port table
+
+| Port | Protocol | What uses it | Bound on | Who connects | Open to |
+|---|---|---|---|---|---|
+| 7373 (`rpc_port`) | TCP | Raft, forwarded writes, CLI traffic | The node's internal IP | Other nodes, and the CLI on a manager | Other nodes only |
+| 7374 (`rpc_port` + 1) | TCP | Drive transport: volume sync, served-drive handoff, folder import | Internal IP | Other nodes | Other nodes only |
+| 7375 (`rpc_port` + 2) | TCP | Relay: connections to containers that run on another node | Internal IP | Other nodes | Other nodes only |
+| 4789 | UDP | VXLAN overlay for stack networks | Internal IP | Other nodes | Other nodes only |
+| 8443 (`web.port`) | TCP, HTTPS | Dashboard and API | All addresses | Admin browsers, `clouduler init --join`, MCP clients | Your admin networks |
+| 8444 (`web.backend_port`) | TCP, HTTP | Proxy to dashboard | 127.0.0.1 only | The local proxy | Nobody (loopback) |
+| 80 (`proxy.http_port`) | TCP, HTTP | Reverse proxy: redirects, ACME HTTP-01, `tls: false` routes | All addresses | Clients of published hostnames | Clients, and the internet for public apps |
+| 443 (`proxy.https_port`) | TCP, HTTPS | Reverse proxy | All addresses | Clients of published hostnames | Clients, and the internet for public apps |
+| 2049 | TCP | NFSv4, served drives only | Exported to the internal subnet | Nodes that mount a served drive | Other nodes only |
+| 53 (`proxy.dns_server.port`) | UDP and TCP | Cluster DNS server, only when `proxy.dns_server.enabled` | Node address on each listed network | LAN clients | Your LAN |
+| Your choice, 51820 in examples | UDP | WireGuard tunnel, `wireguard` networks only | The `wg-<network>` interface | Remote peers | The tunnel's peers |
+| Your choice | TCP or UDP | `x-clouduler.expose` published ports | `0.0.0.0` on every node | Whoever you intend | See the warning below |
+
+`rpc_port` is configurable per node. A node with `rpc_port: 7373` occupies 7373 to 7375, so those three must be free. The VXLAN port, the relay offset and the address pools are fixed constants and cannot be changed.
+
+<Quirk title="expose binds on every node and every address" severity="warn">
+A raw `x-clouduler.expose` port is bound on `0.0.0.0` on **every** node, whatever network the entry names. The network only controls where the container is placed. Treat an `expose` port as open on every node and firewall it yourself if it should not be public. Docker `ports:` publishes behave the same way and are not managed by Clouduler.
+</Quirk>
+
+<Quirk title="Port 80 or 443 already taken" severity="info">
+If another program holds 80 or 443, the proxy cannot listen, but the daemon keeps running. Check with `ss -ltnp | grep -E ':(80|443) '` and `journalctl -u clouduler`. {/* TODO verify: reproduced behaviour. */}
+</Quirk>
+
+<Quirk title="Raft and drive traffic is authenticated but not encrypted" severity="warn">
+Ports 7373 to 7375 require both ends to prove they hold the cluster key, but the traffic after the handshake is plain TCP. This is why the internal network must be a network you trust, or a VPN.
+</Quirk>
+
+## Open the ports
+
+Replace the subnets with yours. The examples assume the internal network is `10.10.0.0/24`, your LAN is `192.168.1.0/24`, and SSH stays open.
+
+<UiCli>
+<UiCli.Ui>
+
+The web UI cannot change your host firewall. Use the tabs in the CLI / config view. To check which ports your own cluster uses, open **Settings > Network** (`web.port`, proxy ports, DNS server port) and **Nodes** (each node's **Cluster RPC port**).
+
+<UiScreen scenario="lan-3-nodes" route="/settings/network?page=proxy" caption="Settings, Network, Reverse proxy: the HTTP and HTTPS ports." alt="Proxy port settings" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+<DistroTabs>
+<DistroTabs.Arch>
+
+Arch has no firewall by default. With `nftables`:
+
+```bash title="/etc/nftables.conf (excerpt)"
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    ct state established,related accept
+    iif lo accept
+    tcp dport 22 accept
+
+    # Between nodes, internal network only
+    ip saddr 10.10.0.0/24 tcp dport { 7373, 7374, 7375 } accept
+    ip saddr 10.10.0.0/24 udp dport 4789 accept
+    # ip saddr 10.10.0.0/24 tcp dport 2049 accept   # served drives only
+
+    # Users
+    tcp dport { 80, 443 } accept
+    ip saddr 192.168.1.0/24 tcp dport 8443 accept
+
+    # Optional: cluster DNS server for the LAN
+    # ip saddr 192.168.1.0/24 udp dport 53 accept
+    # ip saddr 192.168.1.0/24 tcp dport 53 accept
+  }
+}
+```
+
+```bash
+sudo systemctl enable --now nftables
+```
+
+</DistroTabs.Arch>
+<DistroTabs.Debian>
+
+```bash
+sudo ufw default deny incoming
+sudo ufw allow OpenSSH
+
+# Between nodes, internal network only
+sudo ufw allow from 10.10.0.0/24 to any port 7373:7375 proto tcp
+sudo ufw allow from 10.10.0.0/24 to any port 4789 proto udp
+# sudo ufw allow from 10.10.0.0/24 to any port 2049 proto tcp   # served drives only
+
+# Users
+sudo ufw allow 80,443/tcp
+sudo ufw allow from 192.168.1.0/24 to any port 8443 proto tcp
+
+# Optional: cluster DNS server for the LAN
+# sudo ufw allow from 192.168.1.0/24 to any port 53
+
+sudo ufw enable
+```
+
+</DistroTabs.Debian>
+<DistroTabs.Raspbian>
+
+```bash
+sudo apt install ufw
+sudo ufw default deny incoming
+sudo ufw allow OpenSSH
+
+sudo ufw allow from 10.10.0.0/24 to any port 7373:7375 proto tcp
+sudo ufw allow from 10.10.0.0/24 to any port 4789 proto udp
+sudo ufw allow 80,443/tcp
+sudo ufw allow from 192.168.1.0/24 to any port 8443 proto tcp
+
+sudo ufw enable
+```
+
+</DistroTabs.Raspbian>
+</DistroTabs>
+
+With `firewalld`:
+
+```bash
+sudo firewall-cmd --permanent --new-zone=cluster
+sudo firewall-cmd --permanent --zone=cluster --add-source=10.10.0.0/24
+sudo firewall-cmd --permanent --zone=cluster --add-port=7373-7375/tcp
+sudo firewall-cmd --permanent --zone=cluster --add-port=4789/udp
+sudo firewall-cmd --permanent --zone=public --add-service=http --add-service=https
+sudo firewall-cmd --permanent --zone=public --add-port=8443/tcp
+sudo firewall-cmd --reload
+```
+
+</UiCli.Cli>
+</UiCli>
+
+<Quirk title="Docker bypasses ufw for published ports" severity="warn">
+Docker writes its own iptables rules, so a plain `docker -p` publish is reachable even if `ufw` says deny. Clouduler's proxy ports are bound by the daemon itself and obey your firewall, but anything you publish with `ports:` in a stack does not. {/* TODO verify: ufw interaction with Clouduler's own chains on a live host. */}
+</Quirk>
+
+<Quirk title="Router port forwarding for public apps" severity="info">
+For apps reachable from the internet, forward 80 and 443 on your router to your nodes, and list the forwarded ports in the node's `open_ports` on the public network. A raw `expose` port on a `public` network is only scheduled on a node whose router forwards that port. See [Networking](/docs/features/networking).
+</Quirk>
+
+## Outbound access
+
+Each node needs outbound TCP 443 to: Let's Encrypt (when `proxy.acme.enabled`), the Cloudflare API (when `cloudflare` is set), GitHub (when `self_update` is set), and your container registries. Git backup uses SSH to your repository host. {/* TODO verify: outbound port for git backup and the default registries. */}
+
+## The CLDR chains Clouduler manages
+
+Clouduler keeps its own iptables chains for container traffic. They are applied with `iptables -w` and replaced atomically, and the jumps into them are checked every 10 seconds so they survive a Docker restart. Only chains with the `CLDR-` prefix belong to Clouduler. Your own rules are not touched, but **a hand edit to a `CLDR-` chain is overwritten within about 10 seconds**.
+
+| Chain | Table and hook | What it does |
+|---|---|---|
+| `CLDR-IN` | filter, `INPUT` position 1 | Stops containers from reaching the host's own listeners (dashboard API, raft, drive and relay ports). For packets from the overlay, egress and nat address pools it accepts: established and related traffic, DNS (port 53) to the overlay pool, the proxy's HTTP and HTTPS ports, every `x-clouduler.expose` port published on this node, and ICMP echo. Everything else is dropped. Docker `-p` publishes are not affected. |
+| `CLDR-OVL-SNAT` | nat, `POSTROUTING` | Masquerades overlay traffic going to another node, only for TCP to the proxy ports and ICMP echo, so the remote proxy sees a node address and the [network gate](/docs/features/proxy-and-tls) passes. |
+| `CLDR-NAT-<bridge>` | nat, `POSTROUTING` | Masquerades an egress or nat network's bridge out of its host interface. |
+| `CLDR-FWD-<bridge>` | filter, `DOCKER-USER` (else `FORWARD`) | Egress kill-switch: accept bridge to interface, drop the rest from the bridge. |
+| `CLDR-WGIN-<iface>` | filter and nat | WireGuard ingress: default deny for new packets from the tunnel, accept only the opened ports. Ports that differ from their target get a DNAT to the node's internal address. |
+| `CLDR-ALLOW` | filter, `DOCKER-USER` first | Per-stack `allowed` enforcement for routed packets. Exists only when some stack has an `allowed` list. |
+| `CLDR-ALLOW-NAT` | nat, `PREROUTING` first | Redirects proxy traffic from a restricted stack to another node to this node's own proxy, so the proxy can tell the stack apart by source address. |
+
+What this means for you:
+
+- A container can reach the proxy (80/443) on any node, DNS on its overlay gateway, and `expose` ports on any node. It cannot reach 8443, 7373 to 7375 or any other host listener.
+- A container reaching another node's address is only NATed for TCP to the proxy ports and ICMP echo. Its other traffic there is dropped.
+- You can inspect the rules with `sudo iptables -S CLDR-IN` and `sudo iptables -t nat -S CLDR-OVL-SNAT`. Do not edit them.
+
+## Quirks and gotchas
+
+<Quirk title="Node-to-node ports must work in both directions" severity="warn">
+Raft, drive transfers, the relay and VXLAN all connect in both directions between every pair of nodes. A rule that only allows one direction shows up as a node that is "unreachable" or a stack network that drops traffic.
+</Quirk>
+
+<Quirk title="Overlay needs ethtool" severity="info">
+Containers on a stack's own overlay network silently drop real request and response traffic when `ethtool` is not installed on the node. `clouduler init` warns about it.
+</Quirk>
+
+<Quirk title="MTU on the overlay" severity="info">
+VXLAN adds 50 bytes of overhead. Clouduler derives the overlay MTU from the underlay interface (1500 if the kernel reports none), so a VPN underlay with a smaller MTU is accounted for. {/* TODO verify: overlay MTU behaviour when the underlay is a tunnel. */}
+</Quirk>
+
+## Related
+
+- [Networking](/docs/features/networking)
+- [Proxy and TLS](/docs/features/proxy-and-tls)
+- [DNS publishing](/docs/features/dns-publishing)
+- [File locations](/docs/reference/file-locations)
+- [cluster.yaml](/docs/reference/cluster-yaml)

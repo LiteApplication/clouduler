@@ -5,6 +5,347 @@ sidebar_position: 17
 
 # Access and login
 
-One-line summary of access and login goes here.
+There are four separate ways someone or something gets into Clouduler, and they are easy to mix up:
 
-TODO
+| What | Who it is for | Protects |
+|---|---|---|
+| **Dashboard sign-in** (OIDC or API key) | People running the cluster | The web UI and the API |
+| **API keys** | Scripts, CI and the first login | The API, as an admin |
+| **Service login** (`proxy.auth`) | Visitors of your apps | Apps that have no login of their own |
+| **AI client access** (MCP OAuth) | Claude Code, Cursor and similar | The `/mcp` endpoint |
+
+There are no local usernames or passwords. You sign in with an identity provider (OIDC, for example Authentik or Keycloak) or with an API key.
+
+## How it works
+
+- Every successful login becomes a session stored in the cluster state. The browser only holds an opaque `cl_session` cookie (HttpOnly, Secure, SameSite=Lax). A session lasts `auth.session_ttl` (12 hours by default) from login and **does not slide**: an active admin is asked to sign in again after 12 hours.
+- Two roles. **admin** can change anything. **viewer** can read; secret values are never shown to anyone. API keys are always admin. An OIDC user is admin only when a claim in their ID token (default `groups`) contains the configured `admin_value`. Everyone else the provider lets in is a viewer.
+- Clouduler has no allow list. Who may sign in is decided at your identity provider.
+- A role is fixed when the session is created. A user demoted at the provider keeps admin until the session expires.
+
+## Sign in to the dashboard
+
+<UiCli>
+<UiCli.Ui>
+
+The login screen offers two ways in:
+
+- **Sign in with your identity provider** (OIDC). It always shows, even when OIDC is not configured; without OIDC it leads to a raw error page `oidc is not configured`.
+- Under the divider **or use an API key**: paste a key (placeholder `clk_...`) into **API key** and press **Sign in with API key**. A wrong key shows the banner **That key was not accepted**.
+
+Sign out with the logout icon at the bottom of the side navigation (on phones: **More > Sign out**). Signing out ends only the Clouduler session; your identity provider session stays, so the next sign-in may not ask for a password.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/access" caption="Settings, API keys and AI clients: who you are, keys and connected tools." alt="Access settings" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+The CLI has no login. It talks to the local node using the cluster key file, never an API key. To call the API yourself:
+
+```bash
+# Trade the key for a session cookie (what the browser does)
+curl -sS -c cl.jar -H 'Content-Type: application/json' \
+  -d '{"key":"clk_EXAMPLEid12_EXAMPLEsecretEXAMPLEsecretEXAMPLE"}' \
+  https://cloud.int.example.com:8443/auth/login
+
+# Or send the key on every call
+curl -sS -H 'Authorization: Bearer clk_EXAMPLEid12_EXAMPLEsecretEXAMPLEsecretEXAMPLE' \
+  https://cloud.int.example.com:8443/api/status
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## API keys
+
+A key looks like `clk_` + 12 characters + `_` + 32 characters. Keys are shown **once**, have no scopes and no expiry, and are always admin. Deleting the key is the only way to revoke it. Only a hash is stored.
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings > API keys and AI clients** (`/settings/access`).
+2. Press **Create API key** in the header. Give it a **Name** (for example `ci-deploy`). The **Create key** button stays disabled until you type one.
+3. Copy the key from **Copy this key now**. It is shown once and cannot be recovered.
+4. To revoke, press the trash button `Delete <name>` and confirm. "Anything using this key stops working."
+
+The panel **You** shows your username and whether you are `admin` or `read-only`.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+curl -sS -X POST -H 'Authorization: Bearer clk_...' -H 'Content-Type: application/json' \
+  -d '{"name":"ci-deploy"}' https://cloud.int.example.com:8443/api/keys
+# -> {"id":"...","key":"clk_..."}   (the key is returned once)
+```
+
+</UiCli.Cli>
+</UiCli>
+
+<Quirk title="The first-run key" severity="warn">
+On the first launch of a new cluster the leader mints one key named `bootstrap` and logs it once, in a banner: "no api keys exist yet: generated one for initial access ... save it now, it will not be shown again". Read it with `journalctl -u clouduler.service` on the leader. Use it to sign in, set up OIDC, then create named keys.
+</Quirk>
+
+<Quirk title="Join keys are admin keys" severity="warn">
+The **Add node** flow mints a key named `join <name>` for every join command and never removes it. Delete these keys after the node has joined.
+</Quirk>
+
+## Set up OIDC sign-in
+
+The setup is the same for any provider. Provider-specific walkthroughs: [Authentik](/docs/guides/authentik), [Keycloak](/docs/guides/keycloak).
+
+<UiCli>
+<UiCli.Ui>
+
+1. At your identity provider create an OpenID Connect application (authorization code flow). Register this **redirect URI**, exactly: `https://<dashboard address>/auth/oidc/callback`, for example `https://cloud.int.example.com/auth/oidc/callback`. The dashboard address is `web.address` qualified with the domain of `web.network`. The **Sign in with OIDC** help text in the UI shows it.
+2. Open **Settings > Sign-in and backup** (`/settings/security`), panel **Sign-in**. Switch on **Sign in with OIDC**.
+3. Fill in: **Issuer URL** (must start with `https://`), **Client ID**, **Client secret** (write-only; **Save secret** or **Rotate secret**), **Username claim** (for example `preferred_username`), **Admin group claim** (for example `groups`) and **Admin group value** (blank means nobody gets admin).
+4. Apply. Leave **Allow API keys** on until you have confirmed OIDC works.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/security" caption="Settings, Sign-in and backup." alt="Sign-in settings" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+auth:
+  api_keys: true            # keep true until OIDC is known to work
+  session_ttl: 12h
+  oidc:
+    issuer: https://id.example.com/application/o/clouduler/   # exact issuer from discovery
+    client_id: clouduler
+    scopes: [openid, profile, email, groups]   # add groups if your provider releases it by scope
+    admin_claim: groups
+    admin_value: clouduler-admins              # blank or absent means nobody is admin via OIDC
+    username_claim: preferred_username
+```
+
+The client secret is not in the file. Set it in the UI, or:
+
+```bash
+curl -sS -X PUT -H 'Authorization: Bearer clk_...' -H 'Content-Type: application/json' \
+  -d '{"client_secret":"<paste from your provider>"}' \
+  https://cloud.int.example.com:8443/api/oidc/client-secret
+# 204 on success; GET on the same path returns {"configured":true}
+```
+
+Then `clouduler config reload`.
+
+</UiCli.Cli>
+</UiCli>
+
+What your provider must give Clouduler:
+
+| Item | Required value |
+|---|---|
+| Flow | OpenID Connect, authorization code, PKCE S256 (always sent). A confidential client with a secret is recommended; a public client also works. |
+| Redirect URI | `https://<dashboard fqdn>/auth/oidc/callback`, exactly one. |
+| Scopes | `openid profile email` by default; must include `openid`. |
+| ID token claims | `sub`, your username claim, and the group claim named in `admin_claim` (string or array). Claims are read from the **ID token only**; Clouduler never calls the userinfo endpoint. |
+| Issuer | The exact `issuer` from the discovery document at `<issuer>/.well-known/openid-configuration`. Trailing slashes matter. |
+| Who may log in | Restrict at the provider. Anyone it lets in gets at least `viewer`. |
+
+<Quirk title="Groups are not in the default scopes" severity="warn">
+`auth.oidc.scopes` defaults to `openid profile email`, but `admin_claim` defaults to `groups`. If your provider only releases groups through a `groups` scope, nobody becomes admin and nothing warns you. Add `groups` to the scopes (file only; there is no UI control).
+</Quirk>
+
+<Quirk title="No safety net for sign-in edits" severity="danger">
+Edits to `auth` apply at once and are not covered by the rollback timer. A wrong issuer takes effect immediately. Keep an API key.
+</Quirk>
+
+<Quirk title="auth.api_keys false is not enforced" severity="warn">
+The validator refuses `api_keys: false` without OIDC, but nothing reads the flag at runtime today: keys keep working. Do not rely on turning it off to lock keys out. Delete the keys instead.
+</Quirk>
+
+<Quirk title="Dashboard sign-in uses https only, and one node's memory" severity="info">
+The `cl_session` cookie is always `Secure`. A pending OIDC login is kept in memory on the node that started it; if the callback arrives at a different node, or the daemon restarts in between, you see `unknown or expired login state`. Just start again. {/* TODO verify: how the dashboard hostname resolves across several nodes, and whether the callback can reach another node. */}
+</Quirk>
+
+<Quirk title="Changed the dashboard address?" severity="info">
+The redirect URI is built when OIDC is set up. After changing `web.address` or the web network's domain, update the redirect URI at your provider and restart the daemon to be safe. {/* TODO verify by test. */}
+</Quirk>
+
+## Service login: protect apps that have no login
+
+The service login (`proxy.auth`) is a second, separate OIDC login that guards your **apps**, not the dashboard. You turn it on for a route with the `authenticated` middleware. Use it in front of an app that has no authentication of its own.
+
+What it does, exactly:
+
+1. A visitor opens a protected route and has no valid `cl_proxy_auth` cookie for that host. The proxy redirects (302) their browser to the portal, `https://login.<network domain>/login?callback=...`. A request that is not a page navigation (a POST, or one that does not accept HTML) gets `401 login required` instead.
+2. The portal shows a sign-in page with a button, then sends the visitor to your identity provider. If the browser already has a portal session, the page is skipped.
+3. After login the portal gives the browser a one-time token (valid 60 seconds) for the app's host. The app host spends it and sets its own `cl_proxy_auth` cookie, then returns the visitor to the page they asked for.
+4. On every later request the proxy checks that cookie and the route's group rule, then forwards the request to the app with the gate's own cookies removed.
+5. A signed-in visitor outside the allowed groups sees a **No access** page: "`<username>` is not in a group allowed to open this page."
+
+**What it does not do.** Clouduler's proxy is a login wall, not header-based forward-auth. It does not call an endpoint per request and it does not tell the app who the visitor is. No `X-Remote-User`-style header is sent; only `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` are added. The app either trusts that everyone reaching it is logged in or does its own check. The UI hint for **Username claim** that says the name is "passed to apps" is wrong.
+
+Policy on the route:
+
+- `authenticated` (bare): any signed-in visitor.
+- `authenticated: {groups: [family, admins]}`: needs at least one listed group, matched exactly against the groups claim.
+- `allow_internal` (default `true`): a request whose TCP peer is inside one of the cluster's internal subnets (containers and nodes) skips the login. Set `allow_internal: false` to force login for in-cluster callers too.
+
+<UiCli>
+<UiCli.Ui>
+
+1. At your provider create a **separate** OIDC client for the portal. Register one redirect URI per network you offer the login on: `https://<portal host>/callback`, for example `https://login.lan.example.com/callback`. The page lists them for you.
+2. Open **Settings > Sign-in and backup**, panel **Service login**. Switch on **Enable service login**.
+3. Pick **Networks** (at least one, each with a DNS domain), set **Portal host** (a label such as `login`, qualified with each network's domain), **Issuer URL**, **Client ID** and **Client secret**.
+4. Optionally set **Scopes** (default `openid profile email groups`), **Groups claim**, **Username claim**, **Stay signed in for**, **Portal title**, **Palette** (Grape, Sunset, Ocean, Forest) and **Accent colour**.
+5. Apply. Changes to `proxy` arm the rollback timer; confirm once you can still reach the dashboard.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+proxy:
+  auth:
+    host: login                              # becomes login.<network domain>
+    networks: [lan]                          # networks that offer the login
+    issuer: https://id.example.com/application/o/apps/
+    client_id: clouduler-apps
+    scopes: [openid, profile, email, groups]
+    groups_claim: groups
+    session_ttl: 12h
+    title: Sign in to continue
+    palette: grape                           # grape | sunset | ocean | forest
+    # remember_ip: [lan]
+```
+
+Secret: `PUT /api/proxy-auth/client-secret` with `{"client_secret": "..."}`. Protect a route in the stack file:
+
+```yaml title="stack.yaml"
+services:
+  grafana:
+    x-clouduler:
+      proxy:
+        - host: grafana
+          network: lan
+          port: 3000
+          middlewares:
+            - authenticated:
+                groups: [family, admins]
+                allow_internal: false
+```
+
+The route's network must be listed in `proxy.auth.networks`, otherwise validation fails with `authenticated asks for a login on network lan, but proxy.auth does not list it in networks`.
+
+</UiCli.Cli>
+</UiCli>
+
+Cookies the gate uses (all HttpOnly, SameSite=Lax): `cl_proxy_portal` on the portal host, `cl_proxy_auth` on each protected app host, `cl_proxy_login` (10 minutes, sealed) while a login is in flight. Sign out of apps through `/.well-known/clouduler-logout` on the app's host, which ends the portal session, every app session handed out from it and any remembered address.
+
+**Remember this IP address.** Networks listed in `proxy.auth.remember_ip` offer a checkbox "Let visitors remember their IP address". A visitor whose address is inside that network is then trusted for `remember_ip_ttl` (default 30 days). Everyone sharing that address, such as everyone behind a NAT router, is let in too. Off by default.
+
+<Quirk title="Internal callers skip the login" severity="warn">
+`allow_internal` defaults to true. Containers on the cluster's networks reach a protected app without logging in. Set it to false on routes where that matters.
+</Quirk>
+
+<Quirk title="Groups are a snapshot" severity="info">
+Groups and roles are fixed at login. Removing someone from a group at the provider does not log them out of an app; their cookie lives until `session_ttl` ends.
+</Quirk>
+
+<Quirk title="Errors on the gate" severity="info">
+`this route requires login, but proxy.auth does not offer it on this network` (503). `login required` (401). `Sign-in link expired` (403) means the one-time token was already used or timed out. `missing code or state` (400) and `Sign-in refused` (401) come from the provider callback.
+</Quirk>
+
+## AI clients (MCP)
+
+AI tools such as Claude Code, Cursor and VS Code connect to `https://<dashboard>/mcp` using OAuth 2.1 with PKCE and dynamic client registration. A human approves each tool once on a consent page and chooses **Read-only** (inspect nodes, stacks, containers and logs; secrets stay redacted) or **Admin** (can also change the cluster). A non-admin can only grant read-only. Access tokens last 1 hour and refresh tokens 30 days; revoking a client is immediate.
+
+An API key also works on `/mcp` (as `Authorization: Bearer clk_...`) and always grants admin.
+
+<UiCli>
+<UiCli.Ui>
+
+- **Turn it on or off:** **Settings > Sign-in and backup**, section **AI access**, **Allow AI clients**.
+- **Connect a tool:** **Settings > API keys and AI clients**, panel **Connected AI clients**. It shows the **MCP URL**, the **Claude Code command** (`claude mcp add --transport http clouduler https://<fqdn>/mcp`) and links for Claude.ai connectors, Cursor and VS Code.
+- **Approve:** the tool opens the **Connect an application** page. Choose **Read-only** or **Admin**, then **Approve access** or **Deny access**. Pending requests also appear under **Settings > API keys and AI clients** with **Approve read-only**, **Approve admin** and **Deny**.
+- **Revoke:** the trash button `Revoke <client>` in **Connected AI clients**: "It loses access immediately."
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+mcp:
+  enabled: true
+```
+
+With `enabled: false`, `/mcp` and every OAuth page answer 404, so a client sees no MCP server at all. The switch is read on every request. `clouduler init` writes `false` into a new cluster. Most clients register themselves; the discovery document is at `/.well-known/oauth-authorization-server`.
+
+</UiCli.Cli>
+</UiCli>
+
+See [MCP server](/docs/features/mcp) and the [MCP clients guide](/docs/guides/mcp-clients).
+
+<Quirk title="Pending approvals do not survive a leader change" severity="info">
+Pending authorisation requests live in memory on the leader. If the leader changes mid-approval, start the connection again.
+</Quirk>
+
+## If you are locked out
+
+Work down this list:
+
+1. **An API key still exists somewhere.** Use it on the login screen.
+2. **OIDC works at the provider, but admin is missing.** Check that the ID token contains the `admin_claim` with the `admin_value`, and that `scopes` includes what releases it. Log in as a viewer, then ask another admin.
+3. **You deleted every API key and OIDC does not work.** The bootstrap key task runs when the API server starts and mints a key named `bootstrap` only if the leader finds the key store empty. Restarting the daemon on the leader (`sudo systemctl restart clouduler`) should therefore log a new bootstrap key in `journalctl -u clouduler.service`. {/* TODO verify: confirm on a live cluster that a restart re-mints the key and that the CLI has no key command. The research could not confirm any other recovery path. */}
+4. **A bad OIDC edit.** Use the key from step 1 or 3 and fix **Settings > Sign-in and backup**. There is no rollback timer for `auth` edits.
+5. **Wrong `proxy` or `web` edit.** The rollback timer reverts it after the countdown, or run `clouduler config reload` with a known-good file on a manager.
+
+<Quirk title="Do not delete the last key until OIDC works" severity="danger">
+`DELETE /api/keys/{id}` has no check for the last key. Create and test a named key and confirm OIDC before you delete the bootstrap key.
+</Quirk>
+
+## Cluster key and node trust (for completeness)
+
+Nodes do not use logins. They prove they hold the **cluster key** (`/etc/clouduler/secrets.key`) in a challenge-response handshake on the raft, drive and relay connections, and HMAC-sign the HTTP calls they make to each other. The same key seals every stored secret (including the OIDC client secrets) and signs MCP tokens. Back it up: without it every stored secret is unrecoverable. A key file readable by the world or writable by the group is refused. See [File locations](/docs/reference/file-locations).
+
+## Options
+
+### auth
+
+<OptionTable rows={[
+  {"key": "auth", "type": "object", "default": "{api_keys: true, session_ttl: 12h}", "reload": "n/a", "description": "Sign-in to the dashboard and API."},
+  {"key": "auth.api_keys", "type": "bool", "default": "true", "reload": "live", "description": "Intended switch for API key sign-in.", "quirks": "false is rejected unless auth.oidc is set. The research found that the flag is not enforced at runtime today: keys keep working even when false."},
+  {"key": "auth.session_ttl", "type": "duration", "default": "12h", "reload": "live", "description": "How long a dashboard session lasts from login. No sliding renewal.", "quirks": "Existing sessions keep their original expiry."},
+  {"key": "auth.oidc", "type": "object", "default": "absent", "reload": "live", "description": "OIDC identity provider for people who operate the cluster. Absent means OIDC is off. The client secret is a sealed secret, not in this file."},
+  {"key": "auth.oidc.issuer", "type": "https URL", "reload": "live", "description": "Base URL. Discovery is read from ISSUER/.well-known/openid-configuration.", "quirks": "Required when oidc is set. Error: must be an https url. Trailing slashes matter."},
+  {"key": "auth.oidc.client_id", "type": "string", "reload": "live", "description": "OIDC client ID.", "quirks": "Required when oidc is set."},
+  {"key": "auth.oidc.scopes", "type": "list", "default": "[openid, profile, email]", "reload": "live", "description": "Scopes requested at login. Must include openid.", "quirks": "No UI control. Add groups here if your provider releases groups only by scope."},
+  {"key": "auth.oidc.admin_claim", "type": "string", "default": "groups", "reload": "live", "description": "ID token claim (string or array) checked for admin_value."},
+  {"key": "auth.oidc.admin_value", "type": "string", "default": "none", "reload": "live", "description": "Value in the admin claim that grants admin. Blank means nobody becomes admin through OIDC; everyone else is a viewer.", "quirks": "Matching is exact and case-sensitive."},
+  {"key": "auth.oidc.username_claim", "type": "string", "default": "preferred_username", "reload": "live", "description": "Claim shown as the signed-in user's name. Falls back to sub."},
+]} />
+
+### proxy.auth
+
+<OptionTable rows={[
+  {"key": "proxy.auth", "type": "object", "default": "absent", "reload": "live", "description": "Service login: a portal that stands in front of apps whose routes use the authenticated middleware. A separate OIDC client from auth.oidc."},
+  {"key": "proxy.auth.host", "type": "label or FQDN", "reload": "live", "description": "Portal hostname. A bare label gets each listed network's domain appended.", "quirks": "Required when proxy.auth is set. Must differ from the dashboard hostname."},
+  {"key": "proxy.auth.networks", "type": "list of network names", "reload": "live", "description": "Networks that offer the login. Each needs a domain. A route can require login only on a listed network.", "quirks": "Required, at least one."},
+  {"key": "proxy.auth.issuer", "type": "https URL", "reload": "live", "description": "Identity provider for the portal.", "quirks": "Required."},
+  {"key": "proxy.auth.client_id", "type": "string", "reload": "live", "description": "Client ID for the portal. Its secret is sealed separately.", "quirks": "Required."},
+  {"key": "proxy.auth.scopes", "type": "list", "default": "[openid, profile, email, groups]", "reload": "live", "description": "OIDC scopes. Must include openid.", "quirks": "The UI takes space- or comma-separated text."},
+  {"key": "proxy.auth.groups_claim", "type": "string", "default": "groups", "reload": "live", "description": "Claim listing the visitor's groups. Routes restrict by group name."},
+  {"key": "proxy.auth.username_claim", "type": "string", "default": "preferred_username", "reload": "live", "description": "Claim shown as the user's name on the portal. Falls back to sub.", "quirks": "It is not passed to apps."},
+  {"key": "proxy.auth.session_ttl", "type": "duration", "default": "12h", "reload": "live", "description": "Lifetime of a portal login and of each app cookie it issues. Must be greater than zero."},
+  {"key": "proxy.auth.title", "type": "string", "default": "Sign in to continue", "reload": "live", "description": "Heading of the login page."},
+  {"key": "proxy.auth.palette", "type": "enum", "default": "grape", "reload": "live", "description": "Colour set of the login page: grape, sunset, ocean or forest."},
+  {"key": "proxy.auth.accent", "type": "hex colour", "default": "none", "reload": "live", "description": "Overrides the palette's main colour. The server accepts #rgb or #rrggbb.", "quirks": "The UI accepts only six digits; a three-digit accent set in the file shows as unset in the UI."},
+  {"key": "proxy.auth.remember_ip", "type": "list of network names", "default": "[]", "reload": "live", "description": "Networks whose login page offers remember this IP address. Each must be listed in proxy.auth.networks and be internal, private or public."},
+  {"key": "proxy.auth.remember_ip_ttl", "type": "duration", "default": "30d", "reload": "live", "description": "How long a remembered IP skips login, counted from the login that saved it. Must be greater than zero."},
+]} />
+
+### mcp
+
+<OptionTable rows={[
+  {"key": "mcp.enabled", "type": "bool", "default": "true", "reload": "live", "description": "Turns the MCP endpoint and its OAuth pages on or off. Off makes them answer 404.", "quirks": "clouduler init writes false into a new cluster."},
+]} />
+
+## Related
+
+- [Proxy and TLS](/docs/features/proxy-and-tls)
+- [MCP server](/docs/features/mcp)
+- [Authentik guide](/docs/guides/authentik) and [Keycloak guide](/docs/guides/keycloak)
+- [cluster.yaml](/docs/reference/cluster-yaml)
+- [File locations](/docs/reference/file-locations)
