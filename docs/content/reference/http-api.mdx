@@ -46,7 +46,7 @@ Send requests to any node. You do not need to know the leader.
 | `GET` under `/api` | Answered from that node's replicated state. It may lag; compare `state_version` from `/api/status`. Live container, usage and daemon-log data comes from the node that owns it. |
 | `POST`, `PUT`, `PATCH`, `DELETE` under `/api` or `/auth` | Relayed to the leader (method, headers and a body up to 32 MiB). The leader's status, headers and body come back to you. |
 | `/auth/oidc/*` | Served locally, so login works from any node. |
-| `/api/git-backup/webhook`, `/webhook/internal-trigger`, any path containing `/internal/` | Served locally. |
+| `/api/git-backup/webhook`, `/api/git-backup/webhook/internal-trigger`, any path containing `/internal/` | Served locally. |
 | `GET /oauth/authorize` | `307` redirect to the leader. |
 | `POST /oauth/token`, `POST /oauth/register` | Relayed to the leader. |
 | `/mcp` | Relayed to the leader (body up to 5 MiB). |
@@ -171,7 +171,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | POST | `/api/rebalance` | admin | none | `{moves: [{instance, from, to}]}` | Starts the planned moves. |
 | GET | `/api/rebalance/last` | user | none | `{at, moves}` or null | |
 
-`InstanceSummary` includes `id, node, desired, state, running, health, image, image_digest, running_digest, started_at, migration, migration_problem`. {/* TODO verify: the full InstanceSummary struct */} Instances on another node are forwarded to their owner, not rejected; if that node is unreachable the state falls back to `unknown`.
+`InstanceSummary` has 23 fields: `id, node, desired, state, running, health, image, image_digest, running_digest, started_at, migration, migration_problem, reason, step, placement_error, proxy, exit_code, oom_killed, restart_count, restart_limit, finished_at, memory_limit_bytes, crash_moves`, plus the optional ones omitted when empty. A pending placement has `state: pending_placement` and a `placement_error`. Instances on another node are forwarded to their owner, not rejected; if that node is unreachable the state falls back to `unknown`.
 
 ### Updates {#updates}
 
@@ -317,7 +317,7 @@ See [Alerts](/docs/features/alerts).
 
 ### Internal routes
 
-Paths containing `/internal/`, plus `/api/links/...`, are for nodes and the `clouduler` CLI. They are signed with the cluster key (HMAC over method, path, query, timestamp, nonce and body hash), accepted once within a time window, and cannot be called from a script. Do not expose them.
+Paths containing `/internal/`, plus `/api/links/...`, are for nodes and the `clouduler` CLI. They are signed with the cluster key (HMAC over method, path, query, timestamp, nonce and body hash), accepted once within a time window, and cannot be called from a script. Examples are `/api/git-backup/pull`, `/api/git-backup/reconcile`, `/api/updates/internal/scan` and `/apply`, `/api/self-update/internal/restart`, `/api/instances/internal/*`, `/api/nodes/internal/*` and `/api/dns/internal-reconcile`. Do not expose them.
 
 ## Examples
 

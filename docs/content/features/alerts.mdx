@@ -36,7 +36,7 @@ Only the raft leader ([glossary](/docs/intro/glossary#leader)) runs the alert en
 2. **Dropped silently.** A warning that stops holding inside its debounce window is dropped and no message is ever sent. Nobody gets paged by a flapping problem.
 3. **Escalated.** A warning that becomes critical is sent again as `Escalated to <severity>: <title>` (setting `renotify_on_escalation`, on by default).
 4. **Resolved.** When the condition has been absent for two checks in a row, the alert resolves. A "Resolved" follow-up goes to every destination that heard the opening (setting `notify_resolved`, on by default). Discord can edit the original message instead of posting a new one (`edit_resolved`).
-5. **One-shot events.** Some events are announced once and not held open: each OOM kill and each log match.
+5. **One-shot events.** Some events are announced once and not held open: each OOM kill and each log match, plus leader changes, nodes joining or leaving, finished updates and self-update outcomes, stack deploys and removals, API key creation and revocation, secret rotation, finished volume migrations and backups that succeeded with a warning.
 
 ### Severity and routing
 
@@ -74,7 +74,7 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `cluster.node_joined` | Cluster | Info | A node joined. |
 | `cluster.node_removed` | Cluster | Info | A node was removed. |
 | `node.unreachable` | Nodes | Critical | A node is unreachable. Warning instead of Critical for a worker. |
-| `node.disk_low` | Nodes | Warning | A drive is at or above `disk_warning_percent` (90). Critical at `disk_critical_percent` (95). Checked every 60 s with 2 bands of hysteresis. {/* TODO verify: exact crossing rule, over versus at-or-over */} |
+| `node.disk_low` | Nodes | Warning | A drive is at or above `disk_warning_percent` (90). Critical at `disk_critical_percent` (95). Checked every 60 s. A band is entered at or above the threshold and left only when usage drops 2 points below it. |
 | `node.memory_pressure` | Nodes | Warning | Memory stays above `memory_percent` (92) for `memory_for` (10 min). |
 | `instance.crash_loop` | Workloads | Critical | A container keeps crashing. |
 | `instance.oom_killed` | Workloads | Warning | A container was killed for using too much memory. Critical on the third kill of the same instance within one hour. |
@@ -273,12 +273,12 @@ All settings apply live.
   {key: 'URL (secret)', type: 'URL', reload: 'live', required: true, description: 'Webhook or Discord URL, stored as _clouduler_alert_<name>_url and shown masked.', quirks: 'Errors: a URL is required; must be an http or https URL; not a Discord webhook URL (https://discord.com/api/webhooks/...)'},
   {key: 'Authorization (secret)', type: 'string', reload: 'live', description: 'Generic webhook only. Value of the Authorization header, stored as _clouduler_alert_<name>_auth and sent as a sensitive header.'},
   {key: 'style', type: 'embed | short', default: 'embed', reload: 'live', description: 'Discord: rich embed or one plain line.'},
-  {key: 'mention', type: 'string', reload: 'live', description: 'Discord: text used for a Ping. One of <@&roleId>, <@userId>, @here, @everyone; at most 80 characters.', quirks: 'A Ping without a mention pings nobody. Normal and Silent messages never mention.'},
+  {key: 'mention', type: 'string', reload: 'live', description: 'Discord: text used for a Ping. One of <@&roleId>, <@userId>, <@!userId>, @here, @everyone (ids are digits only).', quirks: 'A Ping without a mention pings nobody. Normal and Silent messages never mention.'},
   {key: 'notify.critical', type: 'ping | normal | silent', default: 'ping', reload: 'live', description: 'Discord: how a critical alert announces itself.'},
   {key: 'notify.warning', type: 'ping | normal | silent', default: 'normal', reload: 'live', description: 'Discord: how a warning announces itself.'},
   {key: 'notify.info', type: 'ping | normal | silent', default: 'silent', reload: 'live', description: 'Discord: how an info alert announces itself. Digests use this level.'},
   {key: 'notify.resolved', type: 'ping | normal | silent', default: 'silent', reload: 'live', description: 'Discord: how a resolved message announces itself.'},
-  {key: 'buttons', type: 'bool', default: 'true', reload: 'live', description: 'Discord: link buttons.', quirks: 'Digests always get an "Open alerts" button.'},
+  {key: 'buttons', type: 'bool', default: 'true', reload: 'live', description: 'Discord: link buttons.', quirks: 'Digests get the "Open alerts" button only when `buttons` is on.'},
   {key: 'edit_resolved', type: 'bool', default: 'false', reload: 'live', description: 'Discord: edit the original message when resolved instead of posting a new one.', quirks: 'Discord drops the username when editing. If the original was deleted, a new message is posted.'},
   {key: 'username', type: 'string', reload: 'live', description: 'Discord: display name the webhook posts under.'},
   {key: 'to', type: 'list of addresses', reload: 'live', required: true, description: 'Email: recipients, at least one.', quirks: 'Errors: add at least one recipient; not an email address'},

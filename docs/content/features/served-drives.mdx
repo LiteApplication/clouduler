@@ -39,9 +39,9 @@ Moving a served volume between nodes on purpose (a manual move or a rebalance) g
 
 Open **Settings**, **Storage** (`/settings/storage`). Add a drive (or open an existing card), set **Storage mode** to **Served**, and choose the **Served by** nodes. The order matters: use **move atlas up** and **move atlas down** to set priority. **Resync every** is hidden for served drives in the UI; the config file still accepts `sync_interval` for them.
 
-On the drive page (`/storage/drives/media`) the **Nodes** table has a **Priority** column and **About** shows the active server.
+On the drive page (`/storage/drives/bulk`) the **Nodes** table has a **Priority** column and **About** shows the active server.
 
-<UiScreen scenario="lan-3-nodes" route="/settings/storage" caption="Storage settings. A served drive shows its candidate order." alt="Storage settings with drive cards" height={420} />
+<UiScreen scenario="lan-3-nodes" route="/settings/storage" caption="Storage settings. The served drive bulk shows its candidate order (atlas, boreas)." alt="Storage settings with the served drive bulk" height={420} />
 
 </UiCli.Ui>
 <UiCli.Cli>

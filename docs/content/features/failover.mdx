@@ -66,7 +66,7 @@ Open **Nodes** (`/nodes`). A dead node shows **Unreachable** in the **State** co
 
 <UiScreen scenario="node-down-failover" route="/nodes" caption="boreas is down; its containers have moved to atlas and cirrus." alt="Nodes page with boreas unreachable" />
 
-The **Overview** shows stacks that are updating or failed while the move happens.
+The **Overview** flags the unreachable node and any stack that could not be placed (here machine-learning: "no eligible node: boreas is unreachable and cirrus has too little free memory"), and shows 5 of 9 containers running.
 
 <UiScreen scenario="node-down-failover" route="/" caption="Overview during a failover." alt="Overview with problems after a node failure" />
 

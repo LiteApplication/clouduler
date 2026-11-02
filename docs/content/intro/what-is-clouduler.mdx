@@ -31,7 +31,7 @@ Each of these has a solution, but the solutions are separate tools you have to l
 - **Replicated storage.** [Drives and volumes](/docs/features/drives-and-volumes) keep copies of your data on several machines, so a container that moves finds its files already there.
 - **Automatic HTTPS.** The [built-in proxy](/docs/features/proxy-and-tls) routes hostnames to containers and gets Let's Encrypt certificates for you. [DNS records](/docs/features/dns-publishing) can be published through Cloudflare.
 - **Failover.** If a machine disappears, its containers are started on the others and the dead machine stops its own copies first, so a volume is never written twice. See [Failover](/docs/features/failover).
-- **Backups.** Scheduled [restic backups](/docs/features/backups) of drives to a NAS, an SSH server or S3, and a [git export](/docs/features/git-backup) of your configuration.
+- **Backups.** Scheduled [restic backups](/docs/features/backups) of drives to an SSH server, S3 or a local path on a node (a mounted NAS works), and a [git export](/docs/features/git-backup) of your configuration.
 - **Alerts.** [Discord, webhook or email](/docs/features/alerts) when a node goes offline, a disk fills up or a container crash-loops.
 - **AI access, if you want it.** An [MCP server](/docs/features/mcp) lets an assistant such as Claude Code inspect and debug the cluster, with secrets redacted.
 
@@ -61,7 +61,7 @@ Anything that runs Linux with systemd and Docker, on `x86_64` or `aarch64`:
 - a small VPS, which makes a good public entry point,
 - a mix of all of the above, even in different houses, joined by a VPN such as Tailscale or Headscale (see [the multi-site quick start](/docs/quickstart/multi-site-headscale)).
 
-You need root on each machine and Docker running. Clouduler is a single binary plus a systemd unit. {/* TODO verify: minimum RAM and CPU figures; the research gives none */}
+You need root on each machine and Docker running. Clouduler is a single binary plus a systemd unit. The installer checks no minimum RAM or CPU.
 
 ## Where to go next
 

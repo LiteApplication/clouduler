@@ -145,8 +145,8 @@ Rules for a batch: each node does one download and one restart at a time; nodes 
 
 Open **Updates** (`/updates`, page title **Image updates**).
 
-- **Check again** refreshes the registry lookups. The page does not poll, so this is the refresh.
-- **Update all behind (N)** updates every container marked behind. A row's **Update ID** button updates one; **Retry ID** appears after a failure.
+- **Check again** refreshes the registry lookups. The page refreshes lookups only on request, but it polls the instance list every 3 s while a freshly started instance has not yet reported healthy.
+- **Update all behind (N)** updates every container marked behind. A row's **Update** button updates one; it reads **Retry** after a failure.
 - **Pin digests (N)** records what each unpinned container runs as its pin, so it cannot drift on a later restart. Containers that are already pinned are never re-pinned.
 - Filter chips: **All**, **Behind**, **Off pin**, **Unknown**, **Up to date**, plus a text filter.
 - Table columns: **Container**, **Node**, **Status**, **Running to latest** and **Action**. Status shows **Update available**, **Not on its pin** ("Redeploy to apply the pin"), **Unknown** (with the registry error and an **Add registry login** link when it looks like authentication) or **Up to date**. During an update it shows `Queued`, `Downloading`, `Stopping the old one`, `Starting the new one`, `Started` or `Waiting for the health check`, with `step N of 4`.
@@ -192,12 +192,11 @@ An empty `instances` list means every instance that is behind (apply) or unpinne
 ## Quirks and gotchas {#quirks}
 
 <Quirk title="auto_update does nothing" severity="danger">
-{/* TODO verify: whether automatic image following is planned or was removed */}
-`x-clouduler.auto_update` is accepted by the config parser and listed in the editor schema, but no code acts on it. A stack that sets it gets no behaviour. Update containers yourself.
+`x-clouduler.auto_update` is accepted by the config parser and listed in the editor schema, but no code acts on it (nothing in the code says whether it is planned). A stack that sets it gets no behaviour. Update containers yourself.
 </Quirk>
 
 <Quirk title="Self-update and image updates are unrelated">
-A cluster rollout and a container batch can run at the same time; no lock between them was found. {/* TODO verify: whether a rollout during a container update batch is blocked */}
+A cluster rollout and a container batch can run at the same time; no lock between them exists: the rollout state is kept separately and the container update code never reads it.
 </Quirk>
 
 <Quirk title="A failed self-update leaves a mixed-version cluster">
@@ -213,7 +212,7 @@ A container built locally, or whose registry answer is missing, never shows as b
 </Quirk>
 
 <Quirk title="The batch stops at the first failure">
-Later instances are marked cancelled. Restarts already running on other nodes finish or fail on their own. Progress records disappear 15 minutes after finishing. A record stuck queued for 15 minutes fails with `stalled: queued but never started`, one stuck in another phase for an hour fails with `stalled: no progress for an hour`, and one left over from before a daemon restart fails with `interrupted: the daemon restarted mid-update`. After 15 minutes without progress the instance also shows as a problem: `update is <phase> on <node> and has made no progress for <n>s`.
+Later instances are marked cancelled. Restarts already running on other nodes finish or fail on their own. Progress records disappear 15 minutes after finishing. A record stuck queued for 15 minutes fails with `stalled: queued but never started`, one stuck in another phase for an hour fails with `stalled: no progress for an hour`, one left over from before a daemon restart fails with `interrupted: the daemon restarted mid-update`, and one whose node left the cluster, is unreachable, or no longer hosts the instance fails with `interrupted: the node running this update left the cluster`, `... is unreachable` or `interrupted: the instance moved to another node`. After 15 minutes without progress the instance also shows as a problem: `update is <phase> on <node> and has made no progress for <n>s`.
 </Quirk>
 
 <Quirk title="Redeploy shares the progress record" severity="info">

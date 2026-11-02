@@ -296,7 +296,7 @@ In the node settings the network appears as a card titled `NETWORK (wireguard)` 
 
 To let a port in through the tunnel, open **Proxy**, tab **Ingress rules** (`/proxy/ingress`), click **New ingress rule**, and fill in **Network**, **Port (on the tunnel)**, **Protocol** and **Target port (on this node)**. The target is a host port that a container publishes with `ports:`.
 
-<UiScreen scenario="multisite-headscale" route="/proxy/ingress" caption="Proxy, Ingress tab." alt="Proxy ingress rules" height={420} />
+<UiScreen scenario="lan-3-nodes" route="/proxy/ingress" caption="Proxy, Ingress tab: one rule for the vpn network, 51820/udp." alt="Proxy ingress rules" height={420} />
 
 </UiCli.Ui>
 <UiCli.Cli>
