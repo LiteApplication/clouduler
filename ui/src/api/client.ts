@@ -63,6 +63,7 @@ import type {
   VolumeInspection,
   WireguardIngressRule,
 } from './types';
+import { getTransport } from './transport';
 
 /** Thrown for any non-2xx response, carrying the parsed error body when there is one. */
 export class ApiError extends Error {
@@ -118,7 +119,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method ?? 'GET';
   let res: Response;
   try {
-    res = await fetch(path, {
+    res = await getTransport().fetch(path, {
       credentials: 'include',
       headers: {
         Accept: 'application/json',

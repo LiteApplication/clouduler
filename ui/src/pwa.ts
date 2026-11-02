@@ -3,6 +3,8 @@
 // opens offline but never shows stale state.
 
 export function registerServiceWorker(onUpdateReady: (apply: () => void) => void) {
+  // The docs-site mock build has no worker to register.
+  if (import.meta.env.MODE === 'mock') return;
   if (!('serviceWorker' in navigator)) return;
   // The daemon serves the UI from whatever path it is mounted at, so resolve
   // the worker relative to the current document rather than from the root.

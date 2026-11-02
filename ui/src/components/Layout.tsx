@@ -132,7 +132,7 @@ export function Layout({ children }: { children: ReactNode }) {
           onChange={onRail}
           header={
             <span className="rail-brand" style={{ padding: 0 }}>
-              <img src="/icon.svg" alt="" width={36} height={36} />
+              <img src={`${import.meta.env.BASE_URL}icon.svg`} alt="" width={36} height={36} />
               <span className="rail-name">{clusterName ?? 'clouduler'}</span>
             </span>
           }

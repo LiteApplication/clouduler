@@ -3,6 +3,7 @@
 // whenever the version moves; we just drop that straight into the reducer.
 
 import { createContext, useContext, useEffect, useReducer, type ReactNode } from 'react';
+import { getTransport } from '../api/transport';
 import type { ClusterState } from '../api/types';
 import { initialStoreState, reducer, type StoreState } from './reducer';
 
@@ -13,7 +14,7 @@ export function ClusterStoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     dispatch({ type: 'connecting' });
-    const source = new EventSource('/api/events');
+    const source = getTransport().eventSource('/api/events');
 
     source.addEventListener('open', () => dispatch({ type: 'open' }));
     source.addEventListener('state', (evt) => {

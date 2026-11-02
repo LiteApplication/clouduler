@@ -2,6 +2,7 @@
 // cluster state store, these are opened only while the view showing them is
 // mounted, and each one keeps its own bounded buffer of parsed items.
 
+import { getTransport } from '../api/transport';
 import { useEffect, useRef, useState } from 'react';
 
 export interface UseEventSourceOptions<T> {
@@ -55,7 +56,7 @@ export function useEventSource<T>(url: string | null, options: UseEventSourceOpt
     if (!url || !enabled) return;
     setItems([]);
     setConnected(false);
-    const source = new EventSource(url);
+    const source = getTransport().eventSource(url);
     const seen = new Set<string>();
 
     const onEvent = (evt: MessageEvent) => {

@@ -61,7 +61,7 @@ export function DiscordPreview({
       </div>
       <div className="dc" role="img" aria-label={`Preview of a ${sample} Discord message`}>
         <div className="dc__av">
-          <img src="/icon-192.png" alt="" />
+          <img src={`${import.meta.env.BASE_URL}icon-192.png`} alt="" />
         </div>
         <div className="dc__body">
           <div className="dc__head">

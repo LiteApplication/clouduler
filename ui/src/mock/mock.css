@@ -1,0 +1,8 @@
+/* Embedded-mode tweaks for the docs site. `chrome=0` hides the app shell so a
+   single page can be dropped into an article. */
+html, body { background: transparent; }
+body.mock-nochrome .shell__rail,
+body.mock-nochrome .bnav-fixed,
+body.mock-nochrome .skip { display: none !important; }
+body.mock-nochrome .shell { min-height: 0; background: transparent; }
+body.mock-nochrome .shell__col { padding: var(--space-4); max-width: none; }

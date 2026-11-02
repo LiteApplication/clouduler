@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#150f1f" />
+    <meta name="description" content="clouduler cluster console" />
+    <title>clouduler (demo)</title>
+
+    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="clouduler" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <script>
+      // Stamp the theme before first paint so the page never flashes the
+      // wrong palette. The app keeps this attribute in sync afterwards.
+      (function () {
+        try {
+          var q = new URLSearchParams(location.search).get('theme');
+          var saved = q === 'light' || q === 'dark' ? q : localStorage.getItem('clouduler-theme');
+          var dark =
+            saved === 'dark' ||
+            ((!saved || saved === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+          document
+            .querySelector('meta[name="theme-color"]')
+            .setAttribute('content', dark ? '#150f1f' : '#fff4df');
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.mock.tsx"></script>
+  </body>
+</html>

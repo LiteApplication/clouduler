@@ -4,6 +4,7 @@
 // changes; we just drop that into the reducer.
 
 import { createContext, useContext, useEffect, useReducer, type ReactNode } from 'react';
+import { getTransport } from '../api/transport';
 import type { InstanceProgressEvent } from '../api/types';
 import { updateProgress } from '../lib/updates';
 import { useClusterState } from './store';
@@ -15,7 +16,7 @@ export function InstanceProgressProvider({ children }: { children: ReactNode }) 
   const [state, dispatch] = useReducer(progressReducer, initialProgressState);
 
   useEffect(() => {
-    const source = new EventSource('/api/instances/events');
+    const source = getTransport().eventSource('/api/instances/events');
 
     source.addEventListener('progress', (evt) => {
       try {
