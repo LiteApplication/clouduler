@@ -5,6 +5,295 @@ sidebar_position: 3
 
 # Immich
 
-One-line summary of immich goes here.
+Immich is a self-hosted photo and video library. This stack runs PostgreSQL with the VectorChord extension, a Valkey (Redis-compatible) cache, the Immich server, a public share proxy and a machine-learning worker. The app itself is reachable only on your tailnet, while shared albums are served publicly through the share proxy.
 
-TODO
+## What you'll learn
+
+- **Several services in one stack** that find each other by service name (`database`, `redis`, `server`).
+- A **database on a replicated drive**, with a `Checkpoint` hook and a `Reset WAL` recovery action.
+- **Secrets as environment variables** (`env:`), and secrets as files.
+- Two routes with different audiences: a tailnet-only one and a public one.
+- A **config file** bundled with the stack and mounted at a chosen path.
+- Websockets, the CORS middleware, `stop_signal` and `stop_grace_period`, and a healthcheck that avoids `curl`.
+
+## Prerequisites
+
+**Cluster.** Networks `tailscale` (internal, domain `home.example.com`), `public` (domain `example.com`) and `wan` (egress). Drives `fast` (database and model cache) and `bulk` (the photo library). See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**DNS.**
+
+- `immich.home.example.com`: the app. It sits under the internal domain, so your own devices must resolve it to a node's tailnet address. It is not published to a public zone.
+- `immich-share.example.com`: public share links, on the `public` network.
+
+**Secrets.**
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `immich_db_password` | Password for the `postgres` user. The database reads it from a file, the server gets it as `DB_PASSWORD`. | **Generate**, charset `alphanumeric`, length `32`. Alphanumeric avoids characters that connection strings handle badly. |
+
+**Configs.**
+
+| Name | Source file | Content |
+|---|---|---|
+| `immich_public_proxy_config` | `./config/immich_public_proxy_config.json`, next to the stack file | JSON, shown below |
+
+**Volumes.** `fast/immich-postgres` (database), `fast/immich-models` (model cache), `bulk/immich-library` (photos and videos).
+
+## Stack YAML
+
+```yaml title="immich.yaml"
+# Immich: self-hosted photo and video management.
+# App at https://immich.home.example.com (tailnet only).
+# Public share links at https://immich-share.example.com.
+
+networks:
+  # Hardened: no other stack on tailscale can be reached from this stack.
+  tailscale:
+    allowed: []
+  # Outbound: release checks, map tiles, the Authentik
+  # host (OAuth sign-in is completed from the server) and Hugging Face
+  # (machine-learning model downloads).
+  wan:
+    allowed:
+      - github.com
+      - api.github.com
+      - tiles.immich.cloud
+      - auth.example.com
+      - huggingface.co
+      - "*.huggingface.co"
+      - "*.hf.co"
+  public: {}
+
+configs:
+  immich_public_proxy_config:
+    file: ./config/immich_public_proxy_config.json
+
+secrets:
+  immich_db_password:
+
+services:
+  database:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    stop_signal: SIGINT
+    stop_grace_period: 120s
+    volumes:
+      - fast/immich-postgres:/var/lib/postgresql/data
+    secrets: [immich_db_password]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_PASSWORD_FILE: /run/secrets/immich_db_password
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    networks: [tailscale]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d immich -U postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+    # Reset WAL is the last resort for "invalid checkpoint record" or a crash
+    # loop after WAL corruption. It only runs while the container is up, because
+    # exec needs a running target. If the container crash-loops before you can
+    # run it, freeze the volume and run pg_resetwal from a one-off container.
+    # Checkpoint runs before each replication of the volume, so the replicated
+    # copy has almost no WAL left to replay on crash recovery.
+    x-clouduler:
+      actions:
+        Reset WAL:
+          cmd: pg_resetwal "$PGDATA"
+          user: postgres
+          timeout: 1m
+          confirm: true
+        Checkpoint:
+          cmd: psql -U postgres -d immich -c CHECKPOINT
+          timeout: 2m
+      volume_sync:
+        immich-postgres:
+          before: Checkpoint
+
+  redis:
+    image: docker.io/valkey/valkey:9
+    networks: [tailscale]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+
+  server:
+    image: ghcr.io/immich-app/immich-server:release
+    volumes:
+      - bulk/immich-library:/usr/src/app/upload
+    secrets:
+      - source: immich_db_password
+        env: DB_PASSWORD
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+    networks: [tailscale, wan]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+    x-clouduler:
+      # Break-glass for an OAuth lockout: re-enable the password login form,
+      # or reset the admin password (prints the new one).
+      actions:
+        List users:
+          cmd: immich-admin list-users
+        Enable password login:
+          cmd: immich-admin enable-password-login
+        Reset admin password:
+          cmd: immich-admin reset-admin-password
+          confirm: true
+      proxy:
+        - host: immich
+          network: tailscale
+          port: 2283
+          tls: true
+          websockets: true
+
+  public-proxy:
+    # The healthcheck uses node, not curl: curl has its own DNS resolver and can
+    # pass while the proxy's own lookups fail.
+    image: alangrainger/immich-public-proxy:latest
+    environment:
+      IMMICH_URL: http://server:2283
+      PUBLIC_BASE_URL: https://immich-share.example.com
+    configs:
+      - source: immich_public_proxy_config
+        target: /app/config.json
+    networks: [tailscale, public]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/share/healthcheck').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 128M
+    x-clouduler:
+      proxy:
+        - host: immich-share
+          network: public
+          port: 3000
+          tls: true
+          middlewares:
+            - cors:
+                origins: ["*"]
+
+  machine-learning:
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    volumes:
+      - fast/immich-models:/cache
+    networks: [tailscale, wan]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 4G
+```
+
+## Config files
+
+```json title="config/immich_public_proxy_config.json"
+{
+  "ipp": {
+    "allowDownload": 2,
+    "maxDownloadQuality": "original",
+    "gallery": {
+      "showDownloadZip": true
+    },
+    "lightbox": {
+      "showDownload": true
+    }
+  }
+}
+```
+
+The proxy reads this as `/app/config.json` inside its container, set by `target:` on the config reference.
+
+## Walkthrough
+
+- **`networks.tailscale.allowed: []`**: the stack's containers on the tailnet cannot reach any other stack's routes there. Its own services still talk to each other.
+- **`networks.wan.allowed`**: the only outbound destinations the stack can reach through `wan`. Only `server` and `machine-learning` are attached to it. The Authentik host is listed because OAuth sign-in is completed by a call from the server, and the Hugging Face hosts because machine learning downloads its models from there on first start.
+- **`configs.immich_public_proxy_config.file`** is bundled at deploy time and stored in the cluster under that name. See [Configs and secrets](/docs/features/configs-and-secrets).
+- **`database.stop_signal: SIGINT`** and **`stop_grace_period: 120s`**: PostgreSQL shuts down cleanly on SIGINT, and the grace period gives it time to flush before Clouduler kills it. The maximum is 600 seconds.
+- **`fast/immich-postgres:/var/lib/postgresql/data`** puts the database on a replicated drive. That is why it has a `Checkpoint` action, wired in by `volume_sync.immich-postgres.before`: a `CHECKPOINT` runs before each scheduled copy.
+- **`Reset WAL` with `confirm: true`**: a destructive recovery command. The UI asks before running it.
+- **`server.secrets` with `source` and `env`**: the password reaches the server as the environment variable `DB_PASSWORD` rather than as a file. The database uses the same secret as a file.
+- **`server.x-clouduler.actions`**: three break-glass commands for when OAuth locks you out.
+- **`server.x-clouduler.proxy`** with `network: tailscale`: the route is reachable only from the tailnet. `websockets: true` lets the live-update connection upgrade.
+- **`public-proxy.configs[].target`** mounts the bundled config at `/app/config.json`.
+- **`public-proxy.x-clouduler.proxy`** with `network: public`: anyone on the internet can open a share link. The `cors` middleware with origin `*` lets share pages be embedded anywhere.
+- **`public-proxy.networks: [tailscale, public]`**: the proxy reaches `server` over the tailnet and is published on `public`.
+- **`machine-learning.volumes`**: model downloads are cached on a replicated drive, so a moved container does not download them again.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**, click **Create secret**, name it `immich_db_password`, choose **Generate**, set the length to `32` and the character set to `alphanumeric`.
+2. Open **Stacks**, **Deploy stack**, name it `immich`, paste the YAML.
+3. In the **Bundled files** panel, fill `immich_public_proxy_config` with the JSON above (or use **Load from file**).
+4. Wait for **Spec is valid**, then click **Deploy immich**.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+mkdir -p immich/config && cd immich
+# save the YAML as immich.yaml and the JSON as config/immich_public_proxy_config.json
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set immich_db_password --stdin
+clouduler stack deploy ./immich.yaml
+```
+
+The `file:` path is read relative to the stack file, so keep `config/` next to `immich.yaml`.
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Open `https://immich.home.example.com` from a device on the tailnet and create the first account. Immich makes the first account the administrator.
+2. Optional, OAuth through Authentik: create an OAuth2/OpenID provider and an application with the slug `immich` in Authentik, then enter its issuer, `https://auth.example.com/application/o/immich/`, and the client details in Immich's administration settings. The stack itself does not configure OAuth. See the [Authentik example](/docs/examples/authentik).
+3. Create a share link from an album and open it at `https://immich-share.example.com/share/KEY`.
+4. If OAuth ever locks you out, run **Enable password login** from the server's Containers tab, or **Reset admin password**.
+5. Watch the machine-learning logs on first start (`clouduler stack logs immich`). It downloads its models once into `fast/immich-models`.
+
+## Quirks
+
+<Quirk title="A replicated database is not a backup" severity="warn">
+The Checkpoint hook narrows the window in which a copy contains WAL that must be replayed, and a stale replica is still a copy of the same mistakes. Keep real [backups](/docs/features/backups).
+</Quirk>
+
+- **Healthcheck and DNS.** The share proxy uses `node` for its healthcheck because `curl` has its own resolver and can pass while the proxy's own lookups fail. Keep that check.
+- **Rotating the password.** `immich_db_password` is used by two services. After you overwrite the secret, restart the whole stack, or the server cannot connect to the database. The database keeps its old password until you change it inside PostgreSQL.
+- **Memory.** 2G for the database and server and 4G for machine learning are starting points. Lower the machine-learning limit on small nodes.
+- **No published ports.** Immich is reached only through routes, so placement is not constrained by ports.
+- **Pin the images.** `release` and `latest` move. Pin tags once it works.
+
+## Related
+
+- [Drives and volumes](/docs/features/drives-and-volumes)
+- [Proxy and TLS](/docs/features/proxy-and-tls)
+- [Authentik example](/docs/examples/authentik)

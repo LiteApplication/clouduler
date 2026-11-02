@@ -5,6 +5,224 @@ sidebar_position: 8
 
 # Stalwart
 
-One-line summary of stalwart goes here.
+Stalwart is a full mail server in one binary: SMTP for inbound mail and submission, IMAP, JMAP, ManageSieve and an admin console. Its datastore is RocksDB, kept on a replicated drive. This example is the one that exposes raw TCP ports to the internet, so read the quirks before you deploy.
 
-TODO
+## What you'll learn
+
+- **Raw TCP ports on a public network** with `x-clouduler.expose`, `open_ports` on the nodes and **`proxy_protocol`**.
+- **Several public routes** on different hostnames, each limited to one **`path_prefix`**.
+- The `hostname:` field, and resource limits with `cpus`.
+- Pulling an image from a **private registry**.
+- An admin console that is tailnet-only while mail is public.
+
+## Prerequisites
+
+**Cluster.** Networks `tailscale` (internal), `public` and `wan` (egress). Drive `fast` for the datastore. See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**Node open ports.** Each node that may run Stalwart must list TCP 25, 143, 465, 587, 993 and 4190 under `open_ports` of its `public` network, as `atlas` does in the cluster snippet. Clouduler places a raw `expose` only on a node that lists the port, and your router or firewall must forward those ports to the node. See [Ports and firewall](/docs/reference/ports-and-firewall).
+
+**DNS names.**
+
+- `mail.example.com`: the mail host, also the container's `hostname`. It must match your MX record.
+- `mail.home.example.com`: the admin console, on the tailnet only.
+- `mta-sts.example.com`, `autoconfig.example.com`, `autodiscover.example.com`: public discovery endpoints.
+
+Clouduler does not create the mail records. Create the MX, SPF, DKIM, DMARC and MTA-STS records at the DNS provider for `example.com` yourself.
+
+**Secrets.**
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `stalwart_cf_dns_token` | Cloudflare API token for DNS-01 certificate issuance. Stalwart writes the challenge record, so no port 80 is needed. | **Paste string**, with DNS edit rights for `example.com`. See the [Cloudflare API token guide](/docs/guides/cloudflare-api-token). |
+| `stalwart_license_key` | Licence key from the vendor, mounted by the original. | **Paste string**. It is not generated. |
+
+**Configs.**
+
+| Name | Source file | Content |
+|---|---|---|
+| `stalwart_config` | `./config.json` | One line, below |
+
+**Image.** Replace `registry.example.com/admin/stalwart:latest` with an image you can pull. If the registry is private, log in first, see [Private registries](/docs/guides/private-registries):
+
+```bash
+clouduler registry login registry.example.com --username USER --password-stdin < password.txt
+```
+
+**Volumes.** `fast/stalwart-data` holds accounts, mail, DKIM keys and TLS certificates.
+
+## Stack YAML
+
+```yaml title="stalwart.yaml"
+# Stalwart: full mail server (SMTP, IMAP, JMAP, ManageSieve) for example.com.
+#
+# The datastore (RocksDB: accounts, mail, DKIM keys, TLS certs) lives on fast.
+# An embedded key-value store on slow storage is a poor fit, so it gets the
+# low-latency replicated drive.
+#
+# Bootstrap: the first deploy comes up with an empty datastore and no domains.
+# Create your domain and accounts once after the first start.
+
+networks:
+  # Hardened: only one gateway host is called on tailscale. Mail transport, DNS
+  # and ACME go over wan.
+  tailscale:
+    allowed:
+      - gateway.home.example.com
+  public:
+    allowed: []
+  wan: {}
+
+secrets:
+  stalwart_cf_dns_token:
+  stalwart_license_key:
+
+configs:
+  stalwart_config:
+    file: ./config.json
+
+services:
+  stalwart:
+    image: registry.example.com/admin/stalwart:latest
+    hostname: mail.example.com
+    secrets:
+      - stalwart_cf_dns_token
+      - stalwart_license_key
+    configs:
+      - source: stalwart_config
+        target: /etc/stalwart/config.json
+    volumes:
+      - fast/stalwart-data:/var/lib/stalwart
+    networks: [tailscale, public, wan]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/stalwart", "--help"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    environment:
+      STALWART_PUBLIC_URL: https://mail.home.example.com
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "2.0"
+    x-clouduler:
+      # Admin console, webmail and JMAP. Tailnet only.
+      proxy:
+        - host: mail
+          network: tailscale
+          port: 8080
+          tls: true
+
+        # Public, but only the paths that have to be reachable from the
+        # internet: the MTA-STS policy other mail servers fetch, and the
+        # autoconfig and autodiscover endpoints mail clients probe. A
+        # path_prefix matches one host and one path, so each public path needs
+        # its own route.
+        - host: mta-sts
+          network: public
+          path_prefix: /.well-known/mta-sts.txt
+          port: 8080
+          tls: true
+        - host: autoconfig
+          network: public
+          path_prefix: /mail/config-v1.1.xml
+          port: 8080
+          tls: true
+        - host: autodiscover
+          network: public
+          path_prefix: /autodiscover/autodiscover.xml
+          port: 8080
+          tls: true
+      expose:
+        # These ports need the client's real source address for relay decisions
+        # and spam scoring, which an overlay route would hide.
+        #
+        # proxy_protocol: true. The relay is userspace, so without this header
+        # every connection reaches Stalwart from the node's bridge address.
+        # Stalwart's abuse protection then bans the relay itself. Stalwart must
+        # also be configured to trust the PROXY header on each listener.
+        - { port: 25, published: 25, protocol: tcp, network: public, proxy_protocol: true }     # SMTP (MX and smarthost)
+        - { port: 143, published: 143, protocol: tcp, network: public, proxy_protocol: true }   # IMAP STARTTLS
+        - { port: 465, published: 465, protocol: tcp, network: public, proxy_protocol: true }   # SMTP submission, implicit TLS
+        - { port: 587, published: 587, protocol: tcp, network: public, proxy_protocol: true }   # SMTP submission, STARTTLS
+        - { port: 993, published: 993, protocol: tcp, network: public, proxy_protocol: true }   # IMAP implicit TLS
+        - { port: 4190, published: 4190, protocol: tcp, network: public, proxy_protocol: true } # ManageSieve
+```
+
+## Config files
+
+```json title="config.json (stalwart_config)"
+{ "@type": "RocksDb", "path": "/var/lib/stalwart/" }
+```
+
+The file only tells Stalwart where its datastore is. The container reads it as `/etc/stalwart/config.json`. Put it next to `stalwart.yaml`.
+
+## Walkthrough
+
+- **`networks`**: only one gateway host is reachable on `tailscale` (replace it with a route you run), nothing on `public`, and `wan: {}` is unrestricted because mail delivery, DNS and certificate issuance all go out through it.
+- **`hostname: mail.example.com`** is the name Stalwart uses in SMTP banners and certificates. It must match the MX record.
+- **`configs` with `file:`** bundles `config.json` and mounts it at the `target` path.
+- **Tailnet route**: `network: tailscale` makes the admin console reachable only from the tailnet.
+- **Public routes with `path_prefix`**: each discovery endpoint is its own route, one host and one prefix. Everything else on those hosts answers 404 from the proxy.
+- **`expose` with `network: public`**: six raw TCP ports published on the node that runs Stalwart. On a public network each port must also be listed in that node's `open_ports`, otherwise validation fails with `no node has PORT/PROTO open on network NET, this port could never be reached`. The `{ ... }` inline form is plain YAML, used for brevity. See [Networking](/docs/features/networking#publishing-a-service).
+- **`proxy_protocol: true`** makes the relay send a PROXY v2 header, so Stalwart sees the sender's real address. TCP only.
+- **`cpus: "2.0"`** caps the container at two CPUs. The value is a string.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs** and create the two secrets with **Paste string**.
+2. If your registry is private, open **Updates**, **Manage registry accounts**, and save a login for it.
+3. Open **Stacks**, **Deploy stack**, name it `stalwart`, paste the YAML, and fill `stalwart_config` in **Bundled files**.
+4. Click **Deploy stalwart** once the spec is valid. The panel **Where it can run** shows only nodes that list the mail ports.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+printf '%s' 'the-cloudflare-token' | clouduler secret set stalwart_cf_dns_token --stdin
+printf '%s' 'the-licence-key'      | clouduler secret set stalwart_license_key --stdin
+
+echo '{ "@type": "RocksDb", "path": "/var/lib/stalwart/" }' > config.json
+clouduler stack deploy ./stalwart.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Watch the first start with `clouduler stack logs stalwart -n 200`. Look for the initial administrator credentials, which upstream versions print once.
+2. Open the admin console at `https://mail.home.example.com` from the tailnet. Create the domain `example.com` and at least one account.
+3. Create the DNS records: MX to `mail.example.com`, an A record for `mail` to a node's public address, SPF, DKIM (the key Stalwart shows for the domain), DMARC and the MTA-STS TXT record. Point `autoconfig` and `autodiscover` at a node that serves them.
+4. Check the ports from outside your network, for example `openssl s_client -connect mail.example.com:465`.
+5. Check the certificate. DNS-01 issuance should succeed through the Cloudflare token, and a failure shows up in the logs.
+6. Send a test message to an outside address and read the headers. The client address Stalwart records should be the sender's, not a node's bridge address. If it is the node's, the trusted proxy setting is missing, see the quirks.
+
+## Quirks
+
+<Quirk title="Stalwart must trust the PROXY header" severity="danger">
+`config.json` only holds the datastore path. Stalwart also has to be told, in its own settings, to trust the PROXY v2 header on each listener. Without it every client appears to come from the relay, and the abuse protection can ban the relay itself. Set it from the admin console after the first start.
+</Quirk>
+
+<Quirk title="Ports bind on one node" severity="warn">
+A raw `expose` on a public network is bound on the node that runs Stalwart. If Stalwart moves, the mail ports move with it, and your DNS and router forwarding must follow. Pin the service with `x-clouduler.node` if you want it to stay on one node.
+</Quirk>
+
+- **Redeploys.** The new instance cannot bind port 25 while the old one holds it. Rolling updates are not controlled from the spec, so watch a redeploy and check the logs if the new instance fails to bind.
+- **Weak healthcheck.** `stalwart --help` only proves the binary runs. Check SMTP and IMAP yourself after an upgrade.
+- **No Checkpoint hook.** RocksDB has no write-ahead log to flush the way PostgreSQL does. Whether a before-hook is worth adding was not checked.
+- **Licence key.** The key is mounted, so it must exist. Check Stalwart's documentation to see whether you need one before you remove the secret.
+- **Mail is not backed up by replication.** Keep a [real backup](/docs/features/backups) of `fast/stalwart-data`.
+
+## Related
+
+- [Networking](/docs/features/networking)
+- [Ports and firewall](/docs/reference/ports-and-firewall)
+- [Cloudflare API token guide](/docs/guides/cloudflare-api-token)
+- [Authentik example](/docs/examples/authentik), which can send its mail through this server

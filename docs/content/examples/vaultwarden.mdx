@@ -5,6 +5,153 @@ sidebar_position: 2
 
 # Vaultwarden
 
-One-line summary of vaultwarden goes here.
+Vaultwarden is a self-hosted, Bitwarden-compatible password manager. It is a single container with a SQLite database, which makes it the best first stack to deploy: one service, one secret, one volume, one route.
 
-TODO
+## What you'll learn
+
+- A **standalone secret** read from a file inside the container.
+- A **drive-backed volume** that follows the container between nodes.
+- A hardened network with `allowed: []`.
+- An **action** that doubles as a **pre-replication hook** (`volume_sync`), so the copy of the database on other nodes is consistent.
+- A public HTTPS **proxy route**.
+
+## Prerequisites
+
+**Cluster.** Networks `public` (type `public`, domain `example.com`) and `wan` (type `egress`), and the replicated drive `apps`. See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**DNS.** `vault.example.com`. It is a public route, so the name must sit inside a Cloudflare zone you configured if you want Clouduler to publish the record.
+
+**Secrets.** Create this one before the first deploy:
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `vaultwarden_admin_token` | Token for the `/admin` panel. | **Paste string** with a password you will keep, if you want to use `/admin`. Otherwise **Generate**, charset `alphanumeric`, length `64`. A generated value is never shown again. |
+
+**Configs.** None.
+
+**Volumes.** `apps/vaultwarden` holds the whole data directory (`/data`): the database, attachments and the backup snapshots.
+
+## Stack YAML
+
+```yaml title="vaultwarden.yaml"
+# Vaultwarden: self-hosted Bitwarden-compatible password manager.
+# Served at https://vault.example.com; admin panel at /admin.
+
+networks:
+  # Hardened: the vault has no reason to talk to any other stack. allowed: []
+  # denies everything except the stack itself on public: the proxy returns 403
+  # for other hosts' routes on public, and the host firewall drops other overlay
+  # traffic. wan has no allowed list, so icon fetching, breach checks and the
+  # push relay keep working.
+  public:
+    allowed: []
+  wan: {}
+
+secrets:
+  vaultwarden_admin_token:
+
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    volumes:
+      - apps/vaultwarden:/data
+    secrets: [vaultwarden_admin_token]
+    environment:
+      LOG_LEVEL: warn
+      ENABLE_DB_WAL: "false"
+      ADMIN_TOKEN_FILE: /run/secrets/vaultwarden_admin_token
+    networks: [public, wan]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+    x-clouduler:
+      # Backup writes a consistent db_*.sqlite3 snapshot into /data. It runs
+      # before every replication of the volume, and only the 3 newest snapshots
+      # are kept.
+      actions:
+        Backup:
+          cmd: /vaultwarden backup && ls -1t /data/db_*.sqlite3 | tail -n +4 | xargs -r rm -f
+          timeout: 1m
+      volume_sync:
+        vaultwarden:
+          before: Backup
+      proxy:
+        - host: vault
+          network: public
+          port: 80
+          tls: true
+```
+
+## Config files
+
+None. This stack has no `configs:` block.
+
+## Walkthrough
+
+- **`networks.public.allowed: []`** lets the stack reach nothing else through `public`. The proxy answers 403 for other stacks' routes, and the firewall drops other overlay traffic. See [Allowed hosts and ports](/docs/features/networking#allowed-hosts-and-ports).
+- **`networks.wan: {}`** is an egress network with no `allowed` list, so outbound traffic is unrestricted. The vault needs it for icons and breach checks.
+- **`secrets:` with a name and no value** declares a standalone secret. The stack refers to it by name only, so it must already exist in the cluster. Nothing is bundled from a file.
+- **`secrets: [vaultwarden_admin_token]`** on the service mounts it at `/run/secrets/vaultwarden_admin_token`. `ADMIN_TOKEN_FILE` points the container at that path, so the token never appears in the environment.
+- **`apps/vaultwarden:/data`** is a drive-backed volume: `apps` is the drive, `vaultwarden` is the volume inside it. Whatever is written to `/data` is replicated to every node that holds the `apps` drive, so the container can start on another node if its node fails. See [Drives and volumes](/docs/features/drives-and-volumes).
+- **`restart: unless-stopped`** is the Docker restart policy. Without it the policy is `no`.
+- **`x-clouduler.actions.Backup`** is a named command. It shows up as a button on the stack's Containers tab, and `volume_sync` can use it as a hook.
+- **`volume_sync.vaultwarden.before: Backup`** runs `Backup` inside the running container before each scheduled replication of the volume named `vaultwarden`. The key is the volume name, not the drive name. If the hook fails, that replication is skipped.
+- **`x-clouduler.proxy`**: `host: vault` gets the `public` network's domain appended, so the route is `vault.example.com`. `port: 80` is the container port. See [Proxy and TLS](/docs/features/proxy-and-tls).
+
+## Deploy
+
+Create the secret first, then deploy.
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**, click **Create secret**, name it `vaultwarden_admin_token`, choose **Paste string** (or **Generate**) and save.
+2. Open **Stacks**, click **Deploy stack**, name it `vaultwarden`, paste the YAML into the **Spec** editor.
+3. Wait for **Spec is valid**, check **What it needs** lists the secret, the drive and the networks, then click **Deploy vaultwarden**.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+printf '%s' 'choose-a-long-admin-password' | clouduler secret set vaultwarden_admin_token --stdin
+clouduler stack deploy ./vaultwarden.yaml
+clouduler stack list
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Open `https://vault.example.com` and create your account. This stack does not close sign-up, so create your account first, then check the Vaultwarden documentation for the `SIGNUPS_ALLOWED` setting to close it.
+2. Open `https://vault.example.com/admin` and enter the admin token. If you generated the token and did not copy it, set a new value (saving an existing secret name overwrites it) and restart the instance.
+3. Run the **Backup** action once from the stack's Containers tab, then confirm a snapshot exists:
+
+   ```bash
+   clouduler exec vaultwarden.vaultwarden.0 -- ls -1 /data
+   ```
+
+4. In your Bitwarden clients, set the self-hosted server URL to `https://vault.example.com`.
+
+## Quirks
+
+<Quirk title="Public means public" severity="warn">
+A route on a `public` network is reachable by anyone on the internet. The account password and the admin token are the only protection, so use long ones.
+</Quirk>
+
+<Quirk title="The hook only runs in a running container" severity="info">
+`Backup` runs inside the container, so it cannot run while the container is stopped. A failed hook skips that replication rather than copying an unprepared database.
+</Quirk>
+
+- **Memory.** 256M is a comfortable limit for a handful of users. There is no healthcheck, so a hung process that is still running is not reported unhealthy.
+- **Admin token.** A plain token works. Upstream recommends storing an Argon2 hash instead.
+- **Pin the image.** `latest` is convenient to start with. Pin a version once it works, and update from the [Updates page](/docs/features/updates).
+
+## Related
+
+- [Configs and secrets](/docs/features/configs-and-secrets)
+- [Drives and volumes](/docs/features/drives-and-volumes)
+- [Stack spec reference](/docs/reference/stack-spec)

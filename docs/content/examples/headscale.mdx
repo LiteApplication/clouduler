@@ -5,6 +5,369 @@ sidebar_position: 7
 
 # Headscale
 
-One-line summary of headscale goes here.
+Headscale is a self-hosted Tailscale control server. Headplane is its web admin UI. This stack runs both on one public hostname, with sign-in through [Authentik](/docs/examples/authentik) over OIDC. Once it runs, your nodes and devices can join a tailnet that you control.
 
-TODO
+This page is about the stack. For connecting machines and Clouduler nodes to a tailnet, see the [Tailscale and Headscale guide](/docs/guides/tailscale-headscale), and for building a cluster across several sites on top of Headscale, the [multi-site quick start](/docs/quickstart/multi-site-headscale).
+
+## What you'll learn
+
+- Two services behind **one hostname**, split by **`path_prefix`**.
+- **Writable configs** (`write: true`) that a service edits and Clouduler keeps in the cluster.
+- Mounting the **Docker socket** into a container.
+- A **CORS middleware** and **`preserve_host`**.
+- Three configuration files bundled with the stack.
+- OIDC clients configured against Authentik, and a secret that only exists after the first start.
+
+## Prerequisites
+
+**Cluster.** Networks `public` (domain `example.com`) and `wan` (egress). Drive `apps`. See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**DNS.** `headscale.example.com`, a public route. Clients must reach it from the internet, so the name must sit inside a Cloudflare zone if you want Clouduler to publish it.
+
+**Authentik.** The [Authentik stack](/docs/examples/authentik) must exist first. Create an OAuth2/OpenID provider and application with the slug `headscale` there, using the redirect URIs that the Headscale and Headplane documentation give for your versions. This example points both Headscale and Headplane at that one application, so with a single provider you paste the same client secret into both secrets below.
+
+**Secrets.** All four are referenced, so all four must exist before the first deploy.
+
+| Name | What it is | Where the value comes from |
+|---|---|---|
+| `headplane_api_key` | API key Headplane uses to call Headscale. | Created inside Headscale after the first start. Until then, **Paste string** with a placeholder such as `placeholder`, so the deploy passes. |
+| `headplane_cookie_secret` | Signs Headplane's session cookie. | **Generate**, `alphanumeric`, `32`. Check Headplane's requirement for the length. |
+| `headplane_oidc_client_secret` | OIDC client secret for Headplane. | **Paste string**, copied from the Authentik provider. |
+| `headscale_oidc_client_secret` | OIDC client secret for Headscale. | **Paste string**, copied from the Authentik provider. |
+
+**Configs.**
+
+| Name | Source file | Content |
+|---|---|---|
+| `headscale_config` | `./config/config.yaml` | Headscale's main config |
+| `headscale_policy` | `./config/policy.hujson` | Access policy |
+| `headplane_config` | `./config/headplane.yaml` | Headplane config |
+
+**Volumes.** `apps/headscale-data` (database, Noise key, DERP keys) and `apps/headscale-headplane-data` (Headplane data).
+
+## Stack YAML
+
+```yaml title="headscale.yaml"
+services:
+  headplane:
+    image: ghcr.io/tale/headplane:latest-shell
+    volumes:
+      - apps/headscale-headplane-data:/var/lib/headplane
+    networks:
+      - public
+      - wan
+    configs:
+      - source: headscale_config
+        target: /etc/headscale/config.yaml
+        write: true
+      - source: headplane_config
+        target: /etc/headplane/config.yaml
+        write: true
+    secrets:
+      - source: headplane_cookie_secret
+        env: HEADPLANE_SERVER__COOKIE_SECRET
+      - source: headplane_api_key
+        env: HEADPLANE_HEADSCALE__API_KEY
+      - source: headplane_oidc_client_secret
+        env: HEADPLANE_OIDC__CLIENT_SECRET
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+    # The image ships its own healthcheck, so none is set here.
+    x-clouduler:
+      docker_socket:
+        target: /var/run/docker.sock
+        read_only: false
+      proxy:
+        - host: headscale
+          network: public
+          port: 3000
+          path_prefix: /admin
+          preserve_host: true
+
+  headscale:
+    image: headscale/headscale:latest
+    command: serve
+    volumes:
+      - apps/headscale-data:/var/lib/headscale
+    networks:
+      - public
+      - wan
+    configs:
+      - source: headscale_config
+        target: /etc/headscale/config.yaml
+      - source: headscale_policy
+        target: /etc/headscale/policy.hujson
+    secrets:
+      - source: headscale_oidc_client_secret
+        target: /run/secrets/headscale_oidc_client_secret
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+    x-clouduler:
+      proxy:
+        - host: headscale
+          network: public
+          port: 25725
+          middlewares:
+            - cors:
+                origins:
+                  - https://headscale.example.com
+                methods:
+                  - GET
+                  - POST
+                  - PUT
+                  - DELETE
+                  - OPTIONS
+                headers:
+                  - Authorization
+                  - Content-Type
+                max_age: 1m 40s
+
+networks:
+  # Hardened: only Authentik (OIDC, a public route) is called on public. The
+  # upstream DERP map is the one thing fetched from outside.
+  public:
+    allowed:
+      - auth.example.com
+  wan:
+    allowed:
+      - controlplane.tailscale.com
+
+configs:
+  headplane_config:
+    file: ./config/headplane.yaml
+  headscale_config:
+    file: ./config/config.yaml
+  headscale_policy:
+    file: ./config/policy.hujson
+
+secrets:
+  headplane_api_key:
+  headplane_cookie_secret:
+  headplane_oidc_client_secret:
+  headscale_oidc_client_secret:
+```
+
+## Config files
+
+Put these three files in a `config/` folder next to `headscale.yaml`.
+
+```yaml title="config/config.yaml (headscale_config)"
+server_url: https://headscale.example.com
+listen_addr: 0.0.0.0:25725
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: ""
+  allocation: sequential
+
+derp:
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  auto_update_enabled: true
+  update_frequency: 3h
+  server:
+    enabled: false
+    region_id: 999
+    region_code: headscale
+    region_name: Headscale Embedded DERP
+    stun_listen_addr: 0.0.0.0:3478
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: ""
+    ipv6: ""
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+log:
+  level: info
+  format: text
+
+dns:
+  magic_dns: true
+  base_domain: ts.example.com
+  override_local_dns: true
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 1.0.0.1
+    split:
+      home.example.com:
+        - 192.168.1.53
+        - 192.168.1.54
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false
+
+taildrop:
+  enabled: true
+
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+
+oidc:
+  only_start_if_oidc_is_available: false
+  issuer: "https://auth.example.com/application/o/headscale/"
+  # The client_id is the Authentik application slug. Create the application in
+  # Authentik with this slug. The value is not sensitive.
+  client_id: "headscale"
+  client_secret_path: /run/secrets/headscale_oidc_client_secret
+  pkce:
+    enabled: true
+  scope:
+    - openid
+    - profile
+    - email
+  # Authentik does not always send email_verified for manually created users.
+  email_verified_required: false
+```
+
+```yaml title="config/headplane.yaml (headplane_config)"
+server:
+  host: "0.0.0.0"
+  port: 3000
+  base_url: "https://headscale.example.com/admin"
+  cookie_secure: true
+  data_path: "/var/lib/headplane"
+  # cookie_secret and headscale.api_key are injected at runtime from secrets
+
+headscale:
+  url: "http://headscale:25725"
+  config_path: "/etc/headscale/config.yaml"
+
+integration:
+  agent:
+    enabled: true
+  docker:
+    enabled: true
+    socket: "unix:///var/run/docker.sock"
+
+oidc:
+  issuer: "https://auth.example.com/application/o/headscale/"
+  client_id: "headscale"
+  use_pkce: true
+  scope: "openid profile email"
+```
+
+```json title="config/policy.hujson (headscale_policy)"
+{
+  "tagOwners": {
+    "tag:headplane-agent": ["admin@"]
+  },
+  "acls": [
+    { "action": "accept", "src": ["admin@"], "dst": ["*:*"] },
+    { "action": "accept", "src": ["autogroup:member"], "dst": ["servers@:*"] },
+    { "action": "accept", "src": ["servers@"], "dst": ["servers@:*"] },
+    { "action": "accept", "src": ["servers@", "tag:headplane-agent"], "dst": ["tag:headplane-agent:*"] },
+    { "action": "accept", "src": ["tag:headplane-agent"], "dst": ["servers@:*"] },
+    { "action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:internet:*"] }
+  ]
+}
+```
+
+The `prefixes.v4` range `100.64.0.0/10` is the standard tailnet address range. `base_domain` (`ts.example.com`) is the MagicDNS name and must differ from the public name in `server_url`. The split DNS entry is a single example: replace it with your own resolver and domain.
+
+## Walkthrough
+
+- **Two services, one host.** Both routes use `host: headscale` on `public`. Headplane has `path_prefix: /admin` and Headscale has none, so `/admin` goes to Headplane and everything else goes to Headscale. See [Proxy and TLS](/docs/features/proxy-and-tls). {/* TODO verify: that the proxy picks the longest matching prefix first. */}
+- **`preserve_host: true`** forwards the client's `Host` header to Headplane, which the UI needs to build its links.
+- **`write: true` on both configs of Headplane**: Headplane can edit them and Clouduler writes the edits back to the cluster. Only one instance may hold a writable config, which is why Headplane has `replicas: 1`. Headscale mounts `headscale_config` read-only. See [Configs and secrets](/docs/features/configs-and-secrets).
+- **Secrets as `env:`** for Headplane. Headscale gets its OIDC secret as a file, and the explicit `target` matches `client_secret_path` in the config.
+- **`docker_socket`** mounts the node's Docker socket into Headplane at `/var/run/docker.sock`, so it can see and control containers. `mode` defaults to `local`, the node's real socket.
+- **`cors` middleware** on the Headscale route allows the listed methods and headers from the dashboard origin. `max_age: 1m 40s` is the preflight cache time.
+- **`networks.public.allowed: [auth.example.com]`**: on the public network, the stack may call only Authentik. **`wan.allowed: [controlplane.tailscale.com]`**: the only outside fetch is the upstream DERP map.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**. Create `headplane_cookie_secret` with **Generate** (`alphanumeric`, `32`). Create the two OIDC secrets and the placeholder `headplane_api_key` with **Paste string**.
+2. Open **Stacks**, **Deploy stack**, name it `headscale`, paste the YAML.
+3. In **Bundled files**, fill `headscale_config`, `headscale_policy` and `headplane_config` with the three files above.
+4. Click **Deploy headscale** once the spec is valid.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+mkdir -p headscale/config && cd headscale
+# save headscale.yaml and the three files in config/
+
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set headplane_cookie_secret --stdin
+printf '%s' 'placeholder'          | clouduler secret set headplane_api_key --stdin
+printf '%s' 'the-authentik-secret' | clouduler secret set headplane_oidc_client_secret --stdin
+printf '%s' 'the-authentik-secret' | clouduler secret set headscale_oidc_client_secret --stdin
+
+clouduler stack deploy ./headscale.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Let the stack start once with the placeholder API key. Check `clouduler stack unhealthy` and the logs.
+2. Create a Headscale user for the admin you will sign in as:
+
+   ```bash
+   clouduler exec headscale.headscale.0 -- headscale users create admin
+   ```
+
+3. Create the API key Headplane needs, then store it in the secret (this overwrites the placeholder):
+
+   ```bash
+   clouduler exec headscale.headscale.0 -- headscale apikeys create --expiration 90d
+   printf '%s' "THE_KEY" | clouduler secret set headplane_api_key --stdin
+   ```
+
+   {/* TODO verify: the --expiration flag, check headscale apikeys create --help in the container. */}
+
+4. Restart the stack so Headplane reads the new value: `clouduler stack restart headscale`.
+5. Open `https://headscale.example.com/admin` and sign in with Authentik. `clouduler exec headscale.headscale.0 -- headscale users list` should show your user.
+6. Join a machine: `tailscale up --login-server https://headscale.example.com`. The [Tailscale and Headscale guide](/docs/guides/tailscale-headscale) covers installing the client and pointing Clouduler nodes at the tailnet.
+
+## Quirks
+
+<Quirk title="Headplane has the Docker socket" severity="danger">
+A writable Docker socket is root on that node. This stack keeps `read_only: false` because Headplane's Docker integration needs it. Run it only on nodes you control, and give access to `/admin` only to people you trust.
+</Quirk>
+
+<Quirk title="Rotate the OIDC secret in three places" severity="warn">
+The client secret lives in Authentik and in both `headscale_oidc_client_secret` and `headplane_oidc_client_secret`. Rotating one without the others breaks sign-in.
+</Quirk>
+
+- **The policy names `admin@`.** Headscale matches users by name, so the user must exist as `admin` before the policy takes effect. Check the name after your first OIDC login.
+- **Config edits from Headplane** take effect after Headscale restarts.
+- **Headscale's gRPC and metrics ports** stay on `127.0.0.1`. Only the API port goes through the proxy.
+- **`derp.server.enabled: false`**: the stack uses Tailscale's public relays, not an embedded one.
+- **Memory.** 256M each is enough for a small tailnet. Raise it as it grows.
+- **Pin the images.** Pin both `latest` tags once it works.
+
+## Related
+
+- [Tailscale and Headscale guide](/docs/guides/tailscale-headscale)
+- [Multi-site quick start](/docs/quickstart/multi-site-headscale)
+- [Authentik example](/docs/examples/authentik)

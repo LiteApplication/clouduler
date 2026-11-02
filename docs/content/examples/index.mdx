@@ -3,8 +3,136 @@ title: Overview
 sidebar_position: 1
 ---
 
-# Overview
+# Example stacks
 
-One-line summary of overview goes here.
+These are seven real-world stacks, generalised from a working three-node cluster. Each page gives you the full stack YAML, the config files it needs, the secrets to create first, and a walkthrough of the parts that are specific to Clouduler. They are meant to be copied and adapted, and to show how the features in the rest of these docs fit together in a stack you would actually run.
 
-TODO
+Every name in them is a placeholder: the domain is `example.com`, the tailnet domain is `home.example.com`, the nodes are `atlas`, `boreas` and `cirrus`, and addresses are in `192.168.1.x`. No secret value appears anywhere. Replace the placeholders with your own.
+
+## The examples
+
+| Stack | What it is | What it shows off in Clouduler |
+|---|---|---|
+| [Vaultwarden](/docs/examples/vaultwarden) | Bitwarden-compatible password manager | The smallest useful stack: one public route, a drive-backed volume, a standalone secret, an `allowed: []` network, and an action used as a pre-replication hook. |
+| [Immich](/docs/examples/immich) | Photo and video library | Several services in one stack, a database on a replicated drive with a checkpoint hook, secrets as environment variables, a tailnet-only route next to a public one, websockets, config files. |
+| [Nextcloud](/docs/examples/nextcloud) | File sync and office suite (AIO layout) | A seven-container stack, nine secrets, `tmpfs` volumes, read-only containers, capabilities, a `redirect_regex` middleware, maintenance actions. |
+| [Authentik](/docs/examples/authentik) | Identity provider (OIDC, SAML) | `file://` secret references, a server and a worker sharing volumes, `colocate`, an egress allow list with a port entry, a recovery action. |
+| [Forgejo](/docs/examples/forgejo) | Git forge | A raw TCP port (SSH) published with `expose`, large uploads with `max_body_size`, `depends_on`, a wildcard egress allow list. |
+| [Headscale](/docs/examples/headscale) | Tailscale control server and Headplane admin UI | Two services on one host split by `path_prefix`, writable configs, the Docker socket, a CORS middleware, OIDC sign-in through Authentik. |
+| [Stalwart](/docs/examples/stalwart) | Full mail server | Raw mail ports on a public network with `open_ports` and `proxy_protocol`, several public routes limited by path, a hostname, resource limits. |
+
+## How to use an example
+
+1. **Check the cluster prerequisites** below. The examples assume the networks and drives in the snippet. Your names will differ, so edit the stack to match your own `cluster.yaml`.
+2. **Copy the YAML** from the page into a file named after the stack, for example `immich.yaml`. The stack name is the file name without its extension. Put any config files next to it, in the folder the page names (usually `config/`).
+3. **Create the secrets** the page lists, before the first deploy. A secret named in the stack's `secrets:` block with no `file:` must already exist, otherwise the deploy fails. Every page says which generator settings to use. See [Configs and secrets](/docs/features/configs-and-secrets).
+4. **Adjust the placeholders**: the domain, the network names, the drive names, the memory limits and any image tags.
+5. **Deploy** from the web UI or the CLI. Every page has both.
+6. **Follow the first-run steps** on the page. Most services need an admin account created or a setting changed after the first start.
+
+You can also read the same stacks from an AI client through the [MCP server](/docs/features/mcp), which serves them as `clouduler://examples/*` resources.
+
+## Deploy order
+
+If you run several of them, this order avoids dead ends:
+
+1. [Authentik](/docs/examples/authentik), the OIDC provider the others sign in through.
+2. [Headscale](/docs/examples/headscale), which needs two Authentik clients.
+3. [Vaultwarden](/docs/examples/vaultwarden), [Immich](/docs/examples/immich), [Nextcloud](/docs/examples/nextcloud), [Forgejo](/docs/examples/forgejo) and [Stalwart](/docs/examples/stalwart), in any order. Each needs only its own secrets. Single sign-on can be wired to Authentik afterwards.
+
+## Cluster prerequisites
+
+All seven stacks assume a cluster with the networks and drives below. This is the part of `cluster.yaml` they use, not a complete file. See the [cluster.yaml reference](/docs/reference/cluster-yaml) for the rest, and [Networking](/docs/features/networking) and [Drives and volumes](/docs/features/drives-and-volumes) for what each key does.
+
+```yaml title="cluster.yaml (the parts these stacks need)"
+cluster:
+  name: homelab
+networks:
+  public:
+    type: public
+    domain: example.com
+  tailscale:
+    type: internal
+    subnet: 192.168.1.0/24
+    domain: home.example.com
+  wan:
+    type: egress
+cloudflare:
+  zones:
+    - example.com
+drives:
+  fast:
+    mode: replicated
+    sync_interval: 2m
+  bulk:
+    mode: replicated
+    sync_interval: 15m
+  apps:
+    mode: replicated
+    sync_interval: 5m
+nodes:
+  atlas:
+    role: manager
+    network:
+      public:
+        ipv4: 192.168.1.20
+        open_ports:
+          - { port: 80, protocol: tcp }
+          - { port: 443, protocol: tcp }
+          - { port: 25, protocol: tcp }      # Stalwart, only on a node that may run it
+          - { port: 143, protocol: tcp }
+          - { port: 465, protocol: tcp }
+          - { port: 587, protocol: tcp }
+          - { port: 993, protocol: tcp }
+          - { port: 4190, protocol: tcp }
+      tailscale: 192.168.1.10
+      wan: eth0
+    drives:
+      fast: /srv/fast
+      bulk: /srv/bulk
+      apps: /srv/apps
+  boreas:
+    role: manager
+    network:
+      public:
+        ipv4: 192.168.1.21
+        open_ports:
+          - { port: 80, protocol: tcp }
+          - { port: 443, protocol: tcp }
+      tailscale: 192.168.1.11
+      wan: eth0
+    drives:
+      fast: /srv/fast
+      bulk: /srv/bulk
+      apps: /srv/apps
+  cirrus:
+    role: worker
+    network:
+      public:
+        ipv4: 192.168.1.22
+        open_ports:
+          - { port: 80, protocol: tcp }
+          - { port: 443, protocol: tcp }
+      tailscale: 192.168.1.12
+      wan: eth0
+    drives:
+      fast: /srv/fast
+      bulk: /srv/bulk
+      apps: /srv/apps
+```
+
+Notes on the snippet:
+
+- The network called `tailscale` is the cluster's one `internal` network. The name is only a label. Call yours whatever you like, then change it in the stacks. The `home.example.com` domain is what its routes resolve under, so your own devices must resolve those names to a node's address on that network.
+- `wan` is an `egress` network: it sends a service's outbound traffic out of the named host interface (`eth0` here). A stack that attaches to it can reach the internet, optionally restricted by an `allowed` list.
+- Only `atlas` lists the mail ports. A raw `expose` on a public network is only placed on a node that lists the port in `open_ports`. Copy the mail ports to any other node that may run Stalwart.
+- Every node holds all three drives, so any stack can place a volume on any node. Replicated drives keep a copy on every holder.
+- For Cloudflare to publish the public names, their domain must sit inside a configured zone. See [DNS publishing](/docs/features/dns-publishing).
+
+## Things every example has in common
+
+- **`restart: unless-stopped`** on every service. Without a service-level `restart:`, the Docker restart policy is `no`, and a crashed container stays down until the scheduler notices. The `deploy.restart_policy` block you may know from Compose is parsed but not used.
+- **`deploy.resources.limits.memory`** on every service, so one runaway container cannot take a node down. The numbers are starting points, not tuned values.
+- **Databases on a replicated drive** get a `Checkpoint` action and a `volume_sync` hook, so the copy that lands on the other nodes holds almost no unreplayed write-ahead log. Replication is not a backup. Keep a [real backup](/docs/features/backups).
+- **`allowed` lists** on each network, so a stack can reach only what it needs. See [Allowed hosts and ports](/docs/features/networking#allowed-hosts-and-ports).
+- **Standalone secrets**: the secrets are created in the cluster and referenced by name, so no secret file sits beside a stack file.

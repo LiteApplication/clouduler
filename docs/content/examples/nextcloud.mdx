@@ -5,6 +5,506 @@ sidebar_position: 4
 
 # Nextcloud
 
-One-line summary of nextcloud goes here.
+Nextcloud is file sync, sharing and an office suite. This example uses the same seven containers as the Nextcloud All-in-One (AIO) project: an Apache front end, the Nextcloud app, PostgreSQL, Redis, notify-push, Imaginary for image previews and Collabora for documents. Talk, Whiteboard, OnlyOffice, ClamAV and full-text search are switched off, but their secrets are still referenced, so they must exist.
 
-TODO
+It is the biggest example, and the best one for seeing how Clouduler handles a multi-container app with many secrets and locked-down containers.
+
+## What you'll learn
+
+- **Nine secrets** exposed as environment variables, one of them under three different names.
+- **`tmpfs` volumes** and `read_only: true` containers, plus `cap_add` and `cap_drop`.
+- The same drive volume mounted read-only in some services and read-write in another, and **`colocate`** to keep them on one node.
+- A **`redirect_regex`** middleware for the CalDAV and CardDAV discovery paths.
+- A long `stop_grace_period` (the 600 second maximum) for a database.
+- **Maintenance actions** that wrap `occ`.
+
+## Prerequisites
+
+**Cluster.** Networks `tailscale` (internal, domain `home.example.com`) and `wan` (egress). Drives `fast`, `apps` and `bulk`. See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**DNS.** `nextcloud.home.example.com`, reachable on the tailnet only. Your devices must resolve it to a node's tailnet address.
+
+**Secrets.** All nine are referenced by the stack, so all nine must exist before the first deploy, even those for disabled features.
+
+| Name | Used by | Suggested setting |
+|---|---|---|
+| `nextcloud_db_password` | The database (as a file), Nextcloud (`DATABASE_PASSWORD`, `PGPASSWORD`, `POSTGRES_PASSWORD`) | **Generate**, `alphanumeric`, `32` |
+| `nextcloud_redis_password` | Redis and Nextcloud (`REDIS_HOST_PASSWORD`) | **Generate**, `alphanumeric`, `48` |
+| `nextcloud_admin_password` | Nextcloud (`ADMIN_PASSWORD`), used once to create the first admin | **Paste string** with a password you will keep. A generated value cannot be read back. |
+| `nextcloud_fts_password` | `FULLTEXTSEARCH_PASSWORD`. Full-text search is disabled. | **Generate**, `alphanumeric`, `32` |
+| `nextcloud_imaginary_secret` | Imaginary and Nextcloud (`IMAGINARY_SECRET`) | **Generate**, `hex`, `64` |
+| `nextcloud_turn_secret` | `TURN_SECRET`. Talk is disabled. | **Generate**, `hex`, `64` |
+| `nextcloud_signaling_secret` | `SIGNALING_SECRET`. Talk is disabled. | **Generate**, `hex`, `64` |
+| `nextcloud_recording_secret` | `RECORDING_SECRET`. Talk recording is disabled. | **Generate**, `hex`, `64` |
+| `nextcloud_whiteboard_secret` | `WHITEBOARD_SECRET`. Whiteboard is disabled. | **Generate**, `hex`, `64` |
+
+**Configs.**
+
+| Name | Source file | Content |
+|---|---|---|
+| `nextcloud_disable_jit` | `./config/nextcloud_disable_jit.ini` | `opcache.jit=disable` |
+
+**Volumes.**
+
+| Volume | Mounted by | Notes |
+|---|---|---|
+| `fast/nextcloud-html` | Apache (read-only), Nextcloud (read-write), notify-push (read-only) | Application code and config tree. |
+| `fast/nextcloud-db` | Database | PostgreSQL data directory. |
+| `fast/nextcloud-redis` | Redis | Redis data. |
+| `apps/nextcloud-db-dump` | Database (`/mnt/data`) | Destination for AIO's own database dumps. |
+| `bulk/nextcloud-apache-data` | Apache (`/mnt/data`) | AIO's data directory for the front end. |
+| `bulk/nextcloud-data` | Nextcloud (`/var/www/html/data`) | User files, the bulk of the storage. |
+
+## Stack YAML
+
+```yaml title="nextcloud.yaml"
+networks:
+  # Hardened: only its own route (Collabora and self-links). Single sign-on and
+  # downloads go over wan.
+  tailscale:
+    allowed:
+      - nextcloud.home.example.com
+  wan: {}
+
+configs:
+  nextcloud_disable_jit:
+    file: ./config/nextcloud_disable_jit.ini
+
+secrets:
+  nextcloud_db_password:
+  nextcloud_redis_password:
+  nextcloud_admin_password:
+  nextcloud_fts_password:
+  nextcloud_imaginary_secret:
+  nextcloud_turn_secret:
+  nextcloud_signaling_secret:
+  nextcloud_recording_secret:
+  nextcloud_whiteboard_secret:
+
+services:
+  nextcloud-aio-apache:
+    image: ghcr.io/nextcloud-releases/aio-apache:latest
+    user: "33"
+    healthcheck:
+      start_period: 30s
+      test: /healthcheck.sh
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    environment:
+      NC_DOMAIN: nextcloud.home.example.com
+      NEXTCLOUD_HOST: nextcloud-aio-nextcloud
+      APACHE_HOST: nextcloud-aio-apache
+      COLLABORA_HOST: nextcloud-aio-collabora
+      TALK_HOST: nextcloud-aio-talk
+      APACHE_PORT: "11000"
+      AIO_LOG_LEVEL: warn
+      ONLYOFFICE_HOST: nextcloud-aio-onlyoffice
+      TZ: UTC
+      APACHE_MAX_SIZE: "17179869184"
+      APACHE_MAX_TIME: "3600"
+      NOTIFY_PUSH_HOST: nextcloud-aio-notify-push
+      WHITEBOARD_HOST: nextcloud-aio-whiteboard
+    volumes:
+      - fast/nextcloud-html:/var/www/html:ro
+      - bulk/nextcloud-apache-data:/mnt/data
+      - type: tmpfs
+        target: /var/log/supervisord
+      - type: tmpfs
+        target: /var/run/supervisord
+      - type: tmpfs
+        target: /usr/local/apache2/logs
+      - type: tmpfs
+        target: /tmp
+      - type: tmpfs
+        target: /home/www-data
+    read_only: true
+    cap_drop: [NET_RAW]
+    networks: [tailscale]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+    x-clouduler:
+      # Apache, Nextcloud and notify-push share fast/nextcloud-html: keep them
+      # on one node.
+      colocate: [nextcloud-aio-nextcloud, nextcloud-aio-notify-push]
+      proxy:
+        - host: nextcloud
+          network: tailscale
+          port: 11000
+          tls: true
+          middlewares:
+            - redirect_regex:
+                regex: '^https://(.*)/\.well-known/(?:card|cal)dav'
+                replacement: 'https://${1}/remote.php/dav'
+                permanent: true
+
+  nextcloud-aio-database:
+    image: ghcr.io/nextcloud-releases/aio-postgresql:latest
+    user: "999"
+    healthcheck:
+      start_period: 30s
+      test: /healthcheck.sh
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/nextcloud_db_password
+      POSTGRES_DB: nextcloud_database
+      POSTGRES_USER: nextcloud
+      AIO_LOG_LEVEL: warn
+      TZ: UTC
+      PGTZ: UTC
+    secrets: [nextcloud_db_password]
+    stop_signal: SIGINT
+    stop_grace_period: 600s
+    read_only: true
+    cap_drop: [NET_RAW]
+    volumes:
+      - type: tmpfs
+        target: /var/run/postgresql
+        tmpfs:
+          size: 8388608
+      - fast/nextcloud-db:/var/lib/postgresql/data
+      - apps/nextcloud-db-dump:/mnt/data
+    networks: [tailscale]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+    # Reset WAL is the last resort for "invalid checkpoint record" or a crash
+    # loop after WAL corruption. It only runs while the container is up. If it
+    # crash-loops first, freeze the volume and run pg_resetwal from a one-off
+    # container. Checkpoint runs before each replication of the volume.
+    x-clouduler:
+      actions:
+        Reset WAL:
+          cmd: pg_resetwal "$PGDATA"
+          user: postgres
+          timeout: 1m
+          confirm: true
+        Checkpoint:
+          cmd: psql -U nextcloud -d nextcloud_database -c CHECKPOINT
+          timeout: 2m
+      volume_sync:
+        nextcloud-db:
+          before: Checkpoint
+
+  nextcloud-aio-nextcloud:
+    image: ghcr.io/nextcloud-releases/aio-nextcloud:latest
+    healthcheck:
+      start_period: 30s
+      test: /healthcheck.sh
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    environment:
+      NEXTCLOUD_HOST: nextcloud-aio-nextcloud
+      POSTGRES_HOST: nextcloud-aio-database
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: nextcloud_database
+      POSTGRES_USER: nextcloud
+      REDIS_HOST: nextcloud-aio-redis
+      REDIS_PORT: "6379"
+      APACHE_HOST: nextcloud-aio-apache
+      APACHE_PORT: "11000"
+      NC_DOMAIN: nextcloud.home.example.com
+      ADMIN_USER: admin
+      NEXTCLOUD_DATA_DIR: /var/www/html/data
+      OVERWRITEHOST: nextcloud.home.example.com
+      OVERWRITEPROTOCOL: https
+      ONLYOFFICE_SECRET: ""
+      AIO_LOG_LEVEL: warn
+      NEXTCLOUD_MOUNT: /tmp/nextcloud-mount
+      CLAMAV_ENABLED: "no"
+      CLAMAV_HOST: nextcloud-aio-clamav
+      ONLYOFFICE_ENABLED: "no"
+      COLLABORA_ENABLED: "no"
+      COLLABORA_HOST: nextcloud-aio-collabora
+      TALK_ENABLED: "no"
+      ONLYOFFICE_HOST: nextcloud-aio-onlyoffice
+      UPDATE_NEXTCLOUD_APPS: "no"
+      TZ: UTC
+      TALK_PORT: "3478"
+      IMAGINARY_ENABLED: "yes"
+      IMAGINARY_HOST: nextcloud-aio-imaginary
+      PHP_UPLOAD_LIMIT: 16G
+      PHP_MEMORY_LIMIT: 512M
+      FULLTEXTSEARCH_ENABLED: "no"
+      FULLTEXTSEARCH_HOST: nextcloud-aio-fulltextsearch
+      FULLTEXTSEARCH_PROTOCOL: http
+      FULLTEXTSEARCH_PORT: "9200"
+      FULLTEXTSEARCH_USER: elastic
+      FULLTEXTSEARCH_INDEX: nextcloud-aio
+      PHP_MAX_TIME: "3600"
+      TRUSTED_CACERTS_DIR: /tmp/nextcloud-cacerts
+      STARTUP_APPS: deck twofactor_totp tasks calendar contacts notes
+      ADDITIONAL_APKS: imagemagick
+      ADDITIONAL_PHP_EXTENSIONS: imagick
+      INSTALL_LATEST_MAJOR: "no"
+      TALK_RECORDING_ENABLED: "no"
+      TALK_RECORDING_HOST: nextcloud-aio-talk-recording
+      REMOVE_DISABLED_APPS: "yes"
+      WHITEBOARD_ENABLED: "no"
+    secrets:
+      - source: nextcloud_db_password
+        env: DATABASE_PASSWORD
+      - source: nextcloud_db_password
+        env: PGPASSWORD
+      - source: nextcloud_db_password
+        env: POSTGRES_PASSWORD
+      - source: nextcloud_redis_password
+        env: REDIS_HOST_PASSWORD
+      - source: nextcloud_admin_password
+        env: ADMIN_PASSWORD
+      - source: nextcloud_fts_password
+        env: FULLTEXTSEARCH_PASSWORD
+      - source: nextcloud_imaginary_secret
+        env: IMAGINARY_SECRET
+      - source: nextcloud_turn_secret
+        env: TURN_SECRET
+      - source: nextcloud_signaling_secret
+        env: SIGNALING_SECRET
+      - source: nextcloud_recording_secret
+        env: RECORDING_SECRET
+      - source: nextcloud_whiteboard_secret
+        env: WHITEBOARD_SECRET
+    configs:
+      - source: nextcloud_disable_jit
+        target: /usr/local/etc/php/conf.d/zz-disable-jit.ini
+    stop_grace_period: 600s
+    cap_drop: [NET_RAW]
+    volumes:
+      - fast/nextcloud-html:/var/www/html
+      - bulk/nextcloud-data:/var/www/html/data
+    networks: [tailscale, wan]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+    # Manual occ shortcuts. Maintenance mode blocks all users while it is on.
+    x-clouduler:
+      actions:
+        Maintenance mode on:
+          cmd: cd /var/www/html && php occ maintenance:mode --on
+          user: www-data
+          confirm: true
+        Maintenance mode off:
+          cmd: cd /var/www/html && php occ maintenance:mode --off
+          user: www-data
+        Scan files:
+          cmd: cd /var/www/html && php occ files:scan --all
+          user: www-data
+          timeout: 5m
+        Add missing indices:
+          cmd: cd /var/www/html && php occ db:add-missing-indices
+          user: www-data
+          timeout: 5m
+        Repair:
+          cmd: cd /var/www/html && php occ maintenance:repair
+          user: www-data
+          timeout: 5m
+          confirm: true
+
+  nextcloud-aio-notify-push:
+    image: ghcr.io/nextcloud-releases/aio-notify-push:latest
+    user: "33"
+    healthcheck:
+      start_period: 30s
+      test: /healthcheck.sh
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    environment:
+      NEXTCLOUD_HOST: nextcloud-aio-nextcloud
+      AIO_LOG_LEVEL: warn
+      TZ: UTC
+    read_only: true
+    cap_drop: [NET_RAW]
+    volumes:
+      - fast/nextcloud-html:/var/www/html:ro
+    networks: [tailscale]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 128M
+
+  nextcloud-aio-redis:
+    image: ghcr.io/nextcloud-releases/aio-redis:latest
+    user: "999"
+    healthcheck:
+      start_period: 30s
+      test: /healthcheck.sh
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    environment:
+      AIO_LOG_LEVEL: warn
+      TZ: UTC
+    secrets:
+      - source: nextcloud_redis_password
+        env: REDIS_HOST_PASSWORD
+    read_only: true
+    cap_drop: [NET_RAW]
+    volumes:
+      - fast/nextcloud-redis:/data
+    networks: [tailscale]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+
+  nextcloud-aio-imaginary:
+    image: ghcr.io/nextcloud-releases/aio-imaginary:latest
+    user: "65534"
+    healthcheck:
+      start_period: 30s
+      test: /healthcheck.sh
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    environment:
+      AIO_LOG_LEVEL: warn
+      TZ: UTC
+    secrets:
+      - source: nextcloud_imaginary_secret
+        env: IMAGINARY_SECRET
+    cap_add: [SYS_NICE]
+    cap_drop: [NET_RAW]
+    read_only: true
+    volumes:
+      - type: tmpfs
+        target: /tmp
+    networks: [tailscale]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+
+  nextcloud-aio-collabora:
+    command: ["--o:security.seccomp=true"]
+    image: ghcr.io/nextcloud-releases/aio-collabora:latest
+    healthcheck:
+      start_period: 60s
+      test: ["CMD", "/usr/bin/coolwsd", "--probe", "--use-env-vars"]
+      interval: 30s
+      timeout: 30s
+      retries: 9
+    environment:
+      aliasgroup1: "https://nextcloud.home.example.com:443"
+      extra_params: "--o:ssl.enable=false --o:ssl.termination=true --o:logging.disable_server_audit=true --o:welcome.enable=false --o:fetch_update_check=0 --o:allow_update_popup=false --o:remote_font_config.url=https://nextcloud.home.example.com/apps/richdocuments/settings/fonts.json --o:net.post_allow.host[0]=.+"
+      dictionaries: en_GB en_US
+      AIO_LOG_LEVEL: warn
+      TZ: UTC
+      server_name: nextcloud.home.example.com
+      DONT_GEN_SSL_CERT: "1"
+    volumes:
+      - type: tmpfs
+        target: /tmp
+    cap_add: [SYS_ADMIN, SYS_CHROOT, FOWNER, CHOWN]
+    cap_drop: [NET_RAW]
+    networks: [tailscale]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+```
+
+## Config files
+
+```ini title="config/nextcloud_disable_jit.ini"
+opcache.jit=disable
+```
+
+The Nextcloud container reads it as `/usr/local/etc/php/conf.d/zz-disable-jit.ini`, set by `target:`. It turns off the PHP JIT. Drop the config and the `configs:` entries if you do not need that.
+
+## Walkthrough
+
+- **`networks.tailscale.allowed`** lists only Nextcloud's own hostname: the stack may call its own route (Collabora fetches documents through it) and nothing else on the tailnet. **`wan: {}`** is unrestricted outbound for sign-in and app downloads. Only the Nextcloud container is attached to it.
+- **Secrets as `env:`**. Each `source` and `env` pair exposes a secret as an environment variable. `nextcloud_db_password` appears three times under three names because three tools in the image read three different variable names. A secret exposed this way is visible to `docker inspect` on the node.
+- **Volumes**. `:ro` mounts the same drive volume read-only in Apache and notify-push while Nextcloud mounts it read-write. `type: tmpfs` entries are in-memory mounts: lost on restart and never replicated. With `read_only: true`, they are the only writable paths besides the drive volumes.
+- **`colocate`** on the Apache service pins it, Nextcloud and notify-push to one node, because they all use `fast/nextcloud-html`. Without it, the scheduler is free to place them on different nodes. See [Placement](/docs/features/placement).
+- **`cap_add` and `cap_drop`**: each container drops `NET_RAW`. Imaginary adds `SYS_NICE`, Collabora adds the capabilities its sandbox needs.
+- **`stop_grace_period: 600s`** is the longest the spec allows. The database and Nextcloud need time to finish on shutdown. `stop_signal: SIGINT` is PostgreSQL's fast shutdown.
+- **Database actions**: `Checkpoint` plus `volume_sync.nextcloud-db.before` is the same pattern as in [Immich](/docs/examples/immich).
+- **Proxy route**: `port: 11000` is the AIO Apache port, not 80. The `redirect_regex` middleware rewrites `/.well-known/carddav` and `/.well-known/caldav` to `/remote.php/dav` so mobile clients find the server. `permanent: true` makes it a 301 or 308.
+- **Actions** wrap `occ`. `user: www-data` is the user occ expects. `Maintenance mode on` and `Repair` ask for confirmation.
+- **Healthchecks** use a string `test: /healthcheck.sh`, which runs through a shell. The AIO images ship that script.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**. For each secret in the table, click **Create secret**, choose **Generate** (or **Paste string** for the admin password) and set the length and character set.
+2. Open **Stacks**, **Deploy stack**, name it `nextcloud`, paste the YAML.
+3. In **Bundled files**, fill `nextcloud_disable_jit` with `opcache.jit=disable`.
+4. When the spec is valid and **What it needs** shows no missing secrets, click **Deploy nextcloud**.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+mkdir -p nextcloud/config && cd nextcloud
+echo 'opcache.jit=disable' > config/nextcloud_disable_jit.ini
+# save the YAML as nextcloud.yaml
+
+gen() { tr -dc "$2" </dev/urandom | head -c "$3" | clouduler secret set "$1" --stdin; }
+gen nextcloud_db_password        'A-Za-z0-9' 32
+gen nextcloud_redis_password     'A-Za-z0-9' 48
+gen nextcloud_fts_password       'A-Za-z0-9' 32
+for s in imaginary turn signaling recording whiteboard; do
+  openssl rand -hex 32 | clouduler secret set "nextcloud_${s}_secret" --stdin
+done
+printf '%s' 'choose-an-admin-password' | clouduler secret set nextcloud_admin_password --stdin
+
+clouduler stack deploy ./nextcloud.yaml
+```
+
+`openssl rand -hex 32` prints 64 hex characters.
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Open `https://nextcloud.home.example.com` from a tailnet device and sign in as `admin` with the password you set for `nextcloud_admin_password`. The first start can take a few minutes while Nextcloud installs.
+2. In the administration overview, look for warnings, then run **Add missing indices** from the Containers tab.
+3. After copying files into `bulk/nextcloud-data` by hand, run **Scan files** so Nextcloud sees them. Switch on **Maintenance mode on** for bulk file operations, then **Maintenance mode off**.
+4. Collabora is running, but Nextcloud's Office app still needs its connector pointed at the Collabora host. Check the Office settings after the first start.
+
+## Quirks
+
+<Quirk title="Nine secrets, even for features you do not use" severity="info">
+Talk, Whiteboard, OnlyOffice and full-text search are off, but the Nextcloud container references their secrets. A missing secret fails the deploy, so create all nine. The unused ones are inert.
+</Quirk>
+
+<Quirk title="One domain in many places" severity="warn">
+`NC_DOMAIN`, `OVERWRITEHOST`, `server_name`, the Collabora `aliasgroup1` and font URL, and the route all carry the same host. Change them together when you change domain.
+</Quirk>
+
+- **No upload cap on the route.** `PHP_UPLOAD_LIMIT` and `APACHE_MAX_SIZE` are 16 GB, and the route sets no `max_body_size`, so the proxy does not cap uploads either. Add one if you want a limit.
+- **Memory.** Nextcloud gets 2G and the database 512M. Raise the database limit if you have many users, and keep `PHP_MEMORY_LIMIT` below the container limit.
+- **`COLLABORA_ENABLED` is `no`.** The Collabora container runs and Apache proxies to it, but Nextcloud's own switch is off, so you configure the connector manually.
+- **Pin the images.** The AIO images use `latest`. Pin tags once it works, and move them together.
+
+## Related
+
+- [Immich example](/docs/examples/immich), for the database pattern
+- [Placement](/docs/features/placement)
+- [Stack spec reference](/docs/reference/stack-spec)

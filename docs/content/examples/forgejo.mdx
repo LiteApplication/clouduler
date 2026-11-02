@@ -5,6 +5,262 @@ sidebar_position: 6
 
 # Forgejo
 
-One-line summary of forgejo goes here.
+Forgejo is a self-hosted Git forge (a Gitea fork) with a PostgreSQL database, HTTPS access, SSH on a second port, and package and LFS support. In this example it is reachable only on your tailnet.
 
-TODO
+## What you'll learn
+
+- **`x-clouduler.expose`**: publishing a raw TCP port (SSH) that follows the container between nodes.
+- **`max_body_size`** and **`response_timeout`** for large pushes.
+- `depends_on` and what it does and does not wait for.
+- **Wildcard entries** in an `allowed` list.
+- The `__FILE` environment convention for reading secrets from files.
+- Secrets that you generate with the application's own tool.
+
+## Prerequisites
+
+**Cluster.** Networks `tailscale` (internal, domain `home.example.com`) and `wan` (egress). Drives `fast` (database) and `apps` (Forgejo data). See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**DNS.** `forgejo.home.example.com`, tailnet only. Your devices must resolve it to a node's tailnet address.
+
+**Secrets.**
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `forgejo_db_password` | PostgreSQL password for the `forgejo` user. | **Generate**, `alphanumeric`, `32` |
+| `forgejo_secret_key` | Forgejo's main secret key. | **Generate**, `alphanumeric`, `64` |
+| `forgejo_internal_token` | Token for calls between Forgejo's own processes. | Generate with the image's tool, see below |
+| `forgejo_lfs_jwt_secret` | Signs LFS tokens. | Generate with the image's tool, see below |
+
+For the last two, use the generator that ships with Forgejo and pipe its output straight into Clouduler. `secret set --stdin` removes one trailing newline by default:
+
+```bash
+docker run --rm codeberg.org/forgejo/forgejo:10 forgejo generate secret INTERNAL_TOKEN \
+  | clouduler secret set forgejo_internal_token --stdin
+docker run --rm codeberg.org/forgejo/forgejo:10 forgejo generate secret LFS_JWT_SECRET \
+  | clouduler secret set forgejo_lfs_jwt_secret --stdin
+```
+
+{/* TODO verify: the forgejo generate secret subcommand output shape was not run against the image. */}
+
+**Configs.** None.
+
+**Volumes.** `fast/forgejo-db` (PostgreSQL data) and `apps/forgejo-data` (repositories, LFS objects, packages and state).
+
+## Stack YAML
+
+```yaml title="forgejo.yaml"
+networks:
+  # Hardened: Forgejo only needs its own database and its own route. Other
+  # stacks' routes on tailscale get a 403 from the proxy, and the firewall drops
+  # other overlay traffic leaving the stack. Its own hostname stays listed for
+  # self-calls (webhooks, links back to itself). Outside (wan), only GitHub is
+  # reachable (migrations, mirrors).
+  tailscale:
+    allowed:
+      - forgejo.home.example.com
+  wan:
+    allowed:
+      - github.com
+      - "*.github.com"
+      - "*.githubusercontent.com"
+
+secrets:
+  forgejo_db_password:
+  forgejo_secret_key:
+  forgejo_internal_token:
+  forgejo_lfs_jwt_secret:
+
+services:
+  db:
+    image: postgres:16-alpine
+    stop_signal: SIGINT
+    stop_grace_period: 120s
+    networks: [tailscale]
+    volumes:
+      - fast/forgejo-db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: forgejo
+      POSTGRES_DB: forgejo
+      POSTGRES_PASSWORD_FILE: /run/secrets/forgejo_db_password
+    secrets: [forgejo_db_password]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgejo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+    # Reset WAL is the last resort for "invalid checkpoint record" or a crash
+    # loop after WAL corruption. It only runs while the container is up. If it
+    # crash-loops first, freeze the volume and run pg_resetwal from a one-off
+    # container. Checkpoint runs before each replication of the volume.
+    x-clouduler:
+      actions:
+        Reset WAL:
+          cmd: pg_resetwal "$PGDATA"
+          user: postgres
+          timeout: 1m
+          confirm: true
+        Checkpoint:
+          cmd: psql -U forgejo -d forgejo -c CHECKPOINT
+          timeout: 2m
+      volume_sync:
+        forgejo-db:
+          before: Checkpoint
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    networks: [tailscale, wan]
+    environment:
+      APP_NAME: "Homelab Forge"
+      USER_UID: "1000"
+      USER_GID: "1000"
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: db:5432
+      FORGEJO__database__NAME: forgejo
+      FORGEJO__database__USER: forgejo
+      FORGEJO__database__PASSWD__FILE: /run/secrets/forgejo_db_password
+      FORGEJO__server__DOMAIN: forgejo.home.example.com
+      FORGEJO__server__ROOT_URL: https://forgejo.home.example.com
+      FORGEJO__server__SSH_DOMAIN: forgejo.home.example.com
+      FORGEJO__server__SSH_PORT: "2222"
+      FORGEJO__server__SSH_LISTEN_PORT: "22"
+      FORGEJO__server__PER_WRITE_TIMEOUT: 10m
+      FORGEJO__server__PER_WRITE_PER_KB_TIMEOUT: 30s
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__service__REQUIRE_SIGNIN_VIEW: "false"
+      FORGEJO__security__SECRET_KEY__FILE: /run/secrets/forgejo_secret_key
+      FORGEJO__security__INTERNAL_TOKEN__FILE: /run/secrets/forgejo_internal_token
+      FORGEJO__lfs__LFS_JWT_SECRET__FILE: /run/secrets/forgejo_lfs_jwt_secret
+      FORGEJO__log__LEVEL: Info
+      FORGEJO__packages__ENABLED: "true"
+    secrets:
+      - forgejo_db_password
+      - forgejo_secret_key
+      - forgejo_internal_token
+      - forgejo_lfs_jwt_secret
+    volumes:
+      - apps/forgejo-data:/data
+    depends_on: [db]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+    # Doctor check is read-only. Regenerate SSH keys rewrites authorized_keys.
+    # Regenerate hooks fixes git hooks after a path or config change.
+    x-clouduler:
+      actions:
+        Doctor check:
+          cmd: forgejo doctor check
+          user: git
+          timeout: 2m
+        Regenerate SSH keys:
+          cmd: forgejo admin regenerate keys
+          user: git
+          confirm: true
+        Regenerate hooks:
+          cmd: forgejo admin regenerate hooks
+          user: git
+          timeout: 2m
+          confirm: true
+      proxy:
+        - host: forgejo
+          network: tailscale
+          port: 3000
+          tls: true
+          max_body_size: 20GB
+          websockets: true
+          response_timeout: 10m
+      expose:
+        - port: 22
+          published: 2222
+          protocol: tcp
+          network: tailscale
+```
+
+## Config files
+
+None.
+
+## Walkthrough
+
+- **`networks.tailscale.allowed`** lists Forgejo's own hostname. Forgejo calls itself for webhooks, so its name stays on the list, and everything else on the tailnet is refused.
+- **`networks.wan.allowed`** lists GitHub and its subdomains (`*.github.com` is a wildcard suffix). Migrations and mirrors from any other host fail.
+- **`FORGEJO__...__FILE`** variables: Forgejo reads each value from the file at that path. The secrets are mounted under `/run/secrets/`, so nothing sensitive sits in the environment.
+- **`apps/forgejo-data:/data`** is the single data volume, on a replicated drive. See [Drives and volumes](/docs/features/drives-and-volumes).
+- **`depends_on: [db]`**: Forgejo is not first created until the database has at least one instance running on any node. It waits for running, not healthy.
+- **`proxy`**: `max_body_size: 20GB` allows large pushes and LFS uploads, `response_timeout: 10m` gives slow pushes room before the proxy gives up, and `websockets: true` supports live updates.
+- **`expose`** publishes port 22 of the container as port 2222 on the `tailscale` network. Unlike `ports`, it follows the container to whichever node runs it. `FORGEJO__server__SSH_PORT: "2222"` is what Forgejo prints in clone URLs, so it must match `published`. See [Networking](/docs/features/networking#publishing-a-service).
+- **`actions`** run as the `git` user. Both regenerate actions ask for confirmation.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**. Create `forgejo_db_password` and `forgejo_secret_key` with **Generate** (`alphanumeric`, `32` and `64`). Create the other two with **Paste string** or **File**, with the output of Forgejo's generator.
+2. Open **Stacks**, **Deploy stack**, name it `forgejo`, paste the YAML.
+3. Click **Deploy forgejo** once the spec is valid. If it complains about the `expose` port, see the quirks below.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 | clouduler secret set forgejo_db_password --stdin
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64 | clouduler secret set forgejo_secret_key --stdin
+# forgejo_internal_token and forgejo_lfs_jwt_secret: see the commands above
+
+clouduler stack deploy ./forgejo.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Open `https://forgejo.home.example.com` from a tailnet device. Registration is disabled, so there is no sign-up form. The installer page may appear on the first visit.
+2. Create the admin account from the Containers tab, as the `git` user, with a random password that is printed once:
+
+   ```bash
+   clouduler exec forgejo.forgejo.0 -u git -- forgejo admin user create \
+     --admin --username admin --email admin@example.com --random-password
+   ```
+
+   {/* TODO verify: flags follow the upstream Gitea-style CLI and were not run here. */}
+
+3. Run **Doctor check** and read the output before you run either regenerate action.
+4. Add your public key in the web UI, then test SSH from a tailnet device: `ssh -p 2222 git@forgejo.home.example.com`.
+
+## Quirks
+
+<Quirk title="The healthcheck needs curl" severity="info">
+The check runs `curl` inside the container. If the instance shows unhealthy right after it started, read the logs first, then check that the image ships `curl`. Replace the check with one that suits your image if not.
+</Quirk>
+
+<Quirk title="Port 2222 on the tailnet network" severity="info">
+`expose` on an internal network binds the port on every node that has an address on it. `published` must not clash with another port in the same stack. Collisions with other stacks are not checked.
+</Quirk>
+
+- **`depends_on` waits for running only.** Forgejo can start while PostgreSQL is still initialising and will retry.
+- **Database on a replicated drive.** Like the other examples, it has a `Checkpoint` hook. Replication is not a backup.
+- **Memory.** 512M for the database and 1G for Forgejo are starting points.
+- **Mirrors from other hosts** fail with a denied connection, not a DNS error, because of the `wan` allow list.
+- **App name.** `Homelab Forge` is just a display string.
+
+## Related
+
+- [Networking](/docs/features/networking)
+- [Proxy and TLS](/docs/features/proxy-and-tls)
+- [Stack spec reference](/docs/reference/stack-spec)

@@ -5,6 +5,282 @@ sidebar_position: 5
 
 # Authentik
 
-One-line summary of authentik goes here.
+Authentik is an identity provider: one login for your other services, through OpenID Connect (OIDC) and SAML. It runs as a server, a background worker, PostgreSQL and Redis. Deploy it first, because [Headscale](/docs/examples/headscale) and, optionally, [Immich](/docs/examples/immich) sign in through it.
 
-TODO
+To connect Authentik to Clouduler itself, as the login for the web UI or as a wall in front of apps, see the [Authentik guide](/docs/guides/authentik).
+
+## What you'll learn
+
+- **`file://` secret references** in environment variables, so a secret never sits in the environment as text.
+- Two services (server and worker) that **share volumes**, and `colocate` to keep them together.
+- An egress allow list with a **host entry and a host:port entry**.
+- A Redis snapshot and a PostgreSQL checkpoint as **pre-replication hooks**.
+- A **recovery action** for locked-out admins.
+
+## Prerequisites
+
+**Cluster.** Networks `tailscale` (internal), `public` and `wan` (egress). Drives `fast` (Redis and PostgreSQL) and `apps` (server data, certificates, templates). See the [cluster prerequisites](/docs/examples#cluster-prerequisites).
+
+**DNS.** `auth.example.com`, a public route. The name must sit inside a Cloudflare zone if you want Clouduler to publish the record.
+
+**SMTP.** The stack sends mail through `mail.example.com:587`. That can be the [Stalwart example](/docs/examples/stalwart) or any SMTP relay. See the [SMTP guide](/docs/guides/smtp). Create a user for Authentik there first.
+
+**Secrets.**
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `authentik_pg_pass` | PostgreSQL password for the `authentik` user. | **Generate**, `alphanumeric`, `48` |
+| `authentik_secret_key` | Authentik's signing key. Changing it later invalidates sessions and encrypted fields. | **Generate**, `alphanumeric`, `64` |
+| `authentik_bootstrap_token` | API token for the initial `akadmin` account. | **Generate**, `alphanumeric`, `64` |
+| `authentik_bootstrap_password` | Password for `akadmin` on first start. You need it to log in. | **Paste string** with your own value. A generated value cannot be read back. |
+| `authentik_smtp_password` | Password of the SMTP user. | **Paste string**, copied from your mail server. |
+
+**Configs.** None.
+
+**Volumes.** `fast/authentik-redis`, `fast/authentik-postgres`, `apps/authentik-data` (server and worker), `apps/authentik-certs` (worker), `apps/authentik-custom-templates` (server and worker).
+
+## Stack YAML
+
+```yaml title="authentik.yaml"
+networks:
+  tailscale:
+    allowed: []
+  public:
+    allowed: []
+  wan:
+    allowed:
+      - version.goauthentik.io
+      - "mail.example.com:587"
+
+secrets:
+  authentik_pg_pass:
+  authentik_secret_key:
+  authentik_bootstrap_token:
+  authentik_bootstrap_password:
+  authentik_smtp_password:
+
+services:
+  redis:
+    image: redis:alpine
+    command: --save 60 1
+    volumes:
+      - fast/authentik-redis:/data
+    networks: [tailscale]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+    x-clouduler:
+      actions:
+        Save:
+          cmd: redis-cli SAVE
+      volume_sync:
+        authentik-redis:
+          before: Save
+
+  postgresql:
+    image: docker.io/library/postgres:16
+    stop_signal: SIGINT
+    stop_grace_period: 120s
+    volumes:
+      - fast/authentik-postgres:/var/lib/postgresql
+    secrets: [authentik_pg_pass]
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD_FILE: /run/secrets/authentik_pg_pass
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    networks: [tailscale]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+    x-clouduler:
+      actions:
+        Reset WAL:
+          cmd: pg_resetwal "$PGDATA"
+          user: postgres
+          timeout: 1m
+          confirm: true
+        Checkpoint:
+          cmd: psql -U authentik -d authentik -c CHECKPOINT
+          timeout: 2m
+      volume_sync:
+        authentik-postgres:
+          before: Checkpoint
+
+  server:
+    image: ghcr.io/goauthentik/server:2026.2.3
+    command: server
+    volumes:
+      - apps/authentik-data:/data
+      - apps/authentik-custom-templates:/templates
+    secrets:
+      - authentik_pg_pass
+      - authentik_secret_key
+      - authentik_bootstrap_token
+      - authentik_bootstrap_password
+      - source: authentik_smtp_password
+        env: AUTHENTIK_EMAIL__PASSWORD
+    environment:
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: "file:///run/secrets/authentik_pg_pass"
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_SECRET_KEY: "file:///run/secrets/authentik_secret_key"
+      AUTHENTIK_BOOTSTRAP_EMAIL: "admin@example.com"
+      AUTHENTIK_BOOTSTRAP_PASSWORD: "file:///run/secrets/authentik_bootstrap_password"
+      AUTHENTIK_BOOTSTRAP_TOKEN: "file:///run/secrets/authentik_bootstrap_token"
+      AUTHENTIK_EMAIL__HOST: "mail.example.com"
+      AUTHENTIK_EMAIL__PORT: "587"
+      AUTHENTIK_EMAIL__USERNAME: "authentik-noreply"
+      AUTHENTIK_EMAIL__USE_TLS: "true"
+      AUTHENTIK_EMAIL__USE_SSL: "false"
+      AUTHENTIK_EMAIL__FROM: "authentik-noreply@example.com"
+    networks: [tailscale, public, wan]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+    x-clouduler:
+      # Server and worker share apps/authentik-data and the templates volume.
+      colocate: [worker]
+      actions:
+        Create recovery key:
+          cmd: ak create_recovery_key 10 akadmin 2>&1 | grep -v '^{'
+          timeout: 1m
+          confirm: true
+      proxy:
+        - host: auth
+          network: public
+          port: 9000
+          tls: true
+
+  worker:
+    image: ghcr.io/goauthentik/server:2026.2.3
+    command: worker
+    user: root
+    volumes:
+      - apps/authentik-data:/data
+      - apps/authentik-certs:/certs
+      - apps/authentik-custom-templates:/templates
+    secrets:
+      - authentik_pg_pass
+      - authentik_secret_key
+      - authentik_bootstrap_token
+      - authentik_bootstrap_password
+      - source: authentik_smtp_password
+        env: AUTHENTIK_EMAIL__PASSWORD
+    environment:
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: "file:///run/secrets/authentik_pg_pass"
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_SECRET_KEY: "file:///run/secrets/authentik_secret_key"
+      AUTHENTIK_BOOTSTRAP_EMAIL: "admin@example.com"
+      AUTHENTIK_BOOTSTRAP_PASSWORD: "file:///run/secrets/authentik_bootstrap_password"
+      AUTHENTIK_BOOTSTRAP_TOKEN: "file:///run/secrets/authentik_bootstrap_token"
+      AUTHENTIK_EMAIL__HOST: "mail.example.com"
+      AUTHENTIK_EMAIL__PORT: "587"
+      AUTHENTIK_EMAIL__USERNAME: "authentik-noreply"
+      AUTHENTIK_EMAIL__USE_TLS: "true"
+      AUTHENTIK_EMAIL__USE_SSL: "false"
+      AUTHENTIK_EMAIL__FROM: "authentik-noreply@example.com"
+    networks: [tailscale, wan]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+```
+
+## Config files
+
+None.
+
+## Walkthrough
+
+- **`allowed: []` on `tailscale` and `public`**: nothing on those networks can be reached from this stack except the stack itself.
+- **`networks.wan.allowed`** has two entries. `version.goauthentik.io` is a hostname and `mail.example.com:587` carries a port. On an egress network the firewall enforces both, resolving hostnames through the stack's DNS. Entries with ports are meant for egress networks. See [Allowed hosts and ports](/docs/features/networking#allowed-hosts-and-ports).
+- **Secrets** are standalone. The first four are mounted as files under `/run/secrets/`. The SMTP password uses `source` and `env` to become `AUTHENTIK_EMAIL__PASSWORD`.
+- **`file:///run/secrets/...`** values: Authentik reads these as file references, so the secret never sits in the environment as plain text.
+- **Shared volumes and `colocate`**: server and worker both mount `apps/authentik-data` and the templates volume. `colocate: [worker]` on the server puts them on one node. The relation is transitive, so one entry is enough. Only the worker mounts `apps/authentik-certs`.
+- **Hooks**: `Save` writes a Redis snapshot, `Checkpoint` flushes PostgreSQL, each before the scheduled replication of its volume. `volume_sync` keys are volume names (`authentik-redis`, `authentik-postgres`).
+- **`Create recovery key`** runs `ak create_recovery_key` in the server. `confirm: true` asks first.
+- **`proxy` on `public`, `port: 9000`**: the login page, served over HTTPS at `auth.example.com`.
+- **`user: root` on the worker** is required by the image for the certificates directory.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**. Create the three generated secrets with **Generate**, `alphanumeric` and the lengths in the table. Create `authentik_bootstrap_password` and `authentik_smtp_password` with **Paste string**.
+2. Open **Stacks**, **Deploy stack**, name it `authentik`, paste the YAML.
+3. Click **Deploy authentik** once the spec is valid.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+gen() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$2" | clouduler secret set "$1" --stdin; }
+gen authentik_pg_pass 48
+gen authentik_secret_key 64
+gen authentik_bootstrap_token 64
+printf '%s' 'choose-an-admin-password' | clouduler secret set authentik_bootstrap_password --stdin
+printf '%s' 'the-smtp-password'        | clouduler secret set authentik_smtp_password --stdin
+
+clouduler stack deploy ./authentik.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## First run
+
+1. Open `https://auth.example.com/if/admin/` and sign in as `akadmin` with the `authentik_bootstrap_password` you set.
+2. Change the `akadmin` password from your profile. The bootstrap values only matter on the first start.
+3. Send a test email from the admin settings to check the SMTP path.
+4. For each service that signs in through Authentik, create an OAuth2/OpenID provider and an application. The issuer is `https://auth.example.com/application/o/SLUG/`, where `SLUG` is the application's slug. The Headscale example uses the slug `headscale`, the Immich example uses `immich`.
+5. To use Authentik for Clouduler's own login or as a wall in front of routes, follow the [Authentik guide](/docs/guides/authentik).
+6. Run **Create recovery key** only when you need it. It prints a one-time link, so copy it straight away.
+
+## Quirks
+
+<Quirk title="Pin the PostgreSQL major version" severity="warn">
+`postgres:16` is pinned on purpose. A change of major version alone breaks an existing data directory, so move to a newer one deliberately, with a dump and restore.
+</Quirk>
+
+- **Bootstrap values are first-start only.** Changing `AUTHENTIK_BOOTSTRAP_*` later does nothing to an existing database.
+- **Upgrading.** Change the tag on `server` and `worker` together.
+- **Redis has no password.** It is attached only to `tailscale`, and `allowed: []` keeps that network to this stack.
+- **Memory.** 1G each for server and worker is a starting point. Raise it if sign-in feels slow under load.
+- **Why a recovery action.** If you lose the `akadmin` password, a recovery key gets you back in without touching the database.
+
+## Related
+
+- [Authentik guide](/docs/guides/authentik)
+- [Headscale example](/docs/examples/headscale)
+- [Configs and secrets](/docs/features/configs-and-secrets)
