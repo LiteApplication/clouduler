@@ -4,6 +4,7 @@
 // JSON would be, which src/mock/contract.test.ts checks against fixtures
 // generated from the Rust API.
 
+import { encodeText } from '../api/client';
 import type {
   AlertSettingsUpdate,
   BackupDestination,
@@ -387,6 +388,11 @@ function putConfigEntry(db: MockDb, name: string, content: string, owner: string
   db.state.configs[name] = { name, content, revision: (prev?.revision ?? 0) + 1, owner: prev?.owner ?? owner };
 }
 
+/** Stores a json object the way the server stores a reserved `_clouduler_*` config. */
+function putReservedConfig(db: MockDb, name: string, value: unknown) {
+  putConfigEntry(db, name, encodeText(JSON.stringify(value)));
+}
+
 function putSecretEntry(db: MockDb, name: string, owner: string | null = null) {
   const prev = db.state.secrets[name];
   db.state.secrets[name] = {
@@ -750,7 +756,8 @@ export function buildHttpRoutes(): HttpRoute[] {
     }),
 
     // ---- configs & secrets
-    route('GET', '/api/configs', ({ db }) => Object.values(db.state.configs)),
+    // The server never lists its reserved `_clouduler_*` objects here.
+    route('GET', '/api/configs', ({ db }) => Object.values(db.state.configs).filter((c) => !c.name.startsWith('_clouduler_'))),
     route('GET', '/api/configs/:name', ({ db, params }) => need(db.state.configs[params.name], `config ${params.name}`)),
     route('PUT', '/api/configs/:name', ({ db, params, body }) => {
       putConfigEntry(db, params.name, String(body?.content ?? ''));
@@ -989,21 +996,27 @@ export function buildHttpRoutes(): HttpRoute[] {
         failure_reason: null,
         restart_started_at: null,
       };
+      putReservedConfig(db, '_clouduler_self_update_run', db.selfUpdate.run);
+      commit(db);
       return db.selfUpdate.run;
     }),
     route('GET', '/api/self-update/run', ({ db }) => db.selfUpdate.run),
     route('POST', '/api/self-update/cancel', ({ db }) => {
       db.selfUpdate.run = null;
+      delete db.state.configs['_clouduler_self_update_run'];
+      commit(db);
     }),
 
     // ---- git backup
     route('GET', '/api/git-backup/status', ({ db }) => db.gitBackup),
     route('POST', '/api/git-backup/export-now', ({ db }) => {
       db.gitBackup.last_export = { at: nowSecs(), summary: 'exported 12 objects', commit: fakeDigest('export').slice(7, 14), error: null };
+      putReservedConfig(db, '_clouduler_git_backup_last_export', db.gitBackup.last_export);
       commit(db);
     }),
     route('POST', '/api/git-backup/pull-now', ({ db }) => {
       db.gitBackup.last_pull = { at: nowSecs(), commit: null, rejected: null };
+      putReservedConfig(db, '_clouduler_git_backup_last_pull', db.gitBackup.last_pull);
       commit(db);
     }),
     route('POST', '/api/git-backup/reconcile-now', () => undefined),

@@ -372,6 +372,7 @@ export class ScenarioBuilder {
       auth: { api_keys: true, session_ttl: '12h' },
       proxy: {
         acme: { enabled: true, contact_email: 'admin@example.com' },
+        auth: null,
         dns_publish: 'all-nodes',
         dns_server: { enabled: false, networks: [], port: 53 },
         enabled: true,

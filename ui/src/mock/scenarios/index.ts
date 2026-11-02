@@ -3,6 +3,7 @@ import freshSingleNode from './fresh-single-node';
 import lan3Nodes from './lan-3-nodes';
 import multisiteHeadscale from './multisite-headscale';
 import nodeDownFailover from './node-down-failover';
+import unplaceableStack from './unplaceable-stack';
 
 /** Each entry builds a fresh MockDb, so state never leaks between mounts. */
 export const scenarios: Record<string, () => MockDb> = {
@@ -10,6 +11,7 @@ export const scenarios: Record<string, () => MockDb> = {
   'lan-3-nodes': lan3Nodes,
   'multisite-headscale': multisiteHeadscale,
   'node-down-failover': nodeDownFailover,
+  'unplaceable-stack': unplaceableStack,
 };
 
 export const DEFAULT_SCENARIO = 'lan-3-nodes';
