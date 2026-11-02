@@ -1,0 +1,50 @@
+.figure { margin: 1.5rem 0 2rem; }
+.frame {
+  border: 2px solid var(--cl-ink);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--cl-surface-1);
+  box-shadow: var(--cl-shadow-pop);
+}
+.bar {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--cl-surface-2);
+  border-bottom: 2px solid var(--cl-ink);
+}
+.dots { display: flex; gap: 6px; }
+.dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--cl-line-strong); opacity: 0.55; }
+.dots i:first-child { background: var(--cl-brand-fill); opacity: 1; }
+.url {
+  flex: 1; min-width: 0;
+  font-family: var(--cl-font-mono); font-size: 0.78rem;
+  padding: 0.2rem 0.75rem; border-radius: 999px;
+  background: var(--cl-surface-1); border: 1px solid var(--cl-line);
+  color: var(--cl-ink-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.viewport { position: relative; background: var(--cl-surface-0); }
+.iframe, .img { width: 100%; height: 100%; border: 0; display: block; }
+.img { object-fit: cover; object-position: top left; }
+.overlay {
+  position: absolute; inset: 0; width: 100%;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; cursor: pointer; background: transparent;
+  transition: background 0.15s;
+}
+.overlay span {
+  font-weight: 700; font-size: 0.85rem;
+  padding: 0.45rem 1rem; border-radius: 999px;
+  background: var(--cl-pop-fill, #c8f542); color: #1d1230;
+  border: 2px solid #1d1230; box-shadow: 3px 3px 0 #1d1230;
+  opacity: 0; transform: translateY(4px); transition: all 0.15s;
+}
+.overlay:hover, .overlay:focus-visible { background: rgba(21, 15, 31, 0.18); }
+.overlay:hover span, .overlay:focus-visible span { opacity: 1; transform: none; }
+.placeholder {
+  height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0.5rem; text-align: center; padding: 1rem; color: var(--cl-ink-muted);
+  background: repeating-linear-gradient(135deg, transparent 0 14px, var(--cl-surface-2) 14px 15px);
+}
+.placeholder strong { font-family: var(--cl-font-display); color: var(--cl-ink); font-size: 1.1rem; }
+.caption { margin-top: 0.7rem; text-align: center; font-size: 0.88rem; color: var(--cl-ink-muted); }

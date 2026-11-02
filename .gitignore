@@ -11,3 +11,8 @@ __pycache__/
 .code-graph/
 .cargo/config.toml
 .worktrees/
+docs/.research/
+docs/static/ui-mock/
+docs/static/img/ui/
+docs/build/
+docs/.docusaurus/

@@ -1,0 +1,101 @@
+---
+title: Docs components demo
+sidebar_position: 3
+---
+
+# Docs components demo
+
+This page exercises every docs component. It doubles as a visual test page.
+
+## UiScreen
+
+<UiScreen scenario="lan-3-nodes" route="/stacks" caption="The stacks view, live from the UI mock." alt="Stacks view" />
+
+<UiScreen scenario="lan-3-nodes" route="/nodes" theme="light" chrome={false} height={320} alt="Nodes view, always light" />
+
+## UiCli
+
+<UiCli>
+<UiCli.Ui>
+
+Open **Stacks** and press **New stack**.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler stack deploy web.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## SetupForm and Cmd
+
+<SetupForm fields={[
+  {name: 'user', label: 'SSH user', default: 'pi', help: 'The account you log in with.'},
+  {name: 'ip', label: 'Node IP', default: '192.168.1.10'},
+  {name: 'cluster', label: 'Cluster name'},
+  {name: 'distro', label: 'Distribution', type: 'select', default: 'debian', options: [
+    {value: 'arch', label: 'Arch Linux'}, {value: 'debian', label: 'Debian'}, {value: 'raspbian', label: 'Raspberry Pi OS'}]},
+]} />
+
+<Cmd lang="bash" title="On your laptop">{`ssh {{user}}@{{ip}}
+[arch] sudo pacman -S docker
+[debian,raspbian] sudo apt install docker.io
+clouduler init --name {{cluster}}`}</Cmd>
+
+## DistroTabs
+
+<DistroTabs>
+<DistroTabs.Arch>
+
+```bash
+sudo pacman -S docker
+```
+
+</DistroTabs.Arch>
+<DistroTabs.Debian>
+
+```bash
+sudo apt install docker.io
+```
+
+</DistroTabs.Debian>
+<DistroTabs.Raspbian>
+
+```bash
+sudo apt install docker.io   # 64-bit image recommended
+```
+
+</DistroTabs.Raspbian>
+</DistroTabs>
+
+## OptionTable
+
+<OptionTable rows={[
+  {key: 'cluster.name', type: 'string', default: '"homelab"', reload: 'restart', required: true, description: 'Name of the cluster.', quirks: 'Cannot change after init.'},
+  {key: 'proxy.enabled', type: 'bool', default: 'true', reload: 'live', description: 'Turn the built-in proxy on.'},
+  {key: 'proxy.dns_publish', type: 'enum', default: 'all-nodes', reload: 'live', description: 'Which nodes publish DNS records.'},
+  {key: 'alerts.discord', type: 'url', reload: 'live', description: 'Discord webhook for alerts.'},
+  {key: 'drives.default', type: 'string', reload: 'n/a', description: 'Default drive.'},
+  {key: 'a.b', type: 'int', default: '1', reload: 'live', description: 'Filler.'},
+  {key: 'a.c', type: 'int', default: '2', reload: 'live', description: 'Filler.'},
+  {key: 'a.d', type: 'int', default: '3', reload: 'live', description: 'Filler.'},
+  {key: 'a.e', type: 'int', default: '4', reload: 'restart', description: 'Filler (the filter box appears above 8 rows).'},
+]} />
+
+## Quirk
+
+<Quirk title="Info severity" severity="info">Something that is good to know.</Quirk>
+
+<Quirk title="Default warn severity">A surprising behaviour with `inline code`.</Quirk>
+
+<Quirk title="Danger severity" severity="danger">Data can be lost if you do this.</Quirk>
+
+## Mermaid
+
+```mermaid
+graph LR
+  A[Client] --> B[Proxy] --> C[Stack]
+```

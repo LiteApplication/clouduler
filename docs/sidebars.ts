@@ -1,0 +1,110 @@
+import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+
+const sidebars: SidebarsConfig = {
+  docs: [
+    {
+      type: 'category',
+      label: 'Introduction',
+      collapsed: false,
+      items: [
+        {type: 'doc', id: 'intro/what-is-clouduler', label: 'What is Clouduler?'},
+        {type: 'doc', id: 'intro/how-it-works', label: 'How it works'},
+        {type: 'doc', id: 'intro/glossary', label: 'Glossary'},
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Quick starts',
+      collapsed: false,
+      items: [
+        {type: 'doc', id: 'quickstart/single-node', label: 'Single node'},
+        {type: 'doc', id: 'quickstart/lan-cluster', label: 'LAN cluster'},
+        {type: 'doc', id: 'quickstart/multi-site-headscale', label: 'Multi-site with Headscale'},
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Features',
+      collapsed: true,
+      items: [
+        {type: 'doc', id: 'features/stacks', label: 'Stacks'},
+        {type: 'doc', id: 'features/configs-and-secrets', label: 'Configs and secrets'},
+        {type: 'doc', id: 'features/networking', label: 'Networking'},
+        {type: 'doc', id: 'features/placement', label: 'Placement'},
+        {type: 'doc', id: 'features/proxy-and-tls', label: 'Proxy and TLS'},
+        {type: 'doc', id: 'features/dns-publishing', label: 'DNS publishing'},
+        {type: 'doc', id: 'features/drives-and-volumes', label: 'Drives and volumes'},
+        {type: 'doc', id: 'features/served-drives', label: 'Served drives'},
+        {type: 'doc', id: 'features/folder-import', label: 'Folder import'},
+        {type: 'doc', id: 'features/failover', label: 'Failover'},
+        {type: 'doc', id: 'features/emergency-mode', label: 'Emergency mode'},
+        {type: 'doc', id: 'features/node-lifecycle', label: 'Node lifecycle'},
+        {type: 'doc', id: 'features/updates', label: 'Updates'},
+        {type: 'doc', id: 'features/backups', label: 'Backups'},
+        {type: 'doc', id: 'features/git-backup', label: 'Git backup'},
+        {type: 'doc', id: 'features/alerts', label: 'Alerts'},
+        {type: 'doc', id: 'features/access-and-login', label: 'Access and login'},
+        {type: 'doc', id: 'features/mcp', label: 'MCP server'},
+        {type: 'doc', id: 'features/live-config', label: 'Live config'},
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Guides',
+      collapsed: true,
+      items: [
+        {type: 'doc', id: 'guides/cloudflare-api-token', label: 'Cloudflare API token'},
+        {type: 'doc', id: 'guides/authentik', label: 'Authentik'},
+        {type: 'doc', id: 'guides/keycloak', label: 'Keycloak'},
+        {type: 'doc', id: 'guides/tailscale-headscale', label: 'Tailscale and Headscale'},
+        {type: 'doc', id: 'guides/discord-alerts', label: 'Discord alerts'},
+        {type: 'doc', id: 'guides/smtp', label: 'SMTP'},
+        {type: 'doc', id: 'guides/backup-targets', label: 'Backup targets (B2 / S3)'},
+        {type: 'doc', id: 'guides/git-webhooks', label: 'Git webhooks (GitHub / Forgejo)'},
+        {type: 'doc', id: 'guides/private-registries', label: 'Private registries'},
+        {type: 'doc', id: 'guides/mcp-clients', label: 'MCP clients'},
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Examples',
+      collapsed: true,
+      items: [
+        {type: 'doc', id: 'examples/index', label: 'Overview'},
+        {type: 'doc', id: 'examples/vaultwarden', label: 'Vaultwarden'},
+        {type: 'doc', id: 'examples/immich', label: 'Immich'},
+        {type: 'doc', id: 'examples/nextcloud', label: 'Nextcloud'},
+        {type: 'doc', id: 'examples/authentik', label: 'Authentik'},
+        {type: 'doc', id: 'examples/forgejo', label: 'Forgejo'},
+        {type: 'doc', id: 'examples/headscale', label: 'Headscale'},
+        {type: 'doc', id: 'examples/stalwart', label: 'Stalwart'},
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Reference',
+      collapsed: true,
+      items: [
+        {type: 'doc', id: 'reference/cluster-yaml', label: 'cluster.yaml'},
+        {type: 'doc', id: 'reference/stack-spec', label: 'Stack spec'},
+        {type: 'doc', id: 'reference/cli', label: 'CLI'},
+        {type: 'doc', id: 'reference/http-api', label: 'HTTP API'},
+        {type: 'doc', id: 'reference/ports-and-firewall', label: 'Ports and firewall'},
+        {type: 'doc', id: 'reference/file-locations', label: 'File locations'},
+        {type: 'doc', id: 'reference/troubleshooting', label: 'Troubleshooting'},
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Contributing',
+      collapsed: true,
+      items: [
+        {type: 'doc', id: 'contributing/building', label: 'Building'},
+        {type: 'doc', id: 'contributing/testing', label: 'Testing'},
+        {type: 'doc', id: 'contributing/docs-screens', label: 'Docs components demo'},
+      ],
+    },
+  ],
+};
+
+export default sidebars;

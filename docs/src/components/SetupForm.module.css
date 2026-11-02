@@ -1,0 +1,19 @@
+.form {
+  margin: 1.5rem 0; padding: 1rem 1.1rem 1.1rem;
+  border: 2px solid var(--cl-ink); border-radius: 14px;
+  background: var(--cl-surface-1); box-shadow: var(--cl-shadow-pop);
+}
+.title {
+  font-family: var(--cl-font-display); font-weight: 800; font-size: 1.05rem; margin-bottom: 0.7rem;
+}
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0.85rem 1rem; }
+.field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.88rem; }
+.label { font-weight: 700; }
+.label code { font-size: 0.7rem; margin-left: 0.3rem; color: var(--cl-brand); background: transparent; }
+.field input, .field select {
+  font: inherit; font-family: var(--cl-font-mono); font-size: 0.85rem;
+  padding: 0.45rem 0.65rem; border-radius: 8px;
+  border: 2px solid var(--cl-line); background: var(--cl-surface-0); color: var(--cl-ink);
+}
+.field input:focus, .field select:focus { outline: none; border-color: var(--cl-brand); }
+.help { font-size: 0.78rem; color: var(--cl-ink-muted); }

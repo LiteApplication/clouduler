@@ -1,0 +1,45 @@
+.wrap { margin: 1.25rem 0 1.75rem; }
+.filter {
+  width: 100%; margin-bottom: 0.75rem; font: inherit; padding: 0.55rem 0.9rem;
+  border: 2px solid var(--cl-line); border-radius: 999px; background: var(--cl-surface-1); color: var(--cl-ink);
+}
+.filter:focus { outline: none; border-color: var(--cl-brand); }
+.list { border: 2px solid var(--cl-line); border-radius: 12px; overflow: hidden; background: var(--cl-surface-1); }
+.row {
+  display: grid; grid-template-columns: minmax(150px, 1.1fr) minmax(130px, 1fr) 110px minmax(220px, 2.6fr);
+  gap: 1rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--cl-line); align-items: start; font-size: 0.9rem;
+  scroll-margin-top: 5rem;
+}
+.row:last-child { border-bottom: 0; }
+.row:target { background: var(--cl-brand-bg); }
+.head {
+  background: var(--cl-surface-2); font-family: var(--cl-font-display); font-weight: 700; font-size: 0.8rem;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.key { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
+.anchor { text-decoration: none; }
+.anchor code { font-weight: 600; color: var(--cl-brand); word-break: break-all; }
+.anchor:hover code { text-decoration: underline; }
+.req {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--cl-danger); border: 1.5px solid var(--cl-danger); border-radius: 999px; padding: 0 0.45rem;
+}
+.type { display: flex; flex-direction: column; gap: 0.25rem; }
+.def { font-size: 0.8rem; color: var(--cl-ink-muted); }
+.def code { font-size: 0.78rem; }
+.badge { display: inline-block; font-size: 0.74rem; font-weight: 700; padding: 0.1rem 0.55rem; border-radius: 999px; border: 1.5px solid; white-space: nowrap; }
+.live { color: var(--cl-ok); background: var(--cl-ok-bg); border-color: var(--cl-ok); }
+.restart { color: var(--cl-warn); background: var(--cl-warn-bg); border-color: var(--cl-warn); }
+.na { color: var(--cl-ink-muted); border-color: var(--cl-line); }
+.desc > div > p:first-child { margin-top: 0; }
+.desc p:last-child { margin-bottom: 0; }
+.quirks {
+  margin-top: 0.5rem; padding: 0.4rem 0.65rem; font-size: 0.84rem;
+  border-left: 4px solid var(--cl-warn); background: var(--cl-warn-bg); border-radius: 0 8px 8px 0;
+}
+.empty { padding: 1rem; text-align: center; color: var(--cl-ink-muted); }
+@media (max-width: 900px) {
+  .head { display: none; }
+  .row { grid-template-columns: 1fr; gap: 0.4rem; }
+  .type { flex-direction: row; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; }
+}

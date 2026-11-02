@@ -1,0 +1,19 @@
+.quirk {
+  --c: var(--cl-warn); --bg: var(--cl-warn-bg);
+  display: flex; gap: 0.85rem; margin: 1.4rem 0; padding: 0.9rem 1rem;
+  border: 2px solid var(--c); border-radius: 12px; background: var(--bg);
+  box-shadow: 4px 4px 0 var(--c);
+}
+.info { --c: var(--cl-brand); --bg: var(--cl-brand-bg); }
+.danger { --c: var(--cl-danger); --bg: var(--cl-danger-bg); }
+.badge {
+  flex: none; width: 1.9rem; height: 1.9rem; border-radius: 50%; display: grid; place-items: center;
+  background: var(--c); color: var(--cl-surface-0); font-family: var(--cl-font-display); font-weight: 800; font-size: 1.1rem;
+}
+.body { min-width: 0; flex: 1; }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem; margin-bottom: 0.3rem; }
+.kind { font-size: 0.68rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--c); }
+.title { font-family: var(--cl-font-display); font-size: 1.05rem; color: var(--cl-ink); }
+.content { color: var(--cl-ink); font-size: 0.94rem; }
+.content > :last-child { margin-bottom: 0; }
+.content code { background: rgba(127, 127, 127, 0.18); }
