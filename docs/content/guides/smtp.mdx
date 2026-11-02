@@ -5,6 +5,103 @@ sidebar_position: 6
 
 # SMTP
 
-One-line summary of smtp goes here.
+Clouduler sends alert emails through an SMTP server you provide. It does not run a mail server. This guide sets up the SMTP side for Gmail (with an app password) and for any other provider, then adds an email destination.
 
-TODO
+## What you'll end up with
+
+An SMTP server saved in Clouduler, and an email destination that receives [alerts](/docs/features/alerts) at one or more addresses.
+
+## Prerequisites
+
+- A mailbox that can send through SMTP, with its host, port and a password or app password.
+- A Clouduler admin sign-in.
+
+Clouduler's three security modes map to ports like this:
+
+| Port | Security | Meaning |
+|---|---|---|
+| 587 | `starttls` (default) | Plain connection upgraded with STARTTLS. |
+| 465 | `tls` | TLS from the first byte. |
+| 25 | `none` | No encryption. Only for a trusted relay on your LAN. |
+
+## Gmail: create an app password
+
+Gmail will not accept your normal password for SMTP. You need an app password, which requires 2-Step Verification.
+
+1. Turn on **2-Step Verification** for the Google account first. Security-key-only 2-Step Verification, work or school accounts and Advanced Protection can hide the app password option.
+2. Open [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+3. Enter an app name, for example `Clouduler`, and click **Create**.
+4. Google shows a 16-character password in four groups. Copy it now; it is shown once. Remove the spaces when you paste it.
+
+**You should now have** a 16-character app password. If the account password changes, Google revokes it and you must create a new one. {/* TODO verify: Gmail SMTP host and ports against Google's SMTP help page, which could not be fetched */}
+
+Values for Clouduler:
+
+| Field | Value |
+|---|---|
+| Host | `smtp.gmail.com` |
+| Port and security | `587` and **STARTTLS** (recommended), or `465` and **TLS** |
+| Username | the full address, for example `alerts@example.com` |
+| Password | the app password, without spaces |
+| From | `Clouduler <alerts@example.com>` (Gmail sends as the authenticated account) |
+
+## Any other provider
+
+Copy the host and port from the provider's SMTP page. Use **STARTTLS** for 587 and **TLS** for 465. The username is normally the mailbox address. If the provider asks for an app password or an API key, put that in the password field, never the account password.
+
+## Add the server and a destination in Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Alerts** (`/alerts`), then the **Destinations** tab.
+2. In the SMTP panel fill in **Host**, **Port**, **Security**, **Username**, **Password** and **From**. The UI fills the port when you choose a security mode (587, 465, 25); a port you type by hand wins.
+3. Use **Send a test email to** with your own address.
+4. Click **Add destination**, choose the **Email** chip, give it a **Name**, add one or more **Recipients**, choose **Send these severities**, and save.
+
+<UiScreen scenario="lan-3-nodes" route="/alerts/destinations" caption="Destinations and the SMTP panel." alt="Alerts destinations tab" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+There is no CLI command for alerts. The server settings live in the `smtp` key of the replicated config `_clouduler_alerts`, edited through `PUT /api/alerts/settings`:
+
+```json title="_clouduler_alerts (excerpt)"
+{
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "security": "starttls",
+    "username": "alerts@example.com",
+    "from": "Clouduler <alerts@example.com>"
+  }
+}
+```
+
+The password is the sealed secret `_clouduler_alert_smtp_password` and is write-only. Send a test with `POST /api/alerts/test` (see the [HTTP API](/docs/reference/http-api#alerts)).
+
+</UiCli.Cli>
+</UiCli>
+
+An email destination cannot be added until the server is set: `set up the email server before adding an email destination`.
+
+## Test it
+
+Send a test email from the SMTP panel. Subjects look like `[homelab] Test message from Clouduler`. Real ones look like `[homelab] CRITICAL: <title>` and `[homelab] Daily digest: N events`. If nothing arrives, check the spam folder first.
+
+A stored password is used for a test only when host, port and username match the stored server. If you change the host while testing, enter the password again.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `the mail server refused the message: <reason>` | Wrong credentials, or the sender is not allowed. Not retried. | Re-check the app password and that **From** matches the account. |
+| `could not send the email: <reason>` | Connection or TLS problem. Retried. | Check host, port and security pair up as in the table above. |
+| `the mail server did not answer in time` | Port blocked, or wrong host. Email has a 20 second limit. | Test the port from a node; many ISPs block 25. |
+| `no email server is configured` | SMTP panel not saved. | Fill and save it. |
+| `add at least one recipient` / `not an email address` | Bad **Recipients** entry. | Fix the list. |
+| Gmail rejects the login | A normal password, spaces in the app password, or the app password was revoked. | Create a new app password. |
+
+## Related
+
+- [Alerts](/docs/features/alerts), [Discord alerts](/docs/guides/discord-alerts)

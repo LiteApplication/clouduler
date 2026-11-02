@@ -5,6 +5,108 @@ sidebar_position: 3
 
 # Keycloak
 
-One-line summary of keycloak goes here.
+Keycloak is a self-hosted identity provider, an alternative to [Authentik](/docs/guides/authentik). This guide makes it the login for the Clouduler web UI. Clouduler's setup is the same for any OpenID Connect provider, so you can also use these values for the service login (`proxy.auth`) with a second client; see the Authentik guide for how the two differ.
 
-TODO
+:::note Check the screens against your Keycloak
+The Keycloak steps below use the labels I expect in the Admin Console. Only the realm creation and group membership parts are confirmed against the Keycloak 26.8 documentation. {/* TODO verify: the OpenID Connect client creation screens (Client authentication, Standard flow, Valid redirect URIs, Credentials tab) and the Group Membership mapper labels against a live admin console */}
+:::
+
+## What you'll end up with
+
+You sign in to the dashboard through Keycloak, and members of the Keycloak group `clouduler-admins` become Clouduler admins. Everyone else Keycloak lets in is a viewer.
+
+## Prerequisites
+
+- A running Keycloak reachable over HTTPS, for example `https://id.example.com`, and an admin login.
+- A Clouduler dashboard address with a real certificate, for example `https://cloud.example.com`.
+- A Clouduler API key kept as a safety net (edits to sign-in have no rollback timer).
+
+## 1. Prepare Keycloak
+
+1. In the Admin Console open the **Current realm** dropdown and click **Create Realm**. Enter the name `clouduler` and click **Create**. (You can use an existing realm instead.)
+2. Go to **Clients** and click **Create client**.
+3. **Client type**: **OpenID Connect**. **Client ID**: `clouduler`. **Name**: `Clouduler`. Click **Next**.
+4. Capability config: turn **Client authentication** on (a confidential client), keep **Standard flow** on, and turn off **Direct access grants** and the implicit flow. Click **Next**.
+5. Login settings: **Valid redirect URIs** is exactly `https://cloud.example.com/auth/oidc/callback` (one entry). **Web origins**: `https://cloud.example.com`. Click **Save**.
+6. Open **Clients**, then `clouduler`, then the **Credentials** tab and copy the **Client secret**.
+
+### Add the groups claim
+
+1. Open **Clients**, `clouduler`, the **Client scopes** tab, then `clouduler-dedicated`.
+2. Click **Configure a new mapper** (or **Add mapper**, then **By configuration**) and choose **Group Membership**.
+3. **Name**: `groups`. **Token Claim Name**: `groups`. Turn **Full group path** off, so the value is `clouduler-admins` and not `/clouduler-admins`. Turn **Add to ID token** on. Save.
+4. Go to **Groups** and create `clouduler-admins`. Then **Users**, pick a user, open the **Groups** tab and click **Join Group**.
+
+**You should now have** a client with a secret, and an ID token that carries `"groups": ["clouduler-admins"]` for your user.
+
+The issuer for this realm is:
+
+```text
+https://id.example.com/realms/clouduler
+```
+
+Open `https://id.example.com/realms/clouduler/.well-known/openid-configuration` and check the `issuer` value; Clouduler compares it exactly. Older Keycloak versions put `/auth` before `/realms`. {/* TODO verify: whether the /auth prefix applies to the Keycloak version you run */}
+
+## 2. Tell Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings > Sign-in and backup** (`/settings/security`), panel **Sign-in**, and switch on **Sign in with OIDC**.
+2. Fill in:
+
+   | Field | Value |
+   |---|---|
+   | **Issuer URL** | `https://id.example.com/realms/clouduler` |
+   | **Client ID** | `clouduler` |
+   | **Client secret** | the secret from the **Credentials** tab, then **Save secret** |
+   | **Username claim** | `preferred_username` |
+   | **Admin group claim** | `groups` |
+   | **Admin group value** | `clouduler-admins` |
+
+3. Apply. Keep **Allow API keys** on until you have confirmed it works.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+auth:
+  api_keys: true
+  oidc:
+    issuer: https://id.example.com/realms/clouduler
+    client_id: clouduler
+    scopes: [openid, profile, email, groups]
+    admin_claim: groups
+    admin_value: clouduler-admins
+    username_claim: preferred_username
+```
+
+```bash
+curl -sS -X PUT -H 'Authorization: Bearer clk_...' -H 'Content-Type: application/json' \
+  -d '{"client_secret":"<client secret>"}' \
+  https://cloud.example.com/api/oidc/client-secret
+clouduler config reload
+```
+
+</UiCli.Cli>
+</UiCli>
+
+The scopes line matters. Clouduler's default is `openid profile email`; the groups come from the mapper in the ID token, so `groups` in the scope list is a safe addition if your Keycloak also defines a `groups` client scope. Claims are read from the ID token only; Clouduler never calls the userinfo endpoint.
+
+## 3. Test it
+
+In a private browser window open `https://cloud.example.com` and click **Sign in with your identity provider**. After the Keycloak login you should land on the Overview. On **Settings > API keys and AI clients**, the **You** panel says `admin`.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| Keycloak: `Invalid parameter: redirect_uri` | The redirect URI does not match. | **Valid redirect URIs** must be exactly `https://cloud.example.com/auth/oidc/callback`. |
+| Logged in but only `read-only` | No `groups` claim in the ID token, or **Full group path** is on. | Check the mapper has **Add to ID token** on and **Full group path** off. The value must equal **Admin group value** exactly. |
+| `oidc is not configured` | OIDC switched off. | Switch on **Sign in with OIDC**. |
+| `unknown or expired login state` | Login started on another node, or the daemon restarted. | Start again. |
+| Issuer errors on save or login | Issuer differs from the discovery document, or is not `https://`. | Copy the `issuer` field from the discovery document. |
+
+## Related
+
+- [Access and login](/docs/features/access-and-login), [Authentik guide](/docs/guides/authentik)

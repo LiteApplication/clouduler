@@ -5,6 +5,207 @@ sidebar_position: 2
 
 # Authentik
 
-One-line summary of authentik goes here.
+Authentik is a self-hosted identity provider. This guide connects it to Clouduler in two separate places: as the login for the Clouduler web UI, and as the login wall in front of apps that have none of their own. To run Authentik itself on your cluster, see the [Authentik example stack](/docs/examples/authentik).
 
-TODO
+## What you'll end up with
+
+- You sign in to the Clouduler dashboard with **Sign in with your identity provider**, and members of an Authentik group become admins.
+- Optionally, routes you mark `authenticated` send visitors to an Authentik login first.
+
+These are two different OIDC clients with two different redirect URIs. Do not share a client between them. See [Access and login](/docs/features/access-and-login) for how they differ.
+
+## Prerequisites
+
+- Authentik running and reachable over HTTPS, for example at `https://auth.example.com`, and an admin account for it ([example stack](/docs/examples/authentik)).
+- A Clouduler dashboard address with a real certificate, for example `https://cloud.example.com`. The redirect URI is that address plus `/auth/oidc/callback`.
+- An API key for Clouduler that you keep as a safety net. Edits to sign-in apply at once and have no rollback timer.
+
+## Part 1: sign in to the dashboard with Authentik
+
+### 1. Create the application and provider in Authentik
+
+Open the admin interface at `https://auth.example.com/if/admin/`.
+
+1. Go to **Applications**, then **Applications**, and click **New Application**.
+2. **Name**: `Clouduler`. **Slug**: `clouduler`. The slug is part of the issuer URL, so keep it short and stable.
+3. **Provider Type**: **OAuth2/OIDC**. Click **Next**.
+4. On **Configure Provider** fill in:
+   - **Name**: `clouduler-dashboard`.
+   - **Authorization flow**: `default-provider-authorization-implicit-consent`, or your explicit-consent flow. Either works for a dashboard only you use.
+   - **Client type**: **Confidential**. (Clouduler also accepts public, because it always sends PKCE S256.)
+   - **Client ID** and **Client Secret**: keep the generated values and copy both now.
+   - **Redirect URIs**: exactly one entry, with a **Strict** match: `https://cloud.example.com/auth/oidc/callback`. On Authentik older than 2026.5 every entry is of type Authorization; enter the URL without a trailing slash.
+   - **Signing Key**: pick any available key, for example the default self-signed one.
+   - Leave **Scopes** at the defaults (`openid`, `profile`, `email`) for now.
+5. Click **Next**, then **Create Application** (or **Finish**). {/* TODO verify: button labels of the last wizard steps in the Authentik version you run */}
+
+**You should now see** the new application in **Applications**. Open **Applications**, then **Providers**, and open `clouduler-dashboard` to read the **Issuer**. By default it is:
+
+```text
+https://auth.example.com/application/o/clouduler/
+```
+
+The trailing slash matters: Clouduler compares the issuer exactly. The discovery document is at that URL plus `.well-known/openid-configuration`.
+
+### 2. Make a `groups` claim
+
+Clouduler decides who is an admin from a claim in the ID token (default `groups`). Authentik's default scopes do not include one, so add a scope mapping.
+
+1. Go to **Customization**, then **Property Mappings**, and click **Create**. Choose the type **Scope Mapping**.
+2. **Name**: `clouduler groups`. **Scope name**: `groups`.
+3. **Expression**:
+
+   ```python
+   return {"groups": [g.name for g in request.user.ak_groups.all()]}
+   ```
+
+   {/* TODO verify: the exact helper name in your Authentik version; ak_groups is the usual form for a global groups claim */}
+4. Back in **Applications**, then **Providers**, open `clouduler-dashboard`, expand **Advanced protocol settings**, add `clouduler groups` to **Selected Scopes**, and click **Update**.
+5. Create a group such as `clouduler-admins` under **Directory**, then **Groups**, and add yourself to it. {/* TODO verify: menu path to Groups in Authentik 2026.x */}
+
+To limit who may log in at all, use the application's policy, group or user bindings (**Applications**, **Applications**, `Clouduler`). Clouduler has no allow list of its own: anyone Authentik lets in becomes at least a **viewer**.
+
+### 3. Tell Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, then **Sign-in and backup** (`/settings/security`), panel **Sign-in**.
+2. Switch on **Sign in with OIDC**.
+3. Fill in:
+
+   | Field | Value |
+   |---|---|
+   | **Issuer URL** | `https://auth.example.com/application/o/clouduler/` |
+   | **Client ID** | the Client ID from Authentik |
+   | **Client secret** | the Client Secret from Authentik, then **Save secret** |
+   | **Username claim** | `preferred_username` |
+   | **Admin group claim** | `groups` |
+   | **Admin group value** | `clouduler-admins` |
+
+4. Apply. Leave **Allow API keys** on until you have confirmed OIDC works.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/security" caption="Settings, Sign-in and backup." alt="Sign-in settings" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+auth:
+  api_keys: true
+  oidc:
+    issuer: https://auth.example.com/application/o/clouduler/
+    client_id: <client id from Authentik>
+    scopes: [openid, profile, email, groups]   # groups is not in the default scopes
+    admin_claim: groups
+    admin_value: clouduler-admins
+    username_claim: preferred_username
+```
+
+The secret is not in the file:
+
+```bash
+curl -sS -X PUT -H 'Authorization: Bearer clk_...' -H 'Content-Type: application/json' \
+  -d '{"client_secret":"<paste from Authentik>"}' \
+  https://cloud.example.com/api/oidc/client-secret
+# 204 on success
+```
+
+Then `clouduler config reload`.
+
+</UiCli.Cli>
+</UiCli>
+
+:::warning Add groups to the scopes
+`auth.oidc.scopes` defaults to `openid profile email`. With the mapping above you must add `groups`, or nobody becomes admin and nothing warns you. There is no UI control for scopes; edit the file.
+:::
+
+### 4. Test it
+
+Open a private browser window, go to `https://cloud.example.com`, and click **Sign in with your identity provider**. You go to Authentik, log in, and land back on the Overview. The panel **You** on **Settings > API keys and AI clients** should say `admin`. If it says `read-only`, the groups claim did not match.
+
+## Part 2: protect apps with Authentik
+
+Clouduler's proxy can put a login wall in front of an app that has no login of its own. It is a wall, not forward-auth: a visitor who is signed in and in an allowed group reaches the app, but the app is not told who they are (no `X-Remote-User`-style header). If the app needs to know the user, give it its own OIDC login instead.
+
+### 1. Create a second provider in Authentik
+
+Repeat Part 1 step 1 with these differences:
+
+- **Name** and slug: `clouduler-portal` and `clouduler-portal`.
+- **Redirect URIs**: one per Clouduler network that offers the login, **Strict**, value `https://login.example.com/callback`. The host is `proxy.auth.host` (a label such as `login`) plus the network's domain.
+- **Scopes**: include `groups`. Add the same `clouduler groups` mapping to this provider's **Selected Scopes**.
+- Issuer: `https://auth.example.com/application/o/clouduler-portal/`.
+
+### 2. Tell Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings > Sign-in and backup**, panel **Service login**, and switch on **Enable service login**.
+2. Pick **Networks** (at least one, each with a DNS domain), set **Portal host** to `login`, **Issuer URL** to the portal issuer, **Client ID** and **Client secret**.
+3. **Scopes** default to `openid profile email groups`. Apply, and confirm the rollback timer once you still reach the dashboard.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+proxy:
+  auth:
+    host: login
+    networks: [wan]
+    issuer: https://auth.example.com/application/o/clouduler-portal/
+    client_id: <portal client id>
+    scopes: [openid, profile, email, groups]
+    groups_claim: groups
+```
+
+```bash
+curl -sS -X PUT -H 'Authorization: Bearer clk_...' -H 'Content-Type: application/json' \
+  -d '{"client_secret":"<portal client secret>"}' \
+  https://cloud.example.com/api/proxy-auth/client-secret
+```
+
+</UiCli.Cli>
+</UiCli>
+
+Then mark a route in the stack file:
+
+```yaml title="stack.yaml"
+services:
+  grafana:
+    x-clouduler:
+      proxy:
+        - host: grafana
+          network: wan
+          port: 3000
+          middlewares:
+            - authenticated:
+                groups: [family, admins]
+                allow_internal: false
+```
+
+`groups` is matched exactly against the groups claim. A bare `authenticated` lets any signed-in visitor in.
+
+### 3. Test it
+
+Open the app's address in a private window. You should be redirected to `https://login.example.com/login?...`, then to Authentik, then back to the app. A signed-in user outside the groups sees a **No access** page.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `oidc is not configured` (raw error page) | OIDC is off. | Switch on **Sign in with OIDC** and apply. |
+| Redirect or `invalid redirect_uri` error at Authentik | The redirect URI differs from the one Clouduler builds. | It must be exactly `https://<dashboard address>/auth/oidc/callback`, one entry, Strict. |
+| You log in but are only a viewer | The groups claim is missing, or **Admin group value** does not match exactly. | Add `groups` to the scopes, check the scope mapping on the provider, match case exactly. |
+| `unknown or expired login state` | The login was started on another node or the daemon restarted. | Start the login again. |
+| `login state does not match this browser, start the login again` | The state cookie is missing or differs. | Start again in the same browser; avoid mixing hostnames. |
+| `authenticated asks for a login on network X, but proxy.auth does not list it in networks` | The route's network is not in `proxy.auth.networks`. | Add it. |
+| `this route requires login, but proxy.auth does not offer it on this network` (503) | Same cause at run time. | Add the network and apply. |
+| `Sign-in link expired` (403) | The one-time token was used or timed out (60 seconds). | Reload the app page. |
+| Wrong issuer after an edit | Issuer compared exactly, trailing slash included. | Copy it from the provider page. Use your API key to fix it. |
+
+## Related
+
+- [Access and login](/docs/features/access-and-login), [Keycloak guide](/docs/guides/keycloak)
+- [Authentik example stack](/docs/examples/authentik), [Headscale example](/docs/examples/headscale) (uses Authentik for its own login)

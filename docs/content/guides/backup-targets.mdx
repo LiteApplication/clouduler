@@ -5,6 +5,166 @@ sidebar_position: 7
 
 # Backup targets (B2 / S3)
 
-One-line summary of backup targets (b2 / s3) goes here.
+[Backups](/docs/features/backups) in Clouduler are restic repositories. A **destination** says where the repository lives: a folder on a cluster node, an SSH (SFTP) server, or an S3-compatible bucket. This guide prepares the other end for Backblaze B2, AWS S3, MinIO and an SSH server, and adds the destination to Clouduler.
 
-TODO
+## What you'll end up with
+
+A bucket (or folder) plus a credential that can only reach it, saved as a Clouduler destination, ready for a backup schedule.
+
+## Prerequisites
+
+- `restic` installed on the nodes that hold your drives (see [Backups](/docs/features/backups)).
+- A Clouduler admin sign-in.
+- For off-site targets, an account with the provider.
+
+:::note About the repository password
+Every destination gets a repository password that Clouduler generates and seals in the cluster. It is recoverable only through the cluster key or a [git backup](/docs/features/git-backup). If you lose both, the backups are unreadable, so keep them safe before relying on any target.
+:::
+
+## Backblaze B2 (through the S3 kind)
+
+Clouduler has no native `b2:` kind; it talks to B2's S3-compatible endpoint with the **S3 bucket** kind.
+
+### In Backblaze
+
+{/* TODO verify: B2 console labels for creating a bucket and where the S3 endpoint is shown; the application key steps are confirmed against Backblaze's documentation */}
+
+1. In the B2 web console open **B2 Cloud Storage**, then **Buckets**, and click **Create a Bucket**. Name it, for example, `clouduler-backups`, and set files to **Private**.
+2. Open **Application Keys** in the left menu and click **Add a New Application Key**.
+3. **Name**: `clouduler-restic`.
+4. **Allow Access to Bucket(s)**: choose `clouduler-backups`, not **All**.
+5. **Type of Access**: **Read and Write**. Restic writes and prunes.
+6. Leave **File name prefix** and **Duration** empty. **Allow List All Bucket Names** is not needed.
+7. Click **Create New Key**. Copy the **keyID** and the **applicationKey** now; the application key is shown once.
+8. On the bucket's details find the S3 endpoint, in the form `s3.<region>.backblazeb2.com`, for example `s3.eu-central-003.backblazeb2.com`.
+
+**You should now have** four values: bucket name, endpoint, keyID and applicationKey.
+
+### In Clouduler
+
+| Field | Value |
+|---|---|
+| Name | `b2-main` |
+| Bucket | `clouduler-backups` |
+| Endpoint | `https://s3.eu-central-003.backblazeb2.com` (the one from your console, with the scheme) |
+| Region | `eu-central-003` (the region part of the endpoint) |
+| Prefix | `clouduler` (optional) |
+| Access key ID | the B2 keyID |
+| Secret access key | the B2 applicationKey |
+
+Put the scheme (`https://`) in the endpoint: Clouduler builds the repository address as `s3:<endpoint>/<bucket>[/<prefix>]`, and a bare host can produce a bad repository string.
+
+## AWS S3
+
+{/* TODO verify: AWS console steps are the standard IAM flow, not checked against current AWS docs */}
+
+1. Create a bucket, for example `clouduler-backups-example`, in a region such as `eu-west-1`, with **Block all public access** on.
+2. In **IAM**, then **Users**, click **Create user** (`clouduler-restic`), without console access.
+3. Attach an inline policy. Restic needs to list, read, write and delete on the bucket:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       { "Effect": "Allow", "Action": ["s3:ListBucket", "s3:GetBucketLocation"], "Resource": "arn:aws:s3:::clouduler-backups-example" },
+       { "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], "Resource": "arn:aws:s3:::clouduler-backups-example/*" }
+     ]
+   }
+   ```
+
+4. Under **Security credentials** click **Create access key**, with the use case "Application running outside AWS", and copy the access key ID and secret.
+
+In Clouduler: endpoint `https://s3.eu-west-1.amazonaws.com`, region `eu-west-1`, bucket `clouduler-backups-example`, plus the keys.
+
+## MinIO
+
+In the MinIO console create a bucket, then under **Access Keys** click **Create access key** and attach a policy equivalent to the one above. {/* TODO verify: MinIO console labels */} In Clouduler use endpoint `https://minio.example.com:9000` (or your proxy hostname), the bucket, the keys, and leave the region blank or set the MinIO region (`us-east-1` by default).
+
+## SSH (SFTP) server
+
+On the backup host create a dedicated user and folder:
+
+```bash
+sudo useradd --system --create-home --home-dir /srv/restic clouduler-backup
+sudo install -d -o clouduler-backup -g clouduler-backup /srv/restic/repo
+```
+
+On any machine make a key pair used only for this:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/clouduler_backup -C clouduler-backup -N ""
+```
+
+Put `clouduler_backup.pub` in the backup user's `~/.ssh/authorized_keys` on that host. In Clouduler: host `backup.example.com`, port `22`, user `clouduler-backup`, path `/srv/restic/repo` (no spaces), and the full private key including the `BEGIN` and `END` lines. {/* TODO verify: whether restic over SFTP pins the host key on first use like git backup does; do a test backup */}
+
+## Folder on a cluster node
+
+For a disk or NAS mount on one node, pick the **Cluster node** kind: choose the **Node** and a **Path** (default `/srv/backups`). If that node does not hold the drive, the drive is synced there once before each backup.
+
+REST servers (`rest:`) are not a Clouduler destination kind.
+
+## Add the destination in Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Storage**, tab **Backups** (`/storage/backups`), section **Destinations**, and click **New destination**.
+2. Choose **S3 bucket** (or **SSH server**, **Cluster node**) and fill in the table above.
+3. Give it a name and click **Create destination**.
+
+The form says to leave **Repository password** blank to generate one. In practice the server may refuse a blank password for a new destination with `password is required for a new destination`; if you see that, use the CLI. {/* TODO verify: whether put_destination still requires a password */}
+
+<UiScreen scenario="lan-3-nodes" route="/storage/backups" caption="Backups: destinations are listed at the bottom." alt="Backups tab" height={640} />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler backup destination add b2main --name "B2 main" --kind s3 \
+  --bucket clouduler-backups --endpoint https://s3.eu-central-003.backblazeb2.com \
+  --region eu-central-003 --prefix clouduler \
+  --s3-access-key-id EXAMPLEKEYID --s3-secret-access-key 'example-application-key'
+
+clouduler backup destination add offsite --name "Offsite SSH" --kind ssh \
+  --host backup.example.com --port 22 --user clouduler-backup \
+  --path /srv/restic/repo --ssh-key-file ~/.ssh/clouduler_backup
+
+clouduler backup destination list
+```
+
+The password is generated and sealed, never printed. Never re-run `destination add` for an existing id without `--password`: it generates a new password and the repository can no longer be opened.
+
+</UiCli.Cli>
+</UiCli>
+
+Then add a schedule (see [Backups](/docs/features/backups#schedule-a-backup)):
+
+```bash
+clouduler backup target set fast-b2main --drive fast --destination b2main \
+  --frequency 24h --time-of-day 03:00 --keep-last 7 --keep-within 30d --enabled
+```
+
+## Test it
+
+```bash
+clouduler backup run fast-b2main
+clouduler backup history --target fast-b2main
+```
+
+**You should see** a run that ends with a snapshot id and size. In the UI, **Recent runs** shows the same and the bucket now contains a `config` file and `data/` folders. Then try a restore of something you can afford to lose; see [Restore drill](/docs/features/backups#restore-drill).
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `password is required for a new destination` | Blank password rejected by the server. | Add it with the CLI. |
+| A bad repository string, or a failure right at the start | Endpoint without `https://`. | Include the scheme in **Endpoint**. |
+| Access denied / 403 from the bucket | The key is scoped to a different bucket, or is read-only. | Re-create the key with **Read and Write** on that bucket. |
+| `restic is not on PATH but at least one backup target is enabled - scheduled backups will fail until it is installed` | restic missing on the node. | Install restic. |
+| The schedule never runs | Created without `--enabled`. | Add the flag, or turn it on in the UI. |
+| `backup snapshots` fails for S3 or SSH | The CLI does not pass those credentials to restic. | Use the **Snapshots** section in the UI. |
+| Unreadable repository after re-adding | `destination add` without `--password` rotated the password. | Restore the old password from the cluster key or git backup. |
+
+## Related
+
+- [Backups](/docs/features/backups), [Git backup](/docs/features/git-backup)

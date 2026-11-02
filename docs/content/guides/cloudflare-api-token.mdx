@@ -5,6 +5,124 @@ sidebar_position: 1
 
 # Cloudflare API token
 
-One-line summary of cloudflare api token goes here.
+Clouduler talks to Cloudflare for two jobs: it writes the DNS records for your published apps ([DNS publishing](/docs/features/dns-publishing)) and it proves to Let's Encrypt that you own a name by writing `_acme-challenge` TXT records ([Proxy and TLS](/docs/features/proxy-and-tls)). Both use one API token that is scoped to a single DNS zone.
 
-TODO
+## What you'll end up with
+
+- A Cloudflare API token that can edit DNS records in one zone (for example `example.com`) and nothing else.
+- The token stored sealed inside your cluster, and the zone listed in Clouduler.
+
+## Prerequisites
+
+- A domain whose DNS is hosted on Cloudflare (the zone shows **Active** on the Cloudflare **Domains** page). If it is not there yet, see [Move a domain to Cloudflare](#move-a-domain-to-cloudflare) at the end.
+- A running Clouduler cluster and an admin sign-in.
+
+:::note A token is needed even without wildcard certificates
+The whole certificate pass is gated on the Cloudflare section and token, even for hostnames that would not need DNS-01. Without a token the daemon logs `no cloudflare token yet, ... will not run`.
+:::
+
+## 1. Create the token in Cloudflare
+
+1. Open [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens). That is **My Profile**, then **API Tokens**. (An account-owned token under **Manage Account**, then **API Tokens** works too; the user token is simpler for one operator.)
+2. Click **Create Token**.
+3. Skip the template list and choose **Create Custom Token**. {/* TODO verify: the button sits below the templates and may read "Get started" next to "Create Custom Token" in the current dashboard */}
+4. **Token name**: `clouduler-dns`, or any label that says what it is for.
+5. Under **Permissions**, set the three dropdowns of the first row to **Zone**, **DNS**, **Edit**. DNS Edit is enough for TXT, A, AAAA and CNAME records. {/* TODO verify: the dropdown labels on screen */}
+6. Under **Zone Resources**, set the dropdowns to **Include**, **Specific zone**, and then pick your zone, for example `example.com`. Do not pick **All zones**: a token scoped to one zone is the point.
+7. Leave **Client IP Address Filtering** and **TTL** empty. Clouduler has no flow to refresh an expiring token, so a TTL means a surprise outage later.
+8. Click **Continue to summary**, check it, then click **Create Token**.
+
+**You should now see** a page showing the token once. It starts with `cfut_`. Copy it now; Cloudflare cannot show it again.
+
+### Check the token before you use it
+
+Clouduler does not check a token when you save it. A bad token is found only when the first Cloudflare call fails with `cloudflare auth failed: ...`. So test it from any shell first:
+
+```bash
+curl -s -H "Authorization: Bearer <TOKEN>" https://api.cloudflare.com/client/v4/user/tokens/verify
+```
+
+**You should see** `"status": "active"` in the answer.
+
+## 2. Give it to Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, then **Network**, and the **Cloudflare DNS** page.
+2. Switch on **Manage DNS with Cloudflare**.
+3. In **DNS zones**, type the zone name (`example.com`, not the zone ID).
+4. Paste the token into **API token** and click **Save token**.
+5. Apply. The settings page may ask you to confirm within a minute, or it rolls back; see [Live config](/docs/features/live-config).
+6. To turn on certificates, go to the **Reverse proxy** page, switch on **Issue certificates automatically** and set **Contact email**.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/network?page=cloudflare" caption="Settings, Network, Cloudflare DNS." alt="Cloudflare DNS settings page" />
+
+To replace the token later, use **Rotate token** on the same page.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+The zone list is in `cluster.yaml`:
+
+```yaml title="cluster.yaml"
+cloudflare:
+  zones:
+    - example.com
+
+proxy:
+  acme:
+    enabled: true
+    contact_email: you@example.com
+    # directory_url: https://acme-staging-v02.api.letsencrypt.org/directory   # staging while testing
+```
+
+```bash
+clouduler config reload
+```
+
+The token itself has no CLI command. It is the sealed secret `_clouduler_cloudflare_token`, set only from the web UI.
+
+</UiCli.Cli>
+</UiCli>
+
+## 3. Test it
+
+1. Open **DNS** (`/dns`) and press **Reconcile DNS**.
+2. For a route on a public network, **DNS records** should list the record for your hostname with a good state, and **Certificates** should move from pending to issued within a few minutes (the pass runs about every five minutes).
+3. On the CLI, `sudo clouduler status` has a "certificates & dns" section listing pending and failed records.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `cloudflare auth failed: ...` | Bad token, or it lacks Zone / DNS / Edit. | Run the `curl` check above. Create a new token and use **Rotate token**. |
+| `zone X not found` | The zone name is not in the account behind the token. | Fix **DNS zones** or the token's zone. |
+| `no cloudflare zone covers this hostname` | The hostname is outside every listed zone. | Add the zone to **DNS zones**. |
+| `cloudflare api error CODE: MESSAGE` | Cloudflare refused a record. | Read the code; several failures are summarised as `N records failed to apply: ...`. |
+| `this node holds no cluster key` when saving | The node you used has no cluster key. | Save the token from a node that has `/etc/clouduler/secrets.key`. |
+| `no cloudflare token yet, ... will not run` in the log | No token saved, but ACME is on. | Save the token. |
+
+:::tip Test on staging first
+Let's Encrypt production rate-limits failures. Set **ACME directory URL** to the staging address while you test, then clear it.
+:::
+
+## Move a domain to Cloudflare
+
+Only needed if your domain is not on Cloudflare yet.
+
+1. In the Cloudflare dashboard open **Domains**, then **Onboard a domain**.
+2. Enter the apex domain (`example.com`), choose how DNS records are added, click **Continue**, and pick a plan (Free works).
+3. Review the DNS record scan on the **DNS Records** page. The scan can miss records, so check the apex, `www` and any mail records.
+4. Note the two Cloudflare nameservers shown. If DNSSEC is on at your registrar, turn it off there first.
+5. At your registrar, replace the existing nameservers with the two Cloudflare ones, copied exactly.
+6. Wait up to 24 hours. When the domain shows **Active**, Cloudflare emails you. Re-enable DNSSEC through Cloudflare if you turned it off.
+
+Until the zone is active, expect `no cloudflare zone covers this hostname` or propagation failures.
+
+If you ever need the zone ID for debugging with curl: **Domains**, select the domain, scroll to the **API** section of the **Overview** page and copy **Zone ID**. Clouduler itself matches zones by name.
+
+## Related
+
+- [DNS publishing](/docs/features/dns-publishing), [Proxy and TLS](/docs/features/proxy-and-tls)
+- [Single node quick start, step 8](/docs/quickstart/single-node#8-give-it-a-real-domain-with-https)

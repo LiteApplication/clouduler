@@ -49,3 +49,9 @@ Props: `rows: {key: string, type: string, default?: string, reload: 'live'|'rest
 Props: `title: string`, `severity?: 'info'|'warn'|'danger'` (default warn); children are markdown.
 
     <Quirk title="Renaming a network" severity="danger">Use the rename endpoint, not an edit.</Quirk>
+
+## Var
+Props: `name: string` (a SetupForm field name), `fallback?: string` (shown when the field has no value yet; defaults to `{{name}}`), `plain?: boolean` (render a plain span instead of `<code>`).
+Inline value from the shared SetupForm state, for prose and tables where `Cmd` cannot be used. Unset values are shown highlighted.
+
+    The node is <Var name="hostname" fallback="atlas" />.

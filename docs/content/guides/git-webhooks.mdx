@@ -5,6 +5,169 @@ sidebar_position: 8
 
 # Git webhooks (GitHub / Forgejo)
 
-One-line summary of git webhooks (github / forgejo) goes here.
+[Git backup](/docs/features/git-backup) mirrors your cluster's stacks, configs and (encrypted) secrets into a Git repository, and can also pull changes you push. This guide creates the repository on GitHub or Forgejo, adds the deploy key Clouduler gives you, and sets up the webhook so a push is applied right away.
 
-TODO
+## What you'll end up with
+
+- A private repository `clouduler-state` that Clouduler pushes to.
+- A webhook so pushing a change to a stack file redeploys that stack.
+
+## Prerequisites
+
+- A GitHub account or a Forgejo instance (for example `forgejo.example.com`).
+- A Clouduler dashboard reachable by the Git host for the webhook part. {/* TODO verify: how the proxy exposes /api/git-backup/webhook/ to the public internet; test from outside the LAN */}
+- An age key: Clouduler can generate one in the browser, or run `age-keygen` yourself.
+
+## 1. Create the repository
+
+**GitHub**
+
+1. Click **+**, then **New repository**.
+2. **Repository name**: `clouduler-state`. **Visibility**: **Private**.
+3. Do not add a README, `.gitignore` or license. Clouduler creates the first commit.
+4. Click **Create repository**.
+
+**Forgejo**
+
+1. Click **+** in the top right, then **New Repository**.
+2. Name it `clouduler-state`, make it **Private**, and do not initialise it.
+3. Click **Create Repository**.
+
+{/* TODO verify: GitHub and Forgejo labels; only the deploy key and webhook pages were checked against the official docs */}
+
+**You should now see** an empty repository with its SSH address, for example `git@git.example.com:ops/clouduler-state.git`. Keep it private: configs and stack files are stored in plain text.
+
+## 2. Turn on git backup in Clouduler to get the deploy key
+
+Clouduler only accepts SSH URLs (`git@host:org/repo.git`); HTTP(S) is rejected.
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Sign-in and backup** (`/settings/security`), page **Git backup**.
+2. Tick **Back up cluster state to git**.
+3. **Repository URL**: `git@git.example.com:ops/clouduler-state.git`.
+4. **Encrypt secrets for**: paste an age public key (`age1...`), or click **Generate age key**. The browser creates a key pair and downloads `clouduler-age-key.txt`. Store that file outside the cluster; without it the secrets in Git cannot be recovered.
+5. **Branch**: `main`. Save.
+6. A **deploy key** appears. Click **Copy public key**. It starts with `ssh-ed25519 AAAA...`.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/security?page=git-backup" caption="Settings, Sign-in and backup, Git backup." alt="Git backup settings" height={620} />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+backup:
+  repo_url: git@git.example.com:ops/clouduler-state.git
+  age_recipient: age1example0000000000000000000000000000000000000000000000000
+  branch: main
+```
+
+```bash
+clouduler config reload
+```
+
+The deploy key is generated on the first export and shown in the UI (**Copy public key**). There is no CLI command to print it.
+
+</UiCli.Cli>
+</UiCli>
+
+## 3. Add the deploy key with write access
+
+**GitHub**
+
+1. Open the repository and click **Settings** (under the **More** menu if hidden).
+2. In the sidebar click **Deploy keys**, then **Add deploy key**.
+3. **Title**: `clouduler`. **Key**: paste the public key.
+4. Tick **Allow write access**. Clouduler pushes, so a read-only key fails with `push rejected by remote`.
+5. Click **Add key**.
+
+**Forgejo**
+
+1. Open the repository, **Settings**, then **Deploy Keys**, and click **Add Key**.
+2. Paste the public key, give it a title, and enable **Read/Write**. {/* TODO verify: Forgejo deploy key labels */}
+
+A deploy key belongs to one repository.
+
+## 4. Check the first push
+
+Wait for the first export. On the Git backup page **Last export** should show success, and the repository now contains `cluster.yaml`, `stacks/`, `configs/` and `secrets/*.age`. If it says `Last export failed: ...`, see the troubleshooting table.
+
+## 5. Add the webhook (optional, for pull on push)
+
+Without a webhook Clouduler still exports, but changes you push are only applied when you run `clouduler git-backup pull`.
+
+### Make a token in Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+On the same Git backup page set a **webhook token** and click **Save webhook token**. The UI shows the URL pattern:
+
+```text
+https://cloud.example.com/api/git-backup/webhook/<token>
+```
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+The token is set in the UI. To pull by hand without any webhook:
+
+```bash
+clouduler git-backup pull
+clouduler git-backup pull --via boreas
+```
+
+</UiCli.Cli>
+</UiCli>
+
+:::warning The token is in the URL
+It appears in proxy and access logs, and Clouduler does not verify a signature or filter events: any request to that URL triggers a pull. Treat the URL as a secret. A wrong token answers 401 `bad webhook token`.
+:::
+
+### Tell GitHub
+
+1. Open the repository **Settings**, then **Webhooks**, then **Add webhook**.
+2. **Payload URL**: the URL above. The host must be reachable from GitHub.
+3. **Content type**: `application/json`.
+4. **Secret**: leave it empty. Clouduler does not check it.
+5. Under "Which events would you like to trigger this webhook?" choose **Let me select individual events** and tick **Pushes**, to avoid extra pulls.
+6. Tick **Active** and click **Add webhook**.
+
+**You should now see** a `ping` delivery with a green tick (HTTP 200) under **Recent Deliveries**.
+
+### Tell Forgejo
+
+1. Go to `https://forgejo.example.com/<user>/clouduler-state/settings/hooks`.
+2. Add a webhook of type **Forgejo**.
+3. **Target URL**: the URL above. **HTTP Method**: `POST`. **POST Content Type**: `application/json`.
+4. **Secret**: leave it empty.
+5. **Trigger On**: **Push Events**. Tick **Active** and save.
+6. Click **Test Delivery**.
+
+{/* TODO verify: Forgejo button labels; the hooks URL and webhook types are from the Forgejo docs */}
+
+## 6. Test it
+
+1. Edit `stacks/<name>.yaml` in the repository (for example change an image tag) and push to `main`.
+2. Within seconds the stack redeploys. Only stacks whose spec changed are redeployed.
+3. Check **Recent Deliveries** on GitHub or the delivery list on Forgejo for HTTP 200.
+
+If the pushed commit is invalid, Clouduler moves it to a branch named `rejected/main-<sha12>` and does not apply it.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `only ssh urls are supported (e.g. git@host:org/repo.git), not http(s)` | HTTPS URL entered. | Use the SSH address. |
+| `no git deploy key yet - it is generated after the first export` | Reconcile ran before any export. | Wait for the first export, then copy the key. |
+| `push rejected by remote: ...` | Deploy key missing, or read-only. | Add it with write access. |
+| `remote ssh host key for HOST does not match the one pinned on first connection ...` | The Git host rotated its key. | Delete the pinned entry named in the message to re-pin. |
+| `invalid age recipient: ...` / `must be an age X25519 recipient, starting with age1` | Wrong age key. | Paste the public key (`age1...`). |
+| Webhook returns 401 `bad webhook token` | Wrong token in the URL. | Copy the URL again. |
+| Webhook cannot connect | The dashboard is not reachable from the Git host. | Publish the dashboard on a public network, or use `clouduler git-backup pull`. |
+| Commit moved to `rejected/...` | Pull validation failed, for example `secret S does not already exist in the cluster - git cannot supply new secret content, create it through the api first`. | Fix the commit. Secret values never come from Git. |
+
+## Related
+
+- [Git backup](/docs/features/git-backup), [Backups](/docs/features/backups), [Updates](/docs/features/updates)

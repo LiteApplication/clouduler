@@ -5,6 +5,146 @@ sidebar_position: 10
 
 # MCP clients
 
-One-line summary of mcp clients goes here.
+Clouduler runs an [MCP server](/docs/features/mcp) at `https://<your dashboard address>/mcp`. This guide connects AI tools to it: Claude Code, Claude Desktop and claude.ai, Cursor and VS Code, and scripts or CI.
 
-TODO
+## What you'll end up with
+
+An AI assistant that can inspect your cluster (and, if you allow it, deploy stacks), with secret values redacted from everything it sees.
+
+## Prerequisites
+
+- MCP switched on. Clusters created by `clouduler init` start with it **off**, and then `/mcp` answers `404 {"error":"mcp access is disabled"}`.
+- A dashboard address with a **real certificate**, not a node IP. Clients that check TLS refuse the self-signed fallback.
+- The dashboard route must be reachable from where the client runs. On a private or internal network the proxy answers `403 "this route is only reachable from its own network"` to outside peers; use a public network for the web route or connect from inside the network.
+- A Clouduler sign-in that can approve the connection. Admins can grant **Read-only** or **Admin**; viewers can grant only **Read-only**.
+
+## 1. Turn MCP on
+
+<UiCli>
+<UiCli.Ui>
+
+Open **Settings**, then **Sign-in and backup**, section **AI access**, and switch on **Allow AI clients**.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```yaml title="cluster.yaml"
+mcp:
+  enabled: true
+```
+
+```bash
+clouduler config reload
+```
+
+The switch is read on every request, so no restart is needed.
+
+</UiCli.Cli>
+</UiCli>
+
+## 2. Find the connection details
+
+Open **Settings > API keys and AI clients** (`/settings/access`), panel **Connected AI clients**. It shows the **MCP URL**, a ready-made **Claude Code command**, and links for **Claude.ai connectors**, **Add to Cursor** and **Add to VS Code**.
+
+<UiScreen scenario="lan-3-nodes" route="/settings/access" caption="Connected AI clients on the Access tab." alt="Settings, Access tab" />
+
+## 3. Connect a client
+
+All of these use the same flow: the client registers itself, sends you to a **Connect an application** page in the dashboard, and you choose **Read-only** (the 17 read tools) or **Admin** (all 27 tools, including deploy and `exec`), then click **Approve access** or **Deny access**. Access tokens last 1 hour and refresh by themselves; refresh tokens last 30 days.
+
+### Claude Code
+
+<UiCli>
+<UiCli.Ui>
+
+In the **Connected AI clients** panel, copy the **Claude Code command** and run it in a terminal. Then continue with the CLI tab for the approval step.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+claude mcp add --transport http clouduler https://cloud.example.com/mcp
+```
+
+Scopes: `local` (default, this project for you), `project` (written to `.mcp.json` and shared), `user` (all your projects):
+
+```bash
+claude mcp add --transport http clouduler --scope project https://cloud.example.com/mcp
+```
+
+Then, inside Claude Code, run `/mcp`, choose `clouduler` and approve in the browser page. From a terminal, `claude mcp login clouduler` and `claude mcp logout clouduler` do the same.
+
+</UiCli.Cli>
+</UiCli>
+
+**You should now see** `clouduler` listed as connected in `/mcp`. Ask it "give me a cluster overview"; it should call `cluster_overview`.
+
+### Claude.ai and Claude Desktop
+
+In claude.ai open **Settings**, then **Connectors**, and add a custom connector with the URL `https://cloud.example.com/mcp`. Let it run the OAuth flow and approve the consent page. For Claude Desktop, add a custom connector with the same URL. {/* TODO verify: Claude Desktop's current support for remote HTTP servers. A claude_desktop_config.json entry using `npx mcp-remote https://cloud.example.com/mcp` is a common workaround but was not verified. */}
+
+### Cursor and VS Code
+
+Use the **Add to Cursor** and **Add to VS Code** links on the Access page. They register the server and open the consent flow. Client registration accepts `https` redirects, `http` to `localhost`, `127.0.0.1` or `[::1]`, and app schemes such as `cursor://` and `vscode://`. {/* TODO verify: the manual MCP config entries for Cursor and VS Code */}
+
+### Other clients, scripts and CI
+
+Any client that speaks MCP over Streamable HTTP can connect. Most register themselves; the discovery document is at `/.well-known/oauth-authorization-server`. For headless use, send an API key as a bearer token. An API key always grants **Admin**; there is no read-only key.
+
+```bash
+claude mcp add --transport http clouduler https://cloud.example.com/mcp \
+  --header "Authorization: Bearer <API_KEY>"
+```
+
+```json title=".mcp.json"
+{
+  "mcpServers": {
+    "clouduler": {
+      "type": "http",
+      "url": "https://cloud.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${CLOUDULER_API_KEY}" }
+    }
+  }
+}
+```
+
+Keep the key in its own variable. Claude Code reads some credential variables such as `ANTHROPIC_API_KEY` as empty for remote servers. A configured `Authorization` header replaces OAuth, so remove it to use OAuth again.
+
+## 4. Work with it
+
+The assistant works on **one stack at a time**. It calls `focus_stack` first; every write, `exec` and `read_file` only works on the focused stack. A good first prompt: "Focus the stack `vaultwarden`, list its problems and show the last 50 log lines."
+
+Secrets are never shown. You will see `[REDACTED secret:NAME]` where a value would be; that is expected. The assistant creates secrets with `generate_secret` and references them from the stack's `secrets:` list; `deploy_stack` takes no secret values.
+
+## Test it
+
+- Read-only check: ask for `list_nodes` or `cluster_overview`. It should answer with your nodes.
+- Admin check: ask it to `validate_stack` a small spec (this changes nothing).
+- On **Settings > API keys and AI clients**, the client appears under **Connected AI clients**.
+
+## Revoke access
+
+In **Connected AI clients** click the trash button `Revoke <client>`. "It loses access immediately." Demoting the person who approved does nothing to an existing admin grant; revoke the client instead. To remove an API key, delete it on the same page.
+
+:::warning Admin is real access
+`exec` and `read_file` give an admin client access inside your containers. Redaction is a filter, not a sandbox: a deliberate transform of a secret can escape it. Grant Admin only to assistants you trust.
+:::
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `404 {"error":"mcp access is disabled"}` or "no MCP server" | `mcp.enabled` is false. | Switch on **Allow AI clients**. |
+| `401` on `/mcp` | No token yet. | Run the client's login (`/mcp` in Claude Code) and approve. |
+| `403 "this route is only reachable from its own network"` | The dashboard is on a private network and the client is outside. | Use a public network for the web route, or connect from inside. |
+| TLS or certificate errors | The node serves the self-signed fallback. | Use the real hostname once ACME has issued a certificate. |
+| `only an admin can grant admin access` | A viewer asked for Admin. | Approve as an admin, or choose Read-only. |
+| `needs an admin grant; this connection is read-only...` | The tool needs Admin. | Re-approve with Admin. |
+| Approval page loses the request | Pending approvals live in memory on the leader and a leader change drops them. | Start the connection again. |
+| `too many unapproved clients registered` (429) | More than 100 never-approved clients are stored. | Wait; unapproved ones expire after 24 hours. |
+| Tools refuse with a missing cluster key | The node you reached has no cluster key. | Connect through a node that holds `/etc/clouduler/secrets.key`. |
+| Refresh stops working | A replayed refresh token fails. | Approve the client again. |
+
+## Related
+
+- [MCP server](/docs/features/mcp), [Access and login](/docs/features/access-and-login)

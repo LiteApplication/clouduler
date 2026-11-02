@@ -5,6 +5,85 @@ sidebar_position: 5
 
 # Discord alerts
 
-One-line summary of discord alerts goes here.
+Clouduler can post its [alerts](/docs/features/alerts) to a Discord channel through a webhook: a coloured embed per alert, or one plain line.
 
-TODO
+## What you'll end up with
+
+A channel in your Discord server that receives Critical and Warning alerts (and optionally a daily digest of Info alerts), with an optional ping for critical ones.
+
+## Prerequisites
+
+- A Discord server where you can manage webhooks. The server owner and admins can; otherwise you need the **Manage Webhooks** permission.
+- A Clouduler admin sign-in.
+
+## 1. Create the webhook in Discord
+
+{/* TODO verify: Discord's own help page could not be fetched; these labels come from third-party guides, check them on screen */}
+
+1. Open your server. Hover the text channel that should receive alerts and click the gear icon (**Edit Channel**). Alternatively open **Server Settings**, then **Integrations**.
+2. Open **Webhooks** and click **New Webhook** (some versions say **Create Webhook**).
+3. Set the **Name**, which is the sender name shown on messages (Clouduler can override it with a `username`), and pick the **Channel**.
+4. Click **Copy Webhook URL**. It looks like `https://discord.com/api/webhooks/<ID>/<TOKEN>`.
+5. Click **Save Changes**.
+
+**You should now see** the webhook listed under **Webhooks** with your channel name.
+
+:::warning The URL is a password
+Anyone who has the URL can post to your channel. Clouduler stores it as a sealed secret and shows it afterwards only as `https://discord.com/…`. Do not paste it into chats or into a stack file.
+:::
+
+If you want critical alerts to ping someone, note the role or user ID. In Discord, turn on developer mode in your account's advanced settings, then right-click the role or user and copy its ID. The mention text is `<@&ROLE_ID>` for a role, `<@USER_ID>` for a user, or `@here` / `@everyone`.
+
+## 2. Add the destination in Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Alerts** (`/alerts`), the **Destinations** tab, and click **Add destination** (admins only).
+2. Choose the **Discord** chip.
+3. **Name**: for example `ops-discord`. It is 1 to 40 lowercase letters, digits or dashes, and it cannot be renamed later.
+4. Paste the **Webhook URL**.
+5. Under **Send these severities** keep **Critical** and **Warning**. Tick **Info, as a daily digest** if you want the 09:00 summary.
+6. Optional Discord settings: the style (`embed` by default, or `short`), the mention text, how loud each severity is (critical `ping`, warning `normal`, info `silent`, resolved `silent` by default), link buttons (on) and whether a resolve edits the original message instead of posting a new one (off).
+7. Click **Send test message**, then save.
+
+<UiScreen scenario="lan-3-nodes" route="/alerts/destinations" caption="The Destinations tab shows each destination's status." alt="Alerts destinations tab" />
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+There is no CLI command for alerts. Save the destination in the UI, or use the API (`PUT /api/alerts/settings`, `POST /api/alerts/test`). Settings are stored in the replicated config `_clouduler_alerts`; the webhook URL itself is the sealed secret `_clouduler_alert_<name>_url`.
+
+```bash title="Send a test message to a saved destination"
+curl -X POST https://cloud.example.com/api/alerts/test \
+  -H "Authorization: Bearer $CLOUDULER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "ops-discord"}'
+```
+
+</UiCli.Cli>
+</UiCli>
+
+## 3. Test it
+
+Click **Send test message** (or use the `curl` above). A message should appear in the channel within a few seconds; the test has a 10 second limit. The destination's status on the **Destinations** tab goes from **Not used yet** to **Working**.
+
+To see a real alert, stop a test container and wait; a warning is only sent once it has lasted the debounce window (5 minutes by default), while a critical one is sent at once.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `Discord says the webhook does not exist (HTTP 404); it was probably deleted or the URL is wrong` | Webhook deleted, or URL mistyped. Also shown for HTTP 401, and not retried. | Create a new webhook and paste the new URL. |
+| `Discord is rate limiting this webhook` | HTTP 429. Retried automatically. | Wait. Clouduler also holds back messages beyond 30 per destination per 10 minutes. |
+| `not a Discord webhook URL (https://discord.com/api/webhooks/...)` | The URL does not have the Discord form. | Copy it again with **Copy Webhook URL**. |
+| `a URL is required` / `must be an http or https URL` | Empty or malformed field. | Paste the full URL. |
+| Banner: `NAME has failed N deliveries in a row` | Sends keep failing. | Fix the cause above; the status returns to **Working** after a success. |
+| Nobody is pinged | The mention is empty, or the severity is not set to `ping`. | Set the mention text and check the `notify` level. Normal and Silent messages never mention. |
+| Info alerts never arrive | Info alerts are only sent in the daily digest. | Tick **Info, as a daily digest**. |
+
+A masked URL (`https://discord.com/…`) means "keep what is stored". To clear it, use the Remove action; an empty value fails with `a secret value is empty`.
+
+## Related
+
+- [Alerts](/docs/features/alerts), [SMTP guide](/docs/guides/smtp)

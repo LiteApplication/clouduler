@@ -7,6 +7,7 @@ import Cmd from '@site/src/components/Cmd';
 import DistroTabs from '@site/src/components/DistroTabs';
 import OptionTable from '@site/src/components/OptionTable';
 import Quirk from '@site/src/components/Quirk';
+import Var from '@site/src/components/Var';
 
 export default {
   ...MDXComponents,
@@ -21,4 +22,5 @@ export default {
   DistroTabs,
   OptionTable,
   Quirk,
+  Var,
 };

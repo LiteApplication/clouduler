@@ -5,6 +5,92 @@ sidebar_position: 9
 
 # Private registries
 
-One-line summary of private registries goes here.
+Clouduler pulls images with the registry logins you store, and checks the login against the registry before saving it. Use it for private images on GitHub Container Registry (GHCR) or Docker Hub, or to avoid Docker Hub's anonymous rate limits.
 
-TODO
+## What you'll end up with
+
+A stored, verified login for a registry. Image pulls and the [Updates](/docs/features/updates) page use it for images from that registry. The password is sealed (`_clouduler_registry_<server>`) and never shown again.
+
+## Prerequisites
+
+- An account on the registry and a private image to pull, or a rate-limit problem to solve.
+- A Clouduler admin sign-in.
+
+Registry names are normalised: `docker.io`, `index.docker.io`, `registry-1.docker.io` and `hub.docker.com` all mean Docker Hub, and a leading `https://` and a trailing `/` are stripped.
+
+## GitHub Container Registry (GHCR)
+
+GitHub Packages accepts only classic personal access tokens here, not fine-grained ones.
+
+{/* TODO verify: GitHub settings labels; only the scope and registry host are from official docs */}
+
+1. Click your avatar in the top right, then **Settings**.
+2. At the bottom of the sidebar open **Developer settings**, then **Personal access tokens**, then **Tokens (classic)**.
+3. Click **Generate new token**, then **Generate new token (classic)**.
+4. **Note**: `clouduler-ghcr-pull`. **Expiration**: pick a date and write down the renewal date, or **No expiration**.
+5. Tick **read:packages** only. Pulling needs nothing else.
+6. Click **Generate token** and copy it now. It starts with `ghp_` and is shown once.
+7. If the image belongs to an organisation with SSO, authorise the token for that organisation on the token page.
+
+You will enter: server `ghcr.io`, username your GitHub login, password the `ghp_...` token.
+
+## Docker Hub
+
+1. Sign in to Docker Home (hub.docker.com) and verify your email if asked; tokens cannot be created without it.
+2. Click your avatar, then **Account settings**, then **Personal access tokens**.
+3. Click **Generate new token**.
+4. **Description**: `clouduler-pull`. **Expiration**: the default is **None**; 30 days, 90 days or a custom date are offered.
+5. **Access permissions**: choose a read-only level that covers your private repositories. {/* TODO verify: the exact permission labels (Read-only, Public repo read-only) */}
+6. Click **Generate** and copy the token now.
+
+You will enter: server `docker.io`, username your Docker ID, password the access token (not the account password, which does not work when 2FA or SSO is on).
+
+## Store the login in Clouduler
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Updates** (`/updates`) and click **Manage registry accounts**.
+2. Pick the registry or type its address (`ghcr.io` or `docker.io`).
+3. Enter the username and password (the token).
+4. Click **Test connection**, then **Save login**.
+
+To remove one, use the remove action and confirm "Remove the login for NAME?". Images from that registry may stop pulling.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+echo "$CR_PAT" | clouduler registry login ghcr.io --username example-user --password-stdin
+clouduler registry login docker.io --username example-dockerid     # prompts for the password
+clouduler registry list
+clouduler registry test ghcr.io
+clouduler registry remove ghcr.io      # alias: rm
+```
+
+Prefer stdin: `--password` on the command line is visible to `ps`. Messages: `logged in to ghcr.io as example-user`, `ghcr.io accepted the stored login`, `removed the login for ghcr.io`, `no registry logins stored`.
+
+</UiCli.Cli>
+</UiCli>
+
+## Test it
+
+1. `clouduler registry test ghcr.io` should print `ghcr.io accepted the stored login`.
+2. Deploy a stack that uses a private image, for example `image: ghcr.io/example-org/app:1.0`, and watch it go from pending to running.
+3. On **Updates**, the container should show a real **Latest** digest instead of **Unknown**; press **Check again** to refresh.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `the password is empty` / `the username is empty` | A field was left blank. | Fill both. |
+| The test fails with an authentication error | Wrong scope, expired token, or account password used on Docker Hub. | Make a new token with `read:packages` (GHCR) or a read access token (Docker Hub). |
+| GHCR rejects a fine-grained token | Only classic tokens are supported. | Create a classic token. |
+| Org images are denied | SSO not authorised for the token. | Authorise the token for the organisation. |
+| **Updates** shows **Unknown** with **Add registry login** | Authentication error from the registry. | Store the login. |
+| Docker Hub 429 (rate limit) | Anonymous pulls are limited. | Store a Docker Hub login. Lookups back off automatically. |
+| Pulls fail after the token expired | The stored login still holds the old token. | Save the new token over it. |
+
+## Related
+
+- [Configs and secrets: registry credentials](/docs/features/configs-and-secrets#registry-credentials), [Updates](/docs/features/updates)
