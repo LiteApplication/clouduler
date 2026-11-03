@@ -1,0 +1,32 @@
+---
+title: A tour of the web UI
+sidebar_position: 2
+---
+
+# A tour of the web UI
+
+Full-size screens from a three-node demo cluster. Each one is the real web UI running on sample data. The same images are used in the project README.
+
+## Overview
+
+Cluster health, quorum, resource use, image updates, backups and certificate expiry on one page.
+
+<UiScreen scenario="lan-3-nodes" route="/?view=tour" height={900} alt="Overview of a healthy three-node cluster" />
+
+## A stack and its containers
+
+Every stack shows its containers, the node each one runs on, and live status.
+
+<UiScreen scenario="lan-3-nodes" route="/stacks/nextcloud" height={900} alt="Stack detail for nextcloud with its containers" />
+
+## Why a stack cannot be placed
+
+When something cannot run, the placement table shows which constraint failed on which node.
+
+<UiScreen scenario="node-down-failover" route="/stacks/immich?tab=placement" height={900} alt="Placement table with a node down and a memory constraint failing" />
+
+## Drives and volumes
+
+Replicated and served drives, with free space and sync schedule per drive.
+
+<UiScreen scenario="lan-3-nodes" route="/storage?view=tour" height={900} alt="Storage page with replicated and served drives" />

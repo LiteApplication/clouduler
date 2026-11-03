@@ -1,73 +1,68 @@
 # clouduler
 
-An opinionated, turnkey alternative to Docker Swarm, built for clusters where the network is secure but unreliable, and where nodes are very different from each other.
+Turn the machines you already own into one cluster that runs your Docker containers.
 
-It was designed around one real setup:
+Describe an app once in a Compose-style file. Clouduler picks a machine, keeps its data replicated, puts it behind HTTPS on your domain, and moves it to another machine if the first one dies. One binary, no Kubernetes.
 
-- a secure but unstable network;
-- a cluster that depends on the network, and a network that depends on the cluster;
-- a scattered topology with several public IPs of different capabilities;
-- heterogeneous storage, RAM and CPU.
+[Documentation](https://clouduler.liteapp.fr) · [Quick start](https://clouduler.liteapp.fr/docs/quickstart/single-node) · [UI tour](https://clouduler.liteapp.fr/docs/intro/tour)
 
-The goal was to beat the stability of Swarm + Traefik + GlusterFS/Ceph/SeaweedFS on that infrastructure, and it has been met: no crash or downtime caused by clouduler since. Every crash found during development got a regression test where one could apply, and an end-to-end test harness based on QEMU replays failures on clusters of different sizes to check that they always recover.
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://clouduler.liteapp.fr/img/ui/lan-3-nodes--view-tour--light.png">
+  <img alt="Cluster overview: health, quorum, image updates, backups, certificates and nodes" src="https://clouduler.liteapp.fr/img/ui/lan-3-nodes--view-tour--dark.png">
+</picture>
 
-It ships as one binary (`clouduler`, about 65 MB on arm64) with the web UI embedded. Few external dependencies: Docker, `restic` for backups, and the `nfsv4` kernel module to access remote volumes without a local copy.
+## Why
 
-![Cluster overview](docs/.images/overview.png)
+It was built for clusters where the network is secure but unreliable and the nodes are very different from each other: a Raspberry Pi at home, a mini PC, a small VPS as public entry point. On that kind of setup it replaces Swarm + Traefik + GlusterFS/Ceph, with fewer parts to keep alive.
 
-## Features
+- **One binary** with the daemon, web UI and CLI. About 65 MB on arm64.
+- **Few dependencies:** Docker, `restic` for backups, and the `nfsv4` kernel module for remote volumes.
+- **Tested against failure.** Every crash found during development got a regression test, and a QEMU-based end-to-end harness replays failures on clusters of different sizes.
 
-- **Containers.** Swarm-like orchestration with better docker compose compatibility, plus Swarm-only features missing from compose (configs). Most behaviour is configurable per stack or per container.
-- **Replicated drives.** A drive is a folder of volumes, replicated in full across the nodes that implement it (a node implements a drive by designating a folder, usually on its own storage). Data stays local whenever possible.
-- **Reverse proxy.** Uses Cloudflare DNS for Let's Encrypt DNS-01 certificates and routes each request to the right node, since nodes can have different public and internal addresses. It can also expose services that clouduler does not manage, such as a box admin page.
-- **Networks.** Access to web services is governed by networks: one public network, and any number of private ones, each tied to a subnet and its own domain (for example `liteapp.fr` and `home.liteapp.fr`). Someone outside the subnet cannot reach `home.liteapp.fr`. The same rule applies to containers: one that is not on the internal network cannot reach its services.
-- **Backups.** Per-drive restic backups to one or more cluster nodes, SSH (scp) or S3, with the usual retention policies. Each backup server has its own encryption key, usable with plain restic. Restore a volume from the web UI.
-- **GitOps.** Configuration is pushed to and pulled from git. Configs are part of it, so they can be restored without any data, and editing a config inside a container can commit automatically.
-- **Updates.** Quick updates from Docker Hub or private registries.
-- **Management.** Web UI (OIDC or API key) for almost everything, and a CLI that can `docker exec` from any node and reach advanced features like freezing a volume so replication does not interfere while you work on it.
+## What you get
 
-![Stack detail](docs/.images/stack.png)
+### Stacks that look like Compose
 
-![Storage](docs/.images/storage.png)
+Deploy from the UI, the CLI or git. Most behaviour is configurable per stack or per container, and Swarm-only features missing from Compose, such as configs, are supported.
 
-## Security
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://clouduler.liteapp.fr/img/ui/lan-3-nodes--stacks-nextcloud--light.png">
+  <img alt="A stack with its containers, the node each runs on, and a rolling image update" src="https://clouduler.liteapp.fr/img/ui/lan-3-nodes--stacks-nextcloud--dark.png">
+</picture>
 
-The network the nodes share is assumed to be secure (VPN or internal VLAN), so there is no extra encryption layer. Container traffic is plain text (VXLAN), and node-to-node administration traffic is plain text too, but authenticated with signatures.
+### Placement you can read
 
-- **Secrets** are stored in raft, encrypted with XChaCha20-Poly1305 under a cluster key. The key is only shared at pairing, encrypted to the joining node's public key, and each node keeps it in a mode 600 file.
-- **Secrets in git** are encrypted with age to a public key provided at setup, so clouduler only ever holds the public key.
-- **Per-stack access control.** Each stack declares which networks it can reach (private, public, internet) and can restrict each one, for example only `auth.liteapp.fr` for OIDC and `*.github.com` for updates. Clouduler is the containers' DNS resolver: when a container asks for `api.github.com`, the firewall rule is added before the answer is returned.
-- **Internal HTTP(S)** requests go through the reverse proxy, which enforces access. Other protocols (mail, for instance) must be allowed explicitly and are added to the firewall at start.
+Every stack is placed by explicit constraints. When something cannot run, the table shows which constraint failed on which node, instead of a silent pending state.
 
-The aim is to treat stacks as small, well-guarded islands that are hard to move out of.
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://clouduler.liteapp.fr/img/ui/node-down-failover--stacks-immich-tab-placement--light.png">
+  <img alt="Placement table with one node unreachable" src="https://clouduler.liteapp.fr/img/ui/node-down-failover--stacks-immich-tab-placement--dark.png">
+</picture>
 
-> **Security model:** the internal network is expected to be secure. Most traffic between nodes (raft, replication, overlay) is not encrypted, because clouduler is designed to run over an already encrypted VPN such as Tailscale or Headscale. Do not expose the cluster subnet to untrusted networks.
+### Replicated drives
 
-## Quick start (from a release)
+A drive is a folder of volumes, replicated across the nodes that implement it. Data stays local, so a container that moves finds its files already there. Per-drive restic backups go to a node, SSH or S3.
 
-Requirements on every node: Linux with systemd, Docker, root access. Optional: `restic` (volume backups). All nodes must reach each other over one trusted internal network (LAN, WireGuard, Tailscale or Headscale). Clouduler does not encrypt that traffic. Every node's internal address must be inside the subnet given to `--subnet` when the cluster is created; a node outside it cannot join.
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://clouduler.liteapp.fr/img/ui/lan-3-nodes--storage-view-tour--light.png">
+  <img alt="Replicated and served drives with a table of volumes and their sync state" src="https://clouduler.liteapp.fr/img/ui/lan-3-nodes--storage-view-tour--dark.png">
+</picture>
 
-Release binaries are named `clouduler-x86_64-unknown-linux-gnu` and `clouduler-aarch64-unknown-linux-gnu` and are published by the `release` workflow on every `v*` tag.
+### And also
 
-1. Install the binary.
+- **Reverse proxy** with Let's Encrypt DNS-01 certificates through Cloudflare, routing each request to the right node.
+- **Networks.** One public network and any number of private ones, each with its own subnet and domain. Someone outside the subnet cannot reach `home.example.com`.
+- **Failover with fencing.** An isolated node stops its own containers before the cluster restarts them elsewhere, so a volume never has two writers.
+- **GitOps.** Configuration is exported to git and can be restored without any data. Secrets are encrypted with age to a public key you provide.
+- **Per-stack firewall.** A stack declares which networks and hosts it can reach, for example only `auth.example.com` and `*.github.com`.
+- **Alerts** to Discord, webhook or email, and an optional **MCP server** so an assistant can inspect the cluster with secrets redacted.
 
-```
-VERSION=vX.Y.Z   # a release tag
-ARCH=$(uname -m)-unknown-linux-gnu
-# download clouduler-$ARCH from the release page of the repository, then:
-sudo install -m 0755 clouduler-$ARCH /usr/local/bin/clouduler
-clouduler --help
-```
+## Quick start
 
-2. Create the first node. Interactive:
-
-```
-sudo clouduler init
-```
-
-Or scripted:
+On a Linux machine with systemd and Docker, install the binary from the [releases page](../../releases) and create the first node:
 
 ```
+sudo install -m 0755 clouduler-$(uname -m)-unknown-linux-gnu /usr/local/bin/clouduler
 sudo clouduler init --yes \
   --cluster-name home \
   --subnet 10.10.0.0/24 \
@@ -76,129 +71,32 @@ sudo clouduler init --yes \
   --drive fast=/srv/clouduler/fast
 ```
 
-This writes `/etc/clouduler/cluster.yaml`, creates the drive directories, installs and starts `clouduler.service`.
-
-3. Save what is logged on the very first start (shown once). The API key is only needed to sign in to the web UI before OIDC is set up, and as a fallback when OIDC fails:
+The first start logs an admin API key once, so save it:
 
 ```
 journalctl -u clouduler | grep -i -E "api key|fingerprint"
 ```
 
-- the generated admin API key (`clk_...`)
-- the cluster key fingerprint
+Then open `https://cloud.int.example.com:8443`, sign in with the key, and add more nodes from the Nodes page, which generates the join command for you. Use at least 3 managers for a fault-tolerant cluster.
 
-4. Back up `/etc/clouduler/secrets.key` right now (see Keys below).
+The step-by-step guides cover everything from here:
 
-5. Open `https://cloud.int.example.com:8443` and sign in with the API key. The certificate is self-signed until Cloudflare and ACME are set up in the next step.
+- [Single node](https://clouduler.liteapp.fr/docs/quickstart/single-node): install, first stack, HTTPS
+- [LAN cluster](https://clouduler.liteapp.fr/docs/quickstart/lan-cluster): three machines, replicated storage, failover
+- [Multi-site with Headscale](https://clouduler.liteapp.fr/docs/quickstart/multi-site-headscale): home machines and a VPS
 
-6. Set up Cloudflare (recommended), in the web UI, before adding other nodes. Put your domain's DNS on Cloudflare and create an API token with `Zone:DNS:Edit` on that zone. In the UI, set the Cloudflare zones and the ACME settings (contact email; start on the staging directory and switch to production once it works), and enter the API token in the Cloudflare settings. Clouduler then gets real certificates through ACME DNS-01, which needs no inbound access, so the UI and API serve a trusted certificate and you never need `--tls-fingerprint` when joining nodes. Config changes apply live, no restart needed. Wait for the certificate before continuing. Without Cloudflare the cluster keeps its self-signed certificate and joins should be pinned by fingerprint.
+## Security model
 
-   The file equivalent, in `/etc/clouduler/cluster.yaml` (see `examples/cluster.yaml`):
+The network between nodes is assumed to be secure: a LAN, WireGuard, Tailscale or Headscale. Raft, replication and overlay traffic are not encrypted by clouduler, but node-to-node administration traffic is authenticated. Do not expose the cluster subnet to untrusted networks.
 
-```
-cloudflare:
-  zones:
-    - example.com
-proxy:
-  acme:
-    enabled: true
-    contact_email: ops@example.com
-    # start on staging, remove directory_url for production once it works
-    directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
-```
-
-7. Add more nodes. Open the Nodes page in the web UI and add a node: it generates the exact join command to run on the new machine, so you don't need to write it by hand. The new node's address must be in the cluster subnet. Run the generated command on the machine with the binary installed.
-
-Use at least 3 managers for a fault-tolerant cluster (`--role manager`). The cluster key is handed to the new node automatically, wrapped for its own keypair.
-
-8. Check health: `clouduler check` (parse config), `clouduler status` (live problems, ends with `all clear`).
-
-9. Deploy something: `clouduler stack deploy` with a file like `examples/stacks/simple.yaml`, or use the UI.
-
-## Keys and credentials to set up
-
-| What | Where | Needed for | Notes |
-|---|---|---|---|
-| Cluster key | `/etc/clouduler/secrets.key` (`secrets.key_file`), base64, mode 0600 | Sealing secrets (XChaCha20-Poly1305) and authenticating node-to-node traffic | Generated on the first node, auto-distributed to joiners. If every copy is lost, all stored secrets are lost. Back it up, or set up git backup. |
-| Admin API key | Logged once on first launch; more from the UI | Signing in to the web UI before OIDC is set up, or when OIDC fails; CLI, headless MCP, CI. Not needed for joining nodes (the Nodes page generates the join command) | Sent as `Authorization: Bearer clk_...`. Only a hash is stored. |
-| TLS fingerprint | Printed by `init --join` | Verifying the node you join while the cluster still serves a self-signed certificate | Not needed once Cloudflare DNS-01 is set up and a real certificate is issued. |
-| OIDC (recommended for people) | `auth.oidc` in config (`issuer`, `client_id`, `admin_claim`, `admin_value`); client secret entered in the UI | Single sign-on; users with `admin_value` in `admin_claim` become admin, others viewers | Keep `auth.api_keys: true` until OIDC is proven to work. |
-| Cloudflare API token | Entered in the UI (stored as a cluster secret); zones in the UI or `cloudflare.zones` | Public DNS records and ACME DNS-01 certificates | Set up in the UI after `init`, before adding other nodes. Needed for `proxy.acme.enabled: true`. |
-| ACME contact email | `proxy.acme.contact_email` | Let's Encrypt expiry notices | Starts on the staging directory; switch `directory_url` when ready. |
-| Git backup: age key + deploy key | age public key in `backup.age_recipient`; deploy key generated by the cluster | Off-cluster backup of config, stacks, configs, secrets | Create the age key with `age-keygen` outside the cluster. Add the displayed public deploy key to the repo with write access. |
-| Registry credentials | UI, Registry accounts | Pulling private images | Scoped per registry. |
-| MCP | `mcp.enabled: true` | AI clients | Off by default; OAuth consent, read-only or admin. |
-
-Minimal config is in `examples/cluster-minimal.yaml`; every option is in `examples/cluster.yaml`.
-
-## Running over Tailscale or Headscale
-
-Clouduler works over a Tailscale or Headscale tailnet; this is what the author uses. Use the tailnet addresses as the cluster's internal network: pass the tailnet range (for example `100.64.0.0/10`, or a narrower range) as `--subnet`, and make sure every node's tailnet address is inside it. The interface must already be up before clouduler starts (see `docs/networking.md`).
-
-The tailnet is what provides encryption for node-to-node traffic.
-
-With Headscale, the order matters, because Headscale itself can run as a clouduler stack:
-
-1. Deploy the Headscale container first, on a cluster that is reachable some other way (LAN or a temporary network).
-2. Connect every other node to the tailnet.
-3. Only then add those nodes to the cluster, using their tailnet addresses.
-
-Do not move the cluster onto a tailnet that depends on a Headscale instance the cluster itself has not yet started.
-
-### Recovering when the Headscale container is lost
-
-If Headscale goes down, the nodes lose the tailnet, and with it the quorum the cluster needs to restart Headscale. That is a deadlock, and `clouduler emergency` exists for exactly this case.
-
-1. On one manager that still has its local data, stop the daemon: `sudo systemctl stop clouduler`.
-2. Run `sudo clouduler emergency headscale --yes` (the argument is the stack to bring back up; `--node` defaults to the hostname).
-3. Start the daemon: `sudo systemctl start clouduler`.
-
-The node becomes the sole voter and starts the Headscale stack from its own local data. Other stacks are held off, not stopped. Once Headscale is back and the other managers reconnect, they are promoted back to voters and emergency mode ends on its own. If the stack's content itself is gone, run `clouduler restore` afterwards from the git backup (see `docs/git-backup.md`).
-
-## How it works
-
-### Architecture
-
-Managers vote in raft and hold the replicated database. Workers keep a read-only replica and only run containers. Every node runs a scheduler that reconciles local Docker against the replicated state, plus the reverse proxy and API.
-
-![architecture](docs/.diagrams/architecture.svg)
-
-Source: [docs/.diagrams/architecture.d2](docs/.diagrams/architecture.d2). Details: [database](docs/database.md), [networking](docs/networking.md).
-
-### Deploying a stack
-
-A write can go to any node and is forwarded to the raft leader. Once a majority of managers have it, it is applied identically everywhere, and each node's scheduler starts or stops what belongs on it. Secrets are sealed before they reach the log, so the machine running `stack deploy` needs the cluster key.
-
-![deploy flow](docs/.diagrams/deploy-flow.svg)
-
-See [stacks](docs/stacks.md), [secrets](docs/secrets.md), [drives](docs/drives.md).
-
-### Joining a node
-
-The joiner is not in raft yet, so it goes through the HTTP API with an admin key, confirms the config edit (otherwise it rolls back), and receives the cluster key wrapped for its own public key.
-
-![join flow](docs/.diagrams/join-flow.svg)
-
-See [setup](docs/setup.md).
-
-### Failover and fencing
-
-Two timers work against each other: an isolated node stops its own containers after `fence_timeout`, and only after `node_timeout` does the leader reschedule them elsewhere. `probe_interval < fence_timeout < node_timeout` is enforced so a volume never has two writers.
-
-![failover](docs/.diagrams/failover.svg)
-
-See [failover](docs/failover.md). Disaster recovery: `clouduler emergency` restores quorum, `clouduler restore` restores content from [git backup](docs/git-backup.md).
+Secrets are sealed with XChaCha20-Poly1305 under a cluster key that is only shared at pairing, encrypted to the joining node's public key. Back up `/etc/clouduler/secrets.key`: if every copy is lost, so are the stored secrets.
 
 ## Documentation
 
-- [setup](docs/setup.md): init, joining, systemd, config replication
-- [stacks](docs/stacks.md): stack file format and `x-clouduler` extensions
-- [secrets](docs/secrets.md): configs, secrets, cluster key
-- [proxy](docs/proxy.md): reverse proxy, DNS, certificates
-- [networking](docs/networking.md): overlay, egress networks
-- [drives](docs/drives.md), [served drives](docs/served-drives.md), [volume backups](docs/backups.md), [git backup](docs/git-backup.md)
-- [failover](docs/failover.md), [live config](docs/live-config.md), [alerts](docs/alerts.md)
-- [api](docs/api.md), [mcp](docs/mcp.md), [ui](docs/ui.md), [testing](docs/testing.md)
+- [What is Clouduler](https://clouduler.liteapp.fr/docs/intro/what-is-clouduler) and [how it works](https://clouduler.liteapp.fr/docs/intro/how-it-works)
+- [Features](https://clouduler.liteapp.fr/docs/features/stacks): stacks, drives, proxy, networking, failover, backups, alerts and more
+- [Examples](https://clouduler.liteapp.fr/docs/examples): Nextcloud, Immich, Authentik, Vaultwarden, Forgejo, Headscale, Stalwart
+- [Reference](https://clouduler.liteapp.fr/docs/reference/cli): CLI, `cluster.yaml`, stack spec, HTTP API, troubleshooting
 
 ## Building from source
 
@@ -207,8 +105,4 @@ cd ui && npm ci && npm run build && cd ..
 cargo build --release -p clouduler
 ```
 
-## Regenerating diagrams
-
-```
-cd docs/.diagrams && for f in *.d2; do d2 --layout=elk $f ${f%.d2}.svg; done
-```
+The docs site, including these screenshots, is built from `docs/` with `npm run build:full`. See [docs components](https://clouduler.liteapp.fr/docs/contributing/docs-screens).
