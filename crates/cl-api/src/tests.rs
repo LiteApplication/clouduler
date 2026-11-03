@@ -1297,6 +1297,17 @@ async fn deploy(h: &Harness, name: &str, body: &str) -> StatusCode {
 
 const PLAIN_SPEC: &str = r#"{"spec":"services:\n  web:\n    image: nginx\n"}"#;
 
+/// The UI deploy goes through the same cluster-aware check as the CLI: a
+/// volume on a drive the cluster does not define is refused up front.
+#[tokio::test]
+async fn deploying_a_stack_that_names_an_unknown_drive_is_rejected() {
+    let h = harness().await;
+    let spec = "services:\n  web:\n    image: nginx\n    volumes:\n      - nodrive/vol:/data\n";
+    let body = format!(r#"{{"spec":{spec:?}}}"#);
+    assert_eq!(deploy(&h, "web", &body).await, StatusCode::BAD_REQUEST);
+    assert!(!h.state.cluster.state().await.stacks.contains_key("web"));
+}
+
 /// Axum percent-decodes the path, so `a%2Fb` arrives as `a/b`, which the git
 /// export would flatten onto stack `b`.
 #[tokio::test]

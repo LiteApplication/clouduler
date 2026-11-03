@@ -675,7 +675,7 @@
     },
     "failover": {
       "fence_timeout": "15s",
-      "node_timeout": "30s",
+      "node_timeout": "1m",
       "probe_interval": "5s",
       "stop_grace": "30s"
     },

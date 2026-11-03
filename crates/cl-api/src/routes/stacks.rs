@@ -218,8 +218,8 @@ pub(crate) async fn deploy_stack(
     check_stack_name(state, name).await?;
     let secrets_to_write = {
         let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-        validate_against_cluster(state, &parsed).await?;
         check_overlay_collision(state, name, &parsed).await?;
+        validate_against_cluster(state, &parsed).await?;
         let requirements = parsed.requirements();
         let cluster_state = state.cluster.state().await;
         for config_name in &requirements.file_configs {

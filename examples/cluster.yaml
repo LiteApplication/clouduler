@@ -117,10 +117,11 @@ web:
 # The two timeouts work against each other. fence_timeout must be shorter than
 # node_timeout: the failing node has to stop its containers before anyone else
 # starts them, or the same volume gets two writers. The config is rejected if
-# that ordering is broken.
+# that ordering is broken. fence_timeout plus stop_grace (30s by default) should
+# also stay under node_timeout, or `clouduler check` and the daemon log a warning.
 failover:
   # How long a node may be unreachable before its containers are rescheduled.
-  node_timeout: 30s
+  node_timeout: 60s
   # How long a node may run without a manager quorum before it stops its own
   # containers.
   fence_timeout: 15s

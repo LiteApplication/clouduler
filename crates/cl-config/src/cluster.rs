@@ -241,8 +241,11 @@ fn default_stop_grace() -> Duration {
     DEFAULT_STOP_GRACE
 }
 
+/// Long enough that the default `fence_timeout` (15s) plus the default
+/// `stop_grace` (30s) still finish before the leader reschedules, which
+/// `fence_margin_warning` requires.
 fn default_node_timeout() -> Duration {
-    Duration::from_secs(30)
+    Duration::from_secs(60)
 }
 
 fn default_fence_timeout() -> Duration {

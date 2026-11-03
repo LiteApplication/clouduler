@@ -1181,8 +1181,13 @@ cloudflare:
         // The configured grace is what counts, not a fixed default.
         assert!(f(29, 60, 31).fence_margin_warning().is_some());
         assert!(f(29, 60, 10).fence_margin_warning().is_none());
-        // The defaults (15s / 30s / 30s) are the same trap, and say so.
-        assert!(FailoverConfig::default().fence_margin_warning().is_some());
+        // The defaults (fence 15s + grace 30s inside node 60s) are sane.
+        assert!(FailoverConfig::default().fence_margin_warning().is_none());
+        assert!(ClusterConfig::parse(BASE)
+            .unwrap()
+            .failover
+            .fence_margin_warning()
+            .is_none());
         assert!(f(10, 60, 10)
             .fence_margin_warning_for(Duration::from_secs(50), "service")
             .is_some());
