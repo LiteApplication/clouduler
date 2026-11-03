@@ -215,8 +215,9 @@ pub async fn emergency(
     )?;
     prompt.say(&format!(
         "only {stack} is allowed to start once the daemon comes back up; every other stack's \
-         own desired state is left exactly as it was and picks back up on its own, no restore \
-         step needed, the moment another manager is reachable again and emergency mode ends. \
+         own desired state is left exactly as it was, containers of those stacks already \
+         running on this node are left running untouched, and new work for them resumes on its own, \
+         no restore step needed, the moment another manager is reachable again and emergency mode ends. \
          every node but {name} is marked unreachable, so any served drive {stack} needs treats \
          {name} as the active server, and {name}'s own copy of every volume {stack} uses \
          ({}) is trusted as current, whether or not anything else agrees.",

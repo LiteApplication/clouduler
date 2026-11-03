@@ -322,6 +322,7 @@ impl Scheduler {
         self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
         let mut actions = reconcile::diff(&targets, &actual, gate);
+        reconcile::restrict_to_emergency_stack(&mut actions, state.emergency_stack.as_deref());
 
         // `depends_on`: hold back the first creation of an instance until the
         // services it depends on are up. Only `Create` is gated, so an existing
@@ -740,15 +741,11 @@ impl Scheduler {
 
         for assignment in state.assignments_on(&self.node) {
             let instance = &assignment.instance;
-            // During emergency mode (see `clouduler emergency`), a container
-            // this node was already running for some other stack before it
-            // lost quorum must not keep running: its `desired` was never
-            // touched, so leaving it in `targets` here would restart it
-            // untouched the moment this loop runs, defeating the whole point
-            // of asking an operator to confirm what else is really up first.
-            // Simply excluding it (rather than forcing `desired` to
-            // `Stopped`) is what lets it resume on its own, no restore step
-            // needed, the instant `emergency_stack` clears.
+            // During emergency mode (see `clouduler emergency`), another
+            // stack's instance is not a target (it is not recreated or
+            // updated). Its existing container is left alone rather than
+            // removed: `reconcile::restrict_to_emergency_stack` drops the
+            // actions that would otherwise treat it as no longer assigned.
             if state
                 .emergency_stack
                 .as_deref()

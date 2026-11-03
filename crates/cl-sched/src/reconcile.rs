@@ -73,6 +73,16 @@ impl Action {
     }
 }
 
+/// While emergency mode is on, drop every action that would touch a container
+/// outside the emergency stack. Other stacks are not scheduled, but whatever
+/// of theirs is already running on this node is left exactly as it is: not
+/// stopped, not removed, not recreated.
+pub fn restrict_to_emergency_stack(actions: &mut Vec<Action>, emergency_stack: Option<&str>) {
+    if let Some(only) = emergency_stack {
+        actions.retain(|a| a.instance().stack == only);
+    }
+}
+
 /// What this node should be running, keyed by instance.
 #[derive(Debug, Clone)]
 pub struct Target {
@@ -611,6 +621,21 @@ fn stop_timeout(target: Option<&Target>, fallback: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn emergency_mode_only_acts_on_the_emergency_stacks_containers() {
+        let mut actions = vec![
+            Action::Remove(InstanceId::new("other", "db", 0)),
+            Action::Stop(InstanceId::new("other", "web", 0)),
+            Action::Recreate(InstanceId::new("site", "web", 0)),
+            Action::Create(InstanceId::new("site", "db", 0)),
+        ];
+        restrict_to_emergency_stack(&mut actions, None);
+        assert_eq!(actions.len(), 4, "no emergency: nothing is filtered");
+        restrict_to_emergency_stack(&mut actions, Some("site"));
+        assert_eq!(actions.len(), 2);
+        assert!(actions.iter().all(|a| a.instance().stack == "site"));
+    }
+
     #[tokio::test]
     async fn concurrent_pulls_of_one_instance_keep_it_marked_until_the_last_finishes() {
         let tracker = PullTracker::default();
