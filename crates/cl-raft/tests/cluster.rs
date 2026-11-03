@@ -78,8 +78,13 @@ impl Harness {
     /// Index of the current leader, waiting for one to appear.
     async fn leader(&self) -> usize {
         for _ in 0..100 {
+            // Every node must have learned who leads, not just the leader
+            // itself: a follower forwards writes and answers `NoLeader` until
+            // it has heard the first heartbeat.
             if let Some(i) = self.nodes.iter().position(|n| n.is_leader()) {
-                return i;
+                if self.nodes.iter().all(|n| n.quorum().leader().is_some()) {
+                    return i;
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
