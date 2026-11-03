@@ -39,6 +39,53 @@ impl Decision {
     }
 }
 
+impl Decision {
+    /// As `into_request`, but a re-placement of an instance that has volumes off
+    /// a node that is still reachable (a drained node, say) becomes a
+    /// migration instead of a bare re-`Assign`. The migration stops the
+    /// container, sends the volume's final delta, verifies it and only then
+    /// switches over, so writes made since the last periodic sync are not lost.
+    /// A node that is unreachable cannot take part in a migration, so those
+    /// still fail over with a plain `Assign`.
+    ///
+    /// `None` means leave the instance alone this pass: a migration is already
+    /// in flight, or ended in failure and is waiting for the operator to retry
+    /// or dismiss it (`Assign` would silently abandon it, and with it the
+    /// final sync).
+    pub fn into_request_for(
+        self,
+        state: &ClusterState,
+        drives: BTreeSet<String>,
+    ) -> Option<Request> {
+        let Decision::Place { instance, node } = &self else {
+            return Some(self.into_request(drives));
+        };
+        let Some(current) = state.assignments.get(instance) else {
+            return Some(self.into_request(drives));
+        };
+        if current.node == *node {
+            return Some(self.into_request(drives));
+        }
+        if let Some(migration) = &current.migration {
+            if !migration.phase.is_terminal()
+                || matches!(migration.phase, cl_raft::state::MigrationPhase::Failed { .. })
+            {
+                return None;
+            }
+        }
+        let source_reachable =
+            state.nodes.contains_key(&current.node) && !state.unreachable.contains(&current.node);
+        if drives.is_empty() || !source_reachable {
+            return Some(self.into_request(drives));
+        }
+        Some(Request::BeginMigration {
+            instance: instance.clone(),
+            to: node.clone(),
+            drives,
+        })
+    }
+}
+
 /// A parsed `deploy.placement` constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constraint {
@@ -1082,6 +1129,63 @@ mod tests {
             place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         let target = placed(&decisions, "web", 0).expect("replacement node");
         assert_ne!(target, "n3");
+    }
+
+    fn drained_volume_instance() -> (ClusterState, BTreeSet<String>) {
+        let mut state = cluster();
+        let drives: BTreeSet<String> = ["fast".to_string()].into();
+        state.apply(&Request::Assign {
+            instance: InstanceId::new("site", "web", 0),
+            node: "n3".into(),
+            drives: BTreeSet::new(),
+        });
+        state.apply(&Request::SetAvailability {
+            node: "n3".into(),
+            availability: Availability::Drain,
+        });
+        (state, drives)
+    }
+
+    fn place_web(to: &str) -> Decision {
+        Decision::Place {
+            instance: InstanceId::new("site", "web", 0),
+            node: to.into(),
+        }
+    }
+
+    #[test]
+    fn draining_an_instance_with_volumes_migrates_it_for_a_final_sync() {
+        let (state, drives) = drained_volume_instance();
+        let request = place_web("n1").into_request_for(&state, drives).unwrap();
+        assert!(matches!(request, Request::BeginMigration { ref to, .. } if to == "n1"));
+    }
+
+    #[test]
+    fn draining_an_instance_without_volumes_just_reassigns() {
+        let (state, _) = drained_volume_instance();
+        let request = place_web("n1")
+            .into_request_for(&state, BTreeSet::new())
+            .unwrap();
+        assert!(matches!(request, Request::Assign { .. }));
+    }
+
+    #[test]
+    fn an_unreachable_source_still_fails_over_with_assign() {
+        let (mut state, drives) = drained_volume_instance();
+        state.unreachable.insert("n3".into());
+        let request = place_web("n1").into_request_for(&state, drives).unwrap();
+        assert!(matches!(request, Request::Assign { .. }));
+    }
+
+    #[test]
+    fn an_instance_already_migrating_is_left_alone() {
+        let (mut state, drives) = drained_volume_instance();
+        state.apply(&Request::BeginMigration {
+            instance: InstanceId::new("site", "web", 0),
+            to: "n2".into(),
+            drives: drives.clone(),
+        });
+        assert!(place_web("n1").into_request_for(&state, drives).is_none());
     }
 
     #[test]

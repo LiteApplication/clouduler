@@ -237,7 +237,9 @@ impl Scheduler {
                 .map(|d| d.drives.clone())
                 .unwrap_or_default();
 
-            let request = decision.clone().into_request(drives);
+            let Some(request) = decision.clone().into_request_for(state, drives) else {
+                continue;
+            };
             let response = self.cluster.submit(request).await.map_err(Box::new)?;
             if let Some(error) = response.error {
                 warn!(instance = %decision.instance(), %error, "placement rejected");
