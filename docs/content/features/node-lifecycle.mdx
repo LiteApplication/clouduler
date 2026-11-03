@@ -136,6 +136,17 @@ clouduler clear-errors      # cleared 3 failed backup runs, 1 failed migrations
 
 Clearing a failed move does not move the instance; it stays on whichever node it is on.
 
+## Who can reach whom
+
+The Nodes page has a "Who can reach whom" matrix. Every node probes its peers itself and reports what *it* sees, so a one-way break shows up as two different rows. Rows report, columns are peers.
+
+- The raft side is an authenticated raft ping on a fresh connection (the cluster-key handshake plus one request and reply), not a bare TCP connect. The figure is its round trip in milliseconds, handshake included. Probes time out after 2 seconds.
+- The API side is a TCP connect to the peer's web port. If raft works and this does not, the cell reads "API down".
+- Each node also times a 4 KiB write plus `fsync` in its data dir (`disk_ms`). A raft follower must fsync every append before it can answer the leader, so a node whose fsync takes a second or more answers pings yet cannot keep up. Cells pointing at it read "Slow disk (x.x s)", and it tends to flap in and out of quorum. The probe gives up after 8 seconds.
+- A cell reads "Marked down" when the link works from the reporting node but the leader has the peer on its unreachable list. "No report" means the row's node could not be asked, or did not list that peer.
+
+To stop a node from running the disk probe (an SD card you want to spare, for instance), set `nodes.<name>.disk_probe: false`. That node then reports no disk figure and is never shown as "Slow disk". See [cluster.yaml](/docs/reference/cluster-yaml).
+
 ## Options
 
 <OptionTable rows={[

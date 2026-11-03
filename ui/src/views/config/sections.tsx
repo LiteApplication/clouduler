@@ -697,6 +697,16 @@ export function NodeCard({
         help="Only place a stack here when no other eligible node can take it. Useful for a node whose one virtue is a large drive but whose cpu/ram are weak, so the scheduler doesn't pile general workload onto it just because it sorts first."
         disabled={disabled}
       />
+      <CheckboxField
+        id={`node-${name}-disk-probe`}
+        label="Measure disk speed"
+        configKey={`nodes.${name}.disk_probe`}
+        value={node.disk_probe !== false}
+        onChange={(disk_probe) => onChange({ disk_probe })}
+        hint="Lets the node tables flag a slow disk."
+        help="When the connectivity table asks this node for a report, it times a small write plus fsync in its data dir. Turn it off for a disk you do not want touched, such as an SD card. The node then reports no disk figure and is never shown as 'Slow disk'."
+        disabled={disabled}
+      />
 
       <h4 className="flex-row">
         <Icon name="network" /> Network addresses

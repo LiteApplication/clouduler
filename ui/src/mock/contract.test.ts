@@ -115,7 +115,8 @@ const OPTIONS: Record<string, ShapeOptions> = {
   identity: {},
   instances: { optional: INSTANCE_OPTIONAL },
   lastRebalance: {},
-  nodeConnectivity: {},
+  // null when the node did not report, the probe failed, or disk_probe is off
+  nodeConnectivity: { optional: ['.reports[].disk_ms'] },
   nodeDetail: { optional: ['.usage.version'] },
   nodeMetrics: {},
   oidcClientSecretStatus: {},

@@ -854,7 +854,7 @@
   "nodeConnectivity": {
     "reports": [
       {
-        "disk_ms": null,
+        "disk_ms": 0,
         "links": [],
         "node": "n0",
         "reported": true

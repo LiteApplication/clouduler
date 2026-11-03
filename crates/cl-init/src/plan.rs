@@ -74,6 +74,7 @@ impl NodePlan {
             // init does not ask about this either; a day-two concern set
             // from the config file or the ui.
             last_resort: false,
+            disk_probe: true,
         }
     }
 }

@@ -132,6 +132,7 @@ pub(crate) async fn harness() -> Harness {
                 docker_data_dir: None,
                 generate_secret_key: None,
                 last_resort: false,
+                disk_probe: true,
             },
         )]),
         web: WebConfig {
@@ -154,6 +155,7 @@ pub(crate) async fn harness() -> Harness {
 
     let node = Arc::new(node);
     let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(());
+    let cluster_key = Arc::new(ClusterKey::generate());
     let state = AppState {
         cluster: node.clone(),
         docker: Arc::new(RwLock::new(Docker::connect().ok())),
@@ -163,8 +165,8 @@ pub(crate) async fn harness() -> Harness {
         config_path: dir.path().join("cluster.yaml"),
         cluster_config: Arc::new(RwLock::new(cluster_config)),
         key_path: dir.path().join("secrets.key"),
-        key: Arc::new(RwLock::new(Some(Arc::new(ClusterKey::generate())))),
-        key_tx: tokio::sync::watch::channel(None).0,
+        key: Arc::new(RwLock::new(Some(cluster_key.clone()))),
+        key_tx: tokio::sync::watch::channel(Some(cluster_key)).0,
         sessions: Arc::new(SessionStore::new(node.clone())),
         oidc: Arc::new(RwLock::new(None)),
         pending_edit: Arc::new(Mutex::new(None)),
@@ -902,6 +904,7 @@ fn loopback_node(rpc_port: u16) -> cl_config::Node {
         docker_data_dir: None,
         generate_secret_key: None,
         last_resort: false,
+        disk_probe: true,
     }
 }
 
@@ -910,8 +913,33 @@ fn loopback_node(rpc_port: u16) -> cl_config::Node {
 #[tokio::test]
 async fn connectivity_marks_a_closed_peer_broken_and_an_open_one_healthy() {
     let h = harness().await;
+    // A real raft peer: it proves the cluster key, then answers `Ping`. A
+    // listener that merely accepted sockets would (correctly) read as down.
     let open = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let open_port = open.local_addr().unwrap().port();
+    let key = h.state.key.read().await.clone().unwrap();
+    tokio::spawn(async move {
+        use futures::{SinkExt, StreamExt};
+        loop {
+            let Ok((mut stream, _)) = open.accept().await else { return };
+            let key = key.clone();
+            tokio::spawn(async move {
+                if cl_secret::stream_auth::accept(&mut stream, &key, cl_raft::network::AUTH_LABEL)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let mut conn = cl_raft::rpc::frame(stream);
+                while conn.next().await.is_some() {
+                    let pong = cl_raft::rpc::encode(&cl_raft::rpc::RpcResponse::Pong).unwrap();
+                    if conn.send(pong).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
     let closed_port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
@@ -1226,6 +1254,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
                 docker_data_dir: None,
                 generate_secret_key: None,
                 last_resort: false,
+                disk_probe: true,
             },
         );
         let net = cfg.networks.get_mut("internal").unwrap();

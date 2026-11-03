@@ -484,6 +484,14 @@ pub struct Node {
     /// onto it just because it happens to sort first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last_resort: bool,
+
+    /// Whether this node times a small durable write (write + fsync) in its
+    /// data dir when the connectivity table asks it for a report. On by
+    /// default. Turn it off for a node whose disk is known to be slow or
+    /// should not be touched, such as an SD card you want to spare: the node
+    /// then reports no disk figure and is never shown as "Slow disk".
+    #[serde(default = "default_true_bool", skip_serializing_if = "is_true")]
+    pub disk_probe: bool,
 }
 
 fn default_rpc_port() -> u16 {

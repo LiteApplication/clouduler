@@ -767,6 +767,8 @@ export interface NodeConfig {
   // scheduler from piling general workload onto it just because it sorts
   // first.
   last_resort: boolean;
+  // Time a durable write for the connectivity table. Absent means on.
+  disk_probe?: boolean;
 }
 
 export interface WebConfig {

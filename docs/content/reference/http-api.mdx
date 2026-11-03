@@ -112,7 +112,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET | `/api/status` | user | none | `{node, is_leader, has_quorum, leader, voters, reachable, managers_total, managers_reachable, version, state_version}` | Answered by this node. |
 | GET | `/api/state` | user | none | Redacted cluster state | |
 | GET | `/api/events` | user | none | SSE `state` | |
-| GET | `/api/nodes/connectivity` | user | none | Connectivity JSON | |
+| GET | `/api/nodes/connectivity` | user | none | `{reports: [{node, reported, disk_ms, links: [{peer, raft, api, raft_ms}]}]}` | Each node probes its peers itself: `raft` is an authenticated raft ping, `api` a TCP connect to the web port. `disk_ms` is a write plus fsync on that node's data dir, null if unreported, failed, or `disk_probe: false`. |
 | GET | `/api/tls-fingerprint` | user | none | Fingerprint of the certificate this node serves | |
 | GET | `/api/config` | user | none | Cluster config JSON | |
 | PUT | `/api/config` | admin | `{"config": {...}, "rollback_after": "60s"}` | 200 | Applies the config and arms a rollback timer; call confirm before it expires. |

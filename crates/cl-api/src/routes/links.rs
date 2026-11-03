@@ -173,8 +173,16 @@ pub(crate) async fn local_links(
                 }
             }
         });
-    let (links, disk_ms) =
-        futures::future::join(futures::future::join_all(probes), probe_disk(data_dir)).await;
+    // Per node opt-out: a disk that should not be touched reports no figure.
+    let disk_enabled = cfg.nodes.get(self_name).is_none_or(|n| n.disk_probe);
+    let disk = async {
+        if disk_enabled {
+            probe_disk(data_dir).await
+        } else {
+            None
+        }
+    };
+    let (links, disk_ms) = futures::future::join(futures::future::join_all(probes), disk).await;
     NodeLinks {
         node: self_name.to_string(),
         links,
