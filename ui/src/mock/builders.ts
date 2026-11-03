@@ -434,6 +434,7 @@ export class ScenarioBuilder {
         reports: this.nodeInputs.map((n) => ({
           node: n.name,
           reported: !n.down,
+          disk_ms: n.down ? null : 4,
           links: n.down
             ? []
             : names

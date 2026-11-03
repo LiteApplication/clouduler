@@ -95,7 +95,7 @@ export interface NodeDetail {
 /** What one node sees of one peer (GET /api/nodes/connectivity). */
 export interface PeerLink {
   peer: string;
-  /** A tcp connect from the reporting node to the peer's raft rpc port worked. */
+  /** An authenticated raft ping from the reporting node to the peer worked. */
   raft: boolean;
   /** Same, for the peer's web/api port. */
   api: boolean;
@@ -109,6 +109,11 @@ export interface NodeReport {
   node: string;
   reported: boolean;
   links: PeerLink[];
+  /** Milliseconds a small durable write (write + fsync) took on this node's
+   *  data dir. Raft followers must fsync every append, so seconds here means
+   *  the node answers pings but cannot keep up with the leader. Null when
+   *  unreported or the probe failed. */
+  disk_ms?: number | null;
 }
 
 /** Response of GET /api/nodes/connectivity. */

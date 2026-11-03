@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Connectivity, PeerLink } from '../api/types';
-import { classify, pairLinks } from './links';
+import { cellState, classify, pairLinks } from './links';
 
 const link = (peer: string, ok: boolean): PeerLink => ({ peer, raft: ok, api: ok, raft_ms: ok ? 1 : null });
 
@@ -41,5 +41,22 @@ describe('pairLinks', () => {
       ],
     };
     expect(pairLinks(['a', 'b'], c)[0].status).toBe('broken');
+  });
+});
+
+describe('cellState with disk and leader verdicts', () => {
+  const conn = {
+    reports: [
+      { node: 'a', reported: true, links: [link('b', true)] },
+      { node: 'b', reported: true, links: [], disk_ms: 4200 },
+    ],
+  };
+  it('flags a peer whose disk is too slow to follow raft', () => {
+    expect(cellState(conn, 'a', 'b')).toEqual({ kind: 'slow-disk', diskMs: 4200 });
+  });
+  it('flags a peer the leader has marked unreachable', () => {
+    const ok = { reports: [{ node: 'a', reported: true, links: [link('b', true)] }] };
+    expect(cellState(ok, 'a', 'b', ['b'])).toEqual({ kind: 'flagged' });
+    expect(cellState(ok, 'a', 'b')).toEqual({ kind: 'ok', ms: expect.anything() });
   });
 });

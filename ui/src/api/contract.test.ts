@@ -81,7 +81,7 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   clusterConfig: [config, ['cluster', 'networks', 'nodes', 'web', 'proxy']],
   drives: [drives[0], ['name', 'mode', 'served_by', 'active_server', 'sync_interval', 'nodes']],
   nodeConnectivity: [connectivity, ['reports']],
-  nodeReport: [connectivity.reports[0], ['node', 'reported', 'links']],
+  nodeReport: [connectivity.reports[0], ['node', 'reported', 'links', 'disk_ms']],
   updates: [
     updates[0],
     ['id', 'stack', 'service', 'node', 'image', 'running_digest', 'latest_digest', 'pinned_digest', 'update_available', 'pin_drift'],

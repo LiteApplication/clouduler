@@ -37,6 +37,10 @@ function CellTag({ state }: { state: CellState }) {
       return <Tag tone="danger">Unreachable</Tag>;
     case 'api-down':
       return <Tag tone="warn">API down</Tag>;
+    case 'slow-disk':
+      return <Tag tone="warn">Slow disk ({(state.diskMs / 1000).toFixed(1)} s)</Tag>;
+    case 'flagged':
+      return <Tag tone="danger">Marked down</Tag>;
     case 'no-report':
       return <Tag tone="warn">No report</Tag>;
   }
@@ -220,7 +224,7 @@ export function Nodes() {
         {sorted.length > 0 && (
           <Panel title="Who can reach whom" flush>
             <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
-              Raft and API links, round trip in milliseconds. Rows report, columns are peers.
+              Authenticated raft ping and API link, round trip in milliseconds. Rows report, columns are peers. A slow disk means the node answers but cannot fsync fast enough to follow raft.
             </p>
             {sorted.length === 1 && (
               <p className="cl-sm cl-muted" style={{ padding: '0 var(--space-4)' }}>
@@ -242,7 +246,7 @@ export function Nodes() {
                       <th scope="row">{from}</th>
                       {sorted.map((to) => (
                         <td key={to} className="cl-td--mono" data-label={to}>
-                          <CellTag state={cellState(links, from, to)} />
+                          <CellTag state={cellState(links, from, to, cluster.unreachable)} />
                         </td>
                       ))}
                     </tr>
