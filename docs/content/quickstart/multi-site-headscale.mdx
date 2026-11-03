@@ -529,7 +529,7 @@ Emergency mode clears by itself when the leader sees another **voting manager** 
 :::danger Read before you run it
 - **Never run it while another manager might still be alive with its old state.** The two would conflict. Use it only when the others are truly down or unreachable and will come back through the normal path.
 - **Recent writes can be lost.** `atlas`'s copy of each volume is trusted as current. If a replica elsewhere was newer, those writes are gone.
-- **While it is on, no other stack is scheduled.** Containers of other stacks may be stopped and removed (volumes are not deleted) and come back when it ends.
+- **While it is on, no other stack is scheduled.** Containers of other stacks that are already running on the node are left running untouched.
 - With one voter, one failure stops the cluster again. Get the other managers back quickly.
 :::
 
