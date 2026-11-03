@@ -5,11 +5,11 @@ sidebar_position: 3
 
 # Quick start: three sites over a Headscale tailnet
 
-In [quick start 2](/docs/quickstart/lan-cluster) all my machines sat on one LAN. Real life is messier: one machine is a cheap VPS with a public IP, one is at home behind a router, and one is at a friend's house. They share no network. In this quick start I join them with a **tailnet**, a private network built from WireGuard tunnels, and I make that tailnet Clouduler's internal network. The twist: the program that hands out tailnet addresses, **Headscale**, will itself run as a stack on the cluster. Count on two to three hours, and a lot of care in two places, step 5 (changing a node's address) and the section on blackouts at the end.
+In [quick start 2](/docs/quickstart/lan-cluster) all your machines sat on one LAN. Real life is messier: one machine is a cheap VPS with a public IP, one is at home behind a router, and one is at a friend's house. They share no network. In this quick start you join them with a **tailnet**, a private network built from WireGuard tunnels, and make that tailnet Clouduler's internal network. The twist: the program that hands out tailnet addresses, **Headscale**, will itself run as a stack on the cluster. Count on two to three hours, and a lot of care in two places, step 5 (changing a node's address) and the section on blackouts at the end.
 
-I assume you did [quick start 1](/docs/quickstart/single-node) and [quick start 2](/docs/quickstart/lan-cluster), or at least read them. I link to them instead of repeating their install steps.
+This page assumes you did [quick start 1](/docs/quickstart/single-node) and [quick start 2](/docs/quickstart/lan-cluster), or at least read them. it links to them instead of repeating their install steps.
 
-## What we'll build
+## What you'll build
 
 ```mermaid
 flowchart TB
@@ -37,7 +37,7 @@ Solid lines are the ordinary internet connections. Dotted lines are the tailnet.
 
 ## The chicken and the egg
 
-Here is the problem I have to solve, because the order of the steps comes from it.
+Here is the problem to solve, because the order of the steps comes from it.
 
 - The cluster wants its nodes to have tailnet addresses.
 - The tailnet addresses come from Headscale.
@@ -94,16 +94,16 @@ Names and addresses below are the documentation examples (`example.com`, `203.0.
 
 The first node must be able to host the **public** route for Headscale, which means the internet has to reach its ports 80 and 443. Two honest options:
 
-- **A cheap VPS.** It has a public IP from day one, nothing to configure at home, and it is always on. This is what I use here: it is `atlas`.
-- **My home machine with port forwarding.** It works too: I forward TCP 80 and 443 on the router to it and declare those ports under the node's `open_ports`. The downside is that my home connection, a dynamic IP and a power cut at home would now be able to take Headscale down, and with it every new login. If I do this, I use the home machine as `atlas` below and give the public network an address that points at my router.
+- **A cheap VPS.** It has a public IP from day one, nothing to configure at home, and it is always on. This is what this page uses: it is `atlas`.
+- **Your home machine with port forwarding.** It works too: forward TCP 80 and 443 on the router to it and declare those ports under the node's `open_ports`. The downside is that your home connection, a dynamic IP and a power cut at home would now be able to take Headscale down, and with it every new login. If you do this, use the home machine as `atlas` below and give the public network an address that points at your router.
 
 Everything after step 1 is the same in both cases. The rest of the page says "the VPS" for the first node.
 
 ## 1. Set up the first node on its current address
 
-I prepare and install `atlas` like in quick start 1 (packages, `modprobe vxlan`, and the binary, which I either compile myself or take from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest)). I do not install tailscale yet. I do the other two machines later, in step 6.
+Prepare and install `atlas` like in quick start 1 (packages, `modprobe vxlan`, and the binary, which you either compile yourself or take from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest)). Do not install tailscale yet. Do the other two machines later, in step 6.
 
-Then I initialise the cluster. `--ip` must sit inside `--subnet`, so I cannot hand it the tailnet range yet (the node has no tailnet address). I pick a small temporary subnet that contains the address the node has today. I'll throw it away in step 5.
+Then initialise the cluster. `--ip` must sit inside `--subnet`, so you cannot hand it the tailnet range yet (the node has no tailnet address). Pick a small temporary subnet that contains the address the node has today. You'll throw it away in step 5.
 
 <Cmd title="On the first node">{`sudo mkdir -p /srv/clouduler/fast
 
@@ -116,31 +116,31 @@ sudo clouduler init --yes \\
   --node {{n1}} \\
   --drive fast=/srv/clouduler/fast`}</Cmd>
 
-The validator only checks that the node address is inside the subnet, so a publicly routable address and subnet are accepted. Overlay networks for stacks draw from their own pool (`10.244.0.0/16`), independent of this subnet, so the temporary range does not disturb them. If my LAN already uses `10.244.x.x`, I should keep that in mind.
+The validator only checks that the node address is inside the subnet, so a publicly routable address and subnet are accepted. Overlay networks for stacks draw from their own pool (`10.244.0.0/16`), independent of this subnet, so the temporary range does not disturb them. If your LAN already uses `10.244.x.x`, keep that in mind.
 
-Every flag is explained in [quick start 1, step 3](/docs/quickstart/single-node#3-initialise-the-cluster). Then, as in quick start 1, I check `sudo systemctl status clouduler` is `active (running)`, copy the first API key out of the journal and **back up `/etc/clouduler/secrets.key`**.
+Every flag is explained in [quick start 1, step 3](/docs/quickstart/single-node#3-initialise-the-cluster). Then, as in quick start 1, check `sudo systemctl status clouduler` is `active (running)`, copy the first API key out of the journal and **back up `/etc/clouduler/secrets.key`**.
 
 :::danger Do not expose the web UI
-The UI and API live on port 8443 of the internal network. Right now that network is a public address. Do not open 8443 in the VPS provider's firewall, and do not browse to it over the internet. The web listener binds every interface and Clouduler does not restrict it, so keeping it off the internet is the job of the provider firewall (and, once step 5 is done, the fact that the internal network is the tailnet). Until then I reach it through an SSH tunnel, which works because the listener also answers on localhost: `ssh -L 8443:localhost:8443 user@address`.
+The UI and API live on port 8443 of the internal network. Right now that network is a public address. Do not open 8443 in the VPS provider's firewall, and do not browse to it over the internet. The web listener binds every interface and Clouduler does not restrict it, so keeping it off the internet is the job of the provider firewall (and, once step 5 is done, the fact that the internal network is the tailnet). Until then, reach it through an SSH tunnel, which works because the listener also answers on localhost: `ssh -L 8443:localhost:8443 user@address`.
 :::
 
 ## 2. Run Headscale as a stack
 
 ### Open the public side
 
-Headscale must be reachable at `https://headscale.example.com` by every machine, before the tailnet exists. So it needs a **public** network. I follow [quick start 1, step 8](/docs/quickstart/single-node#8-give-it-a-real-domain-with-https) for the mechanics:
+Headscale must be reachable at `https://headscale.example.com` by every machine, before the tailnet exists. So it needs a **public** network. Follow [quick start 1, step 8](/docs/quickstart/single-node#8-give-it-a-real-domain-with-https) for the mechanics:
 
 1. Create the Cloudflare token ([guide](/docs/guides/cloudflare-api-token)) and store it under **Settings**, **Network**, **Cloudflare DNS**.
 2. Add a network named `public` of type public with the domain <code><Var plain name="zone" fallback="example.com" /></code> on the **Networks** page.
 3. On the **Nodes** page give <code><Var plain name="n1" fallback="atlas" /></code> the address <code><Var plain name="pubip" fallback="203.0.113.5" /></code> on `public`.
-4. Open TCP 80 and 443 in the VPS provider's firewall and in `ufw` if I use it. Port 80 only redirects to HTTPS; certificates are issued through DNS, so it is not needed for that.
-5. I leave the ACME directory URL empty (Let's Encrypt production). The tailscale clients in step 4 need a certificate their system trusts, and a staging certificate would make `tailscale up` fail. Quick start 1 explains why switching from staging to production later is awkward.
+4. Open TCP 80 and 443 in the VPS provider's firewall and in `ufw` if you use it. Port 80 only redirects to HTTPS; certificates are issued through DNS, so it is not needed for that.
+5. Leave the ACME directory URL empty (Let's Encrypt production). The tailscale clients in step 4 need a certificate their system trusts, and a staging certificate would make `tailscale up` fail. Quick start 1 explains why switching from staging to production later is awkward.
 
-Only the VPS lists `public`, so the DNS record for <code><Var plain name="hs" fallback="headscale" />.<Var plain name="zone" fallback="example.com" /></code> will point only at it. Settings pages that touch networks ask me to confirm within a minute or they roll back ([Live config](/docs/features/live-config)).
+Only the VPS lists `public`, so the DNS record for <code><Var plain name="hs" fallback="headscale" />.<Var plain name="zone" fallback="example.com" /></code> will point only at it. Settings pages that touch networks ask you to confirm within a minute or they roll back ([Live config](/docs/features/live-config)).
 
 ### The stack
 
-Two config files, then the stack. I trim the example from [Headscale](/docs/examples/headscale) to the minimum: no Headplane admin UI (it needs the Docker socket and OIDC) and no OIDC. The command line is my admin path.
+Two config files, then the stack. Trim the example from [Headscale](/docs/examples/headscale) to the minimum: no Headplane admin UI (it needs the Docker socket and OIDC) and no OIDC. The command line is your admin path.
 
 <Cmd lang="yaml" title="config/config.yaml (headscale_config)">{`server_url: https://{{hs}}.{{zone}}
 listen_addr: 0.0.0.0:25725
@@ -186,9 +186,9 @@ policy:
   mode: file
   path: /etc/headscale/policy.hujson`}</Cmd>
 
-Three values matter. `server_url` is the address clients log in against. `base_domain` (the name space MagicDNS uses) **must be a different domain** from `server_url`, hence `ts.` here. `prefixes.v4` must stay inside `100.64.0.0/10`; Headscale hands out addresses sequentially from it, so the addresses I get are not ones I choose. `override_local_dns: false` keeps MagicDNS from rewriting the machine's resolver.
+Three values matter. `server_url` is the address clients log in against. `base_domain` (the name space MagicDNS uses) **must be a different domain** from `server_url`, hence `ts.` here. `prefixes.v4` must stay inside `100.64.0.0/10`; Headscale hands out addresses sequentially from it, so the addresses you get are not ones you choose. `override_local_dns: false` keeps MagicDNS from rewriting the machine's resolver.
 
-For the policy I start wide open, because all the machines are mine, and tighten it once everything works:
+For the policy, start wide open, because all the machines are yours, and tighten it once everything works:
 
 ```json title="config/policy.hujson (headscale_policy)"
 {
@@ -243,7 +243,7 @@ What each part is for:
 <UiCli>
 <UiCli.Ui>
 
-I open **Stacks**, press **Deploy stack**, name it `headscale`, paste the YAML, add the two configs, wait for **Spec is valid** and press **Deploy**.
+Open **Stacks**, press **Deploy stack**, name it `headscale`, paste the YAML, add the two configs, wait for **Spec is valid** and press **Deploy**.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -258,14 +258,14 @@ sudo clouduler stack unhealthy --placement --node
 </UiCli.Cli>
 </UiCli>
 
-**What I should see:** the stack goes healthy within a minute or two, the **DNS** page shows the record and certificate for <code><Var plain name="hs" fallback="headscale" />.<Var plain name="zone" fallback="example.com" /></code>, and from my laptop:
+**What you should see:** the stack goes healthy within a minute or two, the **DNS** page shows the record and certificate for <code><Var plain name="hs" fallback="headscale" />.<Var plain name="zone" fallback="example.com" /></code>, and from your laptop:
 
 <Cmd>{`curl -sS -o /dev/null -w '%{http_code}\\n' https://{{hs}}.{{zone}}/health`}</Cmd>
 
-prints `200`. If the certificate is still being issued, I wait a minute and retry rather than using `-k`.
+prints `200`. If the certificate is still being issued, wait a minute and retry rather than using `-k`.
 
 :::warning If it does not start
-`sudo clouduler stack unhealthy` and `clouduler stack logs headscale` tell me. The usual causes: the config file has a typo, the DERP map could not be downloaded (`public` must be allowed to reach the internet; see the [Headscale example](/docs/examples/headscale), which adds an egress network for it), or the Placement tab says the node has no address on `public`.
+`sudo clouduler stack unhealthy` and `clouduler stack logs headscale` tell you. The usual causes: the config file has a typo, the DERP map could not be downloaded (`public` must be allowed to reach the internet; see the [Headscale example](/docs/examples/headscale), which adds an egress network for it), or the Placement tab says the node has no address on `public`.
 {/* TODO verify: whether a container on a public network can reach the internet to fetch the DERP map, (the command is `clouduler stack logs`) */}
 :::
 
@@ -276,17 +276,17 @@ The Headscale command line lives inside the container, and `clouduler exec` runs
 <Cmd>{`clouduler exec headscale.headscale.0 -- headscale users create cluster
 clouduler exec headscale.headscale.0 -- headscale users list`}</Cmd>
 
-**What I should see:** a table with the user `cluster` and its numeric ID. Then I create **one key per machine**, with a short life:
+**What you should see:** a table with the user `cluster` and its numeric ID. Then create **one key per machine**, with a short life:
 
 <Cmd>{`clouduler exec headscale.headscale.0 -- headscale preauthkeys create --user 1 --expiration 1h`}</Cmd>
 
-Replace `1` with the ID from the list. A key printed here is a secret: I copy it straight to the machine that needs it, I never put it in `cluster.yaml` or a stack file, and I do not use `--reusable` (a reusable key is a standing invitation). A single-use key that a failed attempt consumed is gone; I create another.
+Replace `1` with the ID from the list. A key printed here is a secret: copy it straight to the machine that needs it, never put it in `cluster.yaml` or a stack file, and do not use `--reusable` (a reusable key is a standing invitation). A single-use key that a failed attempt consumed is gone; create another.
 
 These flags match Headscale 0.29. They have changed between versions, so run `headscale preauthkeys create --help` in the container if yours differs.
 
 ## 4. Power on the network
 
-Now every machine, including `atlas`, joins the tailnet. I install tailscale on each ([install steps in the guide](/docs/guides/tailscale-headscale#install-the-tailscale-client)) and log in with the key made for that machine:
+Now every machine, including `atlas`, joins the tailnet. install tailscale on each ([install steps in the guide](/docs/guides/tailscale-headscale#install-the-tailscale-client)) and log in with the key made for that machine:
 
 <Cmd title="On every machine, with its own key">{`sudo tailscale up \\
   --login-server https://{{hs}}.{{zone}} \\
@@ -295,18 +295,18 @@ Now every machine, including `atlas`, joins the tailnet. I install tailscale on 
 
 - `--login-server` points the client at Headscale instead of Tailscale's own service.
 - `--auth-key` logs in without a browser. The flag is spelled `--auth-key`.
-- `--accept-dns=false` stops MagicDNS from rewriting the resolver on a cluster node, which Clouduler's own DNS and the node rely on. That is a precaution, not something I tested.
+- `--accept-dns=false` stops MagicDNS from rewriting the resolver on a cluster node, which Clouduler's own DNS and the node rely on. That is a precaution, not something that was tested.
 
 :::warning Flags are not remembered
 Tailscale does not keep these flags. A later `tailscale up` without `--login-server` silently goes back to the default control server. Repeat all three flags every time, including in scripts. If a machine was logged into another control server before, add `--force-reauth`.
 :::
 
-**What I should see on each machine:**
+**What you should see on each machine:**
 
 <Cmd>{`tailscale status
 tailscale ip -4`}</Cmd>
 
-`tailscale status` lists the other machines and `tailscale ip -4` prints that machine's tailnet address, for example <code><Var plain name="ts1" fallback="100.64.0.1" /></code>. I write the three addresses into the form at the top. I do not guess them: Headscale hands them out in order, so the machine I enrol first gets `.1`. From each machine I check that the others answer:
+`tailscale status` lists the other machines and `tailscale ip -4` prints that machine's tailnet address, for example <code><Var plain name="ts1" fallback="100.64.0.1" /></code>. Write the three addresses into the form at the top. Do not guess them: Headscale hands them out in order, so the machine you enrol first gets `.1`. From each machine, check that the others answer:
 
 <Cmd>{`ping -c 3 {{ts1}}
 ping -c 3 {{ts2}}
@@ -318,31 +318,31 @@ Important for step 5: **every node must reach every other node on its tailnet ad
 
 ## 5. Move the first node onto the tailnet
 
-So far the cluster still uses the temporary subnet. Now I switch it to the tailnet, in one edit: the subnet of the internal network and the address of `atlas` on it. They must change together because a node's address has to be inside the subnet, so each half alone would be refused.
+So far the cluster still uses the temporary subnet. Now switch it to the tailnet, in one edit: the subnet of the internal network and the address of `atlas` on it. They must change together because a node's address has to be inside the subnet, so each half alone would be refused.
 
-First I make sure of the preconditions:
+First make sure of the preconditions:
 
 - Step 4 passed on all three machines (they ping each other on the tailnet).
-- My laptop is on the tailnet too (install tailscale on it and run the same `tailscale up`, with its own key), or I will do this over SSH on `atlas`. After the change the web UI lives at the tailnet address.
-- I know the change is live and reversible: if the new address does not work, I can revert the config (the old address keeps being served for 120 seconds after it is dropped).
+- Your laptop is on the tailnet too (install tailscale on it and run the same `tailscale up`, with its own key), or you will do this over SSH on `atlas`. After the change the web UI lives at the tailnet address.
+- You know the change is live and reversible: if the new address does not work, you can revert the config (the old address keeps being served for 120 seconds after it is dropped).
 
-What happens when I apply it: the leader dials the new address, requires that the node answers as itself there, and only then commits a membership change that keeps the voters as they are. If the address is wrong or unreachable the membership is untouched. Other nodes move first and the leader last. The container overlay device, internal DNS, firewall rules and the drive and relay listeners are rebuilt live, with no restart.
+What happens when you apply it: the leader dials the new address, requires that the node answers as itself there, and only then commits a membership change that keeps the voters as they are. If the address is wrong or unreachable the membership is untouched. Other nodes move first and the leader last. The container overlay device, internal DNS, firewall rules and the drive and relay listeners are rebuilt live, with no restart.
 
 <UiCli>
 <UiCli.Ui>
 
-1. I open **Settings**, **Network**, **Networks**. On the internal network I change the **Address range** to <code><Var plain name="tailnet" fallback="100.64.0.0/10" /></code>.
-2. On the **Nodes** page I change <code><Var plain name="n1" fallback="atlas" /></code>'s address on the internal network to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>.
-3. Under **Changes to apply** I press **Validate config**. Both edits are in the same draft.
-4. I set **Confirm within (seconds)** to 120 instead of the default 60, to leave room for the page to reconnect, and press **Apply changes**.
-5. The banner **Config change waiting for you** counts down. As soon as I can reach the dashboard at the new address, I press **Confirm config**. If I do not, the old config comes back by itself.
+1. Open **Settings**, **Network**, **Networks**. On the internal network change the **Address range** to <code><Var plain name="tailnet" fallback="100.64.0.0/10" /></code>.
+2. On the **Nodes** page change <code><Var plain name="n1" fallback="atlas" /></code>'s address on the internal network to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>.
+3. Under **Changes to apply** press **Validate config**. Both edits are in the same draft.
+4. Set **Confirm within (seconds)** to 120 instead of the default 60, to leave room for the page to reconnect, and press **Apply changes**.
+5. The banner **Config change waiting for you** counts down. As soon as you can reach the dashboard at the new address, press **Confirm config**. If you do not, the old config comes back by itself.
 
 <UiScreen scenario="multisite-headscale" route="/nodes" caption="Nodes page of a multi-site cluster, with tailnet addresses." alt="Nodes page of a three-site cluster with tailnet addresses" />
 
 </UiCli.Ui>
 <UiCli.Cli>
 
-On `atlas` I edit the file (these two keys are the only changes), check it, and push it:
+On `atlas` edit the file (these two keys are the only changes), check it, and push it:
 
 ```yaml title="cluster.yaml (changed lines)"
 networks:
@@ -361,14 +361,14 @@ nodes:
 clouduler check
 clouduler config reload`}</Cmd>
 
-`config reload` prints `reloaded config into the cluster, generation N`. There is no rollback timer on this route, so I keep a copy of the previous file to revert.
+`config reload` prints `reloaded config into the cluster, generation N`. There is no rollback timer on this route, so keep a copy of the previous file to revert.
 
 </UiCli.Cli>
 </UiCli>
 
-The validator accepts a `/10` internal subnet, and a subnet change together with the node address changes in one edit. Changing only the subnet is refused with `outside the tailscale subnet`, so I make both edits in the same draft.
+The validator accepts a `/10` internal subnet, and a subnet change together with the node address changes in one edit. Changing only the subnet is refused with `outside the tailscale subnet`, so make both edits in the same draft.
 
-**What I should see:** in the daemon log on the leader, one line per moved node:
+**What you should see:** in the daemon log on the leader, one line per moved node:
 
 <Cmd>{`sudo journalctl -u clouduler -f | grep -i "rpc address"`}</Cmd>
 
@@ -385,14 +385,14 @@ The new address was not reachable from the leader, or something else answered th
 :::
 
 :::warning The web address changes
-The UI is now served at the tailnet address. If I used an `/etc/hosts` line or an SSH tunnel for <code>cloud.<Var plain name="intdomain" fallback="int.example.com" /></code>, I update it to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>. The join command in step 6 contains that name, so it has to resolve on the joining machine.
+The UI is now served at the tailnet address. If you used an `/etc/hosts` line or an SSH tunnel for <code>cloud.<Var plain name="intdomain" fallback="int.example.com" /></code>, update it to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>. The join command in step 6 contains that name, so it has to resolve on the joining machine.
 :::
 
 Docker networks that already exist (the Headscale stack's) are kept as they are, including their MTU. Their subnets come from the overlay pool, not the internal subnet, so the move does not change them. {/* TODO verify: the running stack stays healthy after the move; check it live */}
 
 ## 6. Join the other nodes over the tailnet
 
-The cluster now has a tailnet-addressed first node, so I join the other two exactly as in [quick start 2, step 4](/docs/quickstart/lan-cluster#4-add-the-other-two-nodes), with their **tailnet** addresses. Before that, on each, I install the prerequisites and the binary (quick start 2, step 2) and make sure <code>cloud.<Var plain name="intdomain" fallback="int.example.com" /></code> resolves to <code><Var plain name="ts1" fallback="100.64.0.1" /></code> (an `/etc/hosts` line is enough).
+The cluster now has a tailnet-addressed first node, so join the other two exactly as in [quick start 2, step 4](/docs/quickstart/lan-cluster#4-add-the-other-two-nodes), with their **tailnet** addresses. Before that, on each, install the prerequisites and the binary (quick start 2, step 2) and make sure <code>cloud.<Var plain name="intdomain" fallback="int.example.com" /></code> resolves to <code><Var plain name="ts1" fallback="100.64.0.1" /></code> (an `/etc/hosts` line is enough).
 
 <UiCli>
 <UiCli.Ui>
@@ -416,30 +416,30 @@ sudo clouduler init --yes \\
 
 sudo shred -u /root/join.token`}</Cmd>
 
-For the third node I use <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var plain name="ts3" fallback="100.64.0.3" /></code>.
+For the third node, use <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var plain name="ts3" fallback="100.64.0.3" /></code>.
 
 </UiCli.Cli>
 </UiCli>
 
-The `--ip` must be inside the internal subnet, which now is the tailnet. A join that cannot reach the cluster through the tailnet fails with `error sending request for url`, and the node disappears again. The errors and fixes of quick start 2 apply unchanged. I delete the `join ...` API keys afterwards under **Settings**, **API keys and AI clients**.
+The `--ip` must be inside the internal subnet, which now is the tailnet. A join that cannot reach the cluster through the tailnet fails with `error sending request for url`, and the node disappears again. The errors and fixes of quick start 2 apply unchanged. delete the `join ...` API keys afterwards under **Settings**, **API keys and AI clients**.
 
-Three managers give quorum for one loss. A fourth or fifth adds nothing if the tailnet is the weak link, so I join further machines as workers.
+Three managers give quorum for one loss. A fourth or fifth adds nothing if the tailnet is the weak link, so join further machines as workers.
 
-**What I should see:** `sudo clouduler status` lists three managers, all reachable, and the Nodes page shows them with their tailnet addresses:
+**What you should see:** `sudo clouduler status` lists three managers, all reachable, and the Nodes page shows them with their tailnet addresses:
 
 <UiScreen scenario="multisite-headscale" route="/nodes" caption="Three sites, three managers, one tailnet." alt="Nodes page with atlas, boreas and cirrus on tailnet addresses" />
 
-I can now deploy apps as in the other quick starts. Headscale stays pinned to `atlas`.
+You can now deploy apps as in the other quick starts. Headscale stays pinned to `atlas`.
 
 ## 7. MTU and firewall
 
 ### MTU, before the first overlay network
 
-The overlay's MTU is the MTU of the link that holds the node's internal address, minus 50 bytes. On a tailnet node that link is `tailscale0`, which has an MTU of 1280 by default, so the overlay gets 1230. Docker overlay networks fix their MTU when they are **created**, so if I change the tailscale MTU later, existing networks keep the old value and break.
+The overlay's MTU is the MTU of the link that holds the node's internal address, minus 50 bytes. On a tailnet node that link is `tailscale0`, which has an MTU of 1280 by default, so the overlay gets 1230. Docker overlay networks fix their MTU when they are **created**, so if you change the tailscale MTU later, existing networks keep the old value and break.
 
 <Cmd>{`ip link show tailscale0`}</Cmd>
 
-I check that it shows the MTU I want on every node, and I change it, if I want to, before the first stack gets its own network. Both the node join in step 6 and the stacks I deploy afterwards create networks, so the best time is right after step 4. {/* TODO verify: how to change the tailscale0 MTU persistently; tailscale up and tailscaled have no MTU option, so it is a link setting outside tailscale */}
+Check that it shows the MTU you want on every node, and change it, if you want to, before the first stack gets its own network. Both the node join in step 6 and the stacks you deploy afterwards create networks, so the best time is right after step 4. {/* TODO verify: how to change the tailscale0 MTU persistently; tailscale up and tailscaled have no MTU option, so it is a link setting outside tailscale */}
 
 ### Ports
 
@@ -479,14 +479,14 @@ No tailnet without Headscale, no Headscale without quorum, no quorum without the
 
 ### What should keep working
 
-Two things reduce the problem, and I make sure they hold:
+Two things reduce the problem, and make sure they hold:
 
 - **Keep `/var/lib/tailscale` on every node.** It holds the machine's tailscale identity. Deleting it forces a new login with a new key and possibly a new address, which breaks the cluster config.
 - **Keep the Headscale volume.** Its database holds every machine's keys and addresses, so after Headscale returns, the machines are recognised and keep the same tailnet IPs.
 
-I also expect tailscale to keep working with the peers it already knows while the control server is down, and the rebooted machine to keep its address. **That is the one assumption I could not confirm from the documentation, and the whole recovery depends on it.** The VPS must come up with its tailnet address before the control server is reachable, because Clouduler's raft has to bind that address. If tailscale cannot do that after a reboot, the recovery below cannot start. {/* TODO verify: that tailscaled on a rebooted node recovers its tailnet address, and keeps existing peers connected, while the control server is unreachable; test with every machine powered off at once */}
+Also expect tailscale to keep working with the peers it already knows while the control server is down, and the rebooted machine to keep its address. **That is the one assumption that could not be confirmed from the documentation, and the whole recovery depends on it.** The VPS must come up with its tailnet address before the control server is reachable, because Clouduler's raft has to bind that address. If tailscale cannot do that after a reboot, the recovery below cannot start. {/* TODO verify: that tailscaled on a rebooted node recovers its tailnet address, and keeps existing peers connected, while the control server is unreachable; test with every machine powered off at once */}
 
-One thing I can do to help: make sure the daemon starts after tailscale. The unit `init` writes orders itself only after `network-online.target` and `docker.service`, with nothing about tailscale, so a systemd drop-in with `After=tailscaled.service` and `Wants=tailscaled.service` is needed.
+One thing you can do to help: make sure the daemon starts after tailscale. The unit `init` writes orders itself only after `network-online.target` and `docker.service`, with nothing about tailscale, so a systemd drop-in with `After=tailscaled.service` and `Wants=tailscaled.service` is needed.
 
 ### The recovery
 
@@ -518,11 +518,11 @@ clouduler status`}</Cmd>
 - `--node` names this node in the config; it defaults to the hostname. `--yes` skips the confirmation. There is no dry run.
 - The command rewrites the node's raft membership so it is the **only voter**, marks every other node unreachable, and marks this node's copy of the volumes Headscale uses as the current one. Other stacks stay off.
 
-**What I should see:** `clouduler status` prints `EMERGENCY MODE: only stack headscale is being scheduled`. A minute later Headscale answers at `https://headscale.example.com`, the other machines reappear in `tailscale status` and, when `boreas` or `cirrus` reconnects, `clouduler status` shows more than one reachable manager. Other stacks then resume from their own desired state; I do not restore anything by hand.
+**What you should see:** `clouduler status` prints `EMERGENCY MODE: only stack headscale is being scheduled`. A minute later Headscale answers at `https://headscale.example.com`, the other machines reappear in `tailscale status` and, when `boreas` or `cirrus` reconnects, `clouduler status` shows more than one reachable manager. Other stacks then resume from their own desired state; you do not restore anything by hand.
 
 ### How it ends
 
-Emergency mode clears by itself when the leader sees another **voting manager** reachable again (log: `another manager is reachable again, ending emergency mode`). A worker coming back does not end it. If the other managers are gone for good, it stays on and every other stack stays held. Then I add a new voting manager and, for dead ones, use `clouduler node remove`. The details and the warnings are in [Emergency mode](/docs/features/emergency-mode).
+Emergency mode clears by itself when the leader sees another **voting manager** reachable again (log: `another manager is reachable again, ending emergency mode`). A worker coming back does not end it. If the other managers are gone for good, it stays on and every other stack stays held. Then add a new voting manager and, for dead ones, use `clouduler node remove`. The details and the warnings are in [Emergency mode](/docs/features/emergency-mode).
 
 ### Dangers
 
@@ -539,19 +539,19 @@ If it is `atlas` itself that is lost for good (the VPS is gone), the same comman
 
 <a id="back-up-headscale" />
 
-Losing the Headscale database means every machine is unknown to the new server: new keys, new addresses, and the cluster config no longer matches. I back up at least `db.sqlite` and `noise_private.key` from the `headscale-data` volume (on `atlas` it lives under the drive folder, <code>/srv/clouduler/fast/headscale-data</code>), and I keep them off the cluster. The cluster's own [Backups](/docs/features/backups) can include the drive, but a copy that needs the cluster to restore is not a blackout backup. A copy of the volume on a home node (the drive is replicated) helps only if the pin is changed (see above).
+Losing the Headscale database means every machine is unknown to the new server: new keys, new addresses, and the cluster config no longer matches. Back up at least `db.sqlite` and `noise_private.key` from the `headscale-data` volume (on `atlas` it lives under the drive folder, <code>/srv/clouduler/fast/headscale-data</code>), and keep them off the cluster. The cluster's own [Backups](/docs/features/backups) can include the drive, but a copy that needs the cluster to restore is not a blackout backup. A copy of the volume on a home node (the drive is replicated) helps only if the pin is changed (see above).
 
 ### A checklist to rehearse before you need it
 
-I do this once, on a day when nothing depends on the cluster, and then again after each major change.
+Do this once, on a day when nothing depends on the cluster, and then again after each major change.
 
 1. `/etc/clouduler/secrets.key` is backed up for every node, off the cluster.
 2. `/var/lib/tailscale` exists on every node and is not touched by any script.
-3. The Headscale `db.sqlite` and `noise_private.key` are copied off the cluster, and I have restored them once on a scratch Headscale.
-4. `tailscale up` in my scripts always carries `--login-server`, `--auth-key` or none on re-run, and `--accept-dns=false`.
-5. I know which node is the rescue node (<code><Var plain name="n1" fallback="atlas" /></code>) and can SSH to it without the tailnet (the provider's console, or the public address).
-6. I wrote the exact command on paper: `sudo clouduler --config /etc/clouduler/cluster.yaml emergency headscale --node `<code><Var plain name="n1" fallback="atlas" /></code>.
-7. **The drill:** power every machine off at once, power on only `atlas`, check that its tailnet address is back, run the recovery, power the others on, and watch the emergency end. If `atlas` does not get its tailnet address back without Headscale, I have learned the most important fact about this design, while it was cheap.
+3. The Headscale `db.sqlite` and `noise_private.key` are copied off the cluster, and you have restored them once on a scratch Headscale.
+4. `tailscale up` in your scripts always carries `--login-server`, `--auth-key` or none on re-run, and `--accept-dns=false`.
+5. You know which node is the rescue node (<code><Var plain name="n1" fallback="atlas" /></code>) and can SSH to it without the tailnet (the provider's console, or the public address).
+6. You wrote the exact command on paper: `sudo clouduler --config /etc/clouduler/cluster.yaml emergency headscale --node `<code><Var plain name="n1" fallback="atlas" /></code>.
+7. **The drill:** power every machine off at once, power on only `atlas`, check that its tailnet address is back, run the recovery, power the others on, and watch the emergency end. If `atlas` does not get its tailnet address back without Headscale, you have learned the most important fact about this design, while it was cheap.
 
 ## What happened under the hood
 

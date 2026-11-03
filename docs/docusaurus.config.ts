@@ -6,7 +6,7 @@ const config: Config = {
   title: 'Clouduler',
   tagline: 'The easiest way to run a homelab cluster',
   favicon: 'img/favicon.svg',
-  url: 'https://clouduler.example.com',
+  url: 'https://clouduler.liteapp.fr',
   baseUrl: '/',
   onBrokenLinks: 'throw',
   onBrokenAnchors: 'warn',

@@ -5,11 +5,11 @@ sidebar_position: 2
 
 # Quick start: three machines on a LAN
 
-In [quick start 1](/docs/quickstart/single-node) I ran everything on one machine. Now I'll do the thing Clouduler is actually for: three machines on my home network that look after each other. At the end I'll pull the power cord out of one of them and watch my app come back on another. It takes about an hour, most of it spent installing packages three times.
+In [quick start 1](/docs/quickstart/single-node) you ran everything on one machine. Now you'll do the thing Clouduler is actually for: three machines on your home network that look after each other. At the end you'll pull the power cord out of one of them and watch your app come back on another. It takes about an hour, most of it spent installing packages three times.
 
 You can start from scratch here, or continue from quick start 1. If you already have a single node, skip steps 2 and 3 for that machine and treat it as the first node (<code><Var plain name="n1" fallback="atlas" /></code>). Everything else is identical, because adding nodes to a running cluster is exactly what step 4 does.
 
-## What we'll build
+## What you'll build
 
 ```mermaid
 flowchart TB
@@ -65,7 +65,7 @@ If you filled this in for quick start 1, your values are already here.
 
 ## 1. Open the ports between the nodes
 
-Clouduler does not touch your host firewall. If you run `ufw` or `nftables`, the nodes cannot talk until you allow these. Only the LAN subnet needs the first five (the web UI listens on every interface, so the firewall is what keeps it on the LAN). Do not expose them to the internet. The ports can be changed with `--rpc-port` and `--web-port` at `init`; I use the defaults.
+Clouduler does not touch your host firewall. If you run `ufw` or `nftables`, the nodes cannot talk until you allow these. Only the LAN subnet needs the first five (the web UI listens on every interface, so the firewall is what keeps it on the LAN). Do not expose them to the internet. The ports can be changed with `--rpc-port` and `--web-port` at `init`; the defaults are used here.
 
 | Port | Protocol | Used for |
 |---|---|---|
@@ -76,7 +76,7 @@ Clouduler does not touch your host firewall. If you run `ufw` or `nftables`, the
 | 8443 | TCP | web UI and API, and the join command |
 | 80, 443 | TCP | the reverse proxy for apps |
 
-If I use `ufw`, on every node:
+If you use `ufw`, on every node:
 
 <Cmd title="On every node (only if you run ufw)">{`sudo ufw allow in on {{iface}} from {{subnet}} to any port 7373:7375 proto tcp
 sudo ufw allow in on {{iface}} from {{subnet}} to any port 4789 proto udp
@@ -90,7 +90,7 @@ If you never installed a firewall, there is nothing to do. See [Ports and firewa
 
 ## 2. Prepare all three machines
 
-I repeat the preparation from [quick start 1](/docs/quickstart/single-node#1-prepare-the-machine) on each machine. Here it is in one block. I run it on <code><Var plain name="n1" fallback="atlas" /></code>, <code><Var plain name="n2" fallback="boreas" /></code> and <code><Var plain name="n3" fallback="cirrus" /></code>.
+You repeat the preparation from [quick start 1](/docs/quickstart/single-node#1-prepare-the-machine) on each machine. Here it is in one block. Run it on <code><Var plain name="n1" fallback="atlas" /></code>, <code><Var plain name="n2" fallback="boreas" /></code> and <code><Var plain name="n3" fallback="cirrus" /></code>.
 
 <Cmd title="On each of the three nodes">{`[debian,raspbian] sudo apt update
 [debian,raspbian] sudo apt install -y docker.io iproute2 iptables ethtool restic
@@ -99,18 +99,18 @@ sudo systemctl enable --now docker
 sudo modprobe vxlan
 sudo mkdir -p /srv/clouduler/fast`}</Cmd>
 
-Then I install the same binary on each (see [quick start 1, step 2](/docs/quickstart/single-node#2-install-clouduler)). As there, I can compile it myself or download the prebuilt binary from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest). Then I check it.
+Then install the same binary on each (see [quick start 1, step 2](/docs/quickstart/single-node#2-install-clouduler)). As there, you can compile it yourself or download the prebuilt binary from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest). Then check it.
 
-<Cmd title="Copy and install, from my laptop">{`for h in {{ip1}} {{ip2}} {{ip3}}; do
+<Cmd title="Copy and install, from your laptop">{`for h in {{ip1}} {{ip2}} {{ip3}}; do
   scp clouduler-x86_64-unknown-linux-gnu {{user}}@$h:/tmp/clouduler
   ssh {{user}}@$h 'sudo install -m 0755 /tmp/clouduler /usr/local/bin/clouduler && clouduler --version'
 done`}</Cmd>
 
-Use the `aarch64` file for any Raspberry Pi. **What I should see:** the same version printed three times.
+Use the `aarch64` file for any Raspberry Pi. **What you should see:** the same version printed three times.
 
 ### Names must resolve
 
-The join command the web UI gives me contains the address <code>cloud.<Var plain name="domain" fallback="lan.example.com" />:8443</code>, not an IP. So <code>cloud.<Var plain name="domain" fallback="lan.example.com" /></code> must resolve to <code><Var plain name="n1" fallback="atlas" /></code> on <code><Var plain name="n2" fallback="boreas" /></code> and <code><Var plain name="n3" fallback="cirrus" /></code>. If I have no LAN DNS, I add this line to `/etc/hosts` on <code><Var plain name="n2" fallback="boreas" /></code>, <code><Var plain name="n3" fallback="cirrus" /></code> and on my laptop:
+The join command the web UI gives you contains the address <code>cloud.<Var plain name="domain" fallback="lan.example.com" />:8443</code>, not an IP. So <code>cloud.<Var plain name="domain" fallback="lan.example.com" /></code> must resolve to <code><Var plain name="n1" fallback="atlas" /></code> on <code><Var plain name="n2" fallback="boreas" /></code> and <code><Var plain name="n3" fallback="cirrus" /></code>. If you have no LAN DNS, add this line to `/etc/hosts` on <code><Var plain name="n2" fallback="boreas" /></code>, <code><Var plain name="n3" fallback="cirrus" /></code> and on your laptop:
 
 <Cmd lang="text" title="/etc/hosts">{`{{ip1}}   cloud.{{domain}}`}</Cmd>
 
@@ -120,7 +120,7 @@ That is a node that could not resolve the name in the join command. Fix the name
 
 ## 3. Create the cluster on the first node
 
-If you already finished quick start 1, <code><Var plain name="n1" fallback="atlas" /></code> is ready and you can skip to step 4. Otherwise I run this on <code><Var plain name="n1" fallback="atlas" /></code>:
+If you already finished quick start 1, <code><Var plain name="n1" fallback="atlas" /></code> is ready and you can skip to step 4. Otherwise run this on <code><Var plain name="n1" fallback="atlas" /></code>:
 
 <Cmd title="On the first node">{`sudo clouduler init --yes \\
   --cluster-name {{cluster}} \\
@@ -131,22 +131,22 @@ If you already finished quick start 1, <code><Var plain name="n1" fallback="atla
   --node {{n1}} \\
   --drive fast=/srv/clouduler/fast`}</Cmd>
 
-Every flag is explained in [quick start 1, step 3](/docs/quickstart/single-node#3-initialise-the-cluster). I leave `--drive-mode` at its default, `replicated`: every node keeps a full copy of the drive and containers read local disk. (The alternative, a [served drive](/docs/features/served-drives), changes how failover behaves.)
+Every flag is explained in [quick start 1, step 3](/docs/quickstart/single-node#3-initialise-the-cluster). Leave `--drive-mode` at its default, `replicated`: every node keeps a full copy of the drive and containers read local disk. (The alternative, a [served drive](/docs/features/served-drives), changes how failover behaves.)
 
-Then I do the three things from quick start 1 that I must not skip: confirm `sudo systemctl status clouduler` is `active (running)`, copy the first API key out of the journal (`sudo journalctl -u clouduler --no-pager | grep -o 'clk_[A-Za-z0-9]*_[A-Za-z0-9]*'`), and back up `/etc/clouduler/secrets.key`. Then I sign in to <code>https://cloud.<Var plain name="domain" fallback="lan.example.com" />:8443</code>.
+Then do the three things from quick start 1 that you must not skip: confirm `sudo systemctl status clouduler` is `active (running)`, copy the first API key out of the journal (`sudo journalctl -u clouduler --no-pager | grep -o 'clk_[A-Za-z0-9]*_[A-Za-z0-9]*'`), and back up `/etc/clouduler/secrets.key`. Then sign in to <code>https://cloud.<Var plain name="domain" fallback="lan.example.com" />:8443</code>.
 
 ## 4. Add the other two nodes
 
-A new node needs to prove to the cluster that I allow it, and receive the cluster key without the key ever crossing the network in plain form. The web UI hides all of that behind one command.
+A new node needs to prove to the cluster that you allow it, and receive the cluster key without the key ever crossing the network in plain form. The web UI hides all of that behind one command.
 
 <UiCli>
 <UiCli.Ui>
 
-1. In the web UI I open **Nodes** and click **Add node**.
-2. In the sheet **Add a node** I type the **Node name** (<code><Var plain name="n2" fallback="boreas" /></code>) and choose the role chip **Manager**. The sheet's default is Worker, and workers do not count towards quorum, so I must pick Manager explicitly.
-3. I fill **Address** with <code><Var plain name="ip2" fallback="192.168.1.11" /></code>. If I leave it empty, the node detects its own.
-4. I press **Create join command**. The sheet changes to **Run this on the new node** and shows a command.
-5. I press **Copy command**.
+1. In the web UI open **Nodes** and click **Add node**.
+2. In the sheet **Add a node** type the **Node name** (<code><Var plain name="n2" fallback="boreas" /></code>) and choose the role chip **Manager**. The sheet's default is Worker, and workers do not count towards quorum, so you must pick Manager explicitly.
+3. Fill **Address** with <code><Var plain name="ip2" fallback="192.168.1.11" /></code>. If you leave it empty, the node detects its own.
+4. Press **Create join command**. The sheet changes to **Run this on the new node** and shows a command.
+5. Press **Copy command**.
 
 <UiScreen scenario="fresh-single-node" route="/nodes" caption="The Nodes page of a new cluster, with the Add node button." alt="Nodes page with one node and the Add node button" height={400} />
 
@@ -156,12 +156,12 @@ The command looks like this (the key and pin are real in your sheet):
 clouduler init --yes --join cloud.lan.example.com:8443 --token clk_... --tls-fingerprint <sha256> --node boreas --role manager --ip 192.168.1.11
 ```
 
-It has no `sudo` and no `--drive`, so on <code><Var plain name="n2" fallback="boreas" /></code> I run it as `sudo ... --drive fast=/srv/clouduler/fast`. Then I press **Done** on the sheet and repeat for <code><Var plain name="n3" fallback="cirrus" /></code>.
+It has no `sudo` and no `--drive`, so on <code><Var plain name="n2" fallback="boreas" /></code> run it as `sudo ... --drive fast=/srv/clouduler/fast`. Then press **Done** on the sheet and repeat for <code><Var plain name="n3" fallback="cirrus" /></code>.
 
 </UiCli.Ui>
 <UiCli.Cli>
 
-The CLI form does the same, without the web UI. I need an admin API key (the one from step 3 works) in a file that only root can read, then:
+The CLI form does the same, without the web UI. You need an admin API key (the one from step 3 works) in a file that only root can read, then:
 
 <Cmd title="On the joining node">{`sudo install -m 600 /dev/null /root/join.token
 sudo sh -c 'printf "%s" "clk_PASTE_YOUR_KEY" > /root/join.token'
@@ -177,9 +177,9 @@ sudo clouduler init --yes \\
 
 sudo shred -u /root/join.token`}</Cmd>
 
-Using <code>--join <Var plain name="ip1" fallback="192.168.1.10" /></code> with the IP avoids the name resolution requirement. The pin is what protects me: with `--tls-fingerprint` the joining node checks the cluster's certificate against it before sending the key. Without it the certificate is accepted unchecked and the fingerprint is only printed afterwards. The UI's **Create join command** sheet shows the pin to paste.
+Using <code>--join <Var plain name="ip1" fallback="192.168.1.10" /></code> with the IP avoids the name resolution requirement. The pin is what protects you: with `--tls-fingerprint` the joining node checks the cluster's certificate against it before sending the key. Without it the certificate is accepted unchecked and the fingerprint is only printed afterwards. The UI's **Create join command** sheet shows the pin to paste.
 
-I repeat with <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var plain name="ip3" fallback="192.168.1.12" /></code>.
+Repeat with <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var plain name="ip3" fallback="192.168.1.12" /></code>.
 
 :::note Do not use `clouduler node add` to join
 `clouduler node add` only writes an entry into the live roster by hand. It does not hand over the cluster key or pin a certificate. A node joins itself with `clouduler init --join`.
@@ -188,9 +188,9 @@ I repeat with <code>--node <Var plain name="n3" fallback="cirrus" /> --ip <Var p
 </UiCli.Cli>
 </UiCli>
 
-**What I should see on the joining node:** `the cluster accepted this node`, `installed the cluster key (...)`, and finally `the daemon is running`. Files do not need to be copied by hand: the join fetches `cluster.yaml` from the cluster and receives the cluster key wrapped for the new node's own key pair.
+**What you should see on the joining node:** `the cluster accepted this node`, `installed the cluster key (...)`, and finally `the daemon is running`. Files do not need to be copied by hand: the join fetches `cluster.yaml` from the cluster and receives the cluster key wrapped for the new node's own key pair.
 
-The join key is an admin key and stays valid after the join. Once both nodes are in, I delete the one named <code>join <Var plain name="n2" fallback="boreas" /></code> (and <code>join <Var plain name="n3" fallback="cirrus" /></code>) under **Settings**, **API keys and AI clients**. Like every API key it has admin rights, so I do not leave it around.
+The join key is an admin key and stays valid after the join. Once both nodes are in, delete the one named <code>join <Var plain name="n2" fallback="boreas" /></code> (and <code>join <Var plain name="n3" fallback="cirrus" /></code>) under **Settings**, **API keys and AI clients**. Like every API key it has admin rights, so do not leave it around.
 
 :::warning If you see `the cluster rejected the api key`
 The key is wrong, was deleted, or got a stray space. Generate a new command.
@@ -227,7 +227,7 @@ sudo systemctl enable --now clouduler.service
 
 <Cmd>{`sudo clouduler status`}</Cmd>
 
-**What I should see:** a `raft:` line with `quorum=yes` and `voters=3/3`, three nodes marked `up` and `active`, a summary of the stacks, then `all clear: no unhealthy instances or cluster faults`. Each node line is tab-separated: name, role, reachability, availability, instance count and CPU architecture. The shape is:
+**What you should see:** a `raft:` line with `quorum=yes` and `voters=3/3`, three nodes marked `up` and `active`, a summary of the stacks, then `all clear: no unhealthy instances or cluster faults`. Each node line is tab-separated: name, role, reachability, availability, instance count and CPU architecture. The shape is:
 
 ```text
 cluster home
@@ -252,19 +252,19 @@ Check from that node that the ports in step 1 are open, in particular 7373/tcp, 
 
 ## 6. Check the replicated drive
 
-The drive `fast` exists in the cluster, and each node that maps it holds a copy. Because I passed `--drive fast=/srv/clouduler/fast` on every node, all three do. A node can only pick a drive that already exists in the cluster, which is why I created it on <code><Var plain name="n1" fallback="atlas" /></code> first.
+The drive `fast` exists in the cluster, and each node that maps it holds a copy. Because you passed `--drive fast=/srv/clouduler/fast` on every node, all three do. A node can only pick a drive that already exists in the cluster, which is why you created it on <code><Var plain name="n1" fallback="atlas" /></code> first.
 
 <Cmd>{`sudo ls -la /srv/clouduler/fast`}</Cmd>
 
 On each node, this directory should exist (it will be empty until a stack uses it). In the web UI, **Storage** shows the drive `fast` as replicated, with its resync interval (every 15 minutes by default).
 
 :::note Joined without --drive?
-The web UI cannot add a drive mapping to a node after it has joined (a node's drives are shown read-only on its page). The drive has to be declared when the node is initialised, so I re-run the join with `--drive fast=/srv/clouduler/fast`. A node already in the roster needs `--force` for that.
+The web UI cannot add a drive mapping to a node after it has joined (a node's drives are shown read-only on its page). The drive has to be declared when the node is initialised, so re-run the join with `--drive fast=/srv/clouduler/fast`. A node already in the roster needs `--force` for that.
 :::
 
 ## 7. Deploy an app with a volume
 
-I'll reuse Vaultwarden from quick start 1. Its volume `fast/vaultwarden` lives on the drive I just checked, so Clouduler keeps a copy on every node.
+You'll reuse Vaultwarden from quick start 1. Its volume `fast/vaultwarden` lives on the drive you just checked, so Clouduler keeps a copy on every node.
 
 ```yaml title="vaultwarden.yaml"
 networks:
@@ -287,7 +287,7 @@ services:
 <UiCli>
 <UiCli.Ui>
 
-I open **Stacks**, press **Deploy stack**, name it `vaultwarden`, paste the YAML, wait for **Spec is valid** and look at **Where it can run**: this time it lists all three nodes. Then I press **Deploy**.
+Open **Stacks**, press **Deploy stack**, name it `vaultwarden`, paste the YAML, wait for **Spec is valid** and look at **Where it can run**: this time it lists all three nodes. Then press **Deploy**.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -302,21 +302,21 @@ sudo clouduler stack unhealthy --placement --node
 
 The scheduler picks one node. The stack page shows which. In **Storage** the volume appears with a **Primary** node (the one holding the newest copy) and **Replicas**, and a badge saying **in sync** once they agree. On a replicated drive a replica is refreshed on the drive's resync interval, so after a first deploy it may take a while for the other two to say **in sync**.
 
-I reach the app the same way as in quick start 1: <code>https://vault.<Var plain name="domain" fallback="lan.example.com" /></code> once the name resolves to a node (any node answers, the proxy forwards to the right one).
+You reach the app the same way as in quick start 1: <code>https://vault.<Var plain name="domain" fallback="lan.example.com" /></code> once the name resolves to a node (any node answers, the proxy forwards to the right one).
 
-I note which node it runs on. I'll call it <code><Var plain name="n2" fallback="boreas" /></code> below; yours may differ.
+Note which node it runs on. This page calls it <code><Var plain name="n2" fallback="boreas" /></code> below; yours may differ.
 
 ## 8. Pull the plug
 
-This is the test. I'm going to power off the node that runs Vaultwarden, hard, the way a real failure happens. First I record the state:
+This is the test. You're going to power off the node that runs Vaultwarden, hard, the way a real failure happens. First record the state:
 
 <Cmd>{`sudo clouduler status`}</Cmd>
 
-Then I pull the power on that node (or `sudo poweroff` if I'm squeamish). From another node I watch:
+Then pull the power on that node (or `sudo poweroff` if you're squeamish). From another node, watch:
 
 <Cmd>{`watch -n 2 sudo clouduler status`}</Cmd>
 
-**What I should see**, with the default timers:
+**What you should see**, with the default timers:
 
 | After the power-off | What happens |
 |---|---|
@@ -331,9 +331,9 @@ In the web UI the Overview shows the node as unreachable and the stack's contain
 
 <UiScreen scenario="node-down-failover" route="/" caption="A node is down; its instances have been moved." alt="Overview during a node failure" />
 
-My cluster is still working, with two of three managers. If I now lose a second node, the quorum is gone and the cluster can no longer change anything; the remaining node is read-only until a second one returns. That is by design.
+Your cluster is still working, with two of three managers. If you now lose a second node, the quorum is gone and the cluster can no longer change anything; the remaining node is read-only until a second one returns. That is by design.
 
-:::warning What about my data?
+:::warning What about your data?
 A replicated drive is copied on a timer (every 15 minutes by default), not on every write. If the failed node had written data in the last interval that no other node received, that data is not on the survivors. Lower **Resync every** on the drive (Settings, Storage) for apps where that matters, and keep [backups](/docs/features/backups). If a surviving node holds only an older copy, the app is refused a start while any node with the current copy is reachable. It starts from the freshest older copy only when no current copy can be reached, and then the writes since that copy are gone.
 :::
 
@@ -343,15 +343,15 @@ Open the stack's **Placement** tab. It says, per node, why the stack cannot run 
 
 ## 9. Bring it back
 
-I power the node on again. The service is enabled, so the daemon starts by itself and rejoins.
+Power the node on again. The service is enabled, so the daemon starts by itself and rejoins.
 
 <Cmd>{`sudo journalctl -u clouduler -f`}</Cmd>
 
-On the revived node I should see the daemon start and reconnect. From any node:
+On the revived node you should see the daemon start and reconnect. From any node:
 
 <Cmd>{`sudo clouduler status`}</Cmd>
 
-**What I should see:** all three nodes `reachable` again. Vaultwarden stays where it was moved; the scheduler does not shuffle things back on its own. If I want the load spread evenly again, I press **Rebalance cluster** on the Nodes page, or run `sudo clouduler rebalance --yes`. Each move restarts that instance.
+**What you should see:** all three nodes `reachable` again. Vaultwarden stays where it was moved; the scheduler does not shuffle things back on its own. If you want the load spread evenly again, press **Rebalance cluster** on the Nodes page, or run `sudo clouduler rebalance --yes`. Each move restarts that instance.
 
 :::warning Do not remove a node you want to keep
 Pulling the plug is a failure. **Removing** a node (Nodes, Retire this node, then Remove, or `clouduler node remove`) is a decision, and a removed node wipes its own keys the next time it boots and refuses to rejoin. See [Node lifecycle](/docs/features/node-lifecycle).
