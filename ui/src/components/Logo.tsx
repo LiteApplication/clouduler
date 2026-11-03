@@ -1,6 +1,6 @@
-// The clouduler mark, inline so it renders before any asset request resolves
-// and so it can pick up theme colors. The same artwork lives in
-// public/icon.svg, which is what the manifest and favicon point at.
+// The clouduler mark, inline so it renders before any asset request resolves.
+// The same artwork lives in public/icon.svg, which is what the manifest and
+// favicon point at; keep the two in step.
 
 export function Logo({ size = 32, className }: { size?: number; className?: string }) {
   return (
@@ -8,49 +8,28 @@ export function Logo({ size = 32, className }: { size?: number; className?: stri
       className={className}
       width={size}
       height={size}
-      viewBox="0 0 512 512"
+      viewBox="0 0 64 64"
       role="img"
       aria-label="clouduler"
     >
-      <defs>
-        <linearGradient id="cl-plate" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#0a1420" />
-          <stop offset="0.55" stopColor="#01080d" />
-          <stop offset="1" stopColor="#1a0620" />
-        </linearGradient>
-        <radialGradient id="cl-glow" cx="0.5" cy="0.62" r="0.62">
-          <stop offset="0" stopColor="#820e8e" stopOpacity="0.85" />
-          <stop offset="0.6" stopColor="#ec39a2" stopOpacity="0.18" />
-          <stop offset="1" stopColor="#ec39a2" stopOpacity="0" />
-        </radialGradient>
-        <linearGradient id="cl-cloud" x1="0.1" y1="0" x2="0.9" y2="1">
-          <stop offset="0" stopColor="#ddecfc" />
-          <stop offset="1" stopColor="#86baf3" />
-        </linearGradient>
-        <linearGradient id="cl-edge" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#ec39a2" />
-          <stop offset="1" stopColor="#820e8e" />
-        </linearGradient>
-      </defs>
-      <rect width="512" height="512" rx="112" fill="url(#cl-plate)" />
-      <rect width="512" height="512" rx="112" fill="url(#cl-glow)" />
-      <path
-        fill="url(#cl-cloud)"
-        d="M150 372c-42 0-76-34-76-76 0-38 28-70 65-75 12-46 54-79 103-79 51 0 94 36 104 84 40 3 72 37 72 78 0 43-35 78-78 78z"
-      />
-      <g stroke="url(#cl-edge)" strokeWidth="14" strokeLinecap="round" fill="none">
-        <path d="M256 210v52" />
-        <path d="M256 262 190 306" />
-        <path d="M256 262 322 306" />
+      <rect width="64" height="64" rx="16" fill="#150f1f" />
+      <rect x="1.5" y="1.5" width="61" height="61" rx="14.5" fill="none" stroke="#3a2f57" strokeWidth="3" />
+      <g transform="translate(-2 1)">
+        <g fill="#ff5cae">
+          <circle cx="23" cy="37" r="9" />
+          <circle cx="33" cy="30" r="12" />
+          <circle cx="45" cy="37" r="9" />
+          <rect x="23" y="37" width="22" height="9" />
+        </g>
+        <g stroke="#150f1f" strokeWidth="2" strokeLinecap="round">
+          <line x1="34" y1="29" x2="25" y2="40" />
+          <line x1="34" y1="29" x2="43" y2="40" />
+          <line x1="25" y1="40" x2="43" y2="40" />
+        </g>
+        <circle cx="25" cy="40" r="3.5" fill="#150f1f" />
+        <circle cx="43" cy="40" r="3.5" fill="#150f1f" />
+        <circle cx="34" cy="29" r="5" fill="#c8f542" stroke="#150f1f" strokeWidth="2" />
       </g>
-      <g fill="#01080d">
-        <circle cx="256" cy="198" r="28" />
-        <circle cx="186" cy="312" r="25" />
-        <circle cx="326" cy="312" r="25" />
-      </g>
-      <circle cx="256" cy="198" r="13" fill="#ec39a2" />
-      <circle cx="186" cy="312" r="11" fill="#820e8e" />
-      <circle cx="326" cy="312" r="11" fill="#820e8e" />
     </svg>
   );
 }
