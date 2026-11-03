@@ -86,11 +86,9 @@ services:
           port: 80
 ```
 
-### Validation differs between the UI and the CLI
+### Validation is the same in the UI and the CLI
 
-<Quirk title="The web UI only checks the syntax">
-Currently the web UI deploy only parses the stack. It does not check that the networks, drives and node pins you named exist in the cluster. A typo like `fats/vaultwarden:/data` shows `Spec is valid`, deploys, and then surfaces as a reason on the **Placement** tab (for example `atlas does not implement drive fats`). `clouduler stack deploy` runs the full cluster check first and refuses the deploy with a clear message. If you want that safety net, deploy from the CLI, or check the **Where it can run** panel before you click Deploy.
-</Quirk>
+The web UI, the HTTP API, the MCP tools and `clouduler stack deploy` all run the syntax checks and then the cluster checks. A typo like `fats/vaultwarden:/data` is refused with a message such as `drive fats is not defined in cluster.yaml`, both by **Validate** and on **Deploy**, before anything is stored.
 
 ## Look at a running stack
 
@@ -163,14 +161,14 @@ The stack page (tabs Containers, Placement, Spec, Settings) has no stack-wide st
 ```bash
 clouduler stack stop vaultwarden       # every instance goes to stopped, assignments are kept
 clouduler stack start vaultwarden      # same instances come back, no redeploy needed
-clouduler stack restart vaultwarden    # unassigns each instance so it is placed again
+clouduler stack restart vaultwarden    # rebuilds each instance's container where it already runs
 ```
 
 </UiCli.Cli>
 </UiCli>
 
-<Quirk title="Restart can move a container">
-`stack restart` is not a `docker restart`. It unassigns each instance and lets the scheduler place it again, so it may land on a different node. It does not change the desired state, so a stopped stack stays stopped.
+<Quirk title="Restart rebuilds the container">
+`stack restart` keeps each instance on its current node: the node removes the container and rebuilds it from the same assignment, so placement, volume primaries and any `stack update` image pin are kept. It is a rebuild rather than a `docker restart`, so a changed config or image tag takes effect. It does not change the desired state, so a stopped stack stays stopped. (The UI's per-instance **Restart** is different: it re-rolls placement.)
 </Quirk>
 
 ## Remove

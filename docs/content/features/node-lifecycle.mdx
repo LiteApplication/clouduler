@@ -60,11 +60,9 @@ Output: `boreas is now Drain` or `boreas is now Active`. Only `active` and `drai
 </UiCli.Cli>
 </UiCli>
 
-What happens: on the next scheduling pass (within 10 seconds) each instance on the drained node is assigned to another eligible node. The old container is stopped and removed, the new one starts. Activating does not move anything back. An instance with no other eligible node stays where it is, still running.
+What happens: on the next scheduling pass (within 10 seconds) each instance on the drained node is moved to another eligible node. The old container is stopped and removed, the new one starts. Activating does not move anything back. An instance with no other eligible node stays where it is, still running.
 
-:::warning Drain does not do a final volume sync
-Drain re-assigns instances; it does not use the move pipeline (stop, final sync, verify, switch, start). If a drained node is the primary for a replicated volume, writes made since the last sync may be lost when the new node takes over. {/* TODO verify: derived from the code, not tested on a live cluster. Needs a test with a long sync_interval and a drained primary. */} For stateful services, move each instance first with **Move** on its page (this does a final sync), then drain. The CLI help text "Keeps running what it has" for drain is wrong.
-:::
+Instances that mount volumes are moved with the same pipeline as **Move** (stop, final sync, verify, switch, start), so no writes since the last periodic sync are lost. One migration at a time runs per instance; if a migration fails the instance stays on the drained node until you retry or dismiss it on its page. Instances without volumes, and instances on a node that is already unreachable, are simply re-assigned.
 
 ## Remove a node
 

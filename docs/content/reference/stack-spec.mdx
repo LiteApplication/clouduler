@@ -20,11 +20,7 @@ Three rules to know before the tables:
 Validation runs in two layers.
 
 1. **Syntax** runs on every save in the web UI and on every deploy. It needs no cluster: names, shapes, port collisions, dependency cycles, and so on.
-2. **Cluster checks** ask whether the network, drive and node you named actually exist and whether the service can be placed. The CLI (`clouduler stack deploy`) and the git-backup pull run them.
-
-<Quirk title="The web UI deploy does not run the cluster checks" severity="warn">
-Currently the web UI and the HTTP API (and therefore the MCP tools) only parse the stack. A spec that names a drive, network or node pin that does not exist still shows "Spec is valid" and deploys. The problem appears later, as a placement reason on the stack's Placement tab (for example `atlas does not implement drive bogus`). If you want the full check before anything is stored, deploy from the CLI.
-</Quirk>
+2. **Cluster checks** ask whether the network, drive and node you named actually exist and whether the service can be placed. The web UI, the HTTP API (and the MCP tools), the CLI (`clouduler stack deploy`) and the git-backup pull all run them, and refuse the deploy with a message when a drive, network or node pin does not exist.
 
 Because the UI errors come back without a path, the message carries the whole location, for example `invalid config at services.web.env_file: ...`, and the editor does not highlight a line for it.
 

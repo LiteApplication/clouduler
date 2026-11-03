@@ -95,9 +95,7 @@ Notes:
 - Exit status 78 is not restarted. A node that was removed from the cluster while it was down wipes its own `secrets.key`, `node.key` and `raft/` on next boot, then exits 78.
 - Logs go to the journal: `journalctl -u clouduler -f`.
 
-<Quirk title="The unit names a group that nothing creates" severity="danger">
-The unit has `Group=clouduler`, but the code that would create that group is disabled in the daemon, and `init` does not call it either. On a machine without the group, systemd may refuse to start the service (`Failed to determine group credentials`, status 216/GROUP). If `init --yes` fails at `enable --now`, create it with `sudo groupadd --system clouduler` and start the unit again. {/* TODO verify: not reproduced on a clean machine; check the current release. */}
-</Quirk>
+The `clouduler` system group is created for you (idempotently, with `groupadd -r -f`, falling back to `addgroup --system`) when `init` writes the unit, and again each time the daemon starts. This works on Arch, Debian and Raspberry Pi OS. The daemon also sets the config file, key files and data directory to `root:clouduler`, so members of the group can use the CLI without sudo.
 
 ## What to back up
 

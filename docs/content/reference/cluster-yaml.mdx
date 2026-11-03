@@ -326,7 +326,7 @@ Network names are referenced by nodes, `web.network`, `proxy.auth.networks` and 
 
 <OptionTable rows={[
   {"key": "failover", "type": "object", "default": "all defaults", "reload": "n/a", "description": "Failure handling. See Failover for how the timers interact."},
-  {"key": "failover.node_timeout", "type": "duration", "default": "30s", "reload": "restart", "description": "How long a node may be unreachable before the leader reschedules its work.", "quirks": "The UI shows no restart notice."},
+  {"key": "failover.node_timeout", "type": "duration", "default": "60s", "reload": "restart", "description": "How long a node may be unreachable before the leader reschedules its work.", "quirks": "The UI shows no restart notice."},
   {"key": "failover.fence_timeout", "type": "duration", "default": "15s", "reload": "restart", "description": "How long a node may lack raft quorum before it stops its own containers.", "quirks": "Must be shorter than node_timeout and longer than probe_interval."},
   {"key": "failover.probe_interval", "type": "duration", "default": "5s", "reload": "restart", "description": "How often the leader probes nodes. Also the cadence of the config watcher and the roster pass.", "quirks": "Must be shorter than fence_timeout and not zero."},
   {"key": "failover.stop_grace", "type": "duration", "default": "30s", "reload": "live", "description": "How long a container gets to stop cleanly before it is killed, unless the service sets stop_grace_period. Maximum 600s, not zero.", "quirks": "fence_timeout + stop_grace must stay below node_timeout, otherwise the daemon logs a warning. The defaults trigger it."},
@@ -334,7 +334,7 @@ Network names are referenced by nodes, `web.network`, `proxy.auth.networks` and 
 
 
 <Quirk title="Failover margin warning" severity="warn">
-`fence_timeout + stop_grace` must stay below `node_timeout`. If it does not, a fence may still be stopping containers when the leader reschedules them, which can give one volume two writers. The daemon logs: `failover.fence_timeout (15s) plus the default stop grace (30s) reaches node_timeout (30s): a fence may still be stopping containers when the leader reschedules them, giving one volume two writers. Raise node_timeout or lower fence_timeout or the stop grace`. The defaults trigger this warning. Setting `node_timeout: 60s` clears it. It is a warning, not an error. A second warning naming the "longest service stop_grace_period" is logged when a service's own `stop_grace_period` exceeds `failover.stop_grace` and breaks the same margin.
+`fence_timeout + stop_grace` must stay below `node_timeout`. If it does not, a fence may still be stopping containers when the leader reschedules them, which can give one volume two writers. The daemon logs: `failover.fence_timeout (15s) plus the default stop grace (30s) reaches node_timeout (45s): a fence may still be stopping containers when the leader reschedules them, giving one volume two writers. Raise node_timeout or lower fence_timeout or the stop grace`. The defaults (15s + 30s inside 60s) do not trigger it, and `clouduler check` reports it too. It is a warning, not an error. A second warning naming the "longest service stop_grace_period" is logged when a service's own `stop_grace_period` exceeds `failover.stop_grace` and breaks the same margin.
 </Quirk>
 
 ### secrets

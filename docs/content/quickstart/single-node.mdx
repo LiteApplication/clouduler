@@ -96,14 +96,6 @@ Finally, the folder that will back my first replicated drive. I call the drive `
 
 Pick a path on a disk with room. It does not have to be this one.
 
-### The `clouduler` group
-
-The systemd unit that `init` writes contains `Group=clouduler`, and as far as I can tell from the code nothing creates that group. On a clean machine the service may fail to start. Creating the group first is harmless:
-
-<Cmd>{`sudo groupadd -f clouduler`}</Cmd>
-
-{/* TODO verify: reproduce on a clean VM whether systemd really refuses to start the unit without the group (expected error: "Failed to determine group credentials", exit status 216/GROUP). Remove this step if the group is created automatically. */}
-
 ## 2. Install Clouduler
 
 Clouduler is one static-ish binary that is both the CLI and the daemon. I find out which one I need.
@@ -182,16 +174,6 @@ No unit was installed. I would have to start the daemon by hand, which this page
 
 **What I should see:** `Active: active (running)`.
 
-:::warning If you see `Failed to determine group credentials` or `status=216/GROUP`
-That is the `Group=clouduler` problem from step 1. Create the group and start the service again:
-
-```bash
-sudo groupadd -f clouduler
-sudo systemctl enable --now clouduler.service
-```
-
-{/* TODO verify: not reproduced, see the note in step 1 */}
-:::
 
 :::warning If the service is `failed` for another reason
 Read the log with `sudo journalctl -u clouduler -b --no-pager | tail -50`. The most common causes are Docker not running and another program already holding port 80 or 443 (`sudo ss -ltnp | grep -E ':(80|443) '`). If something else owns those ports, the proxy silently cannot bind them.

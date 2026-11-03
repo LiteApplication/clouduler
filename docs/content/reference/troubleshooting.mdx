@@ -27,7 +27,7 @@ In the web UI the same information is on the dashboard problem list and on each 
 | The page does not load at all | Check that the name resolves (`ping cloud.<your internal domain>`) and that port 8443 answers: `curl -k https://<node ip>:8443`. A host firewall on the node must allow 8443/tcp. |
 | Connection refused or times out on 80/443 | `sudo ss -ltnp \| grep -E ':(80\|443) '` should show `clouduler`. If another program holds 80 or 443 the proxy cannot listen, but the daemon keeps running (look for `proxy listener stopped` in `journalctl -u clouduler`). Stop the other program. |
 | The service is `failed` | `sudo journalctl -u clouduler -b --no-pager \| tail -50`. Usual causes: Docker not running (`Cannot connect to the Docker daemon`, check `sudo systemctl status docker`) or ports 80/443 taken. |
-| `Failed to determine group credentials` or `status=216/GROUP` | The unit names `Group=clouduler` and nothing creates it. Run `sudo groupadd -f clouduler` then `sudo systemctl enable --now clouduler.service`. |
+| `Failed to determine group credentials` or `status=216/GROUP` | The `clouduler` group is missing. Current releases create it when `init` writes the unit; on a unit written by an older release, run `sudo groupadd -f clouduler` then `sudo systemctl enable --now clouduler.service`. |
 | `this machine is not running systemd` | `init` installed no unit; you have to start the daemon yourself. |
 | Browser certificate warning | Expected until ACME issues a certificate; the proxy serves a self-signed fallback (`no issued certificate yet, serving a self-signed fallback`). See [Certificate not issued](#a-certificate-is-not-issued). |
 | 403 on a route | Routes on a subnetted network only answer clients whose address is inside the subnet; a VPN client outside it gets 403. Publish through a public network instead. See [502 and 403 from the proxy](#502-and-403-from-the-proxy). |
@@ -114,7 +114,7 @@ Open the stack's **Placement** tab. It lists, per node, the rule that rejected i
 | Rejects every node after a config change | Stacks are stored separately from `cluster.yaml`. Removing a drive or network from the config can make a stored stack unplaceable without any change to the stack. |
 | `cannot place instance` in the log | An instance on a drained or unreachable node with nowhere else to go stays where it is. |
 | A service started on an unexpected node | Placement does not prefer the primary of a volume. A usable non-primary copy qualifies. |
-| A restarted container moved | `stack restart` and the UI's **Restart** unassign and let the scheduler place again. A stopped stack stays stopped. |
+| A restarted container moved | The UI's per-instance **Restart** re-rolls placement and can pick another node. `clouduler stack restart` keeps each instance where it is. A stopped stack stays stopped. |
 | A flapping service keeps moving | Crash-loop rescheduling moves a repeatedly killed instance, with a 30 minute memory. Each move is a full stop, sync and start. |
 
 Other deploy errors:

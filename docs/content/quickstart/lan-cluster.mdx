@@ -97,10 +97,7 @@ I repeat the preparation from [quick start 1](/docs/quickstart/single-node#1-pre
 [arch] sudo pacman -S --needed docker iproute2 iptables ethtool restic
 sudo systemctl enable --now docker
 sudo modprobe vxlan
-sudo groupadd -f clouduler
 sudo mkdir -p /srv/clouduler/fast`}</Cmd>
-
-{/* TODO verify: groupadd step, see single-node quick start (the code never creates the group, so the step stays) */}
 
 Then I install the same binary on each (see [quick start 1, step 2](/docs/quickstart/single-node#2-install-clouduler)). As there, I can compile it myself or download the prebuilt binary from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest). Then I check it.
 
@@ -324,7 +321,7 @@ Then I pull the power on that node (or `sudo poweroff` if I'm squeamish). From a
 | After the power-off | What happens |
 |---|---|
 | a few seconds | nothing visible yet; the node just stops answering |
-| about 30 s | the leader decides the node is unreachable (`failover.node_timeout` is 30 s) and `status` shows it as `UNREACHABLE` (the UI badge reads **Unreachable**) |
+| about 60 s | the leader decides the node is unreachable (`failover.node_timeout` is 60 s) and `status` shows it as `UNREACHABLE` (the UI badge reads **Unreachable**) |
 | a bit later | the scheduler places Vaultwarden on a surviving node, which pulls the image if it is not cached |
 | a minute or so in total | `clouduler stack unhealthy` goes quiet and the app answers again |
 

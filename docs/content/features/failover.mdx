@@ -44,14 +44,14 @@ sequenceDiagram
   Note over C: T0 cut off
   C->>C: ~1.5s: no quorum, fence clock starts
   C->>C: ~16-22s: fence fires, stops containers
-  L->>L: ~25-35s: no ping for node_timeout, mark unreachable
+  L->>L: ~55-65s: no ping for node_timeout, mark unreachable
   L->>B: assign cirrus instances, volumes become primary on boreas
   B->>B: pull image if needed, start containers
 ```
 
 1. **Quorum lost on cirrus.** Within about 1.5 seconds it notices it cannot hear the leader.
 2. **Fence clock starts.** Nothing is stopped yet. A brief blip that recovers resets the clock.
-3. **Leader probes fail.** Once no ping has succeeded for `node_timeout` (30s), the leader marks cirrus unreachable (log: `unreachable, rescheduling its containers`).
+3. **Leader probes fail.** Once no ping has succeeded for `node_timeout` (60s), the leader marks cirrus unreachable (log: `unreachable, rescheduling its containers`).
 4. **The scheduler moves the work.** Each instance goes to the least-loaded node that passes every check: schedulable, reachable, holds a usable copy of each replicated volume, has the networks and ports needed. See [Placement](/docs/features/placement).
 5. **Volumes follow.** The new node becomes the volume's primary and its generation increases.
 6. **The new node starts the containers**, pulling the image first if needed.
@@ -129,16 +129,16 @@ Rules: `probe_interval < fence_timeout < node_timeout`, all enforced as errors.
 
 ### The fence margin warning
 
-With the shipped defaults the daemon logs this at every start and the UI shows the same alert:
+The defaults (`fence_timeout` 15s, `stop_grace` 30s, `node_timeout` 60s) leave a margin, so a stock config logs nothing. The daemon (and `clouduler check`, and the UI alert) warns when `fence_timeout + stop_grace >= node_timeout`:
 
-> failover.fence_timeout (15s) plus the default stop grace (30s) reaches node_timeout (30s): a fence may still be stopping containers when the leader reschedules them, giving one volume two writers. Raise node_timeout or lower fence_timeout or the stop grace
+> failover.fence_timeout (15s) plus the default stop grace (30s) reaches node_timeout (45s): a fence may still be stopping containers when the leader reschedules them, giving one volume two writers. Raise node_timeout or lower fence_timeout or the stop grace
 
-It fires when `fence_timeout + stop_grace >= node_timeout`. It is a worst-case warning, not a sign that something is broken: it assumes a container uses its full stop grace. Containers that stop quickly are down long before the reschedule. It matters if a container ignores SIGTERM, because it can still be running (and writing) when the new copy starts. To silence it, raise `node_timeout` (for example `60s`) or lower `fence_timeout` or `stop_grace`. If a service has `stop_grace_period: 2m`, `node_timeout` needs to be at least about 2m15s for the daemon to stay quiet; the daemon checks the longest per-service value too. The warning ignores a further 10 seconds of slack a fence stop may take. A longer `node_timeout` also makes real failover slower.
+It is a worst-case warning, not a sign that something is broken: it assumes a container uses its full stop grace. It matters if a container ignores SIGTERM, because it can still be running (and writing) when the new copy starts. To silence it, raise `node_timeout` or lower `fence_timeout` or `stop_grace`. If a service has `stop_grace_period: 2m`, `node_timeout` needs to be at least about 2m15s for the daemon to stay quiet; the daemon checks the longest per-service value too (that per-service check needs the deployed stacks, so only the daemon log and UI report it, not `clouduler check`). The warning ignores a further 10 seconds of slack a fence stop may take. A longer `node_timeout` also makes real failover slower.
 
 ## Options
 
 <OptionTable rows={[
-  {key: 'failover.node_timeout', type: 'duration', default: '30s', reload: 'restart', description: 'How long the leader lets a node stay silent before marking it unreachable and rescheduling its instances.', quirks: 'Must be greater than fence_timeout, else: invalid config at failover.fence_timeout: must be shorter than node_timeout (...), or a container can run on two nodes at once.'},
+  {key: 'failover.node_timeout', type: 'duration', default: '60s', reload: 'restart', description: 'How long the leader lets a node stay silent before marking it unreachable and rescheduling its instances.', quirks: 'Must be greater than fence_timeout, else: invalid config at failover.fence_timeout: must be shorter than node_timeout (...), or a container can run on two nodes at once.'},
   {key: 'failover.fence_timeout', type: 'duration', default: '15s', reload: 'restart', description: 'How long a node may lack quorum before it stops its own containers.', quirks: 'Must be greater than probe_interval, else: invalid config at failover.probe_interval: must be shorter than fence_timeout (...), or a node cannot be missed before it fences.'},
   {key: 'failover.probe_interval', type: 'duration', default: '5s', reload: 'restart', description: 'How often the leader probes each node and each node rechecks quorum. Also the per-probe timeout.', quirks: 'Error if zero: must not be zero.'},
   {key: 'failover.stop_grace', type: 'duration', default: '30s', reload: 'live', description: 'Default time a container gets to stop cleanly before it is killed.', quirks: 'Zero is an error (must not be zero). Maximum 600s (must be at most 600s). Sub-second values are truncated to whole seconds. Migrations use this value, not the service stop_grace_period.'},
@@ -149,11 +149,7 @@ The `failover` block rejects unknown keys, so a typo fails config loading with `
 
 ## Quirks and gotchas
 
-The failover timers `node_timeout` (30s), `fence_timeout` (15s) and `probe_interval` (5s by default) are read when the daemon starts; `stop_grace` (30s) is live. The leader's failure detector uses a 500 ms heartbeat and a 1.5 s quorum acknowledgement window, and the scheduler sweeps every 10 seconds.
-
-<Quirk title="The default config trips the margin warning">
-It is expected with defaults. Raise `node_timeout` to `60s` to quiet it, or accept it if your containers stop quickly.
-</Quirk>
+The failover timers `node_timeout` (60s), `fence_timeout` (15s) and `probe_interval` (5s by default) are read when the daemon starts; `stop_grace` (30s) is live. The leader's failure detector uses a 500 ms heartbeat and a 1.5 s quorum acknowledgement window, and the scheduler sweeps every 10 seconds.
 
 <Quirk title="Three timers need a restart" severity="info">
 `node_timeout`, `fence_timeout` and `probe_interval` are read once at daemon start; the UI does not say so. Restart the daemons after changing them. `stop_grace` is live.

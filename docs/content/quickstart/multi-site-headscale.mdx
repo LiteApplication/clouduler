@@ -101,12 +101,11 @@ Everything after step 1 is the same in both cases. The rest of the page says "th
 
 ## 1. Set up the first node on its current address
 
-I prepare and install `atlas` like in quick start 1 (packages, `modprobe vxlan`, the `clouduler` group, and the binary, which I either compile myself or take from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest)). I do not install tailscale yet. I do the other two machines later, in step 6.
+I prepare and install `atlas` like in quick start 1 (packages, `modprobe vxlan`, and the binary, which I either compile myself or take from the [latest release](https://github.com/LiteApplication/clouduler/releases/latest)). I do not install tailscale yet. I do the other two machines later, in step 6.
 
 Then I initialise the cluster. `--ip` must sit inside `--subnet`, so I cannot hand it the tailnet range yet (the node has no tailnet address). I pick a small temporary subnet that contains the address the node has today. I'll throw it away in step 5.
 
-<Cmd title="On the first node">{`sudo groupadd -f clouduler
-sudo mkdir -p /srv/clouduler/fast
+<Cmd title="On the first node">{`sudo mkdir -p /srv/clouduler/fast
 
 sudo clouduler init --yes \\
   --cluster-name {{cluster}} \\

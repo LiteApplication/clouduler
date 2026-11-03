@@ -133,7 +133,7 @@ Completion is dynamic. Node and drive names come from the config. Stack, instanc
 | `stack remove NAME [--via NODE]` | Removes the stack and everything it runs. No confirmation prompt. Output `removed NAME`. |
 | `stack stop NAME [--via NODE]` | Sets every instance to stopped. Assignments are kept. |
 | `stack start NAME [--via NODE]` | Sets every instance back to running. |
-| `stack restart NAME [--via NODE]` | Unassigns each instance so the scheduler places it again. |
+| `stack restart NAME [--via NODE]` | Rebuilds each running instance's container on the node it already runs on. Placement is kept; a stopped stack stays stopped. |
 | `stack logs NAME [-f] [-n N] [--via NODE]` | Merged, timestamp-ordered logs of every instance. `-n` defaults to 200. |
 | `stack unhealthy [--node] [--uptime] [--placement] [--logs N] [--all] [--via NODE]` | Lists instances whose real state differs from the desired one, plus cluster warnings. |
 
@@ -312,10 +312,6 @@ clouduler capture site.web.0 -w /tmp/site.pcap -- port 443
 
 <Quirk title="Findings do not change the exit code" severity="warn">
 `status`, `stack unhealthy` and `rebalance` exit 0 whether or not they found problems. `logs` and `stack logs` print `INSTANCE: <error text>` (for example `node atlas answered 500`) to stderr for an unreachable instance and still exit 0. In scripts, search the text output for `unhealthy` or `issue(s)`.
-</Quirk>
-
-<Quirk title="stack restart may move instances" severity="warn">
-The help text says "in place", but the command unassigns each instance and the scheduler places it again, possibly on another node. A stopped stack stays stopped.
 </Quirk>
 
 <Quirk title="backup target set disables the target unless you pass --enabled" severity="danger">
