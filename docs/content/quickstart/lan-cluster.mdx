@@ -357,6 +357,21 @@ On the revived node you should see the daemon start and reconnect. From any node
 Pulling the plug is a failure. **Removing** a node (Nodes, Retire this node, then Remove, or `clouduler node remove`) is a decision, and a removed node wipes its own keys the next time it boots and refuses to rejoin. See [Node lifecycle](/docs/features/node-lifecycle).
 :::
 
+## 10. Turn on automatic updates
+
+Point the cluster at the official releases so it knows when a new version is out. In the UI, open **Settings**, then **Updates**, enter `https://github.com/LiteApplication/clouduler` as the **Repository** and click **Save release**. This can be set once from the UI. Leave **Automatic checks** on.
+
+Or put it in `cluster.yaml` (the same keys the UI writes):
+
+```yaml title="cluster.yaml"
+self_update:
+  release_url: https://github.com/LiteApplication/clouduler
+  check_updates: true
+  check_interval: 24h
+```
+
+Clouduler then looks for a newer release every day and shows it in **Settings**, **Updates**. Nothing is installed by itself: you click **Start update** when you are ready, and the nodes restart one at a time. See [Updates](/docs/features/updates).
+
 ## What happened under the hood
 
 1. Every node probes its peers. When the leader's probes to the dead node went unanswered for `node_timeout`, it marked the node unreachable in the replicated state.

@@ -463,6 +463,21 @@ Internal ports are on the tailnet address; only the proxy is public.
 
 Full list: [Ports and firewall](/docs/reference/ports-and-firewall).
 
+## 8. Turn on automatic updates
+
+Point the cluster at the official releases so it knows when a new version is out. In the UI, open **Settings**, then **Updates**, enter `https://github.com/LiteApplication/clouduler` as the **Repository** and click **Save release**. This can be set once from the UI. Leave **Automatic checks** on.
+
+Or put it in `cluster.yaml` (the same keys the UI writes):
+
+```yaml title="cluster.yaml"
+self_update:
+  release_url: https://github.com/LiteApplication/clouduler
+  check_updates: true
+  check_interval: 24h
+```
+
+Clouduler then looks for a newer release every day and shows it in **Settings**, **Updates**. Nothing is installed by itself: you click **Start update** when you are ready, and the nodes restart one at a time. See [Updates](/docs/features/updates).
+
 ## After a blackout: recovering with clouduler emergency
 
 Read this section now, not after the power cut. It is the price of running Headscale on the cluster it connects.

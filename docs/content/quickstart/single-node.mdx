@@ -113,7 +113,7 @@ scp clouduler-x86_64-unknown-linux-gnu {{user}}@{{ip}}:/tmp/clouduler
 sudo install -m 0755 /tmp/clouduler /usr/local/bin/clouduler
 clouduler --version`}</Cmd>
 
-**What you should see:** `clouduler` and a version number. Once the cluster is running, you can also point its auto-update at `https://github.com/LiteApplication/clouduler` (the `self_update.release_url` key, set on the Updates page) so that new releases show up in Settings; see [Updates](/docs/features/updates). `clouduler --help` lists subcommands like `init`, `daemon`, `stack`, `status` and `check`.
+**What you should see:** `clouduler` and a version number. `clouduler --help` lists subcommands like `init`, `daemon`, `stack`, `status` and `check`.
 
 :::note Two copies of the binary
 `init` copies the running binary to `/usr/bin/clouduler`, and that is the copy the service runs. The one in `/usr/local/bin` stays. When you upgrade later, replace both (or let the cluster do it, see [Updates](/docs/features/updates)). do not re-run `init` for that: it refuses to run on a machine that already has a `cluster.yaml` unless you pass `--force`, which starts over. `which -a clouduler` shows both.
@@ -374,6 +374,21 @@ sudo clouduler logs vaultwarden -f`}</Cmd>
 `status` should end with `all clear: no unhealthy instances or cluster faults` and report `stacks 1 deployed, 1/1 instances assigned to run`. `logs` streams the container's output; Ctrl-C leaves it. In the UI, the **Overview** shows the same, and the **Nodes** page shows <code><Var plain name="hostname" fallback="atlas" /></code> as healthy.
 
 The files that matter, if you ever need them: the config is `/etc/clouduler/cluster.yaml` (edit it in the UI, not by hand, because edits are replicated), the cluster key is `/etc/clouduler/secrets.key`, the data directory is `/var/lib/clouduler`, and the drive is `/srv/clouduler/fast`.
+
+## 10. Turn on automatic updates
+
+Point the cluster at the official releases so it knows when a new version is out. In the UI, open **Settings**, then **Updates**, enter `https://github.com/LiteApplication/clouduler` as the **Repository** and click **Save release**. This can be set once from the UI. Leave **Automatic checks** on.
+
+Or put it in `cluster.yaml` (the same keys the UI writes):
+
+```yaml title="cluster.yaml"
+self_update:
+  release_url: https://github.com/LiteApplication/clouduler
+  check_updates: true
+  check_interval: 24h
+```
+
+Clouduler then looks for a newer release every day and shows it in **Settings**, **Updates**. Nothing is installed by itself: you click **Start update** when you are ready, and the nodes restart one at a time. See [Updates](/docs/features/updates).
 
 ## What you just learned
 
