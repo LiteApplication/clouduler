@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
+use crate::routes::check_cloudflare_proxy;
 use crate::server::AppState;
 use crate::static_routes::{new_id, StaticRouteRule, StaticRouteStore, STATIC_ROUTES_CONFIG};
 
@@ -51,6 +52,8 @@ struct StaticRouteBody {
     preserve_host: bool,
     #[serde(default, with = "humantime_serde::option")]
     response_timeout: Option<Duration>,
+    #[serde(default)]
+    cloudflare_proxy: bool,
 }
 
 fn default_true() -> bool {
@@ -79,6 +82,7 @@ async fn create(
         websockets: body.websockets,
         preserve_host: body.preserve_host,
         response_timeout: body.response_timeout,
+        cloudflare_proxy: body.cloudflare_proxy,
     };
     store.routes.push(route.clone());
     submit_store(&state, &store).await?;
@@ -109,6 +113,7 @@ async fn update(
     existing.websockets = body.websockets;
     existing.preserve_host = body.preserve_host;
     existing.response_timeout = body.response_timeout;
+    existing.cloudflare_proxy = body.cloudflare_proxy;
     let updated = existing.clone();
 
     submit_store(&state, &store).await?;
@@ -152,6 +157,7 @@ async fn validate(state: &AppState, body: &StaticRouteBody) -> Result<(), ApiErr
             body.network
         )));
     }
+    check_cloudflare_proxy(&cluster_config, &body.network, body.cloudflare_proxy)?;
     if let Some(node) = &body.node {
         if !cluster_config.nodes.contains_key(node) {
             return Err(ApiError::BadRequest(format!("no node named {node}")));
@@ -173,5 +179,8 @@ async fn submit_store(state: &AppState, store: &StaticRouteStore) -> Result<(), 
     if let Some(msg) = response.error {
         return Err(ApiError::Internal(msg));
     }
+    // Publish the (possibly changed) cloudflare_proxy flag without waiting
+    // out the dns loop's interval.
+    state.nudges.dns.notify_one();
     Ok(())
 }

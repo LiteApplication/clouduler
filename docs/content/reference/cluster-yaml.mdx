@@ -403,6 +403,7 @@ The API token is a sealed secret set from **Settings > Network > Cloudflare DNS*
   {"key": "proxy.auth.palette", "type": "enum", "default": "grape", "reload": "live", "description": "Colour set of the login page: grape, sunset, ocean or forest."},
   {"key": "proxy.auth.accent", "type": "hex colour", "default": "none", "reload": "live", "description": "Overrides the palette's main colour. The server accepts #rgb or #rrggbb.", "quirks": "The UI accepts only six digits; a three-digit accent set in the file shows as unset in the UI."},
   {"key": "proxy.auth.remember_ip", "type": "list of network names", "default": "[]", "reload": "live", "description": "Networks whose login page offers remember this IP address. Each must be listed in proxy.auth.networks and be internal, private or public."},
+  {"key": "proxy.auth.cloudflare_proxy", "type": "bool", "default": "false", "reload": "live", "description": "Publish the login portal hostname with Cloudflare's proxy (orange cloud) on, on the public networks in proxy.auth.networks.", "quirks": "Needs at least one public network in proxy.auth.networks. On only if no other route or redirect on the same hostname leaves it off."},
   {"key": "proxy.auth.remember_ip_ttl", "type": "duration", "default": "30d", "reload": "live", "description": "How long a remembered IP skips login, counted from the login that saved it. Must be greater than zero."},
 ]} />
 

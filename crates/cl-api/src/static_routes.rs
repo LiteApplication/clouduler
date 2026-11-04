@@ -50,6 +50,10 @@ pub struct StaticRouteRule {
     pub preserve_host: bool,
     #[serde(default, with = "humantime_serde::option")]
     pub response_timeout: Option<Duration>,
+    /// Publish this hostname's DNS records through Cloudflare's proxy. Public
+    /// networks only; see `cloudflare_proxied_hosts` in the daemon.
+    #[serde(default)]
+    pub cloudflare_proxy: bool,
 }
 
 fn default_true() -> bool {
@@ -98,6 +102,7 @@ mod tests {
             websockets: true,
             preserve_host: false,
             response_timeout: None,
+            cloudflare_proxy: false,
         }
     }
 

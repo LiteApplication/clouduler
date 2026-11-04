@@ -1169,44 +1169,44 @@ pub fn desired_dns_hosts(
     hosts
 }
 
-/// Hostnames (host, network) whose DNS records go out with Cloudflare's proxy
-/// on: at least one stack route sets `cloudflare_proxy` and nothing else
-/// answering that name (another route, a static route, a redirect, the login
-/// portal) leaves it off. Only public networks qualify.
-fn cloudflare_proxied_hosts(
-    cfg: &ClusterConfig,
-    state: &ClusterState,
-) -> BTreeSet<(String, String)> {
-    let mut on: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut off: BTreeSet<(String, String)> = BTreeSet::new();
+/// Fully qualified hostnames whose DNS records go out with Cloudflare's proxy
+/// on: at least one route sets `cloudflare_proxy` and nothing else answering
+/// that name (another stack route, a static route, a redirect, the login
+/// portal) leaves it off. Keyed by the qualified name, so `app` and
+/// `app.example.com` count as the same host. Only public networks qualify.
+fn cloudflare_proxied_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeSet<String> {
+    let mut on: BTreeSet<String> = BTreeSet::new();
+    let mut off: BTreeSet<String> = BTreeSet::new();
+    let mut mark = |host: &str, network: &str, proxied: bool| {
+        let Some(net) = cfg.networks.get(network) else {
+            return;
+        };
+        let fqdn = cl_config::qualify(host, net.domain.as_deref()).to_ascii_lowercase();
+        // A name on a non-public network can never be proxied, and says
+        // nothing about the same name published on a public one.
+        if net.kind != cl_config::NetworkKind::Public || !proxied {
+            off.insert(fqdn);
+        } else {
+            on.insert(fqdn);
+        }
+    };
     for placement in crate::placement::service_placements(state, cfg) {
         for entry in &placement.extensions.proxy {
-            let key = (entry.host.clone(), entry.network.clone());
-            if entry.cloudflare_proxy {
-                on.insert(key);
-            } else {
-                off.insert(key);
-            }
+            mark(&entry.host, &entry.network, entry.cloudflare_proxy);
         }
     }
     for entry in StaticRouteStore::load(state).routes {
-        off.insert((entry.host, entry.network));
+        mark(&entry.host, &entry.network, entry.cloudflare_proxy);
     }
     for rule in RedirectStore::load(state).rules {
-        off.insert((rule.host, rule.network));
+        mark(&rule.host, &rule.network, rule.cloudflare_proxy);
     }
     if let Some(auth) = &cfg.proxy.auth {
         for network in &auth.networks {
-            off.insert((auth.host.clone(), network.clone()));
+            mark(&auth.host, network, auth.cloudflare_proxy);
         }
     }
-    on.retain(|(host, network)| {
-        !off.contains(&(host.clone(), network.clone()))
-            && cfg
-                .networks
-                .get(network)
-                .is_some_and(|n| n.kind == cl_config::NetworkKind::Public)
-    });
+    on.retain(|fqdn| !off.contains(fqdn));
     on
 }
 
@@ -1254,7 +1254,6 @@ fn desired_records(
         if !publishes_dns(cfg, &network) {
             continue;
         }
-        let orange = proxied.contains(&(host.clone(), network.clone()));
         for node_name in &nodes {
             let Some(node) = cfg.nodes.get(node_name) else {
                 continue;
@@ -1263,7 +1262,7 @@ fn desired_records(
                 continue;
             };
             for r in &mut records {
-                r.proxied = orange;
+                r.proxied = proxied.contains(&r.fqdn.to_ascii_lowercase());
             }
             push_new(&mut out, &mut seen, records);
         }
@@ -1945,6 +1944,7 @@ services:
                 target: "https://new.example.com".into(),
                 preserve_path: true,
                 status: 301,
+                cloudflare_proxy: false,
             }],
         };
         state.configs.insert(
@@ -1987,6 +1987,7 @@ services:
             websockets: true,
             preserve_host: false,
             response_timeout: None,
+            cloudflare_proxy: false,
         }
     }
 
@@ -2064,6 +2065,7 @@ services:
                 target: "https://new.example.com".into(),
                 preserve_path: true,
                 status: 301,
+                cloudflare_proxy: false,
             }],
         };
         state.configs.insert(
@@ -2127,6 +2129,27 @@ services:
         );
         let mixed = desired_records(&cfg(), None, &state);
         assert!(mixed.iter().filter(|r| r.fqdn == "blog.example.com").all(|r| !r.proxied));
+    }
+
+    /// Static routes and redirects join the same all-or-nothing rule as stack
+    /// routes, and a bare label matches its qualified spelling.
+    #[test]
+    fn cloudflare_proxy_covers_static_routes_and_redirects() {
+        let mut route = static_route("ext", "wan", "192.168.1.50:9100");
+        route.cloudflare_proxy = true;
+        let state = with_static_routes(state_with(SPEC, 0), vec![route]);
+        let on = desired_records(&cfg(), None, &state);
+        let ext: Vec<_> = on.iter().filter(|r| r.fqdn == "ext.example.com").collect();
+        assert!(!ext.is_empty() && ext.iter().all(|r| r.proxied), "{ext:?}");
+
+        // The same name spelled qualified by a route that leaves it off wins.
+        let mut other = static_route("ext.example.com", "wan", "192.168.1.51:9100");
+        other.cloudflare_proxy = false;
+        let mut route = static_route("ext", "wan", "192.168.1.50:9100");
+        route.cloudflare_proxy = true;
+        let state = with_static_routes(state_with(SPEC, 0), vec![route, other]);
+        let mixed = desired_records(&cfg(), None, &state);
+        assert!(mixed.iter().filter(|r| r.fqdn == "ext.example.com").all(|r| !r.proxied));
     }
 
     /// A network switched to `publish_dns: false` keeps its hostnames out of

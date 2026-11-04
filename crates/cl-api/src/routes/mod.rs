@@ -31,7 +31,28 @@ pub mod wireguard;
 
 use axum::Router;
 
+use crate::error::ApiError;
 use crate::server::AppState;
+
+/// Rejects `cloudflare_proxy` on a network that is not public: Cloudflare can
+/// only front an address the open internet reaches.
+pub(crate) fn check_cloudflare_proxy(
+    cfg: &cl_config::ClusterConfig,
+    network: &str,
+    requested: bool,
+) -> Result<(), ApiError> {
+    if requested
+        && !cfg
+            .networks
+            .get(network)
+            .is_some_and(|n| n.kind == cl_config::NetworkKind::Public)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "cloudflare_proxy needs a public network, and {network} is not one"
+        )));
+    }
+    Ok(())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()

@@ -29,6 +29,10 @@ pub struct RedirectRule {
     pub preserve_path: bool,
     /// 301, 302, 307 or 308.
     pub status: u16,
+    /// Publish this hostname's DNS records through Cloudflare's proxy. Public
+    /// networks only; see `cloudflare_proxied_hosts` in the daemon.
+    #[serde(default)]
+    pub cloudflare_proxy: bool,
 }
 
 impl RedirectRule {
@@ -89,6 +93,7 @@ mod tests {
             target: "https://new.example.com".to_string(),
             preserve_path: false,
             status: 301,
+            cloudflare_proxy: false,
         }
     }
 

@@ -365,14 +365,14 @@ export const api = {
   setProxyAuthClientSecret: (clientSecret: string) =>
     put<void>('/api/proxy-auth/client-secret', { client_secret: clientSecret }),
 
-  // redirects: UI-managed, not part of cluster.yaml — see docs/proxy.md
+  // redirects: UI-managed, not part of cluster.yaml — see https://clouduler.liteapp.fr/docs/features/proxy-and-tls
   listRedirects: () => get<RedirectRule[]>('/api/redirects'),
   createRedirect: (body: Omit<RedirectRule, 'id'>) => post<RedirectRule>('/api/redirects', body),
   updateRedirect: (id: string, body: Omit<RedirectRule, 'id'>) =>
     put<RedirectRule>(`/api/redirects/${encodeURIComponent(id)}`, body),
   removeRedirect: (id: string) => del<void>(`/api/redirects/${encodeURIComponent(id)}`),
 
-  // static routes: UI-managed, not part of cluster.yaml — see docs/proxy.md
+  // static routes: UI-managed, not part of cluster.yaml — see https://clouduler.liteapp.fr/docs/features/proxy-and-tls
   listStaticRoutes: () => get<StaticRouteRule[]>('/api/static-routes'),
   createStaticRoute: (body: Omit<StaticRouteRule, 'id'>) => post<StaticRouteRule>('/api/static-routes', body),
   updateStaticRoute: (id: string, body: Omit<StaticRouteRule, 'id'>) =>

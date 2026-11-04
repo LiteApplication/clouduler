@@ -1,6 +1,6 @@
 // /proxy/:tab. Routes is what the proxy serves right now (read-only); the
 // other tabs hold the UI-managed rules, which apply immediately and live
-// outside cluster.yaml (see docs/proxy.md).
+// outside cluster.yaml (see https://clouduler.liteapp.fr/docs/features/proxy-and-tls).
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
@@ -24,6 +24,7 @@ function useConfigNames() {
   const [networks, setNetworks] = useState<string[]>([]);
   const [wireguard, setWireguard] = useState<string[]>([]);
   const [nodes, setNodes] = useState<string[]>([]);
+  const [publicNets, setPublicNets] = useState<string[]>([]);
   useEffect(() => {
     api
       .getConfiguration()
@@ -31,10 +32,11 @@ function useConfigNames() {
         setNetworks(Object.keys(c.networks));
         setWireguard(Object.entries(c.networks).filter(([, n]) => n.type === 'wireguard').map(([k]) => k));
         setNodes(Object.keys(c.nodes));
+        setPublicNets(Object.entries(c.networks).filter(([, n]) => n.type === 'public').map(([k]) => k));
       })
       .catch(() => {});
   }, []);
-  return { networks, wireguard, nodes };
+  return { networks, wireguard, nodes, publicNets };
 }
 
 /** `null` means the daemon does not have the route list (older build). */
@@ -252,7 +254,7 @@ function RuleTab<R extends { id: string }, D>({
 type TabProps = { open: boolean; onClose: () => void; onOpen: () => void };
 
 function RedirectsTab(p: TabProps) {
-  const { networks } = useConfigNames();
+  const { networks, publicNets } = useConfigNames();
   type D = Omit<RedirectRule, 'id'>;
   return (
     <RuleTab<RedirectRule, D>
@@ -260,7 +262,7 @@ function RedirectsTab(p: TabProps) {
       noun="redirect"
       emptyText="No redirects yet."
       list={api.listRedirects}
-      blank={() => ({ host: '', network: networks[0] ?? '', path_prefix: null, target: '', preserve_path: false, status: 301 })}
+      blank={() => ({ host: '', network: networks[0] ?? '', path_prefix: null, target: '', preserve_path: false, status: 301, cloudflare_proxy: false })}
       toDraft={({ id: _id, ...d }) => d}
       save={(id, d) => (id ? api.updateRedirect(id, d) : api.createRedirect(d))}
       remove={api.removeRedirect}
@@ -270,6 +272,7 @@ function RedirectsTab(p: TabProps) {
         { key: 'net', header: 'Network', render: (r) => r.network },
         { key: 'to', header: 'Target', mono: true, render: (r) => `${r.target}${r.preserve_path ? '/…' : ''}` },
         { key: 'st', header: 'Status', render: (r) => r.status },
+        { key: 'cf', header: 'Cloudflare', render: (r) => (r.cloudflare_proxy ? 'proxied' : '—') },
       ]}
       form={(d, set) => (
         <>
@@ -278,6 +281,9 @@ function RedirectsTab(p: TabProps) {
           <TextField label="Path prefix" mono value={d.path_prefix ?? ''} onChange={(e) => set({ ...d, path_prefix: e.target.value || null })} />
           <TextField label="Target URL" mono placeholder="https://new.example.com" value={d.target} onChange={(e) => set({ ...d, target: e.target.value })} />
           <Toggle label="Append the original path and query" checked={d.preserve_path} onChange={(preserve_path) => set({ ...d, preserve_path })} />
+          {publicNets.includes(d.network) && (
+            <Toggle label="Cloudflare proxy (orange cloud)" checked={!!d.cloudflare_proxy} onChange={(cloudflare_proxy) => set({ ...d, cloudflare_proxy })} />
+          )}
           <SelectField
             id="redirect-status"
             label="Status"
@@ -292,7 +298,7 @@ function RedirectsTab(p: TabProps) {
 }
 
 function StaticTab(p: TabProps) {
-  const { networks, nodes } = useConfigNames();
+  const { networks, nodes, publicNets } = useConfigNames();
   type D = Omit<StaticRouteRule, 'id'>;
   return (
     <RuleTab<StaticRouteRule, D>
@@ -300,7 +306,7 @@ function StaticTab(p: TabProps) {
       noun="static backend"
       emptyText="No static backends yet."
       list={api.listStaticRoutes}
-      blank={() => ({ host: '', network: networks[0] ?? '', node: null, backend: '', path_prefix: null, tls: true, websockets: true, preserve_host: false, max_body_size: null, response_timeout: null })}
+      blank={() => ({ host: '', network: networks[0] ?? '', node: null, backend: '', path_prefix: null, tls: true, websockets: true, preserve_host: false, max_body_size: null, response_timeout: null, cloudflare_proxy: false })}
       toDraft={({ id: _id, ...d }) => d}
       save={(id, d) => (id ? api.updateStaticRoute(id, d) : api.createStaticRoute(d))}
       remove={api.removeStaticRoute}
@@ -311,6 +317,7 @@ function StaticTab(p: TabProps) {
         { key: 'node', header: 'Node', render: (r) => r.node ?? 'any' },
         { key: 'be', header: 'Backend', mono: true, render: (r) => r.backend },
         { key: 'tls', header: 'TLS', render: (r) => (r.tls ? 'on' : 'off') },
+        { key: 'cf', header: 'Cloudflare', render: (r) => (r.cloudflare_proxy ? 'proxied' : '—') },
       ]}
       form={(d, set) => (
         <>
@@ -322,6 +329,9 @@ function StaticTab(p: TabProps) {
           <Toggle label="TLS" checked={d.tls} onChange={(tls) => set({ ...d, tls })} />
           <Toggle label="Allow websockets" checked={d.websockets} onChange={(websockets) => set({ ...d, websockets })} />
           <Toggle label="Preserve client Host header" checked={d.preserve_host} onChange={(preserve_host) => set({ ...d, preserve_host })} />
+          {publicNets.includes(d.network) && (
+            <Toggle label="Cloudflare proxy (orange cloud)" checked={!!d.cloudflare_proxy} onChange={(cloudflare_proxy) => set({ ...d, cloudflare_proxy })} />
+          )}
           <TextField label="Max body size" mono placeholder="10MB" value={d.max_body_size ?? ''} onChange={(e) => set({ ...d, max_body_size: e.target.value || null })} hint="Blank means unlimited." />
           <TextField label="Response timeout" mono placeholder="30s" value={d.response_timeout ?? ''} onChange={(e) => set({ ...d, response_timeout: e.target.value || null })} hint="Blank waits forever." />
         </>

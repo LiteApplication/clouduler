@@ -820,6 +820,15 @@ pub struct ProxyAuthConfig {
     /// that saved it and independent of `session_ttl`.
     #[serde(with = "humantime_serde", default = "default_remember_ip_ttl")]
     pub remember_ip_ttl: Duration,
+    /// Publish the portal hostname's DNS records through Cloudflare's proxy
+    /// (orange cloud) on the public networks in `networks`; non-public ones
+    /// are unaffected. Needs at least one public network listed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cloudflare_proxy: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn default_remember_ip_ttl() -> Duration {

@@ -172,7 +172,11 @@ config file for each one would be annoying. A redirect rule is a source
 request gets a `Location` response built from the rule and never reaches a
 backend at all. Rules are stored in replicated state under a reserved config
 name (see `cl_api::redirects`) and exposed at `/api/redirects`
-(`GET`/`POST`/`PUT /{id}`/`DELETE /{id}`, admin only to write).
+(`GET`/`POST`/`PUT /{id}`/`DELETE /{id}`, admin only to write). A rule may
+set `cloudflare_proxy: true` (public networks only) to publish its hostname
+with Cloudflare's proxy on; static routes (`/api/static-routes`) take the same
+field. A hostname is proxied only when every route, static route, redirect
+and the login portal answering it sets it.
 
 ## Middlewares
 
@@ -215,6 +219,7 @@ proxy:
     accent: "#e5603c"      # optional: overrides the palette's main colour
     remember_ip: [public]  # networks whose login page offers "remember this IP address" (default: none)
     remember_ip_ttl: 30d   # how long a saved address skips the login (default 30d)
+    cloudflare_proxy: false # orange cloud on the portal host, public networks only (default false)
 
 # stack file
 proxy:

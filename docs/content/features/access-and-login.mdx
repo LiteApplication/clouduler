@@ -235,6 +235,8 @@ The route's network must be listed in `proxy.auth.networks`, otherwise validatio
 
 Cookies the gate uses (all HttpOnly, SameSite=Lax): `cl_proxy_portal` on the portal host, `cl_proxy_auth` on each protected app host, `cl_proxy_login` (10 minutes, sealed) while a login is in flight. Sign out of apps through `/.well-known/clouduler-logout` on the app's host, which ends the portal session, every app session handed out from it and any remembered address.
 
+**Cloudflare proxy.** On the **Service login** settings page, **Proxy the portal through Cloudflare** (`proxy.auth.cloudflare_proxy`, off by default) publishes the portal's DNS records with Cloudflare's proxy on. It only affects the public networks you listed, and the checkbox appears only when one is listed. It follows the same rule as route hostnames: see `cloudflare_proxy` in [Proxy and TLS](/docs/features/proxy-and-tls).
+
 **Remember this IP address.** Networks listed in `proxy.auth.remember_ip` offer a checkbox "Let visitors remember their IP address". A visitor whose address is inside that network is then trusted for `remember_ip_ttl` (default 30 days). Everyone sharing that address, such as everyone behind a NAT router, is let in too. Off by default.
 
 <Quirk title="Internal callers skip the login" severity="warn">
@@ -333,6 +335,7 @@ Nodes do not use logins. They prove they hold the **cluster key** (`/etc/cloudul
   {"key": "proxy.auth.palette", "type": "enum", "default": "grape", "reload": "live", "description": "Colour set of the login page: grape, sunset, ocean or forest."},
   {"key": "proxy.auth.accent", "type": "hex colour", "default": "none", "reload": "live", "description": "Overrides the palette's main colour. The server accepts #rgb or #rrggbb.", "quirks": "The UI accepts only six digits; a three-digit accent set in the file shows as unset in the UI."},
   {"key": "proxy.auth.remember_ip", "type": "list of network names", "default": "[]", "reload": "live", "description": "Networks whose login page offers remember this IP address. Each must be listed in proxy.auth.networks and be internal, private or public."},
+  {"key": "proxy.auth.cloudflare_proxy", "type": "bool", "default": "false", "reload": "live", "description": "Publish the login portal hostname with Cloudflare's proxy (orange cloud) on, on the public networks in proxy.auth.networks.", "quirks": "Needs at least one public network in proxy.auth.networks. On only if no other route or redirect on the same hostname leaves it off."},
   {"key": "proxy.auth.remember_ip_ttl", "type": "duration", "default": "30d", "reload": "live", "description": "How long a remembered IP skips login, counted from the login that saved it. Must be greater than zero."},
 ]} />
 

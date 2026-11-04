@@ -103,7 +103,7 @@ These keys live in each `x-clouduler.proxy` entry. The complete stack file is de
   {key: "max_body_size", type: "size", default: "no limit", reload: "n/a", description: "Largest request body, for example 10MB. Bigger requests get 413 and never reach the container.", quirks: "Set it on anything exposed to the internet."},
   {key: "response_timeout", type: "duration", default: "30s", reload: "n/a", description: "How long the backend may take to respond before 504.", quirks: "Error text: ADDR did not respond within LIMIT. The doc comment in the code says an unset value waits forever; the proxy applies 30s."},
   {key: "preserve_host", type: "bool", default: "false", reload: "n/a", description: "Forward the visitor's Host header instead of the backend's address.", quirks: "Turn it on for apps that build absolute URLs."},
-  {key: "cloudflare_proxy", type: "bool", default: "false", reload: "n/a", description: "Publish the hostname with Cloudflare's proxy (orange cloud) on.", quirks: "Public networks only. On only if every route behind the host sets it; any route, static route or redirect on the same host without it keeps the record DNS-only."},
+  {key: "cloudflare_proxy", type: "bool", default: "false", reload: "n/a", description: "Publish the hostname with Cloudflare's proxy (orange cloud) on.", quirks: "Public networks only. On only if every route behind the host sets it; any route, static backend, redirect or login portal on the same host without it keeps the record DNS-only. Static backends, redirects and the login portal have their own toggle."},
   {key: "sticky", type: "bool", reload: "n/a", description: "Pin a visitor to one backend with the cl_sticky cookie."},
   {key: "middlewares", type: "list", reload: "n/a", description: "Named middlewares: redirect_https, strip_prefix, redirect_regex, headers, cors, authenticated.", quirks: "redirect_https is accepted but redundant: the HTTP listener already redirects (308) to HTTPS."},
 ]} />
@@ -205,7 +205,7 @@ HTTPS negotiates HTTP/1.1 only; HTTP/2 is not offered. Websockets are allowed by
 <UiCli>
 <UiCli.Ui>
 
-On **Proxy**, the **Redirects** tab sends a hostname to another URL (**New redirect**: host, target, status 301, 302, 307 or 308). **Static backends** publishes something Clouduler does not run, like another box on your LAN (**New static backend**: host and `host:port`). Both apply immediately, with no restart. The **Ingress rules** tab is for WireGuard ports (see [Networking](/docs/features/networking)).
+On **Proxy**, the **Redirects** tab sends a hostname to another URL (**New redirect**: host, target, status 301, 302, 307 or 308). **Static backends** publishes something Clouduler does not run, like another box on your LAN (**New static backend**: host and `host:port`). Both apply immediately, with no restart. Both forms have a **Cloudflare proxy (orange cloud)** toggle (`cloudflare_proxy` in the API), shown only when the chosen network is public; saving wakes the DNS reconcile so the record flips within seconds. The login portal has its own switch, see [Access and login](/docs/features/access-and-login). A hostname is proxied only when every stack route, static backend, redirect and portal answering it asks for it, and names are compared fully qualified (`app` and `app.example.com` are one host). The **Ingress rules** tab is for WireGuard ports (see [Networking](/docs/features/networking)).
 
 <UiScreen scenario="lan-3-nodes" route="/proxy/redirects" caption="Proxy, Redirects." alt="Redirect rules" />
 
@@ -219,7 +219,7 @@ No CLI. Use the web UI or the HTTP API (`/api/redirects`, `/api/redirects/{id}`,
 </UiCli.Cli>
 </UiCli>
 
-Redirect errors you may see: `host must not be empty`, `target must not be empty`, `status must be 301, 302, 307 or 308, got N`. Static backend errors: `backend must be host:port`, `N is not a valid port`, `no network named X`, `no node named X`.
+Redirect errors you may see: `host must not be empty`, `target must not be empty`, `status must be 301, 302, 307 or 308, got N`, `cloudflare_proxy needs a public network, and X is not one`. Static backend errors: `backend must be host:port`, `N is not a valid port`, `no network named X`, `no node named X`.
 
 ## Options
 

@@ -2025,6 +2025,18 @@ export function ServiceLoginSection({ draft, setDraft, disabled }: SectionProps)
             configKey="proxy.auth.host"
             disabled={disabled}
           />
+          {a.networks.some((n) => draft.networks[n]?.type === 'public') && (
+            <CheckboxField
+              id="svclogin-cloudflare-proxy"
+              label="Proxy the portal through Cloudflare"
+              value={!!a.cloudflare_proxy}
+              onChange={(cloudflare_proxy) => patch({ cloudflare_proxy })}
+              hint="Publishes the portal's DNS records with Cloudflare's proxy (orange cloud) on, on the listed public networks."
+              help="Only public networks are affected. The portal host is a single name, so the whole portal is either proxied or not; another route or redirect on the same hostname that leaves its own Cloudflare proxy off keeps the record DNS-only."
+              configKey="proxy.auth.cloudflare_proxy"
+              disabled={disabled}
+            />
+          )}
           <div className="field">
             <label>Networks</label>
             <span className="field-hint">
@@ -2307,7 +2319,11 @@ export function ProxySection({ draft, setDraft, disabled }: SectionProps) {
       <DnsServerFields draft={draft} setDraft={setDraft} disabled={disabled} />
       <p className="field-hint">
         Static/external backends and redirects apply immediately from the Redirects page, since they live outside
-        cluster.yaml. See docs/proxy.md.
+        cluster.yaml. See the{' '}
+        <a href="https://clouduler.liteapp.fr/docs/features/proxy-and-tls" target="_blank" rel="noreferrer">
+          proxy documentation
+        </a>
+        .
       </p>
     </div>
   );

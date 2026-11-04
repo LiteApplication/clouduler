@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::redirects::{new_id, RedirectRule, RedirectStore, REDIRECTS_CONFIG};
+use crate::routes::check_cloudflare_proxy;
 use crate::server::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -37,6 +38,8 @@ struct RedirectBody {
     #[serde(default)]
     preserve_path: bool,
     status: u16,
+    #[serde(default)]
+    cloudflare_proxy: bool,
 }
 
 async fn create(
@@ -56,6 +59,7 @@ async fn create(
         target: body.target,
         preserve_path: body.preserve_path,
         status: body.status,
+        cloudflare_proxy: body.cloudflare_proxy,
     };
     store.rules.push(rule.clone());
     submit_store(&state, &store).await?;
@@ -81,6 +85,7 @@ async fn update(
     existing.target = body.target;
     existing.preserve_path = body.preserve_path;
     existing.status = body.status;
+    existing.cloudflare_proxy = body.cloudflare_proxy;
     let updated = existing.clone();
 
     submit_store(&state, &store).await?;
@@ -123,6 +128,7 @@ async fn validate(state: &AppState, body: &RedirectBody) -> Result<(), ApiError>
             body.network
         )));
     }
+    check_cloudflare_proxy(&cluster_config, &body.network, body.cloudflare_proxy)?;
     Ok(())
 }
 
@@ -139,5 +145,8 @@ async fn submit_store(state: &AppState, store: &RedirectStore) -> Result<(), Api
     if let Some(msg) = response.error {
         return Err(ApiError::Internal(msg));
     }
+    // Publish the (possibly changed) cloudflare_proxy flag without waiting
+    // out the dns loop's interval.
+    state.nudges.dns.notify_one();
     Ok(())
 }

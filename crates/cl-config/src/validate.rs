@@ -629,6 +629,17 @@ impl ClusterConfig {
                     ));
                 }
             }
+            if auth.cloudflare_proxy
+                && !auth
+                    .networks
+                    .iter()
+                    .any(|n| self.networks.get(n).is_some_and(|c| c.kind == NetworkKind::Public))
+            {
+                return Err(ConfigError::invalid(
+                    "proxy.auth.cloudflare_proxy",
+                    "needs at least one public network in proxy.auth.networks",
+                ));
+            }
             if auth.remember_ip_ttl.is_zero() {
                 return Err(ConfigError::invalid(
                     "proxy.auth.remember_ip_ttl",

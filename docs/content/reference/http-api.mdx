@@ -227,9 +227,9 @@ curl -N -H "Authorization: Bearer $KEY" \
 
 | Method | Path | Auth | Body | Success | Notes |
 |---|---|---|---|---|---|
-| GET, POST | `/api/redirects` | user, admin | POST: RedirectRule | list, rule | Managed in the UI, not in `cluster.yaml`. |
+| GET, POST | `/api/redirects` | user, admin | POST: RedirectRule | list, rule | Managed in the UI, not in `cluster.yaml`. Optional `cloudflare_proxy` (bool, public networks only; 400 otherwise). |
 | PUT, DELETE | `/api/redirects/{id}` | admin | PUT: RedirectRule | rule, 204 | |
-| GET, POST | `/api/static-routes` | user, admin | POST: StaticRoute | list, route | |
+| GET, POST | `/api/static-routes` | user, admin | POST: StaticRoute | list, route | Optional `cloudflare_proxy` (bool, public networks only; 400 otherwise). |
 | PUT, DELETE | `/api/static-routes/{id}` | admin | PUT: StaticRoute | route, 204 | |
 | GET, POST | `/api/wireguard-ingress` | user, admin | POST: ingress rule | list, rule | |
 | PUT, DELETE | `/api/wireguard-ingress/{id}` | admin | PUT: ingress rule | rule, 204 | |

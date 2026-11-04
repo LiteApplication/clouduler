@@ -857,6 +857,8 @@ export interface ProxyAuthConfig {
   remember_ip?: string[];
   /** How long a saved address skips the login, e.g. `30d`. */
   remember_ip_ttl?: string;
+  /** Publish the portal host with Cloudflare's proxy on (public networks in `networks`). */
+  cloudflare_proxy?: boolean;
 }
 
 /** One row of GET /api/proxy/remembered-ips (admin only). */
@@ -897,6 +899,8 @@ export interface RedirectRule {
   target: string;
   preserve_path: boolean;
   status: 301 | 302 | 307 | 308;
+  /** Publish the host's DNS records with Cloudflare's proxy on. Public networks only. */
+  cloudflare_proxy?: boolean;
 }
 
 /**
@@ -918,6 +922,8 @@ export interface StaticRouteRule {
   websockets: boolean;
   preserve_host: boolean;
   response_timeout?: string | null;
+  /** Publish the host's DNS records with Cloudflare's proxy on. Public networks only. */
+  cloudflare_proxy?: boolean;
 }
 
 /**
