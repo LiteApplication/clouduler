@@ -13,7 +13,7 @@ env:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,7 +38,7 @@ jobs:
 
   ui:
     needs: rust
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: ui
@@ -61,7 +61,7 @@ jobs:
       - run: npx vitest run
 
   examples:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +83,7 @@ jobs:
   # via workflow_dispatch.
   qemu:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The whole suite, and the runners often have no kvm, so every VM is
     # emulated. Locally with kvm the suite takes about twenty minutes; under
     # TCG it is several times that, and a timeout that kills a healthy run
