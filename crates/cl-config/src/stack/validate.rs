@@ -568,6 +568,15 @@ impl StackFile {
                         ),
                     ));
                 }
+                if route.cloudflare_proxy && net.kind != crate::cluster::NetworkKind::Public {
+                    return Err(ConfigError::invalid(
+                        format!("{at}.cloudflare_proxy"),
+                        format!(
+                            "cloudflare_proxy needs a public network, and {} is not one",
+                            route.network
+                        ),
+                    ));
+                }
                 if route
                     .middlewares
                     .iter()
@@ -1157,6 +1166,20 @@ services:
 "#;
         let err = StackFile::parse(raw).unwrap_err();
         assert!(err.to_string().contains("only applies to tcp"), "{err}");
+    }
+
+    #[test]
+    fn cloudflare_proxy_is_public_networks_only() {
+        let cluster = ClusterConfig::parse(include_str!("../../../../examples/cluster.yaml"))
+            .expect("reference cluster is valid");
+        let spec = |net: &str| {
+            format!(
+                "networks:\n  {net}: {{}}\nservices:\n  a:\n    image: x\n    networks: [{net}]\n    x-clouduler:\n      proxy:\n        - host: a\n          network: {net}\n          port: 80\n          cloudflare_proxy: true\n"
+            )
+        };
+        StackFile::parse(&spec("wan")).unwrap().validate(&cluster).unwrap();
+        let err = StackFile::parse(&spec("lan")).unwrap().validate(&cluster).unwrap_err();
+        assert!(err.to_string().contains("cloudflare_proxy"), "{err}");
     }
 
     #[test]

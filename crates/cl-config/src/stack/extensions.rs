@@ -320,6 +320,13 @@ pub struct ProxyRoute {
         skip_serializing_if = "Option::is_none"
     )]
     pub response_timeout: Option<Duration>,
+
+    /// Publish this hostname's DNS records through Cloudflare's proxy (the
+    /// orange cloud). Public networks only. A hostname is only proxied when
+    /// every route behind it (every path, every service) sets this; any
+    /// route, static route or redirect that does not keeps it DNS-only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cloudflare_proxy: bool,
 }
 
 fn default_true() -> bool {

@@ -409,6 +409,7 @@ proxy:
     websockets: true          # default true
     preserve_host: false      # default false
     response_timeout: 30s     # unset waits forever
+    cloudflare_proxy: false   # default false; public networks only
 ```
 
 Fields: `host` (a bare label like `gitlab` is qualified with the network's
@@ -433,6 +434,7 @@ nothing until you set one.
 | `max_body_size` | unlimited | Largest request body to forward. A declared `Content-Length` over the cap is refused with 413 before the body is read at all; a chunked body is cut off mid-stream once it passes the cap. Accepts `10MB`, `10MiB`, `10M` or a plain byte count. |
 | `websockets` | `true` | Whether `Upgrade` requests are proxied. Turning it off answers them with 400, which is worth doing on a route that should never see one. |
 | `preserve_host` | `false` | Forward the client's `Host` instead of rewriting it to the backend's address. Needed by anything that builds absolute URLs or virtual hosts on the header. |
+| `cloudflare_proxy` | `false` | Publish the hostname's DNS records with Cloudflare's proxy (orange cloud) on. Only valid on a `public` network (validation fails otherwise). Applies per hostname: it is on only when *every* route behind that host and network (all paths, all services) sets it; a route without it, a static route or a redirect on the same host keeps the record DNS-only. |
 | `response_timeout` | none | How long the backend has to return response headers, connection time included. Answers 504 when it runs out. Do not set this on a route serving an event stream or a long download — it applies to headers, but a backend that is slow to *start* answering will be cut off. |
 
 Byte sizes take decimal (`kb`, `mb`, `gb`) or binary (`kib`, `mib`, `gib`)

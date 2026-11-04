@@ -1169,6 +1169,47 @@ pub fn desired_dns_hosts(
     hosts
 }
 
+/// Hostnames (host, network) whose DNS records go out with Cloudflare's proxy
+/// on: at least one stack route sets `cloudflare_proxy` and nothing else
+/// answering that name (another route, a static route, a redirect, the login
+/// portal) leaves it off. Only public networks qualify.
+fn cloudflare_proxied_hosts(
+    cfg: &ClusterConfig,
+    state: &ClusterState,
+) -> BTreeSet<(String, String)> {
+    let mut on: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut off: BTreeSet<(String, String)> = BTreeSet::new();
+    for placement in crate::placement::service_placements(state, cfg) {
+        for entry in &placement.extensions.proxy {
+            let key = (entry.host.clone(), entry.network.clone());
+            if entry.cloudflare_proxy {
+                on.insert(key);
+            } else {
+                off.insert(key);
+            }
+        }
+    }
+    for entry in StaticRouteStore::load(state).routes {
+        off.insert((entry.host, entry.network));
+    }
+    for rule in RedirectStore::load(state).rules {
+        off.insert((rule.host, rule.network));
+    }
+    if let Some(auth) = &cfg.proxy.auth {
+        for network in &auth.networks {
+            off.insert((auth.host.clone(), network.clone()));
+        }
+    }
+    on.retain(|(host, network)| {
+        !off.contains(&(host.clone(), network.clone()))
+            && cfg
+                .networks
+                .get(network)
+                .is_some_and(|n| n.kind == cl_config::NetworkKind::Public)
+    });
+    on
+}
+
 /// The config node matching a raft leader id, if it is known and still in the
 /// config. `None` when leadership is unsettled, in which case the caller
 /// publishes nothing for the leader-only web hostname rather than guess.
@@ -1208,17 +1249,22 @@ fn desired_records(
         }
     }
 
+    let proxied = cloudflare_proxied_hosts(cfg, state);
     for ((host, network), nodes) in desired_dns_hosts(cfg, state) {
         if !publishes_dns(cfg, &network) {
             continue;
         }
+        let orange = proxied.contains(&(host.clone(), network.clone()));
         for node_name in &nodes {
             let Some(node) = cfg.nodes.get(node_name) else {
                 continue;
             };
-            let Ok(records) = cl_dns::records_for(cfg, &host, &network, node) else {
+            let Ok(mut records) = cl_dns::records_for(cfg, &host, &network, node) else {
                 continue;
             };
+            for r in &mut records {
+                r.proxied = orange;
+            }
             push_new(&mut out, &mut seen, records);
         }
     }
@@ -2061,6 +2107,26 @@ services:
         // and so never reaches the desired set.
         assert_eq!(blog.len(), 2, "{blog:?}");
         assert!(blog.iter().all(|r| r.kind != cl_dns::RecordType::CNAME));
+    }
+
+    /// `cloudflare_proxy` turns the orange cloud on only when every route
+    /// behind the host sets it.
+    #[test]
+    fn cloudflare_proxy_needs_every_route_behind_the_host() {
+        let all = SPEC.replace("port: 80", "port: 80\n          cloudflare_proxy: true");
+        let on = desired_records(&cfg(), None, &state_with(&all, 1));
+        let blog: Vec<_> = on.iter().filter(|r| r.fqdn == "blog.example.com").collect();
+        assert!(!blog.is_empty() && blog.iter().all(|r| r.proxied), "{blog:?}");
+
+        let off = desired_records(&cfg(), None, &state_with(SPEC, 1));
+        assert!(off.iter().all(|r| !r.proxied));
+
+        let state = with_static_routes(
+            state_with(&all, 1),
+            vec![static_route("blog", "wan", "192.168.1.50:9100")],
+        );
+        let mixed = desired_records(&cfg(), None, &state);
+        assert!(mixed.iter().filter(|r| r.fqdn == "blog.example.com").all(|r| !r.proxied));
     }
 
     /// A network switched to `publish_dns: false` keeps its hostnames out of

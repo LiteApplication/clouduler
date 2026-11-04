@@ -103,6 +103,7 @@ These keys live in each `x-clouduler.proxy` entry. The complete stack file is de
   {key: "max_body_size", type: "size", default: "no limit", reload: "n/a", description: "Largest request body, for example 10MB. Bigger requests get 413 and never reach the container.", quirks: "Set it on anything exposed to the internet."},
   {key: "response_timeout", type: "duration", default: "30s", reload: "n/a", description: "How long the backend may take to respond before 504.", quirks: "Error text: ADDR did not respond within LIMIT. The doc comment in the code says an unset value waits forever; the proxy applies 30s."},
   {key: "preserve_host", type: "bool", default: "false", reload: "n/a", description: "Forward the visitor's Host header instead of the backend's address.", quirks: "Turn it on for apps that build absolute URLs."},
+  {key: "cloudflare_proxy", type: "bool", default: "false", reload: "n/a", description: "Publish the hostname with Cloudflare's proxy (orange cloud) on.", quirks: "Public networks only. On only if every route behind the host sets it; any route, static route or redirect on the same host without it keeps the record DNS-only."},
   {key: "sticky", type: "bool", reload: "n/a", description: "Pin a visitor to one backend with the cl_sticky cookie."},
   {key: "middlewares", type: "list", reload: "n/a", description: "Named middlewares: redirect_https, strip_prefix, redirect_regex, headers, cors, authenticated.", quirks: "redirect_https is accepted but redundant: the HTTP listener already redirects (308) to HTTPS."},
 ]} />

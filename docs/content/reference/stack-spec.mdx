@@ -258,7 +258,8 @@ Each entry of `x-clouduler.proxy`. See [Proxy and TLS](/docs/features/proxy-and-
   {"key": "max_body_size", "type": "size", "default": "unlimited", "reload": "n/a", "description": "Upload cap. The proxy answers 413 above it."},
   {"key": "websockets", "type": "bool", "default": "true", "reload": "n/a", "description": "Allow Upgrade requests."},
   {"key": "preserve_host", "type": "bool", "default": "false", "reload": "n/a", "description": "Forward the client's Host header."},
-  {"key": "response_timeout", "type": "duration", "default": "none (waits forever)", "reload": "n/a", "description": "Maximum wait for the backend's response headers."}
+  {"key": "response_timeout", "type": "duration", "default": "none (waits forever)", "reload": "n/a", "description": "Maximum wait for the backend's response headers."},
+  {"key": "cloudflare_proxy", "type": "bool", "default": "false", "reload": "n/a", "description": "Publish the hostname through Cloudflare's proxy. Public networks only; on only if every route behind the host sets it."}
 ]} />
 
 ### Expose
