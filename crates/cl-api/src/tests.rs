@@ -2171,6 +2171,8 @@ fn normalize(value: &mut serde_json::Value, tempdir: &str) {
         "rpc_addr",
         "content",
         "id",
+        // A live registry lookup (nginx:latest), so it moves whenever upstream republishes.
+        "latest_digest",
     ];
     const VOLATILE_NUMBERS: &[&str] = &[
         "state_version",
