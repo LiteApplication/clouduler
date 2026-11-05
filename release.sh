@@ -42,21 +42,15 @@ fi
 echo "Regenerating api-shapes fixture..."
 UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
 # The regenerating run returns before comparing, so check the written fixture
-# really passes before it is committed and pushed.
+# really passes, twice, before it is committed and pushed. A flaky field would
+# not reliably fail a single run.
+cargo test -p cl-api api_shapes
 cargo test -p cl-api api_shapes
 
 git add Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__fixtures__/api-shapes.json
 
 git commit -m "release: v${VERSION}"
 git tag -a "v${VERSION}" -m "v${VERSION}"
-
-# Last gate before anything leaves the machine: the committed tree must pass.
-echo "Checking the api-shapes fixture on the release commit..."
-if ! cargo test -p cl-api api_shapes; then
-    echo "error: api-shapes test fails on the release commit; nothing was pushed." >&2
-    echo "undo with: git tag -d v${VERSION} && git reset --hard HEAD~1" >&2
-    exit 1
-fi
 
 git push origin HEAD
 git push origin "v${VERSION}"
