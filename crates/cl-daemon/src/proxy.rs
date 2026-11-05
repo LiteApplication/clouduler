@@ -1461,7 +1461,13 @@ async fn reconcile_zone(
     state: &ClusterState,
 ) -> cl_dns::Result<()> {
     let mut live = cf.list_records(zone_id, None, None).await?;
-    let plan = cl_dns::plan(cluster_name, &desired, &live);
+    let known_ids: std::collections::HashSet<String> = state
+        .dns_records
+        .values()
+        .filter(|r| r.zone == zone_name)
+        .filter_map(|r| r.provider_id.clone())
+        .collect();
+    let plan = cl_dns::plan_with_known(cluster_name, &desired, &live, &known_ids);
     let apply_result = if plan.is_empty() {
         Ok(())
     } else {

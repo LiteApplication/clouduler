@@ -39,6 +39,22 @@ impl Plan {
 /// specific conflicts are deleted regardless of ownership; see
 /// `delete_conflicting_live_records`.
 pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
+    plan_with_known(cluster, desired, live, &HashSet::new())
+}
+
+/// Like `plan`, but also treats a live record whose provider id is in
+/// `known_ids` (records this cluster published, per replicated state) as
+/// owned even when its ownership tag names a different cluster, which is what
+/// a renamed cluster leaves behind. Such a record keeps a tag under the
+/// current name (its old tag is rewritten in place), or is deleted along with
+/// its old tag, so it converges instead of being stuck behind a tag nothing
+/// will ever match again.
+pub fn plan_with_known(
+    cluster: &str,
+    desired: &[DesiredRecord],
+    live: &[Record],
+    known_ids: &HashSet<String>,
+) -> Plan {
     // DNS names are case-insensitive and Cloudflare always returns them
     // lowercased, so compare everything lowercased: otherwise a mixed-case
     // desired host never matches its own live record and gets re-created
@@ -53,7 +69,18 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
         .collect();
     let live = live.as_slice();
     let desired = normalize_desired(desired);
-    let owned_keys = owned_keys(cluster, live);
+    let mut owned_keys = owned_keys(cluster, live);
+    // Keys we hold by record id but not by a current-name tag.
+    let mut adopted: HashSet<String> = HashSet::new();
+    for r in live {
+        let known = r.id.as_ref().is_some_and(|id| known_ids.contains(id));
+        if known && !is_tag_record(r) {
+            let key = record_key(r);
+            if owned_keys.insert(key.clone()) {
+                adopted.insert(key);
+            }
+        }
+    }
 
     let mut live_by_key: HashMap<String, Vec<&Record>> = HashMap::new();
     for r in live {
@@ -129,6 +156,25 @@ pub fn plan(cluster: &str, desired: &[DesiredRecord], live: &[Record]) -> Plan {
             if let Some(id) = &tag.id {
                 out.delete.push(id.clone());
             }
+        }
+    }
+
+    // A renamed cluster leaves its tags under the old name. Rewrite the tag of
+    // a record still wanted to the current name; drop the rest with their
+    // record.
+    for tag in live.iter().filter(|r| is_tag_record(r)) {
+        let Some(t) = parse_tag(&tag.content) else {
+            continue;
+        };
+        let (Some(id), true) = (&tag.id, t.cluster != cluster && adopted.contains(&t.key)) else {
+            continue;
+        };
+        match desired_by_key.get(&t.key).and_then(|w| w.first()) {
+            Some(want) => out
+                .update
+                .push((id.clone(), tag_input(cluster, &t.key, &want.fqdn))),
+            None if !out.delete.contains(id) => out.delete.push(id.clone()),
+            None => {}
         }
     }
 
@@ -558,6 +604,55 @@ mod tests {
         ];
         let p = plan(CLUSTER, &[], &live_records);
         assert!(p.delete.is_empty());
+    }
+
+    #[test]
+    fn deletes_a_known_record_whose_tag_names_a_renamed_cluster() {
+        let key = "A:svc.example.com";
+        let live_records = vec![
+            live("r1", RecordType::A, "svc.example.com", "1.2.3.4"),
+            Record {
+                id: Some("t1".to_string()),
+                zone_id: Some("zone1".to_string()),
+                name: tag_name("svc.example.com"),
+                kind: RecordType::TXT,
+                content: tag_content("old-name", key),
+                ttl: 1,
+                proxied: false,
+                comment: None,
+            },
+        ];
+        let known: HashSet<String> = ["r1".to_string()].into();
+        let p = plan_with_known(CLUSTER, &[], &live_records, &known);
+        assert!(p.delete.contains(&"r1".to_string()), "{p:?}");
+        assert!(p.delete.contains(&"t1".to_string()), "{p:?}");
+        // Without the replicated record it stays untouched.
+        assert!(plan(CLUSTER, &[], &live_records).delete.is_empty());
+    }
+
+    #[test]
+    fn rewrites_the_tag_of_a_wanted_record_after_a_cluster_rename() {
+        let key = "A:svc.example.com";
+        let live_records = vec![
+            live("r1", RecordType::A, "svc.example.com", "1.2.3.4"),
+            Record {
+                id: Some("t1".to_string()),
+                zone_id: Some("zone1".to_string()),
+                name: tag_name("svc.example.com"),
+                kind: RecordType::TXT,
+                content: tag_content("old-name", key),
+                ttl: 1,
+                proxied: false,
+                comment: None,
+            },
+        ];
+        let want = vec![desired(RecordType::A, "svc.example.com", "1.2.3.4")];
+        let known: HashSet<String> = ["r1".to_string()].into();
+        let p = plan_with_known(CLUSTER, &want, &live_records, &known);
+        assert!(p.delete.is_empty() && p.create.is_empty(), "{p:?}");
+        assert_eq!(p.update.len(), 1, "{p:?}");
+        assert_eq!(p.update[0].0, "t1");
+        assert!(p.update[0].1.content.contains(CLUSTER), "{p:?}");
     }
 
     #[test]
