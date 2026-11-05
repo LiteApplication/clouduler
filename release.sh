@@ -41,6 +41,9 @@ fi
 
 echo "Regenerating api-shapes fixture..."
 UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
+# The regenerating run returns before comparing, so check the written fixture
+# really passes before it is committed and pushed.
+cargo test -p cl-api api_shapes
 
 git add Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__fixtures__/api-shapes.json
 
