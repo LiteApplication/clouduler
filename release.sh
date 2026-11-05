@@ -50,6 +50,14 @@ git add Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__
 git commit -m "release: v${VERSION}"
 git tag -a "v${VERSION}" -m "v${VERSION}"
 
+# Last gate before anything leaves the machine: the committed tree must pass.
+echo "Checking the api-shapes fixture on the release commit..."
+if ! cargo test -p cl-api api_shapes; then
+    echo "error: api-shapes test fails on the release commit; nothing was pushed." >&2
+    echo "undo with: git tag -d v${VERSION} && git reset --hard HEAD~1" >&2
+    exit 1
+fi
+
 git push origin HEAD
 git push origin "v${VERSION}"
 
