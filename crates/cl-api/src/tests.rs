@@ -2186,6 +2186,8 @@ fn normalize(value: &mut serde_json::Value, tempdir: &str) {
         "total_bytes",
         "free_bytes",
         "container_count",
+        // A timed disk probe: 0 or 1 ms depending on the machine.
+        "disk_ms",
     ];
 
     match value {
