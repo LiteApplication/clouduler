@@ -45,6 +45,10 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// on its own.
 const CRASH_LOOP_THRESHOLD: usize = 3;
 
+/// How long a write-back waits for its own commit to show up in this node's
+/// applied state before leaving the rest to the next sweep.
+const CONFIG_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The window `CRASH_LOOP_THRESHOLD` is counted over.
 const CRASH_LOOP_WINDOW: Duration = Duration::from_secs(120);
 
@@ -411,6 +415,7 @@ impl Scheduler {
         // feed it back through raft, same path anyone else's edit takes.
         // `submit` forwards to the leader on its own, so this runs the same
         // way whether or not this node happens to be it.
+        let mut committed: Vec<(String, u64)> = Vec::new();
         for edit in config_edits {
             // Compare-and-set against the revision the container edited from:
             // a second writer on the same config must not replace the first
@@ -427,6 +432,7 @@ impl Scheduler {
                         warn!(config = %edit.name, %error, "container's edit to a config was rejected");
                     } else {
                         info!(config = %edit.name, "wrote a container's config edit back to the cluster");
+                        committed.push((edit.name.clone(), edit.base_revision + 1));
                     }
                 }
                 Err(e) => {
@@ -435,7 +441,63 @@ impl Scheduler {
             }
         }
 
+        self.settle_config_edits(&committed).await;
+
         Ok(())
+    }
+
+    /// Finish a write-back: the edit is committed once `submit` returns, but
+    /// this node's applied state (a follower's, especially) can still be a
+    /// beat behind, and every other instance mounting the config holds its own
+    /// copy on disk. Wait until the new revision is applied here, then
+    /// re-materialize every local instance that mounts the config so none of
+    /// them is left on the old content. Other nodes read the same committed
+    /// state on their own next sweep.
+    async fn settle_config_edits(&self, committed: &[(String, u64)]) {
+        if committed.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + CONFIG_SETTLE_TIMEOUT;
+        let state = loop {
+            let state = self.cluster.state().await;
+            let applied = committed.iter().all(|(name, revision)| {
+                state.configs.get(name).is_some_and(|c| c.revision >= *revision)
+            });
+            if applied {
+                break state;
+            }
+            if Instant::now() >= deadline {
+                warn!("a config write-back is not yet applied locally; its copies update on the next sweep");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+
+        for assignment in state.assignments_on(&self.node) {
+            let instance = &assignment.instance;
+            let Some(stack) = state.stacks.get(&instance.stack) else {
+                continue;
+            };
+            let Ok(file) = StackFile::parse(&stack.spec) else {
+                continue;
+            };
+            let Some(service) = file.services.get(&instance.service) else {
+                continue;
+            };
+            if !service
+                .configs
+                .iter()
+                .any(|c| committed.iter().any(|(name, _)| *name == c.source))
+            {
+                continue;
+            }
+            if let Err(e) = self
+                .materializer
+                .prepare(&state, instance, &service.configs, &service.secrets)
+            {
+                warn!(instance = %instance, error = %e, "could not refresh a config copy after a write-back");
+            }
+        }
     }
 
     /// Show the operator why an instance was not started: a failed update
