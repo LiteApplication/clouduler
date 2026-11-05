@@ -170,8 +170,12 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
             // often a locally built image that was never pulled from a
             // registry, and reporting those as perpetually out of date would
             // make "update all" a no-op that never stops asking.
-            let update_available = match (&running, &latest) {
-                (Some(running), Some(latest)) => running != latest,
+            // A pinned instance with no container (its pinned image is gone,
+            // so it cannot start) compares the pin instead: updating moves
+            // the pin without needing anything to restart.
+            let update_available = match (&running, &latest, &pinned) {
+                (Some(running), Some(latest), _) => running != latest,
+                (None, Some(latest), Some(pinned)) => pinned != latest,
                 _ => false,
             };
             let pin_drift = match (&running, &pinned) {

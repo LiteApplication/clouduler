@@ -1307,15 +1307,10 @@ async fn pull_steps(
     progress: &cl_sched::UpdateReporter,
 ) -> Result<String, ApiError> {
     use cl_raft::UpdatePhase;
-    let name = instance.container_name();
     let docker = state.docker().await?;
-    docker
-        .inspect(&name)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("container {name} does not exist on this node"))
-        })?;
+    // A container that is not here (a failed migration left it unstartable on
+    // a pinned digest the registry no longer serves) is still updatable: the
+    // pull and the new pin are all it needs.
 
     // The stack's declared reference, e.g. `nginx:1.25` — not the running
     // container's `image`, which once this instance has been pinned before
@@ -1358,13 +1353,21 @@ async fn replace_steps(
     use cl_raft::UpdatePhase;
     let name = instance.container_name();
     let docker = state.docker().await?;
-    let running = docker
-        .inspect(&name)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("container {name} does not exist on this node"))
-        })?;
+    let running = docker.inspect(&name).await.map_err(ApiError::internal)?;
+    let Some(running) = running else {
+        // Nothing to stop: just move the pin, and reconcile builds the
+        // container on it whenever it next starts one.
+        state
+            .cluster
+            .submit(ClusterRequest::SetImageDigest {
+                instance: instance.clone(),
+                digest,
+            })
+            .await
+            .map_err(ApiError::not_leader)?;
+        progress.report(instance, UpdatePhase::Started, None).await;
+        return Ok(());
+    };
 
     // Remember what is running now, so a failed update can put it back. An
     // already-pinned instance has it recorded as the pin; an unpinned one

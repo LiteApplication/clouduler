@@ -15,8 +15,10 @@ type UpdateStep = (typeof UPDATE_STEPS)[number];
 /** One row's verdict, in the order that matters: an error means we do not
  *  know, and "we do not know" must never render as "up to date". */
 function statusOf(row: UpdateRow): Status {
-  if (row.error || !row.running_digest || !row.latest_digest) return 'unknown';
+  if (row.error || !row.latest_digest) return 'unknown';
+  // Not running but pinned: the server flags it when the pin is behind.
   if (row.update_available) return 'update';
+  if (!row.running_digest) return 'unknown';
   if (row.pin_drift) return 'drift';
   return 'current';
 }
@@ -95,7 +97,19 @@ function Digest({ digest, tone }: { digest: string; tone?: 'brand' | 'warn' | 'd
 }
 
 function VersionCell({ row, status }: { row: UpdateRow; status: Status }) {
-  if (!row.running_digest) return <span>-</span>;
+  if (!row.running_digest) {
+    if (status === 'update' && row.pinned_digest && row.latest_digest) {
+      return (
+        <span className="wl-inline">
+          <Icon name="lock" size={14} />
+          <Digest digest={row.pinned_digest} />
+          <span className="muted" aria-label="to">→</span>
+          <Digest digest={row.latest_digest} tone="brand" />
+        </span>
+      );
+    }
+    return <span>-</span>;
+  }
   return (
     <span className="wl-inline">
       {status === 'update' && row.latest_digest ? (

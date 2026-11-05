@@ -177,7 +177,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 
 | Method | Path | Auth | Body | Success | Notes |
 |---|---|---|---|---|---|
-| GET | `/api/updates` | user | none | `[{id, stack, service, node, image, running_digest, latest_digest, pinned_digest, update_available, pin_drift, error?}]` | One registry call per distinct image. Do not poll. |
+| GET | `/api/updates` | user | none | `[{id, stack, service, node, image, running_digest, latest_digest, pinned_digest, update_available, pin_drift, error?}]` | One registry call per distinct image. Do not poll. An instance with a pin but no container (e.g. its pinned image is gone) reports `update_available` when the pin differs from the registry; updating it pulls and moves the pin without restarting anything. |
 | POST | `/api/updates/pin` | admin | `{"instances": []}` | `[{id, ok, error?}]` | Empty list means all unpinned. |
 | POST | `/api/updates/apply` | admin | `{"instances": []}` | 202 `{"accepted": [...]}` | Empty list means all that are behind. Rolling; watch `/api/instances/events`. |
 
