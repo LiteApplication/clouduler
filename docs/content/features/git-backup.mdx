@@ -99,7 +99,7 @@ The webhook is part of the dashboard API, so it is reachable wherever the dashbo
   - `the pulled tree has no stacks/ at all, which would remove all N stack(s) this cluster runs - remove stacks through the api, not by emptying the repo`
   - `stacks/NAME.yaml: config C has no content under configs/`
   - `secret S does not already exist in the cluster - git cannot supply new secret content, create it through the api first`
-  - a commit that changes anything under `secrets/`: `... secret rotation must go through the api, not git`
+  - a commit that changes anything under `secrets/` compared with the last commit the cluster exported or accepted: `... secret rotation must go through the api, not git`. If the cluster has no such commit on record, the pulled commit's parent is the comparison instead.
 - Secret values never come from Git. Rotate them in the UI or with `clouduler secret set`.
 
 Export is leader-only and runs a pull first, so it does not overwrite a manual push. A new leader builds its first export on top of the remote branch, not on an empty history. Older versions had races here that redeployed every stack on each pull and reverted manual pushes; they are fixed.

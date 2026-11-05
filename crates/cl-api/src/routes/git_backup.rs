@@ -643,8 +643,10 @@ fn pull_and_decide(
         }
     }
 
-    // Check whether the secrets/ subtree changed — if so, reject.
-    if backup.secrets_subtree_changed(last_good_oid, candidate)? {
+    // Check whether the secrets/ subtree changed — if so, reject. With no
+    // known good commit the candidate's parent is the baseline, so a lost
+    // status entry cannot make every commit look like a secret rotation.
+    if backup.secrets_changed_against_baseline(last_good_oid, candidate)? {
         let reason = "the pulled commit changes something under secrets/, which this cluster cannot decrypt back \
                        into a live secret - secret rotation must go through the api, not git"
             .to_string();

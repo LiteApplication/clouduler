@@ -449,6 +449,24 @@ impl GitBackup {
         Ok(candidate_secrets != good_secrets)
     }
 
+    /// Like `secrets_subtree_changed`, but for a cluster with no known good
+    /// commit on record (a fresh leader, or a status entry lost to a failed
+    /// export): the candidate's own parent is the baseline instead of "no
+    /// secrets at all", so a commit that leaves `secrets/` alone is not
+    /// mistaken for a secret rotation. A root commit has no parent and keeps
+    /// the strict comparison.
+    pub fn secrets_changed_against_baseline(
+        &self,
+        good_commit: Option<git2::Oid>,
+        candidate_commit: git2::Oid,
+    ) -> Result<bool> {
+        let baseline = match good_commit {
+            Some(oid) => Some(oid),
+            None => self.repo.find_commit(candidate_commit)?.parent_id(0).ok(),
+        };
+        self.secrets_subtree_changed(baseline, candidate_commit)
+    }
+
     fn subtree_oid_from_commit(
         &self,
         commit_oid: git2::Oid,
@@ -1151,6 +1169,63 @@ mod tests {
             .expect("a real commit");
         assert!(backup
             .secrets_subtree_changed(None, with_secret_oid)
+            .expect("diff"));
+    }
+
+    #[test]
+    fn no_known_good_compares_secrets_against_the_parent() {
+        let bare_dir = tempfile::tempdir().expect("bare tempdir");
+        let first_files = vec![
+            TreeFile {
+                path: "cluster.yaml".to_string(),
+                contents: b"nodes: []\n".to_vec(),
+            },
+            TreeFile {
+                path: "secrets/db.age".to_string(),
+                contents: b"ciphertext-v1".to_vec(),
+            },
+        ];
+        let (backup, first_oid, _local) = seeded_backup(&bare_dir, &first_files);
+        let dummy_key = "not-a-real-key";
+        let files = |cluster: &[u8], secret: &[u8]| {
+            vec![
+                TreeFile {
+                    path: "cluster.yaml".to_string(),
+                    contents: cluster.to_vec(),
+                },
+                TreeFile {
+                    path: "secrets/db.age".to_string(),
+                    contents: secret.to_vec(),
+                },
+            ]
+        };
+        let second_files = files(b"nodes: [x]\n", b"ciphertext-v1");
+        let second_oid = backup
+            .sync(&second_files, "second", dummy_key, None)
+            .expect("sync")
+            .expect("a real commit");
+
+        // Untouched secrets/: not a rotation, even with no known good commit.
+        assert!(!backup
+            .secrets_changed_against_baseline(None, second_oid)
+            .expect("diff"));
+
+        let third_files = files(b"nodes: [x]\n", b"ciphertext-v2");
+        let third_oid = backup
+            .sync(&third_files, "third", dummy_key, None)
+            .expect("sync")
+            .expect("a real commit");
+        assert!(backup
+            .secrets_changed_against_baseline(None, third_oid)
+            .expect("diff"));
+
+        // An explicit known good commit still wins over the parent.
+        assert!(backup
+            .secrets_changed_against_baseline(Some(first_oid), second_oid)
+            .map(|c| !c)
+            .expect("diff"));
+        assert!(backup
+            .secrets_changed_against_baseline(Some(first_oid), third_oid)
             .expect("diff"));
     }
 
