@@ -345,11 +345,16 @@ inside the overlay:
   depending on where it was scheduled. The proxy relays to wherever the
   backend runs, so the answer is the same service the outside world sees.
   Only A records are served for these names, so clients do not try IPv6.
+  Containers of a stack that attaches a `nat` network are not given this
+  override: they resolve those names upstream, like any outside client.
   Routes on `internal`/`private` networks are not rewritten (they are gated
   by caller subnet, which the resolver cannot see), and nothing is rewritten
   unless the proxy is on its standard 80/443 ports.
 - anything else is forwarded to the host's configured upstream resolvers
   (read from `/etc/resolv.conf`), so ordinary internet names still resolve.
+  That includes a name under the internal domain that the zone has no
+  records for, rather than answering NXDOMAIN. A name the zone does have
+  (a service with no AAAA, say) still gets the zone's own empty answer.
 
 The zone is hot-swappable: placement changes rebuild the record set and
 swap it into the running server without a restart or dropping in-flight

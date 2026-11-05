@@ -109,7 +109,8 @@ async fn run(
             continue;
         }
         let overrides = proxy_overrides(&state, &live, &node_name);
-        if let Err(e) = dns.reload_overrides(&overrides).await {
+        let skip = nat_clients(&state, &live);
+        if let Err(e) = dns.reload_overrides(&overrides, skip).await {
             warn!(error = %e, "could not rebuild the proxy host overrides");
         }
 
@@ -269,6 +270,32 @@ fn proxy_overrides(state: &ClusterState, cfg: &ClusterConfig, node_name: &str) -
             name,
             addresses: vec![own_ip],
         })
+        .collect()
+}
+
+/// Containers of stacks that attach a nat network. They get no proxy
+/// override: a name the cluster serves resolves to its real address for them,
+/// as for any outside client, instead of this node's internal proxy.
+fn nat_clients(state: &ClusterState, cfg: &ClusterConfig) -> BTreeSet<IpAddr> {
+    let nat_stacks: BTreeSet<&str> = state
+        .stacks
+        .iter()
+        .filter_map(|(name, stack)| {
+            let file = cl_config::StackFile::parse(&stack.spec).ok()?;
+            file.networks
+                .keys()
+                .any(|n| {
+                    cfg.networks
+                        .get(n)
+                        .is_some_and(|net| net.kind == NetworkKind::Nat)
+                })
+                .then_some(name.as_str())
+        })
+        .collect();
+    crate::placement::instance_addresses(state, cfg)
+        .into_iter()
+        .filter(|(id, _)| nat_stacks.contains(id.stack.as_str()))
+        .map(|(_, ip)| IpAddr::V4(ip))
         .collect()
 }
 
@@ -432,6 +459,37 @@ services:
         assert!(proxy_overrides(&state, &off, "n1").is_empty());
         let odd = public_cfg("proxy: { https_port: 9443 }");
         assert!(proxy_overrides(&state, &odd, "n1").is_empty());
+    }
+
+    /// A stack on a nat network keeps the real address for public names;
+    /// one without does not.
+    #[test]
+    fn only_stacks_with_a_nat_network_skip_the_overrides() {
+        let cfg = ClusterConfig::parse(
+            "\
+cluster: { name: test }
+networks:
+  default: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }
+  pub: { type: public, domain: example.org }
+  home: { type: nat }
+nodes:
+  n1:
+    id: 3b0f6c4a-3d3f-4a8e-9b8b-2c1e6a2a9f01
+    role: manager
+    network: { default: 10.10.0.1, pub: { ipv4: 203.0.113.5 } }
+web: { address: cloud, network: default }
+",
+        )
+        .expect("valid cluster config");
+        let plain = state_with(PUBLIC_SPEC, 1);
+        assert!(nat_clients(&plain, &cfg).is_empty());
+
+        let nat_spec = PUBLIC_SPEC.replace(
+            "networks:\n  default: {}",
+            "networks:\n  default: {}\n  home: {}",
+        );
+        let nat = state_with(&nat_spec, 1);
+        assert_eq!(nat_clients(&nat, &cfg).len(), 1);
     }
 
     #[test]

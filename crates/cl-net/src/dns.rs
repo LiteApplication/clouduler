@@ -144,6 +144,22 @@ fn build_authority(origin: &Name, records: &[ZoneRecord]) -> Result<InMemoryZone
     Ok(handler)
 }
 
+/// A name the internal zone has no records for is not necessarily absent: the
+/// internal domain can be a real one (`int.example.com`) that also has public
+/// records. Turning the zone's NXDOMAIN into `Skip` hands the query to the
+/// next handler, the upstream forwarder. A name that exists with no record of
+/// the asked type (an AAAA for a service) still gets the zone's empty answer.
+fn skip_nxdomain(flow: LookupControlFlow<AuthLookup>) -> LookupControlFlow<AuthLookup> {
+    match flow {
+        LookupControlFlow::Continue(Err(e)) | LookupControlFlow::Break(Err(e))
+            if e.is_nx_domain() =>
+        {
+            LookupControlFlow::Skip
+        }
+        other => other,
+    }
+}
+
 /// A zone handler whose backing data can be replaced while the server is
 /// running. `ZoneHandler` methods borrow the current snapshot for the
 /// duration of the call, so an in-flight query always sees a consistent
@@ -188,7 +204,7 @@ impl ZoneHandler for SwappableZone {
         lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let zone = self.current.read().await.clone();
-        zone.lookup(name, rtype, request_info, lookup_options).await
+        skip_nxdomain(zone.lookup(name, rtype, request_info, lookup_options).await)
     }
 
     async fn search(
@@ -197,7 +213,8 @@ impl ZoneHandler for SwappableZone {
         lookup_options: LookupOptions,
     ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
         let zone = self.current.read().await.clone();
-        zone.search(request, lookup_options).await
+        let (flow, ctx) = zone.search(request, lookup_options).await;
+        (skip_nxdomain(flow), ctx)
     }
 
     async fn nsec_records(
@@ -222,6 +239,9 @@ struct OverrideZone {
 struct Overrides {
     handler: InMemoryZoneHandler,
     names: BTreeSet<LowerName>,
+    /// Clients that get no override at all and have their query go upstream
+    /// like any other outside name.
+    skip_clients: BTreeSet<IpAddr>,
 }
 
 impl OverrideZone {
@@ -244,7 +264,11 @@ fn build_overrides(records: &[ZoneRecord]) -> Result<Overrides> {
             .map_err(|e| NetError::Dns(format!("invalid record name {}: {e}", record.name)))?;
         names.insert(LowerName::from(name));
     }
-    Ok(Overrides { handler, names })
+    Ok(Overrides {
+        handler,
+        names,
+        skip_clients: BTreeSet::new(),
+    })
 }
 
 #[async_trait::async_trait]
@@ -284,6 +308,9 @@ impl ZoneHandler for OverrideZone {
         lookup_options: LookupOptions,
     ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
         let current = self.current.read().await.clone();
+        if current.skip_clients.contains(&request.src().ip()) {
+            return (LookupControlFlow::Skip, None);
+        }
         let Ok(info) = request.request_info() else {
             return (LookupControlFlow::Skip, None);
         };
@@ -403,7 +430,8 @@ pub(crate) fn build_forwarder() -> Result<ForwardZoneHandler<TokioRuntimeProvide
 }
 
 /// The internal DNS resolver: serves the clouduler zone on the bridge
-/// address and forwards everything else to the host's configured resolvers.
+/// address and forwards everything else, including names under the zone that
+/// it holds no records for, to the host's configured resolvers.
 pub struct InternalDns {
     origin: Name,
     zone: Arc<SwappableZone>,
@@ -446,8 +474,15 @@ impl InternalDns {
     /// is an absolute hostname (`auth.example.com`); anything not listed still
     /// goes upstream. Only A records are served for a listed name, so its
     /// AAAA query gets an empty answer and clients stay on the address given.
-    pub async fn reload_overrides(&self, records: &[ZoneRecord]) -> Result<()> {
-        let overrides = build_overrides(records)?;
+    /// Queries from `skip_clients` never see an override: they are resolved
+    /// upstream, as if nothing were listed.
+    pub async fn reload_overrides(
+        &self,
+        records: &[ZoneRecord],
+        skip_clients: BTreeSet<IpAddr>,
+    ) -> Result<()> {
+        let mut overrides = build_overrides(records)?;
+        overrides.skip_clients = skip_clients;
         *self.overrides.current.write().await = Arc::new(overrides);
         Ok(())
     }
@@ -456,23 +491,19 @@ impl InternalDns {
     /// Queries outside the internal zone are forwarded using the host's
     /// system resolver configuration (`/etc/resolv.conf`).
     pub async fn serve(&self, bind_addr: SocketAddr) -> Result<()> {
+        let forwarder: Arc<dyn ZoneHandler> = Arc::new(ObservedForwarder {
+            inner: build_forwarder()?,
+            observer: self.observer.clone(),
+        });
         let mut catalog = Catalog::new();
+        // Names the zone has no records for fall through to the upstream.
         catalog.upsert(
             self.zone.origin().clone(),
-            vec![self.zone.clone() as Arc<dyn ZoneHandler>],
+            vec![self.zone.clone() as Arc<dyn ZoneHandler>, forwarder.clone()],
         );
-
-        let forward_origin = LowerName::from(Name::root());
-        let forwarder = build_forwarder()?;
         catalog.upsert(
-            forward_origin,
-            vec![
-                self.overrides.clone() as Arc<dyn ZoneHandler>,
-                Arc::new(ObservedForwarder {
-                    inner: forwarder,
-                    observer: self.observer.clone(),
-                }),
-            ],
+            LowerName::from(Name::root()),
+            vec![self.overrides.clone() as Arc<dyn ZoneHandler>, forwarder],
         );
 
         let mut server = Server::new(catalog);
@@ -535,10 +566,13 @@ mod tests {
             )
             .unwrap(),
         );
-        dns.reload_overrides(&[ZoneRecord {
-            name: "auth.example.org.".to_string(),
-            addresses: vec![Ipv4Addr::new(10, 10, 0, 1)],
-        }])
+        dns.reload_overrides(
+            &[ZoneRecord {
+                name: "auth.example.org.".to_string(),
+                addresses: vec![Ipv4Addr::new(10, 10, 0, 1)],
+            }],
+            BTreeSet::from([IpAddr::from([127, 0, 0, 2])]),
+        )
         .await
         .unwrap();
         let server = dns.clone();
@@ -574,6 +608,28 @@ mod tests {
         assert!(aaaa.answers.is_empty());
         let zone = ask(addr, "web.blog.int.example.com.", RecordType::A).await;
         assert_eq!(zone.answers.len(), 1);
+
+        // A name that exists in the zone keeps its authoritative empty answer
+        // for a type it lacks, and is never sent upstream.
+        let no_data = ask(addr, "web.blog.int.example.com.", RecordType::AAAA).await;
+        assert!(no_data.answers.is_empty());
+        assert_eq!(
+            no_data.metadata.response_code,
+            hickory_proto::op::ResponseCode::NoError
+        );
+    }
+
+    /// An in-zone miss must not be an authoritative NXDOMAIN; it is handed on.
+    #[tokio::test]
+    async fn a_missing_name_in_the_zone_is_skipped_to_the_upstream() {
+        let origin: Name = "int.example.com.".parse().unwrap();
+        let handler = build_authority(&origin, &[]).unwrap();
+        let zone = SwappableZone::new(handler);
+        let ghost = LowerName::from(Name::parse("ghost.int.example.com.", None).unwrap());
+        let flow = zone
+            .lookup(&ghost, RecordType::A, None, LookupOptions::default())
+            .await;
+        assert!(matches!(flow, LookupControlFlow::Skip), "got {flow}");
     }
 
     #[test]
