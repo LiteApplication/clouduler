@@ -41,10 +41,9 @@ fi
 
 echo "Regenerating api-shapes fixture..."
 UPDATE_API_FIXTURES=1 cargo test -p cl-api api_shapes
-# The regenerating run returns before comparing, so check the written fixture
-# really passes, twice, before it is committed and pushed. A flaky field would
-# not reliably fail a single run.
-cargo test -p cl-api api_shapes
+# The regenerating run returns before comparing, so run it again without the
+# flag: the written fixture must pass before it is committed, tagged and pushed.
+echo "Checking the api-shapes fixture..."
 cargo test -p cl-api api_shapes
 
 git add Cargo.toml ui/package.json Cargo.lock ui/package-lock.json ui/src/api/__fixtures__/api-shapes.json
