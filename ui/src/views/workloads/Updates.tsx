@@ -253,14 +253,26 @@ export function Updates() {
     });
   }, [inFlight]);
 
-  // Once the last update in flight finishes, re-check digests once so the
-  // rows settle on their own.
-  const wasActive = useRef(false);
+  // Re-check digests whenever an update record settles (started or failed), so
+  // the rows catch up on their own. Keyed on the records rather than on
+  // "something was in flight": a fast update can go from queued to started
+  // between two renders and would otherwise never trigger a reload, leaving the
+  // row on its stale "behind" button.
+  const settledKey = useMemo(
+    () =>
+      Object.entries(updates)
+        .filter(([, u]) => u.phase === 'started' || u.phase === 'failed')
+        .map(([id, u]) => `${id}:${u.phase}:${u.at}`)
+        .sort()
+        .join(','),
+    [updates],
+  );
+  const lastSettled = useRef<string | null>(null);
   useEffect(() => {
-    const nowActive = active.length > 0;
-    if (wasActive.current && !nowActive) void load();
-    wasActive.current = nowActive;
-  }, [active, load]);
+    const prev = lastSettled.current;
+    lastSettled.current = settledKey;
+    if (prev !== null && prev !== settledKey) void load();
+  }, [settledKey, load]);
 
   // The replicated record ends at "started"; whether a healthcheck still has to
   // pass is a live docker question. Polled only while some freshly started

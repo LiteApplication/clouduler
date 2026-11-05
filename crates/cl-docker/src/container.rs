@@ -431,6 +431,10 @@ pub struct ContainerState {
     pub finished_at: Option<String>,
     /// The memory limit it was created with, in bytes. `None` when unlimited.
     pub memory_limit_bytes: Option<i64>,
+    /// Why docker could not start it (a missing entrypoint, a failed mount, a
+    /// refused port...). Only known from `inspect`, and cleared by the next
+    /// successful start.
+    pub error: Option<String>,
 }
 
 impl From<bollard::models::ContainerInspectResponse> for ContainerState {
@@ -470,6 +474,7 @@ impl From<bollard::models::ContainerInspectResponse> for ContainerState {
                 .finished_at
                 .filter(|t| !t.is_empty() && !t.starts_with("0001-")),
             memory_limit_bytes: host_config.and_then(|h| h.memory).filter(|m| *m > 0),
+            error: state.error.filter(|e| !e.is_empty()),
         }
     }
 }

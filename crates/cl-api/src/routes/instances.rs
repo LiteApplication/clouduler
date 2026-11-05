@@ -1504,6 +1504,10 @@ async fn serve_logs(
         while let Some(item) = futures::StreamExt::next(&mut stream).await {
             yield item;
         }
+        // The log of a container that never started is empty, so say why.
+        if let Some(line) = docker.start_failure_line(&container_name).await {
+            yield Ok(line);
+        }
     };
     Ok(stream::container_log_events(log_stream).into_response())
 }
@@ -2409,6 +2413,13 @@ pub(crate) async fn fetch_logs(
             .to_string(),
             line: line.text.trim_end_matches(['\n', '\r']).to_string(),
             timestamp: line.timestamp,
+        });
+    }
+    if let Some(line) = docker.start_failure_line(&name).await {
+        lines.push(LogLine {
+            stream: "stderr".to_string(),
+            line: line.text,
+            timestamp: None,
         });
     }
     Ok(lines)

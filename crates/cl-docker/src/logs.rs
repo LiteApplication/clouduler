@@ -70,6 +70,22 @@ impl Docker {
             .logs(name, Some(options))
             .map(|item| item.map_err(classify).map(log_line_from_output))
     }
+
+    /// Why the container last failed to start, as a stderr line to show after
+    /// its logs. A container that never started has no output of its own, so
+    /// without this its log is empty and the reason is only in docker's state.
+    /// `None` when it started fine, or does not exist.
+    pub async fn start_failure_line(&self, name: &str) -> Option<LogLine> {
+        let state = self.inspect(name).await.ok()??;
+        if state.running {
+            return None;
+        }
+        Some(LogLine {
+            stream: LogStream::Stderr,
+            timestamp: None,
+            text: format!("container failed to start: {}", state.error?),
+        })
+    }
 }
 
 fn log_line_from_output(output: bollard::container::LogOutput) -> LogLine {
