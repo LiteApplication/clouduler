@@ -554,21 +554,39 @@ impl Scheduler {
             })
             .collect();
 
-        let report: BTreeMap<InstanceId, bool> = state
+        // What each container was created with, from its secrets label.
+        let revisions: BTreeMap<InstanceId, BTreeMap<String, u64>> = actual
+            .iter()
+            .filter_map(|c| {
+                let id = c.labels.get(cl_docker::LABEL_INSTANCE)?.parse().ok()?;
+                let label = c.labels.get(reconcile::LABEL_SECRETS)?;
+                Some((id, reconcile::decode_secret_revisions(label)))
+            })
+            .collect();
+
+        let report: BTreeMap<InstanceId, (bool, BTreeMap<String, u64>)> = state
             .assignments_on(&self.node)
             .map(|a| {
                 (
                     a.instance.clone(),
-                    running.get(&a.instance).copied().unwrap_or(false),
+                    (
+                        running.get(&a.instance).copied().unwrap_or(false),
+                        revisions.get(&a.instance).cloned().unwrap_or_default(),
+                    ),
                 )
             })
             .collect();
 
-        let current: BTreeMap<InstanceId, bool> = state
+        let current: BTreeMap<InstanceId, (bool, BTreeMap<String, u64>)> = state
             .container_status
             .iter()
             .filter(|(_, status)| status.node == self.node)
-            .map(|(id, status)| (id.clone(), status.running))
+            .map(|(id, status)| {
+                (
+                    id.clone(),
+                    (status.running, status.secret_revisions.clone()),
+                )
+            })
             .collect();
 
         if report == current {
@@ -578,7 +596,11 @@ impl Scheduler {
             .cluster
             .submit(Request::ReportContainerStatus {
                 node: self.node.clone(),
-                running: report,
+                running: report.iter().map(|(id, (r, _))| (id.clone(), *r)).collect(),
+                secret_revisions: report
+                    .into_iter()
+                    .map(|(id, (_, revs))| (id, revs))
+                    .collect(),
             })
             .await
         {
@@ -1001,7 +1023,7 @@ impl Scheduler {
             let revision =
                 revision_with_mounts(stack.revision, service, &dynamic_mounts, placement.ip);
 
-            let spec = match spec::build(
+            let mut spec = match spec::build(
                 instance,
                 service,
                 spec::Materialization {
@@ -1026,6 +1048,13 @@ impl Scheduler {
                     continue;
                 }
             };
+
+            if !objects.secret_revisions.is_empty() {
+                spec.labels.insert(
+                    reconcile::LABEL_SECRETS.to_string(),
+                    reconcile::encode_secret_revisions(&objects.secret_revisions),
+                );
+            }
 
             targets.push(Target {
                 assignment,

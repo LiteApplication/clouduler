@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const APPLY_PATH: &str = "/api/updates/internal/apply";
 
-fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
+pub(crate) fn pick_node<'a>(cfg: &'a ClusterConfig, via: Option<&'a str>) -> Result<&'a str> {
     match via {
         Some(name) => {
             cfg.node(name)

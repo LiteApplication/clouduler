@@ -27,6 +27,8 @@ import type {
   NodeMetricSample,
   NodeMetrics,
   SecretPutRequest,
+  SecretRollStarted,
+  SecretSummary,
   StackDetailResponse,
   StackState,
   StackValidationResult,
@@ -404,6 +406,46 @@ function putSecretEntry(db: MockDb, name: string, owner: string | null = null) {
   };
 }
 
+/** Secrets whose running containers have not been restarted since the last
+ *  overwrite, per mock db. The real server derives this from the revision each
+ *  container was created with. */
+const staleSecrets = new WeakMap<MockDb, Set<string>>();
+
+function secretSummaries(db: MockDb): SecretSummary[] {
+  const stale = staleSecrets.get(db) ?? new Set<string>();
+  return Object.values(db.state.secrets).map((secret) => {
+    const used_by: SecretSummary['used_by'] = [];
+    for (const stack of Object.values(db.state.stacks)) {
+      if (!stack.used_secrets.includes(secret.name)) continue;
+      for (const a of Object.values(db.state.assignments)) {
+        if (a.instance.split('.')[0] !== stack.name) continue;
+        const isStale = stale.has(secret.name);
+        used_by.push({
+          instance: a.instance,
+          stack: stack.name,
+          service: a.instance.split('.')[1] ?? '',
+          node: a.node,
+          delivery: 'file',
+          target: `/run/secrets/${secret.name}`,
+          running: a.desired === 'running',
+          running_revision: isStale ? Math.max(1, secret.revision - 1) : secret.revision,
+          freshness: isStale ? 'stale' : 'current',
+        });
+      }
+    }
+    return { ...secret, used_by, stale: used_by.filter((u) => u.freshness === 'stale').length };
+  });
+}
+
+function rollSecretUsers(db: MockDb, name: string): SecretRollStarted {
+  const restarting = secretSummaries(db)
+    .find((s) => s.name === name)
+    ?.used_by.filter((u) => u.freshness === 'stale' && u.running)
+    .map((u) => u.instance) ?? [];
+  staleSecrets.get(db)?.delete(name);
+  return { revision: db.state.secrets[name]?.revision ?? 0, restarting, skipped: [] };
+}
+
 function validateStack(db: MockDb, spec: string): StackValidationResult {
   const { parsed, requirements, per_service } = requirementsFor(String(spec ?? ''), domainsOf(db));
   const errors: StackValidationResult['errors'] = [];
@@ -768,10 +810,31 @@ export function buildHttpRoutes(): HttpRoute[] {
       delete db.state.configs[params.name];
       commit(db);
     }),
-    route('GET', '/api/secrets', ({ db }) => Object.values(db.state.secrets)),
+    route('GET', '/api/secrets', ({ db }) => secretSummaries(db)),
+    route('POST', '/api/secrets/:name/rotate', ({ db, params, body }) => {
+      need(db.state.secrets[params.name], `secret ${params.name}`);
+      putSecretEntry(db, params.name);
+      if (!staleSecrets.has(db)) staleSecrets.set(db, new Set());
+      staleSecrets.get(db)!.add(params.name);
+      const started = body?.restart
+        ? rollSecretUsers(db, params.name)
+        : { revision: db.state.secrets[params.name].revision, restarting: [], skipped: [] };
+      commit(db);
+      return started;
+    }),
+    route('POST', '/api/secrets/:name/restart', ({ db, params }) => {
+      need(db.state.secrets[params.name], `secret ${params.name}`);
+      const started = rollSecretUsers(db, params.name);
+      commit(db);
+      return started;
+    }),
     route('PUT', '/api/secrets/:name', ({ db, params, body }) => {
       const req = body as SecretPutRequest;
       if (!req || typeof req !== 'object') throw new HttpError(400, 'body required');
+      if (db.state.secrets[params.name]) {
+        if (!staleSecrets.has(db)) staleSecrets.set(db, new Set());
+        staleSecrets.get(db)!.add(params.name);
+      }
       putSecretEntry(db, params.name);
       commit(db);
     }),

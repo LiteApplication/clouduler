@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api, ApiError, encodeText } from '../api/client';
-import type { SecretCharset } from '../api/types';
+import type { SecretCharset, SecretPutRequest, SecretSummary } from '../api/types';
+import { Banner, Tag } from '../ds';
 import { previewFor, validateGeneratorLength } from '../lib/secretGenerator';
 import { Icon } from '../components/Icon';
 
@@ -10,6 +11,7 @@ export function SecretForm({
   onDone,
   initialName = '',
   lockName = false,
+  rotate,
 }: {
   onDone: () => void;
   /** Prefills the name, e.g. when creating a secret a stack is already
@@ -18,8 +20,12 @@ export function SecretForm({
   /** Locks the name field, so the created secret is guaranteed to match what
    *  the caller is waiting on. */
   lockName?: boolean;
+  /** Rotate this existing secret instead of creating one: the name is fixed,
+   *  its users are listed, and the form offers to restart them. */
+  rotate?: SecretSummary;
 }) {
-  const [name, setName] = useState(initialName);
+  const [name, setName] = useState(rotate?.name ?? initialName);
+  const [restart, setRestart] = useState(false);
   const [mode, setMode] = useState<Mode>('paste');
   const [value, setValue] = useState('');
   const [fileContent, setFileContent] = useState('');
@@ -47,12 +53,16 @@ export function SecretForm({
     }
     setBusy(true);
     try {
-      if (mode === 'paste') {
-        await api.putSecret(name.trim(), { value });
-      } else if (mode === 'file') {
-        await api.putSecret(name.trim(), { content: encodeText(fileContent) });
+      const body: SecretPutRequest =
+        mode === 'paste'
+          ? { value }
+          : mode === 'file'
+            ? { content: encodeText(fileContent) }
+            : { generate: { length, charset } };
+      if (rotate) {
+        await api.rotateSecret(name.trim(), { ...body, restart });
       } else {
-        await api.putSecret(name.trim(), { generate: { length, charset } });
+        await api.putSecret(name.trim(), body);
       }
       onDone();
     } catch (err) {
@@ -67,8 +77,9 @@ export function SecretForm({
     <div className="cfg">
       <form onSubmit={submit} className="card section">
         <h3 className="flex-row">
-          <Icon name="key" /> New secret
+          <Icon name="key" /> {rotate ? `Rotate ${rotate.name}` : 'New secret'}
         </h3>
+        {rotate && <RotateNotes secret={rotate} restart={restart} onRestart={setRestart} />}
         <div className="field">
           <label htmlFor="secret-name">Name</label>
           <input
@@ -76,7 +87,7 @@ export function SecretForm({
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            disabled={lockName}
+            disabled={lockName || !!rotate}
             required
           />
         </div>
@@ -167,7 +178,7 @@ export function SecretForm({
         </p>
         <div className="btn-row">
           <button type="submit" className="primary" disabled={busy}>
-            <Icon name="key" /> Create secret
+            <Icon name="key" /> {rotate ? (restart ? 'Rotate and restart now' : 'Rotate, store only') : 'Create secret'}
           </button>
           <button type="button" onClick={onDone} disabled={busy}>
             <Icon name="close" /> Cancel
@@ -175,5 +186,62 @@ export function SecretForm({
         </div>
       </form>
     </div>
+  );
+}
+
+/** What rotating does and does not do, who is affected, and the restart choice. */
+function RotateNotes({
+  secret,
+  restart,
+  onRestart,
+}: {
+  secret: SecretSummary;
+  restart: boolean;
+  onRestart: (on: boolean) => void;
+}) {
+  const users = secret.used_by;
+  return (
+    <>
+      <Banner tone="warn" title="Clouduler does not migrate data derived from this secret">
+        A database password stored inside the database, or an encryption key protecting data at rest, keeps its old
+        value there. Rotating those needs the application's own procedure: change it in the app first or together
+        with this, otherwise the service can lock itself out.
+      </Banner>
+      <div className="field">
+        <label>Used by</label>
+        {users.length === 0 ? (
+          <p className="muted">No running instance references this secret.</p>
+        ) : (
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {users.map((u) => (
+              <li key={`${u.instance}:${u.target}`} className="flex-row">
+                <code>{u.instance}</code>
+                <span className="muted">
+                  {u.delivery === 'env' ? `env ${u.target}` : `file ${u.target}`}
+                </span>
+                {u.freshness === 'stale' && <Tag tone="warn">stale: runs r{u.running_revision}</Tag>}
+                {u.freshness === 'current' && <Tag tone="ok">current</Tag>}
+                {u.freshness === 'unknown' && <Tag>revision unknown</Tag>}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="field-hint">
+          Current revision is r{secret.revision}. Containers keep the value they started with, for files and env
+          variables alike, until they are recreated.
+        </p>
+      </div>
+      <div className="field">
+        <label>After storing the new value</label>
+        <label className="flex-row">
+          <input type="radio" name="rotate-restart" checked={!restart} onChange={() => onRestart(false)} /> Store
+          only, do not restart (instances show as stale)
+        </label>
+        <label className="flex-row">
+          <input type="radio" name="rotate-restart" checked={restart} onChange={() => onRestart(true)} /> Rotate and
+          restart now: one instance at a time per service, waiting for health, stopping at the first failure
+        </label>
+      </div>
+    </>
   );
 }

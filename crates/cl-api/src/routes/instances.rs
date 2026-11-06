@@ -1123,7 +1123,7 @@ pub(crate) async fn roll_back_instance(
 }
 
 /// Removes `instance`'s container on `node`, here or via that node.
-async fn remove_container_on(
+pub(crate) async fn remove_container_on(
     state: &AppState,
     instance: &InstanceId,
     node: &str,

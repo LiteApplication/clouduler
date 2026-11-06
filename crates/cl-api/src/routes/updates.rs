@@ -803,7 +803,7 @@ const UPDATE_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Waits for an instance's update record to reach a terminal phase, and
 /// returns it with the failure message, if any. `None` on timeout, or if the
 /// record disappeared (the instance was removed or moved away).
-async fn wait_for_update(
+pub(crate) async fn wait_for_update(
     state: &AppState,
     instance: &InstanceId,
 ) -> Option<(UpdatePhase, Option<String>)> {

@@ -1,9 +1,9 @@
 // Settings > Secrets & configs: the cluster key, then the secrets and configs
 // lists. Create secret reuses SecretForm (paste, file or generate).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api, ApiError, encodeText } from '../../api/client';
-import type { ClusterKeyStatus } from '../../api/types';
+import type { ClusterKeyStatus, SecretSummary } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { Banner, BottomSheet, Button, Panel, Tag, TextField, useConfirm, useToast } from '../../ds';
 import { useClusterState } from '../../state/store';
@@ -19,6 +19,33 @@ export function SettingsSecrets({ sheetOpen, onClose }: { sheetOpen: boolean; on
   const [configName, setConfigName] = useState('');
   const [configContent, setConfigContent] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [summaries, setSummaries] = useState<SecretSummary[]>([]);
+  const [rotating, setRotating] = useState<SecretSummary | null>(null);
+
+  // Which revision each container started with is not in a form the browser
+  // can read off the stack specs, so the server resolves it. Refetched when
+  // anything that feeds it changes: a secret's revision, a container report,
+  // or a restart's progress.
+  const usageKey = useMemo(
+    () =>
+      cluster
+        ? JSON.stringify([
+            Object.values(cluster.secrets).map((s) => [s.name, s.revision]),
+            Object.entries(cluster.container_status ?? {}).map(([id, c]) => [id, c.secret_revisions ?? {}]),
+            Object.entries(cluster.instance_updates).map(([id, u]) => [id, u.phase]),
+          ])
+        : '',
+    [cluster],
+  );
+  useEffect(() => {
+    if (!usageKey) return;
+    let live = true;
+    api.listSecrets().then((rows) => live && setSummaries(rows)).catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [usageKey]);
+  const summary = (name: string) => summaries.find((s) => s.name === name);
 
   if (!cluster) return <p className="cl-muted">Loading…</p>;
   const configs = Object.values(cluster.configs);
@@ -39,6 +66,21 @@ export function SettingsSecrets({ sheetOpen, onClose }: { sheetOpen: boolean; on
       toast(`Saved ${configName.trim()}.`);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not save that config.');
+    }
+  };
+
+  const restartStale = async (name: string) => {
+    const ok = await confirm({
+      title: `Restart instances running an old ${name}?`,
+      body: 'One instance at a time per service, waiting for each to be healthy. The roll stops at the first failure.',
+      confirmLabel: 'Restart',
+    });
+    if (!ok) return;
+    try {
+      const r = await api.restartSecretUsers(name);
+      toast(r.restarting.length ? `Restarting ${r.restarting.length} instance(s).` : 'Nothing to restart.');
+    } catch (e) {
+      toast(e instanceof ApiError ? e.message : 'Could not start the restart.', { tone: 'danger' });
     }
   };
 
@@ -75,12 +117,26 @@ export function SettingsSecrets({ sheetOpen, onClose }: { sheetOpen: boolean; on
           columns={[
             { key: 'name', header: 'Name', render: (s) => <code>{s.name}</code> },
             { key: 'rev', header: 'Revision', render: (s) => s.revision },
+            {
+              key: 'stale',
+              header: 'Running',
+              render: (s) => {
+                const stale = summary(s.name)?.stale ?? 0;
+                return stale > 0 ? <Tag tone="warn">{stale} stale</Tag> : <span className="cl-muted">-</span>;
+              },
+            },
             { key: 'owner', header: 'Owner', render: (s) => s.owner ?? '-' },
             { key: 'fp', header: 'Key', render: (s) => <code>{s.key_fingerprint.slice(0, 12)}</code> },
             { key: 'used', header: 'Used by', render: (s) => usedBy('used_secrets', s.name) },
             ...(isAdmin
               ? [{ key: 'act', header: '', render: (s: (typeof secrets)[number]) => (
-                  <Button iconOnly size="sm" variant="ghost" icon="trash" label={`Remove ${s.name}`} onClick={() => void remove('secret', s.name)} />
+                  <>
+                    <Button size="sm" variant="ghost" icon="key" onClick={() => setRotating(summary(s.name) ?? { ...s, used_by: [], stale: 0 })}>Rotate</Button>
+                    {(summary(s.name)?.stale ?? 0) > 0 && (
+                      <Button size="sm" variant="ghost" icon="refresh" onClick={() => void restartStale(s.name)}>Restart stale</Button>
+                    )}
+                    <Button iconOnly size="sm" variant="ghost" icon="trash" label={`Remove ${s.name}`} onClick={() => void remove('secret', s.name)} />
+                  </>
                 ) }]
               : []),
           ]}
@@ -105,6 +161,9 @@ export function SettingsSecrets({ sheetOpen, onClose }: { sheetOpen: boolean; on
         />
       </Panel>
 
+      <BottomSheet open={rotating !== null} title={rotating ? `Rotate ${rotating.name}` : 'Rotate'} onClose={() => setRotating(null)}>
+        {rotating && <SecretForm rotate={rotating} onDone={() => setRotating(null)} />}
+      </BottomSheet>
       <BottomSheet open={sheetOpen} title="Create a secret" onClose={onClose}>
         <SecretForm onDone={onClose} />
       </BottomSheet>

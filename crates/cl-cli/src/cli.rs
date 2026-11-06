@@ -694,6 +694,44 @@ pub enum SecretCommand {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
+    /// Replace an existing secret's value, then optionally restart what uses
+    /// it. The new value comes from --value, --file, --generate, or stdin.
+    ///
+    /// Without --restart the value is only stored: running containers keep
+    /// the value they started with until they restart, and the web ui marks
+    /// them stale. With --restart, instances running an older revision are
+    /// restarted one at a time per service, waiting for each to be healthy,
+    /// and the roll stops at the first one that fails. Progress shows in
+    /// `clouduler status` and the web ui.
+    ///
+    /// Clouduler does not migrate anything derived from the old value. A
+    /// database password stored inside the database, or a key that encrypts
+    /// data at rest, needs the application's own rotation procedure.
+    Rotate {
+        /// Name of the secret. It must already exist.
+        name: String,
+        /// New value. Omit this, --file and --generate to read it from stdin.
+        #[arg(long, conflicts_with_all = ["file", "generate"])]
+        value: Option<String>,
+        /// Read the new value from a file.
+        #[arg(long, conflicts_with = "generate")]
+        file: Option<PathBuf>,
+        /// Generate a random value of this many characters.
+        #[arg(long, value_name = "LENGTH")]
+        generate: Option<usize>,
+        /// Characters for --generate: alphanumeric, hex, base64 or printable.
+        #[arg(long, default_value = "alphanumeric", requires = "generate")]
+        charset: String,
+        /// Keep a single trailing newline read from --file or stdin.
+        #[arg(long)]
+        no_trim: bool,
+        /// Restart the instances that run an older revision.
+        #[arg(long)]
+        restart: bool,
+        /// Node to submit through. Defaults to any manager in the config.
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
     /// List the secrets stored in the cluster. Values are never shown.
     List {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]

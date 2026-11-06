@@ -133,6 +133,34 @@ pub const DEFAULT_STOP_GRACE: Duration = cl_config::DEFAULT_STOP_GRACE;
 /// every field docker may have normalised.
 pub const LABEL_REVISION: &str = "clouduler.revision";
 
+/// Label carrying the revision of every cluster secret the container was
+/// created with, as `name=revision` pairs joined by commas (secret names
+/// cannot contain `=` or `,`). Deliberately not part of `LABEL_REVISION`:
+/// `diff` recreates a container whenever that changes, and overwriting a
+/// secret must not restart anything unless the operator asks for it. Holds
+/// names and numbers only, never a value.
+pub const LABEL_SECRETS: &str = "clouduler.secrets";
+
+/// `name=revision` pairs for `LABEL_SECRETS`, sorted by name.
+pub fn encode_secret_revisions(revisions: &BTreeMap<String, u64>) -> String {
+    revisions
+        .iter()
+        .map(|(name, revision)| format!("{name}={revision}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Inverse of `encode_secret_revisions`. Malformed pairs are skipped.
+pub fn decode_secret_revisions(label: &str) -> BTreeMap<String, u64> {
+    label
+        .split(',')
+        .filter_map(|pair| {
+            let (name, revision) = pair.split_once('=')?;
+            Some((name.to_string(), revision.parse().ok()?))
+        })
+        .collect()
+}
+
 /// Work out what to do, given what the cluster wants and what docker has.
 ///
 /// `Closed` short circuits everything: a node that has lost quorum stops what
@@ -919,5 +947,18 @@ mod tests {
             panic!("stopped under a released fence")
         })
         .await;
+    }
+
+    #[test]
+    fn secret_revisions_round_trip_through_the_label() {
+        let revisions = BTreeMap::from([("db".to_string(), 3), ("api.key".to_string(), 12)]);
+        let label = encode_secret_revisions(&revisions);
+        assert_eq!(label, "api.key=12,db=3");
+        assert_eq!(decode_secret_revisions(&label), revisions);
+        assert!(decode_secret_revisions("").is_empty());
+        assert_eq!(
+            decode_secret_revisions("db=3,junk,x=notanumber"),
+            BTreeMap::from([("db".to_string(), 3)])
+        );
     }
 }

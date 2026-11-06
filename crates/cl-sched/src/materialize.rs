@@ -74,6 +74,8 @@ pub struct Prepared {
     pub mounts: Vec<Materialized>,
     pub env: Vec<(String, String)>,
     pub config_edits: Vec<ConfigEdit>,
+    /// Revision of every secret opened for this instance, file or env alike.
+    pub secret_revisions: BTreeMap<String, u64>,
 }
 
 /// Writes objects out for one instance.
@@ -155,6 +157,7 @@ impl Materializer {
         let mut out = Vec::new();
         let mut env = Vec::new();
         let mut config_edits = Vec::new();
+        let mut secret_revisions = BTreeMap::new();
 
         for reference in configs {
             let entry =
@@ -229,6 +232,7 @@ impl Materializer {
                     reason: e.to_string(),
                 })?;
             drop(key_guard);
+            secret_revisions.insert(reference.source.clone(), entry.revision);
 
             if let Some(var) = &reference.env {
                 // Never touches disk: it goes straight into the container's
@@ -256,6 +260,7 @@ impl Materializer {
             mounts: out,
             env,
             config_edits,
+            secret_revisions,
         })
     }
 

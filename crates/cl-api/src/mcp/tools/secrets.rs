@@ -67,7 +67,7 @@ pub struct GenerateSecretArgs {
     /// Retry until every selected class appears at least once (default true).
     #[serde(default = "yes")]
     pub require_each_class: bool,
-    /// Replace an existing secret of this name (default false). Rotating a secret a running service already uses (a database password!) breaks that service.
+    /// Replace an existing secret of this name (default false). Overwriting stores the value only; running containers keep the old one until restarted, and anything derived from it (a database password!) is not migrated, so it can break the service.
     #[serde(default)]
     pub overwrite: bool,
 }
@@ -201,6 +201,14 @@ pub(super) async fn inspect_secret(ctx: &Ctx, args: NameArgs) -> ToolResult {
         "revision": entry.revision,
         "owner": entry.owner,
         "used_by": used_by(&state, &args.name),
+        // Containers keep the value they started with, so after an overwrite
+        // these still run the old one until restarted (by the operator, from
+        // the secrets view or `clouduler secret rotate --restart`).
+        "instances_running_an_older_revision": crate::routes::secret_rotation::usage(&state, &args.name)
+            .into_iter()
+            .filter(|u| u.freshness == crate::routes::secret_rotation::Freshness::Stale)
+            .map(|u| u.instance)
+            .collect::<Vec<_>>(),
         "facts": facts,
         "note": "facts only; the value is never shown",
     });

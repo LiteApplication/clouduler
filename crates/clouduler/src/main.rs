@@ -178,6 +178,26 @@ async fn main() -> Result<()> {
                 cl_cli::secret::set(&cfg, &name, value, file.as_deref(), no_trim, via.as_deref())
                     .await
             }
+            SecretCommand::Rotate {
+                name,
+                value,
+                file,
+                generate,
+                charset,
+                no_trim,
+                restart,
+                via,
+            } => {
+                cl_cli::secret::rotate(
+                    &cfg,
+                    &name,
+                    cl_cli::secret::NewValue::from_args(value, file, generate, &charset)?,
+                    no_trim,
+                    restart,
+                    via.as_deref(),
+                )
+                .await
+            }
             SecretCommand::List { via } => cl_cli::secret::list(&cfg, via.as_deref()).await,
         },
         Command::Registry { command } => match command {

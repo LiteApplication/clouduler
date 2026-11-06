@@ -86,6 +86,7 @@ mod tests {
                 ContainerStatus {
                     node: node.to_string(),
                     running: *running,
+                    secret_revisions: Default::default(),
                 },
             );
         }

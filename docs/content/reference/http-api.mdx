@@ -189,8 +189,11 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET | `/api/configs/{name}` | user | none | `{name, content, revision, owner}` | `content` is base64. |
 | PUT | `/api/configs/{name}` | admin | `{"content": "<base64>"}` | 200 | |
 | DELETE | `/api/configs/{name}` | admin | none | 204 | |
-| GET | `/api/secrets` | user | none | `[{name, revision, owner, key_fingerprint}]` | Never values. |
+| GET | `/api/secrets` | user | none | `[{name, revision, owner, key_fingerprint, used_by, stale}]` | Never values. `used_by` has one entry per instance that references the secret: `{instance, stack, service, node, delivery, target, running, running_revision, freshness}`. `delivery` is `file` or `env`, `target` the path or variable name, `freshness` is `current`, `stale` (created with an older revision) or `unknown` (no revision recorded). `stale` counts the stale ones. |
 | PUT | `/api/secrets/{name}` | admin | `{"value": "..."}`, `{"content": "<base64>"}` or `{"generate": {"length": 32, "charset": "alphanumeric"}}` | 200 | Charsets: `alphanumeric`, `hex`, `base64`, `printable`. 409 if this node holds no cluster key; 400 for reserved names or over 1 MiB. |
+| POST | `/api/secrets/{name}/rotate` | admin | One of the `PUT` bodies, plus optional `"restart": true` | `{revision, restarting, skipped}` | Replaces an existing secret and keeps its owner; 404 if it does not exist. Without `restart` only the value is stored. With it, instances running an older revision are queued and restarted in the background, one at a time per service, stopping at the first failure; progress and failures are in `instance_updates`. `restarting` lists the queued instances, `skipped` is `[{instance, reason}]`. |
+| POST | `/api/secrets/{name}/restart` | admin | none | 202 `{revision, restarting, skipped}` | Starts the same restart for a stored secret without changing its value. |
+| POST | `/api/secrets/internal/restart` | internal | `{"name": "..."}` | 202 `{revision, restarting, skipped}` | Node to node and CLI only: signed with the cluster key. Used by `clouduler secret rotate --restart`. |
 | DELETE | `/api/secrets/{name}` | admin | none | 204 | |
 | GET | `/api/secrets/key` | user | none | `{held, fingerprint}` | |
 | POST | `/api/secrets/key` | admin | `{"key": "<base64>"}` | 200 | Refused if a key is already present. |
@@ -317,7 +320,7 @@ See [Alerts](/docs/features/alerts).
 
 ### Internal routes
 
-Paths containing `/internal/`, plus `/api/links/...`, are for nodes and the `clouduler` CLI. They are signed with the cluster key (HMAC over method, path, query, timestamp, nonce and body hash), accepted once within a time window, and cannot be called from a script. Examples are `/api/git-backup/pull`, `/api/git-backup/reconcile`, `/api/updates/internal/scan` and `/apply`, `/api/self-update/internal/restart`, `/api/instances/internal/*`, `/api/nodes/internal/*` and `/api/dns/internal-reconcile`. Do not expose them.
+Paths containing `/internal/`, plus `/api/links/...`, are for nodes and the `clouduler` CLI. They are signed with the cluster key (HMAC over method, path, query, timestamp, nonce and body hash), accepted once within a time window, and cannot be called from a script. Examples are `/api/git-backup/pull`, `/api/git-backup/reconcile`, `/api/updates/internal/scan` and `/apply`, `/api/self-update/internal/restart`, `/api/secrets/internal/restart`, `/api/instances/internal/*`, `/api/nodes/internal/*` and `/api/dns/internal-reconcile`. Do not expose them.
 
 ## Examples
 

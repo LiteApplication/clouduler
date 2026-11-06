@@ -23,6 +23,7 @@ pub mod redirects;
 pub mod registries;
 pub mod remembered_ips;
 pub mod restic;
+pub mod secret_rotation;
 pub mod self_update;
 pub mod stacks;
 pub mod static_routes;
@@ -66,6 +67,7 @@ pub fn router() -> Router<AppState> {
         .merge(stacks::router())
         .merge(instances::router())
         .merge(objects::router())
+        .merge(secret_rotation::router())
         .merge(drives::router())
         .merge(git_backup::router())
         .merge(images::router())

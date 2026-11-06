@@ -174,6 +174,11 @@ struct SecretSummary {
     revision: u64,
     owner: Option<String>,
     key_fingerprint: String,
+    /// Every instance that references the secret, and which revision its
+    /// container started with.
+    used_by: Vec<super::secret_rotation::SecretUse>,
+    /// How many of `used_by` run an older revision.
+    stale: usize,
 }
 
 /// Never includes a value, at any role: the contract is explicit that a
@@ -189,11 +194,20 @@ async fn list_secrets(
             .secrets
             .values()
             .filter(|s| !is_reserved_secret(&s.name))
-            .map(|s| SecretSummary {
-                name: s.name.clone(),
-                revision: s.revision,
-                owner: s.owner.clone(),
-                key_fingerprint: s.key_fingerprint.clone(),
+            .map(|s| {
+                let used_by = super::secret_rotation::usage(&cluster_state, &s.name);
+                let stale = used_by
+                    .iter()
+                    .filter(|u| u.freshness == super::secret_rotation::Freshness::Stale)
+                    .count();
+                SecretSummary {
+                    name: s.name.clone(),
+                    revision: s.revision,
+                    owner: s.owner.clone(),
+                    key_fingerprint: s.key_fingerprint.clone(),
+                    used_by,
+                    stale,
+                }
             })
             .collect(),
     )
@@ -201,14 +215,14 @@ async fn list_secrets(
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum PutSecretRequest {
+pub(crate) enum PutSecretRequest {
     Literal { value: String },
     File { content: String },
     Generate { generate: GenerateSpec },
 }
 
 #[derive(Deserialize)]
-struct GenerateSpec {
+pub(crate) struct GenerateSpec {
     length: usize,
     charset: Charset,
 }
@@ -222,6 +236,18 @@ async fn put_secret(
     if is_reserved_secret(&name) {
         return Err(ApiError::BadRequest(format!("{name} is a reserved name")));
     }
+    store_secret(&state, &name, body, None).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Produce the plaintext, seal it under this node's cluster key and store it,
+/// returning the new revision. The caller has already refused reserved names.
+pub(crate) async fn store_secret(
+    state: &AppState,
+    name: &str,
+    body: PutSecretRequest,
+    owner: Option<String>,
+) -> Result<u64, ApiError> {
     let plaintext = match body {
         PutSecretRequest::Literal { value } => value.into_bytes(),
         PutSecretRequest::File { content } => {
@@ -242,24 +268,31 @@ async fn put_secret(
     let key = key_guard
         .as_ref()
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
-    let sealed = Sealed::seal(key, &name, &plaintext).map_err(ApiError::internal)?;
+    let sealed = Sealed::seal(key, name, &plaintext).map_err(ApiError::internal)?;
     let key_fingerprint = key.fingerprint();
     drop(key_guard);
 
     let response = state
         .cluster
         .submit(ClusterRequest::PutSecret {
-            name,
+            name: name.to_string(),
             sealed: sealed.blob,
             key_fingerprint,
-            owner: None,
+            owner,
         })
         .await
         .map_err(ApiError::not_leader)?;
     if let Some(msg) = response.error {
         return Err(ApiError::BadRequest(msg));
     }
-    Ok(StatusCode::OK)
+    Ok(state
+        .cluster
+        .state()
+        .await
+        .secrets
+        .get(name)
+        .map(|s| s.revision)
+        .unwrap_or(0))
 }
 
 async fn delete_secret(

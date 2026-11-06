@@ -193,12 +193,13 @@ TARGET is an instance id (`stack.service.index`, for example `immich.server.0`) 
 |---|---|
 | `secret set NAME [--value V \| --file PATH] [--no-trim] [--via NODE]` | Seals a value and stores it. With neither flag, reads stdin. |
 | `secret list [--via NODE]` | `NAME revision=N owner=STACK\|-`. Names only. |
+| `secret rotate NAME [--value V \| --file PATH \| --generate LENGTH [--charset C]] [--no-trim] [--restart] [--via NODE]` | Replaces an existing secret, keeping its owner. With none of the value flags, reads stdin. `--charset` is `alphanumeric` (default), `hex`, `base64` or `printable`. With `--restart`, restarts the instances running an older revision, one at a time per service, stopping at the first failure. |
 | `registry login SERVER -u USER [--password P \| --password-stdin] [--via NODE]` | Like `docker login`. Verifies against the registry, then stores it sealed. With neither flag, prompts without echo. |
 | `registry list [--via NODE]` | `SERVER USERNAME` per stored login. |
 | `registry test SERVER [--via NODE]` | Re-checks a stored login. |
 | `registry remove SERVER [--via NODE]` (alias `rm`) | Removes a stored login. Idempotent. |
 
-`secret set` removes one trailing newline from `--file` and stdin input unless you pass `--no-trim`. There is no `secret remove` or `rotate`: run `secret set` again to replace a value. Keep values out of shell history:
+`secret set` removes one trailing newline from `--file` and stdin input unless you pass `--no-trim`. There is no `secret remove`. `secret set` replaces a value without restarting anything; `secret rotate` does the same for an existing secret and can restart what uses it (see [Rotating a secret](/docs/features/configs-and-secrets#rotating-a-secret)). Neither migrates data derived from the old value. Keep values out of shell history:
 
 ```bash
 printf '%s' "$VALUE" | clouduler secret set db-password

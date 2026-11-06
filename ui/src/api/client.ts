@@ -47,8 +47,10 @@ import type {
   RedirectRule,
   RegistryAccount,
   RestoreRequest,
-  SecretEntry,
   SecretPutRequest,
+  SecretRollStarted,
+  SecretRotateRequest,
+  SecretSummary,
   SelfUpdateConfig,
   SelfUpdateGithubTokenStatus,
   SelfUpdateRunState,
@@ -307,7 +309,12 @@ export const api = {
   putConfig: (name: string, content: string) => put<void>(`/api/configs/${encodeURIComponent(name)}`, { content }),
   removeConfig: (name: string) => del<void>(`/api/configs/${encodeURIComponent(name)}`),
 
-  listSecrets: () => get<SecretEntry[]>('/api/secrets'),
+  listSecrets: () => get<SecretSummary[]>('/api/secrets'),
+  rotateSecret: (name: string, body: SecretRotateRequest) =>
+    post<SecretRollStarted>(`/api/secrets/${encodeURIComponent(name)}/rotate`, body),
+  /** Restart whatever still runs an older revision of a stored secret. */
+  restartSecretUsers: (name: string) =>
+    post<SecretRollStarted>(`/api/secrets/${encodeURIComponent(name)}/restart`, {}),
   putSecret: (name: string, body: SecretPutRequest) => put<void>(`/api/secrets/${encodeURIComponent(name)}`, body),
   removeSecret: (name: string) => del<void>(`/api/secrets/${encodeURIComponent(name)}`),
 

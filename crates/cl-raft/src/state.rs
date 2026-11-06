@@ -910,6 +910,13 @@ pub struct ContainerStatus {
     /// instances it no longer runs) without touching what other nodes report.
     pub node: String,
     pub running: bool,
+    /// The revision of each cluster secret the container was created with,
+    /// read from its `clouduler.secrets` label. Empty for a container with no
+    /// secrets, and for one created before the label existed: the two cannot
+    /// be told apart here, so callers compare against the secrets the stack
+    /// declares.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_revisions: BTreeMap<String, u64>,
 }
 
 /// Where one instance's image update or redeploy stands. Written through
@@ -1219,6 +1226,10 @@ pub enum Request {
     ReportContainerStatus {
         node: String,
         running: BTreeMap<InstanceId, bool>,
+        /// Per instance, the secret revisions its container was created with.
+        /// Optional so a report from a node that predates it still applies.
+        #[serde(default)]
+        secret_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
     },
     /// Record the step an instance's update or redeploy has reached. `at` is
     /// unix seconds, supplied by the caller so `apply` stays pure. Rejected
@@ -1616,6 +1627,8 @@ mod request_mirror {
         ReportContainerStatus {
             node: String,
             running: BTreeMap<InstanceId, bool>,
+            #[serde(default)]
+            secret_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
         },
         SetInstanceUpdate {
             instance: InstanceId,
@@ -2604,7 +2617,11 @@ impl ClusterState {
                 Ok(())
             }
 
-            Request::ReportContainerStatus { node, running } => {
+            Request::ReportContainerStatus {
+                node,
+                running,
+                secret_revisions,
+            } => {
                 self.container_status
                     .retain(|_, status| &status.node != node);
                 for (instance, is_running) in running {
@@ -2613,6 +2630,10 @@ impl ClusterState {
                         ContainerStatus {
                             node: node.clone(),
                             running: *is_running,
+                            secret_revisions: secret_revisions
+                                .get(instance)
+                                .cloned()
+                                .unwrap_or_default(),
                         },
                     );
                 }
@@ -3538,6 +3559,7 @@ mod tests {
             Request::ReportContainerStatus {
                 node: "n1".into(),
                 running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
+                secret_revisions: BTreeMap::new(),
             },
             Request::SetInstanceUpdate {
                 instance: InstanceId::new("gitlab", "web", 0),
@@ -5473,6 +5495,7 @@ mod tests {
         state.apply(&Request::ReportContainerStatus {
             node: "n1".into(),
             running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
+            secret_revisions: BTreeMap::new(),
         });
         assert!(!state.container_status.is_empty());
 
@@ -5523,5 +5546,28 @@ mod tests {
         assert!(state.assignments[&instance].migration.is_some());
         assert!(assign(&mut state, "n3", &[]).is_ok());
         assert!(state.assignments[&instance].migration.is_none());
+    }
+
+    #[test]
+    fn a_container_report_carries_secret_revisions_and_a_bare_one_clears_them() {
+        let mut state = ClusterState::default();
+        let id = InstanceId::new("app", "web", 0);
+        state.apply(&Request::ReportContainerStatus {
+            node: "n1".into(),
+            running: BTreeMap::from([(id.clone(), true)]),
+            secret_revisions: BTreeMap::from([(
+                id.clone(),
+                BTreeMap::from([("db".to_string(), 2)]),
+            )]),
+        });
+        assert_eq!(state.container_status[&id].secret_revisions["db"], 2);
+
+        // A report from a node that predates the field omits it.
+        let request: Request = serde_json::from_str(
+            r#"{"ReportContainerStatus":{"node":"n1","running":{"app.web.0":true}}}"#,
+        )
+        .expect("old-shape report");
+        state.apply(&request);
+        assert!(state.container_status[&id].secret_revisions.is_empty());
     }
 }

@@ -436,6 +436,10 @@ export interface ClusterState {
    *  step by step by the node doing the work. Finished entries are cleared
    *  by that node about 15 minutes later. */
   instance_updates: Record<InstanceId, InstanceUpdate>;
+  /** Last docker state each node reported per instance. `secret_revisions`
+   *  holds the revision of each cluster secret the container was created
+   *  with (absent when it has none or predates the label). */
+  container_status?: Record<InstanceId, { node: string; running: boolean; secret_revisions?: Record<string, number> }>;
   /** Login sessions keyed by a hash of the cookie; the ui never needs them. */
   sessions?: Record<string, unknown>;
   /** Reverse proxy login sessions and one-time tokens; the ui never needs them. */
@@ -679,6 +683,48 @@ export type SecretPutRequest =
   | { value: string }
   | { content: string }
   | { generate: { length: number; charset: SecretCharset } };
+
+/** Whether a container runs a secret's current revision. `unknown` means
+ *  nothing is recorded (it predates revision tracking, or its node has not
+ *  reported yet). */
+export type SecretFreshness = 'current' | 'stale' | 'unknown';
+
+/** One instance that references a secret. */
+export interface SecretUse {
+  instance: InstanceId;
+  stack: string;
+  service: string;
+  node: string;
+  delivery: 'file' | 'env';
+  /** The environment variable name, or the path inside the container. */
+  target: string;
+  running: boolean;
+  /** The revision the container was created with, when recorded. */
+  running_revision: number | null;
+  freshness: SecretFreshness;
+}
+
+/** A row of `GET /api/secrets`. Never carries a value. */
+export interface SecretSummary {
+  name: string;
+  revision: number;
+  owner: string | null;
+  key_fingerprint: string;
+  used_by: SecretUse[];
+  /** How many of `used_by` run an older revision. */
+  stale: number;
+}
+
+export type SecretRotateRequest = SecretPutRequest & {
+  /** Restart the instances that run an older revision, one at a time per service. */
+  restart?: boolean;
+};
+
+export interface SecretRollStarted {
+  revision: number;
+  restarting: InstanceId[];
+  skipped: { instance: InstanceId; reason: string }[];
+}
 
 export interface ClusterKeyStatus {
   fingerprint: string | null;

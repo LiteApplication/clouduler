@@ -137,7 +137,7 @@ An assistant works on **one stack at a time**. Call `focus_stack` first. Every w
 | `list_configs` | none | Name, size, revision, owner of each non-reserved config. |
 | `get_config` | `name` | Config text (redacted). Binary content is reported, not shown. |
 | `list_secrets` | none | Name, revision, owner. Never values. |
-| `inspect_secret` | `name` | Facts only: exists, owner, where used, length, whitespace and character classes. No hash, prefix or suffix. |
+| `inspect_secret` | `name` | Facts only: exists, revision, owner, where used, instances running an older revision, length, whitespace and character classes. No hash, prefix or suffix. |
 | `validate_stack` | `spec`, `name` (optional) | Validates a stack without deploying: `{valid, errors, requirements, per_service}`. |
 
 10 admin tools (Admin grant only):
@@ -186,7 +186,7 @@ Token lifetimes are fixed: access token 1 hour, refresh token 30 days, authoriza
 ## Quirks and gotchas
 
 <Quirk title="Deploy never takes secrets" severity="info">
-Create a secret with `generate_secret`, then reference it from the stack's `secrets:` list. Rotating a secret a running service already uses can break it.
+Create a secret with `generate_secret`, then reference it from the stack's `secrets:` list. `generate_secret` with `overwrite=true` only stores the new value: running containers keep the old one until they restart, and data derived from the old value (a database password) is not migrated, so it can break the service. `inspect_secret` lists the instances still running an older revision. Restarting them is left to the operator (the secrets page or `clouduler secret rotate NAME --restart`); there is no MCP tool for it.
 </Quirk>
 
 <Quirk title="Revoke instead of demoting">

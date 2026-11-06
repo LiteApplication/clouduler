@@ -20,6 +20,7 @@ pub use plan::{expand, Desired};
 pub use progress::UpdateReporter;
 pub use reconcile::{
     diff, pull_finished, pull_started, Action, PullTracker, Reconciler, Target, LABEL_REVISION,
+    LABEL_SECRETS,
 };
 pub use registries::{Registries, StoredLogin};
 pub use run::{desired_instances, Scheduler};
