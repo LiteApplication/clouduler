@@ -302,7 +302,12 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
             );
         }
         for (node, generation) in &volume.replicas {
-            if *generation < volume.generation {
+            // A draining node is on its way out: it is not expected to keep up.
+            let draining = state
+                .nodes
+                .get(node)
+                .is_some_and(|n| n.availability != cl_raft::state::Availability::Active);
+            if !draining && *generation < volume.generation {
                 add(
                     "volume",
                     id.to_string(),

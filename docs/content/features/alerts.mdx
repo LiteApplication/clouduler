@@ -87,7 +87,7 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `volume.sync_refused` | Storage | Critical | A sync was refused because it would wipe data. |
 | `volume.migration_failed` | Storage | Critical | A volume migration failed. |
 | `volume.empty` | Storage | Critical | A volume that should hold data is empty. |
-| `volume.replica_error` | Storage | Warning | A replica has an error or is behind its primary for at least 30 min. |
+| `volume.replica_error` | Storage | Warning | A replica has an error or is behind its primary for at least 30 min. Replicas on draining nodes are ignored. |
 | `volume.migration_completed` | Storage | Info | A volume migration completed. |
 | `restore.failed` | Backups | Critical | A restore failed. Stays open for 3 days. |
 | `backup.failed` | Backups | Warning | A backup failed. Critical once failures have lasted 24 h. |
