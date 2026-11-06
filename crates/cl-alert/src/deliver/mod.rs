@@ -70,11 +70,9 @@ pub async fn deliver(
             let url = secrets.url.as_deref().ok_or_else(missing_url)?;
             discord::send(http, url, opts, n, edit_message_id).await
         }
-        DestinationKind::Email { to } => {
-            email::send(smtp, secrets.smtp_password.as_deref(), to, n)
-                .await
-                .map(|()| None)
-        }
+        DestinationKind::Email { to } => email::send(smtp, secrets.smtp_password.as_deref(), to, n)
+            .await
+            .map(|()| None),
     }
 }
 

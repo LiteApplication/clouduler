@@ -49,10 +49,7 @@ const TOOLKIT_BINS: &[&str] = &["nvidia-container-runtime-hook", "nvidia-contain
 
 /// Detect on a schedule, publishing each result. `None` until the first one,
 /// so a daemon that has only just started does not report "no GPUs".
-pub async fn run(
-    docker: Arc<RwLock<Option<Docker>>>,
-    tx: watch::Sender<Option<NodeGpus>>,
-) {
+pub async fn run(docker: Arc<RwLock<Option<Docker>>>, tx: watch::Sender<Option<NodeGpus>>) {
     loop {
         let runtimes = match docker.read().await.clone() {
             Some(docker) => tokio::time::timeout(DOCKER_TIMEOUT, docker.runtimes())
@@ -275,7 +272,13 @@ mod tests {
     #[test]
     fn only_numbered_nvidia_nodes_count_as_gpus() {
         let names = [
-            "nvidia1", "nvidia0", "nvidiactl", "nvidia-uvm", "nvidia-modeset", "nvme0", "null",
+            "nvidia1",
+            "nvidia0",
+            "nvidiactl",
+            "nvidia-uvm",
+            "nvidia-modeset",
+            "nvme0",
+            "null",
             "nvidia10",
         ];
         assert_eq!(
@@ -286,7 +289,14 @@ mod tests {
 
     #[test]
     fn render_nodes_are_told_from_cards_and_the_by_path_dir() {
-        let names = ["by-path", "card0", "card1", "renderD128", "renderD129", "renderD"];
+        let names = [
+            "by-path",
+            "card0",
+            "card1",
+            "renderD128",
+            "renderD129",
+            "renderD",
+        ];
         assert_eq!(
             render_node_names(names.into_iter()),
             vec!["renderD128", "renderD129"]
@@ -302,12 +312,14 @@ mod tests {
 
     #[test]
     fn terminals_and_loop_devices_are_not_reported_but_serial_adapters_are() {
-        for kept in ["dri", "video0", "kfd", "nvidia0", "ttyUSB0", "ttyACM1", "ttyAMA0", "serial"] {
+        for kept in [
+            "dri", "video0", "kfd", "nvidia0", "ttyUSB0", "ttyACM1", "ttyAMA0", "serial",
+        ] {
             assert!(keep_dev_entry(kept), "{kept}");
         }
         for skipped in [
-            "tty", "tty12", "ttyS0", "loop3", "ram0", "vcs1", "ptmx", "pts", "console", "sda", "sda1",
-            "nvme0n1", "vda", "mmcblk0", "dm-0", "md0",
+            "tty", "tty12", "ttyS0", "loop3", "ram0", "vcs1", "ptmx", "pts", "console", "sda",
+            "sda1", "nvme0n1", "vda", "mmcblk0", "dm-0", "md0",
         ] {
             assert!(!keep_dev_entry(skipped), "{skipped}");
         }
@@ -365,12 +377,20 @@ mod tests {
         std::fs::write(b.join("nvidia-container-cli"), "").unwrap();
         assert_eq!(
             find_toolkit(&[a.as_path(), b.as_path()]),
-            Some(b.join("nvidia-container-cli").to_string_lossy().into_owned())
+            Some(
+                b.join("nvidia-container-cli")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
         std::fs::write(a.join("nvidia-container-runtime-hook"), "").unwrap();
         assert_eq!(
             find_toolkit(&[a.as_path(), b.as_path()]),
-            Some(a.join("nvidia-container-runtime-hook").to_string_lossy().into_owned())
+            Some(
+                a.join("nvidia-container-runtime-hook")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
     }
 

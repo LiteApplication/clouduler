@@ -532,7 +532,8 @@ pub async fn send(
     let mut returned_id: Option<String> = None;
 
     for (idx, message) in msgs.iter().enumerate() {
-        let should_patch = opts.edit_resolved && is_resolved && idx == 0 && edit_message_id.is_some();
+        let should_patch =
+            opts.edit_resolved && is_resolved && idx == 0 && edit_message_id.is_some();
 
         if should_patch {
             let msg_id = edit_message_id.unwrap();
@@ -551,11 +552,7 @@ pub async fn send(
                 obj.remove("username");
                 obj.remove("avatar_url");
             }
-            let resp = req
-                .json(&payload)
-                .send()
-                .await
-                .map_err(transport_error)?;
+            let resp = req.json(&payload).send().await.map_err(transport_error)?;
             let status = resp.status();
             if status.is_success() {
                 returned_id = Some(msg_id.to_string());
@@ -1051,7 +1048,11 @@ mod tests {
             requests
         });
 
-        let opts = DiscordOptions { edit_resolved: true, ..Default::default() };        let client = reqwest::Client::new();
+        let opts = DiscordOptions {
+            edit_resolved: true,
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
 
         // 1. Send opened alert - should POST with ?wait=true and return message id
         let open_n = notification(Body::Alert(alert(Severity::Critical, Phase::Opened)));
@@ -1060,15 +1061,9 @@ mod tests {
 
         // 2. Send resolved alert with edit_message_id - should PATCH /messages/1122334455
         let resolved_n = notification(Body::Alert(alert(Severity::Critical, Phase::Resolved)));
-        let edit_id = send(
-            &client,
-            &url,
-            &opts,
-            &resolved_n,
-            returned_id.as_deref(),
-        )
-        .await
-        .unwrap();
+        let edit_id = send(&client, &url, &opts, &resolved_n, returned_id.as_deref())
+            .await
+            .unwrap();
         assert_eq!(edit_id, Some("1122334455".to_string()));
 
         let reqs = h.await.unwrap();
@@ -1130,7 +1125,11 @@ mod tests {
             requests
         });
 
-        let opts = DiscordOptions { edit_resolved: true, ..Default::default() };        let client = reqwest::Client::new();
+        let opts = DiscordOptions {
+            edit_resolved: true,
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
         let resolved_n = notification(Body::Alert(alert(Severity::Critical, Phase::Resolved)));
 
         let res = send(&client, &url, &opts, &resolved_n, Some("deleted-msg-id"))
@@ -1139,7 +1138,9 @@ mod tests {
         assert_eq!(res, Some("99887766".to_string()));
 
         let reqs = h.await.unwrap();
-        assert!(reqs[0].starts_with("PATCH /hook/token/messages/deleted-msg-id?with_components=true "));
+        assert!(
+            reqs[0].starts_with("PATCH /hook/token/messages/deleted-msg-id?with_components=true ")
+        );
         assert!(reqs[1].starts_with("POST /hook/token?wait=true&with_components=true "));
     }
 }

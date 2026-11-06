@@ -417,7 +417,9 @@ pub(crate) fn build_forwarder() -> Result<ForwardZoneHandler<TokioRuntimeProvide
 /// straight back to the node that asked, so forwarding to it loops.
 const MAGIC_DNS: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(100, 100, 100, 100)),
-    IpAddr::V6(std::net::Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x53)),
+    IpAddr::V6(std::net::Ipv6Addr::new(
+        0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x53,
+    )),
 ];
 
 /// Resolvers a split-DNS target may forward to when the host has none left.
@@ -593,8 +595,14 @@ mod tests {
         );
         assert_eq!(split_dns_upstreams(&[], vec![]), FALLBACK_UPSTREAMS);
         // The setting wins as given, in order, whatever the host has.
-        assert_eq!(split_dns_upstreams(&[eight, nine], vec![nine]), [eight, nine]);
-        assert_eq!(split_dns_upstreams(&[MAGIC_DNS[0]], vec![nine]), [MAGIC_DNS[0]]);
+        assert_eq!(
+            split_dns_upstreams(&[eight, nine], vec![nine]),
+            [eight, nine]
+        );
+        assert_eq!(
+            split_dns_upstreams(&[MAGIC_DNS[0]], vec![nine]),
+            [MAGIC_DNS[0]]
+        );
     }
 
     fn iid(stack: &str, service: &str, index: u32) -> InstanceId {

@@ -333,12 +333,7 @@ async fn trigger_reconcile(
             }
             None => "/api/git-backup/webhook/internal-reconcile".to_string(),
         };
-        return internal_peer::post_empty(
-            state,
-            &leader,
-            &path,
-        )
-        .await;
+        return internal_peer::post_empty(state, &leader, &path).await;
     }
     run_reconcile(state, author).await
 }
@@ -349,7 +344,9 @@ async fn internal_reconcile(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<StatusCode, ApiError> {
-    let author = params.get("author").map(|u| (u.clone(), format!("{}@localhost", u)));
+    let author = params
+        .get("author")
+        .map(|u| (u.clone(), format!("{}@localhost", u)));
     run_reconcile(&state, author).await?;
     Ok(StatusCode::NO_CONTENT)
 }

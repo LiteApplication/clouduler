@@ -237,7 +237,15 @@ async fn connectivity(
 /// Node-to-node: always this node's own view.
 async fn internal_links(_auth: InternalAuth, State(state): State<AppState>) -> Json<NodeLinks> {
     let cfg = state.cluster_config.read().await.clone();
-    Json(local_links(&state.node_name, &cfg, &state.key_tx.subscribe(), &state.data_dir).await)
+    Json(
+        local_links(
+            &state.node_name,
+            &cfg,
+            &state.key_tx.subscribe(),
+            &state.data_dir,
+        )
+        .await,
+    )
 }
 
 #[cfg(test)]
@@ -253,7 +261,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_disk_probe_reports_none_for_a_missing_dir() {
-        assert_eq!(probe_disk(std::path::Path::new("/nonexistent/clouduler")).await, None);
+        assert_eq!(
+            probe_disk(std::path::Path::new("/nonexistent/clouduler")).await,
+            None
+        );
     }
 
     #[tokio::test]

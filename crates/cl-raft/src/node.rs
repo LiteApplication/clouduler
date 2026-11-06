@@ -647,7 +647,10 @@ async fn supervise_listeners(
             info!(%addr, "no longer serving rpc on this address");
         }
         for addr in plan.bind {
-            if tried.get(&addr).is_some_and(|at| at.elapsed() < LISTEN_RETRY) {
+            if tried
+                .get(&addr)
+                .is_some_and(|at| at.elapsed() < LISTEN_RETRY)
+            {
                 continue;
             }
             tried.insert(addr, Instant::now());

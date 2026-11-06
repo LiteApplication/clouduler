@@ -3078,8 +3078,11 @@ impl ClusterState {
             }
 
             Request::Served { drive, op } => {
-                let next =
-                    crate::served::ServedAuthority::apply(self.served.get(drive), op, &self.unreachable)?;
+                let next = crate::served::ServedAuthority::apply(
+                    self.served.get(drive),
+                    op,
+                    &self.unreachable,
+                )?;
                 self.served.insert(drive.clone(), next);
                 Ok(())
             }

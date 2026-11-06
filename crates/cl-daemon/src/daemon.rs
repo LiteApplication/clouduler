@@ -1035,7 +1035,9 @@ async fn watch_git_backup(
         // it either way.
         let state = cluster.state().await;
 
-        let author = api_state.as_ref().and_then(|a| a.git_export_author.lock().unwrap().take());
+        let author = api_state
+            .as_ref()
+            .and_then(|a| a.git_export_author.lock().unwrap().take());
         let (result, updated_cache) = run_git_export_blocking(
             state.clone(),
             key,
@@ -1140,7 +1142,15 @@ async fn run_git_export_blocking(
     let cache_before_attempt = secret_cache.clone();
     match tokio::task::spawn_blocking(move || {
         let mut secret_cache = secret_cache;
-        let result = run_git_export(&state, &key, &backup_cfg, &dir, &message, &mut secret_cache, author);
+        let result = run_git_export(
+            &state,
+            &key,
+            &backup_cfg,
+            &dir,
+            &message,
+            &mut secret_cache,
+            author,
+        );
         (result, secret_cache)
     })
     .await

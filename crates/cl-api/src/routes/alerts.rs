@@ -809,7 +809,11 @@ mod tests {
         let ids_pending: Vec<_> = l_pending.active.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids_pending, vec!["c", "w-new", "w-old"]);
         assert_eq!(
-            (l_pending.counts.critical, l_pending.counts.warning, l_pending.counts.info),
+            (
+                l_pending.counts.critical,
+                l_pending.counts.warning,
+                l_pending.counts.info
+            ),
             (1, 2, 0)
         );
     }

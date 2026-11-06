@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cl_raft::ids::InstanceId;
-use tracing::warn;
 use cl_raft::state::{ClusterState, NodeState, Request, Role, VolumeState};
+use tracing::warn;
 
 use crate::error::{Result, SchedError};
 use crate::plan::{Desired, GpuNeeds};
@@ -842,12 +842,18 @@ mod tests {
         state.apply(&Request::UpsertNode(gpu_node("one", 1, true, &[])));
         state.apply(&Request::UpsertNode(gpu_node("two", 2, true, &[])));
 
-        assert_eq!(eligible_names(&state, &wants_nvidia(1, &[])), ["one", "two"]);
+        assert_eq!(
+            eligible_names(&state, &wants_nvidia(1, &[])),
+            ["one", "two"]
+        );
         assert_eq!(eligible_names(&state, &wants_nvidia(2, &[])), ["two"]);
         assert!(eligible_names(&state, &wants_nvidia(3, &[])).is_empty());
 
         let why = rejections(&state, &wants_nvidia(2, &[]));
-        assert!(why.contains(&"none has no NVIDIA GPU".to_string()), "{why:?}");
+        assert!(
+            why.contains(&"none has no NVIDIA GPU".to_string()),
+            "{why:?}"
+        );
         assert!(
             why.iter()
                 .any(|r| r.starts_with("noruntime has no NVIDIA container toolkit")),
@@ -884,12 +890,20 @@ mod tests {
     #[test]
     fn host_devices_must_exist_on_the_node() {
         let mut state = ClusterState::default();
-        state.apply(&Request::UpsertNode(gpu_node("igpu", 0, false, &["/dev/dri", "/dev/dri/renderD128"])));
+        state.apply(&Request::UpsertNode(gpu_node(
+            "igpu",
+            0,
+            false,
+            &["/dev/dri", "/dev/dri/renderD128"],
+        )));
         state.apply(&Request::UpsertNode(gpu_node("plain", 0, false, &[])));
         let mut item = desired("jellyfin", 0);
         item.gpu_needs.devices = ["/dev/dri".to_string()].into();
         assert_eq!(eligible_names(&state, &item), ["igpu"]);
-        assert_eq!(rejections(&state, &item), ["plain has no host device /dev/dri"]);
+        assert_eq!(
+            rejections(&state, &item),
+            ["plain has no host device /dev/dri"]
+        );
     }
 
     #[test]

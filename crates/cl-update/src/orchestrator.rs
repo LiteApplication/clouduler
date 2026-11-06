@@ -38,20 +38,31 @@ const RESTART_TIMEOUT: Duration = Duration::from_secs(180);
 pub fn restart_order(nodes: &BTreeMap<String, NodeState>, leader: &str) -> Vec<String> {
     let mut workers: Vec<&String> = nodes
         .iter()
-        .filter(|(name, n)| n.availability == cl_raft::state::Availability::Active && n.role == Role::Worker && name.as_str() != leader)
+        .filter(|(name, n)| {
+            n.availability == cl_raft::state::Availability::Active
+                && n.role == Role::Worker
+                && name.as_str() != leader
+        })
         .map(|(name, _)| name)
         .collect();
     workers.sort();
 
     let mut managers: Vec<&String> = nodes
         .iter()
-        .filter(|(name, n)| n.availability == cl_raft::state::Availability::Active && n.role == Role::Manager && name.as_str() != leader)
+        .filter(|(name, n)| {
+            n.availability == cl_raft::state::Availability::Active
+                && n.role == Role::Manager
+                && name.as_str() != leader
+        })
         .map(|(name, _)| name)
         .collect();
     managers.sort();
 
     let mut order: Vec<String> = workers.into_iter().chain(managers).cloned().collect();
-    if nodes.get(leader).is_some_and(|n| n.availability == cl_raft::state::Availability::Active) {
+    if nodes
+        .get(leader)
+        .is_some_and(|n| n.availability == cl_raft::state::Availability::Active)
+    {
         order.push(leader.to_string());
     }
     order

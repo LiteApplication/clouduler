@@ -7,9 +7,9 @@ use std::time::Duration;
 use bollard::models::{
     ContainerCreateBody, ContainerState as BollardContainerState, ContainerStateStatusEnum,
     ContainerSummary, DeviceMapping as BollardDeviceMapping, DeviceRequest as BollardDeviceRequest,
-    EndpointIpamConfig, EndpointSettings, HealthConfig as BollardHealthConfig,
-    HealthStatusEnum, HostConfig, NetworkingConfig, PortBinding,
-    RestartPolicy as BollardRestartPolicy, RestartPolicyNameEnum,
+    EndpointIpamConfig, EndpointSettings, HealthConfig as BollardHealthConfig, HealthStatusEnum,
+    HostConfig, NetworkingConfig, PortBinding, RestartPolicy as BollardRestartPolicy,
+    RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, DownloadFromContainerOptionsBuilder,
@@ -1119,7 +1119,10 @@ mod tests {
         assert_eq!(requests[0].driver.as_deref(), Some("nvidia"));
         assert_eq!(requests[0].count, Some(-1));
         assert_eq!(requests[0].device_ids, None);
-        assert_eq!(requests[0].capabilities, Some(vec![vec!["gpu".to_string()]]));
+        assert_eq!(
+            requests[0].capabilities,
+            Some(vec![vec!["gpu".to_string()]])
+        );
         assert_eq!(requests[1].device_ids, Some(vec!["0".to_string()]));
     }
 

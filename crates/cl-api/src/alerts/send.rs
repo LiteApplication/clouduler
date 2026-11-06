@@ -130,7 +130,13 @@ impl Sender {
         let this = self.clone();
         tokio::spawn(async move {
             let outcome = this
-                .deliver_with_retries(records, destination, phase, &notification, edit_message_id.as_deref())
+                .deliver_with_retries(
+                    records,
+                    destination,
+                    phase,
+                    &notification,
+                    edit_message_id.as_deref(),
+                )
                 .await;
             let _ = tx.send(outcome);
         });
@@ -167,7 +173,9 @@ impl Sender {
         };
         for attempt in 1..=MAX_ATTEMPTS {
             outcome.attempts = attempt;
-            let result = self.attempt(&destination, notification, edit_message_id).await;
+            let result = self
+                .attempt(&destination, notification, edit_message_id)
+                .await;
             outcome.at = unix_now();
             match result {
                 Ok(msg_id) => {
@@ -190,7 +198,12 @@ impl Sender {
         outcome
     }
 
-    async fn attempt(&self, name: &str, n: &Notification, edit_message_id: Option<&str>) -> Result<Option<String>, DeliveryError> {
+    async fn attempt(
+        &self,
+        name: &str,
+        n: &Notification,
+        edit_message_id: Option<&str>,
+    ) -> Result<Option<String>, DeliveryError> {
         let fatal = |m: &str| DeliveryError {
             message: m.to_string(),
             retryable: false,
@@ -211,7 +224,14 @@ impl Sender {
             ));
         };
         let secrets = unseal_for(&state, &key, dest, &settings).map_err(|m| fatal(&m))?;
-        let fut = deliver(&self.http, dest, &secrets, settings.smtp.as_ref(), n, edit_message_id);
+        let fut = deliver(
+            &self.http,
+            dest,
+            &secrets,
+            settings.smtp.as_ref(),
+            n,
+            edit_message_id,
+        );
         match tokio::time::timeout(ATTEMPT_TIMEOUT + Duration::from_secs(2), fut).await {
             Ok(r) => r.map_err(scrub_error),
             Err(_) => Err(DeliveryError {

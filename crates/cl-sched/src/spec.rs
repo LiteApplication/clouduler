@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use cl_config::{Command, DockerSocketMode, RestartPolicy as StackRestart, Service};
 use cl_docker::{
-    BindMount, ContainerSpec, DeviceMount, GpuRequest, Healthcheck, PortMapping, PortProtocol, ResourceLimits,
-    RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
+    BindMount, ContainerSpec, DeviceMount, GpuRequest, Healthcheck, PortMapping, PortProtocol,
+    ResourceLimits, RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
 };
 use cl_raft::ids::InstanceId;
 
@@ -965,7 +965,10 @@ services:
         assert_eq!(spec.gpu_requests[1].count, 0);
         assert_eq!(spec.gpu_requests[1].device_ids, ["0", "GPU-abc"]);
         assert_eq!(spec.gpu_requests[1].capabilities.len(), 2);
-        assert_eq!(spec.resources.memory_bytes, None, "reservations are not limits");
+        assert_eq!(
+            spec.resources.memory_bytes, None,
+            "reservations are not limits"
+        );
     }
 
     #[test]
