@@ -706,7 +706,8 @@
       "dns_server": {
         "enabled": false,
         "networks": [],
-        "port": 53
+        "port": 53,
+        "upstream": []
       },
       "enabled": true,
       "http_port": 80,

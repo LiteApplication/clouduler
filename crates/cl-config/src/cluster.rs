@@ -991,6 +991,13 @@ pub struct DnsServerConfig {
     pub networks: Vec<String>,
     #[serde(default = "default_dns_port")]
     pub port: u16,
+    /// Resolvers that names the cluster does not own are forwarded to, tried
+    /// in order on port 53. Empty means the host's own resolvers
+    /// (`/etc/resolv.conf`) minus Tailscale MagicDNS, which split DNS can
+    /// route straight back to this server, or `1.1.1.1` and `1.0.0.1` when
+    /// MagicDNS is all the host has.
+    #[serde(default)]
+    pub upstream: Vec<std::net::IpAddr>,
 }
 
 fn default_dns_port() -> u16 {
@@ -1003,6 +1010,7 @@ impl Default for DnsServerConfig {
             enabled: false,
             networks: Vec::new(),
             port: default_dns_port(),
+            upstream: Vec::new(),
         }
     }
 }

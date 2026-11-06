@@ -374,7 +374,7 @@ export class ScenarioBuilder {
         acme: { enabled: true, contact_email: 'admin@example.com' },
         auth: null,
         dns_publish: 'all-nodes',
-        dns_server: { enabled: false, networks: [], port: 53 },
+        dns_server: { enabled: false, networks: [], port: 53, upstream: [] },
         enabled: true,
         http_port: 80,
         https_port: 443,

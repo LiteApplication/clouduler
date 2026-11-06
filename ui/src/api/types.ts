@@ -878,6 +878,9 @@ export interface DnsServerConfig {
   /** Empty means every internal/private network the node has an address on. */
   networks: string[];
   port: number;
+  /** Resolvers for names the cluster does not own, in order. Empty means the
+   *  host's resolvers without Tailscale MagicDNS. */
+  upstream?: string[];
 }
 
 export interface ProxyConfig {

@@ -255,6 +255,7 @@ services:
   {"key": "proxy.dns_server.enabled", "type": "bool", "default": "false", "reload": "live", "description": "Run a cluster DNS server on each node's address, answering by the client's network."},
   {"key": "proxy.dns_server.networks", "type": "list of names", "default": "every subnetted network the node is on", "reload": "live", "description": "Networks the DNS server answers for. A public network is only served if listed."},
   {"key": "proxy.dns_server.port", "type": "u16", "default": "53", "reload": "restart", "description": "Port the DNS server listens on."},
+  {"key": "proxy.dns_server.upstream", "type": "list of IP addresses", "default": "[] (the host's resolvers except Tailscale MagicDNS)", "reload": "live", "description": "Resolvers for names the cluster does not own, tried in order on port 53."},
   {"key": "proxy.http_port, proxy.https_port", "type": "u16", "default": "80, 443", "reload": "live", "description": "Proxy listener ports. Also the ports containers are allowed to reach on a node."}
 ]} />
 

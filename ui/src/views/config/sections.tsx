@@ -2333,7 +2333,41 @@ const DEFAULT_DNS_SERVER: DnsServerConfig = {
   enabled: false,
   networks: [],
   port: 53,
+  upstream: [],
 };
+
+/** Splits a comma or space separated list of resolver addresses. */
+export function parseUpstreamList(text: string): string[] {
+  return text.split(/[\s,]+/).filter(Boolean);
+}
+
+function DnsUpstreamField({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string[];
+  onChange: (upstream: string[]) => void;
+  disabled: boolean;
+}) {
+  // Local text, so a trailing comma or space survives while typing.
+  const [text, setText] = useState(value.join(', '));
+  return (
+    <TextField
+      id="proxy-dns-server-upstream"
+      label="DNS server upstream"
+      configKey="proxy.dns_server.upstream"
+      value={text}
+      onChange={(next) => {
+        setText(next);
+        onChange(parseUpstreamList(next));
+      }}
+      hint="Resolver IPs, comma separated. Blank uses the host's resolvers without Tailscale MagicDNS."
+      help="Resolvers that names the cluster does not own are forwarded to, tried in order on port 53. Leave blank to use the host's own resolvers except Tailscale MagicDNS (100.100.100.100), which split DNS can route straight back to this server and loop; if MagicDNS is the host's only resolver, 1.1.1.1 and 1.0.0.1 are used. Applies live."
+      disabled={disabled}
+    />
+  );
+}
 
 function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, 'draft' | 'setDraft' | 'disabled'>) {
   const d = draft.proxy.dns_server ?? DEFAULT_DNS_SERVER;
@@ -2389,6 +2423,7 @@ function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, 'draf
             configKey="proxy.dns_server.port"
             disabled={disabled}
           />
+          <DnsUpstreamField value={d.upstream ?? []} onChange={(upstream) => set({ upstream })} disabled={disabled} />
         </>
       )}
     </>

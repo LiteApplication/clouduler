@@ -208,14 +208,22 @@ impl ClientDns {
     }
 
     /// Serve on `bind_addr` until the process exits or the server errors out.
-    pub async fn serve(&self, bind_addr: SocketAddr) -> Result<()> {
+    /// Names forwarded upstream go to `upstream`, or to the host's resolvers
+    /// minus MagicDNS when it is empty.
+    pub async fn serve(&self, bind_addr: SocketAddr, upstream: &[IpAddr]) -> Result<()> {
+        self.serve_with(bind_addr, Arc::new(build_split_dns_forwarder(upstream)?))
+            .await
+    }
+
+    async fn serve_with(
+        &self,
+        bind_addr: SocketAddr,
+        forwarder: Arc<dyn ZoneHandler>,
+    ) -> Result<()> {
         let mut catalog = Catalog::new();
         catalog.upsert(
             LowerName::from(Name::root()),
-            vec![
-                self.zone.clone() as Arc<dyn ZoneHandler>,
-                Arc::new(build_split_dns_forwarder()?),
-            ],
+            vec![self.zone.clone() as Arc<dyn ZoneHandler>, forwarder],
         );
         let mut server = Server::new(catalog);
         let socket = tokio::net::UdpSocket::bind(bind_addr)
@@ -243,6 +251,9 @@ mod tests {
         msg.metadata.id = 9;
         msg.metadata.message_type = MessageType::Query;
         msg.metadata.op_code = OpCode::Query;
+        // A forwarder only answers queries that ask for recursion, as every
+        // real client's do.
+        msg.metadata.recursion_desired = true;
         msg.add_query(Query::query(Name::parse(name, None).unwrap(), rtype));
         let socket = tokio::net::UdpSocket::bind(format!("{from}:0"))
             .await
@@ -312,7 +323,7 @@ mod tests {
         });
         dns.reload(&views, classify).await.unwrap();
         let server = dns.clone();
-        tokio::spawn(async move { server.serve(addr).await });
+        tokio::spawn(async move { server.serve(addr, &[]).await });
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         let lan = ask(addr, "127.0.0.1", "app.example.org.", RecordType::A).await;
@@ -325,5 +336,93 @@ mod tests {
         // Nobody here owns this and this view does not forward.
         let other = ask(addr, "127.0.0.2", "www.example.net.", RecordType::A).await;
         assert_eq!(other.metadata.response_code, ResponseCode::Refused);
+    }
+
+    /// A fake upstream resolver on loopback that answers every A query with
+    /// `192.0.2.7` and counts what it was asked.
+    async fn fake_upstream() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = asked.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+                    return;
+                };
+                let Ok(query) = Message::from_vec(&buf[..n]) else {
+                    continue;
+                };
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut reply = Message::response(query.metadata.id, OpCode::Query);
+                reply.metadata.response_code = ResponseCode::NoError;
+                reply.metadata.recursion_desired = true;
+                reply.metadata.recursion_available = true;
+                for q in &query.queries {
+                    reply.add_query(q.clone());
+                    reply.add_answer(Record::from_rdata(
+                        q.name().clone(),
+                        30,
+                        RData::A(A(Ipv4Addr::new(192, 0, 2, 7))),
+                    ));
+                }
+                let _ = socket.send_to(&reply.to_vec().unwrap(), from).await;
+            }
+        });
+        (port, asked)
+    }
+
+    /// A name nobody here owns goes to the configured upstream for a client
+    /// whose view forwards, and is still refused for one whose view does not.
+    #[tokio::test]
+    async fn unowned_names_go_to_the_configured_upstream() {
+        use hickory_server::resolver::config::{ConnectionConfig, NameServerConfig};
+
+        let (upstream_port, asked) = fake_upstream().await;
+        let mut ns = NameServerConfig::udp_and_tcp(IpAddr::from([127, 0, 0, 1]));
+        ns.connections = vec![{
+            let mut udp = ConnectionConfig::udp();
+            udp.port = upstream_port;
+            udp
+        }];
+        let forwarder = crate::dns::forwarder_to(vec![ns], None).unwrap();
+
+        let port = {
+            let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        let views = BTreeMap::from([
+            (
+                "lan".to_string(),
+                View {
+                    forward: true,
+                    ..View::default()
+                },
+            ),
+            ("pub".to_string(), View::default()),
+        ]);
+        let dns = Arc::new(ClientDns::new().unwrap());
+        let classify: Classifier = Arc::new(|ip| {
+            if ip == IpAddr::from([127, 0, 0, 1]) {
+                "lan"
+            } else {
+                "pub"
+            }
+            .to_string()
+        });
+        dns.reload(&views, classify).await.unwrap();
+        let server = dns.clone();
+        tokio::spawn(async move { server.serve_with(addr, Arc::new(forwarder)).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let lan = ask(addr, "127.0.0.1", "mail.example.net.", RecordType::A).await;
+        assert_eq!(a_records(&lan), [Ipv4Addr::new(192, 0, 2, 7)]);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let outsider = ask(addr, "127.0.0.2", "mail.example.net.", RecordType::A).await;
+        assert_eq!(outsider.metadata.response_code, ResponseCode::Refused);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

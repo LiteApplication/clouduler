@@ -147,6 +147,10 @@ proxy:
     enabled: false
     networks: []   # empty = every internal/private network the node sits on
     port: 53
+    # Resolvers for names the cluster does not own, tried in order. Empty =
+    # the host's resolvers minus Tailscale MagicDNS (which split DNS can route
+    # back to this server), or 1.1.1.1 and 1.0.0.1 if that leaves none.
+    upstream: []
   acme:
     # Off by default: ordering certificates from a cluster the internet cannot
     # reach yet spends rate limit for nothing. Turn it on once the names in

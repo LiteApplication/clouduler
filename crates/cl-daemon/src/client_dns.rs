@@ -67,6 +67,8 @@ async fn run(
     // live config, so enabling, disabling or retargeting the server needs no
     // restart.
     let mut listeners: HashMap<SocketAddr, JoinHandle<()>> = HashMap::new();
+    // The upstream the running listeners forward to; a change restarts them.
+    let mut upstream: Vec<IpAddr> = Vec::new();
     let mut ticker = tokio::time::interval(RELOAD_INTERVAL);
 
     loop {
@@ -79,8 +81,12 @@ async fn run(
         } else {
             BTreeSet::new()
         };
+        let upstream_changed = upstream != cfg.proxy.dns_server.upstream;
+        if upstream_changed {
+            upstream = cfg.proxy.dns_server.upstream.clone();
+        }
         listeners.retain(|addr, handle| {
-            let keep = wanted.contains(addr) && !handle.is_finished();
+            let keep = wanted.contains(addr) && !handle.is_finished() && !upstream_changed;
             if !keep {
                 handle.abort();
             }
@@ -113,11 +119,12 @@ async fn run(
                 continue;
             }
             let dns = dns.clone();
+            let upstream = upstream.clone();
             listeners.insert(
                 addr,
                 tokio::spawn(async move {
                     loop {
-                        match dns.serve(addr).await {
+                        match dns.serve(addr, &upstream).await {
                             Ok(()) => return,
                             Err(e) => debug!(%addr, error = %e, "client dns not serving here yet"),
                         }

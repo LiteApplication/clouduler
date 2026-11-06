@@ -496,6 +496,20 @@ impl ClusterConfig {
                 "must not be 0",
             ));
         }
+        for (i, ip) in dns.upstream.iter().enumerate() {
+            if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+                return Err(ConfigError::invalid(
+                    "proxy.dns_server.upstream",
+                    format!("{ip} is not a resolver address"),
+                ));
+            }
+            if dns.upstream[..i].contains(ip) {
+                return Err(ConfigError::invalid(
+                    "proxy.dns_server.upstream",
+                    format!("{ip} is listed twice"),
+                ));
+            }
+        }
         for network in &dns.networks {
             let Some(net) = self.networks.get(network) else {
                 return Err(ConfigError::invalid(
@@ -1377,6 +1391,32 @@ cloudflare:
         assert!(ClusterConfig::parse(&unknown).is_err());
         let port = format!("{BASE}proxy:\n  dns_server: {{ port: 0 }}\n");
         assert!(ClusterConfig::parse(&port).is_err());
+    }
+
+    #[test]
+    fn the_dns_server_upstream_is_a_list_of_resolver_addresses() {
+        let cfg = ClusterConfig::parse(BASE).unwrap();
+        assert!(cfg.proxy.dns_server.upstream.is_empty());
+
+        let ok = format!(
+            "{BASE}proxy:\n  dns_server: {{ upstream: [9.9.9.9, '2606:4700:4700::1111'] }}\n"
+        );
+        let cfg = ClusterConfig::parse(&ok).unwrap();
+        assert_eq!(cfg.proxy.dns_server.upstream.len(), 2);
+
+        for (list, needle) in [
+            ("[0.0.0.0]", "not a resolver"),
+            ("[127.0.0.1]", "not a resolver"),
+            ("[224.0.0.1]", "not a resolver"),
+            ("[1.1.1.1, 1.1.1.1]", "twice"),
+        ] {
+            let bad = format!("{BASE}proxy:\n  dns_server: {{ upstream: {list} }}\n");
+            let err = ClusterConfig::parse(&bad).unwrap_err().to_string();
+            assert!(err.contains("proxy.dns_server.upstream"), "{err}");
+            assert!(err.contains(needle), "{err}");
+        }
+        let name = format!("{BASE}proxy:\n  dns_server: {{ upstream: [dns.google] }}\n");
+        assert!(ClusterConfig::parse(&name).is_err());
     }
 
     #[test]

@@ -426,10 +426,15 @@ const FALLBACK_UPSTREAMS: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
 ];
 
-/// The upstream servers of the host's resolver configuration without
-/// MagicDNS, or the public fallbacks when MagicDNS was the only one.
-fn loop_free_upstreams(configured: Vec<IpAddr>) -> Vec<IpAddr> {
-    let kept: Vec<IpAddr> = configured
+/// The resolvers a split-DNS listener forwards to. `explicit` (the
+/// `proxy.dns_server.upstream` setting) wins as given. Otherwise the host's
+/// own resolvers without MagicDNS, or the public fallbacks when MagicDNS was
+/// the only one.
+pub(crate) fn split_dns_upstreams(explicit: &[IpAddr], system: Vec<IpAddr>) -> Vec<IpAddr> {
+    if !explicit.is_empty() {
+        return explicit.to_vec();
+    }
+    let kept: Vec<IpAddr> = system
         .into_iter()
         .filter(|ip| !MAGIC_DNS.contains(ip))
         .collect();
@@ -441,22 +446,33 @@ fn loop_free_upstreams(configured: Vec<IpAddr>) -> Vec<IpAddr> {
 }
 
 /// A forwarder for a listener that tailnet split DNS points at: like
-/// [`build_forwarder`] but never asking MagicDNS, which would send the query
-/// back here and time out.
-pub(crate) fn build_split_dns_forwarder() -> Result<ForwardZoneHandler<TokioRuntimeProvider>> {
+/// [`build_forwarder`] but, unless `explicit` names the resolvers, never
+/// asking MagicDNS, which would send the query back here and time out.
+pub(crate) fn build_split_dns_forwarder(
+    explicit: &[IpAddr],
+) -> Result<ForwardZoneHandler<TokioRuntimeProvider>> {
     use hickory_server::resolver::config::NameServerConfig;
-    use hickory_server::store::forwarder::ForwardConfig;
 
     let (system, options) = hickory_server::resolver::system_conf::read_system_conf()
         .map_err(|e| NetError::Dns(format!("error reading system configuration: {e}")))?;
     let configured = system.name_servers().iter().map(|ns| ns.ip).collect();
-    let name_servers = loop_free_upstreams(configured)
+    let name_servers = split_dns_upstreams(explicit, configured)
         .into_iter()
         .map(NameServerConfig::udp_and_tcp)
         .collect();
+    forwarder_to(name_servers, Some(options))
+}
+
+/// A forwarder with exactly these upstream servers.
+pub(crate) fn forwarder_to(
+    name_servers: Vec<hickory_server::resolver::config::NameServerConfig>,
+    options: Option<hickory_server::resolver::config::ResolverOpts>,
+) -> Result<ForwardZoneHandler<TokioRuntimeProvider>> {
+    use hickory_server::store::forwarder::ForwardConfig;
+
     ForwardZoneHandler::builder_tokio(ForwardConfig {
         name_servers,
-        options: Some(options),
+        options,
     })
     .with_search(Vec::new())
     .with_domain(Name::root())
@@ -562,11 +578,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn magic_dns_is_never_an_upstream() {
-        let host = vec![MAGIC_DNS[0], MAGIC_DNS[1], IpAddr::from([9, 9, 9, 9])];
-        assert_eq!(loop_free_upstreams(host), [IpAddr::from([9, 9, 9, 9])]);
-        let only = vec![MAGIC_DNS[0], MAGIC_DNS[1]];
-        assert_eq!(loop_free_upstreams(only), FALLBACK_UPSTREAMS);
+    fn split_dns_upstreams_skip_magic_dns_unless_told_otherwise() {
+        let nine = IpAddr::from([9, 9, 9, 9]);
+        let eight = IpAddr::from([8, 8, 8, 8]);
+        // Host resolvers minus MagicDNS.
+        assert_eq!(
+            split_dns_upstreams(&[], vec![MAGIC_DNS[0], MAGIC_DNS[1], nine]),
+            [nine]
+        );
+        // MagicDNS alone: the public fallbacks.
+        assert_eq!(
+            split_dns_upstreams(&[], vec![MAGIC_DNS[0], MAGIC_DNS[1]]),
+            FALLBACK_UPSTREAMS
+        );
+        assert_eq!(split_dns_upstreams(&[], vec![]), FALLBACK_UPSTREAMS);
+        // The setting wins as given, in order, whatever the host has.
+        assert_eq!(split_dns_upstreams(&[eight, nine], vec![nine]), [eight, nine]);
+        assert_eq!(split_dns_upstreams(&[MAGIC_DNS[0]], vec![nine]), [MAGIC_DNS[0]]);
     }
 
     fn iid(stack: &str, service: &str, index: u32) -> InstanceId {

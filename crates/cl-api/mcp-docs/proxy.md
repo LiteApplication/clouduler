@@ -398,6 +398,7 @@ proxy:
     enabled: true      # default false; port 53 on node addresses is left alone otherwise
     networks: [lan]    # empty = every internal/private network the node has an address on
     port: 53
+    upstream: []       # resolvers for names the cluster does not own
 ```
 
 Each node listens on its own address on those networks
@@ -416,9 +417,15 @@ routable address. Answers follow:
   that subnet, exactly the proxy's network gate. Anyone else gets `REFUSED`.
 - Which nodes are named follows `proxy.dns_publish`, and the web ui hostname
   names the leader alone, as in the published records.
-- Names the cluster does not own are forwarded to the host's resolvers for
-  clients inside a subnetted network, and `REFUSED` for everyone else, so
-  listing a public network never makes the node an open resolver. A public
+- Names the cluster does not own are forwarded to `proxy.dns_server.upstream`
+  (IP addresses, tried in order, port 53) for clients inside a subnetted
+  network, and `REFUSED` for everyone else, so listing a public network never
+  makes the node an open resolver. Empty `upstream` means the host's
+  resolvers except Tailscale MagicDNS (`100.100.100.100`,
+  `fd7a:115c:a1e0::53`): tailnet split DNS may route the cluster's domains
+  back to this server, so forwarding to MagicDNS loops and times out. If
+  MagicDNS is all the host has, `1.1.1.1` and `1.0.0.1` are used. Changing
+  `upstream` restarts the listeners (within one 5 second pass). A public
   address is only bound if this node actually holds it (often it sits on the
   router), otherwise the bind is retried quietly.
 
