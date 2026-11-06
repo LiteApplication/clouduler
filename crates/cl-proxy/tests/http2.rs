@@ -85,6 +85,12 @@ async fn report(req: Request<Incoming>) -> Result<Response<StreamBody<ReportStre
         .unwrap_or("-")
         .to_string();
     let path = req.uri().path().to_string();
+    let cookies: Vec<_> = req
+        .headers()
+        .get_all("cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap_or("?").to_string())
+        .collect();
     // Drain the request, keeping its trailers to prove they cross the proxy.
     let mut body = req.into_body();
     let mut req_trailer = "-".to_string();
@@ -102,7 +108,8 @@ async fn report(req: Request<Incoming>) -> Result<Response<StreamBody<ReportStre
     trailers.insert("x-seen-req-trailer", req_trailer.parse().unwrap());
     let frames: Vec<Result<Frame<Bytes>, BoxErr>> = vec![
         Ok(Frame::data(Bytes::from(format!(
-            "{version} te={te} path={path}"
+            "{version} te={te} path={path} cookies={}",
+            cookies.join("|")
         )))),
         Ok(Frame::trailers(trailers)),
     ];
@@ -459,4 +466,34 @@ async fn a_websocket_upgrade_still_works_over_http11_on_the_same_listener() {
         .expect("no echo through the upgraded connection")
         .unwrap();
     assert_eq!(&echo, b"ping");
+}
+
+/// Browsers send one `cookie` header per cookie over h2. A backend (or the
+/// sticky lookup) that reads only the first would lose the session cookie, so
+/// the proxy joins them, for both upstream protocols.
+#[tokio::test]
+async fn split_h2_cookie_headers_reach_the_backend_as_one_header() {
+    let backend = spawn_dual_backend().await;
+    let proxy = serve(vec![
+        route(None, backend, RouteOptions::permissive()),
+        route(Some("/grpc"), backend, h2_options()),
+    ])
+    .await;
+    let mut sender = h2_sender(&proxy).await;
+
+    for path in ["/login", "/grpc/x"] {
+        let (mut req, tx) = request(path);
+        drop(tx);
+        req.headers_mut()
+            .append("cookie", "other=1".parse().unwrap());
+        req.headers_mut()
+            .append("cookie", "authentik_session=abc".parse().unwrap());
+        let resp = sender.send_request(req).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.ends_with("cookies=other=1; authentik_session=abc"),
+            "{path}: {text}"
+        );
+    }
 }

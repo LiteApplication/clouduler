@@ -342,6 +342,27 @@ fn ensure_host_header(req: &mut Request<Incoming>) {
     }
 }
 
+/// Joins several `Cookie` headers into one with `; `. HTTP/2 clients send
+/// one header per cookie (RFC 9113 §8.2.3), and an HTTP/1.1 backend, the
+/// sticky-cookie lookup and the login gate all read only the first, so the
+/// session cookie would be lost. Done once, before anything looks at the
+/// request.
+fn merge_cookie_headers(headers: &mut hyper::HeaderMap) {
+    if headers.get_all(hyper::header::COOKIE).iter().count() < 2 {
+        return;
+    }
+    let mut joined: Vec<u8> = Vec::new();
+    for value in headers.get_all(hyper::header::COOKIE) {
+        if !joined.is_empty() {
+            joined.extend_from_slice(b"; ");
+        }
+        joined.extend_from_slice(value.as_bytes());
+    }
+    if let Ok(v) = HeaderValue::from_bytes(&joined) {
+        headers.insert(hyper::header::COOKIE, v);
+    }
+}
+
 fn route_for(routes: &RouteTable, req: &Request<Incoming>) -> Option<Arc<Route>> {
     let host = req.headers().get(HOST).and_then(|v| v.to_str().ok())?;
     routes.lookup(host, req.uri().path())
@@ -504,11 +525,12 @@ fn respond_redirect_regex(
 }
 
 async fn handle_http(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     routes: Arc<RouteTable>,
     backends: Backends,
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
+    merge_cookie_headers(req.headers_mut());
     let host = req
         .headers()
         .get(HOST)
@@ -587,6 +609,7 @@ async fn handle_https(
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     ensure_host_header(&mut req);
+    merge_cookie_headers(req.headers_mut());
     let host = req
         .headers()
         .get(HOST)
@@ -1045,6 +1068,22 @@ mod tests {
         let five = Some(Duration::from_secs(5));
         assert_eq!(limit(five, false), five);
         assert_eq!(limit(five, true), five);
+    }
+
+    #[test]
+    fn split_cookie_headers_are_joined_into_one() {
+        let mut h = hyper::HeaderMap::new();
+        merge_cookie_headers(&mut h);
+        assert!(h.get("cookie").is_none());
+        h.append("cookie", "a=1".parse().unwrap());
+        merge_cookie_headers(&mut h);
+        assert_eq!(h.get_all("cookie").iter().count(), 1);
+        h.append("cookie", "authentik_session=s; b=2".parse().unwrap());
+        h.append("cookie", "c=3".parse().unwrap());
+        merge_cookie_headers(&mut h);
+        let all: Vec<_> = h.get_all("cookie").iter().collect();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0], "a=1; authentik_session=s; b=2; c=3");
     }
 
     #[test]
