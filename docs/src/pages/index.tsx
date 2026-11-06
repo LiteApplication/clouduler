@@ -5,12 +5,15 @@ import UiScreen from '@site/src/components/UiScreen';
 import styles from './index.module.css';
 
 const FEATURES = [
-  {t: 'Stacks, not YAML sprawl', d: 'Describe a service once. Clouduler places it, restarts it and keeps it running.'},
-  {t: 'Automatic failover', d: 'A node dies, its stacks come back on another one. Raft keeps the cluster honest.'},
-  {t: 'Built-in proxy and TLS', d: 'Publish a service on your domain with certificates handled for you.'},
-  {t: 'Replicated drives', d: 'Volumes follow your data across nodes, with sync and backups built in.'},
-  {t: 'Private by default', d: 'Overlay networking between nodes, secrets sealed in the cluster state.'},
-  {t: 'A UI that explains itself', d: 'Everything you can do in the web UI you can also do from config and CLI.'},
+  {t: 'Stacks, not YAML sprawl', d: 'Describe a service once. Clouduler places it, keeps it running, and updates container images and Clouduler itself when you ask.'},
+  {t: 'Automatic failover', d: 'A node dies, its stacks restart on another one. The cut-off node stops its own containers first, so a volume never has two writers.'},
+  {t: 'Built-in proxy and TLS', d: "Publish a service on your domain with Let's Encrypt certificates and Cloudflare DNS records handled for you, plus an optional login in front."},
+  {t: 'Drives and backups', d: 'Replicate volumes across nodes or serve one over NFS, then back drives up on a schedule to encrypted restic repositories you can restore.'},
+  {t: 'Private by default', d: 'Containers talk over an overlay between nodes, private-network routes refuse outside clients, and secrets are encrypted in the cluster state.'},
+  {t: 'Alerts', d: 'Get notified about offline nodes, full disks and crash loops on Discord, a JSON webhook or email. Info events batch into a daily digest.'},
+  {t: 'AI access over MCP', d: 'Let Claude Code or Cursor inspect and debug the cluster over OAuth, as read-only or admin. Secret values are redacted from output.'},
+  {t: 'Git backup', d: 'Mirror cluster config and stacks to your own Git repository, with secrets age-encrypted. Edit a stack in Git and a webhook pulls it in.'},
+  {t: 'Web UI, CLI and API', d: 'Use the web UI, the CLI or the HTTP API it is built on. Most config changes apply live, with no restart.'},
 ];
 
 const STARTS = [
