@@ -82,9 +82,10 @@ pub struct ReplicaTarget {
 
 /// Supplies the per-volume interval; the daemon derives this from the
 /// cluster config's drive defaults and each stack's `x-clouduler.volume_sync`
-/// overrides, none of which this crate needs to know how to parse.
+/// overrides, none of which this crate needs to know how to parse. `state` is
+/// the replicated state of this pass, which holds the stacks.
 pub trait IntervalSource: Send + Sync {
-    fn interval_for(&self, volume: &VolumeId) -> Duration;
+    fn interval_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Duration;
 }
 
 /// Which side of a replication a hook runs on.
@@ -204,7 +205,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     continue;
                 }
 
-                let interval = intervals.interval_for(id);
+                let interval = intervals.interval_for(id, &state);
                 let due_at = next_due.entry(id.clone()).or_insert_with(|| {
                     let spread: f64 = rand::thread_rng().gen();
                     now + jitter(interval, spread)
@@ -485,7 +486,7 @@ impl StaticIntervals {
 }
 
 impl IntervalSource for StaticIntervals {
-    fn interval_for(&self, volume: &VolumeId) -> Duration {
+    fn interval_for(&self, volume: &VolumeId, _state: &cl_raft::ClusterState) -> Duration {
         resolve_interval(self.default, self.overrides.get(volume).copied())
     }
 }
@@ -520,14 +521,18 @@ mod tests {
 
     #[test]
     fn static_intervals_prefer_the_override() {
+        let state = cl_raft::ClusterState::default();
         let volume = VolumeId::new("fast", "data");
         let intervals = StaticIntervals::new(
             Duration::from_secs(900),
             std::collections::BTreeMap::from([(volume.clone(), Duration::from_secs(30))]),
         );
-        assert_eq!(intervals.interval_for(&volume), Duration::from_secs(30));
         assert_eq!(
-            intervals.interval_for(&VolumeId::new("fast", "other")),
+            intervals.interval_for(&volume, &state),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            intervals.interval_for(&VolumeId::new("fast", "other"), &state),
             Duration::from_secs(900)
         );
     }

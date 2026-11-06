@@ -11,7 +11,7 @@ Clouduler has two separate kinds of update, and they never mix:
 2. **[Container image updates](#image-updates)** replace the image a running container uses (for example `nginx:1.25`).
 
 :::info Nothing updates by itself
-Clouduler never installs anything automatically. The cluster can check for a newer Clouduler release and tell you, but an operator starts the rollout. Container images are only updated when you click **Update** (or run `clouduler update`). The stack key `auto_update` is accepted by the parser but nothing acts on it (see [Quirks](#quirks)).
+Clouduler never installs a new Clouduler release by itself: the cluster can check for one and tell you, but an operator starts the rollout. Container images are updated when you click **Update** (or run `clouduler update`), or by themselves only for services whose stack sets [`x-clouduler.auto_update`](#auto-update), which is off by default.
 :::
 
 ## Part 1: cluster self-update {#self-update}
@@ -116,7 +116,13 @@ Manual rollback on a node that kept its `.old` file: `mv /usr/local/bin/cloudule
 
 ## Part 2: container image updates {#image-updates}
 
-The **Updates** page compares what each container runs with what its registry serves now for the image your stack file names. You can update one container, all that are behind, or pin what is running so it cannot drift.
+The **Updates** page compares what each container runs with what its registry served at the last registry check, for the image your stack file names. You can update one container, all that are behind, or pin what is running so it cannot drift.
+
+### When the registries are asked {#registry-checks}
+
+Opening the page, or calling `GET /api/updates`, never contacts a registry. The leader asks the registries about every distinct image the stacks declare on a timer (`updates.check_interval` in `cluster.yaml`, default 6 hours, never less than 10 minutes) and when someone presses **Refresh**. It stores the answer (the latest digest per image, when it was checked, and any error) in the replicated cluster state, so every node serves the same cached result and a new leader keeps it. The first timed check runs about a minute after a node becomes leader if the stored result is older than the interval. The running digest is the only live part: each node inspects its own containers when the page is read.
+
+A lookup that fails (for example HTTP 429 from a registry) keeps the digest from the previous check and records the error, so a rate limit does not turn a known answer into Unknown for the next interval. Lookups run four at a time. The lookup is made through the local Docker daemon (its distribution endpoint), so Clouduler cannot choose a HEAD or GET request; a 429 is retried with a growing wait.
 
 ### How it works
 
@@ -161,11 +167,12 @@ Images are removed by ID without force, so Docker refuses one that is still in u
 
 Open **Updates** (`/updates`, page title **Image updates**).
 
-- **Check again** refreshes the registry lookups. The page refreshes lookups only on request, but it polls the instance list every 3 s while a freshly started instance has not yet reported healthy.
+- The subtitle ends with `Checked <time> ago`, the time of the last registry check. **Refresh** asks the leader to check the registries now (it shows `Checking registries` while that runs, up to two minutes). Pressing it again within 30 seconds of a finished check, or while one runs, does nothing. The page polls the instance list every 3 s only while a freshly started instance has not yet reported healthy.
 - **Update all behind (N)** updates every container marked behind. A row's **Update** button updates one; it reads **Retry** after a failure.
 - **Pin digests (N)** records what each unpinned container runs as its pin, so it cannot drift on a later restart. Containers that are already pinned are never re-pinned.
 - Filter chips: **All**, **Behind**, **Off pin**, **Unknown**, **Up to date**, plus a text filter.
 - Table columns: **Container**, **Node**, **Status**, **Running to latest** and **Action**. Status shows **Update available**, **Not on its pin** ("Redeploy to apply the pin"), **Unknown** (with the registry error and an **Add registry login** link when it looks like authentication) or **Up to date**. During an update it shows `Queued`, `Downloading`, `Stopping the old one`, `Starting the new one`, `Started` or `Waiting for the health check`, with `step N of 4`.
+- A service with `auto_update` shows an extra line under its status: `Auto-update (delay 24h): auto-applies in 5 hours`, `auto-applying`, `auto-applied`, `failed, not retried for this image (<error>)`, or for notify mode `Auto-update: notify: notified`.
 - While updating, a panel reads `Updating N of M`. It is safe to leave the page. A failure banner `N update(s) failed` offers **Retry failed**.
 - **Manage registry accounts** stores logins for private registries. See [Private registries](/docs/guides/private-registries).
 
@@ -181,12 +188,13 @@ clouduler update media.web.0 media.db.0   # several
 clouduler update --via boreas             # ask a specific node
 ```
 
-The command prints `updating N instance(s):` and the accepted ids, or `nothing to update`. It returns when the work is accepted and does not report success or failure; watch the Updates page.
+With no id, `clouduler update` updates what the last registry check found behind; it does not trigger a new check. The command prints `updating N instance(s):` and the accepted ids, or `nothing to update`. It returns when the work is accepted and does not report success or failure; watch the Updates page.
 
 API:
 
 ```bash title="Image updates through the API"
 curl -H "Authorization: Bearer $KEY" https://cloud.example.com/api/updates
+curl -X POST -H "Authorization: Bearer $KEY" https://cloud.example.com/api/updates/refresh
 curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"instances": []}' https://cloud.example.com/api/updates/apply
 ```
@@ -196,19 +204,56 @@ An empty `instances` list means every instance that is behind (apply) or unpinne
 </UiCli.Cli>
 </UiCli>
 
+### Auto-update {#auto-update}
+
+`x-clouduler.auto_update` is set at the top level of the stack as the default for every service, and a service can override it in its own `x-clouduler` block. The service value wins field by field; with neither set the service is off.
+
+```yaml title="Stack default, one service overriding it"
+x-clouduler:
+  auto_update: { mode: apply, delay: 24h }
+services:
+  app:
+    image: ghcr.io/example/app:latest
+  db:
+    image: postgres:16
+    x-clouduler:
+      auto_update: false          # never automatic
+  web:
+    image: nginx:1.27
+    x-clouduler:
+      auto_update: notify         # only tell me
+```
+
+Accepted values: `false`, `true` or `"apply"`, `"notify"`, or a map with `mode` (`apply`, `notify`, `off`) and `delay`. The short forms set the mode and a delay of 0. In the map form, a field you leave out is inherited (`auto_update: { delay: 1h }` on a service keeps the stack's mode). Any other value is rejected when the stack is deployed.
+
+How it works, using the same pipeline as the **Update** button:
+
+1. The leader's registry check (see [When the registries are asked](#registry-checks)) finds that the declared tag now serves a digest other than the one running. That check time is recorded in the cluster state as the detection time of that digest.
+2. For mode `apply`, once `delay` has passed since the detection, the leader queues the instance exactly as the Updates page would, and progress shows in the same place. A different, newer digest found while waiting replaces the first and restarts the countdown. Because the detection time is in the cluster state, a leader change does not restart it.
+3. For mode `notify`, the leader raises the `update.available` alert once per new digest and changes nothing.
+
+Nothing is applied automatically when a stack is in emergency mode (the cluster is degraded), when the instance is stopped, or while an update or redeploy of that instance is running; it is picked up on a later pass. An update that fails is reported like any failed update (`update.failed`) and is not retried for the same digest. The Updates page shows the state of every auto-update instance.
+
 ### Options
 
 <OptionTable rows={[
   {key: 'services.<name>.image', type: 'string', reload: 'restart', required: true, description: 'The declared tag or digest reference that scans and pulls ask the registry about. A digest reference never shows as behind.', quirks: 'Takes effect on redeploy.'},
-  {key: 'x-clouduler.auto_update', type: 'bool', default: 'false', reload: 'n/a', description: 'Parsed at stack level and per service, but no code reads it. Nothing happens automatically.', quirks: 'Do not rely on it.'},
+  {key: 'x-clouduler.auto_update', type: 'bool | "apply" | "notify" | map', default: 'false', reload: 'n/a', description: 'Stack-wide default, overridable per service. true or "apply": the leader updates the service itself after a newer digest is found. "notify": only raises the update.available alert. false: nothing. See Auto-update below.', quirks: 'The short forms mean a delay of 0. Takes effect when the stack is deployed.'},
+  {key: 'x-clouduler.auto_update.mode', type: 'apply | notify | off', default: 'off', reload: 'n/a', description: 'Map form of the setting. A service inherits any field it leaves out from the stack level.'},
+  {key: 'x-clouduler.auto_update.delay', type: 'duration', default: '0s', reload: 'n/a', description: 'How long after the check that first saw a new digest it is applied, for mode apply. Written like other durations (`30m`, `24h`).', quirks: 'A newer digest seen during the wait restarts the countdown. Does not delay notify.'},
+  {key: 'updates.check_interval', type: 'duration', default: '6h', reload: 'live', description: 'How often the leader asks the registries about the declared images (cluster.yaml).', quirks: 'Values under 10m are treated as 10m.'},
   {key: 'failover.stop_grace', type: 'duration', reload: 'live', description: 'How long the old container may take to stop during an update before it is killed.'},
   {key: '_clouduler_registry_<server>', type: 'sealed secret', reload: 'live', description: 'Registry login (server, username, password). Verified against the registry before it is saved, and offered only to images from that registry.'},
 ]} />
 
 ## Quirks and gotchas {#quirks}
 
-<Quirk title="auto_update does nothing" severity="danger">
-`x-clouduler.auto_update` is accepted by the config parser and listed in the editor schema, but no code acts on it (nothing in the code says whether it is planned). A stack that sets it gets no behaviour. Update containers yourself.
+<Quirk title="auto_update gives up on a failed digest" severity="info">
+If an automatic update of an instance fails, it is not retried for that digest, not even after **Clear errors**. It is tried again when the registry serves a newer digest, and you can always update it from the Updates page. When an update stops a batch, the instances it cancelled go back to waiting and are queued again on the next pass; only the instance that failed is marked failed.
+</Quirk>
+
+<Quirk title="auto_update only sees images at a check" severity="info">
+A new digest is noticed at the next registry check, so with the default 6 hour interval and a delay of 24h an update can be applied up to 30 hours after it was pushed. Press **Refresh** to look sooner.
 </Quirk>
 
 <Quirk title="Self-update and image updates are unrelated">
@@ -241,6 +286,6 @@ A redeploy and an image update both write the same progress record, so one can s
 
 ## Related
 
-- [Alerts](/docs/features/alerts): `self_update.rolled_back`, `self_update.completed`, `update.failed`, `update.stuck`, `update.completed`
+- [Alerts](/docs/features/alerts): `self_update.rolled_back`, `self_update.completed`, `update.failed`, `update.stuck`, `update.available`, `update.completed`
 - [Stacks](/docs/features/stacks), [Private registries](/docs/guides/private-registries), [Git webhooks](/docs/guides/git-webhooks)
 - [Glossary](/docs/intro/glossary)

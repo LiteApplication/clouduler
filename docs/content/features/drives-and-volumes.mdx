@@ -171,7 +171,7 @@ Each node reports disk use every 60 seconds. The alert `node.disk_low` fires at 
 ## Options
 
 <OptionTable rows={[
-  {key: 'drives.<name>.sync_interval', type: 'duration', default: '15m', reload: 'live', description: 'How often the primary pushes each replicated volume to the other nodes.', quirks: 'Drive-wide only. A per-volume override in a stack (x-clouduler.volume_sync) is parsed but never applied.'},
+  {key: 'drives.<name>.sync_interval', type: 'duration', default: '15m', reload: 'live', description: 'How often the primary pushes each replicated volume to the other nodes.', quirks: 'A stack can override it per volume with x-clouduler.volume_sync.<vol>.interval (never under 30s).'},
   {key: 'drives.<name>.mode', type: 'replicated | served', default: 'replicated', reload: 'live', description: 'Replicated keeps a copy on every holder. Served keeps one active copy exported over NFS.', quirks: 'Lowercase only.'},
   {key: 'drives.<name>.served_by', type: 'list of node names', default: '[]', reload: 'live', description: 'Served drives only: nodes that can be the active server, in priority order.', quirks: 'Each node must implement the drive. Setting it on a replicated drive is an error.'},
   {key: 'nodes.<name>.drives.<drive>', type: 'absolute path', reload: 'live', required: true, description: 'Folder on this node that backs the drive. A node holds a drive only if it maps it.', quirks: 'The drive must be declared under drives:. Reaches the scheduler within one probe interval.'},
@@ -184,8 +184,8 @@ Each node reports disk use every 60 seconds. The alert `node.disk_low` fires at 
 
 ## Quirks and gotchas
 
-<Quirk title="The Resync every help text over-promises" severity="info">
-The settings page says "A stack can override this per volume." That is not true today. `x-clouduler.volume_sync.<vol>.interval` and `.enabled` are accepted by the parser but nothing reads them. Only the drive-level `sync_interval` applies.
+<Quirk title="Per-volume sync interval, but no per-volume off switch" severity="info">
+A stack can set `x-clouduler.volume_sync.<vol>.interval` for one volume; it replaces the drive's `sync_interval` for that volume, is never shorter than 30 seconds, and the shortest value wins if several services mount the volume. A longer interval widens the window of writes a failover can lose. Replication cannot be turned off per volume (`enabled` is rejected when the stack is deployed): placement only starts an instance on a node holding a current copy of every volume it mounts, so a volume that was never copied would pin the service to its node. Data that must not replicate belongs on a drive only one node implements.
 </Quirk>
 
 <Quirk title="Placement does not prefer the primary">

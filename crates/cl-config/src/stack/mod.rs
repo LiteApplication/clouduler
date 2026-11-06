@@ -23,8 +23,9 @@ pub use deploy::{
     MAX_REPLICAS,
 };
 pub use extensions::{
-    Authenticated, CorsPolicy, DockerSocket, DockerSocketMode, ExposePort, Headers, Middleware,
-    ProxyRoute, RedirectRegex, ServiceAction, ServiceExtensions, StackDefaults, VolumeSyncOverride,
+    Authenticated, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, CorsPolicy, DockerSocket,
+    DockerSocketMode, ExposePort, Headers, Middleware, ProxyRoute, RedirectRegex, ServiceAction,
+    ServiceExtensions, StackDefaults, VolumeSyncOverride,
 };
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};
@@ -44,6 +45,11 @@ use crate::error::{ConfigError, Result};
 /// Default sync interval used when neither the stack, the service nor the
 /// drive itself specifies one. Mirrors `cluster::Drive`'s default.
 pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// The shortest per-volume `volume_sync` interval that is honoured: the sync
+/// scheduler looks for due volumes every 30 seconds, so anything shorter
+/// would not run any sooner.
+pub const MIN_VOLUME_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Root of a stack file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -483,9 +489,90 @@ services:
       auto_update: false
 "#;
         let stack = StackFile::parse(raw).unwrap();
-        assert!(stack.effective_auto_update("a"));
-        assert!(!stack.effective_auto_update("b"));
+        assert_eq!(stack.effective_auto_update("a").mode, AutoUpdateMode::Apply);
+        assert_eq!(stack.effective_auto_update("b").mode, AutoUpdateMode::Off);
         assert_eq!(stack.effective_node("a").as_deref(), Some("n1"));
+    }
+
+    #[test]
+    fn auto_update_delay_and_mode_inherit_per_field() {
+        let raw = r#"
+x-clouduler:
+  auto_update: { mode: apply, delay: 24h }
+services:
+  a:
+    image: x
+  b:
+    image: y
+    x-clouduler:
+      auto_update: { delay: 1h }
+  c:
+    image: z
+    x-clouduler:
+      auto_update: notify
+  d:
+    image: w
+    x-clouduler:
+      auto_update: false
+"#;
+        let stack = StackFile::parse(raw).unwrap();
+        let day = std::time::Duration::from_secs(86400);
+        let a = stack.effective_auto_update("a");
+        assert_eq!((a.mode, a.delay), (AutoUpdateMode::Apply, day));
+        let b = stack.effective_auto_update("b");
+        assert_eq!(
+            (b.mode, b.delay),
+            (AutoUpdateMode::Apply, std::time::Duration::from_secs(3600))
+        );
+        let c = stack.effective_auto_update("c");
+        assert_eq!(
+            (c.mode, c.delay),
+            (AutoUpdateMode::Notify, std::time::Duration::ZERO)
+        );
+        assert_eq!(stack.effective_auto_update("d").mode, AutoUpdateMode::Off);
+        assert_eq!(
+            StackFile::parse("services:\n  a:\n    image: x\n")
+                .unwrap()
+                .effective_auto_update("a"),
+            AutoUpdate::default()
+        );
+    }
+
+    #[test]
+    fn volume_sync_override_takes_the_shortest_across_mounting_services() {
+        let raw = r#"
+x-clouduler:
+  volume_sync:
+    data: { interval: 30m }
+services:
+  a:
+    image: x
+    volumes:
+      - fast/data:/data
+    x-clouduler:
+      volume_sync:
+        data: { interval: 10m }
+  b:
+    image: x
+    volumes:
+      - fast/data:/data
+  c:
+    image: x
+    volumes:
+      - slow/data:/data
+  d:
+    image: x
+"#;
+        let stack = StackFile::parse(raw).unwrap();
+        assert_eq!(
+            stack.volume_sync_override("fast", "data"),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            stack.volume_sync_override("slow", "data"),
+            Some(Duration::from_secs(1800))
+        );
+        assert_eq!(stack.volume_sync_override("fast", "other"), None);
     }
 
     #[test]

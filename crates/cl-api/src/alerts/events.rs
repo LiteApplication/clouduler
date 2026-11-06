@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cl_config::AlertSeverity;
 use cl_raft::alerts::AlertLink;
-use cl_raft::state::{BackupRunOutcome, MigrationPhase, UpdatePhase};
+use cl_raft::state::{AutoUpdateOutcome, BackupRunOutcome, MigrationPhase, UpdatePhase};
 use cl_raft::{ClusterState, InstanceId};
 
 use super::lifecycle::Observed;
@@ -19,6 +19,8 @@ pub struct Snapshot {
     updates: BTreeMap<InstanceId, (i64, bool)>,
     /// instance -> migration target, while a move is in flight
     migrations: BTreeMap<InstanceId, String>,
+    /// instance -> digest an `auto_update: notify` alert was raised for
+    notified: BTreeMap<InstanceId, String>,
     secrets: BTreeMap<String, u64>,
     api_keys: BTreeMap<String, Option<String>>,
     warned_runs: BTreeSet<String>,
@@ -47,6 +49,12 @@ impl Snapshot {
                         && m.phase != MigrationPhase::Done)
                         .then(|| (a.instance.clone(), m.to.clone()))
                 })
+                .collect(),
+            notified: state
+                .auto_updates
+                .iter()
+                .filter(|(_, r)| r.outcome == AutoUpdateOutcome::Notified)
+                .map(|(i, r)| (i.clone(), r.digest.clone()))
                 .collect(),
             secrets: state
                 .secrets
@@ -164,6 +172,21 @@ pub fn diff(prev: &Snapshot, state: &ClusterState) -> Vec<Observed> {
             e.stack = Some(inst.stack.clone());
             e.instance = Some(inst.to_string());
             e.links = link("Open instance", format!("/instances/{inst}"));
+            out.push(e);
+        }
+    }
+    for (inst, digest) in &now.notified {
+        if prev.notified.get(inst) != Some(digest) {
+            let mut e = event(
+                "update.available",
+                &format!("{inst}:{digest}"),
+                format!("A newer image is available for {inst}"),
+                "Its stack sets auto_update to notify, so nothing was changed. Update it from the Updates page."
+                    .into(),
+            );
+            e.stack = Some(inst.stack.clone());
+            e.instance = Some(inst.to_string());
+            e.links = link("Open updates", "/updates".into());
             out.push(e);
         }
     }
@@ -309,6 +332,29 @@ mod tests {
         let second = Snapshot::take(&st);
         st.apply(&Request::RemoveStack { name: "web".into() });
         assert_eq!(diff(&second, &st)[0].event, "stack.removed");
+    }
+
+    #[test]
+    fn notify_mode_raises_update_available_once_per_digest() {
+        use cl_raft::state::AutoUpdateRecord;
+        let inst = InstanceId::new("web", "app", 0);
+        let mut st = ClusterState::default();
+        let rec = |digest: &str| AutoUpdateRecord {
+            digest: digest.into(),
+            detected_at: 1,
+            outcome: AutoUpdateOutcome::Notified,
+            at: 1,
+            error: None,
+        };
+        let before = Snapshot::take(&st);
+        st.auto_updates.insert(inst.clone(), rec("sha256:a"));
+        let ev = diff(&before, &st);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].event, "update.available");
+        let same = Snapshot::take(&st);
+        assert!(diff(&same, &st).is_empty());
+        st.auto_updates.insert(inst, rec("sha256:b"));
+        assert_eq!(diff(&same, &st).len(), 1);
     }
 
     #[test]

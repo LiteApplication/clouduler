@@ -141,7 +141,9 @@ Details: [Placement](/docs/features/placement), [Stacks](/docs/features/stacks),
 | Containers on the stack overlay silently drop traffic | `ethtool` is not installed on the node. `clouduler init` warns about it. |
 | A `ports:` entry is open on one node only | It binds on the node running the container. For a port open on every node use `x-clouduler.expose`, and firewall it yourself: it binds `0.0.0.0` on every node regardless of network. |
 | Network collision refused (`rename one of them`) | Two egress or wireguard networks hash to the same bridge subnet or routing table. Rename one. |
-| Config keys like `deploy.restart_policy`, `x-clouduler.auto_update` do nothing | They are accepted but not acted on. Use the service-level `restart:` key and update containers yourself. |
+| Config keys like `deploy.restart_policy` do nothing | They are accepted but not acted on. Use the service-level `restart:` key. |
+| `auto_update` does not update a service | It acts only at a registry check (`updates.check_interval`, default 6h, or **Refresh**), waits out its `delay`, and skips stopped instances, instances mid-update, stacks in emergency mode, and a digest whose automatic update already failed. The Updates page shows what it is waiting for. |
+| Stack rejected: `per-volume replication cannot be turned off` | `x-clouduler.volume_sync.VOL.enabled` is no longer accepted. Remove it; see the [stack spec](/docs/reference/stack-spec). |
 
 Details: [Networking](/docs/features/networking), [Stack spec](/docs/reference/stack-spec).
 
@@ -199,7 +201,7 @@ Open **Storage**, **Volumes** tab. State badges are **In sync**, **Syncing**, **
 | **Sync** does nothing visible | The button only bumps the generation. Data moves at the next scheduled sync. To push now, run `clouduler volume unfreeze` on the node with the copy you want, or use [folder import](/docs/features/folder-import). |
 | New writes missing after a node died | Replication is periodic (`sync_interval`, default 15 minutes) and pauses while the cluster has no quorum. Shorten `sync_interval` for drives that matter and take backups. |
 | `holds no current copy of volume` | A replica one generation behind is not used unless no reachable node holds a current copy. |
-| Per-volume `x-clouduler.volume_sync` interval is ignored | Only the drive-level `sync_interval` applies. |
+| A volume syncs more often or less often than its drive's `sync_interval` | A stack sets `x-clouduler.volume_sync.<vol>.interval` for it. The shortest value among the services mounting it applies, never under 30 seconds. |
 | `volume freeze` refuses | Containers on other nodes use the volume. Use `--force` on the CLI; the UI never sends it. Served volumes cannot be frozen. |
 | Unfreeze seems to end early in the UI | The UI waits 120 seconds for replicas and then starts containers even if some are behind. The CLI waits up to one hour. |
 | Files imported are not writable by the container | Imported files belong to the user who ran the command (root under `sudo`) and that replicates. `chown` on the node and let it sync. |

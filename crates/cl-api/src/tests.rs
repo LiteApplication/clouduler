@@ -151,6 +151,7 @@ pub(crate) async fn harness() -> Harness {
         self_update: None,
         backup: None,
         mcp: Default::default(),
+        updates: Default::default(),
     };
 
     let node = Arc::new(node);
@@ -921,7 +922,9 @@ async fn connectivity_marks_a_closed_peer_broken_and_an_open_one_healthy() {
     tokio::spawn(async move {
         use futures::{SinkExt, StreamExt};
         loop {
-            let Ok((mut stream, _)) = open.accept().await else { return };
+            let Ok((mut stream, _)) = open.accept().await else {
+                return;
+            };
             let key = key.clone();
             tokio::spawn(async move {
                 if cl_secret::stream_auth::accept(&mut stream, &key, cl_raft::network::AUTH_LABEL)

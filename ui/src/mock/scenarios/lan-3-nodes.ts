@@ -151,6 +151,13 @@ export default function lan3Nodes() {
     row('immich.machine-learning.0').error = 'registry ghcr.io answered 401 unauthorized';
     row('nextcloud.redis.0').update_available = true;
     row('nextcloud.redis.0').latest_digest = 'sha256:' + 'c'.repeat(64);
+    for (const u of db.updates) u.checked_at = db.now - 1800;
+    const web = db.updates.find((u) => u.id !== 'nextcloud.redis.0' && !u.error && !u.pin_drift);
+    if (web) {
+      web.update_available = true;
+      web.latest_digest = 'sha256:' + 'd'.repeat(64);
+      web.auto_update = { mode: 'apply', delay_secs: 86400, outcome: 'waiting', detected_at: db.now - 7200, apply_at: db.now + 79200 };
+    }
     db.state.instance_updates['nextcloud.redis.0'] = { node: 'atlas', phase: 'stopping', started_at: db.now - 20, at: db.now - 8 };
 
     // Access: two connected AI clients and one waiting for consent.

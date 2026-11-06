@@ -382,9 +382,7 @@ async fn build(
                 node: node_name.to_string(),
                 docker: docker.clone(),
             }));
-            let intervals = DriveIntervals {
-                config_rx: config_rx.clone(),
-            };
+            let intervals = DriveIntervals::new(config_rx.clone());
             running.tasks.push(tokio::spawn(async move {
                 scheduler.run(&intervals).await;
             }));
@@ -801,22 +799,66 @@ impl SyncHooks for ActionHooks {
 /// which is a stale assignment being cleaned up.
 const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Per drive sync intervals, read fresh from the live config on every call
-/// rather than a snapshot taken once: changing a drive's `sync_interval` in
-/// the ui takes effect on the sync scheduler's very next pass, without
-/// needing the drive subsystem (or the daemon) to restart.
+/// Sync intervals: a stack's `x-clouduler.volume_sync.VOL.interval` when one
+/// mounting the volume sets it (never shorter than
+/// `MIN_VOLUME_SYNC_INTERVAL`), else the drive's `sync_interval`. Read fresh
+/// from the live config and the replicated stacks on every call rather than a
+/// snapshot taken once: changing either takes effect on the sync scheduler's
+/// very next pass, without needing the drive subsystem (or the daemon) to
+/// restart.
 struct DriveIntervals {
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    /// Parsed stacks by name, reparsed only when the stack's revision moves.
+    stacks: std::sync::Mutex<ParsedStacks>,
+}
+
+type ParsedStacks = std::collections::BTreeMap<String, (u64, Option<Arc<cl_config::StackFile>>)>;
+
+impl DriveIntervals {
+    fn new(config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>) -> Self {
+        Self {
+            config_rx,
+            stacks: Default::default(),
+        }
+    }
+
+    /// The shortest override any stack sets for `volume`, clamped.
+    fn stack_override(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Option<Duration> {
+        let mut cache = self.stacks.lock().expect("interval cache");
+        cache.retain(|name, _| state.stacks.contains_key(name));
+        state
+            .stacks
+            .iter()
+            .filter_map(|(name, stack)| {
+                let entry = cache
+                    .entry(name.clone())
+                    .or_insert_with(|| (u64::MAX, None));
+                if entry.0 != stack.revision {
+                    *entry = (
+                        stack.revision,
+                        cl_config::StackFile::parse(&stack.spec).ok().map(Arc::new),
+                    );
+                }
+                entry
+                    .1
+                    .as_ref()?
+                    .volume_sync_override(&volume.drive, &volume.volume)
+            })
+            .min()
+            .map(|d| d.max(cl_config::MIN_VOLUME_SYNC_INTERVAL))
+    }
 }
 
 impl IntervalSource for DriveIntervals {
-    fn interval_for(&self, volume: &VolumeId) -> Duration {
-        self.config_rx
-            .borrow()
-            .drives
-            .get(&volume.drive)
-            .map(|drive| drive.sync_interval)
-            .unwrap_or(DEFAULT_SYNC_INTERVAL)
+    fn interval_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Duration {
+        self.stack_override(volume, state).unwrap_or_else(|| {
+            self.config_rx
+                .borrow()
+                .drives
+                .get(&volume.drive)
+                .map(|drive| drive.sync_interval)
+                .unwrap_or(DEFAULT_SYNC_INTERVAL)
+        })
     }
 }
 
@@ -847,21 +889,57 @@ web: { address: cloud, network: internal }
     }
 
     fn intervals(cfg: ClusterConfig) -> DriveIntervals {
-        DriveIntervals {
-            config_rx: tokio::sync::watch::channel(Arc::new(cfg)).1,
-        }
+        DriveIntervals::new(tokio::sync::watch::channel(Arc::new(cfg)).1)
     }
 
     #[test]
     fn each_drive_syncs_on_its_own_interval() {
         let intervals = intervals(config());
         assert_eq!(
-            intervals.interval_for(&VolumeId::new("fast", "data")),
+            intervals.interval_for(
+                &VolumeId::new("fast", "data"),
+                &cl_raft::ClusterState::default()
+            ),
             Duration::from_secs(30)
         );
         assert_eq!(
-            intervals.interval_for(&VolumeId::new("bulk", "data")),
+            intervals.interval_for(
+                &VolumeId::new("bulk", "data"),
+                &cl_raft::ClusterState::default()
+            ),
             Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn a_stack_volume_sync_interval_overrides_the_drive_and_is_clamped() {
+        let intervals = intervals(config());
+        let mut state = cl_raft::ClusterState::default();
+        let deploy = |state: &mut cl_raft::ClusterState, interval: &str, at: i64| {
+            state.apply(&cl_raft::Request::DeployStack {
+                name: "web".into(),
+                spec: format!(
+                    "services:\n  db:\n    image: x\n    volumes:\n      - bulk/data:/d\n    x-clouduler:\n      volume_sync:\n        data: {{ interval: {interval} }}\n"
+                ),
+                at,
+            });
+        };
+        let bulk = VolumeId::new("bulk", "data");
+        deploy(&mut state, "5m", 1);
+        assert_eq!(
+            intervals.interval_for(&bulk, &state),
+            Duration::from_secs(300)
+        );
+        // Another volume on the same drive keeps the drive's interval.
+        assert_eq!(
+            intervals.interval_for(&VolumeId::new("bulk", "other"), &state),
+            Duration::from_secs(3600)
+        );
+        // A redeploy (new revision) is picked up, and too short is raised.
+        deploy(&mut state, "1s", 2);
+        assert_eq!(
+            intervals.interval_for(&bulk, &state),
+            cl_config::MIN_VOLUME_SYNC_INTERVAL
         );
     }
 
@@ -869,7 +947,10 @@ web: { address: cloud, network: internal }
     fn a_volume_on_an_undeclared_drive_falls_back_rather_than_spinning() {
         let intervals = intervals(config());
         assert_eq!(
-            intervals.interval_for(&VolumeId::new("gone", "data")),
+            intervals.interval_for(
+                &VolumeId::new("gone", "data"),
+                &cl_raft::ClusterState::default()
+            ),
             Duration::from_secs(15 * 60)
         );
     }
@@ -877,9 +958,12 @@ web: { address: cloud, network: internal }
     #[test]
     fn a_config_update_changes_the_interval_without_rebuilding_anything() {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(config()));
-        let intervals = DriveIntervals { config_rx: rx };
+        let intervals = DriveIntervals::new(rx);
         assert_eq!(
-            intervals.interval_for(&VolumeId::new("fast", "data")),
+            intervals.interval_for(
+                &VolumeId::new("fast", "data"),
+                &cl_raft::ClusterState::default()
+            ),
             Duration::from_secs(30)
         );
 
@@ -888,7 +972,10 @@ web: { address: cloud, network: internal }
         tx.send(Arc::new(edited)).unwrap();
 
         assert_eq!(
-            intervals.interval_for(&VolumeId::new("fast", "data")),
+            intervals.interval_for(
+                &VolumeId::new("fast", "data"),
+                &cl_raft::ClusterState::default()
+            ),
             Duration::from_secs(5)
         );
     }

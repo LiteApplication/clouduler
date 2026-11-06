@@ -12,6 +12,21 @@ use super::extensions::DockerSocketMode;
 use super::port::Protocol;
 use super::StackFile;
 
+/// `volume_sync.VOL.enabled` was accepted for a long time and never did
+/// anything. Replication cannot be switched off for one volume: a failover
+/// only starts an instance on a node holding a current replica of every
+/// volume it mounts, so a volume that is never copied would pin the service
+/// to its node forever.
+fn enabled_rejected(path: String) -> ConfigError {
+    ConfigError::invalid(
+        path,
+        "per-volume replication cannot be turned off, so `enabled` is no longer accepted. \
+         Remove it, set a longer `interval` for a volume that changes rarely, or put \
+         scratch data on a drive that only one node implements (such a drive has nowhere \
+         to replicate to)",
+    )
+}
+
 impl StackFile {
     /// Checks that only look at the stack file itself.
     pub fn validate_syntax(&self) -> Result<()> {
@@ -182,6 +197,11 @@ impl StackFile {
     fn validate_sync_hooks(&self) -> Result<()> {
         if let Some(defaults) = &self.x_clouduler {
             for (volume, o) in &defaults.volume_sync {
+                if o.enabled.is_some() {
+                    return Err(enabled_rejected(format!(
+                        "x-clouduler.volume_sync.{volume}.enabled"
+                    )));
+                }
                 if o.before.is_some() || o.after.is_some() {
                     return Err(ConfigError::invalid(
                         format!("x-clouduler.volume_sync.{volume}"),
@@ -195,6 +215,11 @@ impl StackFile {
                 continue;
             };
             for (volume, o) in &ext.volume_sync {
+                if o.enabled.is_some() {
+                    return Err(enabled_rejected(format!(
+                        "services.{name}.x-clouduler.volume_sync.{volume}.enabled"
+                    )));
+                }
                 for (key, action) in [("before", &o.before), ("after", &o.after)] {
                     let Some(action) = action else { continue };
                     if !ext.actions.contains_key(action) {
@@ -975,6 +1000,19 @@ mod tests {
         assert!(super::StackFile::parse(stack_level).is_err());
     }
 
+    #[test]
+    fn volume_sync_enabled_is_rejected_with_an_actionable_error() {
+        let svc = "services:\n  db:\n    image: x\n    x-clouduler:\n      volume_sync:\n        data: { enabled: false }\n";
+        let err = super::StackFile::parse(svc).unwrap_err().to_string();
+        assert!(err.contains("volume_sync.data.enabled"), "{err}");
+        assert!(err.contains("interval"), "{err}");
+        let stack = "x-clouduler:\n  volume_sync:\n    data: { enabled: true }\nservices:\n  db:\n    image: x\n";
+        assert!(super::StackFile::parse(stack).is_err());
+        // The interval alone is fine.
+        let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      volume_sync:\n        data: { interval: 1h }\n";
+        super::StackFile::parse(ok).unwrap();
+    }
+
     use super::*;
     use crate::cluster::ClusterConfig;
 
@@ -1178,8 +1216,14 @@ services:
                 "networks:\n  {net}: {{}}\nservices:\n  a:\n    image: x\n    networks: [{net}]\n    x-clouduler:\n      proxy:\n        - host: a\n          network: {net}\n          port: 80\n          cloudflare_proxy: true\n"
             )
         };
-        StackFile::parse(&spec("wan")).unwrap().validate(&cluster).unwrap();
-        let err = StackFile::parse(&spec("lan")).unwrap().validate(&cluster).unwrap_err();
+        StackFile::parse(&spec("wan"))
+            .unwrap()
+            .validate(&cluster)
+            .unwrap();
+        let err = StackFile::parse(&spec("lan"))
+            .unwrap()
+            .validate(&cluster)
+            .unwrap_err();
         assert!(err.to_string().contains("cloudflare_proxy"), "{err}");
     }
 

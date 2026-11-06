@@ -28,10 +28,11 @@ pub use network::{fixed_key, throwaway_key, KeyWatch};
 pub use node::{ClusterNode, Options};
 pub use quorum::{QuorumStatus, QuorumWatch};
 pub use state::{
-    base64_decode, base64_encode, dns_key, instances_using_volume, Assignment, Availability,
-    CertificateState, ClusterConfigEntry, ClusterState, ConfigEntry, DesiredState, DnsRecordState,
-    InstanceUpdate, Migration, MigrationPhase, NodeState, PortProtocol, ProxySessionRecord,
-    ProxyTokenRecord, ReconcileStatus, Request, Response, Role, SecretEntry, SessionRecord,
-    StackState, SyncRefusal, UpdatePhase, VolumeState, MAX_OBJECT_BYTES,
+    base64_decode, base64_encode, dns_key, instances_using_volume, Assignment, AutoUpdateOutcome,
+    AutoUpdateRecord, Availability, CertificateState, ClusterConfigEntry, ClusterState,
+    ConfigEntry, DesiredState, DnsRecordState, ImageCheck, InstanceUpdate, Migration,
+    MigrationPhase, NodeState, PortProtocol, ProxySessionRecord, ProxyTokenRecord, ReconcileStatus,
+    Request, Response, Role, SecretEntry, SessionRecord, StackState, SyncRefusal, UpdatePhase,
+    VolumeState, MAX_OBJECT_BYTES,
 };
 pub use store::Store;

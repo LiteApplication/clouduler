@@ -14,10 +14,12 @@
 //! rebuilt yet is behind its own pin, which is drift rather than an update.
 //!
 //! The registry lookups are the expensive part — one network round trip per
-//! distinct image — so the fan-out is per *node*, not per instance: each node
-//! scans everything it runs, deduplicating by image reference, and answers
-//! once. A cluster running forty copies of the same three images makes three
-//! registry calls, not forty.
+//! distinct image — so they are not made when a page loads. The leader asks
+//! the registries on a timer (`updates.check_interval`) and when someone
+//! presses Refresh (`check_images`), and stores the answers in
+//! `ClusterState::image_checks`. Everything here that answers a GET reads
+//! that cache. Only the *running* digest is gathered live, by asking each
+//! node about the containers it runs, which is local docker work.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -27,8 +29,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use cl_config::AutoUpdateMode;
 use cl_raft::ids::InstanceId;
-use cl_raft::state::{ClusterState, UpdatePhase};
+use cl_raft::state::{AutoUpdateOutcome, ClusterState, ImageCheck, UpdatePhase};
 use cl_raft::Request as ClusterRequest;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -43,6 +46,7 @@ use crate::server::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/updates", get(list))
+        .route("/api/updates/refresh", post(refresh))
         .route("/api/updates/pin", post(pin))
         .route("/api/updates/apply", post(apply))
         // Node-to-node only, HMAC authenticated: one node's answer about the
@@ -65,7 +69,7 @@ const INTERNAL_SCAN_PATH: &str = "/api/updates/internal/scan";
 /// registry serve for this exact digest" always answers with the same
 /// digest, no matter how many new tags have been pushed since. The declared
 /// reference is the one that can actually move.
-fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String> {
+pub(crate) fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String> {
     state
         .stacks
         .get(&instance.stack)
@@ -77,7 +81,7 @@ fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String>
         })
 }
 
-/// How many registry lookups one node runs at once. See `scan_local`.
+/// How many registry lookups run at once. See `check_images`.
 ///
 /// Four rather than eight: at eight, ghcr.io and lscr.io started answering
 /// 429 to a routine scan. `registry_digest` retries those, so the cap is
@@ -86,9 +90,9 @@ fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String>
 /// difference between four and one.
 const REGISTRY_LOOKUP_CONCURRENCY: usize = 4;
 
-/// How long the leader waits for one node's scan. The scan does a registry
-/// round trip per distinct image, which the default 5s peer read cannot cover;
-/// kept under the reverse proxy's 30s response timeout.
+/// How long the leader waits for one node's scan, which inspects every
+/// container the node runs; kept under the reverse proxy's 30s response
+/// timeout.
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// What one node can say about one of its containers without consulting raft.
@@ -119,8 +123,15 @@ struct UpdateRow {
     latest_digest: Option<String>,
     /// What the cluster has pinned, if anything.
     pinned_digest: Option<String>,
-    /// The registry serves something other than what is running.
+    /// The registry served something other than what is running when it was
+    /// last checked.
     update_available: bool,
+    /// Unix seconds the registry was last asked about this image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checked_at: Option<i64>,
+    /// `x-clouduler.auto_update` for this instance, when it is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_update: Option<AutoUpdateRow>,
     /// A pin exists but the container is not on it. Distinct from
     /// `update_available`: this one is fixed by rebuilding the container, not
     /// by pulling anything new.
@@ -129,8 +140,126 @@ struct UpdateRow {
     error: Option<String>,
 }
 
+/// What auto_update is doing about an instance's newest digest.
+#[derive(Serialize)]
+struct AutoUpdateRow {
+    /// `apply` or `notify`.
+    mode: &'static str,
+    delay_secs: u64,
+    /// `waiting`, `queued`, `updated`, `failed` or `notified`; absent when
+    /// nothing has been recorded for the newest digest yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<AutoUpdateOutcome>,
+    /// Unix seconds the newest digest was first seen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detected_at: Option<i64>,
+    /// Unix seconds a waiting apply will be queued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apply_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<UpdateRow>> {
     Json(rows(&state).await)
+}
+
+/// Shortest time between two checks however often Refresh is pressed.
+const REFRESH_DEBOUNCE_SECS: i64 = 30;
+
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Serialize)]
+struct Refresh {
+    /// False when a check is already running or finished moments ago; the
+    /// cached answer is what is shown.
+    started: bool,
+}
+
+/// Starts a registry check in the background. Like every write, a follower
+/// relays this to the leader before it gets here.
+async fn refresh(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> (StatusCode, Json<Refresh>) {
+    let last = state.cluster.state().await.image_checks_at;
+    let now = crate::alerts::unix_now();
+    let recent = last != 0 && now - last < REFRESH_DEBOUNCE_SECS;
+    let started = !recent && !CHECKING.load(std::sync::atomic::Ordering::SeqCst);
+    if started {
+        let worker = state.clone();
+        tokio::spawn(async move { check_images(&worker).await });
+    }
+    (StatusCode::ACCEPTED, Json(Refresh { started }))
+}
+
+/// Asks the registries about every image the stacks declare, stores the
+/// answers, and lets `auto_update` see what is new. One lookup per distinct
+/// reference, a few at a time, with `registry_digest` backing off on 429.
+/// A second call while one runs does nothing.
+pub(crate) async fn check_images(state: &AppState) {
+    use std::sync::atomic::Ordering;
+    if CHECKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CHECKING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _reset = Reset;
+
+    let Some(docker) = state.docker.read().await.clone() else {
+        warn!("cannot check image updates: no docker connection on this node");
+        return;
+    };
+    let cluster_state = state.cluster.state().await;
+    let registries = super::registries::load(state).await;
+
+    let images: BTreeSet<String> = cluster_state
+        .assignments
+        .keys()
+        .filter_map(|i| declared_image(&cluster_state, i))
+        .collect();
+    let checks: BTreeMap<String, ImageCheck> = futures::stream::iter(images)
+        .map(|image| {
+            let docker = docker.clone();
+            let credentials = registries.for_image(&image).cloned();
+            async move {
+                let answer = docker.registry_digest(&image, credentials.as_ref()).await;
+                let check = ImageCheck {
+                    latest_digest: answer.as_ref().ok().cloned().flatten(),
+                    checked_at: crate::alerts::unix_now(),
+                    error: answer.err().map(|e| e.to_string()),
+                };
+                (image, check)
+            }
+        })
+        .buffer_unordered(REGISTRY_LOOKUP_CONCURRENCY)
+        .collect()
+        .await;
+    drop(cluster_state);
+
+    let at = crate::alerts::unix_now();
+    if let Err(e) = state
+        .cluster
+        .submit(ClusterRequest::SetImageChecks { checks, at })
+        .await
+    {
+        warn!(error = %e, "could not store the image check results");
+        return;
+    }
+
+    let seen = rows(state)
+        .await
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.id.parse::<InstanceId>().ok()?;
+            Some((id, row.latest_digest, row.update_available))
+        })
+        .collect();
+    crate::auto_update::record_detections(state, seen).await;
 }
 
 /// The whole cluster's answer, shared by the listing route and by `apply`,
@@ -162,7 +291,11 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
             let id = assignment.instance.to_string();
             let status = by_instance.get(&id);
             let running = status.and_then(|s| s.running_digest.clone());
-            let latest = status.and_then(|s| s.latest_digest.clone());
+            // What the registry last said, from the cache. Never fetched here.
+            let check = status
+                .and_then(|s| s.image.as_ref())
+                .and_then(|image| cluster_state.image_checks.get(image));
+            let latest = check.and_then(|c| c.latest_digest.clone());
             let pinned = assignment.image_digest.clone();
 
             // Both sides have to be known. An unknown running digest with a
@@ -183,6 +316,8 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
                 _ => false,
             };
 
+            let auto_update =
+                auto_update_row(&cluster_state, &assignment.instance, latest.as_deref());
             UpdateRow {
                 id,
                 stack: assignment.instance.stack.clone(),
@@ -193,14 +328,42 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
                 latest_digest: latest,
                 pinned_digest: pinned,
                 update_available,
+                checked_at: check.map(|c| c.checked_at),
+                auto_update,
                 pin_drift,
-                error: status.and_then(|s| s.error.clone()),
+                error: check.and_then(|c| c.error.clone()),
             }
         })
         .collect();
 
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     rows
+}
+
+fn auto_update_row(
+    state: &ClusterState,
+    instance: &InstanceId,
+    latest: Option<&str>,
+) -> Option<AutoUpdateRow> {
+    let auto = crate::auto_update::setting(state, instance);
+    let mode = match auto.mode {
+        AutoUpdateMode::Off => return None,
+        AutoUpdateMode::Apply => "apply",
+        AutoUpdateMode::Notify => "notify",
+    };
+    // A record for an older digest says nothing about the newest one.
+    let record = state
+        .auto_updates
+        .get(instance)
+        .filter(|r| latest == Some(r.digest.as_str()));
+    Some(AutoUpdateRow {
+        mode,
+        delay_secs: auto.delay.as_secs(),
+        outcome: record.map(|r| r.outcome),
+        detected_at: record.map(|r| r.detected_at),
+        apply_at: record.and_then(|r| crate::auto_update::apply_at(auto, r)),
+        error: record.and_then(|r| r.error.clone()),
+    })
 }
 
 /// Ask one node about everything it runs. A node that cannot be reached
@@ -234,16 +397,14 @@ async fn internal_scan(
     Json(scan_local(&state).await)
 }
 
-/// Inspect every container this node is assigned, then ask each distinct
-/// registry reference once what it currently serves.
+/// Inspect every container this node is assigned for what it is running.
+/// No registry is asked; see `check_images`.
 async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
     let Some(docker) = state.docker.read().await.clone() else {
         return Vec::new();
     };
     let cluster_state = state.cluster.state().await;
-    let registries = super::registries::load(state).await;
 
-    // Pass one: what is running here, locally, with no network involved.
     let mut statuses = Vec::new();
     for assignment in cluster_state.assignments.values() {
         if assignment.node != state.node_name {
@@ -279,45 +440,6 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
         });
     }
 
-    // Pass two: one registry lookup per distinct reference, however many
-    // containers share it, and several in flight at once.
-    //
-    // Concurrency matters more than it looks. These are round trips to the
-    // open internet, tens of them, and run one after another they added up to
-    // well over the reverse proxy's 30s response timeout on a cluster this
-    // size — the view 504'd rather than rendering. Bounded rather than
-    // unlimited so a node with a hundred distinct images does not open a
-    // hundred sockets, and because registries rate-limit anonymous pulls.
-    let images: Vec<String> = statuses
-        .iter()
-        .filter_map(|s| s.image.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let latest: BTreeMap<String, Result<Option<String>, String>> = futures::stream::iter(images)
-        .map(|image| {
-            let docker = docker.clone();
-            let credentials = registries.for_image(&image).cloned();
-            async move {
-                let answer = docker
-                    .registry_digest(&image, credentials.as_ref())
-                    .await
-                    .map_err(|e| e.to_string());
-                (image, answer)
-            }
-        })
-        .buffer_unordered(REGISTRY_LOOKUP_CONCURRENCY)
-        .collect()
-        .await;
-
-    for status in &mut statuses {
-        let Some(image) = &status.image else { continue };
-        match latest.get(image) {
-            Some(Ok(digest)) => status.latest_digest.clone_from(digest),
-            Some(Err(reason)) => status.error = Some(reason.clone()),
-            None => {}
-        }
-    }
     statuses
 }
 

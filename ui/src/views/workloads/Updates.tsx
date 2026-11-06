@@ -12,6 +12,60 @@ import './workloads.css';
 type Status = 'update' | 'drift' | 'current' | 'unknown';
 type UpdateStep = (typeof UPDATE_STEPS)[number];
 
+/** Unix milliseconds of the newest registry check any row reports, or null. */
+export function latestCheck(list: UpdateRow[]): number | null {
+  const secs = list.reduce((max, r) => Math.max(max, r.checked_at ?? 0), 0);
+  return secs > 0 ? secs * 1000 : null;
+}
+
+const REFRESH_POLL_MS = 3000;
+const REFRESH_WAIT_MS = 2 * 60 * 1000;
+
+/** "24h", "90m", "45s" for an auto-update delay. */
+function delayLabel(secs: number): string {
+  if (secs >= 3600 && secs % 3600 === 0) return `${secs / 3600}h`;
+  if (secs >= 60 && secs % 60 === 0) return `${secs / 60}m`;
+  return `${secs}s`;
+}
+
+/** What `x-clouduler.auto_update` is doing about this row, if it is on. */
+function AutoUpdateNote({ row, now }: { row: UpdateRow; now: number }) {
+  const auto = row.auto_update;
+  if (!auto) return null;
+  const mode = auto.mode === 'notify' ? 'Auto-update: notify' : 'Auto-update';
+  let detail: string | null = null;
+  let danger = false;
+  switch (auto.outcome) {
+    case 'waiting':
+      detail = auto.apply_at && auto.apply_at * 1000 > now ? `auto-applies ${relativeTime(auto.apply_at, now)}` : 'auto-applies shortly';
+      break;
+    case 'queued':
+      detail = 'auto-applying';
+      break;
+    case 'updated':
+      detail = 'auto-applied';
+      break;
+    case 'failed':
+      detail = 'failed, not retried for this image';
+      danger = true;
+      break;
+    case 'notified':
+      detail = 'notified';
+      break;
+    default:
+      detail = row.update_available ? 'picked up at the next check' : null;
+  }
+  const delay = auto.mode === 'apply' && auto.delay_secs > 0 ? ` (delay ${delayLabel(auto.delay_secs)})` : '';
+  return (
+    <span className={`sub${danger ? ' wl-danger' : ''}`} title={auto.error ?? undefined}>
+      {mode}
+      {delay}
+      {detail ? `: ${detail}` : ''}
+      {danger && auto.error ? ` (${auto.error})` : ''}
+    </span>
+  );
+}
+
 /** One row's verdict, in the order that matters: an error means we do not
  *  know, and "we do not know" must never render as "up to date". */
 function statusOf(row: UpdateRow): Status {
@@ -150,6 +204,9 @@ export function Updates() {
   const [busy, setBusy] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const checkedAtRef = useRef<number | null>(null);
+  checkedAtRef.current = checkedAt;
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BulkResult[] | null>(null);
   const cluster = useClusterState();
@@ -198,8 +255,9 @@ export function Updates() {
   const load = useCallback(async () => {
     setChecking(true);
     try {
-      setRows(await api.listUpdates());
-      setCheckedAt(Date.now());
+      const list = await api.listUpdates();
+      setRows(list);
+      setCheckedAt(latestCheck(list));
       setError(null);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -207,6 +265,33 @@ export function Updates() {
       setChecking(false);
     }
   }, []);
+
+  /** Ask the leader to check the registries now, then poll the (cached) list
+   *  until the check time moves. The check runs on the leader in the
+   *  background and can take longer than a request may, and a Refresh pressed
+   *  just after another is answered with the cached result, so the wait is
+   *  capped. */
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const before = checkedAtRef.current ?? 0;
+      const { started } = await api.refreshUpdates();
+      if (started) {
+        const deadline = Date.now() + REFRESH_WAIT_MS;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, REFRESH_POLL_MS));
+          const list = await api.listUpdates();
+          if ((latestCheck(list) ?? 0) > before) break;
+        }
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -218,8 +303,8 @@ export function Updates() {
     }
   }, []);
 
-  // Not polled. Every load costs one registry round trip per distinct image
-  // across the cluster, so this refreshes when asked and not on a timer.
+  // Loading only reads what the leader last found out: the registries are
+  // asked on the cluster's timer and by Refresh, never by opening this page.
   useEffect(() => {
     void load();
     void loadAccounts();
@@ -398,7 +483,7 @@ export function Updates() {
   const retryable = failedUpdates
     .map(([id]) => id)
     .filter((id) => rows.some((r) => r.id === id && statusOf(r) === 'update') && !inFlight.has(id));
-  const checkedLabel = checkedAt ? `Checked ${relativeTime(Math.floor(checkedAt / 1000), now)}` : 'Not checked yet';
+  const checkedLabel = checkedAt ? `Checked ${relativeTime(checkedAt, now)}` : 'Not checked yet';
   const subtitle =
     rows.length === 0
       ? `No containers · ${checkedLabel}`
@@ -491,6 +576,7 @@ export function Updates() {
                 )}
               </span>
             )}
+            <AutoUpdateNote row={row} now={now} />
             {status === 'drift' && (
               <Link className="lnk sub" to={`/instances/${encodeURIComponent(row.id)}`}>
                 Redeploy to apply the pin
@@ -543,8 +629,8 @@ export function Updates() {
               <Button icon="lock" disabled={busy !== null || unpinned.length === 0} title="Record what each unpinned container runs as its pin, so it cannot drift on a later restart" onClick={() => void runPin()}>
                 {`Pin digests (${unpinned.length})`}
               </Button>
-              <Button variant="ghost" icon="refresh" loading={checking} onClick={() => void load()}>
-                {checking ? 'Checking' : 'Check again'}
+              <Button variant="ghost" icon="refresh" loading={checking || refreshing} disabled={refreshing} title="Ask the registries now. They are also checked on a timer." onClick={() => void refresh()}>
+                {refreshing ? 'Checking registries' : 'Refresh'}
               </Button>
               <Button variant="primary" icon="download" disabled={busy !== null || behindIdle.length === 0} loading={busy === 'bulk'} onClick={() => void startUpdate(behindIdle.map((r) => r.id))}>
                   {`Update all behind (${behindIdle.length})`}

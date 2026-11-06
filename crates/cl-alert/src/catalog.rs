@@ -361,6 +361,15 @@ pub const EVENTS: &[EventDef] = &[
         true,
     ),
     ev(
+        "update.available",
+        Deployments,
+        "A newer image is available",
+        Info,
+        "",
+        false,
+        true,
+    ),
+    ev(
         "update.completed",
         Deployments,
         "An image update completed",

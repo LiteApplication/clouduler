@@ -414,7 +414,141 @@ impl DockerSocketMode {
     }
 }
 
-/// Per volume override of the drive's default sync interval.
+/// What to do when the registry serves a newer image for a service's tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoUpdateMode {
+    /// Nothing happens on its own; updates are applied from the Updates page.
+    #[default]
+    Off,
+    /// The leader updates the instance as if the Updates page's button had
+    /// been clicked, once the delay has passed.
+    Apply,
+    /// The leader only raises an `update.available` alert.
+    Notify,
+}
+
+impl AutoUpdateMode {
+    fn parse(word: &str) -> Result<Self, String> {
+        match word {
+            "apply" | "true" => Ok(Self::Apply),
+            "notify" => Ok(Self::Notify),
+            "off" | "false" => Ok(Self::Off),
+            other => Err(format!(
+                "auto_update mode must be apply, notify or off, not \"{other}\""
+            )),
+        }
+    }
+}
+
+/// `x-clouduler.auto_update` as written, at stack or service level.
+///
+/// Short forms: `true` / `"apply"`, `false`, `"notify"`. They set the mode
+/// and a delay of zero. The map form `{mode, delay}` sets only the fields it
+/// names, and the others are inherited (service from stack).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AutoUpdateSetting {
+    pub mode: Option<AutoUpdateMode>,
+    pub delay: Option<Duration>,
+}
+
+/// The resolved setting of one service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AutoUpdate {
+    pub mode: AutoUpdateMode,
+    /// How long after a newer digest is first seen it is applied.
+    pub delay: Duration,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum RawAutoUpdate {
+    Flag(bool),
+    Word(String),
+    Map(RawAutoUpdateMap),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAutoUpdateMap {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    delay: Option<Duration>,
+}
+
+impl TryFrom<RawAutoUpdate> for AutoUpdateSetting {
+    type Error = String;
+
+    fn try_from(raw: RawAutoUpdate) -> Result<Self, String> {
+        let short = |mode| AutoUpdateSetting {
+            mode: Some(mode),
+            delay: Some(Duration::ZERO),
+        };
+        match raw {
+            RawAutoUpdate::Flag(true) => Ok(short(AutoUpdateMode::Apply)),
+            RawAutoUpdate::Flag(false) => Ok(short(AutoUpdateMode::Off)),
+            RawAutoUpdate::Word(w) => AutoUpdateMode::parse(&w).map(short),
+            RawAutoUpdate::Map(m) => Ok(AutoUpdateSetting {
+                mode: m.mode.as_deref().map(AutoUpdateMode::parse).transpose()?,
+                delay: m.delay,
+            }),
+        }
+    }
+}
+
+impl From<AutoUpdateSetting> for RawAutoUpdate {
+    fn from(s: AutoUpdateSetting) -> Self {
+        let word = |m: AutoUpdateMode| match m {
+            AutoUpdateMode::Off => "off",
+            AutoUpdateMode::Apply => "apply",
+            AutoUpdateMode::Notify => "notify",
+        };
+        RawAutoUpdate::Map(RawAutoUpdateMap {
+            mode: s.mode.map(|m| word(m).to_string()),
+            delay: s.delay,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for AutoUpdateSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = RawAutoUpdate::deserialize(d)?;
+        Self::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for AutoUpdateSetting {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        RawAutoUpdate::from(*self).serialize(s)
+    }
+}
+
+impl AutoUpdateSetting {
+    /// This setting layered over `base`: fields it leaves unset come from
+    /// `base`.
+    pub fn over(self, base: Option<AutoUpdateSetting>) -> AutoUpdateSetting {
+        let base = base.unwrap_or_default();
+        AutoUpdateSetting {
+            mode: self.mode.or(base.mode),
+            delay: self.delay.or(base.delay),
+        }
+    }
+
+    pub fn resolve(self) -> AutoUpdate {
+        AutoUpdate {
+            mode: self.mode.unwrap_or_default(),
+            delay: self.delay.unwrap_or_default(),
+        }
+    }
+}
+
+/// Per volume override of the drive's sync interval, plus the actions to run
+/// around each replication. The interval is raised to
+/// `MIN_VOLUME_SYNC_INTERVAL` when used.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeSyncOverride {
@@ -424,6 +558,8 @@ pub struct VolumeSyncOverride {
         skip_serializing_if = "Option::is_none"
     )]
     pub interval: Option<Duration>,
+    /// Rejected by validation: replication cannot be turned off per volume.
+    /// Kept as a field so the error can say why instead of "unknown field".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// Name of one of this service's `actions`, run in its container on the
@@ -459,7 +595,7 @@ pub struct ServiceExtensions {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub volume_sync: BTreeMap<String, VolumeSyncOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_update: Option<bool>,
+    pub auto_update: Option<AutoUpdateSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,7 +658,7 @@ impl ServiceAction {
 #[serde(deny_unknown_fields)]
 pub struct StackDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_update: Option<bool>,
+    pub auto_update: Option<AutoUpdateSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -646,14 +782,71 @@ volume_sync:
         .unwrap();
         let o = &ext.volume_sync["gitlab-data"];
         assert_eq!(o.interval, Some(Duration::from_secs(3600)));
+        // Still parsed so validation can reject it with an explanation.
         assert_eq!(o.enabled, Some(false));
     }
 
     #[test]
     fn parses_auto_update_and_node() {
         let ext: ServiceExtensions = serde_yaml::from_str("auto_update: true\nnode: n1\n").unwrap();
-        assert_eq!(ext.auto_update, Some(true));
+        assert_eq!(
+            ext.auto_update.unwrap().resolve().mode,
+            AutoUpdateMode::Apply
+        );
         assert_eq!(ext.node.as_deref(), Some("n1"));
+    }
+
+    fn parse_auto(v: &str) -> Result<AutoUpdateSetting, serde_yaml::Error> {
+        let ext: ServiceExtensions = serde_yaml::from_str(&format!("auto_update: {v}\n"))?;
+        Ok(ext.auto_update.unwrap())
+    }
+
+    #[test]
+    fn auto_update_short_forms_mean_zero_delay() {
+        for (v, mode) in [
+            ("false", AutoUpdateMode::Off),
+            ("true", AutoUpdateMode::Apply),
+            ("apply", AutoUpdateMode::Apply),
+            ("notify", AutoUpdateMode::Notify),
+        ] {
+            let s = parse_auto(v).unwrap();
+            assert_eq!(s.mode, Some(mode), "{v}");
+            assert_eq!(s.delay, Some(Duration::ZERO), "{v}");
+        }
+        let err = parse_auto("sometimes").unwrap_err().to_string();
+        assert!(err.contains("auto_update mode must be"), "{err}");
+        assert!(parse_auto("3").is_err());
+    }
+
+    #[test]
+    fn auto_update_map_form() {
+        let s = parse_auto("{ mode: apply, delay: 24h }").unwrap();
+        assert_eq!(s.mode, Some(AutoUpdateMode::Apply));
+        assert_eq!(s.delay, Some(Duration::from_secs(86400)));
+        let only_delay = parse_auto("{ delay: 1h }").unwrap();
+        assert_eq!(only_delay.mode, None);
+        assert!(parse_auto("{ mode: apply, delay: soon }").is_err());
+        assert!(parse_auto("{ mode: apply, wait: 1h }").is_err());
+        assert!(parse_auto("{ mode: nope }").is_err());
+    }
+
+    #[test]
+    fn auto_update_round_trips() {
+        for v in [
+            "false",
+            "notify",
+            "{ mode: apply, delay: 2h }",
+            "{ delay: 5m }",
+        ] {
+            let setting = parse_auto(v).unwrap();
+            let ext = ServiceExtensions {
+                auto_update: Some(setting),
+                ..Default::default()
+            };
+            let back: ServiceExtensions =
+                serde_yaml::from_str(&serde_yaml::to_string(&ext).unwrap()).unwrap();
+            assert_eq!(back.auto_update, Some(setting), "{v}");
+        }
     }
 
     #[test]

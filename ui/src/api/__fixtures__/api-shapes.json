@@ -460,6 +460,20 @@
     {
       "category": "deployments",
       "effective_severity": "info",
+      "key": "update.available",
+      "note": "",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "info",
+      "stack_scoped": true,
+      "stateful": false,
+      "title": "A newer image is available"
+    },
+    {
+      "category": "deployments",
+      "effective_severity": "info",
       "key": "update.completed",
       "note": "",
       "override": null,
@@ -717,6 +731,9 @@
       "generate_if_missing": true,
       "key_file": "/etc/clouduler/secrets.key",
       "node_key_file": "/etc/clouduler/node.key"
+    },
+    "updates": {
+      "check_interval": "6h"
     },
     "web": {
       "address": "cloud",
@@ -1049,6 +1066,7 @@
         "node": "n0"
       }
     },
+    "auto_updates": {},
     "cert_status": {
       "example.test": {
         "Error": {
@@ -1097,6 +1115,8 @@
       "new.example.test": "Pending"
     },
     "emergency_stack": null,
+    "image_checks": {},
+    "image_checks_at": 0,
     "instance_updates": {},
     "nodes": {
       "n0": {
@@ -1228,7 +1248,7 @@
     {
       "id": "<volatile>",
       "image": "nginx",
-      "latest_digest": "<volatile>",
+      "latest_digest": null,
       "node": "n0",
       "pin_drift": false,
       "pinned_digest": null,
@@ -1240,7 +1260,7 @@
     {
       "id": "<volatile>",
       "image": "nginx",
-      "latest_digest": "<volatile>",
+      "latest_digest": null,
       "node": "n0",
       "pin_drift": false,
       "pinned_digest": null,

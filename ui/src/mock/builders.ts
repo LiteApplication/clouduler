@@ -345,6 +345,9 @@ export class ScenarioBuilder {
       restic_runs: {},
       restore_requests: {},
       instance_updates: {},
+      auto_updates: {},
+      image_checks: {},
+      image_checks_at: 0,
       sessions: {},
       proxy_sessions: {},
       proxy_tokens: {},
@@ -380,6 +383,7 @@ export class ScenarioBuilder {
         https_port: 443,
       },
       mcp: { enabled: true },
+      updates: { check_interval: '6h' },
     } as unknown as ClusterConfig;
 
     const names = this.nodeInputs.map((n) => n.name);

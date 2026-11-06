@@ -179,7 +179,9 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.proxy.middlewares.cors': ['origins', 'methods', 'headers', 'allow_credentials', 'max_age'],
   'services.*.x-clouduler.proxy.middlewares.redirect_regex': ['regex', 'replacement', 'permanent'],
   'services.*.x-clouduler.expose': ['port', 'published', 'protocol', 'network', 'proxy_protocol'],
-  'services.*.x-clouduler.volume_sync.*': ['interval', 'enabled', 'before', 'after'],
+  'services.*.x-clouduler.volume_sync.*': ['interval', 'before', 'after'],
+  'services.*.x-clouduler.auto_update': ['mode', 'delay'],
+  'x-clouduler.auto_update': ['mode', 'delay'],
   'services.*.x-clouduler.docker_socket': ['target', 'read_only', 'mode'],
   'services.*.x-clouduler.backup': ['stop_before'],
   'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui'],
@@ -190,7 +192,7 @@ const SCHEMA: Record<string, string[]> = {
   'x-clouduler.alerts.logs': ['match', 'regex', 'ignore_case', 'severity', 'title', 'cooldown', 'stream', 'services'],
   'services.*.x-clouduler.alerts': ['enabled', 'mute', 'severity', 'logs'],
   'services.*.x-clouduler.alerts.logs': ['match', 'regex', 'ignore_case', 'severity', 'title', 'cooldown', 'stream'],
-  'x-clouduler.volume_sync.*': ['interval', 'enabled'],
+  'x-clouduler.volume_sync.*': ['interval'],
   'x-clouduler.backup': ['stop_before'],
   'configs.*': ['file'],
   'secrets.*': ['file'],
@@ -200,7 +202,7 @@ const SCHEMA: Record<string, string[]> = {
  *  none of them collide with a differently-typed field of the same name. */
 const BOOLEAN_KEYS = new Set([
   'tls', 'sticky', 'websockets', 'preserve_host', 'cloudflare_proxy', 'proxy_protocol', 'allow_credentials', 'permanent',
-  'stop_before', 'auto_update', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui', 'ignore_case',
+  'stop_before', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui', 'ignore_case',
 ]);
 
 const BARE_MIDDLEWARES = ['redirect_https', 'strip_prefix', 'authenticated'];
@@ -225,6 +227,8 @@ function valueNamesFor(
   if (key === 'node') return known.nodes;
   if (key === 'image') return dedupe([...localImages(doc), ...known.images]);
   if (key === 'restart') return RESTART_VALUES;
+  if (key === 'auto_update') return ['false', 'true', 'notify', 'apply'];
+  if (key === 'mode' && container === 'auto_update') return ['apply', 'notify', 'off'];
   if (key === 'protocol') return ['tcp', 'udp'];
   if (key === 'stream' && path.includes('alerts')) return ['both', 'stdout', 'stderr'];
   if (key === 'severity' && path.includes('alerts')) return ['info', 'warning', 'critical'];

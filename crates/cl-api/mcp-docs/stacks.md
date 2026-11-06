@@ -532,13 +532,14 @@ this.
 
 ### `volume_sync`
 
-Per-volume override of the drive's default replication interval.
+Per-volume override of the drive's default replication interval. Replication
+cannot be turned off per volume: `enabled` is rejected, because failover only
+starts an instance on a node holding a current copy of every volume it mounts.
 
 ```yaml
 volume_sync:
   gitlab-data:
-    interval: 5m
-    enabled: true
+    interval: 5m         # never shorter than 30s; the shortest across mounting services wins
     before: Checkpoint   # service level only: an action to run before each replication
     after: Resume        # ... and after it
 ```
@@ -555,11 +556,18 @@ service's own `volume_sync` entry for that volume, then the stack-wide
 ### `auto_update`
 
 ```yaml
-auto_update: true
+auto_update: true                              # same as "apply", delay 0
+auto_update: notify                            # only raise the update.available alert
+auto_update: { mode: apply, delay: 24h }       # wait 24h after the check that saw the new digest
 ```
 
-Whether a `:latest` image tag is followed automatically when a new image is
-pushed, rather than requiring an explicit stack redeploy.
+What happens when the registry serves a newer digest for the service's tag,
+found at the leader's registry checks (`updates.check_interval`, default 6h).
+`true`/`"apply"` updates the instance through the same pipeline as the Updates
+page's button, `"notify"` only raises an alert, `false` (the default) does
+nothing. Set at the stack level as a default; a service overrides it field by
+field (`mode`, `delay`). Never applied during emergency mode, to a stopped or
+mid-update instance, or again for a digest whose automatic update failed.
 
 ### `node`
 

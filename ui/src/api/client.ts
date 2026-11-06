@@ -281,6 +281,7 @@ export const api = {
   // `pinUpdates`/`applyUpdates` with no argument mean "everything this
   // applies to", which is what the view's bulk buttons send.
   listUpdates: () => get<UpdateRow[]>('/api/updates'),
+  refreshUpdates: () => post<{ started: boolean }>('/api/updates/refresh', {}),
   pinUpdates: (instances?: string[]) => post<BulkResult[]>('/api/updates/pin', { instances: instances ?? [] }),
   // Answers 202 as soon as the work is scheduled: a pull takes far longer
   // than any http timeout allows, so the response says what was accepted and

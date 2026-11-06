@@ -133,7 +133,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
       '.stacks', '.assignments', '.volumes', '.volumes.*.replicas', '.configs', '.secrets',
       '.certificates', '.dns_records', '.cert_status', '.dns_status', '.wrapped_keys',
       '.alert_destinations', '.alerts', '.alert_inbox', '.container_status', '.crash_moves',
-      '.previous_image_digests', '.volume_removals', '.instance_updates',
+      '.previous_image_digests', '.volume_removals', '.instance_updates', '.auto_updates', '.image_checks',
       '.restic_destinations', '.restic_targets', '.restic_runs', '.restore_requests',
       '.sessions', '.proxy_sessions', '.proxy_tokens', '.stacks.*.requirements.allowed',
     ],
@@ -144,7 +144,12 @@ const OPTIONS: Record<string, ShapeOptions> = {
     any: ['.assignments.*.migration', '.cert_status.*', '.dns_status.*', '.alerts.*', '.alert_destinations.*'],
   },
   status: {},
-  updates: { optional: ['[].error'] },
+  updates: {
+    optional: [
+      '[].error', '[].checked_at', '[].auto_update', '[].auto_update.outcome', '[].auto_update.detected_at',
+      '[].auto_update.apply_at', '[].auto_update.error',
+    ],
+  },
   volumes: {},
 };
 

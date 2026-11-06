@@ -49,6 +49,43 @@ pub struct ClusterConfig {
     /// The MCP endpoint and the OAuth server that fronts it.
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Registry checks for container image updates.
+    #[serde(default)]
+    pub updates: ImageUpdatesConfig,
+}
+
+/// How often the leader asks the registries whether the images the stacks
+/// declare have a newer digest. The results are stored in the cluster state
+/// and are what the Updates page shows and `x-clouduler.auto_update` acts on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImageUpdatesConfig {
+    /// Time between checks. Values below `MIN_IMAGE_CHECK_INTERVAL` are
+    /// treated as that minimum.
+    #[serde(with = "humantime_serde", default = "default_image_check_interval")]
+    pub check_interval: Duration,
+}
+
+/// The shortest effective `updates.check_interval`.
+pub const MIN_IMAGE_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+impl Default for ImageUpdatesConfig {
+    fn default() -> Self {
+        Self {
+            check_interval: default_image_check_interval(),
+        }
+    }
+}
+
+impl ImageUpdatesConfig {
+    /// `check_interval`, raised to the minimum.
+    pub fn effective_interval(&self) -> Duration {
+        self.check_interval.max(MIN_IMAGE_CHECK_INTERVAL)
+    }
+}
+
+fn default_image_check_interval() -> Duration {
+    Duration::from_secs(6 * 60 * 60)
 }
 
 /// Whether AI clients may connect over MCP.

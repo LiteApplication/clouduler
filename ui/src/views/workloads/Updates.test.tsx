@@ -32,11 +32,13 @@ vi.mock('../../state/store', () => ({
 
 const listUpdates = vi.fn();
 const applyUpdates = vi.fn();
+const refreshUpdates = vi.fn();
 vi.mock('../../api/client', () => ({
   ApiError: class extends Error {},
   api: {
     listUpdates: () => listUpdates(),
     applyUpdates: (ids?: string[]) => applyUpdates(ids),
+    refreshUpdates: () => refreshUpdates(),
     listRegistries: () => Promise.resolve([]),
     listInstances: () => Promise.resolve([]),
     pinUpdates: () => Promise.resolve([]),
@@ -61,6 +63,46 @@ describe('Updates page', () => {
     listUpdates.mockReset();
     applyUpdates.mockReset();
     applyUpdates.mockResolvedValue({ accepted: [] });
+    refreshUpdates.mockReset();
+    refreshUpdates.mockResolvedValue({ started: false });
+  });
+
+  it('shows when the registries were last checked and refreshes on request', async () => {
+    listUpdates.mockResolvedValue([row('a', { checked_at: NOW - 3 * 3600 })]);
+    renderPage();
+    await screen.findByText(/Checked 3 hours ago/);
+    listUpdates.mockResolvedValue([row('a', { checked_at: NOW })]);
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(refreshUpdates).toHaveBeenCalledTimes(1);
+    await screen.findByText(/Checked just now/);
+  });
+
+  it('does not ask the registries when the page loads', async () => {
+    listUpdates.mockResolvedValue([row('a')]);
+    renderPage();
+    await screen.findByText('a');
+    expect(refreshUpdates).not.toHaveBeenCalled();
+  });
+
+  it('says when an auto-update will be applied and what happened', async () => {
+    listUpdates.mockResolvedValue([
+      behind('w'),
+    ].map((r) => ({
+      ...r,
+      auto_update: { mode: 'apply' as const, delay_secs: 86400, outcome: 'waiting' as const, apply_at: NOW + 5 * 3600 },
+    })));
+    const view = renderPage();
+    await screen.findByText(/auto-applies in 5 hours/);
+    view.unmount();
+    listUpdates.mockResolvedValue([
+      row('f', {
+        auto_update: { mode: 'apply', delay_secs: 0, outcome: 'failed', error: 'pull failed' },
+        latest_digest: 'sha256:' + 'b'.repeat(64),
+        update_available: true,
+      }),
+    ]);
+    renderPage();
+    await screen.findByText(/failed, not retried for this image \(pull failed\)/);
   });
 
   it('does not claim the newest image while a row is unknown', async () => {

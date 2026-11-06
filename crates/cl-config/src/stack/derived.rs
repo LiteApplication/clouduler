@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::cluster::{ClusterConfig, NetworkKind};
 
-use super::{Service, StackFile, DEFAULT_SYNC_INTERVAL};
+use super::{AutoUpdate, AutoUpdateSetting, Service, StackFile, DEFAULT_SYNC_INTERVAL};
 
 impl Service {
     /// Drives this service mounts a volume from.
@@ -30,7 +30,7 @@ impl Service {
             .memory_bytes()
     }
 
-    fn auto_update(&self) -> Option<bool> {
+    fn auto_update(&self) -> Option<AutoUpdateSetting> {
         self.x_clouduler.as_ref().and_then(|x| x.auto_update)
     }
 
@@ -62,7 +62,7 @@ impl StackFile {
             .collect()
     }
 
-    fn stack_auto_update(&self) -> Option<bool> {
+    fn stack_auto_update(&self) -> Option<AutoUpdateSetting> {
         self.x_clouduler.as_ref().and_then(|x| x.auto_update)
     }
 
@@ -110,14 +110,16 @@ impl StackFile {
         )
     }
 
-    /// Whether `:latest` images are followed automatically for this service:
-    /// the service's own setting, else the stack wide default, else false.
-    pub fn effective_auto_update(&self, service: &str) -> bool {
-        self.services
-            .get(service)
-            .and_then(Service::auto_update)
-            .or_else(|| self.stack_auto_update())
-            .unwrap_or(false)
+    /// What happens when the registry serves a newer image for this service's
+    /// tag: the stack wide default with the service's own setting layered
+    /// over it field by field, off with no delay when neither says.
+    pub fn effective_auto_update(&self, service: &str) -> AutoUpdate {
+        let stack = self.stack_auto_update();
+        match self.services.get(service).and_then(Service::auto_update) {
+            Some(own) => own.over(stack),
+            None => stack.unwrap_or_default(),
+        }
+        .resolve()
     }
 
     /// The node this service is pinned to, if any: the service's own pin,
@@ -167,6 +169,25 @@ impl StackFile {
             .and_then(|drive| cluster.drives.get(drive))
             .map(|d| d.sync_interval)
             .unwrap_or(DEFAULT_SYNC_INTERVAL)
+    }
+
+    /// The `x-clouduler.volume_sync` interval override for the volume
+    /// `drive/volume`, if any service mounting it (or the stack default for
+    /// that volume name) sets one. The shortest wins when services disagree,
+    /// since the volume has one replication schedule. Not clamped.
+    pub fn volume_sync_override(&self, drive: &str, volume: &str) -> Option<Duration> {
+        self.services
+            .iter()
+            .filter(|(_, svc)| {
+                svc.volumes.iter().any(|v| {
+                    v.drive.as_deref() == Some(drive) && v.volume.as_deref() == Some(volume)
+                })
+            })
+            .filter_map(|(_, svc)| {
+                svc.volume_sync_interval(volume)
+                    .or_else(|| self.stack_volume_sync_interval(volume))
+            })
+            .min()
     }
 
     /// The colocation group key for `service`, if `x-clouduler.colocate`

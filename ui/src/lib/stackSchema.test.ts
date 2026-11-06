@@ -169,7 +169,28 @@ describe('actions', () => {
   it('suggests before/after under volume_sync', () => {
     expect(
       complete('services:\n  a:\n    x-clouduler:\n      volume_sync:\n        data:\n          |'),
-    ).toEqual(expect.arrayContaining(['interval', 'enabled', 'before', 'after']));
+    ).toEqual(expect.arrayContaining(['interval', 'before', 'after']));
+  });
+});
+
+describe('auto_update', () => {
+  it('suggests the short forms as values', () => {
+    expect(complete('x-clouduler:\n  auto_update: |')).toEqual(['false', 'true', 'notify', 'apply']);
+  });
+
+  it('suggests mode and delay in the map form, at both levels', () => {
+    expect(complete('x-clouduler:\n  auto_update:\n    |')).toEqual(['mode', 'delay']);
+    expect(complete('services:\n  a:\n    x-clouduler:\n      auto_update:\n        |')).toEqual(['mode', 'delay']);
+  });
+
+  it('suggests the modes', () => {
+    expect(complete('x-clouduler:\n  auto_update:\n    mode: |')).toEqual(['apply', 'notify', 'off']);
+  });
+
+  it('no longer suggests volume_sync enabled', () => {
+    expect(
+      complete('x-clouduler:\n  volume_sync:\n    data:\n      |'),
+    ).toEqual(['interval']);
   });
 });
 

@@ -100,6 +100,7 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `self_update.completed` | Deployments | Info | Clouduler updated on a node (sent after the new binary clears probation). |
 | `update.failed` | Deployments | Warning | An image update failed. |
 | `update.stuck` | Deployments | Warning | An image update made no progress for over 15 minutes. |
+| `update.available` | Deployments | Info | A newer image was found for a service whose stack sets `auto_update: notify`. Once per new digest. |
 | `update.completed` | Deployments | Info | An image update completed. |
 | `stack.deployed` | Deployments | Info | A stack was deployed ("First deploy." or "Redeployed, revision N."). |
 | `stack.removed` | Deployments | Info | A stack was removed. |

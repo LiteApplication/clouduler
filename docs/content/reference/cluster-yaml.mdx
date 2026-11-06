@@ -62,7 +62,7 @@ Open **Settings**. The tabs that edit `cluster.yaml` are **General**, **Network*
 4. Press **Apply changes**. The UI validates first, then submits.
 5. If your edit touched `networks`, `nodes`, `web`, `proxy` or `cloudflare`, a rollback timer starts. The banner **Config change waiting for you** counts down and the header button turns into **Confirm config**. Press it once you can still reach the dashboard. **Roll back now** restores the previous config immediately.
 
-Edits to `failover`, `secrets`, `auth`, `drives`, `self_update`, `backup`, `mcp` and `cluster.name` apply at once with no countdown.
+Edits to `failover`, `secrets`, `auth`, `drives`, `self_update`, `backup`, `mcp`, `updates` and `cluster.name` apply at once with no countdown.
 
 Only admins can apply. Viewers can read.
 
@@ -250,6 +250,9 @@ backup:
 
 mcp:
   enabled: true
+
+updates:
+  check_interval: 6h
 ```
 
 `self_update` is not shown: it is written through the Updates page. Only `cluster`, `networks`, `nodes` and `web` are required. Everything else has a default.
@@ -431,6 +434,12 @@ The API token is a sealed secret set from **Settings > Network > Cloudflare DNS*
 
 <OptionTable rows={[
   {"key": "mcp.enabled", "type": "bool", "default": "true", "reload": "live", "description": "Turns the MCP endpoint and its OAuth pages on or off. Off makes them answer 404.", "quirks": "clouduler init writes false into a new cluster."},
+]} />
+
+### updates
+
+<OptionTable rows={[
+  {"key": "updates.check_interval", "type": "duration", "default": "6h", "reload": "live", "description": "How often the leader asks the registries whether the images the stacks declare have a newer digest. The results are stored in the cluster state and used by the Updates page and by `x-clouduler.auto_update`. Pressing Refresh on the Updates page checks sooner.", "quirks": "Values under 10m are treated as 10m."},
 ]} />
 
 ## Validation errors you may see

@@ -440,6 +440,15 @@ export interface ClusterState {
    *  holds the revision of each cluster secret the container was created
    *  with (absent when it has none or predates the label). */
   container_status?: Record<InstanceId, { node: string; running: boolean; secret_revisions?: Record<string, number> }>;
+  /** What auto_update did about each instance's newest digest. */
+  auto_updates?: Record<
+    InstanceId,
+    { digest: string; detected_at: number; outcome: AutoUpdateOutcome; at: number; error?: string }
+  >;
+  /** The registries' last answer per declared image reference. */
+  image_checks?: Record<string, { latest_digest?: string; checked_at: number; error?: string }>;
+  /** Unix seconds the last registry check finished, 0 before the first. */
+  image_checks_at?: number;
   /** Login sessions keyed by a hash of the cookie; the ui never needs them. */
   sessions?: Record<string, unknown>;
   /** Reverse proxy login sessions and one-time tokens; the ui never needs them. */
@@ -1006,6 +1015,12 @@ export interface ClusterConfig {
   self_update: SelfUpdateConfig | null;
   backup: GitBackupConfig | null;
   mcp: McpConfig;
+  updates?: ImageUpdatesConfig;
+}
+
+export interface ImageUpdatesConfig {
+  /** How often the leader asks the registries about declared images, e.g. `6h`. */
+  check_interval: string;
 }
 
 export interface McpConfig {
@@ -1175,6 +1190,21 @@ export interface GitBackupWebhookSecretStatus {
   configured: boolean;
 }
 
+export type AutoUpdateOutcome = 'waiting' | 'queued' | 'updated' | 'failed' | 'notified';
+
+/** Mirrors `cl_api::routes::updates::AutoUpdateRow`. */
+export interface AutoUpdateRow {
+  mode: 'apply' | 'notify';
+  delay_secs: number;
+  /** Absent until the newest digest has been recorded. */
+  outcome?: AutoUpdateOutcome;
+  /** Unix seconds the newest digest was first seen. */
+  detected_at?: number;
+  /** Unix seconds a waiting apply will be queued. */
+  apply_at?: number;
+  error?: string;
+}
+
 /** One row of the Updates view: what a container runs versus what its
  *  registry currently serves. Mirrors `cl_api::routes::updates::UpdateRow`. */
 export interface UpdateRow {
@@ -1195,6 +1225,11 @@ export interface UpdateRow {
   /** A pin exists but the container was never rebuilt onto it. Fixed by
    *  rebuilding, not by pulling — which is why it is not `update_available`. */
   pin_drift: boolean;
+  /** Unix seconds the registry was last asked about `image`. The registry is
+   *  checked on a timer and by Refresh, never when this list is fetched. */
+  checked_at?: number;
+  /** `x-clouduler.auto_update` for this instance, present when it is on. */
+  auto_update?: AutoUpdateRow;
   /** Why the registry could not be asked. Carried per row so one bad login
    *  does not blank out the rest of the cluster's answer. */
   error?: string;

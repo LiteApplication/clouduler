@@ -275,6 +275,9 @@ impl ApiServer {
         crate::alerts::spawn(state.clone());
         crate::alerts::producers::spawn(state.clone());
 
+        // The leader's image update checker and `x-clouduler.auto_update`.
+        crate::auto_update::spawn(state.clone());
+
         Ok(Self {
             router: build_router(state.clone()),
             listen_addr: options.listen_addr,

@@ -177,7 +177,8 @@ curl -N -H "Authorization: Bearer $KEY" \
 
 | Method | Path | Auth | Body | Success | Notes |
 |---|---|---|---|---|---|
-| GET | `/api/updates` | user | none | `[{id, stack, service, node, image, running_digest, latest_digest, pinned_digest, update_available, pin_drift, error?}]` | One registry call per distinct image. Do not poll. An instance with a pin but no container (e.g. its pinned image is gone) reports `update_available` when the pin differs from the registry; updating it pulls and moves the pin without restarting anything. |
+| GET | `/api/updates` | user | none | `[{id, stack, service, node, image, running_digest, latest_digest, pinned_digest, update_available, pin_drift, checked_at?, auto_update?, error?}]` | Never contacts a registry: `latest_digest`, `checked_at` (unix seconds) and `error` come from the last check the leader stored; `running_digest` is read from the nodes. `auto_update` is present for services with `x-clouduler.auto_update` on: `{mode, delay_secs, outcome?, detected_at?, apply_at?, error?}` with `outcome` one of `waiting`, `queued`, `updated`, `failed`, `notified`. An instance with a pin but no container (e.g. its pinned image is gone) reports `update_available` when the pin differs from the registry; updating it pulls and moves the pin without restarting anything. |
+| POST | `/api/updates/refresh` | admin | none | 202 `{"started": bool}` | Starts a registry check on the leader (a follower relays it) and returns at once. `started` is false when a check is already running or one finished less than 30 seconds ago. Poll `GET /api/updates` until `checked_at` moves. |
 | POST | `/api/updates/pin` | admin | `{"instances": []}` | `[{id, ok, error?}]` | Empty list means all unpinned. |
 | POST | `/api/updates/apply` | admin | `{"instances": []}` | 202 `{"accepted": [...]}` | Empty list means all that are behind. Rolling; watch `/api/instances/events`. |
 

@@ -155,6 +155,7 @@ mod tests {
             self_update: None,
             backup: None,
             mcp: Default::default(),
+            updates: Default::default(),
         }
     }
 

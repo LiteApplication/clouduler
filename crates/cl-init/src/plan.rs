@@ -140,6 +140,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         // default, which stays `true` so clusters that predate the setting keep
         // the access they already had.
         mcp: McpConfig { enabled: false },
+        updates: Default::default(),
     };
 
     config

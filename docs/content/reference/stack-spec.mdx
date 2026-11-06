@@ -212,8 +212,11 @@ A published port is bound on the node that runs the container and moves with it.
 ]} />
 
 <Quirk title="Fields that are parsed but currently not acted on" severity="info">
-`deploy.restart_policy`, `deploy.update_config`, `deploy.resources.reservations`, `x-clouduler.auto_update`, and `x-clouduler.volume_sync.VOL.interval` / `enabled` are validated but nothing in the scheduler or daemon reads them today. Use the service-level `restart:` for restart behaviour. Per-volume replication uses the drive's own `sync_interval`. Image updates are applied from the Updates page, not by `auto_update`.
-{/* TODO verify: confirm with the owner whether volume_sync interval/enabled and auto_update are meant to be wired up (code confirms they are not read today). */}
+`deploy.restart_policy`, `deploy.update_config` and `deploy.resources.reservations` are validated but nothing in the scheduler or daemon reads them today. Use the service-level `restart:` for restart behaviour.
+</Quirk>
+
+<Quirk title="volume_sync enabled is rejected" severity="info">
+`x-clouduler.volume_sync.VOL.enabled` used to be accepted and ignored. It is now an error naming the key, at stack and service level. Replication cannot be turned off per volume, because a failover starts an instance only on a node holding a current copy of every volume it mounts. Remove the key, give a rarely changing volume a longer `interval`, or keep scratch data on a drive that only one node implements.
 </Quirk>
 
 ## Proxy and x-clouduler per service
@@ -227,9 +230,9 @@ A published port is bound on the node that runs the container and moves with it.
   {"key": "x-clouduler.expose", "type": "list", "reload": "n/a", "description": "Non-HTTP ports routed over the overlay (SSH and similar). See the expose table below."},
   {"key": "x-clouduler.volume_sync.VOL.before", "type": "str", "reload": "n/a", "description": "Name of an action of this service, run in the container on the primary node before each scheduled replication. If it fails, that replication is skipped.", "quirks": "Service level only. Runs on scheduled replication, not on migrations or manual syncs."},
   {"key": "x-clouduler.volume_sync.VOL.after", "type": "str", "reload": "n/a", "description": "Name of an action run after each replication attempt.", "quirks": "Service level only."},
-  {"key": "x-clouduler.volume_sync.VOL.interval", "type": "duration", "default": "drive sync_interval", "reload": "n/a", "description": "Per-volume replication interval override. Parsed but currently not acted on.", "quirks": "Only the drive's own sync_interval is used today."},
-  {"key": "x-clouduler.volume_sync.VOL.enabled", "type": "bool", "default": "true", "reload": "n/a", "description": "Per-volume replication on/off. Parsed but currently not acted on."},
-  {"key": "x-clouduler.auto_update", "type": "bool", "default": "false", "reload": "n/a", "description": "Meant to follow :latest. Parsed but currently not acted on.", "quirks": "Image updates are applied from the Updates page."},
+  {"key": "x-clouduler.volume_sync.VOL.interval", "type": "duration", "default": "drive sync_interval", "reload": "n/a", "description": "How often this volume replicates, instead of the drive's sync_interval. VOL is the volume name in drive/volume.", "quirks": "Also valid at stack level. Each service uses its own value, else the stack-level one for that volume name; when several services mount the volume the shortest wins. Never shorter than 30s. Takes effect on the next sync pass after the stack is deployed."},
+  {"key": "x-clouduler.volume_sync.VOL.enabled", "type": "bool", "reload": "n/a", "description": "Rejected: see the quirk below.", "quirks": "Stack validation fails with an error naming the key."},
+  {"key": "x-clouduler.auto_update", "type": "bool | apply | notify | map", "default": "false", "reload": "n/a", "description": "What happens when the registry serves a newer image for the service's tag: true or apply updates it automatically, notify only raises an alert. Map form: {mode: apply|notify|off, delay: duration}. Set at stack level as the default; a service overrides it field by field.", "quirks": "Short forms mean delay 0. See Updates for what auto-update will not do."},
   {"key": "x-clouduler.backup.stop_before", "type": "bool", "default": "drive backup target decides (stop)", "reload": "n/a", "description": "Whether a restic backup stops this service first."},
   {"key": "x-clouduler.docker_socket.target", "type": "path", "reload": "n/a", "required": true, "description": "Path inside the container where the Docker socket appears."},
   {"key": "x-clouduler.docker_socket.mode", "type": "local or clouduler", "default": "local", "reload": "n/a", "description": "local is the node's real socket (root-equivalent on the host). clouduler is a read-only endpoint for image queries."},

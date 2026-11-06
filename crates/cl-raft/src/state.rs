@@ -810,6 +810,21 @@ pub struct ClusterState {
     /// ever had one pin.
     #[serde(default)]
     pub previous_image_digests: BTreeMap<InstanceId, String>,
+    /// What `x-clouduler.auto_update` did about the newest registry digest
+    /// of each instance's image. Written by the leader only, and kept in raft
+    /// so a new leader neither restarts a delay countdown nor retries an
+    /// update that already failed. See `AutoUpdateRecord`.
+    #[serde(default)]
+    pub auto_updates: BTreeMap<InstanceId, AutoUpdateRecord>,
+    /// What the registries last said about each image reference a stack
+    /// declares, keyed by that reference (`nginx:1.25`). Filled by the
+    /// leader's timer and by the Updates page's Refresh button; reading it
+    /// never touches a registry. See `ImageCheck`.
+    #[serde(default)]
+    pub image_checks: BTreeMap<String, ImageCheck>,
+    /// Unix seconds the last registry check finished, 0 before the first.
+    #[serde(default)]
+    pub image_checks_at: i64,
     /// Volumes deleted on purpose, with the nodes that still have to remove
     /// their copy. A node takes its name off once the directory is gone, and
     /// the entry goes with the last one.
@@ -935,6 +950,52 @@ pub struct InstanceUpdate {
     /// Why it failed, only on `UpdatePhase::Failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// What one registry lookup said about an image reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageCheck {
+    /// The digest the registry serves for the reference. Kept from the
+    /// previous check when the latest lookup failed, so a rate limit does not
+    /// blank what is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_digest: Option<String>,
+    /// Unix seconds of the latest lookup, successful or not.
+    pub checked_at: i64,
+    /// Why the latest lookup failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// How far `x-clouduler.auto_update` got with one registry digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoUpdateRecord {
+    /// The registry digest this record is about. A different digest seen
+    /// later replaces the record and restarts its countdown.
+    pub digest: String,
+    /// Unix seconds this digest was first seen as newer than the running one.
+    pub detected_at: i64,
+    pub outcome: AutoUpdateOutcome,
+    /// Unix seconds of the latest outcome change.
+    pub at: i64,
+    /// Why it failed, only on `AutoUpdateOutcome::Failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoUpdateOutcome {
+    /// Seen, and waiting out the configured delay.
+    Waiting,
+    /// Handed to the update pipeline; its progress is in `instance_updates`.
+    Queued,
+    /// The instance restarted on the new image.
+    Updated,
+    /// The update failed. Not retried for this digest.
+    Failed,
+    /// Mode `notify`: an `update.available` alert was raised.
+    Notified,
 }
 
 /// The steps of an update, in the order they happen. The old container keeps
@@ -1247,6 +1308,25 @@ pub enum Request {
     ClearInstanceUpdate {
         instance: InstanceId,
     },
+    /// Record what `x-clouduler.auto_update` did about `digest`. A record for
+    /// the same digest keeps its `detected_at`; a different digest starts a
+    /// fresh one at `at`. `at` is unix seconds, supplied by the caller.
+    SetAutoUpdate {
+        instance: InstanceId,
+        digest: String,
+        outcome: AutoUpdateOutcome,
+        #[serde(default)]
+        error: Option<String>,
+        at: i64,
+    },
+    /// Replace the registry check results wholesale: images no stack
+    /// declares any more drop out. `at` (unix seconds) becomes
+    /// `image_checks_at`. An entry that failed keeps the digest the previous
+    /// entry for the same image had.
+    SetImageChecks {
+        checks: BTreeMap<String, ImageCheck>,
+        at: i64,
+    },
     /// Drops every recorded failure: failed backup runs, restore requests,
     /// image updates and migrations, certificate/DNS errors and failed alert
     /// deliveries. These only linger as history, so an operator who has dealt
@@ -1417,6 +1497,8 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "ReportContainerStatus",
     "SetInstanceUpdate",
     "ClearInstanceUpdate",
+    "SetAutoUpdate",
+    "SetImageChecks",
     "ClearErrors",
     "PutSession",
     "RemoveSession",
@@ -1640,6 +1722,18 @@ mod request_mirror {
         },
         ClearInstanceUpdate {
             instance: InstanceId,
+        },
+        SetAutoUpdate {
+            instance: InstanceId,
+            digest: String,
+            outcome: AutoUpdateOutcome,
+            #[serde(default)]
+            error: Option<String>,
+            at: i64,
+        },
+        SetImageChecks {
+            checks: BTreeMap<String, ImageCheck>,
+            at: i64,
         },
         ClearErrors,
         PutSession {
@@ -2083,6 +2177,7 @@ impl ClusterState {
                 let removed = self.stacks.remove(name);
                 self.assignments.retain(|id, _| &id.stack != name);
                 self.instance_updates.retain(|id, _| &id.stack != name);
+                self.auto_updates.retain(|id, _| &id.stack != name);
                 self.crash_moves.retain(|id, _| &id.stack != name);
                 if let Some(stack) = removed {
                     for config in &stack.configs {
@@ -2166,6 +2261,7 @@ impl ClusterState {
                 self.assignments.remove(instance);
                 self.crash_moves.remove(instance);
                 self.instance_updates.remove(instance);
+                self.auto_updates.remove(instance);
                 self.previous_image_digests.remove(instance);
                 Ok(())
             }
@@ -2671,6 +2767,48 @@ impl ClusterState {
 
             Request::ClearInstanceUpdate { instance } => {
                 self.instance_updates.remove(instance);
+                Ok(())
+            }
+
+            Request::SetImageChecks { checks, at } => {
+                let mut next = checks.clone();
+                for (image, check) in next.iter_mut() {
+                    if check.latest_digest.is_none() && check.error.is_some() {
+                        check.latest_digest = self
+                            .image_checks
+                            .get(image)
+                            .and_then(|old| old.latest_digest.clone());
+                    }
+                }
+                self.image_checks = next;
+                self.image_checks_at = *at;
+                Ok(())
+            }
+
+            Request::SetAutoUpdate {
+                instance,
+                digest,
+                outcome,
+                error,
+                at,
+            } => {
+                if !self.assignments.contains_key(instance) {
+                    return Err(format!("unknown instance {instance}"));
+                }
+                let detected_at = match self.auto_updates.get(instance) {
+                    Some(current) if &current.digest == digest => current.detected_at,
+                    _ => *at,
+                };
+                self.auto_updates.insert(
+                    instance.clone(),
+                    AutoUpdateRecord {
+                        digest: digest.clone(),
+                        detected_at,
+                        outcome: *outcome,
+                        at: *at,
+                        error: error.clone(),
+                    },
+                );
                 Ok(())
             }
 
@@ -3570,6 +3708,24 @@ mod tests {
             },
             Request::ClearInstanceUpdate {
                 instance: InstanceId::new("gitlab", "web", 0),
+            },
+            Request::SetAutoUpdate {
+                instance: InstanceId::new("gitlab", "web", 0),
+                digest: "sha256:a".into(),
+                outcome: AutoUpdateOutcome::Waiting,
+                error: None,
+                at: 5,
+            },
+            Request::SetImageChecks {
+                checks: BTreeMap::from([(
+                    "nginx:1".to_string(),
+                    ImageCheck {
+                        latest_digest: Some("sha256:a".into()),
+                        checked_at: 5,
+                        error: None,
+                    },
+                )]),
+                at: 5,
             },
             Request::ClearErrors,
             Request::PutSession {
@@ -5342,6 +5498,63 @@ mod tests {
 
         assert!(set_update(&mut state, UpdatePhase::Queued, 40).is_ok());
         assert_eq!(state.instance_updates[&instance].started_at, 40);
+    }
+
+    #[test]
+    fn auto_update_record_keeps_detection_time_per_digest() {
+        let mut state = cluster();
+        assert!(assign(&mut state, "n1", &[]).is_ok());
+        let instance = InstanceId::new("gitlab", "web", 0);
+        let set = |state: &mut ClusterState, digest: &str, outcome, at| {
+            state.apply(&Request::SetAutoUpdate {
+                instance: InstanceId::new("gitlab", "web", 0),
+                digest: digest.into(),
+                outcome,
+                error: None,
+                at,
+            })
+        };
+        assert!(set(&mut state, "sha256:a", AutoUpdateOutcome::Waiting, 10).is_ok());
+        assert!(set(&mut state, "sha256:a", AutoUpdateOutcome::Queued, 50).is_ok());
+        let rec = &state.auto_updates[&instance];
+        assert_eq!((rec.detected_at, rec.at), (10, 50));
+        // A newer digest restarts the countdown.
+        assert!(set(&mut state, "sha256:b", AutoUpdateOutcome::Waiting, 60).is_ok());
+        assert_eq!(state.auto_updates[&instance].detected_at, 60);
+        // Survives clearing errors, goes with the instance.
+        state.apply(&Request::ClearErrors);
+        assert!(state.auto_updates.contains_key(&instance));
+        state.apply(&Request::Unassign {
+            instance: instance.clone(),
+        });
+        assert!(state.auto_updates.is_empty());
+        assert!(!set(&mut state, "sha256:c", AutoUpdateOutcome::Waiting, 70).is_ok());
+    }
+
+    #[test]
+    fn image_checks_replace_wholesale_but_keep_a_digest_through_an_error() {
+        let mut state = cluster();
+        let check = |digest: Option<&str>, error: Option<&str>| ImageCheck {
+            latest_digest: digest.map(String::from),
+            checked_at: 1,
+            error: error.map(String::from),
+        };
+        state.apply(&Request::SetImageChecks {
+            checks: BTreeMap::from([
+                ("a:1".to_string(), check(Some("sha256:a"), None)),
+                ("b:1".to_string(), check(Some("sha256:b"), None)),
+            ]),
+            at: 10,
+        });
+        state.apply(&Request::SetImageChecks {
+            checks: BTreeMap::from([("a:1".to_string(), check(None, Some("429")))]),
+            at: 20,
+        });
+        assert_eq!(state.image_checks_at, 20);
+        assert_eq!(state.image_checks.len(), 1);
+        let a = &state.image_checks["a:1"];
+        assert_eq!(a.latest_digest.as_deref(), Some("sha256:a"));
+        assert_eq!(a.error.as_deref(), Some("429"));
     }
 
     #[test]

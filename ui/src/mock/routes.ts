@@ -757,6 +757,10 @@ export function buildHttpRoutes(): HttpRoute[] {
 
     // ---- updates
     route('GET', '/api/updates', ({ db }) => db.updates),
+    route('POST', '/api/updates/refresh', ({ db }) => {
+      for (const u of db.updates) u.checked_at = nowSecs();
+      return { started: true };
+    }),
     route('POST', '/api/updates/pin', ({ db, body }): BulkResult[] => {
       const ids: string[] = Array.isArray(body?.instances) && body.instances.length ? body.instances : db.updates.map((u) => u.id);
       return ids.map((id) => {
