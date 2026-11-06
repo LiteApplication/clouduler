@@ -11,7 +11,7 @@ const FEATURES = [
   {t: 'Drives and backups', d: 'Replicate volumes across nodes or serve one over NFS, then back drives up on a schedule to encrypted restic repositories you can restore.'},
   {t: 'Private by default', d: 'Containers talk over an overlay between nodes, private-network routes refuse outside clients, and secrets are encrypted in the cluster state.'},
   {t: 'Alerts', d: 'Get notified about offline nodes, full disks and crash loops on Discord, a JSON webhook or email. Info events batch into a daily digest.'},
-  {t: 'AI access over MCP', d: 'Let Claude Code or Cursor inspect and debug the cluster over OAuth, as read-only or admin. Secret values are redacted from output.'},
+  {t: 'AI access over MCP', d: 'Off by default. Turn it on to let Claude Code or Cursor inspect and debug the cluster over OAuth, as read-only or admin, with secrets redacted.'},
   {t: 'Git backup', d: 'Mirror cluster config and stacks to your own Git repository, with secrets age-encrypted. Edit a stack in Git and a webhook pulls it in.'},
   {t: 'Web UI, CLI and API', d: 'Use the web UI, the CLI or the HTTP API it is built on. Most config changes apply live, with no restart.'},
 ];
