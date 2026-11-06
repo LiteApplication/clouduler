@@ -29,8 +29,12 @@ pub struct RouteOptions {
     pub websockets: bool,
     /// Forward the client's `Host` rather than rewriting it to the backend.
     pub preserve_host: bool,
-    /// Cap on how long the backend has to return response headers.
+    /// Cap on how long the backend has to return response headers. `None`
+    /// means the proxy default (30s, none on an `http2` route); a zero
+    /// duration means no limit.
     pub response_timeout: Option<std::time::Duration>,
+    /// Speak h2c (HTTP/2 with prior knowledge) to the backend, for gRPC.
+    pub http2: bool,
     /// Restricts this route to clients whose TCP peer address falls inside
     /// this subnet. Set for a route published on an internal or private
     /// network; `None` for a public one, which is reachable from anywhere.

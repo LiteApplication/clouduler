@@ -312,14 +312,22 @@ pub struct ProxyRoute {
     pub preserve_host: bool,
 
     /// How long to wait for the backend's response headers, connection time
-    /// included. Unset waits forever, which ties up a connection when a
-    /// container wedges.
+    /// included. Unset means 30s, or no limit on an `http2` route; `0s`
+    /// removes the limit on any route.
     #[serde(
         default,
         with = "humantime_serde::option",
         skip_serializing_if = "Option::is_none"
     )]
     pub response_timeout: Option<Duration>,
+
+    /// Talk to the container in cleartext HTTP/2 with prior knowledge (h2c)
+    /// instead of HTTP/1.1. This is what a gRPC service needs. Decided per
+    /// route, so several `path_prefix` routes on one host and port can mix
+    /// h2c and HTTP/1.1. Upgrade requests (websockets) on such a route still
+    /// go to the container over HTTP/1.1.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub http2: bool,
 
     /// Publish this hostname's DNS records through Cloudflare's proxy (the
     /// orange cloud). Public networks only. A hostname is only proxied when
@@ -711,6 +719,7 @@ proxy:
     websockets: false
     preserve_host: true
     response_timeout: 30s
+    http2: true
 "#,
         )
         .expect("parse");
@@ -719,6 +728,7 @@ proxy:
         assert!(!route.websockets);
         assert!(route.preserve_host);
         assert_eq!(route.response_timeout, Some(Duration::from_secs(30)));
+        assert!(route.http2);
     }
 
     /// Every new knob is optional, and the defaults have to be the behaviour
@@ -734,6 +744,7 @@ proxy:
         assert!(route.websockets, "websockets must stay on by default");
         assert!(!route.preserve_host);
         assert_eq!(route.response_timeout, None);
+        assert!(!route.http2, "routes stay HTTP/1.1 unless asked");
     }
 
     /// The settings are stack-file settings: this asserts they survive a real

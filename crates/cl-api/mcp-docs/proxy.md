@@ -78,7 +78,7 @@ A route is built from one `ProxyRoute` entry (`host`, `network`, `port`,
 `path_prefix`, `tls`, `middlewares`, `sticky`) plus the overlay address of
 every running replica of the service instance. Per-route behaviour that is
 about neither matching nor backend choice — `max_body_size`, `websockets`,
-`preserve_host`, `response_timeout` — is carried separately in
+`preserve_host`, `response_timeout`, `http2` — is carried separately in
 `RouteOptions`, so adding a knob does not touch every `Route::new` call
 site. The routing table
 (`RouteTable`) is rebuilt wholesale on every placement change and swapped in

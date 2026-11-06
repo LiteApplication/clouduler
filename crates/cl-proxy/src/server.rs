@@ -14,9 +14,10 @@ use hyper::body::Incoming;
 use hyper::header::{HeaderValue, HOST};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use rustls::server::Acceptor;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
@@ -63,6 +64,9 @@ fn incoming_to_proxy_body(b: Incoming) -> ProxyBody {
 #[derive(Clone)]
 struct Backends {
     client: Client<BackendConnector, ProxyBody>,
+    /// Same dialer, but speaks h2c (HTTP/2 with prior knowledge); used by
+    /// routes with `http2` set.
+    client_h2: Client<BackendConnector, ProxyBody>,
     /// What `client` dials through, for the websocket path, which opens its
     /// own connection outside the pool.
     dialer: Dialer,
@@ -76,6 +80,7 @@ pub struct ProxyServer {
     routes: Arc<RouteTable>,
     certs: Arc<CertStore>,
     client: Client<BackendConnector, ProxyBody>,
+    client_h2: Client<BackendConnector, ProxyBody>,
     /// How backends are dialed: directly, or through the relay of the node
     /// running a container this node does not (see `with_dialer`).
     dialer: Dialer,
@@ -124,6 +129,32 @@ fn backend_client(dialer: Dialer) -> Client<BackendConnector, ProxyBody> {
         .build(BackendConnector::new(dialer, BACKEND_CONNECT_TIMEOUT))
 }
 
+/// How often an idle h2 connection (client or upstream) is pinged, and how
+/// long the peer has to answer. A long-lived gRPC stream can sit silent for
+/// minutes; without pings a NAT or a killed container leaves it half-open
+/// forever.
+const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Idle budget for a pooled h2c connection. Longer than `POOL_IDLE_TIMEOUT`
+/// because one h2 connection carries many streams and is cheap to keep, and
+/// a dead one is caught by the keep-alive pings rather than by guessing.
+const H2_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The pooled client for routes with `http2` set: cleartext HTTP/2 with
+/// prior knowledge, so a request is never sent as HTTP/1.1.
+fn backend_client_h2(dialer: Dialer) -> Client<BackendConnector, ProxyBody> {
+    Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .timer(TokioTimer::new())
+        .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(H2_POOL_IDLE_TIMEOUT)
+        .http2_keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+        .http2_keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
+        .build(BackendConnector::new(dialer, BACKEND_CONNECT_TIMEOUT))
+}
+
 impl ProxyServer {
     pub fn new(routes: Arc<RouteTable>, certs: Arc<CertStore>) -> Self {
         Self::with_auth_gate(routes, certs, None)
@@ -151,6 +182,7 @@ impl ProxyServer {
             routes,
             certs,
             client: backend_client(dialer.clone()),
+            client_h2: backend_client_h2(dialer.clone()),
             dialer,
             auth_gate,
             http01,
@@ -170,6 +202,7 @@ impl ProxyServer {
     /// directly from this host, which only reaches containers running here.
     pub fn with_dialer(mut self, dialer: Dialer) -> Self {
         self.client = backend_client(dialer.clone());
+        self.client_h2 = backend_client_h2(dialer.clone());
         self.dialer = dialer;
         self
     }
@@ -177,6 +210,7 @@ impl ProxyServer {
     fn backends(&self) -> Backends {
         Backends {
             client: self.client.clone(),
+            client_h2: self.client_h2.clone(),
             dialer: self.dialer.clone(),
             auth_gate: self.auth_gate.clone(),
             http01: self.http01.clone(),
@@ -232,7 +266,7 @@ impl ProxyServer {
         let mut config = ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(resolver);
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let config = Arc::new(config);
 
         debug!(addr = ?listener.local_addr().ok(), "https listener started");
@@ -278,14 +312,34 @@ async fn accept_tls(
     let tls_stream = start.into_stream(config).await?;
     let io = TokioIo::new(tls_stream);
     let svc = service_fn(move |req| handle_https(req, routes.clone(), backends.clone(), peer));
-    if let Err(e) = http1::Builder::new()
-        .serve_connection(io, svc)
-        .with_upgrades()
-        .await
-    {
+    // Negotiated by ALPN: HTTP/1.1 keeps its upgrade support (websockets), h2
+    // clients (gRPC) get streams and trailers.
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+        .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT);
+    if let Err(e) = builder.serve_connection_with_upgrades(io, svc).await {
         debug!(error = %e, "https connection error");
     }
     Ok(())
+}
+
+/// An h2 request carries its host in `:authority` (the URI), not a `Host`
+/// header, but routing, the gates and the forwarded headers all read `Host`.
+/// Synthesise it so every code path below sees the same thing for HTTP/1.1
+/// and HTTP/2 clients.
+fn ensure_host_header(req: &mut Request<Incoming>) {
+    if req.headers().contains_key(HOST) {
+        return;
+    }
+    let Some(authority) = req.uri().authority().map(|a| a.as_str().to_string()) else {
+        return;
+    };
+    if let Ok(v) = HeaderValue::from_str(&authority) {
+        req.headers_mut().insert(HOST, v);
+    }
 }
 
 fn route_for(routes: &RouteTable, req: &Request<Incoming>) -> Option<Arc<Route>> {
@@ -527,11 +581,12 @@ fn http01_response(store: &Http01Store, token: &str) -> Response<ProxyBody> {
 }
 
 async fn handle_https(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     routes: Arc<RouteTable>,
     backends: Backends,
     peer: SocketAddr,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
+    ensure_host_header(&mut req);
     let host = req
         .headers()
         .get(HOST)
@@ -721,8 +776,23 @@ async fn proxy(
 
     let forwarded_host = req.headers().get(HOST).cloned();
     let (mut parts, body) = req.into_parts();
+    // gRPC servers insist on `te: trailers`, which is hop-by-hop and so
+    // stripped below; it is the one value HTTP/2 allows, so put it back.
+    let te_trailers = options.http2 && wants_trailers(&parts.headers);
     middleware::strip_hop_by_hop(&mut parts.headers);
+    if te_trailers {
+        parts
+            .headers
+            .insert(hyper::header::TE, HeaderValue::from_static("trailers"));
+    }
     add_forwarded_headers(&mut parts.headers, scheme, peer, forwarded_host.as_ref());
+    // The inbound request may be HTTP/2; the version has to match the client
+    // it goes out on, whatever the visitor spoke.
+    parts.version = if options.http2 {
+        Version::HTTP_2
+    } else {
+        Version::HTTP_11
+    };
 
     let Ok(uri) = backend_uri(picked.addr, &parts.uri) else {
         return bad_gateway("could not build backend uri");
@@ -739,16 +809,23 @@ async fn proxy(
 
     let outbound = Request::from_parts(parts, limited_body(body, options.max_body_size));
 
-    let sent = backends.client.request(outbound);
-    let limit = options.response_timeout.unwrap_or(DEFAULT_RESPONSE_TIMEOUT);
-    let result = match tokio::time::timeout(limit, sent).await {
-        Ok(result) => result,
-        Err(_) => {
-            return status_response(
-                StatusCode::GATEWAY_TIMEOUT,
-                &format!("{} did not respond within {limit:?}", picked.addr),
-            )
-        }
+    let client = if options.http2 {
+        &backends.client_h2
+    } else {
+        &backends.client
+    };
+    let sent = client.request(outbound);
+    let result = match response_limit(options) {
+        Some(limit) => match tokio::time::timeout(limit, sent).await {
+            Ok(result) => result,
+            Err(_) => {
+                return status_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    &format!("{} did not respond within {limit:?}", picked.addr),
+                )
+            }
+        },
+        None => sent.await,
     };
 
     let mut resp = match result {
@@ -756,6 +833,9 @@ async fn proxy(
             let (rparts, rbody) = resp.into_parts();
             let mut rparts = rparts;
             middleware::strip_hop_by_hop(&mut rparts.headers);
+            // An h2c backend answers as HTTP/2; the visitor's connection
+            // (HTTP/1.1 or h2) encodes its own version.
+            rparts.version = Version::HTTP_11;
             Response::from_parts(rparts, incoming_to_proxy_body(rbody))
         }
         Err(e) => return bad_gateway(format!("{} unreachable: {}", picked.addr, with_causes(&e))),
@@ -776,6 +856,33 @@ async fn proxy(
         }
     }
     resp
+}
+
+/// How long the backend has to return response headers, or `None` for no
+/// limit. Unset is 30s on a plain route and unlimited on an `http2` one (a
+/// gRPC stream may legitimately send nothing for a long time, and gRPC
+/// clients set their own deadlines); an explicit `0s` removes the limit on
+/// any route. The limit only ever covers the headers: bodies and trailers
+/// stream with no timer at all.
+fn response_limit(options: &crate::route::RouteOptions) -> Option<Duration> {
+    match options.response_timeout {
+        Some(limit) if limit.is_zero() => None,
+        Some(limit) => Some(limit),
+        None if options.http2 => None,
+        None => Some(DEFAULT_RESPONSE_TIMEOUT),
+    }
+}
+
+/// Whether the client's `TE` header lists `trailers`.
+fn wants_trailers(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get_all(hyper::header::TE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("trailers"))
+        })
 }
 
 fn backend_uri(
@@ -914,4 +1021,37 @@ async fn proxy_websocket(
     });
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::route::RouteOptions;
+
+    fn limit(response_timeout: Option<Duration>, http2: bool) -> Option<Duration> {
+        response_limit(&RouteOptions {
+            response_timeout,
+            http2,
+            ..RouteOptions::default()
+        })
+    }
+
+    #[test]
+    fn response_limit_defaults_per_protocol_and_zero_disables_it() {
+        assert_eq!(limit(None, false), Some(DEFAULT_RESPONSE_TIMEOUT));
+        assert_eq!(limit(None, true), None, "a gRPC stream has no default cap");
+        assert_eq!(limit(Some(Duration::ZERO), false), None);
+        assert_eq!(limit(Some(Duration::ZERO), true), None);
+        let five = Some(Duration::from_secs(5));
+        assert_eq!(limit(five, false), five);
+        assert_eq!(limit(five, true), five);
+    }
+
+    #[test]
+    fn te_trailers_is_detected_among_other_tokens() {
+        let mut h = hyper::HeaderMap::new();
+        assert!(!wants_trailers(&h));
+        h.insert("te", "gzip, Trailers".parse().unwrap());
+        assert!(wants_trailers(&h));
+    }
 }

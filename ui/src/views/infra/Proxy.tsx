@@ -333,7 +333,7 @@ function StaticTab(p: TabProps) {
             <Toggle label="Cloudflare proxy (orange cloud)" checked={!!d.cloudflare_proxy} onChange={(cloudflare_proxy) => set({ ...d, cloudflare_proxy })} />
           )}
           <TextField label="Max body size" mono placeholder="10MB" value={d.max_body_size ?? ''} onChange={(e) => set({ ...d, max_body_size: e.target.value || null })} hint="Blank means unlimited." />
-          <TextField label="Response timeout" mono placeholder="30s" value={d.response_timeout ?? ''} onChange={(e) => set({ ...d, response_timeout: e.target.value || null })} hint="Blank waits forever." />
+          <TextField label="Response timeout" mono placeholder="30s" value={d.response_timeout ?? ''} onChange={(e) => set({ ...d, response_timeout: e.target.value || null })} hint="Blank means 30s; 0s means no limit." />
         </>
       )}
     />

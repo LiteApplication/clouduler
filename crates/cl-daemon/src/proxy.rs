@@ -559,6 +559,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
                     websockets: entry.websockets,
                     preserve_host: entry.preserve_host,
                     response_timeout: entry.response_timeout,
+                    http2: entry.http2,
                     allowed_subnet: allowed_subnet(cfg, &entry.network),
                     trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
                     network: Some(entry.network.clone()),
@@ -712,6 +713,7 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
                 websockets: entry.websockets,
                 preserve_host: entry.preserve_host,
                 response_timeout: entry.response_timeout,
+                http2: false,
                 allowed_subnet: allowed_subnet(cfg, &entry.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
                 network: Some(entry.network.clone()),
@@ -2124,7 +2126,10 @@ services:
         let all = SPEC.replace("port: 80", "port: 80\n          cloudflare_proxy: true");
         let on = desired_records(&cfg(), None, &state_with(&all, 1));
         let blog: Vec<_> = on.iter().filter(|r| r.fqdn == "blog.example.com").collect();
-        assert!(!blog.is_empty() && blog.iter().all(|r| r.proxied), "{blog:?}");
+        assert!(
+            !blog.is_empty() && blog.iter().all(|r| r.proxied),
+            "{blog:?}"
+        );
 
         let off = desired_records(&cfg(), None, &state_with(SPEC, 1));
         assert!(off.iter().all(|r| !r.proxied));
@@ -2134,7 +2139,10 @@ services:
             vec![static_route("blog", "wan", "192.168.1.50:9100")],
         );
         let mixed = desired_records(&cfg(), None, &state);
-        assert!(mixed.iter().filter(|r| r.fqdn == "blog.example.com").all(|r| !r.proxied));
+        assert!(mixed
+            .iter()
+            .filter(|r| r.fqdn == "blog.example.com")
+            .all(|r| !r.proxied));
     }
 
     /// Static routes and redirects join the same all-or-nothing rule as stack
@@ -2155,7 +2163,10 @@ services:
         route.cloudflare_proxy = true;
         let state = with_static_routes(state_with(SPEC, 0), vec![route, other]);
         let mixed = desired_records(&cfg(), None, &state);
-        assert!(mixed.iter().filter(|r| r.fqdn == "ext.example.com").all(|r| !r.proxied));
+        assert!(mixed
+            .iter()
+            .filter(|r| r.fqdn == "ext.example.com")
+            .all(|r| !r.proxied));
     }
 
     /// A network switched to `publish_dns: false` keeps its hostnames out of

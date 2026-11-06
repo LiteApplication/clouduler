@@ -408,7 +408,8 @@ proxy:
     max_body_size: 10MB       # 413 above this; unset means no limit
     websockets: true          # default true
     preserve_host: false      # default false
-    response_timeout: 30s     # unset waits forever
+    response_timeout: 30s     # unset: 30s (none when http2); 0s: no limit
+    http2: false              # default false; true = h2c to the container (gRPC)
     cloudflare_proxy: false   # default false; public networks only
 ```
 
@@ -435,7 +436,8 @@ nothing until you set one.
 | `websockets` | `true` | Whether `Upgrade` requests are proxied. Turning it off answers them with 400, which is worth doing on a route that should never see one. |
 | `preserve_host` | `false` | Forward the client's `Host` instead of rewriting it to the backend's address. Needed by anything that builds absolute URLs or virtual hosts on the header. |
 | `cloudflare_proxy` | `false` | Publish the hostname's DNS records with Cloudflare's proxy (orange cloud) on. Only valid on a `public` network (validation fails otherwise). Applies per hostname: it is on only when *every* route behind that host and network (all paths, all services) sets it; a route without it, or a static route, redirect or login portal on the same host that leaves its own `cloudflare_proxy` off, keeps the record DNS-only. Names are compared fully qualified. |
-| `response_timeout` | none | How long the backend has to return response headers, connection time included. Answers 504 when it runs out. Do not set this on a route serving an event stream or a long download — it applies to headers, but a backend that is slow to *start* answering will be cut off. |
+| `response_timeout` | 30s (none when `http2`) | How long the backend has to return response headers, connection time included. Answers 504 when it runs out. `0s` removes the limit. It only covers headers: bodies and trailers stream untimed, but a backend that is slow to *start* answering will be cut off. |
+| `http2` | `false` | Talk cleartext HTTP/2 (h2c, prior knowledge) to the container instead of HTTP/1.1; required for gRPC. Per route, so several `path_prefix` routes on one host and port can mix h2c and HTTP/1.1. Bodies and trailers stream both ways unbuffered. The HTTPS listener itself always offers h2 and http/1.1. |
 
 Byte sizes take decimal (`kb`, `mb`, `gb`) or binary (`kib`, `mib`, `gib`)
 suffixes; a bare `k`/`m`/`g` is binary, and a plain number is bytes.

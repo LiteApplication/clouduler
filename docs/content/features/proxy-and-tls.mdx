@@ -101,7 +101,8 @@ These keys live in each `x-clouduler.proxy` entry. The complete stack file is de
   {key: "tls", type: "bool", default: "true", reload: "n/a", description: "Use a certificate for the route.", quirks: "A route with tls: false is still served on the HTTPS listener too."},
   {key: "websockets", type: "bool", default: "true", reload: "n/a", description: "Let Upgrade requests through. Set false to refuse them.", quirks: "When refused the proxy answers 400 connection upgrades are not enabled for this route. The research file listed the default as false; the code default is true."},
   {key: "max_body_size", type: "size", default: "no limit", reload: "n/a", description: "Largest request body, for example 10MB. Bigger requests get 413 and never reach the container.", quirks: "Set it on anything exposed to the internet."},
-  {key: "response_timeout", type: "duration", default: "30s", reload: "n/a", description: "How long the backend may take to respond before 504.", quirks: "Error text: ADDR did not respond within LIMIT. The doc comment in the code says an unset value waits forever; the proxy applies 30s."},
+  {key: "response_timeout", type: "duration", default: "30s (no limit when http2 is true)", reload: "n/a", description: "How long the backend may take to return response headers before 504. 0s removes the limit.", quirks: "Error text: ADDR did not respond within LIMIT. It covers connecting plus the response headers only: response bodies and trailers stream with no timer."},
+  {key: "http2", type: "bool", default: "false", reload: "n/a", description: "Talk to the container in cleartext HTTP/2 (h2c, prior knowledge) instead of HTTP/1.1. Needed for gRPC.", quirks: "Per route, so path_prefix routes on one host and port can mix h2c and HTTP/1.1. The container must accept h2c on that port. Upgrade requests (websockets) on the route still reach the container over HTTP/1.1."},
   {key: "preserve_host", type: "bool", default: "false", reload: "n/a", description: "Forward the visitor's Host header instead of the backend's address.", quirks: "Turn it on for apps that build absolute URLs."},
   {key: "cloudflare_proxy", type: "bool", default: "false", reload: "n/a", description: "Publish the hostname with Cloudflare's proxy (orange cloud) on.", quirks: "Public networks only. On only if every route behind the host sets it; any route, static backend, redirect or login portal on the same host without it keeps the record DNS-only. Static backends, redirects and the login portal have their own toggle."},
   {key: "sticky", type: "bool", reload: "n/a", description: "Pin a visitor to one backend with the cl_sticky cookie."},
@@ -198,7 +199,42 @@ A stack can limit what its containers may reach with `allowed:`. A hostname entr
 
 The proxy adds `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` to the request and removes hop-by-hop headers. It adds no header naming the logged-in user, even with the `authenticated` middleware (see [Access and login](/docs/features/access-and-login)). Use the route's `headers` middleware to add your own.
 
-HTTPS negotiates HTTP/1.1 only; HTTP/2 is not offered. Websockets are allowed by default.
+Websockets are allowed by default.
+
+## HTTP/2 and gRPC
+
+The HTTPS listener offers both `h2` and `http/1.1` through ALPN, so browsers and gRPC clients can use HTTP/2 to reach the proxy. The plain HTTP listener stays HTTP/1.1. Websockets keep working: a client that upgrades does so over HTTP/1.1 on the same listener.
+
+What the proxy speaks to the *container* is chosen per route. By default it is HTTP/1.1. Set `http2: true` on a route and the proxy talks h2c (cleartext HTTP/2 with prior knowledge) to the container instead, which is what a gRPC server needs. A client using HTTP/1.1 or HTTP/2 can reach either kind of route; the proxy translates.
+
+```yaml
+x-clouduler:
+  proxy:
+    # gRPC paths: h2c to the container, no timeout on the stream
+    - host: netbird
+      network: wan
+      port: 80
+      path_prefix: /management.ManagementService
+      http2: true
+    - host: netbird
+      network: wan
+      port: 80
+      path_prefix: /signalexchange.SignalExchange
+      http2: true
+    # everything else on the same host and port stays HTTP/1.1 (and websockets)
+    - host: netbird
+      network: wan
+      port: 80
+```
+
+On an `http2` route:
+
+- Request and response bodies are streamed in both directions without buffering, and trailers (such as `grpc-status`) are forwarded both ways. `te: trailers` is preserved.
+- An unset `response_timeout` means no limit, because a stream may send nothing for a long time and gRPC clients set their own deadlines. A value you set still applies, and still only to the response headers. `0s` removes the limit on any route.
+- Idle HTTP/2 connections, to visitors and to containers, are pinged every 30s, so a dead peer is noticed instead of holding a stream open forever.
+- `max_body_size` counts the bytes of the whole request stream, so on a long-lived client stream leave it unset or set it high enough for the stream's lifetime.
+
+The proxy's health check still uses HTTP/1.1, so the container must answer HTTP/1.1 on that port as well, or the route will look unhealthy.
 
 ## Redirects and static backends
 
