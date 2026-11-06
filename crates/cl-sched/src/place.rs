@@ -68,7 +68,10 @@ impl Decision {
         }
         if let Some(migration) = &current.migration {
             if !migration.phase.is_terminal()
-                || matches!(migration.phase, cl_raft::state::MigrationPhase::Failed { .. })
+                || matches!(
+                    migration.phase,
+                    cl_raft::state::MigrationPhase::Failed { .. }
+                )
             {
                 return None;
             }

@@ -120,6 +120,8 @@ pub struct Scheduler {
     /// Rung when the fence releases, so a node that just regained quorum
     /// starts its containers now instead of waiting out the sweep interval.
     wake: Arc<tokio::sync::Notify>,
+    /// Old-image cleanup, see `crate::images`.
+    image_gc: crate::images::ImageGc,
 }
 
 impl Scheduler {
@@ -131,11 +133,13 @@ impl Scheduler {
         boot_config: ClusterConfig,
         pulling: PullTracker,
     ) -> Self {
+        let image_gc = crate::images::ImageGc::new(materializer.data_dir());
         Self {
             node,
             cluster,
             docker,
             materializer,
+            image_gc,
             zone: None,
             boot_config,
             pulling,
@@ -401,6 +405,9 @@ impl Scheduler {
             .await?;
         self.report_container_status(state, &actual).await;
         self.expire_updates(state, &actual).await;
+        if !fenced {
+            self.clean_images(state, &docker, &targets, &actual).await;
+        }
 
         // Objects for instances that have moved on must not linger on disk.
         let keep: BTreeMap<String, ()> = targets
@@ -461,7 +468,10 @@ impl Scheduler {
         let state = loop {
             let state = self.cluster.state().await;
             let applied = committed.iter().all(|(name, revision)| {
-                state.configs.get(name).is_some_and(|c| c.revision >= *revision)
+                state
+                    .configs
+                    .get(name)
+                    .is_some_and(|c| c.revision >= *revision)
             });
             if applied {
                 break state;
@@ -491,9 +501,9 @@ impl Scheduler {
             {
                 continue;
             }
-            if let Err(e) = self
-                .materializer
-                .prepare(&state, instance, &service.configs, &service.secrets)
+            if let Err(e) =
+                self.materializer
+                    .prepare(&state, instance, &service.configs, &service.secrets)
             {
                 warn!(instance = %instance, error = %e, "could not refresh a config copy after a write-back");
             }
@@ -574,6 +584,70 @@ impl Scheduler {
         {
             warn!(error = %e, "could not report container status");
         }
+    }
+
+    /// Remove old images (see `crate::images` for the rule): once after an
+    /// update on this node succeeded, and as a sweep at daemon start and
+    /// daily. Runs in the background so a slow docker never holds a pass, and
+    /// never fails the pass.
+    async fn clean_images(
+        &self,
+        state: &ClusterState,
+        docker: &Docker,
+        targets: &[Target],
+        actual: &[cl_docker::ContainerState],
+    ) {
+        // With the wanted set not fully known, cleanup could mistake a
+        // service's image for an unwanted one.
+        if state.emergency_stack.is_some() {
+            return;
+        }
+        let mut busy = !self.pulling.read().await.is_empty();
+        let mut succeeded = Vec::new();
+        for (instance, update) in &state.instance_updates {
+            if update.node != self.node {
+                continue;
+            }
+            match update.phase {
+                UpdatePhase::Started => succeeded.push((instance.to_string(), update.at)),
+                UpdatePhase::Failed => {}
+                _ => busy = true,
+            }
+        }
+
+        let mut wanted = crate::images::Wanted::default();
+        let mut known = true;
+        for assignment in state.assignments_on(&self.node) {
+            let instance = &assignment.instance;
+            let Some(stack) = state.stacks.get(&instance.stack) else {
+                continue;
+            };
+            let Ok(file) = StackFile::parse(&stack.spec) else {
+                // Cannot tell what the stack wants, so do not guess.
+                known = false;
+                break;
+            };
+            if let Some(service) = file.services.get(&instance.service) {
+                wanted.add(&service.image);
+            }
+        }
+        if !known || !self.image_gc.due(&succeeded, busy) {
+            return;
+        }
+        for target in targets {
+            wanted.add(&target.spec.image);
+        }
+        let managed: BTreeSet<String> = actual
+            .iter()
+            .map(|c| crate::images::repo_of(&c.image))
+            .collect();
+
+        let gc = self.image_gc.clone();
+        let docker = docker.clone();
+        let now = unix_now();
+        tokio::spawn(async move {
+            gc.sweep(&docker, &wanted, &managed, now).await;
+        });
     }
 
     /// Tidy this node's entries in `instance_updates`: drop finished ones once

@@ -138,6 +138,22 @@ Applying an update:
 
 Rules for a batch: each node does one download and one restart at a time; nodes work in parallel; two instances of the same service never restart together. The first failure halts the batch: that container is rolled back to its previous pin, and the instances not yet started are marked `cancelled: the update of <instance> failed, so the rolling update stopped`.
 
+### Old image cleanup {#image-cleanup}
+
+Each node removes image versions it no longer needs, so updates do not fill the disk. The rule applies per image repository that a stack service on that node uses:
+
+- An image used by any container on the node, running or stopped, Clouduler's or not, is kept.
+- An image a service on the node is configured with (by tag or by pinned digest) is kept. This is the running one and the one being updated to.
+- Of the remaining images of that repository, the newest is kept so you can roll back, and the rest are removed.
+
+After a successful update the new image and the one just before it stay. Cleanup does not run while an update or a pull is in progress on the node, and a failed update keeps both images.
+
+When it runs: shortly after the daemon starts, after an update on the node finished successfully, and every 24 hours.
+
+A repository that no stack service on the node has used for 7 days (for example the stack was removed) has all its unused images removed. The node remembers which repositories it pulled for stack services in `image-repos.json` in its data directory. Images of any other repository are never touched, and neither is an image that also carries a tag from another repository.
+
+Images are removed by ID without force, so Docker refuses one that is still in use. An image with several tags is untagged name by name. The log lists each removed image with its size and a total (the sum of image sizes, so layers shared with kept images are overcounted); a failure is logged as a warning and does not affect the update. The retention counts and the 7 day grace are fixed and not configurable.
+
 ### Tasks
 
 <UiCli>
@@ -213,6 +229,10 @@ A container built locally, or whose registry answer is missing, never shows as b
 
 <Quirk title="The batch stops at the first failure">
 Later instances are marked cancelled. Restarts already running on other nodes finish or fail on their own. Progress records disappear 15 minutes after finishing. A record stuck queued for 15 minutes fails with `stalled: queued but never started`, one stuck in another phase for an hour fails with `stalled: no progress for an hour`, one left over from before a daemon restart fails with `interrupted: the daemon restarted mid-update`, and one whose node left the cluster, is unreachable, or no longer hosts the instance fails with `interrupted: the node running this update left the cluster`, `... is unreachable` or `interrupted: the instance moved to another node`. After 15 minutes without progress the instance also shows as a problem: `update is <phase> on <node> and has made no progress for <n>s`.
+</Quirk>
+
+<Quirk title="Nameless images are left alone" severity="info">
+When a tag such as `latest` moves, the previous image keeps its `repo@sha256` digest and still counts as a version of that repository, so it is kept as the rollback image. An image with neither a tag nor a digest cannot be tied to a repository and is never removed; Clouduler does not run `docker image prune`.
 </Quirk>
 
 <Quirk title="Redeploy shares the progress record" severity="info">

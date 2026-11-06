@@ -2,6 +2,7 @@
 
 pub mod deps;
 pub mod error;
+pub mod images;
 pub mod materialize;
 pub mod place;
 pub mod plan;

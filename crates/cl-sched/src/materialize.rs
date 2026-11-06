@@ -114,6 +114,11 @@ impl Materializer {
         &self.docker_api_socket
     }
 
+    /// This node's data directory.
+    pub fn data_dir(&self) -> &Path {
+        self.root.parent().unwrap_or(&self.root)
+    }
+
     pub fn has_key(&self) -> bool {
         self.key.borrow().is_some()
     }

@@ -6,6 +6,22 @@ use futures::StreamExt;
 use crate::client::Docker;
 use crate::error::{classify, DockerError, Result};
 
+/// One local image as `GET /images/json` reports it, reduced to what image
+/// cleanup decides on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalImage {
+    /// The local image ID (`sha256:...`). This is what a container's
+    /// `image_digest` holds, and is neither a tag nor a registry digest.
+    pub id: String,
+    /// `repo:tag` names pointing at this image.
+    pub repo_tags: Vec<String>,
+    /// `repo@sha256:...` registry digests of this image.
+    pub repo_digests: Vec<String>,
+    /// Unix seconds the image was built.
+    pub created: i64,
+    pub size: u64,
+}
+
 /// A parsed docker image reference: repository plus an optional tag or digest.
 /// A reference has a tag XOR a digest, never both (docker doesn't allow both).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +191,54 @@ impl Docker {
             .await
             .map_err(classify)?;
         serde_json::to_value(images).map_err(|e| DockerError::Other(e.to_string()))
+    }
+
+    /// Every local image (not intermediate layers), as `LocalImage`.
+    pub async fn list_local_images(&self) -> Result<Vec<LocalImage>> {
+        let images = self
+            .inner
+            .list_images(None::<bollard::query_parameters::ListImagesOptions>)
+            .await
+            .map_err(classify)?;
+        Ok(images
+            .into_iter()
+            .map(|i| LocalImage {
+                id: i.id,
+                repo_tags: i.repo_tags,
+                repo_digests: i.repo_digests,
+                created: i.created,
+                size: i.size.max(0) as u64,
+            })
+            .collect())
+    }
+
+    /// The image ID of every container on the node, running or stopped,
+    /// whether clouduler created it or not.
+    pub async fn all_container_image_ids(&self) -> Result<Vec<String>> {
+        let options = bollard::query_parameters::ListContainersOptionsBuilder::new()
+            .all(true)
+            .build();
+        let summaries = self
+            .inner
+            .list_containers(Some(options))
+            .await
+            .map_err(classify)?;
+        Ok(summaries.into_iter().filter_map(|c| c.image_id).collect())
+    }
+
+    /// `DELETE /images/{name}` without force, so docker itself refuses an
+    /// image a container still uses. `name` is an image ID, or a `repo:tag`
+    /// to untag just that name.
+    pub async fn remove_image(&self, name: &str) -> Result<()> {
+        let options = bollard::query_parameters::RemoveImageOptionsBuilder::new()
+            .force(false)
+            .noprune(false)
+            .build();
+        self.inner
+            .remove_image(name, Some(options), None)
+            .await
+            .map_err(classify)?;
+        Ok(())
     }
 
     /// `GET /images/{name}/get`: the image as a `docker save` tar. Streamed,
