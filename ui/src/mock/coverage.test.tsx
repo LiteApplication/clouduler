@@ -116,9 +116,12 @@ for (const scenario of Object.keys(scenarios)) {
         );
         // Past the auth gate and the first state event: the nav shows the user.
         await waitFor(() => expect(screen.getAllByText('demo').length).toBeGreaterThan(0), { timeout: 3000 });
-        await new Promise((r) => setTimeout(r, 120));
-        expect(container.querySelector('main')).not.toBeNull();
-        expect((container.querySelector('main')?.textContent ?? '').length).toBeGreaterThan(10);
+        // Some routes redirect and load data first, so wait for content rather
+        // than a fixed delay.
+        await waitFor(
+          () => expect((container.querySelector('main')?.textContent ?? '').length).toBeGreaterThan(10),
+          { timeout: 3000 },
+        );
         const mockErrors = errors.mock.calls.filter((c) => String(c[0]).startsWith('[mock]'));
         expect(mockErrors).toEqual([]);
         unmount();
