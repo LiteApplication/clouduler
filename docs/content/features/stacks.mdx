@@ -44,10 +44,27 @@ Open **Stacks**. If you have none yet, the page shows an empty state with a **De
    - **Validation** shows `Spec is valid` or a list of problems to fix.
    - **What it needs** lists the networks, drives, configs and secrets the spec uses.
    - **Bundled files** appears if the spec references configs or secrets with `file:`. Load each file or type its content here.
+   - **Environment file for SERVICE** appears for every service that sets `env_file`. See [Import an env_file](#import-an-env_file).
    - **Where it can run** shows, per service, which nodes can host it.
 5. Click **Deploy NAME**. The button stays disabled until the spec is valid. You land on the stack page.
 
 If a step fails you see a red **Not deployed** banner: `The deploy failed while STEP: MESSAGE`.
+
+### Import an env_file
+
+A stack file cannot use `env_file`, because the daemon never sees the file. The deploy editor (new stack and redeploy) converts it for you. For each service that sets `env_file`, an **Environment file for SERVICE** panel names the service and the listed paths and has one text box per service. If the service lists several files, paste them one after the other in the listed order. A key defined twice is reported and the last value wins.
+
+1. Paste the contents of the file and click **Review N variables**. The parser reads `KEY=value`, `export KEY=value`, `#` comment lines, single-quoted values (literal), double-quoted values (`\n`, `\r`, `\t`, `\\`, `\"` escapes, may span lines), and strips a trailing ` # comment` from unquoted values. Variables such as `${OTHER}` are not expanded. A line it cannot read, such as a bare `KEY` without `=` or an unterminated quote, is listed with its line number and is not imported.
+2. For each variable choose **Plain** or **Secret**. Names containing PASSWORD, PASSWD, PASS, SECRET, TOKEN, KEY, PRIVATE, CREDENTIAL, SALT, AUTH, CERT or DSN start as Secret, except a few identifier-like names such as `PUBLIC_KEY` or `KEY_ID`. Values are masked until you click **Show values**. An empty value can only be Plain.
+3. A secret gets a name, by default `SERVICE-key-in-lowercase` with `_` turned into `-`. Names may contain letters, digits, dot, dash and underscore and must not start with a dot. If the name is already declared in the spec or already exists as a cluster secret, you must tick the overwrite box or pick another name. Overwriting a cluster secret changes it for every stack that uses it and can break a running service.
+4. Click **Apply to the spec**. The editor text is rewritten in place, keeping your comments and layout:
+   - the service's `env_file` is removed;
+   - Plain variables are added to its `environment`, in the existing map or list form, or a new map if there is none. A variable the service already sets in `environment` (or as a secret with `env:`) is skipped and keeps its explicit value, and a toast names it;
+   - each Secret is added as a top-level `secrets: NAME: {file: ./secrets/NAME}` entry and as `- source: NAME` with `env: KEY` on the service, and its value is filled in under **Bundled files**, with no newline added.
+
+You can still edit the spec and the bundled values before you click **Deploy**. The pasted text and values exist only in the page while you work. They are not logged, put in a URL or saved in the browser, and the pasted text is cleared when you apply or discard. The secret values are sent when you deploy, like any bundled secret.
+
+The CLI does not do this conversion. `clouduler stack deploy` with an `env_file` fails with the validation error.
 
 <UiScreen scenario="lan-3-nodes" route="/stacks" caption="A cluster with three stacks running." alt="Stacks view listing vaultwarden, nextcloud and immich" />
 

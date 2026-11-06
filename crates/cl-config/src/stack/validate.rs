@@ -355,13 +355,14 @@ impl StackFile {
     }
 
     /// `env_file` is parsed but its variables are never injected into the
-    /// container, so a service relying on it would start without them.
+    /// container, so a service relying on it would start without them. The web
+    /// UI rewrites it into `environment` and secrets before the spec is sent.
     fn validate_env_file(&self) -> Result<()> {
         for (name, svc) in &self.services {
             if !svc.env_file.is_empty() {
                 return Err(ConfigError::invalid(
                     format!("services.{name}.env_file"),
-                    "env_file is not supported yet, move its entries into environment",
+                    "env_file is not supported in a stack file; move its entries into environment, or paste it in the web UI's stack editor to import it",
                 ));
             }
         }
@@ -1096,11 +1097,11 @@ mod tests {
     }
 
     #[test]
-    fn env_file_is_rejected_until_supported() {
+    fn env_file_is_rejected_in_a_stack_file() {
         let raw = "services:\n  a:\n    image: x\n    env_file: .env\n";
         let err = StackFile::parse(raw).unwrap_err();
         assert!(err.to_string().contains("services.a.env_file"));
-        assert!(err.to_string().contains("not supported yet"));
+        assert!(err.to_string().contains("import it"));
 
         let raw = "services:\n  a:\n    image: x\n    env_file: [.env, .env.local]\n";
         assert!(StackFile::parse(raw).is_err());

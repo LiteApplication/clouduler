@@ -10,6 +10,7 @@ import { StackSpecEditor } from '../../components/StackSpecEditor';
 import { diffLines, lineForPath } from '../../lib/specText';
 import { useClusterState } from '../../state/store';
 import { useAuth } from '../../auth/AuthContext';
+import { EnvImportPanel } from './EnvImportPanel';
 import { PlacementPanel } from './PlacementPanel';
 import { DiffView } from './StackDetail';
 import { allConfigKeys, allSecretKeys, useKnownNames } from './specTools';
@@ -219,6 +220,14 @@ export function Deploy() {
             </div>
             <StackSpecEditor value={spec} onChange={setSpec} editable known={known} minHeight="360px" errorLines={errorLines} />
           </div>
+          <EnvImportPanel
+            spec={spec}
+            clusterSecrets={Object.keys(cluster?.secrets ?? {})}
+            onApply={(next, values) => {
+              setSpec(next);
+              setSecretDrafts((p) => ({ ...p, ...values }));
+            }}
+          />
           <Validation checking={checking} spec={spec} result={result} checkError={checkError} />
           {changes.length > 0 && (
             <Panel title="Changes to deploy">

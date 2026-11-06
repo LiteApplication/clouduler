@@ -120,7 +120,7 @@ Each key under `services:` must be a DNS label (lowercase letters, digits and hy
   {"key": "command", "type": "string or list", "default": "image default", "reload": "n/a", "description": "Overrides the image CMD. A string is split like Docker does, a list is exec form."},
   {"key": "entrypoint", "type": "string or list", "default": "image default", "reload": "n/a", "description": "Overrides the image ENTRYPOINT."},
   {"key": "environment", "type": "map or list of KEY=value", "reload": "n/a", "description": "Environment variables.", "quirks": "List entries must contain =. Numbers and booleans in a map are stringified, null becomes empty. Secret environment variables come from secrets with env:."},
-  {"key": "env_file", "type": "path or list", "reload": "n/a", "description": "Not supported.", "quirks": "Always rejected. Move the entries into environment."},
+  {"key": "env_file", "type": "path or list", "reload": "n/a", "description": "Not supported in a stack file.", "quirks": "Always rejected by the daemon and the CLI. The web UI deploy editor offers to import it: paste the file there and its entries are moved into environment or into secrets. See Stacks."},
   {"key": "labels", "type": "map or list of key=value", "reload": "n/a", "description": "Docker labels on the container. Clouduler adds its own revision label."},
   {"key": "volumes", "type": "list", "reload": "n/a", "description": "Mounts from drives, or in-memory tmpfs. See Volumes below."},
   {"key": "ports", "type": "list", "reload": "n/a", "description": "Ports published on the node that runs the container. See Ports below."},
@@ -321,7 +321,7 @@ The format is `invalid config at PATH: MESSAGE`, where PATH is a dotted path suc
 **Syntax errors (UI and CLI)**
 
 - `service name must be a valid DNS label (lowercase letters, digits, hyphens, not starting or ending with a hyphen) since it becomes an overlay hostname`
-- `env_file is not supported yet, move its entries into environment`
+- `env_file is not supported in a stack file; move its entries into environment, or paste it in the web UI's stack editor to import it`
 - `network NET is not declared in this stack's top-level networks`
 - `no service named DEP in this stack`, `a service cannot depend on itself`, `dependency cycle: a -> b -> a`
 - `port P/PROTO is already published by services.X.ports[I]`
