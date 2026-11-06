@@ -50,7 +50,8 @@ Containers find each other by name. The cluster DNS answers on the overlay gatew
 | `tasks.SERVICE.STACK` | the same set (Swarm style) |
 | `NODE` | that node's internal IP |
 | a proxy hostname on a public network | this node's internal IP, so containers see the same service the outside sees (not for stacks that use a `nat` network, which get the real public answer) |
-| anything else, including a name under the internal domain the cluster has no record for | forwarded to the host's upstream resolvers |
+| a name under the internal domain the cluster has no record for | NXDOMAIN (never forwarded: a host resolver may send the domain straight back to the cluster) |
+| anything else | forwarded to the host's upstream resolvers |
 
 Inside a stack, the bare service name also works (`db`), because each container gets a search list of `STACK.DOMAIN` and `DOMAIN`. Answers have a 5 second TTL.
 

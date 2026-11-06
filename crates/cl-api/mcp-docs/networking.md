@@ -352,9 +352,9 @@ inside the overlay:
   unless the proxy is on its standard 80/443 ports.
 - anything else is forwarded to the host's configured upstream resolvers
   (read from `/etc/resolv.conf`), so ordinary internet names still resolve.
-  That includes a name under the internal domain that the zone has no
-  records for, rather than answering NXDOMAIN. A name the zone does have
-  (a service with no AAAA, say) still gets the zone's own empty answer.
+  A name under the internal domain that the zone has no records for gets
+  NXDOMAIN and is never forwarded: a host resolver (tailscale split DNS)
+  may send the domain straight back to the cluster, and the loop times out.
 
 The zone is hot-swappable: placement changes rebuild the record set and
 swap it into the running server without a restart or dropping in-flight
