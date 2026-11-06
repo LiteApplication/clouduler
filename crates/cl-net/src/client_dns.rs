@@ -24,7 +24,7 @@ use hickory_server::zone_handler::{
 };
 use tokio::sync::RwLock;
 
-use crate::dns::{build_forwarder, RECORD_TTL};
+use crate::dns::{build_split_dns_forwarder, RECORD_TTL};
 use crate::error::{NetError, Result};
 
 /// One piece of an answer.
@@ -214,7 +214,7 @@ impl ClientDns {
             LowerName::from(Name::root()),
             vec![
                 self.zone.clone() as Arc<dyn ZoneHandler>,
-                Arc::new(build_forwarder()?),
+                Arc::new(build_split_dns_forwarder()?),
             ],
         );
         let mut server = Server::new(catalog);

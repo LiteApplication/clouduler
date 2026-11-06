@@ -412,6 +412,58 @@ pub(crate) fn build_forwarder() -> Result<ForwardZoneHandler<TokioRuntimeProvide
         .map_err(NetError::Dns)
 }
 
+/// Tailscale's MagicDNS addresses. With split DNS pointing the cluster's
+/// domains at the nodes, MagicDNS sends a name the cluster does not own
+/// straight back to the node that asked, so forwarding to it loops.
+const MAGIC_DNS: [IpAddr; 2] = [
+    IpAddr::V4(Ipv4Addr::new(100, 100, 100, 100)),
+    IpAddr::V6(std::net::Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x53)),
+];
+
+/// Resolvers a split-DNS target may forward to when the host has none left.
+const FALLBACK_UPSTREAMS: [IpAddr; 2] = [
+    IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+    IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
+];
+
+/// The upstream servers of the host's resolver configuration without
+/// MagicDNS, or the public fallbacks when MagicDNS was the only one.
+fn loop_free_upstreams(configured: Vec<IpAddr>) -> Vec<IpAddr> {
+    let kept: Vec<IpAddr> = configured
+        .into_iter()
+        .filter(|ip| !MAGIC_DNS.contains(ip))
+        .collect();
+    if kept.is_empty() {
+        FALLBACK_UPSTREAMS.to_vec()
+    } else {
+        kept
+    }
+}
+
+/// A forwarder for a listener that tailnet split DNS points at: like
+/// [`build_forwarder`] but never asking MagicDNS, which would send the query
+/// back here and time out.
+pub(crate) fn build_split_dns_forwarder() -> Result<ForwardZoneHandler<TokioRuntimeProvider>> {
+    use hickory_server::resolver::config::NameServerConfig;
+    use hickory_server::store::forwarder::ForwardConfig;
+
+    let (system, options) = hickory_server::resolver::system_conf::read_system_conf()
+        .map_err(|e| NetError::Dns(format!("error reading system configuration: {e}")))?;
+    let configured = system.name_servers().iter().map(|ns| ns.ip).collect();
+    let name_servers = loop_free_upstreams(configured)
+        .into_iter()
+        .map(NameServerConfig::udp_and_tcp)
+        .collect();
+    ForwardZoneHandler::builder_tokio(ForwardConfig {
+        name_servers,
+        options: Some(options),
+    })
+    .with_search(Vec::new())
+    .with_domain(Name::root())
+    .build()
+    .map_err(NetError::Dns)
+}
+
 /// The internal DNS resolver: serves the clouduler zone on the bridge
 /// address and forwards everything else to the host's configured resolvers.
 pub struct InternalDns {
@@ -508,6 +560,14 @@ impl InternalDns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magic_dns_is_never_an_upstream() {
+        let host = vec![MAGIC_DNS[0], MAGIC_DNS[1], IpAddr::from([9, 9, 9, 9])];
+        assert_eq!(loop_free_upstreams(host), [IpAddr::from([9, 9, 9, 9])]);
+        let only = vec![MAGIC_DNS[0], MAGIC_DNS[1]];
+        assert_eq!(loop_free_upstreams(only), FALLBACK_UPSTREAMS);
+    }
 
     fn iid(stack: &str, service: &str, index: u32) -> InstanceId {
         InstanceId::new(stack, service, index)

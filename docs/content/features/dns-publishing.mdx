@@ -125,7 +125,7 @@ proxy:
 </UiCli.Cli>
 </UiCli>
 
-The server answers according to the network the client is on. A client on a subnetted network gets the node's own LAN address for a public hostname (so LAN traffic does not hairpin through your router), and names the cluster does not own are forwarded upstream. It returns `REFUSED` to clients outside the configured networks, and for names it does not own to clients outside a subnetted network, so a public listener cannot be used as an open resolver. `networks` defaults to every subnetted network. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
+The server answers according to the network the client is on. A client on a subnetted network gets the node's own LAN address for a public hostname (so LAN traffic does not hairpin through your router), and names the cluster does not own are forwarded upstream, using the host's resolvers except Tailscale MagicDNS (`100.100.100.100`), which split DNS may route back to this server; if MagicDNS is the host's only resolver, `1.1.1.1` and `1.0.0.1` are used. It returns `REFUSED` to clients outside the configured networks, and for names it does not own to clients outside a subnetted network, so a public listener cannot be used as an open resolver. `networks` defaults to every subnetted network. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
 
 ## Options
 
