@@ -912,6 +912,11 @@ pub struct ClusterState {
     /// Unix seconds the last registry check finished, 0 before the first.
     #[serde(default)]
     pub image_checks_at: i64,
+    /// Which node holds each served drive's authoritative copy, keyed by
+    /// drive. A drive with no entry has had no failover yet and is served by
+    /// the first reachable `served_by` candidate. See `served`.
+    #[serde(default)]
+    pub served: BTreeMap<String, crate::served::ServedAuthority>,
     /// Volumes deleted on purpose, with the nodes that still have to remove
     /// their copy. A node takes its name off once the directory is gone, and
     /// the entry goes with the last one.
@@ -1508,6 +1513,12 @@ pub enum Request {
     /// placement again. Submitted by `watch_leadership` once this node can
     /// reach another voter, not by an operator - see `emergency_stack`.
     ClearEmergency,
+    /// Changes who holds a served drive, or a handover between holders. See
+    /// `served::ServedOp`.
+    Served {
+        drive: String,
+        op: crate::served::ServedOp,
+    },
     /// Stand-in for a variant this node's binary doesn't recognize - a
     /// command a newer node submitted that this (older) node hasn't been
     /// upgraded to understand yet. `dispatch` treats it as a no-op (and does
@@ -1604,6 +1615,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "RecordCrashMove",
     "NoOp",
     "ClearEmergency",
+    "Served",
 ];
 
 // Mirrors `Request` field-for-field purely so `#[derive(Deserialize)]` can
@@ -1879,6 +1891,10 @@ mod request_mirror {
         },
         NoOp,
         ClearEmergency,
+        Served {
+            drive: String,
+            op: crate::served::ServedOp,
+        },
         // `Unknown` is deliberately absent: there is no wire shape a sender
         // would legitimately produce for it - it is only ever the fallback
         // result when nothing above matches.
@@ -3061,6 +3077,13 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::Served { drive, op } => {
+                let next =
+                    crate::served::ServedAuthority::apply(self.served.get(drive), op, &self.unreachable)?;
+                self.served.insert(drive.clone(), next);
+                Ok(())
+            }
+
             Request::RecordCrashMove { instance, from, at } => {
                 if !self.assignments.contains_key(instance) {
                     return Err(format!("unknown instance {instance}"));
@@ -3885,6 +3908,10 @@ mod tests {
             },
             Request::NoOp,
             Request::ClearEmergency,
+            Request::Served {
+                drive: "fast".into(),
+                op: crate::served::ServedOp::RequestFailback,
+            },
         ];
 
         for req in requests {

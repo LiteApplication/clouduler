@@ -15,6 +15,8 @@ use crate::server::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/drives", get(list_drives))
+        .route("/api/drives/{drive}/failback", post(request_failback))
+        .route("/api/drives/{drive}/resolve", post(resolve_conflict))
         .route("/api/volumes", get(list_volumes))
         .route("/api/volumes/{drive}/{volume}/sync", post(sync_volume))
         .route("/api/volumes/{drive}/{volume}/inspect", get(inspect_volume))
@@ -40,9 +42,39 @@ struct DriveSummary {
     /// candidate is unreachable.
     active_server: Option<String>,
     sync_interval: String,
+    /// Whether a served drive goes back to a preferred node that returns
+    /// after a failover.
+    failback: cl_config::Failback,
+    /// Who holds a served drive's authoritative copy, and any handover or
+    /// conflict. `None` for a replicated drive, and for a served drive that
+    /// has never failed over.
+    served: Option<ServedSummary>,
     /// Nodes that implement this drive, with whether each one is currently
     /// reachable.
     nodes: Vec<DriveNodeStatus>,
+}
+
+#[derive(Serialize)]
+struct ServedSummary {
+    /// The node whose copy is authoritative.
+    holder: String,
+    /// Counts every change of holder.
+    epoch: u64,
+    /// The node the drive is being handed to right now; nobody serves it
+    /// until the handover ends.
+    handover_to: Option<String>,
+    /// Both copies were written while apart. Replication between them is
+    /// stopped until an operator resolves it.
+    conflict: Option<ServedConflictSummary>,
+    /// Why the last automatic hand back did not finish.
+    failback_blocked: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ServedConflictSummary {
+    holder: String,
+    other: String,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -65,12 +97,28 @@ async fn list_drives(
                 name: name.clone(),
                 mode: drive.mode,
                 served_by: drive.served_by.clone(),
-                active_server: drive
-                    .served_by
-                    .iter()
-                    .find(|n| !cluster_state.unreachable.contains(*n))
-                    .cloned(),
+                active_server: cl_raft::served::choose_active_server(
+                    &drive.served_by,
+                    &cluster_state.unreachable,
+                    cluster_state.served.get(name),
+                )
+                .map(str::to_string),
                 sync_interval: humantime::format_duration(drive.sync_interval).to_string(),
+                failback: drive.failback,
+                served: cluster_state.served.get(name).map(|a| ServedSummary {
+                    holder: a.holder.clone(),
+                    epoch: a.epoch,
+                    handover_to: a.handover.as_ref().map(|h| h.to.clone()),
+                    conflict: a.conflict.as_ref().map(|c| ServedConflictSummary {
+                        holder: c.holder.clone(),
+                        other: c.other.clone(),
+                        reason: c.reason.clone(),
+                    }),
+                    failback_blocked: a
+                        .blocked
+                        .as_ref()
+                        .map(|b| format!("{}: {}", b.node, b.reason)),
+                }),
                 nodes: cluster_state
                     .nodes
                     .values()
@@ -145,6 +193,66 @@ async fn list_volumes(
             })
             .collect(),
     )
+}
+
+async fn submit_served(
+    state: &AppState,
+    drive: String,
+    op: cl_raft::served::ServedOp,
+) -> Result<StatusCode, ApiError> {
+    let response = state
+        .cluster
+        .submit(ClusterRequest::Served { drive, op })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
+    Ok(StatusCode::OK)
+}
+
+/// Asks the node holding a served drive to hand it back to its preferred
+/// server now, whatever the drive's `failback` is. The holder still checks
+/// that the preferred server's copy can safely take over, and copies over
+/// anything it is missing first.
+async fn request_failback(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(drive): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !state
+        .cluster_config
+        .read()
+        .await
+        .drives
+        .get(&drive)
+        .is_some_and(|d| d.is_served())
+    {
+        return Err(ApiError::NotFound(format!("no served drive {drive}")));
+    }
+    submit_served(&state, drive, cl_raft::served::ServedOp::RequestFailback).await
+}
+
+#[derive(Deserialize)]
+struct ResolveBody {
+    /// The node whose copy to keep. The other copy is overwritten by it.
+    keep: String,
+}
+
+/// Settles a served drive's diverged copies by keeping one. Copy anything
+/// worth saving off the other node first: its copy is replaced.
+async fn resolve_conflict(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(drive): Path<String>,
+    Json(body): Json<ResolveBody>,
+) -> Result<StatusCode, ApiError> {
+    submit_served(
+        &state,
+        drive,
+        cl_raft::served::ServedOp::Resolve { keep: body.keep },
+    )
+    .await
 }
 
 /// Triggering a sync outside the drive's own schedule is not a raft command:

@@ -24,6 +24,13 @@ describe('normalizeConfig', () => {
     expect(cfg.nodes.piosny.data_dir).toBe('/var/lib/clouduler/');
   });
 
+  it('passes the drive failback through and leaves it unset when omitted', () => {
+    expect(normalizeConfig(raw).drives['bulk-media'].failback).toBeUndefined();
+    const withFailback = JSON.parse(JSON.stringify(raw)) as ClusterConfig;
+    withFailback.drives['bulk-media'].failback = 'manual';
+    expect(normalizeConfig(withFailback).drives['bulk-media'].failback).toBe('manual');
+  });
+
   it('is stable, so a freshly loaded draft shows no staged changes', () => {
     const cfg = normalizeConfig(raw);
     expect(diffConfig(cfg, normalizeConfig(JSON.parse(JSON.stringify(cfg))))).toEqual([]);

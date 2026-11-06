@@ -33,6 +33,8 @@ const DERIVED: &[&str] = &[
     "volume.migration_failed",
     "volume.empty",
     "volume.replica_error",
+    "drive.served_conflict",
+    "drive.failback_blocked",
     "restore.failed",
     "backup.failed",
     "backup.overdue",
@@ -273,6 +275,26 @@ fn from_problem(b: &mut Builder, state: &ClusterState, p: Problem) {
                 "volume.sync_refused",
                 &p.subject,
                 format!("Sync of {} refused", p.subject),
+                p.detail.clone(),
+            );
+            o.links = vec![link("Open storage", "/storage".into())];
+            o
+        }
+        "served_conflict" => {
+            let mut o = base(
+                "drive.served_conflict",
+                &p.subject,
+                format!("Served drive {} has diverged copies", p.subject),
+                p.detail.clone(),
+            );
+            o.links = vec![link("Open storage", "/storage".into())];
+            o
+        }
+        "served_failback_blocked" => {
+            let mut o = base(
+                "drive.failback_blocked",
+                &p.subject,
+                format!("Served drive {} did not go back", p.subject),
                 p.detail.clone(),
             );
             o.links = vec![link("Open storage", "/storage".into())];

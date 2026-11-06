@@ -412,6 +412,24 @@ pub enum DriveMode {
     Served,
 }
 
+/// What a served drive does when the node it prefers comes back after a
+/// failover.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Failback {
+    /// Hand the drive back on its own once the preferred node has caught up.
+    #[default]
+    Auto,
+    /// Keep serving from the standby until an operator asks for the handover.
+    Manual,
+}
+
+impl Failback {
+    pub fn is_default(&self) -> bool {
+        *self == Failback::Auto
+    }
+}
+
 /// A cluster wide directory namespace. Nodes opt in by mapping it to a local path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -435,6 +453,12 @@ pub struct Drive {
     /// mountpoint instead, always pointed at whichever server is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_by: Vec<String>,
+
+    /// Whether a served drive goes back to a preferred node (earlier in
+    /// `served_by`) that returns after a failover. Either way the node only
+    /// takes the drive back after copying over what was written meanwhile.
+    #[serde(default, skip_serializing_if = "Failback::is_default")]
+    pub failback: Failback,
 }
 
 impl Drive {

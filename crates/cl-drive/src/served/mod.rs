@@ -10,6 +10,7 @@
 //! server changes, and detecting and repairing an unhealthy mount.
 
 pub mod exports;
+pub mod failback;
 pub mod mount;
 
 pub use exports::{check_available as exports_available, ensure_export, remove_export, NFS_PORT};

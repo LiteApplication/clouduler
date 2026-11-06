@@ -644,10 +644,11 @@ impl ClusterConfig {
                 }
             }
             if auth.cloudflare_proxy
-                && !auth
-                    .networks
-                    .iter()
-                    .any(|n| self.networks.get(n).is_some_and(|c| c.kind == NetworkKind::Public))
+                && !auth.networks.iter().any(|n| {
+                    self.networks
+                        .get(n)
+                        .is_some_and(|c| c.kind == NetworkKind::Public)
+                })
             {
                 return Err(ConfigError::invalid(
                     "proxy.auth.cloudflare_proxy",

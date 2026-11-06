@@ -455,13 +455,29 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
               disabled={disabled}
             />
           ) : (
-            <ServedByField
-              id={`drive-${name}-servedby`}
-              servedBy={drive.served_by}
-              nodeNames={Object.keys(draft.nodes)}
-              onChange={(served_by) => update(name, { served_by })}
-              disabled={disabled}
-            />
+            <>
+              <ServedByField
+                id={`drive-${name}-servedby`}
+                servedBy={drive.served_by}
+                nodeNames={Object.keys(draft.nodes)}
+                onChange={(served_by) => update(name, { served_by })}
+                disabled={disabled}
+              />
+              <SelectField
+                id={`drive-${name}-failback`}
+                label="Fail back"
+                value={drive.failback ?? 'auto'}
+                onChange={(failback) => update(name, { failback: failback === 'manual' ? 'manual' : undefined })}
+                options={[
+                  { value: 'auto', label: 'Auto' },
+                  { value: 'manual', label: 'Manual' },
+                ]}
+                hint="Return to the preferred node."
+                help="Auto hands the drive back to the first node in Served by once it is back and has caught up. Manual keeps serving from the standby until you ask."
+                configKey={`drives.${name}.failback`}
+                disabled={disabled}
+              />
+            </>
           )}
         </div>
       ))}

@@ -87,6 +87,8 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `volume.sync_refused` | Storage | Critical | A sync was refused because it would wipe data. |
 | `volume.migration_failed` | Storage | Critical | A volume migration failed. |
 | `volume.empty` | Storage | Critical | A volume that should hold data is empty. |
+| `drive.served_conflict` | Storage | Critical | A served drive's two copies were both written while apart. Replication between them is stopped until you choose one. |
+| `drive.failback_blocked` | Storage | Warning | A served drive could not go back to its preferred server, so the standby keeps serving. |
 | `volume.replica_error` | Storage | Warning | A replica has an error or is behind its primary for at least 30 min. Replicas on draining nodes are ignored. |
 | `volume.migration_completed` | Storage | Info | A volume migration completed. |
 | `restore.failed` | Backups | Critical | A restore failed. Stays open for 3 days. |

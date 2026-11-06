@@ -289,7 +289,8 @@ Network names are referenced by nodes, `web.network`, `proxy.auth.networks` and 
   {"key": "drives", "type": "map", "default": "{}", "reload": "live", "description": "Cluster-wide directory namespaces. Volumes live inside a drive."},
   {"key": "drives.<name>.sync_interval", "type": "duration", "default": "15m", "reload": "live", "description": "How often each copy syncs (replicated) or the active server pushes to standbys (served).", "quirks": "0s passes validation. What the sync loop does with it is not verified."},
   {"key": "drives.<name>.mode", "type": "enum", "default": "replicated", "reload": "live", "description": "replicated: every node that implements the drive keeps a copy. served: one active copy on one node, mounted elsewhere over the internal network."},
-  {"key": "drives.<name>.served_by", "type": "list of node names", "default": "[]", "reload": "live", "description": "Candidate order for the active server of a served drive. The first reachable node serves.", "quirks": "Only valid with mode: served. Each name must exist, be listed once and map the drive."},
+  {"key": "drives.<name>.failback", "type": "enum", "default": "auto", "reload": "live", "description": "auto or manual. Whether a served drive goes back to a candidate earlier in served_by after it returns from a failover. It only goes once that node has caught up from the active server.", "quirks": "manual waits for Fail back now on the drive page. See Served drives."},
+  {"key": "drives.<name>.served_by", "type": "list of node names", "default": "[]", "reload": "live", "description": "Candidate order for the active server of a served drive. The first reachable node serves until a failover; then the node holding the data keeps serving until a handover.", "quirks": "Only valid with mode: served. Each name must exist, be listed once and map the drive."},
 ]} />
 
 ### nodes

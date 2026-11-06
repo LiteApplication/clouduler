@@ -236,6 +236,7 @@ pub fn drive_definition(mode: DriveMode, server: &str) -> Drive {
             DriveMode::Served => vec![server.to_string()],
             DriveMode::Replicated => Vec::new(),
         },
+        failback: Default::default(),
     }
 }
 

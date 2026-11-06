@@ -1146,12 +1146,32 @@ mod tests {
                 "services:\n  web:\n    image: x\n    devices: {devices}\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - {reservation}\n"
             )
         };
-        StackFile::parse(&spec("[\"/dev/dri:/dev/dri\"]", "{capabilities: [gpu], count: 1}")).unwrap();
+        StackFile::parse(&spec(
+            "[\"/dev/dri:/dev/dri\"]",
+            "{capabilities: [gpu], count: 1}",
+        ))
+        .unwrap();
         for (devices, reservation, at) in [
-            ("[\"/etc/passwd\"]", "{capabilities: [gpu]}", "services.web.devices[0]"),
-            ("[\"/dev/../etc\"]", "{capabilities: [gpu]}", "services.web.devices[0]"),
-            ("[]", "{driver: amd, capabilities: [gpu]}", "reservations.devices[0]"),
-            ("[]", "{count: 1, device_ids: ['0'], capabilities: [gpu]}", "reservations.devices[0]"),
+            (
+                "[\"/etc/passwd\"]",
+                "{capabilities: [gpu]}",
+                "services.web.devices[0]",
+            ),
+            (
+                "[\"/dev/../etc\"]",
+                "{capabilities: [gpu]}",
+                "services.web.devices[0]",
+            ),
+            (
+                "[]",
+                "{driver: amd, capabilities: [gpu]}",
+                "reservations.devices[0]",
+            ),
+            (
+                "[]",
+                "{count: 1, device_ids: ['0'], capabilities: [gpu]}",
+                "reservations.devices[0]",
+            ),
             ("[]", "{count: 1}", "reservations.devices[0]"),
         ] {
             let err = StackFile::parse(&spec(devices, reservation)).unwrap_err();

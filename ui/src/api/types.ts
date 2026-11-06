@@ -492,6 +492,9 @@ export interface ClusterState {
   /** Reverse proxy login sessions and one-time tokens; the ui never needs them. */
   proxy_sessions?: Record<string, unknown>;
   proxy_tokens?: Record<string, unknown>;
+  /** Served-drive authority (holder, handover, conflict) for drives that have
+   *  failed over; the drive list carries the same facts, the ui does not read this. */
+  served?: Record<string, ServedAuthority>;
   version: number;
 }
 
@@ -708,6 +711,32 @@ export interface DriveNodeStatus {
   reachable: boolean;
 }
 
+export interface ServedConflict {
+  holder: string;
+  other: string;
+  reason: string;
+}
+
+export interface ServedStatus {
+  holder: string;
+  epoch: number;
+  handover_to: string | null;
+  conflict: ServedConflict | null;
+  failback_blocked: string | null;
+}
+
+export interface ServedAuthority {
+  holder: string;
+  epoch: number;
+  handover: { to: string; at: number } | null;
+  conflict: (ServedConflict & { at: number }) | null;
+  blocked: { node: string; reason: string; at: number } | null;
+  failback_requested: boolean;
+  overwrite: string | null;
+}
+
+export type DriveFailback = 'auto' | 'manual';
+
 export interface DriveStatus {
   name: string;
   mode: DriveMode;
@@ -718,6 +747,11 @@ export interface DriveStatus {
    *  candidate is unreachable. */
   active_server: string | null;
   sync_interval: string;
+  /** Whether a served drive goes back to a preferred node that returns. */
+  failback: DriveFailback;
+  /** Authority state once a served drive has failed over; `null` for a
+   *  replicated drive or one that never failed over. */
+  served: ServedStatus | null;
   /** Nodes that implement this drive. */
   nodes: DriveNodeStatus[];
 }
@@ -834,6 +868,8 @@ export interface DriveConfig {
   mode: DriveModeConfig;
   /** Candidate serving nodes for a served drive, in priority order. */
   served_by: string[];
+  /** Served drives only; omitted when `auto` (the default). */
+  failback?: DriveFailback;
 }
 
 export type NodeRoleConfig = 'manager' | 'worker';

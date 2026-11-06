@@ -350,6 +350,7 @@ export class ScenarioBuilder {
       image_checks: {},
       image_checks_at: 0,
       sessions: {},
+      served: {},
       proxy_sessions: {},
       proxy_tokens: {},
       version: 100,

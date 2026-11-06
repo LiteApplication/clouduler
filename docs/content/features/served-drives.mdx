@@ -19,12 +19,46 @@ flowchart LR
 ```
 
 1. You list candidate servers in `served_by`, in priority order. Every candidate exports the drive over NFSv4 with the kernel NFS server (`exportfs`), restricted to the internal subnet, read-write with `no_root_squash` (root on a mounting node is root on the exported copy), port 2049.
-2. The **active server** is the first candidate in the list that is reachable. Only that node's copy is live. The other candidates keep a standby copy, synced from the active server on the drive's `sync_interval`.
+2. The **active server** is the node holding the drive's current data. Until a failover has happened that is the first candidate in the list that is reachable. After one, the cluster records which node holds the data and that node stays the active server, even when a candidate earlier in the list comes back (see [When the original server comes back](#when-the-original-server-comes-back)). Only the active server's copy is live. The other candidates keep a standby copy, synced from the active server on the drive's `sync_interval`.
 3. Nodes that are not candidates mount the active server at `<data_dir>/volume-mounts/<drive>/<volume>` (NFS 4.2 over TCP, soft mount, no file locking). Containers see the volume at the path you mounted.
 4. Every 10 seconds each node checks who the active server is. If it changes, the node unmounts and remounts against the new one. Each mount is health-checked every 30 seconds with a 3 second timeout.
-5. If the active server becomes unreachable, the next candidate in `served_by` takes over automatically. The standby copy it holds is only as fresh as the last sync.
+5. If the active server becomes unreachable, the first reachable candidate in `served_by` takes over automatically and records itself as the holder. The standby copy it holds is only as fresh as the last sync.
 
 Moving a served volume between nodes on purpose (a manual move or a rebalance) goes through a migration with these phases: stopping, syncing, verifying (both ends are hashed), switching, starting.
+
+## When the original server comes back
+
+A standby that took over is written to while it serves, so its copy is newer than the one on the server that went away. Handing the drive straight back to the first node in `served_by` would serve, and then sync out, the old data. It does not work that way: the node holding the data stays the active server until a handover moves it.
+
+Every candidate remembers a fingerprint of its copy of each volume (paths, sizes, modification times, modes, owners, directories) as of the last time it pushed to or received from its peer, in `<data_dir>/served-sync` on that node. A copy whose files no longer match that fingerprint has been written since. Any change counts, including a touch. Before the active server pushes to a candidate, and before any handover, it asks that candidate for its fingerprint and decides per volume:
+
+| The returning node's copy | The active server's copy | What happens |
+|---|---|---|
+| Unchanged since they last agreed | Anything | The active server copies its data over it. |
+| Written | Unchanged | The returning node is ahead. Nothing is pushed to it, and it can take the drive back without a copy. |
+| Written | Written | Conflict. Nothing is copied either way. |
+| Holds files but has no recorded history | Anything | Conflict, because nothing says which copy is newer. A drive that has never failed over is exempt, so the first sync after an upgrade is not flagged. |
+
+If no volume is in conflict and `failback` allows it (below), the active server hands the drive back in these steps:
+
+1. It records that a handover to the returning node has begun. From this moment nobody is the active server of the drive. Nodes that mount it drop their mount.
+2. It stops exporting the drive over NFS, which cuts off any client still attached, and waits 10 seconds.
+3. It copies every volume the returning node is missing or has stale (a final sync), then updates its record of what each side holds.
+4. It records the handover as complete. The returning node is now the active server, and the old one exports the drive again as a standby. The new active server syncs back to it from then on.
+
+If anything in steps 2 and 3 fails (the returning node stops answering, a copy errors), the handover is cancelled and the node that was serving serves again. The reason is stored on the drive: the drive page shows it, the problem list shows `served_failback_blocked`, and the alert `drive.failback_blocked` fires. The same node does not try the drive again for a minute, and no automatic handover is attempted for an hour; **Fail back now** on the drive page (or `POST /api/drives/{drive}/failback`) skips the hour's wait.
+
+Set `failback: manual` on the drive to never hand the drive back on its own. The standby then keeps serving until you press **Fail back now**. The drive still goes to the next candidate by itself if the active server drops out, and the check and copy above still apply to a manual handover. `auto` is the default because the handover only happens after the returning node has caught up.
+
+### Both copies were written
+
+This happens when the original server kept taking writes while it was cut off (clients on its own node, say) and the standby was written too, or when it was written after its last sync and then crashed. The cluster does not pick one. It records a conflict on the drive:
+
+- Nothing is copied in either direction, so both copies stay exactly as they are.
+- The node that was serving keeps serving. Nothing is handed back.
+- The drive page shows a banner (and the problem list shows `served_conflict`, and the alert `drive.served_conflict` fires) naming the two nodes and the volume where the copies differ.
+
+Choose a copy to keep with **Keep NODE** on that banner, or `POST /api/drives/{drive}/resolve` with `{"keep": "NODE"}`. The kept node becomes the active server and its copy replaces the other one on the next sync, once. The other copy is overwritten, so copy anything you want from it first: its files are not kept anywhere else.
 
 ## Requirements
 
@@ -81,8 +115,9 @@ Mount it exactly like a replicated drive: `media/library:/data` in a stack. The 
 
 <OptionTable rows={[
   {key: 'drives.<name>.mode', type: 'replicated | served', default: 'replicated', reload: 'live', description: 'Set to served for an NFS-exported drive.', quirks: 'Changing mode rebuilds only that drive.'},
-  {key: 'drives.<name>.served_by', type: 'list of node names', default: '[]', reload: 'live', description: 'Candidate servers in priority order. The first reachable one is the active server.', quirks: 'Each node must map the drive. Empty is accepted by validation.'},
+  {key: 'drives.<name>.served_by', type: 'list of node names', default: '[]', reload: 'live', description: 'Candidate servers in priority order. The first reachable one serves until a failover; after that the node holding the data keeps serving until a handover.', quirks: 'Each node must map the drive. Empty is accepted by validation.'},
   {key: 'drives.<name>.sync_interval', type: 'duration', default: '15m', reload: 'live', description: 'How often the active server pushes to standby candidates.'},
+  {key: 'drives.<name>.failback', type: 'auto | manual', default: 'auto', reload: 'live', description: 'Whether the drive goes back to a candidate earlier in served_by after it returns from a failover. Either way it only goes once that node has caught up.', quirks: 'Manual waits for Fail back now. Has no effect on a replicated drive.'},
   {key: 'nodes.<name>.drives.<drive>', type: 'absolute path', reload: 'live', description: 'Folder holding the copy. Required on candidates; not needed on nodes that only mount.'},
 ]} />
 
@@ -93,11 +128,12 @@ Mount it exactly like a replicated drive: `media/library:/data` in a stack. The 
 </Quirk>
 
 <Quirk title="Failover has no fresh copy to fall back on" severity="danger">
-There is no replica set. The standby candidate only holds data as of the last sync. If the active server dies, the next candidate serves its standby copy, and anything written since is lost. Keep [backups](/docs/features/backups) of served drives too.
+There is no replica set. The standby candidate only holds data as of the last sync. If the active server dies, the next candidate serves its standby copy, and anything written to the dead server since the last sync is not on it. If the dead server comes back with those writes, they are kept and reported as a conflict if the standby was written too. Keep [backups](/docs/features/backups) of served drives too.
 </Quirk>
 
-<Quirk title="The old server coming back">
-When the original active server returns, it becomes the active server again because it is first in `served_by`. {/* TODO verify: needs a live cluster; whether the reclaim path can overwrite data written on the standby while it was serving is untested. */} Avoid writing to the standby for long periods without checking `served_by` order.
+<Quirk title="The old server coming back" severity="info">
+It does not take the drive back by returning. The standby keeps serving until a handover that first copies over what was written there (see [above](#when-the-original-server-comes-back)). While the handover runs, clients of the drive are cut off for the length of the final sync plus about 10 seconds.
+{/* TODO verify: needs a live cluster; how the kernel NFS clients and the containers on other nodes behave while the export is stopped and the drive has no active server (the logic and the copies are covered by tests, the NFS and container side is not). */}
 </Quirk>
 
 <Quirk title="Missing root or nfsv4" severity="info">

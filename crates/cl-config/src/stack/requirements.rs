@@ -250,7 +250,10 @@ services:
                 device_ids: vec![]
             }]
         );
-        assert_eq!(per["ml"].host_devices, vec!["/dev/dri", "/dev/dri/renderD128"]);
+        assert_eq!(
+            per["ml"].host_devices,
+            vec!["/dev/dri", "/dev/dri/renderD128"]
+        );
         assert!(per["plain"].gpu_requests.is_empty() && per["plain"].host_devices.is_empty());
     }
 

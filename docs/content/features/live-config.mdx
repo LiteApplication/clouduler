@@ -33,7 +33,7 @@ graph LR
 |---|---|---|
 | `cluster.name` | Live | Display and alerts. Raft keeps the name it saw at boot. |
 | `networks.*` (type, subnet, domain, publish_dns) | Live | Re-derived on the leader's next pass. Use the rename button to rename. |
-| `drives.*` (mode, served_by, sync_interval) | Live | Only the changed drive is rebuilt. `sync_interval` is read on every pass. |
+| `drives.*` (mode, served_by, sync_interval, failback) | Live | Only the changed drive is rebuilt. `sync_interval` is read on every pass. |
 | `nodes.<n>.network`, `drives`, `labels`, `last_resort`, `role` | Live | Reaches the scheduler within one `probe_interval`. |
 | `nodes.<n>.rpc_port` | **Restart** | Peers learn the new port live, but the node keeps listening on the old one. |
 | `nodes.<n>.data_dir`, `data_dir` | **Restart** | Clouduler does not move your data. |

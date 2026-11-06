@@ -135,6 +135,40 @@ impl Manifest {
         self.files.is_empty()
     }
 
+    /// A fingerprint of everything `diff` compares, so two no-hash manifests
+    /// have the same digest exactly when diffing them finds nothing to do.
+    /// Used to tell whether a copy has been written since it last agreed
+    /// with its peer.
+    pub fn digest(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        let mut put = |bytes: &[u8]| {
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        };
+        for (path, meta) in &self.files {
+            put(path.as_bytes());
+            put(&meta.uid.to_le_bytes());
+            put(&meta.gid.to_le_bytes());
+            if meta.is_symlink {
+                put(b"l");
+                put(meta.link_target.as_deref().unwrap_or("").as_bytes());
+            } else {
+                put(b"f");
+                put(&meta.size.to_le_bytes());
+                put(&meta.mtime_nanos.to_le_bytes());
+                put(&meta.mode.to_le_bytes());
+            }
+        }
+        put(b"dirs");
+        for (path, meta) in &self.dirs {
+            put(path.as_bytes());
+            put(&meta.mode.to_le_bytes());
+            put(&meta.uid.to_le_bytes());
+            put(&meta.gid.to_le_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// What's needed to bring `other` up to `self`.
     pub fn diff(&self, other: &Manifest) -> Diff {
         let mut diff = Diff::default();
@@ -527,6 +561,30 @@ mod tests {
         assert_eq!(diff.changed_dirs, vec!["sub".to_string()]);
         assert!(diff.added_dirs.is_empty());
         assert!(diff.removed_dirs.is_empty());
+    }
+
+    #[test]
+    fn digest_changes_exactly_when_a_diff_would_find_something() {
+        let mut a = Manifest::default();
+        a.files.insert("f".into(), meta(10, 100));
+        let same = a.clone();
+        assert_eq!(a.digest(), same.digest());
+
+        let mut resized = a.clone();
+        resized.files.insert("f".into(), meta(11, 100));
+        assert_ne!(a.digest(), resized.digest());
+
+        let mut touched = a.clone();
+        touched.files.insert("f".into(), meta(10, 101));
+        assert_ne!(a.digest(), touched.digest());
+
+        let mut added = a.clone();
+        added.files.insert("g".into(), meta(1, 1));
+        assert_ne!(a.digest(), added.digest());
+
+        let mut with_dir = a.clone();
+        with_dir.dirs.insert("d".into(), DirMeta::default());
+        assert_ne!(a.digest(), with_dir.digest());
     }
 
     #[test]

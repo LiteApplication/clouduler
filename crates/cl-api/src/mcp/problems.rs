@@ -263,6 +263,29 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
             format!("node {node} is unreachable"),
         );
     }
+    for (drive, served) in &state.served {
+        if let Some(conflict) = &served.conflict {
+            add(
+                "served_conflict",
+                drive.clone(),
+                format!(
+                    "{} and {} both changed their copy since they last agreed ({}). Nothing is \
+                     synced between them and {} keeps serving; choose the copy to keep",
+                    conflict.holder, conflict.other, conflict.reason, conflict.holder
+                ),
+            );
+        }
+        if let Some(block) = &served.blocked {
+            add(
+                "served_failback_blocked",
+                drive.clone(),
+                format!(
+                    "handing the drive back to {} failed, so {} keeps serving: {}",
+                    block.node, served.holder, block.reason
+                ),
+            );
+        }
+    }
     for (id, volume) in &state.volumes {
         if let Some(refusal) = &volume.sync_refused {
             add(

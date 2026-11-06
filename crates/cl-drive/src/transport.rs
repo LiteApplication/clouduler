@@ -210,6 +210,61 @@ pub enum Message {
         uid: u32,
         gid: u32,
     },
+    /// Asks a peer whether its copy of a served volume was written since it
+    /// last agreed with its source. Answered with `SyncStateReport` and the
+    /// connection closed.
+    SyncStateRequest {
+        volume: VolumeId,
+    },
+    SyncStateReport(CopyState),
+}
+
+/// What a node knows about its own copy of a served volume: the digest of
+/// its tree now, and of the tree it held when it last pushed or received a
+/// sync. See `DriveRegistry::record_synced`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CopyState {
+    pub current: String,
+    pub recorded: Option<String>,
+    /// The copy holds no files, so there is nothing to lose by overwriting it.
+    pub empty: bool,
+}
+
+/// This node's `CopyState` for a volume.
+pub async fn local_copy_state(registry: &DriveRegistry, volume: &VolumeId) -> Result<CopyState> {
+    let root = registry.ensure_volume(volume)?;
+    let manifest = scan::scan_off_runtime(root, false).await?;
+    Ok(CopyState {
+        current: manifest.digest(),
+        recorded: registry.recorded_sync(volume),
+        empty: manifest.is_empty(),
+    })
+}
+
+/// Ask a peer for its `CopyState` of a volume.
+pub async fn request_copy_state(
+    peer: SocketAddr,
+    volume: &VolumeId,
+    keys: &KeyWatch,
+) -> Result<CopyState> {
+    let mut conn = connect_authenticated(peer, keys).await?;
+    send(
+        &mut conn,
+        &Message::SyncStateRequest {
+            volume: volume.clone(),
+        },
+    )
+    .await
+    .map_err(io_err)?;
+    match recv(&mut conn).await.map_err(io_err)? {
+        Some(Message::SyncStateReport(state)) => Ok(state),
+        Some(other) => Err(DriveError::Transfer {
+            message: format!("expected a sync state report, got {other:?}"),
+        }),
+        None => Err(DriveError::Transfer {
+            message: "peer closed before reporting its sync state".into(),
+        }),
+    }
 }
 
 pub type Connection = Framed<TcpStream, LengthDelimitedCodec>;
@@ -438,6 +493,13 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 let root = registry.ensure_volume(&volume)?;
                 let manifest = scan::scan_off_runtime(root, hash_content).await?;
                 send(&mut conn, &Message::Ready(manifest))
+                    .await
+                    .map_err(io_err)?;
+                return Ok(());
+            }
+            Some(Message::SyncStateRequest { volume }) => {
+                let state = local_copy_state(registry, &volume).await?;
+                send(&mut conn, &Message::SyncStateReport(state))
                     .await
                     .map_err(io_err)?;
                 return Ok(());
@@ -755,6 +817,12 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
                 }
             }
             Some(Message::Done) => {
+                // A served volume's copy now matches its source: remember
+                // that tree, so a later write to this copy is noticed.
+                if staging.is_none() && registry.is_served(&volume.drive) {
+                    let applied = scan::scan_off_runtime(root.clone(), false).await?;
+                    registry.record_synced(&volume, &applied.digest());
+                }
                 send(&mut conn, &Message::Ack(generation))
                     .await
                     .map_err(io_err)?;
@@ -1095,6 +1163,14 @@ mod tests {
             uid: 1000,
             gid: 1000,
         });
+        msg_round_trip(Message::SyncStateRequest {
+            volume: VolumeId::new("fast", "data"),
+        });
+        msg_round_trip(Message::SyncStateReport(CopyState {
+            current: "a".into(),
+            recorded: Some("b".into()),
+            empty: false,
+        }));
     }
 
     #[test]

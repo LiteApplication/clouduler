@@ -11,7 +11,7 @@ mod validate;
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{
     qualify, AuthConfig, CloudflareConfig, ClusterConfig, ClusterMeta, DnsPublishMode, Drive,
-    DriveMode, EgressFallback, FailoverConfig, GitBackupConfig, ImageUpdatesConfig,
+    DriveMode, EgressFallback, Failback, FailoverConfig, GitBackupConfig, ImageUpdatesConfig,
     InterfaceAddress, McpConfig, Network, NetworkKind, Node, NodeAddress, NodeRole, OidcConfig,
     OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig, PublicAddress, SecretsConfig,
     SelfUpdateConfig, WebConfig, DEFAULT_RPC_PORT, DEFAULT_STOP_GRACE, DEFAULT_WEB_BACKEND_PORT,
@@ -24,12 +24,13 @@ pub use netalloc::{
 };
 pub use stack::{
     mute_matches, validate_stack_name, AlertSeverity, AllowedHost, AllowedPorts, AllowedTarget,
-    Authenticated, GpuRequirement, DeviceCount, DeviceMapping, DeviceRequest, NVIDIA_DRIVER, Reservations, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, BoundPort, ByteSize, Command,
-    CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket, DockerSocketMode,
-    ExposePort, Headers, Healthcheck, HealthcheckTest, LogRule, LogStream, Middleware, ObjectRef,
-    Placement, PortMapping, PortRange, Protocol, ProxyRoute, PublishMode, RedirectRegex,
-    ResourceSpec, Resources, RestartPolicy, Service, ServiceAction, ServiceExtensions, StackAlerts,
-    StackConfig, StackDefaults, StackFile, StackNetwork, StackRequirements, StackSecret,
-    StackVolume, TmpfsOptions, UpdateConfig, VolumeMount, VolumeSyncOverride,
-    DEFAULT_SYNC_INTERVAL, MAX_REPLICAS, MIN_VOLUME_SYNC_INTERVAL, SECRET_DIR,
+    Authenticated, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, BoundPort, ByteSize, Command,
+    CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DeviceCount, DeviceMapping, DeviceRequest,
+    DockerSocket, DockerSocketMode, ExposePort, GpuRequirement, Headers, Healthcheck,
+    HealthcheckTest, LogRule, LogStream, Middleware, ObjectRef, Placement, PortMapping, PortRange,
+    Protocol, ProxyRoute, PublishMode, RedirectRegex, Reservations, ResourceSpec, Resources,
+    RestartPolicy, Service, ServiceAction, ServiceExtensions, StackAlerts, StackConfig,
+    StackDefaults, StackFile, StackNetwork, StackRequirements, StackSecret, StackVolume,
+    TmpfsOptions, UpdateConfig, VolumeMount, VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
+    MAX_REPLICAS, MIN_VOLUME_SYNC_INTERVAL, NVIDIA_DRIVER, SECRET_DIR,
 };

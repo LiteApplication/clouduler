@@ -289,6 +289,35 @@
     },
     {
       "category": "storage",
+      "effective_severity": "critical",
+      "key": "drive.served_conflict",
+      "note": "",
+      "override": null,
+      "routes": [
+        "in-app",
+        "main"
+      ],
+      "severity": "critical",
+      "stack_scoped": true,
+      "stateful": true,
+      "title": "A served drive's two copies were both written and need resolving"
+    },
+    {
+      "category": "storage",
+      "effective_severity": "warning",
+      "key": "drive.failback_blocked",
+      "note": "",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "warning",
+      "stack_scoped": true,
+      "stateful": true,
+      "title": "A served drive could not go back to its preferred server"
+    },
+    {
+      "category": "storage",
       "effective_severity": "info",
       "key": "volume.migration_completed",
       "note": "",
@@ -766,6 +795,7 @@
   "drives": [
     {
       "active_server": "n0",
+      "failback": "auto",
       "mode": "served",
       "name": "fast",
       "nodes": [
@@ -778,6 +808,7 @@
           "reachable": true
         }
       ],
+      "served": null,
       "served_by": [
         "n0"
       ],
@@ -1203,6 +1234,7 @@
         "sealed": ""
       }
     },
+    "served": {},
     "sessions": {},
     "stacks": {
       "web": {

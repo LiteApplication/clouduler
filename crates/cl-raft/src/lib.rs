@@ -15,6 +15,7 @@ pub mod node;
 pub mod quorum;
 pub mod rpc;
 pub mod server;
+pub mod served;
 pub mod state;
 pub mod store;
 pub mod types;

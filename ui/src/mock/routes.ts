@@ -177,7 +177,7 @@ function driveRows(db: MockDb): DriveStatus[] {
     const servedBy = d.served_by ?? [];
     const active =
       d.mode === 'served' ? (servedBy.find((s) => !db.state.unreachable.includes(s)) ?? null) : null;
-    return { name, mode: d.mode, served_by: servedBy, active_server: active, sync_interval: d.sync_interval, nodes };
+    return { name, mode: d.mode, served_by: servedBy, active_server: active, sync_interval: d.sync_interval, failback: d.failback ?? 'auto', served: null, nodes };
   });
 }
 
@@ -868,6 +868,8 @@ export function buildHttpRoutes(): HttpRoute[] {
       need(db.state.volumes[`${params.drive}/${params.volume}`], 'volume').frozen = null;
       commit(db);
     }),
+    route('POST', '/api/drives/:drive/failback', () => {}),
+    route('POST', '/api/drives/:drive/resolve', () => {}),
     route('DELETE', '/api/volumes/:drive/:volume', ({ db, params }) => {
       need(db.state.volumes[`${params.drive}/${params.volume}`], 'volume');
       delete db.state.volumes[`${params.drive}/${params.volume}`];

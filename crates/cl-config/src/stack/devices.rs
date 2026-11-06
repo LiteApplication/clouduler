@@ -175,14 +175,10 @@ impl DeviceMapping {
         };
         let components_ok = |p: &str| !p.split('/').any(|c| c == ".." || c == ".");
         if !host.starts_with("/dev/") || host.len() <= "/dev/".len() || !components_ok(host) {
-            return Err(format!(
-                "host device \"{host}\" must be a path under /dev/"
-            ));
+            return Err(format!("host device \"{host}\" must be a path under /dev/"));
         }
         if !container.starts_with('/') || !components_ok(container) {
-            return Err(format!(
-                "container path \"{container}\" must be absolute"
-            ));
+            return Err(format!("container path \"{container}\" must be absolute"));
         }
         if !is_permissions(permissions) {
             return Err(format!(
@@ -201,9 +197,7 @@ fn is_permissions(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 3
         && s.chars().all(|c| matches!(c, 'r' | 'w' | 'm'))
-        && s.chars()
-            .enumerate()
-            .all(|(i, c)| !s[..i].contains(c))
+        && s.chars().enumerate().all(|(i, c)| !s[..i].contains(c))
 }
 
 #[cfg(test)]
@@ -256,8 +250,12 @@ mod tests {
 
     #[test]
     fn validation_refuses_other_drivers_and_count_with_ids() {
-        assert!(request("capabilities: [gpu]\ndriver: nvidia").validate().is_ok());
-        assert!(request("capabilities: [gpu]\ndriver: amd").validate().is_err());
+        assert!(request("capabilities: [gpu]\ndriver: nvidia")
+            .validate()
+            .is_ok());
+        assert!(request("capabilities: [gpu]\ndriver: amd")
+            .validate()
+            .is_err());
         assert!(request("capabilities: [gpu]\ncount: 1\ndevice_ids: ['0']")
             .validate()
             .is_err());
@@ -268,7 +266,11 @@ mod tests {
     fn a_device_entry_parses_with_defaults() {
         let d = DeviceMapping::parse("/dev/dri").unwrap();
         assert_eq!(
-            (d.host.as_str(), d.container.as_str(), d.permissions.as_str()),
+            (
+                d.host.as_str(),
+                d.container.as_str(),
+                d.permissions.as_str()
+            ),
             ("/dev/dri", "/dev/dri", "rwm")
         );
         let d = DeviceMapping::parse("/dev/dri/renderD128:/dev/dri/card0").unwrap();
@@ -276,7 +278,10 @@ mod tests {
         let d = DeviceMapping::parse("/dev/video0:/dev/video0:rw").unwrap();
         assert_eq!(d.permissions, "rw");
         let d = DeviceMapping::parse("/dev/video0:rw").unwrap();
-        assert_eq!((d.container.as_str(), d.permissions.as_str()), ("/dev/video0", "rw"));
+        assert_eq!(
+            (d.container.as_str(), d.permissions.as_str()),
+            ("/dev/video0", "rw")
+        );
     }
 
     #[test]

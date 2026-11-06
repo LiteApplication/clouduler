@@ -196,8 +196,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 }
                 let is_served = self.registry.is_served(&id.drive);
                 let is_source = if is_served {
-                    self.registry.active_server(&id.drive, &state.unreachable)
-                        == Some(self.registry.node())
+                    self.registry.active_server(&id.drive, &state) == Some(self.registry.node())
                 } else {
                     volume.primary == self.registry.node()
                 };
@@ -248,7 +247,16 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 };
 
                 self.check_empty(id, volume.looks_empty).await;
-                self.run_one(id.clone(), volume.generation, targets).await;
+                let authority = is_served
+                    .then(|| state.served.get(&id.drive).cloned())
+                    .flatten();
+                self.run_one(
+                    id.clone(),
+                    volume.generation,
+                    targets,
+                    is_served.then_some(authority),
+                )
+                .await;
             }
         }
     }
@@ -373,6 +381,26 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
+    /// Stops a served drive's replication between two copies that were both
+    /// written, and records the conflict for an operator.
+    async fn record_served_conflict(&self, id: &VolumeId, other: &str, reason: String) {
+        warn!(%id, %other, %reason, "served drive copies diverged, keeping both");
+        let _ = self
+            .node
+            .submit(Request::Served {
+                drive: id.drive.clone(),
+                op: cl_raft::served::ServedOp::Conflict {
+                    holder: self.registry.node().to_string(),
+                    other: other.to_string(),
+                    reason: format!("{id}: {reason}"),
+                    at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs() as i64),
+                },
+            })
+            .await;
+    }
+
     async fn clear_refusal(&self, id: &VolumeId) {
         let recorded = self
             .node
@@ -392,7 +420,16 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
         }
     }
 
-    async fn run_one(&self, id: VolumeId, generation: u64, targets: Vec<ReplicaTarget>) {
+    /// `served` is `Some` for a served drive's volume, carrying the drive's
+    /// recorded authority: every target is then asked whether its copy was
+    /// written since it last agreed, and one that was is never pushed over.
+    async fn run_one(
+        &self,
+        id: VolumeId,
+        generation: u64,
+        targets: Vec<ReplicaTarget>,
+        served: Option<Option<cl_raft::served::ServedAuthority>>,
+    ) {
         let src = match self.registry.volume_path(&id) {
             Ok(path) => path,
             Err(e) => {
@@ -426,6 +463,46 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             let drive_addr = crate::transport::drive_port(target.addr.port());
             let peer = std::net::SocketAddr::new(target.addr.ip(), drive_addr);
 
+            let mut synced_digest = None;
+            if let Some(authority) = &served {
+                if authority
+                    .as_ref()
+                    .and_then(|a| a.conflict.as_ref())
+                    .is_some_and(|c| c.other == target.node || c.holder == target.node)
+                {
+                    debug!(%id, node = %target.node, "unresolved conflict, not syncing to this node");
+                    continue;
+                }
+                let plan = crate::served::failback::plan_push(
+                    self.engine.as_ref(),
+                    &self.registry,
+                    &id,
+                    peer,
+                    &target.node,
+                    authority.as_ref(),
+                )
+                .await;
+                match plan {
+                    Err(e) => {
+                        warn!(%id, node = %target.node, error = %e, "could not check the standby's copy, not syncing to it");
+                        continue;
+                    }
+                    Ok(plan) => match plan.direction {
+                        crate::served::failback::Direction::Push => {
+                            synced_digest = Some(plan.local.current);
+                        }
+                        crate::served::failback::Direction::TargetAhead => {
+                            debug!(%id, node = %target.node, "the standby holds newer data, not syncing to it");
+                            continue;
+                        }
+                        crate::served::failback::Direction::Conflict(reason) => {
+                            self.record_served_conflict(&id, &target.node, reason).await;
+                            continue;
+                        }
+                    },
+                }
+            }
+
             match self
                 .engine
                 .sync(
@@ -440,6 +517,22 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             {
                 Ok(stats) => {
                     debug!(%id, node = %target.node, ?stats, "volume synced");
+                    if let Some(digest) = &synced_digest {
+                        self.registry.record_synced(&id, digest);
+                        if served
+                            .as_ref()
+                            .and_then(|a| a.as_ref())
+                            .is_some_and(|a| a.overwrite.as_deref() == Some(target.node.as_str()))
+                        {
+                            let _ = self
+                                .node
+                                .submit(Request::Served {
+                                    drive: id.drive.clone(),
+                                    op: cl_raft::served::ServedOp::ClearOverwrite,
+                                })
+                                .await;
+                        }
+                    }
                     self.clear_refusal(&id).await;
                     if let Err(e) = self
                         .node

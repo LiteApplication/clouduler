@@ -401,6 +401,18 @@ async fn build(
             .map(|(name, _)| name.clone())
             .collect();
         if !served_drive_names.is_empty() {
+            let supervisor = cl_drive::served::failback::ServedSupervisor::new(
+                cluster.clone(),
+                registry.clone(),
+                Arc::new(DeltaEngine::new(keys.clone())),
+                Arc::new(DaemonServedHost {
+                    config_rx: config_rx.clone(),
+                    node: node_name.to_string(),
+                }),
+            );
+            running
+                .tasks
+                .push(tokio::spawn(async move { supervisor.run().await }));
             let watch_cluster = cluster.clone();
             let watch_registry = registry.clone();
             running.tasks.push(tokio::spawn(async move {
@@ -412,6 +424,55 @@ async fn build(
 
     start_volume_mounts(cfg, node, node_name, &mut running, cluster)?;
     Ok(running)
+}
+
+/// What `ServedSupervisor` needs from the daemon: the live config's fail-back
+/// mode, and control over this node's NFS export while a drive is handed over.
+struct DaemonServedHost {
+    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    node: String,
+}
+
+impl DaemonServedHost {
+    fn export_target(&self, drive: &str) -> Option<(PathBuf, String)> {
+        let cfg = self.config_rx.borrow().clone();
+        let root = cfg.node(&self.node)?.drives.get(drive)?.clone();
+        let subnet = cfg.internal_network().1.subnet?.to_string();
+        Some((root, subnet))
+    }
+}
+
+impl cl_drive::served::failback::ServedHost for DaemonServedHost {
+    fn failback(&self, drive: &str) -> cl_config::Failback {
+        self.config_rx
+            .borrow()
+            .drives
+            .get(drive)
+            .map(|d| d.failback)
+            .unwrap_or_default()
+    }
+
+    fn suspend_export(&self, drive: &str) {
+        if let Some((root, subnet)) = self.export_target(drive) {
+            match cl_drive::remove_export(&root, &subnet) {
+                Ok(()) => info!(%drive, "stopped exporting the drive for a handover"),
+                Err(e) => warn!(%drive, error = %e, "could not stop exporting the drive"),
+            }
+        }
+    }
+
+    fn resume_export(&self, drive: &str) {
+        if let Some((root, subnet)) = self.export_target(drive) {
+            if let Err(e) = cl_drive::ensure_export(drive, &root, &subnet) {
+                warn!(%drive, error = %e, "could not export the drive again after a handover");
+            }
+        }
+    }
+
+    fn peer_addr(&self, node: &str, state: &cl_raft::ClusterState) -> Option<SocketAddr> {
+        let addr = state.nodes.get(node)?.rpc_addr;
+        Some(SocketAddr::new(addr.ip(), drive_port(addr.port())))
+    }
 }
 
 /// Export every served drive this node is a `served_by` candidate for over
@@ -666,12 +727,11 @@ async fn watch_volume_mounts(
                 let Some(info) = served_drives.get(drive) else {
                     continue;
                 };
-                let Some(active) = info
-                    .served_by
-                    .iter()
-                    .map(String::as_str)
-                    .find(|n| !state.unreachable.contains(*n))
-                else {
+                let Some(active) = cl_raft::served::choose_active_server(
+                    &info.served_by,
+                    &state.unreachable,
+                    state.served.get(drive),
+                ) else {
                     // No reachable server for this drive right now; nothing
                     // useful to mount against.
                     continue;

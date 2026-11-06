@@ -224,7 +224,7 @@ impl Footprint {
             }
             let served_by = registry
                 .is_served(drive)
-                .then(|| registry.active_server(drive, &state.unreachable));
+                .then(|| registry.active_server(drive, state));
             let recorded: Vec<(&VolumeId, &str)> = state
                 .volumes
                 .iter()
@@ -558,7 +558,7 @@ fn authority_node(
 ) -> Result<String> {
     if registry.is_served(&volume.drive) {
         return registry
-            .active_server(&volume.drive, &state.unreachable)
+            .active_server(&volume.drive, state)
             .map(str::to_string)
             .ok_or_else(|| anyhow!("drive {} has no reachable active server", volume.drive));
     }

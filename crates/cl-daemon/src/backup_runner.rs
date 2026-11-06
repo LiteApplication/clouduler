@@ -804,7 +804,7 @@ fn is_local_source(registry: &DriveRegistry, state: &ClusterState, drive: &str) 
         return false;
     }
     if registry.is_served(drive) {
-        return registry.active_server(drive, &state.unreachable) == Some(registry.node());
+        return registry.active_server(drive, state) == Some(registry.node());
     }
     let mut volumes = state
         .volumes
@@ -833,7 +833,7 @@ fn pushes_volume(
         return false;
     }
     if registry.is_served(&id.drive) {
-        return registry.active_server(&id.drive, &state.unreachable) == Some(registry.node());
+        return registry.active_server(&id.drive, state) == Some(registry.node());
     }
     volume.primary == registry.node()
 }

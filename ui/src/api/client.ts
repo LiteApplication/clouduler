@@ -335,6 +335,9 @@ export const api = {
     post<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/unfreeze`),
   deleteVolume: (drive: string, volume: string) =>
     del<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}`),
+  failbackDrive: (drive: string) => post<void>(`/api/drives/${encodeURIComponent(drive)}/failback`),
+  resolveDrive: (drive: string, keep: string) =>
+    post<void>(`/api/drives/${encodeURIComponent(drive)}/resolve`, { keep }),
   syncVolume: (drive: string, volume: string) =>
     post<void>(`/api/volumes/${encodeURIComponent(drive)}/${encodeURIComponent(volume)}/sync`),
 

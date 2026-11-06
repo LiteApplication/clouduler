@@ -205,6 +205,8 @@ curl -N -H "Authorization: Bearer $KEY" \
 | Method | Path | Auth | Body | Success | Notes |
 |---|---|---|---|---|---|
 | GET | `/api/drives` | user | none | `[DriveSummary]` | |
+| POST | `/api/drives/{drive}/failback` | admin | none | 200 | Served drives: asks the holder to hand the drive back to its preferred node now. |
+| POST | `/api/drives/{drive}/resolve` | admin | `{keep}` | 200 | Served drives: keeps the copy on node `keep` after a conflict; the other copy is overwritten. |
 | GET | `/api/volumes` | user | none | `[VolumeSummary]` | |
 | GET | `/api/volumes/{drive}/{volume}/inspect?node=` | user | none | VolumeInspection | Files of the copy on `node`. |
 | POST | `/api/volumes/{drive}/{volume}/sync` | admin | none | 202 | Bumps the generation, which triggers a sync. |

@@ -111,7 +111,7 @@ function VolumesTab() {
                   {d.mode === 'served' && (
                     <>
                       <dt>Active</dt>
-                      <dd>{d.active_server ?? 'nobody reachable'}</dd>
+                      <dd>{d.active_server ?? (d.served?.handover_to ? `handing over to ${d.served.handover_to}` : 'nobody reachable')}</dd>
                     </>
                   )}
                   <dt>Volumes</dt>

@@ -103,7 +103,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
     optional: [
       '.cloudflare', '.self_update', '.backup', '.proxy.acme.contact_email', '.proxy.acme.directory_url',
       '.proxy.auth', '.auth.oidc', '.networks.*.subnet', '.networks.*.domain', '.networks.*.publish_dns',
-      '.drives.*.served_by', '.nodes.*.data_dir', '.nodes.*.docker_data_dir', '.nodes.*.last_resort',
+      '.drives.*.served_by', '.drives.*.failback', '.nodes.*.data_dir', '.nodes.*.docker_data_dir', '.nodes.*.last_resort',
       '.nodes.*.generate_secret_key',
     ],
     // a node address is a bare string or a tagged object
@@ -111,7 +111,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
   },
   clusterKeyStatus: {},
   dns: {},
-  drives: { optional: ['[].active_server'] }, // null for a replicated drive; the fixture only has a served one
+  drives: { optional: ['[].active_server', '[].served'] }, // null for a replicated drive; the fixture only has a served one
   identity: {},
   instances: { optional: INSTANCE_OPTIONAL },
   lastRebalance: {},
@@ -135,7 +135,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
       '.alert_destinations', '.alerts', '.alert_inbox', '.container_status', '.crash_moves',
       '.previous_image_digests', '.volume_removals', '.instance_updates', '.auto_updates', '.image_checks',
       '.restic_destinations', '.restic_targets', '.restic_runs', '.restore_requests',
-      '.sessions', '.proxy_sessions', '.proxy_tokens', '.stacks.*.requirements.allowed',
+      '.sessions', '.served', '.proxy_sessions', '.proxy_tokens', '.stacks.*.requirements.allowed',
     ],
     optional: [
       '.nodes.*.version', '.stacks.*.deployed_at', '.stacks.*.previous_spec', '.cluster_config',

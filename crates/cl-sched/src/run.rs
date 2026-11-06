@@ -1100,7 +1100,7 @@ impl Scheduler {
             if !drive.is_served() {
                 continue;
             }
-            if active_server(drive, &state.unreachable) != Some(self.node.as_str()) {
+            if active_server(name, drive, state) != Some(self.node.as_str()) {
                 roots.insert(name.clone(), data_dir.join("volume-mounts").join(name));
                 dynamic.insert(name.clone());
             }
@@ -1171,19 +1171,21 @@ fn revision_with_mounts(
     hasher.finish()
 }
 
-/// The node currently serving a `Served` drive: the first of `served_by` that
-/// is not reported unreachable. Mirrors `cl_drive::registry::DriveRegistry`'s
-/// `active_server`, computed independently here since placement/mount
-/// resolution only need the answer, not the rest of that crate.
+/// The node currently serving a `Served` drive: the holder recorded in raft
+/// while it is reachable, otherwise the first reachable `served_by` candidate.
+/// The same rule as `cl_drive::registry::DriveRegistry::active_server`,
+/// computed here since placement/mount resolution only need the answer, not
+/// the rest of that crate.
 fn active_server<'a>(
+    name: &str,
     drive: &'a cl_config::Drive,
-    unreachable: &BTreeSet<String>,
+    state: &ClusterState,
 ) -> Option<&'a str> {
-    drive
-        .served_by
-        .iter()
-        .map(String::as_str)
-        .find(|n| !unreachable.contains(*n))
+    cl_raft::served::choose_active_server(
+        &drive.served_by,
+        &state.unreachable,
+        state.served.get(name),
+    )
 }
 
 /// Whether `path` is itself a mount point (its device differs from its
@@ -1297,7 +1299,7 @@ pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Reques
             }
 
             let primary = match live.drives.get(drive) {
-                Some(cfg) if served => active_server(cfg, &state.unreachable).map(str::to_string),
+                Some(cfg) if served => active_server(drive, cfg, state).map(str::to_string),
                 _ => Some(assignment.node.clone()),
             };
             let Some(primary) = primary else {

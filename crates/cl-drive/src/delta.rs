@@ -118,6 +118,21 @@ pub trait SyncEngine: Send + Sync {
         staging: Option<String>,
         progress: crate::progress::ProgressSink,
     ) -> BoxFuture<'a, Result<SyncStats>>;
+
+    /// Whether `peer`'s copy of a served volume was written since it last
+    /// agreed with its source. Engines that cannot ask refuse, which keeps a
+    /// served volume from being pushed over blind.
+    fn copy_state<'a>(
+        &'a self,
+        _peer: SocketAddr,
+        _volume: &'a VolumeId,
+    ) -> BoxFuture<'a, Result<crate::transport::CopyState>> {
+        Box::pin(async {
+            Err(DriveError::Transfer {
+                message: "this sync engine cannot report a peer's copy state".into(),
+            })
+        })
+    }
 }
 
 /// The default engine: works anywhere, no filesystem cooperation required.
@@ -157,6 +172,14 @@ impl SyncEngine for DeltaEngine {
             self.sync_impl(src, peer, volume, generation, staging, progress)
                 .await
         })
+    }
+
+    fn copy_state<'a>(
+        &'a self,
+        peer: SocketAddr,
+        volume: &'a VolumeId,
+    ) -> BoxFuture<'a, Result<crate::transport::CopyState>> {
+        Box::pin(async move { transport::request_copy_state(peer, volume, &self.keys).await })
     }
 }
 

@@ -77,9 +77,9 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   cloudflareTokenStatus: [cloudflare, ['configured']],
   oidcClientSecretStatus: [oidcSecret, ['configured']],
   clusterKeyStatus: [clusterKey, ['fingerprint', 'held']],
-  state: [state, ['nodes', 'stacks', 'assignments', 'unreachable', 'version']],
+  state: [state, ['nodes', 'stacks', 'assignments', 'unreachable', 'version', 'served']],
   clusterConfig: [config, ['cluster', 'networks', 'nodes', 'web', 'proxy']],
-  drives: [drives[0], ['name', 'mode', 'served_by', 'active_server', 'sync_interval', 'nodes']],
+  drives: [drives[0], ['name', 'mode', 'served_by', 'active_server', 'sync_interval', 'failback', 'served', 'nodes']],
   nodeConnectivity: [connectivity, ['reports']],
   nodeReport: [connectivity.reports[0], ['node', 'reported', 'links', 'disk_ms']],
   updates: [

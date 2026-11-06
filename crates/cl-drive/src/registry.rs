@@ -5,7 +5,7 @@
 //! (reject `..`, empty and absolute components) rather than canonicalizing,
 //! since the target path may not exist yet.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -20,8 +20,8 @@ use crate::error::{DriveError, Result};
 pub enum DriveRole {
     /// A replicated drive: this node's copy is kept current by delta sync.
     Replicate,
-    /// A served drive, and this is the currently active server: the first
-    /// node in `served_by` that is reachable.
+    /// A served drive, and this is the currently active server: the node
+    /// holding the drive's authoritative copy.
     Serve,
     /// A served drive, and this node is one of the other candidates in
     /// `served_by`: it keeps a synced backup copy but isn't answering
@@ -47,6 +47,10 @@ pub struct DriveRegistry {
     /// the cluster changes. Empty until it does, which refuses every staging
     /// push rather than accepting an unvetted one.
     staging_destinations: RwLock<Vec<PathBuf>>,
+    /// Where this node keeps its per-volume sync records, see
+    /// `record_synced`. `None` records nothing, which makes every copy read
+    /// as having no sync history.
+    state_dir: Option<PathBuf>,
 }
 
 impl DriveRegistry {
@@ -85,6 +89,7 @@ impl DriveRegistry {
             drives,
             served_by,
             staging_destinations: RwLock::default(),
+            state_dir: Some(data_dir.join("served-sync")),
         })
     }
 
@@ -97,7 +102,45 @@ impl DriveRegistry {
             drives,
             served_by: BTreeMap::new(),
             staging_destinations: RwLock::default(),
+            state_dir: None,
         }
+    }
+
+    /// Keep sync records under `dir`. For tests and standalone tools.
+    pub fn with_state_dir(mut self, dir: PathBuf) -> Self {
+        self.state_dir = Some(dir);
+        self
+    }
+
+    fn record_path(&self, id: &VolumeId) -> Option<PathBuf> {
+        let dir = self.state_dir.as_ref()?;
+        let key = blake3::hash(id.to_string().as_bytes()).to_hex();
+        Some(dir.join(format!("{}-{}", id.drive, &key.as_str()[..16])))
+    }
+
+    /// Remembers that this node's copy of a served volume held exactly the
+    /// tree `digest` (see `Manifest::digest`) when it last agreed with its
+    /// peer: after pushing it, or after receiving a push. A copy whose tree
+    /// no longer matches has been written since.
+    pub fn record_synced(&self, id: &VolumeId, digest: &str) {
+        let Some(path) = self.record_path(id) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, digest).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    /// The digest `record_synced` last stored for a volume, if any.
+    pub fn recorded_sync(&self, id: &VolumeId) -> Option<String> {
+        std::fs::read_to_string(self.record_path(id)?)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Mark drives as served, mapping each to its candidate serving nodes in
@@ -161,25 +204,27 @@ impl DriveRegistry {
         self.served_by.get(drive).map_or(&[], Vec::as_slice)
     }
 
-    /// The node currently serving a drive: the first candidate not in
-    /// `unreachable`. `None` if every candidate is unreachable, or this
-    /// isn't a served drive.
+    /// The node currently serving a drive: the holder recorded in raft while
+    /// it is reachable, otherwise the first reachable candidate (see
+    /// `cl_raft::served::choose_active_server`). `None` if no candidate is
+    /// reachable, a handover is in progress, or this isn't a served drive.
     pub fn active_server<'a>(
         &'a self,
         drive: &str,
-        unreachable: &BTreeSet<String>,
+        state: &cl_raft::ClusterState,
     ) -> Option<&'a str> {
-        self.served_candidates(drive)
-            .iter()
-            .map(String::as_str)
-            .find(|n| !unreachable.contains(*n))
+        cl_raft::served::choose_active_server(
+            self.served_candidates(drive),
+            &state.unreachable,
+            state.served.get(drive),
+        )
     }
 
     /// Whether this node serves, mounts, backs up, or replicates a drive.
     /// Unknown drives (this node doesn't implement it) come back as
     /// `Replicate`, same as the default for an ordinary drive; callers that
     /// care check `implements` first.
-    pub fn role(&self, drive: &str, unreachable: &BTreeSet<String>) -> DriveRole {
+    pub fn role(&self, drive: &str, state: &cl_raft::ClusterState) -> DriveRole {
         let candidates = self.served_candidates(drive);
         if candidates.is_empty() {
             return DriveRole::Replicate;
@@ -187,7 +232,7 @@ impl DriveRegistry {
         if !candidates.iter().any(|n| n == &self.node) {
             return DriveRole::Mount;
         }
-        match self.active_server(drive, unreachable) {
+        match self.active_server(drive, state) {
             Some(active) if active == self.node => DriveRole::Serve,
             _ => DriveRole::Standby,
         }
@@ -394,6 +439,7 @@ pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cl_raft::ClusterState;
 
     fn registry() -> DriveRegistry {
         DriveRegistry::from_drives(
@@ -518,10 +564,39 @@ mod tests {
         assert!(path.is_dir());
     }
 
+    fn unreachable(nodes: &[&str]) -> ClusterState {
+        ClusterState {
+            unreachable: nodes.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_recorded_holder_stays_active_when_the_first_candidate_returns() {
+        let reg = DriveRegistry::from_drives("n1", BTreeMap::new()).with_served_by(BTreeMap::from(
+            [("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])],
+        ));
+        let mut state = ClusterState::default();
+        assert_eq!(reg.active_server("fast", &state), Some("n1"));
+        state.served.insert(
+            "fast".into(),
+            cl_raft::served::ServedAuthority {
+                holder: "n2".into(),
+                epoch: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(reg.active_server("fast", &state), Some("n2"));
+        assert_eq!(reg.role("fast", &state), DriveRole::Standby);
+    }
+
     #[test]
     fn role_is_replicate_for_a_drive_with_no_serving_node() {
         let reg = registry();
-        assert_eq!(reg.role("fast", &BTreeSet::new()), DriveRole::Replicate);
+        assert_eq!(
+            reg.role("fast", &ClusterState::default()),
+            DriveRole::Replicate
+        );
         assert!(!reg.is_served("fast"));
     }
 
@@ -535,7 +610,10 @@ mod tests {
             "fast".to_string(),
             vec!["n1".to_string()],
         )]));
-        assert_eq!(serving.role("fast", &BTreeSet::new()), DriveRole::Serve);
+        assert_eq!(
+            serving.role("fast", &ClusterState::default()),
+            DriveRole::Serve
+        );
         assert!(serving.is_served("fast"));
 
         let mounting = DriveRegistry::from_drives(
@@ -546,7 +624,10 @@ mod tests {
             "fast".to_string(),
             vec!["n1".to_string()],
         )]));
-        assert_eq!(mounting.role("fast", &BTreeSet::new()), DriveRole::Mount);
+        assert_eq!(
+            mounting.role("fast", &ClusterState::default()),
+            DriveRole::Mount
+        );
         assert!(mounting.is_served("fast"));
     }
 
@@ -566,11 +647,20 @@ mod tests {
         )
         .with_served_by(served_by);
 
-        assert_eq!(primary.role("fast", &BTreeSet::new()), DriveRole::Serve);
-        assert_eq!(backup.role("fast", &BTreeSet::new()), DriveRole::Standby);
-        assert_eq!(primary.active_server("fast", &BTreeSet::new()), Some("n1"));
+        assert_eq!(
+            primary.role("fast", &ClusterState::default()),
+            DriveRole::Serve
+        );
+        assert_eq!(
+            backup.role("fast", &ClusterState::default()),
+            DriveRole::Standby
+        );
+        assert_eq!(
+            primary.active_server("fast", &ClusterState::default()),
+            Some("n1")
+        );
 
-        let n1_down = BTreeSet::from(["n1".to_string()]);
+        let n1_down = unreachable(&["n1"]);
         assert_eq!(primary.role("fast", &n1_down), DriveRole::Standby);
         assert_eq!(backup.role("fast", &n1_down), DriveRole::Serve);
         assert_eq!(primary.active_server("fast", &n1_down), Some("n2"));
@@ -581,7 +671,7 @@ mod tests {
         let reg = DriveRegistry::from_drives("n1", BTreeMap::new()).with_served_by(BTreeMap::from(
             [("fast".to_string(), vec!["n1".to_string(), "n2".to_string()])],
         ));
-        let all_down = BTreeSet::from(["n1".to_string(), "n2".to_string()]);
+        let all_down = unreachable(&["n1", "n2"]);
         assert_eq!(reg.active_server("fast", &all_down), None);
         assert_eq!(reg.role("fast", &all_down), DriveRole::Standby);
     }

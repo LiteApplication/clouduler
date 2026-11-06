@@ -266,7 +266,7 @@ pub async fn run(cfg: &ClusterConfig, node_name: &str, args: FolderImportArgs) -
     );
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;
 
-    if registry.is_served(&drive) && registry.role(&drive, &state.unreachable) == DriveRole::Standby
+    if registry.is_served(&drive) && registry.role(&drive, &state) == DriveRole::Standby
     {
         bail!(
             "node {node_name} is a standby for drive {drive}; import from the active server or a node that mounts it, not a backup candidate"
