@@ -188,7 +188,12 @@ async fn complete_authorizations(
 
         cl_dns::await_propagation(cf, zone_id, &domain, &value, propagation_timeout)
             .await
-            .map_err(|_| ProxyError::ChallengeTimeout)?;
+            .map_err(|e| match e {
+                // Only a real timeout is a timeout; a resolver or Cloudflare
+                // API failure keeps its own message.
+                cl_dns::DnsError::PropagationTimeout(_) => ProxyError::ChallengeTimeout,
+                other => ProxyError::Dns(other),
+            })?;
 
         challenge.set_ready().await.map_err(acme_err)?;
     }

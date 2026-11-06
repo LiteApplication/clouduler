@@ -97,6 +97,10 @@ struct ResultInfo {
 struct Zone {
     id: String,
     name: String,
+    /// The zone's authoritative nameserver hostnames, as Cloudflare assigned
+    /// them. Absent from some responses, so it may be empty.
+    #[serde(default)]
+    name_servers: Vec<String>,
 }
 
 /// Cloudflare API v4 client, bearer token authenticated.
@@ -165,9 +169,15 @@ impl Cloudflare {
     /// challenge record has actually propagated rather than just landed in
     /// Cloudflare's control plane.
     pub async fn zone_name(&self, zone_id: &str) -> Result<String> {
+        Ok(self.zone_info(zone_id).await?.0)
+    }
+
+    /// The zone's name and the hostnames of its authoritative nameservers
+    /// (empty when Cloudflare's response omits them).
+    pub async fn zone_info(&self, zone_id: &str) -> Result<(String, Vec<String>)> {
         let url = format!("{}/zones/{}", self.base_url, zone_id);
         let zone: Zone = self.request(reqwest::Method::GET, &url, None::<()>).await?;
-        Ok(zone.name)
+        Ok((zone.name, zone.name_servers))
     }
 
     /// Lists records in a zone, optionally filtered by name and/or type.

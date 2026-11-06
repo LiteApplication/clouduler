@@ -81,19 +81,20 @@ pub async fn await_propagation(
         tokio::time::sleep(poll_interval).await;
     }
 
-    let zone = cf.zone_name(zone_id).await?;
-    await_authoritative(&zone, &name, expected_value, deadline).await
+    let (zone, name_servers) = cf.zone_info(zone_id).await?;
+    await_authoritative(&zone, &name_servers, &name, expected_value, deadline).await
 }
 
 /// Polls the zone's own authoritative nameservers directly for `name` until
 /// a TXT record matching `expected_value` shows up, or `deadline` passes.
 async fn await_authoritative(
     zone: &str,
+    name_servers: &[String],
     name: &str,
     expected_value: &str,
     deadline: Instant,
 ) -> Result<()> {
-    let servers = authoritative_servers(zone).await?;
+    let servers = authoritative_servers(zone, name_servers).await?;
     let resolver = direct_resolver(&servers)?;
     let poll_interval = Duration::from_secs(2);
 
@@ -123,33 +124,97 @@ async fn await_authoritative(
     }
 }
 
-/// The IP addresses of `zone`'s authoritative nameservers, resolved through
-/// the system's normal recursive resolver. NS/glue records are set once at
-/// registration and don't have the propagation lag this module exists to
-/// work around, so a plain recursive lookup is fine here.
-async fn authoritative_servers(zone: &str) -> Result<Vec<IpAddr>> {
-    let system = hickory_resolver::TokioResolver::builder_tokio()
-        .map_err(|e| DnsError::Resolve(e.to_string()))?
-        .build()
-        .map_err(|e| DnsError::Resolve(e.to_string()))?;
+/// Public recursive resolvers used to find the zone's nameservers. Never the
+/// host's own resolver: a node behind split-horizon DNS (Tailscale MagicDNS
+/// forwarding the zone to the cluster's own DNS server, say) answers for the
+/// zone itself, with no NS records, and the real authoritative servers cannot
+/// be found through it.
+const PUBLIC_RESOLVERS: [IpAddr; 3] = [
+    IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+    IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9)),
+    IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+];
 
-    let ns_lookup = system
-        .lookup(format!("{zone}."), ResolveRecordType::NS)
-        .await
-        .map_err(|e| DnsError::Resolve(format!("no nameservers found for {zone}: {e}")))?;
+/// Where the nameservers of a zone come from. A trait so the selection logic
+/// can be tested without a network.
+trait NameserverSource {
+    /// NS hostnames for `zone` according to DNS; empty when none are returned.
+    async fn ns_hostnames(&self, zone: &str) -> Result<Vec<String>>;
+    /// Addresses of one nameserver hostname.
+    async fn addresses(&self, host: &str) -> Vec<IpAddr>;
+}
 
-    let mut ips = Vec::new();
-    for record in ns_lookup.answers() {
-        let RData::NS(ns) = &record.data else {
-            continue;
-        };
-        if let Ok(addrs) = system.lookup_ip(ns.0.to_string()).await {
-            ips.extend(addrs.iter());
+struct PublicDns(Resolver<TokioRuntimeProvider>);
+
+impl PublicDns {
+    fn new() -> Result<Self> {
+        let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
+        for ip in PUBLIC_RESOLVERS {
+            config.add_name_server(NameServerConfig::udp_and_tcp(ip));
         }
+        Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+            .build()
+            .map(Self)
+            .map_err(|e| DnsError::Resolve(e.to_string()))
+    }
+}
+
+impl NameserverSource for PublicDns {
+    async fn ns_hostnames(&self, zone: &str) -> Result<Vec<String>> {
+        let lookup = self
+            .0
+            .lookup(format!("{zone}."), ResolveRecordType::NS)
+            .await
+            .map_err(|e| DnsError::Resolve(format!("no nameservers found for {zone}: {e}")))?;
+        Ok(lookup
+            .answers()
+            .iter()
+            .filter_map(|record| match &record.data {
+                RData::NS(ns) => Some(ns.0.to_string()),
+                _ => None,
+            })
+            .collect())
+    }
+
+    async fn addresses(&self, host: &str) -> Vec<IpAddr> {
+        match self.0.lookup_ip(host.to_string()).await {
+            Ok(addrs) => addrs.iter().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// The IP addresses of `zone`'s authoritative nameservers. The hostnames come
+/// from the Cloudflare API (`api_names`, the zone's own `name_servers`) and
+/// only when that is empty from an NS lookup against public resolvers; their
+/// addresses are resolved the same way. The system resolver is never used.
+async fn authoritative_servers(zone: &str, api_names: &[String]) -> Result<Vec<IpAddr>> {
+    resolve_servers(zone, api_names, &PublicDns::new()?).await
+}
+
+async fn resolve_servers(
+    zone: &str,
+    api_names: &[String],
+    source: &impl NameserverSource,
+) -> Result<Vec<IpAddr>> {
+    let names = if api_names.is_empty() {
+        source.ns_hostnames(zone).await?
+    } else {
+        api_names.to_vec()
+    };
+    if names.is_empty() {
+        return Err(DnsError::Resolve(format!(
+            "no nameservers found for {zone}"
+        )));
+    }
+    let mut ips = Vec::new();
+    for name in &names {
+        ips.extend(source.addresses(name).await);
     }
     if ips.is_empty() {
         return Err(DnsError::Resolve(format!(
-            "could not resolve any nameserver address for {zone}"
+            "could not resolve any nameserver address for {zone} ({})",
+            names.join(", ")
         )));
     }
     Ok(ips)
@@ -168,4 +233,84 @@ fn direct_resolver(servers: &[IpAddr]) -> Result<hickory_resolver::Resolver<Toki
     builder
         .build()
         .map_err(|e| DnsError::Resolve(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A source that answers from fixed tables, to prove where the
+    /// nameservers come from without any network.
+    struct Fake {
+        ns: Vec<String>,
+        ips: Vec<(&'static str, IpAddr)>,
+    }
+
+    impl NameserverSource for Fake {
+        async fn ns_hostnames(&self, _zone: &str) -> Result<Vec<String>> {
+            Ok(self.ns.clone())
+        }
+        async fn addresses(&self, host: &str) -> Vec<IpAddr> {
+            self.ips
+                .iter()
+                .filter(|(h, _)| *h == host)
+                .map(|(_, ip)| *ip)
+                .collect()
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_resolver_with_no_ns_records_and_no_api_names_is_a_clear_error() {
+        let fake = Fake {
+            ns: vec![],
+            ips: vec![],
+        };
+        let err = resolve_servers("liteapp.fr", &[], &fake).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no nameservers found for liteapp.fr"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_zones_api_nameservers_are_used_even_when_dns_has_no_ns_records() {
+        let fake = Fake {
+            ns: vec![],
+            ips: vec![("apollo.ns.cloudflare.com", ip("108.162.1.1"))],
+        };
+        let api = vec!["apollo.ns.cloudflare.com".to_string()];
+        let got = resolve_servers("liteapp.fr", &api, &fake).await.unwrap();
+        assert_eq!(got, vec![ip("108.162.1.1")]);
+    }
+
+    #[tokio::test]
+    async fn dns_ns_records_are_the_fallback_when_the_api_lists_none() {
+        let fake = Fake {
+            ns: vec!["dara.ns.cloudflare.com".to_string()],
+            ips: vec![("dara.ns.cloudflare.com", ip("108.162.2.2"))],
+        };
+        let got = resolve_servers("liteapp.fr", &[], &fake).await.unwrap();
+        assert_eq!(got, vec![ip("108.162.2.2")]);
+    }
+
+    #[tokio::test]
+    async fn nameservers_that_resolve_to_nothing_name_themselves_in_the_error() {
+        let fake = Fake {
+            ns: vec![],
+            ips: vec![],
+        };
+        let api = vec!["apollo.ns.cloudflare.com".to_string()];
+        let err = resolve_servers("liteapp.fr", &api, &fake)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("apollo.ns.cloudflare.com"),
+            "{err}"
+        );
+    }
 }
