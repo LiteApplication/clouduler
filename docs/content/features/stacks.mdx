@@ -263,7 +263,7 @@ Every instance runs on one node. The scheduler picks a node that can hold everyt
 ## Quirks and gotchas
 
 <Quirk title="Fields that do nothing today" severity="info">
-`deploy.restart_policy`, `deploy.update_config` and `deploy.resources.reservations` are accepted but currently not acted on. Use the service-level `restart:` key. See the [stack spec](/docs/reference/stack-spec#deploy).
+`deploy.restart_policy`, `deploy.update_config` and `deploy.resources.reservations.cpus` and `.memory` are accepted but currently not acted on. Use the service-level `restart:` key. See the [stack spec](/docs/reference/stack-spec#deploy).
 </Quirk>
 
 <Quirk title="Published ports follow the container, but only on its own node">

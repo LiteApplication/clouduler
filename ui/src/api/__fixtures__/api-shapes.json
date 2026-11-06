@@ -960,6 +960,8 @@
       ],
       "file_configs": [],
       "file_secrets": [],
+      "gpu_requests": [],
+      "host_devices": [],
       "hosts": [],
       "networks": [],
       "pinned_node": null,
@@ -1127,6 +1129,14 @@
           "fast": "/mnt/fast"
         },
         "egress_networks": [],
+        "gpus": {
+          "dev_paths": [],
+          "nvidia": [],
+          "nvidia_devices": [],
+          "nvidia_hook": null,
+          "nvidia_runtime": false,
+          "render_nodes": []
+        },
         "id": "<volatile>",
         "labels": {},
         "last_resort": false,
@@ -1147,6 +1157,14 @@
           "fast": "/mnt/fast"
         },
         "egress_networks": [],
+        "gpus": {
+          "dev_paths": [],
+          "nvidia": [],
+          "nvidia_devices": [],
+          "nvidia_hook": null,
+          "nvidia_runtime": false,
+          "render_nodes": []
+        },
         "id": "<volatile>",
         "labels": {},
         "last_resort": false,

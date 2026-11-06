@@ -29,6 +29,18 @@ impl Docker {
         self.inner.ping().await.map_err(DockerError::Connect)?;
         Ok(())
     }
+
+    /// Names of the container runtimes the daemon has registered (`runc`,
+    /// `nvidia`, ...). The NVIDIA container toolkit shows up as `nvidia`.
+    pub async fn runtimes(&self) -> Result<Vec<String>> {
+        let info = self.inner.info().await.map_err(DockerError::Connect)?;
+        let mut names: Vec<String> = info
+            .runtimes
+            .map(|r| r.into_keys().collect())
+            .unwrap_or_default();
+        names.sort();
+        Ok(names)
+    }
 }
 
 #[cfg(test)]

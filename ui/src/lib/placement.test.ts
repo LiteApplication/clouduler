@@ -44,4 +44,56 @@ describe('placement rows', () => {
     const row = rows.find((r) => r.label === 'secret: pw')!;
     expect(row).toMatchObject({ missing: true, kind: 'secret', name: 'pw' });
   });
+
+  describe('gpu and device rows', () => {
+    const gpus = (extra: Partial<NonNullable<NodeState['gpus']>> = {}): NodeState['gpus'] => ({
+      nvidia_devices: [], nvidia: [], nvidia_runtime: false, nvidia_hook: null, render_nodes: [], dev_paths: [], ...extra,
+    });
+    const gpuCluster = {
+      ...cluster,
+      nodes: {
+        none: node('none'),
+        one: node('one', { gpus: gpus({ nvidia_devices: ['/dev/nvidia0'], nvidia: [{ index: 0, uuid: 'GPU-x', name: 'T4' }], nvidia_runtime: true }) }),
+        noruntime: node('noruntime', { gpus: gpus({ nvidia_devices: ['/dev/nvidia0', '/dev/nvidia1'] }) }),
+        igpu: node('igpu', { gpus: gpus({ dev_paths: ['/dev/dri', '/dev/dri/renderD128'] }) }),
+      },
+    } as unknown as ClusterState;
+    const eligible = (r: Partial<StackRequirements>) =>
+      nodeEligibility(buildPlacementRows(reqs(r), gpuCluster, ctx), gpuCluster)
+        .filter((n) => n.eligible)
+        .map((n) => n.name);
+
+    it('needs enough NVIDIA GPUs and the docker runtime', () => {
+      expect(eligible({ gpu_requests: [{ count: 1, device_ids: [] }] })).toEqual(['one']);
+      expect(eligible({ gpu_requests: [{ count: 2, device_ids: [] }] })).toEqual([]);
+      expect(eligible({ gpu_requests: [{ count: 1, device_ids: ['GPU-x'] }] })).toEqual(['one']);
+      expect(eligible({ gpu_requests: [{ count: 1, device_ids: ['5'] }] })).toEqual([]);
+    });
+
+    it('accepts the toolkit hook in place of a registered runtime', () => {
+      const hooked = {
+        ...gpuCluster,
+        nodes: { h: node('h', { gpus: gpus({ nvidia_devices: ['/dev/nvidia0'], nvidia_hook: '/usr/bin/nvidia-container-cli' }) }) },
+      } as unknown as ClusterState;
+      const rows = buildPlacementRows(reqs({ gpu_requests: [{ count: 1, device_ids: [] }] }), hooked, ctx);
+      expect(nodeEligibility(rows, hooked)[0].eligible).toBe(true);
+    });
+
+    it('says why a node falls short', () => {
+      const rows = buildPlacementRows(reqs({ gpu_requests: [{ count: 1, device_ids: [] }] }), gpuCluster, ctx);
+      const why = Object.fromEntries(nodeEligibility(rows, gpuCluster).map((n) => [n.name, n.reasons]));
+      expect(why.none).toEqual(['no NVIDIA GPU']);
+      expect(why.noruntime).toEqual(['no NVIDIA container toolkit']);
+    });
+
+    it('needs host devices to exist, unless the node is pinned', () => {
+      expect(eligible({ host_devices: ['/dev/dri'] })).toEqual(['igpu']);
+      expect(eligible({ host_devices: ['/dev/dri'], pinned_node: 'none' })).toEqual(['none']);
+      expect(eligible({ host_devices: ['/dev/dri'], placement_constraints: ['node.hostname==none'] })).toEqual(['none']);
+    });
+
+    it('lets an explicit pin override a node that reported no GPU', () => {
+      expect(eligible({ gpu_requests: [{ count: 1, device_ids: [] }], placement_constraints: ['node.hostname==none'] })).toEqual(['none']);
+    });
+  });
 });

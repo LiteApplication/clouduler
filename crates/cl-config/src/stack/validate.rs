@@ -8,6 +8,7 @@ use crate::cluster::{ClusterConfig, MAX_STOP_GRACE};
 use crate::error::{ConfigError, Result};
 
 use super::deploy::{parse_memory_bytes, MAX_REPLICAS};
+use super::devices::DeviceMapping;
 use super::extensions::DockerSocketMode;
 use super::port::Protocol;
 use super::StackFile;
@@ -43,6 +44,7 @@ impl StackFile {
         self.validate_single_config_writer()?;
         self.validate_replicas()?;
         self.validate_memory_sizes()?;
+        self.validate_devices()?;
         self.validate_docker_sockets()?;
         self.validate_alerts()?;
         Ok(())
@@ -118,17 +120,50 @@ impl StackFile {
             let Some(resources) = svc.deploy.as_ref().and_then(|d| d.resources.as_ref()) else {
                 continue;
             };
-            for (kind, spec) in [
-                ("limits", &resources.limits),
-                ("reservations", &resources.reservations),
+            for (kind, raw) in [
+                (
+                    "limits",
+                    resources.limits.as_ref().and_then(|s| s.memory.as_deref()),
+                ),
+                (
+                    "reservations",
+                    resources
+                        .reservations
+                        .as_ref()
+                        .and_then(|s| s.memory.as_deref()),
+                ),
             ] {
-                let Some(raw) = spec.as_ref().and_then(|s| s.memory.as_deref()) else {
+                let Some(raw) = raw else {
                     continue;
                 };
                 if parse_memory_bytes(raw).is_none() && memory_overflows(raw) {
                     return Err(ConfigError::invalid(
                         format!("services.{name}.deploy.resources.{kind}.memory"),
                         format!("\"{raw}\" is too large to be a byte count"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// GPU device requests and `devices:` entries are well formed, and host
+    /// devices stay under `/dev/`.
+    fn validate_devices(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            for (idx, entry) in svc.devices.iter().enumerate() {
+                if let Err(msg) = DeviceMapping::parse(entry) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.devices[{idx}]"),
+                        msg,
+                    ));
+                }
+            }
+            for (idx, request) in svc.device_requests().iter().enumerate() {
+                if let Err(msg) = request.validate() {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.deploy.resources.reservations.devices[{idx}]"),
+                        msg,
                     ));
                 }
             }
@@ -1102,6 +1137,26 @@ mod tests {
             "services:\n  web:\n    image: x\n    deploy:\n      replicas: {MAX_REPLICAS}\n"
         ))
         .is_ok());
+    }
+
+    #[test]
+    fn device_entries_and_requests_are_checked() {
+        let spec = |devices: &str, reservation: &str| {
+            format!(
+                "services:\n  web:\n    image: x\n    devices: {devices}\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - {reservation}\n"
+            )
+        };
+        StackFile::parse(&spec("[\"/dev/dri:/dev/dri\"]", "{capabilities: [gpu], count: 1}")).unwrap();
+        for (devices, reservation, at) in [
+            ("[\"/etc/passwd\"]", "{capabilities: [gpu]}", "services.web.devices[0]"),
+            ("[\"/dev/../etc\"]", "{capabilities: [gpu]}", "services.web.devices[0]"),
+            ("[]", "{driver: amd, capabilities: [gpu]}", "reservations.devices[0]"),
+            ("[]", "{count: 1, device_ids: ['0'], capabilities: [gpu]}", "reservations.devices[0]"),
+            ("[]", "{count: 1}", "reservations.devices[0]"),
+        ] {
+            let err = StackFile::parse(&spec(devices, reservation)).unwrap_err();
+            assert!(err.to_string().contains(at), "{err}");
+        }
     }
 
     #[test]

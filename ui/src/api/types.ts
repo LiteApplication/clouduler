@@ -39,6 +39,37 @@ export interface NodeState {
   /** Version of the running binary, e.g. "0.14.2". Absent until the node has
    *  reported in since this field was added. */
   version?: string;
+  /** GPUs and device nodes the node found on itself. Absent on a node too old
+   *  to report them, which the scheduler treats as having none. */
+  gpus?: NodeGpus;
+}
+
+export interface NvidiaGpu {
+  index: number;
+  uuid: string;
+  name: string;
+}
+
+export interface RenderNode {
+  path: string;
+  /** Kernel driver (`i915`, `xe`, `amdgpu`, ...); empty when unknown. */
+  driver: string;
+}
+
+/** Mirrors `cl_raft::state::NodeGpus`. */
+export interface NodeGpus {
+  /** `/dev/nvidia[0-9]*` device nodes. */
+  nvidia_devices: string[];
+  /** GPUs `nvidia-smi` listed; may be empty while `nvidia_devices` is not. */
+  nvidia: NvidiaGpu[];
+  /** Docker has an `nvidia` runtime (NVIDIA container toolkit configured). */
+  nvidia_runtime: boolean;
+  /** Path of nvidia-container-runtime-hook or nvidia-container-cli, when one
+   *  was found; docker can serve NVIDIA requests with only this. */
+  nvidia_hook?: string | null;
+  render_nodes: RenderNode[];
+  /** Host paths a service's `devices:` entry may name. */
+  dev_paths: string[];
 }
 
 /** Per-drive space on one node: the drive's configured path matched to the
@@ -336,6 +367,13 @@ export interface StackRequirements {
   /** Each network the stack declares, with its `allowed` list as written;
    *  `null` means unrestricted. Stack aggregate only (empty on `per_service`). */
   allowed?: Record<string, string[] | null>;
+  /** NVIDIA device requests (`deploy.resources.reservations.devices`): the
+   *  least GPUs needed and any named ids. A node needs enough GPUs in
+   *  `gpus` and the nvidia docker runtime. Per-service only. */
+  gpu_requests?: { count: number; device_ids: string[] }[];
+  /** Host paths from `devices:`; a node must report each in `gpus.dev_paths`.
+   *  Per-service only. */
+  host_devices?: string[];
 }
 
 /** GET /api/stacks/:name. */

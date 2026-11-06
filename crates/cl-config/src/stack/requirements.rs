@@ -20,6 +20,15 @@ pub struct BoundPort {
     pub published: u16,
 }
 
+/// One NVIDIA device request: what a node must have to satisfy it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GpuRequirement {
+    /// The least GPUs needed: `count`, the number of `device_ids`, or one for
+    /// "all".
+    pub count: usize,
+    pub device_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StackRequirements {
     /// Networks any service attaches to.
@@ -76,6 +85,15 @@ pub struct StackRequirements {
     /// the stack, not to one service.
     #[serde(default)]
     pub allowed: BTreeMap<String, Option<Vec<String>>>,
+    /// NVIDIA device requests (`deploy.resources.reservations.devices`): a
+    /// node must report enough GPUs, and the nvidia docker runtime. Per-service
+    /// only, same reasoning as `pinned_node`.
+    #[serde(default)]
+    pub gpu_requests: Vec<GpuRequirement>,
+    /// Host paths from `devices:`; a node must report each one. Per-service
+    /// only, same reasoning as `pinned_node`.
+    #[serde(default)]
+    pub host_devices: Vec<String>,
 }
 
 fn named_volume(drive: &str, volume: Option<&str>) -> Option<String> {
@@ -149,6 +167,15 @@ impl StackFile {
             if let Some(constraints) = svc.deploy.as_ref().and_then(|d| d.placement.as_ref()) {
                 r.placement_constraints = constraints.constraints.clone();
             }
+            r.gpu_requests = svc
+                .device_requests()
+                .iter()
+                .map(|d| GpuRequirement {
+                    count: d.min_gpus(),
+                    device_ids: d.device_ids.clone(),
+                })
+                .collect();
+            r.host_devices = svc.device_mappings().into_iter().map(|d| d.host).collect();
             if let Some(ext) = &svc.x_clouduler {
                 r.bound_ports = ext
                     .expose
@@ -194,6 +221,38 @@ mod tests {
 
     const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
     const GITLAB_YAML: &str = include_str!("../../../../examples/stacks/gitlab.yaml");
+
+    #[test]
+    fn a_services_gpu_needs_are_carried_per_service() {
+        let stack = StackFile::parse(
+            r#"
+services:
+  ml:
+    image: x
+    devices: ["/dev/dri:/dev/dri", "/dev/dri/renderD128"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+  plain:
+    image: x
+"#,
+        )
+        .expect("parse");
+        let per = stack.service_requirements();
+        assert_eq!(
+            per["ml"].gpu_requests,
+            vec![GpuRequirement {
+                count: 2,
+                device_ids: vec![]
+            }]
+        );
+        assert_eq!(per["ml"].host_devices, vec!["/dev/dri", "/dev/dri/renderD128"]);
+        assert!(per["plain"].gpu_requests.is_empty() && per["plain"].host_devices.is_empty());
+    }
 
     #[test]
     fn hosts_qualifies_a_bare_label_with_its_networks_domain() {

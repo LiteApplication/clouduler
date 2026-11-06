@@ -21,7 +21,9 @@ flowchart TD
   C -->|no| R
   C -->|yes| D{Implements the networks and open ports?}
   D -->|no| R
-  D -->|yes| E{Passes placement constraints?}
+  D -->|yes| G{Has the GPUs and devices?}
+  G -->|no| R
+  G -->|yes| E{Passes placement constraints?}
   E -->|no| R
   E -->|yes| OK[Eligible]
 ```
@@ -38,6 +40,7 @@ The tests, in the order the scheduler applies them:
 | Egress network | the service uses an egress or wireguard network the node has no interface for | `not on network` |
 | Other networks | the node does not implement a network the service names (nat networks always pass) | `not on network` |
 | Open ports | an `x-clouduler.expose` port on a public or wireguard network is not listed in the node's `open_ports` | `port closed` |
+| GPUs and devices | the service asks for NVIDIA GPUs or `devices:` and the node did not report them, unless the node is pinned to (see [GPUs and devices](#gpus-and-devices)) | `no NVIDIA GPU`, `no NVIDIA container toolkit`, `no GPU ID`, `N of M GPUs`, `no such device` |
 | Constraints | the node fails a `deploy.placement.constraints` entry | `NODE fails constraint KEY == VALUE` |
 | Configs and secrets | a config or secret the service needs is missing, or the node has no cluster key to open a secret | `missing`, `no cluster key` |
 
@@ -78,6 +81,11 @@ These are the scheduler's own reasons, one per node. An instance that cannot be 
 - `NODE does not implement egress network NET`
 - `NODE does not implement network NET`
 - `NODE does not have PORT/Tcp open on network NET`
+- `NODE has no NVIDIA GPU`
+- `NODE has no NVIDIA container toolkit (no nvidia runtime in docker, no nvidia-container-runtime-hook or nvidia-container-cli)`
+- `NODE has no NVIDIA GPU with id ID`
+- `NODE has N NVIDIA GPU(s), the service needs M`
+- `NODE has no host device PATH`
 - `NODE fails constraint KEY == VALUE`
 
 If every node is rejected, the instance is not started anywhere. Fix the cause and the scheduler tries again on its next pass; you do not need to redeploy unless the cause is in the spec.
@@ -156,6 +164,27 @@ Networks narrow the choice of nodes, so adding a network to a service can move i
 
 See [Networking](/docs/features/networking) for the kinds and how to declare them.
 
+## GPUs and devices
+
+A service with a `deploy.resources.reservations.devices` request, or a `devices:` list, can only run on a node that has what it asks for. See [GPUs](/docs/reference/stack-spec#gpus) for the spec.
+
+Each node looks for its own GPUs when the daemon starts and again every five minutes, and reports the result with the rest of its node facts. It records:
+
+- the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidia1`, ...), and the GPUs `nvidia-smi` lists (index, uuid, name) when `nvidia-smi` is installed;
+- whether the NVIDIA container toolkit is available: an `nvidia` runtime registered in Docker, or `nvidia-container-runtime-hook` or `nvidia-container-cli` in `/usr/bin`, `/usr/local/bin` or `/usr/sbin` (Docker serves GPU requests with either);
+- the DRI render nodes (`/dev/dri/renderD*`) and the kernel driver behind each (`i915`, `xe`, `amdgpu`, ...);
+- the device paths a `devices:` entry can name: the entries directly under `/dev` and the entries in `/dev/dri`, `/dev/snd`, `/dev/input`, `/dev/dvb`, `/dev/nvidia-caps`, `/dev/serial/by-id` and `/dev/serial/by-path`. USB and on-board serial adapters (`ttyUSB*`, `ttyACM*`, `ttyAMA*`, for Zigbee and Z-Wave dongles) are included; console terminals, loop and ram devices and raw disks (`sd*`, `nvme*`, `vd*`, `mmcblk*`, `dm-*`, `md*`) are left out.
+
+The node page lists the GPUs it found.
+
+The rules:
+
+- An NVIDIA request is eligible on a node with at least as many GPUs as the requests ask for in total (one for `all`), with the NVIDIA container toolkit (the `nvidia` runtime in Docker, or the hook or cli binary), and, when `device_ids` names GPUs, with each of those indexes or uuids. Without `nvidia-smi`, only numeric indexes can be checked, against the device nodes.
+- A `devices:` entry is eligible on a node that reported its host path.
+- Failover and rebalancing use the same rules, so a GPU service only moves to another node with the GPU.
+- A node that never reported (a daemon from before this feature, or detection that found nothing) counts as having no GPUs.
+- Pinning overrides that. If the service is pinned to a node with `x-clouduler.node`, or has a `node.hostname==NAME` constraint, that node is accepted even when it reported no matching GPU or device. The scheduler logs a warning and places the service there. If the device really is missing, the container fails to start.
+
 ## Drive holders
 
 A volume lives on a drive, and a drive can be implemented by several nodes. Two kinds of drive behave differently.
@@ -180,6 +209,10 @@ If there is no record of a volume yet, any node that implements the drive qualif
 
 <Quirk title="Constraint forms with spaces are not name-checked">
 `node.hostname == n3` works in the scheduler, but the CLI only checks the exact forms `node.hostname==NAME` and `node==NAME`. A typo in the other forms is not caught up front.
+</Quirk>
+
+<Quirk title="GPU detection runs every five minutes" severity="info">
+A GPU or the NVIDIA toolkit that appears after the daemon started is picked up on the next scan, up to five minutes later. Until then the node counts as not having it, unless the service is pinned to it.
 </Quirk>
 
 <Quirk title="Placement problems after config changes">

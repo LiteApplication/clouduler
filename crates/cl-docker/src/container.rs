@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use bollard::models::{
     ContainerCreateBody, ContainerState as BollardContainerState, ContainerStateStatusEnum,
-    ContainerSummary, EndpointIpamConfig, EndpointSettings, HealthConfig as BollardHealthConfig,
+    ContainerSummary, DeviceMapping as BollardDeviceMapping, DeviceRequest as BollardDeviceRequest,
+    EndpointIpamConfig, EndpointSettings, HealthConfig as BollardHealthConfig,
     HealthStatusEnum, HostConfig, NetworkingConfig, PortBinding,
     RestartPolicy as BollardRestartPolicy, RestartPolicyNameEnum,
 };
@@ -94,6 +95,26 @@ pub struct ResourceLimits {
     pub nano_cpus: Option<i64>,
 }
 
+/// A host device passed through to the container (`--device`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceMount {
+    pub host_path: String,
+    pub container_path: String,
+    /// Any of `r`, `w`, `m`.
+    pub permissions: String,
+}
+
+/// A device request (`--gpus`): docker asks the named driver for devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuRequest {
+    pub driver: String,
+    /// -1 for all devices. Ignored by docker when `device_ids` is set.
+    pub count: i64,
+    pub device_ids: Vec<String>,
+    /// An OR list of AND lists, as the docker api takes it.
+    pub capabilities: Vec<Vec<String>>,
+}
+
 /// A container healthcheck, equivalent to docker's `HEALTHCHECK`.
 #[derive(Debug, Clone)]
 pub struct Healthcheck {
@@ -153,6 +174,10 @@ pub struct ContainerSpec {
     pub dns_options: Vec<String>,
     pub restart_policy: RestartPolicy,
     pub resources: ResourceLimits,
+    /// Host devices (`devices:`), e.g. `/dev/dri`.
+    pub devices: Vec<DeviceMount>,
+    /// Device requests (`deploy.resources.reservations.devices`).
+    pub gpu_requests: Vec<GpuRequest>,
     pub healthcheck: Option<Healthcheck>,
     /// Signal sent on a graceful stop. `None` leaves the image's own
     /// `STOPSIGNAL` (usually `SIGTERM`) in effect.
@@ -266,6 +291,28 @@ impl ContainerSpec {
             memory: self.resources.memory_bytes,
             nano_cpus: self.resources.nano_cpus,
             readonly_rootfs: Some(self.read_only),
+            devices: (!self.devices.is_empty()).then(|| {
+                self.devices
+                    .iter()
+                    .map(|d| BollardDeviceMapping {
+                        path_on_host: Some(d.host_path.clone()),
+                        path_in_container: Some(d.container_path.clone()),
+                        cgroup_permissions: Some(d.permissions.clone()),
+                    })
+                    .collect()
+            }),
+            device_requests: (!self.gpu_requests.is_empty()).then(|| {
+                self.gpu_requests
+                    .iter()
+                    .map(|g| BollardDeviceRequest {
+                        driver: Some(g.driver.clone()),
+                        count: Some(g.count),
+                        device_ids: (!g.device_ids.is_empty()).then(|| g.device_ids.clone()),
+                        capabilities: Some(g.capabilities.clone()),
+                        options: None,
+                    })
+                    .collect()
+            }),
             cap_add: (!self.cap_add.is_empty()).then(|| self.cap_add.clone()),
             cap_drop: (!self.cap_drop.is_empty()).then(|| self.cap_drop.clone()),
             sysctls: (!self.sysctls.is_empty()).then(|| {
@@ -1037,6 +1084,43 @@ mod tests {
         let host_config = body.host_config.unwrap();
         assert_eq!(host_config.memory, Some(256 * 1024 * 1024));
         assert_eq!(host_config.nano_cpus, Some(500_000_000));
+    }
+
+    #[test]
+    fn devices_and_gpu_requests_land_in_host_config() {
+        let mut spec = base_spec();
+        let host = spec.to_create_body().host_config.unwrap();
+        assert_eq!(host.devices, None);
+        assert_eq!(host.device_requests, None);
+
+        spec.devices.push(DeviceMount {
+            host_path: "/dev/dri".to_string(),
+            container_path: "/dev/dri".to_string(),
+            permissions: "rwm".to_string(),
+        });
+        spec.gpu_requests.push(GpuRequest {
+            driver: "nvidia".to_string(),
+            count: -1,
+            device_ids: vec![],
+            capabilities: vec![vec!["gpu".to_string()]],
+        });
+        spec.gpu_requests.push(GpuRequest {
+            driver: "nvidia".to_string(),
+            count: 0,
+            device_ids: vec!["0".to_string()],
+            capabilities: vec![vec!["gpu".to_string()]],
+        });
+        let host = spec.to_create_body().host_config.unwrap();
+        let device = &host.devices.unwrap()[0];
+        assert_eq!(device.path_on_host.as_deref(), Some("/dev/dri"));
+        assert_eq!(device.path_in_container.as_deref(), Some("/dev/dri"));
+        assert_eq!(device.cgroup_permissions.as_deref(), Some("rwm"));
+        let requests = host.device_requests.unwrap();
+        assert_eq!(requests[0].driver.as_deref(), Some("nvidia"));
+        assert_eq!(requests[0].count, Some(-1));
+        assert_eq!(requests[0].device_ids, None);
+        assert_eq!(requests[0].capabilities, Some(vec![vec!["gpu".to_string()]]));
+        assert_eq!(requests[1].device_ids, Some(vec!["0".to_string()]));
     }
 
     #[test]

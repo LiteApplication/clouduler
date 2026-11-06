@@ -24,7 +24,7 @@ pub use netalloc::{
 };
 pub use stack::{
     mute_matches, validate_stack_name, AlertSeverity, AllowedHost, AllowedPorts, AllowedTarget,
-    Authenticated, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, BoundPort, ByteSize, Command,
+    Authenticated, GpuRequirement, DeviceCount, DeviceMapping, DeviceRequest, NVIDIA_DRIVER, Reservations, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, BoundPort, ByteSize, Command,
     CorsPolicy, Deploy, DeployMode, DeployRestartPolicy, DockerSocket, DockerSocketMode,
     ExposePort, Headers, Healthcheck, HealthcheckTest, LogRule, LogStream, Middleware, ObjectRef,
     Placement, PortMapping, PortRange, Protocol, ProxyRoute, PublishMode, RedirectRegex,

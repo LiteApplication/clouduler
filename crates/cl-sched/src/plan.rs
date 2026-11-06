@@ -14,6 +14,47 @@ fn to_port_protocol(protocol: Protocol) -> PortProtocol {
     }
 }
 
+/// The GPUs and host devices a service asks for, which placement matches
+/// against what each node reported (`NodeState::gpus`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GpuNeeds {
+    /// `deploy.resources.reservations.devices`, one entry per request:
+    /// the least GPUs it needs, and the ids it names.
+    pub nvidia: Vec<NvidiaNeed>,
+    /// Host paths from `devices:`.
+    pub devices: BTreeSet<String>,
+}
+
+impl GpuNeeds {
+    pub fn is_empty(&self) -> bool {
+        self.nvidia.is_empty() && self.devices.is_empty()
+    }
+
+    fn of(service: &Service) -> Self {
+        GpuNeeds {
+            nvidia: service
+                .device_requests()
+                .iter()
+                .map(|r| NvidiaNeed {
+                    count: r.min_gpus(),
+                    device_ids: r.device_ids.clone(),
+                })
+                .collect(),
+            devices: service
+                .device_mappings()
+                .into_iter()
+                .map(|d| d.host)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NvidiaNeed {
+    pub count: usize,
+    pub device_ids: Vec<String>,
+}
+
 /// One instance the cluster should be running, with everything placement needs
 /// to decide where it can go.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +103,8 @@ pub struct Desired {
     /// service declares no memory limit - `rebalance::plan` then falls back
     /// to balancing this instance by raw instance count instead of weight.
     pub memory_bytes: Option<u64>,
+    /// GPUs and host devices this instance needs on its node.
+    pub gpu_needs: GpuNeeds,
 }
 
 impl Desired {
@@ -169,6 +212,7 @@ pub fn expand(
                 proxy_hosts: proxy_hosts.clone(),
                 colocate_key: file.colocate_group(service_name),
                 memory_bytes: service.memory_limit_bytes(),
+                gpu_needs: GpuNeeds::of(service),
             });
         }
     }

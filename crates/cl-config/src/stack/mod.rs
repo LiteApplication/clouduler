@@ -6,6 +6,7 @@ mod allowed;
 mod bytesize;
 mod de;
 mod deploy;
+mod devices;
 mod derived;
 mod extensions;
 mod healthcheck;
@@ -19,9 +20,10 @@ pub use alerts::{mute_matches, AlertSeverity, LogRule, LogStream, StackAlerts};
 pub use allowed::{AllowedHost, AllowedPorts, AllowedTarget};
 pub use bytesize::ByteSize;
 pub use deploy::{
-    Deploy, DeployMode, DeployRestartPolicy, Placement, ResourceSpec, Resources, UpdateConfig,
-    MAX_REPLICAS,
+    Deploy, DeployMode, DeployRestartPolicy, Placement, Reservations, ResourceSpec, Resources,
+    UpdateConfig, MAX_REPLICAS,
 };
+pub use devices::{DeviceCount, DeviceMapping, DeviceRequest, NVIDIA_DRIVER};
 pub use extensions::{
     Authenticated, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, CorsPolicy, DockerSocket,
     DockerSocketMode, ExposePort, Headers, Middleware, ProxyRoute, RedirectRegex, ServiceAction,
@@ -30,7 +32,7 @@ pub use extensions::{
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};
 pub use port::{PortMapping, PortRange, Protocol, PublishMode};
-pub use requirements::{BoundPort, StackRequirements};
+pub use requirements::{BoundPort, GpuRequirement, StackRequirements};
 pub use validate::validate_stack_name;
 pub use volume::{TmpfsOptions, VolumeMount};
 
@@ -169,6 +171,10 @@ pub struct Service {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub sysctls: BTreeMap<String, String>,
+    /// Host devices handed to the container, `HOST[:CONTAINER[:PERMISSIONS]]`,
+    /// host path under `/dev/` (see `DeviceMapping::parse`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<String>,
     /// Makes the container's root filesystem read-only. A service that writes
     /// outside its declared volumes will fail rather than silently
     /// accumulating state nothing backs up.

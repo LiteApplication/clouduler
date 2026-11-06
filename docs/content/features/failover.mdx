@@ -147,6 +147,8 @@ It is a worst-case warning, not a sign that something is broken: it assumes a co
 
 The `failover` block rejects unknown keys, so a typo fails config loading with `unknown field`. Fixed internals you cannot change: quorum is re-checked every 500 ms and requires leader contact within 1.5 s; raft heartbeat 500 ms; scheduler sweep 10 s.
 
+A service that needs a GPU or a `devices:` path is only rescheduled onto a node that reported it. If no other node has one, its instances stay in `pending_placement` until the node returns. See [GPUs and devices](/docs/features/placement#gpus-and-devices).
+
 ## Quirks and gotchas
 
 The failover timers `node_timeout` (60s), `fence_timeout` (15s) and `probe_interval` (5s by default) are read when the daemon starts; `stop_grace` (30s) is live. The leader's failure detector uses a 500 ms heartbeat and a 1.5 s quorum acknowledgement window, and the scheduler sweeps every 10 seconds.

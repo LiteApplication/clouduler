@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use cl_config::{Command, DockerSocketMode, RestartPolicy as StackRestart, Service};
 use cl_docker::{
-    BindMount, ContainerSpec, Healthcheck, PortMapping, PortProtocol, ResourceLimits,
+    BindMount, ContainerSpec, DeviceMount, GpuRequest, Healthcheck, PortMapping, PortProtocol, ResourceLimits,
     RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
 };
 use cl_raft::ids::InstanceId;
@@ -206,6 +206,25 @@ pub fn build(
             .unwrap_or_default(),
         restart_policy: restart_policy(service),
         resources: resources(service),
+        devices: service
+            .device_mappings()
+            .into_iter()
+            .map(|d| DeviceMount {
+                host_path: d.host,
+                container_path: d.container,
+                permissions: d.permissions,
+            })
+            .collect(),
+        gpu_requests: service
+            .device_requests()
+            .iter()
+            .map(|r| GpuRequest {
+                driver: r.driver_name().to_string(),
+                count: r.docker_count(),
+                device_ids: r.device_ids.clone(),
+                capabilities: r.capabilities.clone(),
+            })
+            .collect(),
         healthcheck: healthcheck(service),
         stop_signal: service.stop_signal.clone(),
         pinned_gateway: placement.egress_network.as_ref().and(placement.resolver),
@@ -892,6 +911,61 @@ mod tests {
 
         assert_eq!(spec.resources.memory_bytes, Some(512 * 1024 * 1024));
         assert_eq!(spec.resources.nano_cpus, Some(1_500_000_000));
+    }
+
+    #[test]
+    fn gpu_requests_and_devices_map_to_docker() {
+        let s = service(
+            r#"
+services:
+  web:
+    image: nginx
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/video0:/dev/cam:r
+    deploy:
+      resources:
+        reservations:
+          memory: 128M
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+            - driver: nvidia
+              device_ids: ["0", "GPU-abc"]
+              capabilities: [[gpu], [compute]]
+"#,
+        );
+        let spec = build(
+            &instance(),
+            &s,
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
+            },
+            Placement::default(),
+            None,
+            1,
+        );
+
+        assert_eq!(spec.devices.len(), 2);
+        assert_eq!(spec.devices[0].host_path, "/dev/dri");
+        assert_eq!(spec.devices[0].permissions, "rwm");
+        assert_eq!(spec.devices[1].container_path, "/dev/cam");
+        assert_eq!(spec.devices[1].permissions, "r");
+        assert_eq!(spec.gpu_requests.len(), 2);
+        assert_eq!(spec.gpu_requests[0].driver, "nvidia");
+        assert_eq!(spec.gpu_requests[0].count, -1);
+        assert_eq!(
+            spec.gpu_requests[0].capabilities,
+            vec![vec!["gpu".to_string()]]
+        );
+        assert_eq!(spec.gpu_requests[1].count, 0);
+        assert_eq!(spec.gpu_requests[1].device_ids, ["0", "GPU-abc"]);
+        assert_eq!(spec.gpu_requests[1].capabilities.len(), 2);
+        assert_eq!(spec.resources.memory_bytes, None, "reservations are not limits");
     }
 
     #[test]

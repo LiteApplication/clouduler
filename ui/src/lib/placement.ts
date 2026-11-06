@@ -181,6 +181,54 @@ export function buildPlacementRows(
       reason: () => 'port closed',
     });
   }
+  // An explicit pin to a node (`x-clouduler.node`, or `node.hostname == name`)
+  // overrides what the node reported about its GPUs: the scheduler logs a
+  // warning and places there anyway, so the user can still force it.
+  const pinnedHere = (n: string) =>
+    pinnedNode === n ||
+    requirements.placement_constraints.some((raw) => {
+      const c = parseConstraint(raw);
+      return !!c && c.equal && (c.key === 'node.hostname' || c.key === 'node.id') && c.value === n;
+    });
+  const gpuRequests = requirements.gpu_requests ?? [];
+  if (gpuRequests.length > 0) {
+    const wanted = gpuRequests.reduce((sum, r) => sum + r.count, 0);
+    const ids = gpuRequests.flatMap((r) => r.device_ids);
+    const nvidiaCount = (n: string) => {
+      const g = cluster.nodes[n]?.gpus;
+      return g ? Math.max(g.nvidia.length, g.nvidia_devices.length) : 0;
+    };
+    const hasId = (n: string, id: string) => {
+      const g = cluster.nodes[n]?.gpus;
+      if (!g) return false;
+      if (g.nvidia.some((x) => x.uuid === id || String(x.index) === id)) return true;
+      return g.nvidia.length === 0 && /^\d+$/.test(id) && g.nvidia_devices.includes(`/dev/nvidia${id}`);
+    };
+    const shortfall = (n: string): string | undefined => {
+      if (nvidiaCount(n) === 0) return 'no NVIDIA GPU';
+      const tk = cluster.nodes[n]?.gpus;
+      if (!tk?.nvidia_runtime && !tk?.nvidia_hook) return 'no NVIDIA container toolkit';
+      const missing = ids.find((id) => !hasId(n, id));
+      if (missing !== undefined) return `no GPU ${missing}`;
+      if (nvidiaCount(n) < wanted) return `${nvidiaCount(n)} of ${wanted} GPUs`;
+      return undefined;
+    };
+    rows.push({
+      id: 'gpu: nvidia',
+      label: `gpu: ${wanted} NVIDIA`,
+      detail: ids.length > 0 ? `ids ${ids.join(', ')}` : undefined,
+      ok: (n) => shortfall(n) === undefined || pinnedHere(n),
+      reason: (n) => shortfall(n),
+    });
+  }
+  for (const path of requirements.host_devices ?? []) {
+    rows.push({
+      id: `device: ${path}`,
+      label: `device: ${path}`,
+      ok: (n) => (cluster.nodes[n]?.gpus?.dev_paths ?? []).includes(path.replace(/\/+$/, '')) || pinnedHere(n),
+      reason: () => 'no such device',
+    });
+  }
   return rows;
 }
 

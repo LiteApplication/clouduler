@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::devices::DeviceRequest;
+
 /// `deploy.mode`: replicated runs `replicas` copies, global runs one per node.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +59,21 @@ pub fn parse_memory_bytes(raw: &str) -> Option<u64> {
         .and_then(|n| n.checked_mul(multiplier))
 }
 
+/// `deploy.resources.reservations`. Only `devices` has any effect: `cpus` and
+/// `memory` are parsed and otherwise ignored, as compose reservations are
+/// scheduler hints clouduler does not use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Reservations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    /// Device requests (GPUs), handed to docker as `DeviceRequests`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceRequest>,
+}
+
 /// The most replicas a single service may ask for. `plan::expand` builds one
 /// `Desired` per replica on every leader pass, so an unbounded count is a way
 /// to exhaust a leader's memory with one line of yaml.
@@ -69,7 +86,7 @@ pub struct Resources {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ResourceSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reservations: Option<ResourceSpec>,
+    pub reservations: Option<Reservations>,
 }
 
 /// `deploy.restart_policy`.

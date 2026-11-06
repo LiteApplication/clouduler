@@ -165,6 +165,7 @@ export class ScenarioBuilder {
         binary_hash: fakeDigest(`bin-${n.name}`).slice(7, 39),
         node_pubkey: `pk-${n.name}`,
         memory_total_bytes: (n.memGiB ?? 16) * GIB,
+        gpus: { nvidia_devices: [], nvidia: [], nvidia_runtime: false, nvidia_hook: null, render_nodes: [], dev_paths: [] },
         last_resort: false,
         version: n.version ?? '0.9.10',
       };

@@ -7,10 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cl_raft::ids::InstanceId;
+use tracing::warn;
 use cl_raft::state::{ClusterState, NodeState, Request, Role, VolumeState};
 
 use crate::error::{Result, SchedError};
-use crate::plan::Desired;
+use crate::plan::{Desired, GpuNeeds};
 
 /// What the scheduler wants changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +193,71 @@ fn holds_usable_copy(state: &ClusterState, record: &VolumeState, node: &str) -> 
         .any(|(name, generation)| *generation > held && reachable(name))
 }
 
+/// Why `node` cannot give an instance the GPUs and devices it asked for, as
+/// the tail of a sentence about the node. `None` when it can.
+///
+/// What a node has is what it reported itself; one that never reported (an
+/// older version) has none.
+fn gpu_shortfall(node: &NodeState, needs: &GpuNeeds) -> Option<String> {
+    let gpus = &node.gpus;
+    if !needs.nvidia.is_empty() {
+        let wanted: usize = needs.nvidia.iter().map(|n| n.count).sum();
+        if gpus.nvidia_count() == 0 {
+            return Some("has no NVIDIA GPU".to_string());
+        }
+        if !gpus.nvidia_ready() {
+            return Some(
+                "has no NVIDIA container toolkit (no nvidia runtime in docker, no nvidia-container-runtime-hook or nvidia-container-cli)".to_string(),
+            );
+        }
+        for id in needs.nvidia.iter().flat_map(|n| &n.device_ids) {
+            if !gpus.has_nvidia_id(id) {
+                return Some(format!("has no NVIDIA GPU with id {id}"));
+            }
+        }
+        if gpus.nvidia_count() < wanted {
+            return Some(format!(
+                "has {} NVIDIA GPU(s), the service needs {wanted}",
+                gpus.nvidia_count()
+            ));
+        }
+    }
+    for path in &needs.devices {
+        if !gpus.has_device(path) {
+            return Some(format!("has no host device {path}"));
+        }
+    }
+    None
+}
+
+/// Warn once per instance and node that a pin overrides a GPU shortfall: the
+/// scheduler passes every few seconds and the same line each time is noise.
+fn warn_pinned_without_gpu(desired: &Desired, node: &NodeState, missing: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<BTreeSet<(String, String)>>> = OnceLock::new();
+    let key = (desired.id.to_string(), node.name.clone());
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if seen.insert(key) {
+        warn!(
+            instance = %desired.id,
+            node = %node.name,
+            "node {missing}, placing there anyway because it is pinned"
+        );
+    }
+}
+
+/// Whether the operator named this node for the instance: `x-clouduler.node`,
+/// or a `node.hostname == name` constraint.
+fn is_explicitly_pinned(node: &NodeState, desired: &Desired, constraints: &[Constraint]) -> bool {
+    desired.pinned_node.as_deref() == Some(node.name.as_str())
+        || constraints.iter().any(|c| {
+            c.equal && matches!(c.key.as_str(), "node.hostname" | "node.id") && c.value == node.name
+        })
+}
+
 /// Why a node was rejected, kept so the error can say what went wrong.
 fn rejection(
     state: &ClusterState,
@@ -275,6 +341,14 @@ fn rejection(
             ));
         }
     }
+    if let Some(missing) = gpu_shortfall(node, &desired.gpu_needs) {
+        // An explicit pin to this node overrides what it reported, so a node
+        // whose detection fails (or that predates detection) can still be
+        // forced. `candidates` logs the warning.
+        if !is_explicitly_pinned(node, desired, constraints) {
+            return Some(format!("{} {missing}", node.name));
+        }
+    }
     for constraint in constraints {
         if !constraint.matches(node) {
             return Some(format!(
@@ -346,7 +420,12 @@ pub fn candidates<'a>(
             served_drives,
             everywhere_networks,
         ) {
-            None => eligible.push(node),
+            None => {
+                if let Some(missing) = gpu_shortfall(node, &desired.gpu_needs) {
+                    warn_pinned_without_gpu(desired, node, &missing);
+                }
+                eligible.push(node)
+            }
             Some(reason) => rejected.push(reason),
         }
     }
@@ -637,6 +716,7 @@ mod tests {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            gpus: Default::default(),
             version: Default::default(),
         }
     }
@@ -719,6 +799,128 @@ mod tests {
         state
     }
 
+    fn gpu_node(name: &str, nvidia: usize, runtime: bool, devs: &[&str]) -> NodeState {
+        let mut n = node(name, Role::Worker, &[]);
+        n.gpus.nvidia = (0..nvidia)
+            .map(|i| cl_raft::state::NvidiaGpu {
+                index: i as u32,
+                uuid: format!("GPU-{name}-{i}"),
+                name: "RTX".into(),
+            })
+            .collect();
+        n.gpus.nvidia_runtime = runtime;
+        n.gpus.dev_paths = devs.iter().map(|d| d.to_string()).collect();
+        n
+    }
+
+    fn wants_nvidia(count: usize, ids: &[&str]) -> Desired {
+        let mut item = desired("ml", 0);
+        item.gpu_needs.nvidia.push(crate::plan::NvidiaNeed {
+            count,
+            device_ids: ids.iter().map(|s| s.to_string()).collect(),
+        });
+        item
+    }
+
+    fn eligible_names(state: &ClusterState, item: &Desired) -> Vec<String> {
+        let (eligible, _) =
+            candidates(state, item, &no_served(), &no_everywhere()).expect("candidates");
+        eligible.iter().map(|n| n.name.clone()).collect()
+    }
+
+    fn rejections(state: &ClusterState, item: &Desired) -> Vec<String> {
+        candidates(state, item, &no_served(), &no_everywhere())
+            .expect("candidates")
+            .1
+    }
+
+    #[test]
+    fn an_nvidia_request_needs_enough_gpus_and_the_runtime() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::UpsertNode(gpu_node("none", 0, true, &[])));
+        state.apply(&Request::UpsertNode(gpu_node("noruntime", 2, false, &[])));
+        state.apply(&Request::UpsertNode(gpu_node("one", 1, true, &[])));
+        state.apply(&Request::UpsertNode(gpu_node("two", 2, true, &[])));
+
+        assert_eq!(eligible_names(&state, &wants_nvidia(1, &[])), ["one", "two"]);
+        assert_eq!(eligible_names(&state, &wants_nvidia(2, &[])), ["two"]);
+        assert!(eligible_names(&state, &wants_nvidia(3, &[])).is_empty());
+
+        let why = rejections(&state, &wants_nvidia(2, &[]));
+        assert!(why.contains(&"none has no NVIDIA GPU".to_string()), "{why:?}");
+        assert!(
+            why.iter()
+                .any(|r| r.starts_with("noruntime has no NVIDIA container toolkit")),
+            "{why:?}"
+        );
+        assert!(
+            why.contains(&"one has 1 NVIDIA GPU(s), the service needs 2".to_string()),
+            "{why:?}"
+        );
+    }
+
+    #[test]
+    fn the_toolkit_hook_counts_without_a_registered_runtime() {
+        let mut state = ClusterState::default();
+        let mut hooked = gpu_node("hooked", 1, false, &[]);
+        hooked.gpus.nvidia_hook = Some("/usr/bin/nvidia-container-runtime-hook".into());
+        state.apply(&Request::UpsertNode(hooked));
+        state.apply(&Request::UpsertNode(gpu_node("bare", 1, false, &[])));
+        assert_eq!(eligible_names(&state, &wants_nvidia(1, &[])), ["hooked"]);
+    }
+
+    #[test]
+    fn named_gpu_ids_must_exist_on_the_node() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::UpsertNode(gpu_node("a", 1, true, &[])));
+        state.apply(&Request::UpsertNode(gpu_node("b", 2, true, &[])));
+        assert_eq!(eligible_names(&state, &wants_nvidia(1, &["1"])), ["b"]);
+        assert_eq!(
+            eligible_names(&state, &wants_nvidia(1, &["GPU-a-0"])),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn host_devices_must_exist_on_the_node() {
+        let mut state = ClusterState::default();
+        state.apply(&Request::UpsertNode(gpu_node("igpu", 0, false, &["/dev/dri", "/dev/dri/renderD128"])));
+        state.apply(&Request::UpsertNode(gpu_node("plain", 0, false, &[])));
+        let mut item = desired("jellyfin", 0);
+        item.gpu_needs.devices = ["/dev/dri".to_string()].into();
+        assert_eq!(eligible_names(&state, &item), ["igpu"]);
+        assert_eq!(rejections(&state, &item), ["plain has no host device /dev/dri"]);
+    }
+
+    #[test]
+    fn a_node_that_never_reported_has_no_gpus_unless_pinned_to() {
+        let mut state = ClusterState::default();
+        // `cluster()` nodes use the default, unreported `gpus`.
+        state.apply(&Request::UpsertNode(node("old", Role::Worker, &[])));
+        state.apply(&Request::UpsertNode(gpu_node("new", 1, true, &[])));
+        let item = wants_nvidia(1, &[]);
+        assert_eq!(eligible_names(&state, &item), ["new"]);
+
+        let mut pinned = item.clone();
+        pinned.pinned_node = Some("old".into());
+        assert_eq!(eligible_names(&state, &pinned), ["old"]);
+
+        let mut by_constraint = item.clone();
+        by_constraint.constraints = vec!["node.hostname==old".into()];
+        assert_eq!(eligible_names(&state, &by_constraint), ["old"]);
+
+        // A negated or unrelated constraint is not a pin.
+        let mut not_pin = item;
+        not_pin.constraints = vec!["node.hostname!=new".into()];
+        assert!(eligible_names(&state, &not_pin).is_empty());
+    }
+
+    #[test]
+    fn a_service_without_gpu_needs_ignores_what_nodes_report() {
+        let state = cluster();
+        assert_eq!(eligible_names(&state, &desired("web", 0)).len(), 3);
+    }
+
     fn desired(service: &str, index: u32) -> Desired {
         Desired {
             id: InstanceId::new("site", service, index),
@@ -734,6 +936,7 @@ mod tests {
             proxy_hosts: BTreeSet::new(),
             colocate_key: None,
             memory_bytes: None,
+            gpu_needs: Default::default(),
         }
     }
 

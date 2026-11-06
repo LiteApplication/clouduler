@@ -154,7 +154,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*': [
     'image', 'hostname', 'command', 'entrypoint', 'environment', 'env_file', 'labels', 'volumes',
     'ports', 'networks', 'depends_on', 'healthcheck', 'restart', 'user', 'working_dir', 'cap_add',
-    'cap_drop', 'sysctls', 'read_only', 'stop_grace_period', 'stop_signal', 'configs', 'secrets',
+    'cap_drop', 'sysctls', 'devices', 'read_only', 'stop_grace_period', 'stop_signal', 'configs', 'secrets',
     'deploy', 'x-clouduler',
   ],
   'services.*.healthcheck': ['test', 'interval', 'timeout', 'start_period', 'retries', 'disable'],
@@ -164,7 +164,8 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.deploy.placement': ['constraints'],
   'services.*.deploy.resources': ['limits', 'reservations'],
   'services.*.deploy.resources.limits': ['cpus', 'memory'],
-  'services.*.deploy.resources.reservations': ['cpus', 'memory'],
+  'services.*.deploy.resources.reservations': ['cpus', 'memory', 'devices'],
+  'services.*.deploy.resources.reservations.devices': ['driver', 'count', 'device_ids', 'capabilities'],
   'services.*.deploy.restart_policy': ['condition', 'delay', 'max_attempts', 'window'],
   'services.*.deploy.update_config': ['parallelism', 'delay', 'order', 'failure_action'],
   'services.*.x-clouduler': [

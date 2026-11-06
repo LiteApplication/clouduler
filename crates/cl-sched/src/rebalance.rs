@@ -276,6 +276,7 @@ mod tests {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes,
+            gpus: Default::default(),
             version: Default::default(),
         }
     }
@@ -299,6 +300,7 @@ mod tests {
             proxy_hosts: Default::default(),
             colocate_key: None,
             memory_bytes,
+            gpu_needs: Default::default(),
         }
     }
 

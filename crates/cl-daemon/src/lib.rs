@@ -13,6 +13,7 @@ pub mod docker_api;
 pub mod drives;
 pub mod egress;
 pub mod expose;
+pub mod gpu;
 pub mod internal_dns;
 pub mod log_alerts;
 pub mod migration;

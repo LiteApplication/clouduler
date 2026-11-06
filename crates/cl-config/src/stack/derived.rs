@@ -9,6 +9,25 @@ use crate::cluster::{ClusterConfig, NetworkKind};
 use super::{AutoUpdate, AutoUpdateSetting, Service, StackFile, DEFAULT_SYNC_INTERVAL};
 
 impl Service {
+    /// `deploy.resources.reservations.devices`.
+    pub fn device_requests(&self) -> &[super::devices::DeviceRequest] {
+        self.deploy
+            .as_ref()
+            .and_then(|d| d.resources.as_ref())
+            .and_then(|r| r.reservations.as_ref())
+            .map(|r| r.devices.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// `devices:` entries that parse. Invalid ones are skipped here;
+    /// validation is what rejects them.
+    pub fn device_mappings(&self) -> Vec<super::devices::DeviceMapping> {
+        self.devices
+            .iter()
+            .filter_map(|e| super::devices::DeviceMapping::parse(e).ok())
+            .collect()
+    }
+
     /// Drives this service mounts a volume from.
     pub fn drives_used(&self) -> BTreeSet<String> {
         self.volumes

@@ -136,6 +136,31 @@ describe('NodeDetail configuration section', () => {
     expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument();
   });
 
+  it('lists the GPUs the node reported, and warns when docker has no nvidia runtime', async () => {
+    cluster.nodes.n1.gpus = {
+      nvidia_devices: ['/dev/nvidia0'],
+      nvidia: [{ index: 0, uuid: 'GPU-abc', name: 'RTX 3090' }],
+      nvidia_runtime: false,
+      render_nodes: [{ path: '/dev/dri/renderD128', driver: 'i915' }],
+      dev_paths: [],
+    };
+    try {
+      renderNodeDetail();
+      await waitFor(() => expect(screen.getByText('0: RTX 3090')).toBeInTheDocument());
+      expect(screen.getByText('GPU-abc')).toBeInTheDocument();
+      expect(screen.getByText('/dev/dri/renderD128')).toBeInTheDocument();
+      expect(screen.getByText(/no NVIDIA container toolkit binary/i)).toBeInTheDocument();
+    } finally {
+      delete cluster.nodes.n1.gpus;
+    }
+  });
+
+  it('shows no GPU panel for a node without GPUs', async () => {
+    renderNodeDetail();
+    await waitFor(() => expect(screen.getByText('manager')).toBeInTheDocument());
+    expect(screen.queryByText('GPUs')).not.toBeInTheDocument();
+  });
+
   it('hides the Edit button for a viewer', async () => {
     isAdmin = false;
     renderNodeDetail();

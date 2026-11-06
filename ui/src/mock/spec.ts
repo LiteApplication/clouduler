@@ -117,6 +117,8 @@ function requirementsOf(services: ParsedService[], networks: string[], domains: 
     placement_constraints: [],
     bound_ports: [],
     whole_drive_mounts: [],
+    gpu_requests: [],
+    host_devices: [],
     volumes,
     allowed: perService ? {} : Object.fromEntries(uniq([...networks, ...services.flatMap((s) => s.networks)]).map((n) => [n, null])),
   };

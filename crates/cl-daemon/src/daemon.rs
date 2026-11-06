@@ -422,7 +422,14 @@ pub async fn run(
         failover.probe_interval,
     ));
     cl_api::node_metrics::spawn();
-    let self_report = tokio::spawn(report_self(node_name.clone(), cluster.clone(), node_pubkey));
+    let (gpus_tx, gpus_rx) = tokio::sync::watch::channel(None);
+    let gpu_detector = tokio::spawn(crate::gpu::run(docker.clone(), gpus_tx));
+    let self_report = tokio::spawn(report_self(
+        node_name.clone(),
+        cluster.clone(),
+        node_pubkey,
+        gpus_rx,
+    ));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
     let git_backup = tokio::spawn(watch_git_backup(
         cluster.clone(),
@@ -499,6 +506,7 @@ pub async fn run(
     detector.abort();
     fencing.abort();
     docker_reconnect.abort();
+    gpu_detector.abort();
     docker_api.abort();
     scheduler.abort();
     if let Some((orchestrator, worker)) = self_update {
@@ -1741,10 +1749,11 @@ fn to_state(
         node_pubkey: current.and_then(|c| c.node_pubkey.clone()),
         memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
         version: current.map(|c| c.version.clone()).unwrap_or_default(),
+        gpus: current.map(|c| c.gpus.clone()).unwrap_or_default(),
     }
 }
 
-/// Keep this node's own `arch`, `binary_hash`, `version` and `memory_total_bytes`
+/// Keep this node's own `arch`, `binary_hash`, `version`, `memory_total_bytes` and `gpus`
 /// accurate in the roster. Unlike the rest of a `NodeState`, these fields
 /// describe facts only the node itself can observe, so every node runs this
 /// about itself regardless of leadership — the leader-driven `seed_roster`
@@ -1754,7 +1763,12 @@ fn to_state(
 /// such an entry keeps whatever was stored (empty/zero) forever otherwise,
 /// since `to_state` only fills a field in when the node is being created for
 /// the first time.
-async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: Option<String>) {
+async fn report_self(
+    node_name: String,
+    cluster: Arc<ClusterNode>,
+    node_pubkey: Option<String>,
+    gpus_rx: tokio::sync::watch::Receiver<Option<cl_raft::state::NodeGpus>>,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
@@ -1766,7 +1780,15 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
         let version = env!("CARGO_PKG_VERSION").to_string();
+        // Until the first detection finishes, keep what is already stored
+        // rather than report a restarting node as having no GPUs.
+        let gpus = gpus_rx
+            .borrow()
+            .clone()
+            .map(Box::new)
+            .unwrap_or_else(|| current.gpus.clone());
         if current.version == version
+            && current.gpus == gpus
             && current.arch == arch
             && current.binary_hash == binary_hash
             && current.node_pubkey == node_pubkey
@@ -1780,6 +1802,7 @@ async fn report_self(node_name: String, cluster: Arc<ClusterNode>, node_pubkey: 
             node_pubkey: node_pubkey.clone(),
             memory_total_bytes,
             version,
+            gpus,
             ..current.clone()
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {

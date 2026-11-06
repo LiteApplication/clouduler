@@ -16,7 +16,7 @@ pub mod spec;
 pub use error::{Result, SchedError};
 pub use materialize::{docker_api_socket_path, Materialized, Materializer};
 pub use place::{candidates, place, Constraint, Decision, PlaceOutcome, Unplaceable};
-pub use plan::{expand, Desired};
+pub use plan::{expand, Desired, GpuNeeds, NvidiaNeed};
 pub use progress::UpdateReporter;
 pub use reconcile::{
     diff, pull_finished, pull_started, Action, PullTracker, Reconciler, Target, LABEL_REVISION,

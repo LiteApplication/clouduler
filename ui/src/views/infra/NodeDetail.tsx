@@ -58,6 +58,7 @@ export function NodeDetail() {
   const unreachable = !!cluster?.unreachable.includes(name);
   const view = node ? nodeStatus(node, unreachable) : null;
   const usage = detail?.usage;
+  const gpus = node?.gpus && (node.gpus.nvidia.length > 0 || node.gpus.nvidia_devices.length > 0 || node.gpus.render_nodes.length > 0) ? node.gpus : null;
 
   const setAvailability = async (to: 'active' | 'drain') => {
     if (to === 'drain') {
@@ -200,6 +201,29 @@ export function NodeDetail() {
             )}
           </Panel>
         </div>
+
+        {gpus && (
+          <Panel title="GPUs">
+            {gpus.nvidia.map((g) => (
+              <div className="li" key={g.uuid}><strong>{g.index}: {g.name}</strong><code>{g.uuid}</code></div>
+            ))}
+            {gpus.nvidia.length === 0 && gpus.nvidia_devices.length > 0 && (
+              <div className="li"><strong>NVIDIA</strong><code>{gpus.nvidia_devices.join(', ')}</code></div>
+            )}
+            {gpus.render_nodes.map((r) => (
+              <div className="li" key={r.path}><strong>{r.driver || 'render node'}</strong><code>{r.path}</code></div>
+            ))}
+            {gpus.nvidia_devices.length > 0 && (
+              <p className="cl-sm cl-muted">
+                {gpus.nvidia_runtime
+                  ? 'Docker has the nvidia runtime, so services can request these GPUs.'
+                  : gpus.nvidia_hook
+                    ? `Found ${gpus.nvidia_hook}, so services can request these GPUs.`
+                    : 'Docker has no nvidia runtime and no NVIDIA container toolkit binary was found: install the toolkit before a service can request these GPUs.'}
+              </p>
+            )}
+          </Panel>
+        )}
 
         {configNode && editing && draft && (
           <Panel title="Edit node config">

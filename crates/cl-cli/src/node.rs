@@ -62,6 +62,7 @@ pub async fn add(
             binary_hash: String::new(),
             node_pubkey: None,
             memory_total_bytes: 0,
+            gpus: Default::default(),
             version: Default::default(),
         }))
         .await

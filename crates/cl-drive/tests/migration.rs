@@ -171,6 +171,7 @@ impl Harness {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            gpus: Default::default(),
             version: Default::default(),
         }))
         .await
@@ -191,6 +192,7 @@ impl Harness {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            gpus: Default::default(),
             version: Default::default(),
         }))
         .await

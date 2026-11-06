@@ -99,6 +99,93 @@ pub struct NodeState {
     /// reported in. The ui shows it; nothing decides on it.
     #[serde(default)]
     pub version: String,
+    /// GPUs and GPU-related device nodes this node found on itself,
+    /// self-reported by `report_self` in `cl-daemon`. Empty until the node has
+    /// reported (and on a node too old to report it at all), which the
+    /// scheduler reads as "no GPUs". Boxed to keep `Request::UpsertNode`
+    /// from growing.
+    #[serde(default)]
+    pub gpus: Box<NodeGpus>,
+}
+
+/// One NVIDIA GPU, as `nvidia-smi` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvidiaGpu {
+    pub index: u32,
+    pub uuid: String,
+    pub name: String,
+}
+
+/// A DRI render node (`/dev/dri/renderD*`), with the kernel driver behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderNode {
+    pub path: String,
+    /// `i915`, `xe`, `amdgpu`, ... Empty when sysfs did not say.
+    #[serde(default)]
+    pub driver: String,
+}
+
+/// What a node detected about its GPUs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeGpus {
+    /// `/dev/nvidia[0-9]*` device nodes present on the host.
+    #[serde(default)]
+    pub nvidia_devices: Vec<String>,
+    /// GPUs listed by `nvidia-smi`. May be empty on a node with device nodes
+    /// but no `nvidia-smi` on its path.
+    #[serde(default)]
+    pub nvidia: Vec<NvidiaGpu>,
+    /// Whether docker has an `nvidia` runtime registered (the NVIDIA
+    /// container toolkit is configured).
+    #[serde(default)]
+    pub nvidia_runtime: bool,
+    /// Path of `nvidia-container-runtime-hook` or `nvidia-container-cli`
+    /// when one was found in the usual PATH directories. Docker's device
+    /// requests also work with only this and no registered runtime.
+    #[serde(default)]
+    pub nvidia_hook: Option<String>,
+    #[serde(default)]
+    pub render_nodes: Vec<RenderNode>,
+    /// Host device paths a service's `devices:` entry may name: the entries
+    /// directly under `/dev` and under a few device directories (`dri`, `snd`,
+    /// `input`, `dvb`, `nvidia-caps`), plus those directories themselves.
+    #[serde(default)]
+    pub dev_paths: BTreeSet<String>,
+}
+
+impl NodeGpus {
+    /// How many NVIDIA GPUs docker could hand out: whichever of `nvidia-smi`
+    /// and the device nodes saw more.
+    pub fn nvidia_count(&self) -> usize {
+        self.nvidia.len().max(self.nvidia_devices.len())
+    }
+
+    /// Whether `id` (a GPU index or uuid, as `device_ids` takes) names a GPU
+    /// this node has.
+    pub fn has_nvidia_id(&self, id: &str) -> bool {
+        if self
+            .nvidia
+            .iter()
+            .any(|g| g.uuid == id || g.index.to_string() == id)
+        {
+            return true;
+        }
+        // No nvidia-smi: only an index can be checked, against the device nodes.
+        self.nvidia.is_empty()
+            && id
+                .parse::<usize>()
+                .is_ok_and(|i| self.nvidia_devices.contains(&format!("/dev/nvidia{i}")))
+    }
+
+    /// Whether docker can serve an NVIDIA device request: the `nvidia`
+    /// runtime is registered, or the toolkit's hook/cli binary is installed.
+    pub fn nvidia_ready(&self) -> bool {
+        self.nvidia_runtime || self.nvidia_hook.is_some()
+    }
+
+    pub fn has_device(&self, path: &str) -> bool {
+        self.dev_paths.contains(path.trim_end_matches('/'))
+    }
 }
 
 impl NodeState {
@@ -3897,6 +3984,7 @@ mod tests {
             binary_hash: Default::default(),
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
+            gpus: Default::default(),
             version: Default::default(),
         }
     }

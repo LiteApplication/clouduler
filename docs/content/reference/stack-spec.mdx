@@ -133,6 +133,7 @@ Each key under `services:` must be a DNS label (lowercase letters, digits and hy
   {"key": "cap_add", "type": "list of str", "reload": "n/a", "description": "Extra Linux capabilities."},
   {"key": "cap_drop", "type": "list of str", "reload": "n/a", "description": "Dropped capabilities."},
   {"key": "sysctls", "type": "map or list of key=value", "reload": "n/a", "description": "Kernel parameters for the container."},
+  {"key": "devices", "type": "list of str", "reload": "n/a", "description": "Host devices passed to the container, HOST[:CONTAINER[:PERMISSIONS]], for example /dev/dri:/dev/dri or /dev/dri/renderD128. Permissions are some of r, w, m (default rwm). Used for Intel and AMD GPUs.", "quirks": "The host path must be under /dev/. Anything else, or a path with .. in it, is a validation error. The service is only placed on nodes that report the path. See GPUs below."},
   {"key": "read_only", "type": "bool", "default": "false", "reload": "n/a", "description": "Read-only root filesystem. Writes outside declared volumes fail."},
   {"key": "stop_grace_period", "type": "duration", "default": "cluster failover.stop_grace (30s)", "reload": "n/a", "description": "How long a graceful stop may take before the kill.", "quirks": "Must be greater than zero and at most 600s."},
   {"key": "stop_signal", "type": "str", "default": "image STOPSIGNAL", "reload": "n/a", "description": "Signal for the graceful stop, for example SIGINT.", "quirks": "Must be SIG plus uppercase letters, or digits. Lowercase sigint fails."},
@@ -206,18 +207,55 @@ A published port is bound on the node that runs the container and moves with it.
   {"key": "deploy.placement.constraints", "type": "list of str", "reload": "n/a", "description": "Swarm-style node filters: KEY==VALUE or KEY!=VALUE with keys node.hostname, node.id, node.role (manager or worker), node.labels.KEY.", "quirks": "node.hostname==NAME and node==NAME are checked against cluster nodes by the CLI. An unknown key never matches."},
   {"key": "deploy.resources.limits.cpus", "type": "str (float)", "reload": "n/a", "description": "CPU cap, for example \"1.0\".", "quirks": "A value that does not parse is silently ignored."},
   {"key": "deploy.resources.limits.memory", "type": "size", "reload": "n/a", "description": "Memory cap. Also used by the rebalancer.", "quirks": "An unparseable value is silently ignored (no cap). A digit string that overflows is an error."},
-  {"key": "deploy.resources.reservations.*", "type": "same as limits", "reload": "n/a", "description": "Parsed but currently not acted on. No consumer outside the config parser."},
+  {"key": "deploy.resources.reservations.cpus", "type": "str (float)", "reload": "n/a", "description": "Parsed but currently not acted on."},
+  {"key": "deploy.resources.reservations.memory", "type": "size", "reload": "n/a", "description": "Parsed but currently not acted on."},
+  {"key": "deploy.resources.reservations.devices", "type": "list of maps", "reload": "n/a", "description": "Device requests, handed to Docker as DeviceRequests. Each entry takes driver, count, device_ids and capabilities. See GPUs below.", "quirks": "Only the nvidia driver is accepted. count and device_ids cannot both be set. capabilities is required."},
   {"key": "deploy.restart_policy.*", "type": "map", "reload": "n/a", "description": "Parsed but currently not acted on. Use the service-level restart key instead.", "quirks": "The shipped gitlab.yaml example sets max_attempts: 3 here and it does nothing."},
   {"key": "deploy.update_config.*", "type": "map", "reload": "n/a", "description": "Parsed but currently not acted on. Rolling updates are not controlled from the spec."}
 ]} />
 
 <Quirk title="Fields that are parsed but currently not acted on" severity="info">
-`deploy.restart_policy`, `deploy.update_config` and `deploy.resources.reservations` are validated but nothing in the scheduler or daemon reads them today. Use the service-level `restart:` for restart behaviour.
+`deploy.restart_policy`, `deploy.update_config` and `deploy.resources.reservations.cpus` and `.memory` are validated but nothing in the scheduler or daemon reads them today. Use the service-level `restart:` for restart behaviour.
 </Quirk>
 
 <Quirk title="volume_sync enabled is rejected" severity="info">
 `x-clouduler.volume_sync.VOL.enabled` used to be accepted and ignored. It is now an error naming the key, at stack and service level. Replication cannot be turned off per volume, because a failover starts an instance only on a node holding a current copy of every volume it mounts. Remove the key, give a rarely changing volume a longer `interval`, or keep scratch data on a drive that only one node implements.
 </Quirk>
+
+### GPUs
+
+Two forms hand a GPU to a container.
+
+NVIDIA GPUs use the compose device request:
+
+```yaml
+services:
+  ml:
+    image: ollama/ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+- `driver` is `nvidia` or left out (it means `nvidia`). Any other driver is a validation error.
+- `count` is a number or `all`. `device_ids` lists GPU indexes or uuids instead. Setting both is an error. With neither, the request is for all GPUs.
+- `capabilities` is required. Both `[gpu]` and `[[gpu], [compute]]` are accepted; the flat form is one set.
+
+Intel and AMD GPUs (Jellyfin, Immich machine learning, Frigate) use the service-level `devices:` list, usually the whole DRI directory or one render node:
+
+```yaml
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    devices:
+      - /dev/dri:/dev/dri
+```
+
+Each node detects its GPUs and reports them. A service is only placed on a node that has them: see [Placement](/docs/features/placement#gpus-and-devices).
 
 ## Proxy and x-clouduler per service
 
