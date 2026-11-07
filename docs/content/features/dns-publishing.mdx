@@ -126,7 +126,7 @@ proxy:
 </UiCli.Cli>
 </UiCli>
 
-The server answers according to the network the client is on. A client on a subnetted network gets the node's own LAN address for a public hostname (so LAN traffic does not hairpin through your router), and names the cluster does not own are forwarded upstream to `upstream`, in order. Left empty, that is the host's resolvers except Tailscale MagicDNS (`100.100.100.100`), which split DNS may route back to this server and loop; if MagicDNS is the host's only resolver, `1.1.1.1` and `1.0.0.1` are used. Set `upstream` explicitly when your tailnet's split DNS covers a domain you also serve here, or when the host's resolvers should not be used. It returns `REFUSED` to clients outside the configured networks, and for names it does not own to clients outside a subnetted network, so a public listener cannot be used as an open resolver. `networks` defaults to every subnetted network. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
+The server answers according to the network the client is on. A client on a subnetted network gets the node's own LAN address for a public hostname (the private-network shortcut, so LAN traffic does not hairpin through your router; a route can opt out with `private_shortcut: false`, see the gotcha below), and names the cluster does not own are forwarded upstream to `upstream`, in order. Left empty, that is the host's resolvers except Tailscale MagicDNS (`100.100.100.100`), which split DNS may route back to this server and loop; if MagicDNS is the host's only resolver, `1.1.1.1` and `1.0.0.1` are used. Set `upstream` explicitly when your tailnet's split DNS covers a domain you also serve here, or when the host's resolvers should not be used. It returns `REFUSED` to clients outside the configured networks, and for names it does not own to clients outside a subnetted network, so a public listener cannot be used as an open resolver. `networks` defaults to every subnetted network. It re-reads the config every 5 seconds. Ports below 1024 need root, which the daemon has. Remember to open port 53 on the nodes' firewall for your LAN (see [Ports and firewall](/docs/reference/ports-and-firewall)).
 
 ## Options
 
@@ -158,6 +158,21 @@ The server answers according to the network the client is on. A client on a subn
 
 <Quirk title="Names on private networks can end up in public DNS" severity="warn">
 Internal and private networks publish to Cloudflare by default (`publish_dns` defaults to true), so `vault.lan.example.com` becomes a public record pointing at a 192.168.x.x address. That is harmless for access (the proxy gates it, see [Proxy and TLS](/docs/features/proxy-and-tls)) but reveals your naming. Set `publish_dns: false` on those networks to keep them out. A public network cannot be set to false.
+</Quirk>
+
+<Quirk title="Public hostnames are reachable through a private-network shortcut" severity="warn">
+With `proxy.dns_server` on, a client inside an internal or private network that asks for a public-network hostname is answered with the node's address on *its own* network (the shortcut), not the public address. LAN traffic then skips your router and the proxy sees the client's real LAN address, but it also means a public service can be reached over the private network. To turn the shortcut off for a service, set `private_shortcut: false` on its route in the stack file (public networks only):
+
+```yaml
+x-clouduler:
+  proxy:
+    - host: blog
+      network: wan
+      port: 80
+      private_shortcut: false
+```
+
+Clients on private networks are then answered with the route's public address like everyone else. If any route behind a hostname sets it to `false`, the shortcut is off for that hostname. This only changes DNS answers; a client that connects straight to a node's private IP still reaches the proxy.
 </Quirk>
 
 <Quirk title="Only the leader publishes" severity="info">

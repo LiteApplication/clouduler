@@ -1212,6 +1212,22 @@ fn cloudflare_proxied_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeS
     on
 }
 
+/// `(host, network)` pairs, keyed like `desired_dns_hosts`, where a stack
+/// route sets `private_shortcut: false`: the client DNS server then answers
+/// every client with the route's own address instead of the node's address on
+/// the client's internal or private network.
+pub fn private_shortcut_denied_hosts(
+    cfg: &ClusterConfig,
+    state: &ClusterState,
+) -> BTreeSet<(String, String)> {
+    crate::placement::service_placements(state, cfg)
+        .into_iter()
+        .flat_map(|placement| placement.extensions.proxy)
+        .filter(|entry| !entry.private_shortcut)
+        .map(|entry| (entry.host, entry.network))
+        .collect()
+}
+
 /// The config node matching a raft leader id, if it is known and still in the
 /// config. `None` when leadership is unsettled, in which case the caller
 /// publishes nothing for the leader-only web hostname rather than guess.

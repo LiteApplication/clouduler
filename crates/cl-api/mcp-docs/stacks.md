@@ -411,6 +411,7 @@ proxy:
     response_timeout: 30s     # unset: 30s (none when http2); 0s: no limit
     http2: false              # default false; true = h2c to the container (gRPC)
     cloudflare_proxy: false   # default false; public networks only
+    private_shortcut: true     # default true; false = no private-network DNS shortcut, public networks only
 ```
 
 Fields: `host` (a bare label like `gitlab` is qualified with the network's
@@ -436,6 +437,7 @@ nothing until you set one.
 | `websockets` | `true` | Whether `Upgrade` requests are proxied. Turning it off answers them with 400, which is worth doing on a route that should never see one. |
 | `preserve_host` | `false` | Forward the client's `Host` instead of rewriting it to the backend's address. Needed by anything that builds absolute URLs or virtual hosts on the header. |
 | `cloudflare_proxy` | `false` | Publish the hostname's DNS records with Cloudflare's proxy (orange cloud) on. Only valid on a `public` network (validation fails otherwise). Applies per hostname: it is on only when *every* route behind that host and network (all paths, all services) sets it; a route without it, or a static route, redirect or login portal on the same host that leaves its own `cloudflare_proxy` off, keeps the record DNS-only. Names are compared fully qualified. |
+| `private_shortcut` | `true` | The private-network shortcut. Only valid on a `public` network. With `proxy.dns_server` on, a client inside an internal or private network is by default answered with the node's address on that network, so a public route is reachable over the private network. Set `false` to close that shortcut: every client is answered with the route's own public address instead. It only changes DNS answers; a direct connection to a node's private IP still reaches the proxy. Off for a hostname as soon as any route behind it sets `false`. |
 | `response_timeout` | 30s (none when `http2`) | How long the backend has to return response headers, connection time included. Answers 504 when it runs out. `0s` removes the limit. It only covers headers: bodies and trailers stream untimed, but a backend that is slow to *start* answering will be cut off. |
 | `http2` | `false` | Talk cleartext HTTP/2 (h2c, prior knowledge) to the container instead of HTTP/1.1; required for gRPC. Per route, so several `path_prefix` routes on one host and port can mix h2c and HTTP/1.1. Bodies and trailers stream both ways unbuffered. The HTTPS listener itself always offers h2 and http/1.1. |
 

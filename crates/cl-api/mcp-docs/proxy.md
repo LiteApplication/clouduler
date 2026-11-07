@@ -407,7 +407,7 @@ client's source address (`ClusterConfig::client_network`): the subnetted
 network whose subnet holds it, else the public network for a globally
 routable address. Answers follow:
 
-- A hostname on a **public** network is answered to everyone. A client inside
+- A hostname on a **public** network is answered to everyone (a route can set `private_shortcut: false` to skip the next sentence's shortcut and answer private clients with the route's own address). A client inside
   a private network gets each serving node's address *on that network* (a LAN
   client gets the node's LAN address, so it skips the router and the proxy
   sees its real address, which `proxy.auth.remember_ip` relies on). A node

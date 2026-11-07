@@ -175,6 +175,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.proxy': [
     'host', 'network', 'port', 'path_prefix', 'tls', 'middlewares', 'sticky', 'max_body_size',
     'websockets', 'preserve_host', 'response_timeout', 'http2', 'cloudflare_proxy',
+    'private_shortcut',
   ],
   'services.*.x-clouduler.proxy.middlewares.headers': ['request', 'response', 'remove_request', 'remove_response'],
   'services.*.x-clouduler.proxy.middlewares.cors': ['origins', 'methods', 'headers', 'allow_credentials', 'max_age'],
@@ -202,7 +203,7 @@ const SCHEMA: Record<string, string[]> = {
 /** Map key names that are always plain booleans, wherever they appear —
  *  none of them collide with a differently-typed field of the same name. */
 const BOOLEAN_KEYS = new Set([
-  'tls', 'sticky', 'websockets', 'preserve_host', 'http2', 'cloudflare_proxy', 'proxy_protocol', 'allow_credentials', 'permanent',
+  'tls', 'sticky', 'websockets', 'preserve_host', 'http2', 'cloudflare_proxy', 'private_shortcut', 'proxy_protocol', 'allow_credentials', 'permanent',
   'stop_before', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui', 'ignore_case',
 ]);
 

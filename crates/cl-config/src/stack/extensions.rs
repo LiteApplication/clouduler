@@ -335,6 +335,16 @@ pub struct ProxyRoute {
     /// route, static route or redirect that does not keeps it DNS-only.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cloudflare_proxy: bool,
+
+    /// Let clients on an internal or private network reach this route through
+    /// the node's address on that network. On by default: the client DNS
+    /// server (`proxy.dns_server`) answers a client inside such a network with
+    /// the node's address there, so it skips the router. Set false to answer
+    /// every client with the route's own public address instead. Public
+    /// networks only. Names are compared fully qualified; the shortcut is off
+    /// for a hostname as soon as any route behind it sets this false.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub private_shortcut: bool,
 }
 
 fn default_true() -> bool {

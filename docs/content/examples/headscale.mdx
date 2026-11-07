@@ -87,6 +87,7 @@ services:
           port: 3000
           path_prefix: /admin
           preserve_host: true
+          private_shortcut: false
 
   headscale:
     image: headscale/headscale:latest
@@ -115,6 +116,7 @@ services:
         - host: headscale
           network: public
           port: 25725
+          private_shortcut: false
           middlewares:
             - cors:
                 origins:
@@ -292,6 +294,7 @@ The `prefixes.v4` range `100.64.0.0/10` is the standard tailnet address range. `
 ## Walkthrough
 
 - **Two services, one host.** Both routes use `host: headscale` on `public`. Headplane has `path_prefix: /admin` and Headscale has none, so `/admin` goes to Headplane and everything else goes to Headscale. See [Proxy and TLS](/docs/features/proxy-and-tls).
+- **`private_shortcut: false`** on both routes: tailnet and LAN clients are answered with the public address, not a node's address on their own network, so the control server is not reached through a private network. See [DNS publishing](/docs/features/dns-publishing).
 - **`preserve_host: true`** forwards the client's `Host` header to Headplane, which the UI needs to build its links.
 - **`write: true` on both configs of Headplane**: Headplane can edit them and Clouduler writes the edits back to the cluster. Only one instance may hold a writable config, which is why Headplane has `replicas: 1`. Headscale mounts `headscale_config` read-only. See [Configs and secrets](/docs/features/configs-and-secrets).
 - **Secrets as `env:`** for Headplane. Headscale gets its OIDC secret as a file, and the explicit `target` matches `client_secret_path` in the config.

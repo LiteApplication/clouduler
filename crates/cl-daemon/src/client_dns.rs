@@ -102,7 +102,8 @@ async fn run(
                 .values()
                 .find(|node| cl_raft::node_id(node.id) == id)
         });
-        let views = views_for(&cfg, &hosts, leader);
+        let no_private = crate::proxy::private_shortcut_denied_hosts(&cfg, &state);
+        let views = views_for(&cfg, &hosts, &no_private, leader);
         let live = Arc::new(cfg.clone());
         let classify: Classifier = Arc::new(move |ip| {
             live.client_network(ip)
@@ -179,6 +180,8 @@ fn listen_addrs(cfg: &ClusterConfig, node_name: &str) -> Vec<SocketAddr> {
 struct Entry {
     network: String,
     nodes: Vec<String>,
+    /// False when the route opted out of the per-network address shortcut.
+    private_shortcut: bool,
 }
 
 /// One view per network a client can be in (every subnetted and public
@@ -187,6 +190,7 @@ struct Entry {
 fn views_for(
     cfg: &ClusterConfig,
     hosts: &BTreeMap<(String, String), BTreeSet<String>>,
+    no_private: &BTreeSet<(String, String)>,
     leader: Option<&Node>,
 ) -> BTreeMap<String, View> {
     let mut by_name: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
@@ -200,6 +204,7 @@ fn views_for(
             .push(Entry {
                 network: network.clone(),
                 nodes: nodes.iter().cloned().collect(),
+                private_shortcut: !no_private.contains(&(host.clone(), network.clone())),
             });
     }
     // Writes only land on the leader, so the dashboard names no other node.
@@ -211,6 +216,7 @@ fn views_for(
                 .push(Entry {
                     network: cfg.web.network.clone(),
                     nodes: vec![name.clone()],
+                    private_shortcut: true,
                 });
         }
     }
@@ -270,7 +276,12 @@ fn answers_for(
             };
             // A dotted name is used as is, so the network only picks the
             // address.
-            let found = records_for(cfg, fqdn, client_net, node)
+            let own_net = if entry.private_shortcut {
+                client_net
+            } else {
+                &entry.network
+            };
+            let found = records_for(cfg, fqdn, own_net, node)
                 .or_else(|_| records_for(cfg, fqdn, &entry.network, node));
             if let Ok(found) = found {
                 records.extend(found);
@@ -333,7 +344,12 @@ mod tests {
     /// address, not the router's public one.
     #[test]
     fn a_lan_client_gets_the_node_address_on_its_own_network() {
-        let views = views_for(&cfg(), &hosts(&[("blog", "wan", &["n1"])]), None);
+        let views = views_for(
+            &cfg(),
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &BTreeSet::new(),
+            None,
+        );
         assert_eq!(
             answer(&views, "lan", "blog.example.com"),
             Some(&[a([192, 168, 1, 1])][..])
@@ -345,12 +361,32 @@ mod tests {
         );
     }
 
+    /// `private_shortcut: false` hands a LAN client the route's own address.
+    #[test]
+    fn a_route_can_refuse_the_private_network_shortcut() {
+        let no_private = BTreeSet::from([("blog".to_string(), "wan".to_string())]);
+        let views = views_for(
+            &cfg(),
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &no_private,
+            None,
+        );
+        let lan = answer(&views, "lan", "blog.example.com").expect("answered");
+        assert_ne!(lan, &[a([192, 168, 1, 1])][..]);
+        assert_eq!(lan, answer(&views, "wan", "blog.example.com").unwrap());
+    }
+
     /// With no LAN address, a LAN client falls back to the node's public one.
     #[test]
     fn a_node_without_an_address_on_the_clients_network_falls_back_to_the_route() {
         let mut cfg = cfg();
         cfg.nodes.get_mut("n2").unwrap().network.remove("lan");
-        let views = views_for(&cfg, &hosts(&[("blog", "wan", &["n2"])]), None);
+        let views = views_for(
+            &cfg,
+            &hosts(&[("blog", "wan", &["n2"])]),
+            &BTreeSet::new(),
+            None,
+        );
         assert_eq!(
             answer(&views, "lan", "blog.example.com"),
             Some(&[ViewAnswer::Cname("n2.example.net".into())][..])
@@ -359,7 +395,12 @@ mod tests {
 
     #[test]
     fn a_public_client_gets_the_public_addresses() {
-        let views = views_for(&cfg(), &hosts(&[("blog", "wan", &["n1"])]), None);
+        let views = views_for(
+            &cfg(),
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &BTreeSet::new(),
+            None,
+        );
         assert_eq!(
             answer(&views, "wan", "blog.example.com"),
             Some(
@@ -376,7 +417,12 @@ mod tests {
     /// answer 403 to anyone else, so DNS does not hand out the way in.
     #[test]
     fn a_host_on_a_private_network_is_refused_to_everyone_else() {
-        let views = views_for(&cfg(), &hosts(&[("printer", "lan", &["n1"])]), None);
+        let views = views_for(
+            &cfg(),
+            &hosts(&[("printer", "lan", &["n1"])]),
+            &BTreeSet::new(),
+            None,
+        );
         assert_eq!(
             answer(&views, "lan", "printer.lan.example.com"),
             Some(&[a([192, 168, 1, 1])][..])
@@ -389,7 +435,12 @@ mod tests {
 
     #[test]
     fn only_the_listed_nodes_are_named() {
-        let views = views_for(&cfg(), &hosts(&[("svc", "tailscale", &["n1", "n3"])]), None);
+        let views = views_for(
+            &cfg(),
+            &hosts(&[("svc", "tailscale", &["n1", "n3"])]),
+            &BTreeSet::new(),
+            None,
+        );
         assert_eq!(
             answer(&views, "tailscale", "svc.int.example.com"),
             Some(&[a([10, 10, 0, 1]), a([10, 10, 0, 3])][..])
@@ -400,19 +451,19 @@ mod tests {
     fn the_dashboard_names_the_leader_alone() {
         let cfg = cfg();
         let leader = cfg.node("n3");
-        let views = views_for(&cfg, &BTreeMap::new(), leader);
+        let views = views_for(&cfg, &BTreeMap::new(), &BTreeSet::new(), leader);
         assert_eq!(
             answer(&views, "tailscale", "cloud.int.example.com"),
             Some(&[a([10, 10, 0, 3])][..])
         );
         // No leader, no answer, and no stale guess: the name just isn't ours.
-        let none = views_for(&cfg, &BTreeMap::new(), None);
+        let none = views_for(&cfg, &BTreeMap::new(), &BTreeSet::new(), None);
         assert!(answer(&none, "tailscale", "cloud.int.example.com").is_none());
     }
 
     #[test]
     fn egress_networks_have_no_view() {
-        let views = views_for(&cfg(), &BTreeMap::new(), None);
+        let views = views_for(&cfg(), &BTreeMap::new(), &BTreeSet::new(), None);
         assert!(!views.contains_key("vpn"));
         assert_eq!(views.len(), 3);
     }
