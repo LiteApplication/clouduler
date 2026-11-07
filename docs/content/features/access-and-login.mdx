@@ -150,7 +150,7 @@ What your provider must give Clouduler:
 </Quirk>
 
 <Quirk title="No safety net for sign-in edits" severity="danger">
-Edits to `auth` apply at once and are not covered by the rollback timer. A wrong issuer takes effect immediately. Keep an API key.
+Edits to `auth` apply at once and cannot be undone automatically. A wrong issuer takes effect immediately. Keep an API key.
 </Quirk>
 
 <Quirk title="auth.api_keys false is not enforced" severity="warn">
@@ -192,7 +192,7 @@ Policy on the route:
 2. Open **Settings > Sign-in and backup**, panel **Service login**. Switch on **Enable service login**.
 3. Pick **Networks** (at least one, each with a DNS domain), set **Portal host** (a label such as `login`, qualified with each network's domain), **Issuer URL**, **Client ID** and **Client secret**.
 4. Optionally set **Scopes** (default `openid profile email groups`), **Groups claim**, **Username claim**, **Stay signed in for**, **Portal title**, **Palette** (Grape, Sunset, Ocean, Forest) and **Accent colour**.
-5. Apply. Changes to `proxy` arm the rollback timer; confirm once you can still reach the dashboard.
+5. Apply.
 
 </UiCli.Ui>
 <UiCli.Cli>
@@ -291,8 +291,8 @@ Work down this list:
 1. **An API key still exists somewhere.** Use it on the login screen.
 2. **OIDC works at the provider, but admin is missing.** Check that the ID token contains the `admin_claim` with the `admin_value`, and that `scopes` includes what releases it. Log in as a viewer, then ask another admin.
 3. **You deleted every API key and OIDC does not work.** The bootstrap key task runs when the API server starts and mints a key named `bootstrap` only if the leader finds the key store empty. Restarting the daemon on the leader (`sudo systemctl restart clouduler`) logs a new bootstrap key in `journalctl -u clouduler.service` (the task retries every 2 seconds until the key is stored). The CLI has no key command, so this is the recovery path.
-4. **A bad OIDC edit.** Use the key from step 1 or 3 and fix **Settings > Sign-in and backup**. There is no rollback timer for `auth` edits.
-5. **Wrong `proxy` or `web` edit.** The rollback timer reverts it after the countdown, or run `clouduler config reload` with a known-good file on a manager.
+4. **A bad OIDC edit.** Use the key from step 1 or 3 and fix **Settings > Sign-in and backup**.
+5. **Wrong `proxy` or `web` edit.** Run `clouduler config reload` with a known-good file on a manager.
 
 <Quirk title="Do not delete the last key until OIDC works" severity="danger">
 `DELETE /api/keys/{id}` has no check for the last key. Create and test a named key and confirm OIDC before you delete the bootstrap key.

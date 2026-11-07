@@ -38,7 +38,6 @@ export function Settings() {
   const compact = useCompact();
   const { isAdmin } = useAuth();
   const cfg = useSettingsConfig();
-  const [rollbackAfter, setRollbackAfter] = useState(60);
   const [sheet, setSheet] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
 
@@ -73,8 +72,7 @@ export function Settings() {
           disabled={p.disabled}
           loading={cfg.busy}
           onClick={() => {
-            if (cfg.pending?.armed) void cfg.confirm();
-            else if (cfg.draft) void cfg.apply(cfg.draft, `${rollbackAfter}s`);
+            if (cfg.draft) void cfg.apply(cfg.draft);
           }}
         >
           {p.label}
@@ -100,7 +98,7 @@ export function Settings() {
       <div className="settings__body">
         {!compact && menu}
         <div className="settings__main">
-          {isConfig && <ConfigTab tab={current.id} cfg={cfg} rollbackAfter={rollbackAfter} setRollbackAfter={setRollbackAfter} />}
+          {isConfig && <ConfigTab tab={current.id} cfg={cfg} />}
           {current.id === 'secrets' && <SettingsSecrets sheetOpen={sheet} onClose={() => setSheet(false)} />}
           {current.id === 'access' && <SettingsAccess sheetOpen={sheet} onClose={() => setSheet(false)} />}
           {current.id === 'self-update' && <SettingsUpdate startSignal={startSignal} />}

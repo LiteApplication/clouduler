@@ -887,7 +887,6 @@ export function buildHttpRoutes(): HttpRoute[] {
     route('PUT', '/api/config', ({ db, body }) => {
       if (!body?.config || typeof body.config !== 'object') throw new HttpError(400, 'config is required');
       db.config = body.config as ClusterConfig;
-      if (body.rollback_after) db.pending = { armed: true, seconds_left: 60 };
       commit(db);
     }),
     route('POST', '/api/config/validate', ({ body }) => {
@@ -896,13 +895,6 @@ export function buildHttpRoutes(): HttpRoute[] {
       if (!c?.cluster?.name) errors.push({ path: 'cluster.name', message: 'a cluster needs a name' });
       return { valid: errors.length === 0, errors };
     }),
-    route('POST', '/api/config/confirm', ({ db }) => {
-      db.pending = { armed: false, seconds_left: null };
-    }),
-    route('POST', '/api/config/rollback', ({ db }) => {
-      db.pending = { armed: false, seconds_left: null };
-    }),
-    route('GET', '/api/config/pending', ({ db }) => db.pending),
     route('POST', '/api/config/networks/:name/rename', ({ db, params, body }) => {
       const to = String(body?.new_name ?? '');
       if (!to) throw new HttpError(400, 'new_name is required');

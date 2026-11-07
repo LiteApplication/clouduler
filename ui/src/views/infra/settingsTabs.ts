@@ -36,7 +36,7 @@ export const SETTINGS_TABS: SettingsTab[] = [
     id: 'network',
     label: 'Network',
     desc: 'Networks, dashboard, proxy, DNS',
-    sub: 'How nodes reach each other and the world. Risky changes roll back unless you confirm.',
+    sub: 'How nodes reach each other and the world.',
     icon: 'network',
     group: 'Connectivity',
   },

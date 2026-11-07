@@ -1101,11 +1101,6 @@ export interface McpConfig {
   enabled: boolean;
 }
 
-export interface PendingConfig {
-  armed: boolean;
-  seconds_left: number | null;
-}
-
 // ---- validation ----
 
 export interface ValidationError {

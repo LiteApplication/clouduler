@@ -115,11 +115,8 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET | `/api/nodes/connectivity` | user | none | `{reports: [{node, reported, disk_ms, links: [{peer, raft, api, raft_ms}]}]}` | Each node probes its peers itself: `raft` is an authenticated raft ping, `api` a TCP connect to the web port. `disk_ms` is a write plus fsync on that node's data dir, null if unreported, failed, or `disk_probe: false`. |
 | GET | `/api/tls-fingerprint` | user | none | Fingerprint of the certificate this node serves | |
 | GET | `/api/config` | user | none | Cluster config JSON | |
-| PUT | `/api/config` | admin | `{"config": {...}, "rollback_after": "60s"}` | 200 | Applies the config and arms a rollback timer; call confirm before it expires. |
+| PUT | `/api/config` | admin | `{"config": {...}}` | 200 | Applies the config at once. |
 | POST | `/api/config/validate` | user | `{"config": {...}}` | `{valid, errors: [{path, message}]}` | |
-| POST | `/api/config/confirm` | admin | none | 200 | Keeps the pending config. |
-| POST | `/api/config/rollback` | admin | none | 200 | Restores the previous config now. |
-| GET | `/api/config/pending` | user | none | `{armed, seconds_left}` | |
 | POST | `/api/config/networks/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks, redirects, static routes and WireGuard. |
 | POST | `/api/config/drives/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks' volume mounts. |
 

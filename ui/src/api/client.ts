@@ -42,7 +42,6 @@ import type {
   RememberedIp,
   SelfUpdateLatest,
   OidcClientSecretStatus,
-  PendingConfig,
   RebalanceResponse,
   RedirectRule,
   RegistryAccount,
@@ -343,12 +342,8 @@ export const api = {
 
   // configuration
   getConfiguration: () => get<ClusterConfig>('/api/config'),
-  applyConfiguration: (config: ClusterConfig, rollbackAfter?: string) =>
-    put<void>('/api/config', { config, rollback_after: rollbackAfter }),
+  applyConfiguration: (config: ClusterConfig) => put<void>('/api/config', { config }),
   validateConfiguration: (config: ClusterConfig) => post<ValidationResult>('/api/config/validate', { config }),
-  confirmConfiguration: () => post<void>('/api/config/confirm'),
-  rollbackConfiguration: () => post<void>('/api/config/rollback'),
-  pendingConfiguration: () => get<PendingConfig>('/api/config/pending'),
   // Renames a network everywhere it is referenced: cluster.yaml, every
   // deployed stack, and the redirect/static-route/wireguard-ingress stores.
   // Not part of the generic apply flow above because it fans out to state that

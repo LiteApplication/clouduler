@@ -4,7 +4,6 @@ pub mod alerts;
 pub mod auth;
 pub mod auto_update;
 pub mod cloudflare;
-pub mod config_edit;
 pub mod docker_stats;
 pub mod error;
 pub mod internal_peer;

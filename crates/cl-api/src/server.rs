@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -16,7 +16,7 @@ use cl_config::ClusterConfig;
 use cl_docker::Docker;
 use cl_raft::ClusterNode;
 use cl_secret::ClusterKey;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -24,7 +24,6 @@ use tracing::{info, warn};
 
 use crate::auth::oidc::OidcAuthenticator;
 use crate::auth::session::SessionStore;
-use crate::config_edit::PendingEdit;
 use crate::error::ApiError;
 use crate::routes;
 use crate::ui;
@@ -69,10 +68,6 @@ pub struct AppState {
     /// effect on every node without a restart, not just the one that
     /// accepted the edit.
     pub oidc: Arc<RwLock<Option<Arc<OidcAuthenticator>>>>,
-    pub pending_edit: Arc<Mutex<Option<PendingEdit>>>,
-    /// Fixed point `config_edit`'s pure clock counts from.
-    pub started_at: Instant,
-    pub rollback_after: Duration,
     /// Where a self-update artifact this node built or fetched is staged,
     /// waiting for the internal restart route to install it.
     pub self_update_artifact_path: PathBuf,
@@ -117,11 +112,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Duration since `started_at`, the clock `config_edit::PendingEdit` uses.
-    pub fn clock(&self) -> Duration {
-        self.started_at.elapsed()
-    }
-
     /// The docker client, or a 503 naming why there is none.
     pub async fn docker(&self) -> Result<Docker, ApiError> {
         self.docker.read().await.clone().ok_or_else(|| {
@@ -225,9 +215,6 @@ impl ApiServer {
             key_tx: options.key_tx,
             sessions: Arc::new(SessionStore::new(cluster.clone())),
             oidc: Arc::new(RwLock::new(oidc)),
-            pending_edit: Arc::new(Mutex::new(None)),
-            started_at: Instant::now(),
-            rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
             self_update_artifact_path: options.self_update_artifact_path,
             shutdown: options.shutdown,
             http: options.http,

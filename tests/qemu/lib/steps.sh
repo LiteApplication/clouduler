@@ -181,18 +181,12 @@ step_join_node() {
   leader_port="$(cat "$RUN_DIR/$leader.web_port")"
 
   local payload status
-  payload="$(jq -n --slurpfile cfg "$RUN_DIR/cluster-joined.json" '{config: $cfg[0], rollback_after: "30s"}')"
+  payload="$(jq -n --slurpfile cfg "$RUN_DIR/cluster-joined.json" '{config: $cfg[0]}')"
   status="$(curl -sk -o /dev/null -w '%{http_code}' -m 10 -X PUT \
     -H "Authorization: Bearer $(api_key)" -H "Content-Type: application/json" \
     -d "$payload" "https://$leader_host:$leader_port/api/config")"
   [[ "$status" == "200" ]] || die "pushing the joined config for $node failed (http $status)"
 
-  # Adding a node changes `nodes`, which arms a rollback watchdog (any edit
-  # that could cut off the connection it arrived over) - confirm immediately
-  # so the addition sticks rather than reverting after 30s.
-  status="$(curl -sk -o /dev/null -w '%{http_code}' -m 10 -X POST \
-    -H "Authorization: Bearer $(api_key)" "https://$leader_host:$leader_port/api/config/confirm")"
-  [[ "$status" == "200" ]] || die "confirming the joined config failed (http $status)"
   log "pushed the joined config (adds $node) via $leader's api, without touching $leader's own process"
 
   # The next disk built bakes whatever is currently at cluster.yaml. Existing

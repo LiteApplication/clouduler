@@ -58,9 +58,7 @@ Open **Settings**. The tabs that edit `cluster.yaml` are **General**, **Network*
 
 1. Change fields on any page. Changes are staged in a draft. The header button **Apply changes** stays disabled until the draft differs from the running config.
 2. Open **Changes to apply** to see the diff. **Validate config** checks the draft without applying it, **Discard edits** throws it away.
-3. Set **Confirm within (seconds)** (default 60, minimum 5).
-4. Press **Apply changes**. The UI validates first, then submits.
-5. If your edit touched `networks`, `nodes`, `web`, `proxy` or `cloudflare`, a rollback timer starts. The banner **Config change waiting for you** counts down and the header button turns into **Confirm config**. Press it once you can still reach the dashboard. **Roll back now** restores the previous config immediately.
+3. Press **Apply changes**. The UI validates first, then submits. The edit takes effect at once and nothing reverts it automatically.
 
 Edits to `failover`, `secrets`, `auth`, `drives`, `self_update`, `backup`, `mcp`, `updates` and `cluster.name` apply at once with no countdown.
 
@@ -112,8 +110,8 @@ clouduler config reload --via boreas   # submit through a specific node
 
 On success it prints `reloaded config into the cluster, generation N`. A rejection prints `cluster rejected the config: ...`.
 
-<Quirk title="config reload has no rollback" severity="danger">
-Unlike the UI, `config reload` applies immediately even if the change cuts you off, for example a wrong dashboard port. Keep a copy of the previous file and run `reload` again to undo it.
+<Quirk title="Edits are not reverted automatically" severity="danger">
+The UI and `config reload` both apply immediately, even if the change cuts you off, for example a wrong dashboard port. Keep a copy of the previous file and run `reload` again to undo it.
 </Quirk>
 
 Global flags: `--config <PATH>` (env `CLOUDULER_CONFIG`, default `/etc/clouduler/cluster.yaml`) and `--data-dir <PATH>` (env `CLOUDULER_DATA`).
@@ -475,10 +473,6 @@ An edit that would make two deployed stacks share an overlay network is refused 
 
 <Quirk title="Failover timers, dashboard ports and rpc_port need a restart" severity="warn">
 These are read once at boot: `failover.node_timeout`, `fence_timeout`, `probe_interval`, `web.port`, `web.backend_port`, the certificate built from `web.address`, `nodes.<name>.rpc_port`, `data_dir`, and the `secrets` key paths. The UI does not warn you. After changing them run `systemctl restart clouduler` on each node, one at a time.
-</Quirk>
-
-<Quirk title="A pending rollback lives in one process" severity="info">
-The rollback timer is held in memory on the node that took your edit, not in raft. If that node restarts before the deadline, the edit simply stays. A `PUT` to a follower is not forwarded: it gets `503`. So an edit is always armed on the leader, and a confirm sent to any other node also gets `503`. `no config edit is pending` is returned only by the leader when no edit is armed.
 </Quirk>
 
 <Quirk title="Two managers means quorum 2" severity="warn">

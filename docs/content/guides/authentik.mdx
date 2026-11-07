@@ -18,7 +18,7 @@ These are two different OIDC clients with two different redirect URIs. Do not sh
 
 - Authentik running and reachable over HTTPS, for example at `https://auth.example.com`, and an admin account for it ([example stack](/docs/examples/authentik)).
 - A Clouduler dashboard address with a real certificate, for example `https://cloud.example.com`. The redirect URI is that address plus `/auth/oidc/callback`.
-- An API key for Clouduler that you keep as a safety net. Edits to sign-in apply at once and have no rollback timer.
+- An API key for Clouduler that you keep as a safety net. Edits to sign-in apply at once and are not undone automatically.
 
 ## Part 1: sign in to the dashboard with Authentik
 
@@ -144,7 +144,7 @@ Repeat Part 1 step 1 with these differences:
 
 1. Open **Settings > Sign-in and backup**, panel **Service login**, and switch on **Enable service login**.
 2. Pick **Networks** (at least one, each with a DNS domain), set **Portal host** to `login`, **Issuer URL** to the portal issuer, **Client ID** and **Client secret**.
-3. **Scopes** default to `openid profile email groups`. Apply, and confirm the rollback timer once you still reach the dashboard.
+3. **Scopes** default to `openid profile email groups`. Apply.
 
 </UiCli.Ui>
 <UiCli.Cli>

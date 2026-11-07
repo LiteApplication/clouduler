@@ -44,7 +44,7 @@ In the web UI the same information is on the dashboard problem list and on each 
 | `invalid redirect_uri` at the provider | The redirect URI must be exactly `https://<dashboard address>/auth/oidc/callback`. After changing `web.address`, update it at the provider and restart the daemon. |
 | `Sign-in link expired` (403) | The one-time token was used or timed out (60 seconds). Reload the app page. |
 | `this route requires login, but proxy.auth does not offer it on this network` (503) | Add the route's network to `proxy.auth.networks`. |
-| A wrong issuer locked you out | Edits to `auth` apply at once with no rollback timer. Use an API key to fix it, and keep one until OIDC is proven. |
+| A wrong issuer locked you out | Edits to `auth` apply at once and are not undone automatically. Use an API key to fix it, and keep one until OIDC is proven. |
 
 Details: [Access and login](/docs/features/access-and-login), [Authentik guide](/docs/guides/authentik), [Keycloak guide](/docs/guides/keycloak).
 
@@ -290,7 +290,6 @@ Details: [Updates](/docs/features/updates).
 | `config reload` lost a UI change | It sends the file loaded from `--config`, not the cluster's copy. Compare before reloading. |
 | Success reported but behaviour is unchanged | The key is restart-only; the new value is stored and used after the next restart. |
 | Two admins overwrite each other | Last writer wins and saves strip comments. |
-| Confirm or rollback answers 503 | The rollback timer lives on the leader that took your edit; send it there. |
 | `node add` was forgotten after a restart | It only touches the live roster. Edit the config and run `config reload`. |
 | `removed boreas from the live roster, but could not drop it from the config: ...` | Remove it from the config by hand and run `clouduler config reload`. |
 | `cluster rejected the removal: node boreas still runs INSTANCE` | Retire or drain the node first. Draining does not do a final volume sync, so writes since the last sync may be lost. |

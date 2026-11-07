@@ -7,7 +7,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api, ApiError } from '../../api/client';
-import type { ClusterConfig, PendingConfig, ValidationError } from '../../api/types';
+import type { ClusterConfig, ValidationError } from '../../api/types';
 import { diffConfig, type DiffEntry } from '../../lib/configDiff';
 import { normalizeConfig } from '../../lib/configNormalize';
 
@@ -83,34 +83,20 @@ export function changesFor(diff: DiffEntry[], keys: string[]): number {
 
 export interface ConfigApply {
   errors: ValidationError[];
-  pending: PendingConfig | null;
   busy: boolean;
   validate: (config: ClusterConfig) => Promise<boolean>;
-  apply: (config: ClusterConfig, rollbackAfter: string) => Promise<boolean>;
-  confirm: () => Promise<void>;
-  rollback: () => Promise<void>;
+  apply: (config: ClusterConfig) => Promise<boolean>;
   clearErrors: () => void;
 }
 
 /**
- * Validate/apply/confirm/rollback against `/api/config`, plus the pending
- * rollback timer poll, shared by `Configuration` (the whole draft) and
- * `NodeDetail` (just one node's slice of it), since both submit the same
- * `ClusterConfig` through the same connection-sensitive-edit safety net.
+ * Validate/apply against `/api/config`, shared by `Configuration` (the whole
+ * draft) and `NodeDetail` (just one node's slice of it), since both submit the
+ * same `ClusterConfig`.
  */
 export function useConfigApply(reload: () => void): ConfigApply {
   const [errors, setErrors] = useState<ValidationError[]>([]);
-  const [pending, setPending] = useState<PendingConfig | null>(null);
   const [busy, setBusy] = useState(false);
-
-  // Poll for an armed rollback timer, ours or someone else's, so a page
-  // reload mid-window still shows the countdown instead of hiding it.
-  useEffect(() => {
-    const check = () => api.pendingConfiguration().then(setPending).catch(() => {});
-    check();
-    const id = setInterval(check, 1000);
-    return () => clearInterval(id);
-  }, []);
 
   const validate = useCallback(async (config: ClusterConfig) => {
     try {
@@ -124,13 +110,12 @@ export function useConfigApply(reload: () => void): ConfigApply {
   }, []);
 
   const apply = useCallback(
-    async (config: ClusterConfig, rollbackAfter: string) => {
+    async (config: ClusterConfig) => {
       setBusy(true);
       try {
         const ok = await validate(config);
         if (!ok) return false;
-        await api.applyConfiguration(config, rollbackAfter);
-        setPending(await api.pendingConfiguration());
+        await api.applyConfiguration(config);
         reload();
         return true;
       } catch (e) {
@@ -143,17 +128,5 @@ export function useConfigApply(reload: () => void): ConfigApply {
     [validate, reload],
   );
 
-  const confirm = useCallback(async () => {
-    await api.confirmConfiguration();
-    setPending(await api.pendingConfiguration());
-    reload();
-  }, [reload]);
-
-  const rollback = useCallback(async () => {
-    await api.rollbackConfiguration();
-    setPending(await api.pendingConfiguration());
-    reload();
-  }, [reload]);
-
-  return { errors, pending, busy, validate, apply, confirm, rollback, clearErrors: () => setErrors([]) };
+  return { errors, busy, validate, apply, clearErrors: () => setErrors([]) };
 }

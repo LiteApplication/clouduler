@@ -76,7 +76,7 @@ describe('api client error handling', () => {
   // a failure.
   it('resolves a 200 with an empty body instead of failing to parse it', async () => {
     mockFetch({ status: 200, text: async () => '' });
-    await expect(api.applyConfiguration({} as never, '60s')).resolves.toBeUndefined();
+    await expect(api.applyConfiguration({} as never)).resolves.toBeUndefined();
   });
 
   it('resolves a 204 with no body', async () => {

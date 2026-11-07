@@ -334,7 +334,7 @@ To get a certificate that browsers trust, Clouduler needs to prove to Let's Encr
 If you leave **ACME directory URL** empty, Clouduler uses Let's Encrypt production, which rate-limits failures. Test on staging, and be aware that the ACME account Clouduler creates is remembered together with the directory it was created against. Clearing the field later does not re-point that account, so only use staging when you are ready to wipe the account file (`acme-account.json` in the data directory) before switching.
 :::
 
-Settings pages that affect networking ask you to **confirm** the change within a minute, or they roll back. That is a safety net so you can't lock yourself out. See [Live config](/docs/features/live-config).
+Settings apply at once. A wrong networking value can lock you out of the dashboard, so keep a copy of the previous values. See [Live config](/docs/features/live-config).
 
 Then point the stack at the new network. In the Deploy page for `vaultwarden` (or in the file) change `internal` to `wan` in both places:
 

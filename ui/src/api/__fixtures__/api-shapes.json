@@ -965,10 +965,6 @@
   "oidcClientSecretStatus": {
     "configured": false
   },
-  "pendingConfig": {
-    "armed": false,
-    "seconds_left": null
-  },
   "proxyRoutes": [],
   "selfUpdateGithubToken": {
     "configured": false

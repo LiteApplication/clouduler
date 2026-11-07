@@ -6,7 +6,7 @@
 import { useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthContext';
-import { Banner, Button, Icon, Panel, Tag, TextField, useConfirm, useToast } from '../../ds';
+import { Banner, Button, Icon, Panel, Tag, useToast } from '../../ds';
 import { useConfigApply, useConfigDraft } from '../config/draft';
 import { CONFIG_PAGES, nodePathTarget, pageForPath } from '../config/pages';
 import type { SectionProps } from '../config/sections';
@@ -31,25 +31,20 @@ export function useSettingsConfig() {
 
 export type SettingsConfig = ReturnType<typeof useSettingsConfig>;
 
-/** The header button's label follows whether a rollback timer is running. */
 export function primaryAction(cfg: SettingsConfig) {
-  const armed = !!cfg.pending?.armed;
   return {
-    label: armed ? 'Confirm config' : 'Apply changes',
+    label: 'Apply changes',
     icon: 'check' as const,
-    disabled: armed ? false : cfg.busy || cfg.diff.length === 0,
+    disabled: cfg.busy || cfg.diff.length === 0,
   };
 }
 
-export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
+export function ConfigTab({ tab, cfg }: {
   tab: string;
   cfg: SettingsConfig;
-  rollbackAfter: number;
-  setRollbackAfter: (n: number) => void;
 }) {
   const { isAdmin } = useAuth();
   const toast = useToast();
-  const confirm = useConfirm();
   const [params] = useSearchParams();
   const wanted = params.get('page');
   const ready = !!cfg.original && !!cfg.draft;
@@ -57,7 +52,7 @@ export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
   useEffect(() => {
     if (wanted && ready) document.getElementById(`cfg-${wanted}`)?.scrollIntoView({ block: 'start' });
   }, [wanted, ready, tab]);
-  const { original, draft, setDraft, discard, diff, loadError, errors, pending, validate, rollback } = cfg;
+  const { original, draft, setDraft, discard, diff, loadError, errors, validate } = cfg;
 
   if (loadError) return <Banner tone="danger" title="Could not load the configuration">{loadError}</Banner>;
   if (!original || !draft) return <p className="cl-muted">Loading configuration…</p>;
@@ -65,21 +60,8 @@ export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
   const props: SectionProps = { draft, setDraft, disabled: !isAdmin, original };
   const pages = CONFIG_PAGES.filter((p) => CONFIG_SLUG_TAB[p.slug] === tab);
 
-  const doRollback = async () => {
-    if (await confirm({ title: 'Roll back now?', body: 'The previous config comes back immediately.', confirmLabel: 'Roll back now', confirmVariant: 'danger' })) {
-      await rollback();
-      toast('Rolled back to the previous config.');
-    }
-  };
-
   return (
     <div className="stack cfg">
-      {pending?.armed && (
-        <Banner tone="warn" title="Config change waiting for you" action="Roll back now" onAction={doRollback}>
-          <span className="pending-countdown">{pending.seconds_left ?? '?'}s</span> left to confirm. Without a confirm,
-          Clouduler returns to the previous config so you cannot lock yourself out.
-        </Banner>
-      )}
       {errors.length > 0 && (
         <Banner tone="danger" title="Fix these before applying">
           {errors.map((e, i) => (
@@ -102,8 +84,6 @@ export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
         diff={diff}
         isAdmin={isAdmin}
         busy={cfg.busy}
-        rollbackAfter={rollbackAfter}
-        setRollbackAfter={setRollbackAfter}
         onValidate={async () => {
           if (await validate(draft)) toast('Config is valid.');
         }}
@@ -113,12 +93,10 @@ export function ConfigTab({ tab, cfg, rollbackAfter, setRollbackAfter }: {
   );
 }
 
-function ChangesPanel({ diff, isAdmin, busy, rollbackAfter, setRollbackAfter, onValidate, onDiscard }: {
+function ChangesPanel({ diff, isAdmin, busy, onValidate, onDiscard }: {
   diff: DiffEntry[];
   isAdmin: boolean;
   busy: boolean;
-  rollbackAfter: number;
-  setRollbackAfter: (n: number) => void;
   onValidate: () => void;
   onDiscard: () => void;
 }) {
@@ -155,15 +133,6 @@ function ChangesPanel({ diff, isAdmin, busy, rollbackAfter, setRollbackAfter, on
           ];
         })}
       </div>
-      <TextField
-        label="Confirm within (seconds)"
-        type="number"
-        inputMode="numeric"
-        mono
-        value={String(rollbackAfter)}
-        onChange={(e) => setRollbackAfter(Math.max(5, Number(e.target.value) || 60))}
-        hint="Network changes roll back after this long unless you confirm."
-      />
     </Panel>
   );
 }

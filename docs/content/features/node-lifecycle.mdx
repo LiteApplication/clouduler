@@ -169,9 +169,8 @@ To do it:
 
 1. Bring the new network up on every node and check that the nodes reach each other on it, **follower to follower**. The leader only tests reachability from itself.
 2. Edit `cluster.yaml` once: the new `subnet` on the internal network and the new IP for every node, in the same edit. See [cluster.yaml](/docs/reference/cluster-yaml#editing-the-config).
-3. Confirm the edit within the 60 second rollback window.
-4. Watch the leader's logs (`journalctl -u clouduler -f`) for one `moved a member to a new rpc address` line per node, then check that all nodes are healthy.
-5. If one node never moves, revert the config. The old address is still served.
+3. Watch the leader's logs (`journalctl -u clouduler -f`) for one `moved a member to a new rpc address` line per node, then check that all nodes are healthy.
+4. If one node never moves, revert the config. The old address is still served.
 
 :::warning Two-voter clusters
 With two voters, a moved voter whose new address stops working takes quorum with it. Recover with [`clouduler emergency`](/docs/features/emergency-mode). Run three managers before re-addressing.

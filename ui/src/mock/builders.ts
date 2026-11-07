@@ -434,7 +434,6 @@ export class ScenarioBuilder {
       oidcSecretSet: false,
       proxyAuthSecretSet: false,
       clusterKey: { fingerprint: fakeDigest('key').slice(7, 23), held: true },
-      pending: { armed: false, seconds_left: null },
       lastRebalance: null,
       connectivity: {
         reports: this.nodeInputs.map((n) => ({

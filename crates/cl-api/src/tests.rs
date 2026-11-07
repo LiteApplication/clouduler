@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -17,7 +17,7 @@ use cl_raft::state::{Availability, NodeState, Role as ClusterRole};
 use cl_secret::ClusterKey;
 use openraft::BasicNode;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use crate::auth::session::SessionStore;
@@ -171,9 +171,6 @@ pub(crate) async fn harness() -> Harness {
         key_tx: tokio::sync::watch::channel(Some(cluster_key)).0,
         sessions: Arc::new(SessionStore::new(node.clone())),
         oidc: Arc::new(RwLock::new(None)),
-        pending_edit: Arc::new(Mutex::new(None)),
-        started_at: Instant::now(),
-        rollback_after: crate::config_edit::DEFAULT_ROLLBACK_AFTER,
         self_update_artifact_path: dir.path().join("self-update-artifact"),
         data_dir: dir.path().to_path_buf(),
         shutdown,
@@ -2532,7 +2529,6 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("alertSettings", "/api/alerts/settings"),
         ("state", "/api/state"),
         ("identity", "/auth/me"),
-        ("pendingConfig", "/api/config/pending"),
         ("clusterConfig", "/api/config"),
         ("cloudflareTokenStatus", "/api/cloudflare/token"),
         ("oidcClientSecretStatus", "/api/oidc/client-secret"),

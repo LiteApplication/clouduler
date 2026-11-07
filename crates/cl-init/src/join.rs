@@ -163,39 +163,21 @@ impl Peer {
             .context("the cluster config the peer returned does not parse")
     }
 
-    /// Push the amended config and confirm it straight away.
-    ///
-    /// An unconfirmed edit rolls itself back, which for a join would mean the
-    /// node quietly disappearing from the cluster a minute later. The window is
-    /// left short and closed immediately rather than skipped, so a push that
-    /// succeeds but whose confirm fails still ends in a known state.
+    /// Push the amended config.
     pub async fn push_config(&self, config: &ClusterConfig) -> Result<()> {
         #[derive(Serialize)]
         struct Body<'a> {
             config: &'a ClusterConfig,
-            rollback_after: &'a str,
         }
 
         let response = self
             .client
             .put(format!("{}/api/config", self.base))
             .bearer_auth(&self.token)
-            .json(&Body {
-                config,
-                rollback_after: "120s",
-            })
+            .json(&Body { config })
             .send()
             .await
             .context("sending the amended cluster config")?;
-        check(response).await?;
-
-        let response = self
-            .client
-            .post(format!("{}/api/config/confirm", self.base))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .context("confirming the config edit")?;
         check(response).await?;
         Ok(())
     }

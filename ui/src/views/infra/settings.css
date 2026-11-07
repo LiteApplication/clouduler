@@ -38,7 +38,6 @@
 .settings__blurb{margin-bottom:var(--space-1)}
 .settings__sync{display:flex;align-items:center;gap:var(--space-2);margin:0;padding:0 var(--space-1);font:400 14px/20px var(--font-sans);color:var(--ink-muted)}
 .settings__sync .cl-icon{color:var(--ok)}
-.settings .pending-countdown{font:700 20px/1 var(--font-mono)}
 
 /* The old config sections: their .card wrappers lose their own chrome, fields
    get an even gap, and nested cards (one per network, drive or node) read as

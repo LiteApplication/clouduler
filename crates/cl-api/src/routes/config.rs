@@ -1,4 +1,4 @@
-//! `/api/config`: the cluster config file, edited with an auto-rollback safety net.
+//! `/api/config`: the cluster config file.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -8,9 +8,6 @@ use cl_config::{ClusterConfig, StackFile};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{Identity, RequireAdmin};
-use crate::config_edit::{
-    connection_sensitive_change, PendingEdit, PendingStatus, DEFAULT_ROLLBACK_AFTER,
-};
 use crate::error::ApiError;
 use crate::redirects::{RedirectStore, REDIRECTS_CONFIG};
 use crate::server::AppState;
@@ -21,9 +18,6 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/validate", post(validate_config))
-        .route("/api/config/confirm", post(confirm))
-        .route("/api/config/rollback", post(rollback))
-        .route("/api/config/pending", get(pending))
         .route("/api/config/networks/{name}/rename", post(rename_network))
         .route("/api/config/drives/{name}/rename", post(rename_drive))
 }
@@ -35,8 +29,6 @@ async fn get_config(_identity: Identity, State(state): State<AppState>) -> Json<
 #[derive(Deserialize)]
 struct PutConfigRequest {
     config: ClusterConfig,
-    /// Humantime string, e.g. "60s". Defaults to 60 seconds.
-    rollback_after: Option<String>,
 }
 
 async fn put_config(
@@ -47,12 +39,6 @@ async fn put_config(
     body.config
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    let rollback_after = match body.rollback_after {
-        Some(text) => humantime::parse_duration(&text)
-            .map_err(|e| ApiError::BadRequest(format!("bad rollback_after: {e}")))?,
-        None => DEFAULT_ROLLBACK_AFTER,
-    };
 
     let previous = state.cluster_config.read().await.clone();
 
@@ -71,16 +57,6 @@ async fn put_config(
     }
     apply_config(&state, &body.config).await?;
 
-    // Only arm the rollback watchdog for edits that can cut off the
-    // connection this request came over. Anything else takes effect right
-    // away: a mistyped failover timer doesn't need a 60 second grace period.
-    if connection_sensitive_change(&previous, &body.config) {
-        let mut pending = state.pending_edit.lock().await;
-        *pending = Some(PendingEdit::arm(previous, state.clock(), rollback_after));
-        drop(pending);
-
-        spawn_rollback_watchdog(state, rollback_after);
-    }
     Ok(StatusCode::OK)
 }
 
@@ -96,28 +72,6 @@ fn deployed_overlay_collision(
         .filter_map(|(name, s)| Some((name.as_str(), StackFile::parse(&s.spec).ok()?)))
         .collect();
     cl_sched::run::overlay_collision(cfg, files.iter().map(|(n, f)| (*n, f)))
-}
-
-/// Waits out the rollback window, then restores the previous config unless it
-/// was confirmed or rolled back manually in the meantime.
-fn spawn_rollback_watchdog(state: AppState, after: std::time::Duration) {
-    tokio::spawn(async move {
-        tokio::time::sleep(after).await;
-        let mut pending = state.pending_edit.lock().await;
-        let Some(edit) = pending.as_mut() else { return };
-        if !edit.expire(state.clock()) {
-            return;
-        }
-        let restored = edit.previous().clone();
-        drop(pending);
-
-        match apply_config(&state, &restored).await {
-            Ok(()) => {
-                tracing::warn!("config edit was not confirmed in time, rolled back automatically")
-            }
-            Err(e) => tracing::error!(error = %e, "automatic config rollback failed"),
-        }
-    });
 }
 
 /// Put a config into effect: through raft first, so every node's daemon writes
@@ -590,59 +544,6 @@ async fn validate_config(
             }],
         }),
     }
-}
-
-async fn confirm(
-    _admin: RequireAdmin,
-    State(state): State<AppState>,
-) -> Result<StatusCode, ApiError> {
-    let mut pending = state.pending_edit.lock().await;
-    let edit = pending
-        .as_mut()
-        .ok_or_else(|| ApiError::Conflict("no config edit is pending".into()))?;
-    if !edit.confirm() {
-        return Err(ApiError::Conflict("pending edit already settled".into()));
-    }
-    Ok(StatusCode::OK)
-}
-
-async fn rollback(
-    _admin: RequireAdmin,
-    State(state): State<AppState>,
-) -> Result<StatusCode, ApiError> {
-    let mut pending = state.pending_edit.lock().await;
-    let edit = pending
-        .as_mut()
-        .ok_or_else(|| ApiError::Conflict("no config edit is pending".into()))?;
-    if !edit.rollback_manually() {
-        return Err(ApiError::Conflict("pending edit already settled".into()));
-    }
-    let restored = edit.previous().clone();
-    drop(pending);
-
-    apply_config(&state, &restored).await?;
-    Ok(StatusCode::OK)
-}
-
-#[derive(Serialize)]
-struct PendingBody {
-    armed: bool,
-    seconds_left: Option<u64>,
-}
-
-async fn pending(_identity: Identity, State(state): State<AppState>) -> Json<PendingBody> {
-    let pending = state.pending_edit.lock().await;
-    let body = match pending.as_ref() {
-        Some(edit) if edit.status() == PendingStatus::Armed => PendingBody {
-            armed: true,
-            seconds_left: Some(edit.remaining(state.clock()).as_secs()),
-        },
-        _ => PendingBody {
-            armed: false,
-            seconds_left: None,
-        },
-    };
-    Json(body)
 }
 
 #[cfg(test)]

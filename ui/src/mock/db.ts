@@ -19,7 +19,6 @@ import type {
   LastRebalance,
   McpClient,
   NodeState,
-  PendingConfig,
   PendingOAuthRequest,
   ProxyRoute,
   RedirectRule,
@@ -93,7 +92,6 @@ export interface MockDb {
   oidcSecretSet: boolean;
   proxyAuthSecretSet: boolean;
   clusterKey: ClusterKeyStatus;
-  pending: PendingConfig;
   lastRebalance: LastRebalance | null;
   connectivity: Connectivity;
   tlsFingerprint: string;

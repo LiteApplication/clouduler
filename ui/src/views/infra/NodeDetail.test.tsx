@@ -77,7 +77,6 @@ vi.mock('../../auth/AuthContext', () => ({
 
 const getNode = vi.fn();
 const getConfiguration = vi.fn();
-const pendingConfiguration = vi.fn();
 const validateConfiguration = vi.fn();
 const applyConfiguration = vi.fn();
 
@@ -85,7 +84,6 @@ vi.mock('../../api/client', () => ({
   api: {
     getNode: (...args: unknown[]) => getNode(...args),
     getConfiguration: (...args: unknown[]) => getConfiguration(...args),
-    pendingConfiguration: (...args: unknown[]) => pendingConfiguration(...args),
     validateConfiguration: (...args: unknown[]) => validateConfiguration(...args),
     applyConfiguration: (...args: unknown[]) => applyConfiguration(...args),
     setAvailability: vi.fn(),
@@ -124,7 +122,6 @@ describe('NodeDetail configuration section', () => {
       usage: { local: false, cpu_count: 0, load_1m: 0, memory_total_bytes: 0, memory_used_bytes: 0, uptime_seconds: 0 },
     });
     getConfiguration.mockResolvedValue(clusterConfig);
-    pendingConfiguration.mockResolvedValue({ armed: false, seconds_left: null });
   });
 
   it('shows the node config read-only with an Edit button, admin only', async () => {

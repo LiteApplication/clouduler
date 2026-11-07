@@ -6,7 +6,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, nodeLogsUrl } from '../../api/client';
 import type { NodeAddress, NodeDetail as NodeDetailT, NodeLogLine } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { Banner, Button, ContainerRow, LogView, Meter, PageHeader, Panel, KV, StatusBadge, Tag, TextField, useConfirm, useToast, type LogViewLine } from '../../ds';
+import { Banner, Button, ContainerRow, LogView, Meter, PageHeader, Panel, KV, StatusBadge, Tag, useConfirm, useToast, type LogViewLine } from '../../ds';
 import { useEventSource } from '../../hooks/useEventSource';
 import { cpuPercent, memPercent } from '../../hooks/useNodeMetrics';
 import { formatBytes, formatUptime } from '../../lib/format';
@@ -27,9 +27,8 @@ export function NodeDetail() {
   const [detail, setDetail] = useState<NodeDetailT | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [rollbackAfter, setRollbackAfter] = useState(60);
   const { original, draft, setDraft, reload } = useConfigDraft();
-  const { errors: configErrors, pending, busy, apply, confirm: confirmConfig, rollback: rollbackConfig, clearErrors } = useConfigApply(reload);
+  const { errors: configErrors, busy, apply, clearErrors } = useConfigApply(reload);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +103,7 @@ export function NodeDetail() {
     setEditing(false);
   };
   const save = async () => {
-    if (draft && (await apply(draft, `${rollbackAfter}s`))) setEditing(false);
+    if (draft && (await apply(draft))) setEditing(false);
   };
 
   if (!node && !configNode) {
@@ -143,11 +142,6 @@ export function NodeDetail() {
         {diskOver && (
           <Banner tone="danger" title="Disk almost full">
             {diskOver.drive} has {formatBytes(diskOver.free_bytes)} left. Free some space or move volumes elsewhere.
-          </Banner>
-        )}
-        {pending?.armed && (
-          <Banner tone="warn" title="Config change waiting for you" action="Roll back now" onAction={() => void rollbackConfig()}>
-            {pending.seconds_left ?? '?'}s left to confirm. <Button size="sm" variant="primary" onClick={() => void confirmConfig()}>Confirm config</Button>
           </Banner>
         )}
 
@@ -250,15 +244,6 @@ export function NodeDetail() {
                 ))}
               </Banner>
             )}
-            <TextField
-              label="Rollback after (seconds)"
-              type="number"
-              inputMode="numeric"
-              mono
-              value={String(rollbackAfter)}
-              onChange={(e) => setRollbackAfter(Math.max(5, Number(e.target.value) || 60))}
-              hint="Network-affecting edits roll back unless you confirm in time."
-            />
             <div className="row">
               <Button onClick={cancelEditing} disabled={busy}>Cancel</Button>
               <Button variant="primary" icon="check" loading={busy} onClick={() => void save()}>Save</Button>

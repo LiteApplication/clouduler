@@ -136,7 +136,7 @@ Headscale must be reachable at `https://headscale.example.com` by every machine,
 4. Open TCP 80 and 443 in the VPS provider's firewall and in `ufw` if you use it. Port 80 only redirects to HTTPS; certificates are issued through DNS, so it is not needed for that.
 5. Leave the ACME directory URL empty (Let's Encrypt production). The tailscale clients in step 4 need a certificate their system trusts, and a staging certificate would make `tailscale up` fail. Quick start 1 explains why switching from staging to production later is awkward.
 
-Only the VPS lists `public`, so the DNS record for <code><Var plain name="hs" fallback="headscale" />.<Var plain name="zone" fallback="example.com" /></code> will point only at it. Settings pages that touch networks ask you to confirm within a minute or they roll back ([Live config](/docs/features/live-config)).
+Only the VPS lists `public`, so the DNS record for <code><Var plain name="hs" fallback="headscale" />.<Var plain name="zone" fallback="example.com" /></code> will point only at it. Settings apply at once (see [Live config](/docs/features/live-config)).
 
 ### The stack
 
@@ -334,8 +334,7 @@ What happens when you apply it: the leader dials the new address, requires that 
 1. Open **Settings**, **Network**, **Networks**. On the internal network change the **Address range** to <code><Var plain name="tailnet" fallback="100.64.0.0/10" /></code>.
 2. On the **Nodes** page change <code><Var plain name="n1" fallback="atlas" /></code>'s address on the internal network to <code><Var plain name="ts1" fallback="100.64.0.1" /></code>.
 3. Under **Changes to apply** press **Validate config**. Both edits are in the same draft.
-4. Set **Confirm within (seconds)** to 120 instead of the default 60, to leave room for the page to reconnect, and press **Apply changes**.
-5. The banner **Config change waiting for you** counts down. As soon as you can reach the dashboard at the new address, press **Confirm config**. If you do not, the old config comes back by itself.
+4. Press **Apply changes**. The edit takes effect at once, so the page may lose its connection until you open the dashboard at the new address.
 
 <UiScreen scenario="multisite-headscale" route="/nodes" caption="Nodes page of a multi-site cluster, with tailnet addresses." alt="Nodes page of a three-site cluster with tailnet addresses" />
 
@@ -361,7 +360,7 @@ nodes:
 clouduler check
 clouduler config reload`}</Cmd>
 
-`config reload` prints `reloaded config into the cluster, generation N`. There is no rollback timer on this route, so keep a copy of the previous file to revert.
+`config reload` prints `reloaded config into the cluster, generation N`. Nothing reverts it automatically, so keep a copy of the previous file.
 
 </UiCli.Cli>
 </UiCli>
@@ -381,7 +380,7 @@ With a single manager there is one line, for `atlas`. Then `sudo clouduler statu
 <UiScreen scenario="multisite-headscale" route="/" caption="Overview of the cluster once every node is on the tailnet." alt="Overview of the multi-site cluster" />
 
 :::warning If the line never appears
-The new address was not reachable from the leader, or something else answered there. Nothing in the membership changed. Press **Roll back now** (or let the timer run out), or put the previous file back and `clouduler config reload`. Then fix the tunnel and try again.
+The new address was not reachable from the leader, or something else answered there. Nothing in the membership changed. Put the previous values back in Settings, or put the previous file back and `clouduler config reload`. Then fix the tunnel and try again.
 :::
 
 :::warning The web address changes

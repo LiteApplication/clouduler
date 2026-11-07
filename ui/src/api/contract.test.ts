@@ -44,7 +44,6 @@ import type {
   StackDetailResponse,
   VolumeState,
   OidcClientSecretStatus,
-  PendingConfig,
   UpdateRow,
 } from './types';
 
@@ -53,7 +52,6 @@ import type {
 const status: ClusterStatus = shapes.status;
 const state: ClusterState = shapes.state as unknown as ClusterState;
 const identity: Identity = shapes.identity as Identity;
-const pending: PendingConfig = shapes.pendingConfig;
 const config: ClusterConfig = shapes.clusterConfig as unknown as ClusterConfig;
 const cloudflare: CloudflareTokenStatus = shapes.cloudflareTokenStatus;
 const oidcSecret: OidcClientSecretStatus = shapes.oidcClientSecretStatus;
@@ -73,7 +71,6 @@ const nodeMetrics: NodeMetrics = shapes.nodeMetrics as unknown as NodeMetrics;
 const READ_BY_UI: Record<string, [object, string[]]> = {
   status: [status, ['has_quorum', 'leader', 'managers_total', 'managers_reachable', 'version', 'state_version']],
   identity: [identity, ['subject', 'role']],
-  pendingConfig: [pending, ['armed', 'seconds_left']],
   cloudflareTokenStatus: [cloudflare, ['configured']],
   oidcClientSecretStatus: [oidcSecret, ['configured']],
   clusterKeyStatus: [clusterKey, ['fingerprint', 'held']],
@@ -111,11 +108,5 @@ describe('api response shapes match what the ui reads', () => {
     expect(status).toHaveProperty('has_quorum');
     expect(status).not.toHaveProperty('quorum');
     expect(typeof status.has_quorum).toBe('boolean');
-  });
-
-  // Same class, caught earlier: the config rollback countdown.
-  it('reports the rollback countdown under the name the ui reads', () => {
-    expect(pending).toHaveProperty('seconds_left');
-    expect(pending).not.toHaveProperty('remaining_seconds');
   });
 });

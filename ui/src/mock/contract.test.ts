@@ -28,7 +28,6 @@ import type {
   NodeDetail,
   NodeMetrics,
   OidcClientSecretStatus,
-  PendingConfig,
   ProxyRoute,
   SelfUpdateConfig,
   SelfUpdateGithubTokenStatus,
@@ -120,7 +119,6 @@ const OPTIONS: Record<string, ShapeOptions> = {
   nodeDetail: { optional: ['.usage.version'] },
   nodeMetrics: {},
   oidcClientSecretStatus: {},
-  pendingConfig: {},
   proxyRoutes: {},
   selfUpdateGithubToken: {},
   selfUpdateRepo: {},
@@ -175,7 +173,6 @@ const ENDPOINTS: Endpoint[] = [
   { fixture: 'nodeDetail', path: (db) => `/api/nodes/${Object.keys(db.state.nodes)[0]}` },
   { fixture: 'nodeMetrics', path: () => '/api/nodes/metrics' },
   { fixture: 'oidcClientSecretStatus', path: () => '/api/oidc/client-secret' },
-  { fixture: 'pendingConfig', path: () => '/api/config/pending' },
   { fixture: 'proxyRoutes', path: () => '/api/proxy/routes' },
   { fixture: 'selfUpdateGithubToken', path: () => '/api/self-update/github-token' },
   { fixture: 'selfUpdateRepo', path: () => '/api/self-update/repo' },
@@ -218,7 +215,6 @@ for (const name of Object.keys(scenarios)) {
       const catalog: AlertCatalogEntry[] = db.alertCatalog;
       const settings: AlertSettingsResponse = db.alertSettings;
       const config: ClusterConfig = db.config;
-      const pending: PendingConfig = db.pending;
       const connectivity: Connectivity = db.connectivity;
       const rows: UpdateRow[] = db.updates;
       const routes: ProxyRoute[] = db.proxyRoutes;
@@ -227,7 +223,7 @@ for (const name of Object.keys(scenarios)) {
       const key: ClusterKeyStatus = db.clusterKey;
       const repo: SelfUpdateConfig | null = db.selfUpdate.repo;
       const run: SelfUpdateRunState | null = db.selfUpdate.run;
-      expect([state, stacks, alerts, catalog, settings, config, pending, connectivity, rows, routes, identity, rebalance, key, repo, run]).toBeDefined();
+      expect([state, stacks, alerts, catalog, settings, config, connectivity, rows, routes, identity, rebalance, key, repo, run]).toBeDefined();
 
       // And the same, through the wire, for what the routes derive.
       const wire = {
