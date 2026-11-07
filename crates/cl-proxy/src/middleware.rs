@@ -20,6 +20,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 const HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
+    "proxy-connection",
     "proxy-authenticate",
     "proxy-authorization",
     "te",

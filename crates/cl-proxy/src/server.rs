@@ -329,9 +329,11 @@ async fn accept_tls(
 /// An h2 request carries its host in `:authority` (the URI), not a `Host`
 /// header, but routing, the gates and the forwarded headers all read `Host`.
 /// Synthesise it so every code path below sees the same thing for HTTP/1.1
-/// and HTTP/2 clients.
+/// and HTTP/2 clients. For HTTP/2 `:authority` always wins over a `Host`
+/// header the client also sent (RFC 9113 §8.3.1), so a request cannot be
+/// routed by one name and checked against another.
 fn ensure_host_header(req: &mut Request<Incoming>) {
-    if req.headers().contains_key(HOST) {
+    if req.version() != Version::HTTP_2 && req.headers().contains_key(HOST) {
         return;
     }
     let Some(authority) = req.uri().authority().map(|a| a.as_str().to_string()) else {

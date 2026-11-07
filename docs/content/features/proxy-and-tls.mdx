@@ -236,6 +236,8 @@ On an `http2` route:
 - Idle HTTP/2 connections, to visitors and to containers, are pinged every 30s, so a dead peer is noticed instead of holding a stream open forever.
 - `max_body_size` counts the bytes of the whole request stream, so on a long-lived client stream leave it unset or set it high enough for the stream's lifetime.
 
+For an HTTP/2 visitor the proxy routes on `:authority` (a conflicting `Host` header is ignored), joins the browser's one-cookie-per-header `Cookie` headers into one, and drops connection-specific headers such as `Connection`, `Keep-Alive` and `Proxy-Connection`. Websockets over HTTP/2 (RFC 8441) are not supported; browsers fall back to HTTP/1.1 for them. Server push is not implemented.
+
 The proxy's health check still uses HTTP/1.1, so the container must answer HTTP/1.1 on that port as well, or the route will look unhealthy.
 
 ## Redirects and static backends
