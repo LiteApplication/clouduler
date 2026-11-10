@@ -138,6 +138,14 @@ pub fn mangle_chain(network: &str) -> String {
 pub fn mangle_output_chain(network: &str) -> String {
     short_name("CLDR-CTNR-", network, CHAIN_USABLE)
 }
+/// Mangle `POSTROUTING` chain (clears the reply mark before the vxlan sees it).
+pub fn mangle_post_chain(network: &str) -> String {
+    short_name("CLDR-CTNX-", network, CHAIN_USABLE)
+}
+/// Raw `PREROUTING` chain (no conntrack for frames the host puts on the segment).
+pub fn raw_chain(network: &str) -> String {
+    short_name("CLDR-CTNT-", network, CHAIN_USABLE)
+}
 /// L2 isolation chain of a segment bridge.
 pub fn l2_chain(bridge: &str) -> String {
     short_name("CLDR-CTNL2-", bridge, CHAIN_USABLE)
@@ -153,6 +161,8 @@ pub fn all_chains(network: &str) -> Vec<(&'static str, String)> {
         ("nat", masq_chain(network)),
         ("mangle", mangle_chain(network)),
         ("mangle", mangle_output_chain(network)),
+        ("mangle", mangle_post_chain(network)),
+        ("raw", raw_chain(network)),
     ]
 }
 
@@ -910,6 +920,7 @@ pub fn mangle_iptables_plan(
     network: &str,
     bridge: &str,
     veth: &str,
+    peer: &str,
     router_ip: Option<Ipv4Addr>,
 ) -> IptablesPlan {
     let mark = container_mark(network);
@@ -934,6 +945,36 @@ pub fn mangle_iptables_plan(
     };
     let mut pre = ChainSpec::new("mangle", &pre_name);
     let mut out = ChainSpec::new("mangle", &out_name);
+    // The mark has done its job once the route is chosen. A frame bridged
+    // onto the segment keeps it (the restore above runs again for bridged
+    // frames), and the vxlan device looks its underlay route up with the
+    // frame's mark: the fwmark rule would then send the tunnel's own UDP
+    // packet into the segment (the reply table's default route is the
+    // router) instead of out of the node. Clear our bits on the way out.
+    let post_name = mangle_post_chain(network);
+    let mut post = ChainSpec::new("mangle", &post_name);
+    post.push(&["-o", bridge, "-j", "MARK", "--set-xmark", &format!("0x0/{mask}")]);
+    // A reply the host sends to the router leaves through `veth`, which
+    // is a bridge port, so the bridge sees the very same packet again with a
+    // fresh conntrack lookup. By then a DNAT'd reply carries the original
+    // destination as its source, so its tuple is the reverse of the
+    // connection's own original tuple and clashes with it: conntrack
+    // "resolves" that by renumbering the source port, and the router resets
+    // the connection. The frame was already tracked on its way out, so it is
+    // not tracked a second time.
+    let raw_name = raw_chain(network);
+    let mut raw = ChainSpec::new("raw", &raw_name);
+    raw.push(&[
+        "-i",
+        bridge,
+        "-m",
+        "physdev",
+        "--physdev-in",
+        peer,
+        "-j",
+        "CT",
+        "--notrack",
+    ]);
     restore(&mut pre);
     restore(&mut out);
     for m in ingress_matches(bridge, veth, router_ip) {
@@ -953,10 +994,12 @@ pub fn mangle_iptables_plan(
         );
     }
     IptablesPlan {
-        chains: vec![pre, out],
+        chains: vec![pre, out, post, raw],
         jumps: vec![
+            Jump::new("raw", &["PREROUTING"], &raw_name, true),
             Jump::new("mangle", &["PREROUTING"], &pre_name, true),
             Jump::new("mangle", &["OUTPUT"], &out_name, true),
+            Jump::new("mangle", &["POSTROUTING"], &post_name, true),
         ],
     }
 }
@@ -1592,7 +1635,7 @@ mod tests {
 
     #[test]
     fn connmark_is_set_on_new_router_connections_and_restored_everywhere() {
-        let plan = mangle_iptables_plan("tn", "clbr-x", "clch-tn", Some(ip("10.244.9.5")));
+        let plan = mangle_iptables_plan("tn", "clbr-x", "clch-tn", "clcp-tn", Some(ip("10.244.9.5")));
         let v = format!("{:#x}/{MARK_MASK:#x}", container_mark("tn"));
         let pre = rules(&plan, &mangle_chain("tn"));
         assert!(pre[0].contains("--restore-mark"));
@@ -1606,8 +1649,21 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("--restore-mark"));
         let parents: Vec<&str> = plan.jumps.iter().map(|j| j.parents[0].as_str()).collect();
-        assert_eq!(parents, vec!["PREROUTING", "OUTPUT"]);
-        assert!(plan.jumps.iter().all(|j| j.table == "mangle"));
+        assert_eq!(parents, vec!["PREROUTING", "PREROUTING", "OUTPUT", "POSTROUTING"]);
+        assert_eq!(plan.jumps[0].table, "raw");
+        assert!(plan.jumps[1..].iter().all(|j| j.table == "mangle"));
+        assert_eq!(
+            rules(&plan, &raw_chain("tn")),
+            vec!["-i clbr-x -m physdev --physdev-in clcp-tn -j CT --notrack"]
+        );
+        // The mark must not survive onto the segment: the vxlan device routes
+        // its own UDP packet with the frame's mark, and the reply table's
+        // default route would swallow it.
+        let post = rules(&plan, &mangle_post_chain("tn"));
+        assert_eq!(
+            post,
+            vec![format!("-o clbr-x -j MARK --set-xmark 0x0/{MARK_MASK:#x}")]
+        );
     }
 
     #[test]

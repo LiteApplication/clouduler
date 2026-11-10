@@ -532,6 +532,8 @@ Clouduler manages host firewall rules with iptables. It only touches chains with
 | `CLDR-CTNN-NET` (nat, `PREROUTING`) | DNAT of `open_ports` whose `target_port` differs, and of 80/443 to the node's segment address. |
 | `CLDR-CTNP-NET` (nat, `POSTROUTING`) | Masquerades traffic leaving through `clch-NET` and router traffic towards allowed subnets. Traffic that leaves through the segment bridge keeps its source address (the rule ahead of the overlay source NAT, which would otherwise replace a router's address with the gateway address). |
 | `CLDR-CTNM-NET`, `CLDR-CTNR-NET` (mangle, `PREROUTING`, `OUTPUT`) | Marks new connections that arrive from the router and restores the mark on their packets, so replies go back to the router. |
+| `CLDR-CTNX-NET` (mangle, `POSTROUTING`) | Clears that mark on frames leaving through the segment bridge, so the tunnel between nodes is not routed back into the segment. |
+| `CLDR-CTNT-NET` (raw, `PREROUTING`) | Skips connection tracking for frames the host sends onto the segment through its host port a second time, so replies to DNAT-ed connections keep their source port. |
 
 Long network names are shortened with a hash so the chain and interface names fit Linux's limits. A container network also adds policy routing rules (priority 5050, and 5200 and above) and two routing tables per network, which Clouduler removes when the network goes away.
 

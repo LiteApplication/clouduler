@@ -22,7 +22,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET="x86_64-unknown-linux-musl"
 BUILDER_IMAGE="clouduler-musl-builder"
-OUT="$REPO_ROOT/target/$TARGET/release/clouduler"
+# Cargo profile: `qemu` (see Cargo.toml) builds much faster than release.
+# Override with CLOUDULER_PROFILE=release for an optimized binary.
+PROFILE="${CLOUDULER_PROFILE:-qemu}"
+JOBS="${CARGO_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+case "$PROFILE" in dev) PROFILE_DIR=debug; PROFILE_FLAG="" ;; release) PROFILE_DIR=release; PROFILE_FLAG="--release" ;; *) PROFILE_DIR="$PROFILE"; PROFILE_FLAG="--profile $PROFILE" ;; esac
+OUT="$REPO_ROOT/target/$TARGET/$PROFILE_DIR/clouduler"
 
 log() { printf 'build-binary: %s\n' "$*" >&2; }
 
@@ -45,7 +50,9 @@ if [[ -n "$musl_cc" ]] && rustup target list --installed 2>/dev/null | grep -qx 
   log "building with $musl_cc"
   CC_x86_64_unknown_linux_musl="$musl_cc" \
   CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$musl_cc" \
-    cargo build --release --target "$TARGET" -p clouduler >&2
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
+  CARGO_INCREMENTAL=1 RUSTC_WRAPPER="${CLOUDULER_RUSTC_WRAPPER-}" \
+    cargo build $PROFILE_FLAG -j "$JOBS" --target "$TARGET" -p clouduler >&2
 elif command -v docker >/dev/null 2>&1; then
   log "no musl compiler on PATH, building in docker"
   # A one-off image rather than `apk add` on every run: the packages have to
@@ -71,8 +78,11 @@ DOCKERFILE
     -e CARGO_HOME=/src/target/musl-cargo-home \
     -e CARGO_TARGET_DIR=/src/target \
     -e SCCACHE_DIR=/src/target/musl-sccache \
+    -e CARGO_BUILD_JOBS="$JOBS" \
+    -e CARGO_INCREMENTAL=1 \
+    -e RUSTC_WRAPPER="${CLOUDULER_RUSTC_WRAPPER-}" \
     "$BUILDER_IMAGE" \
-    cargo build --release --target "$TARGET" -p clouduler >&2
+    cargo build $PROFILE_FLAG -j "$JOBS" --target "$TARGET" -p clouduler >&2
 else
   log "no way to build a musl binary: install musl-tools (or musl), or docker, or set CLOUDULER_BIN"
   exit 1
@@ -84,6 +94,13 @@ fi
 # it now rather than 40 seconds into a scenario.
 if file "$OUT" 2>/dev/null | grep -q "dynamically linked, interpreter /lib64"; then
   log "$OUT is dynamically linked against glibc, not musl"
+  exit 1
+fi
+
+# A musl binary that is not static needs /lib/ld-musl at run time (the host
+# segfaults on it, the guest may lack libgcc_s): musl-gcc builds default to it.
+if file "$OUT" 2>/dev/null | grep -q "interpreter /lib/ld-musl"; then
+  log "$OUT is dynamically linked against musl, expected a static binary"
   exit 1
 fi
 

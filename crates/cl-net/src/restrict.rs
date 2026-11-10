@@ -958,6 +958,7 @@ mod tests {
                 "tn",
                 "clbr-x",
                 "clch-tn",
+                "clcp-tn",
                 Some(ip("10.244.9.5")),
             ));
             plans.push(l2_isolation_plan(

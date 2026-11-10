@@ -205,9 +205,14 @@ steps:
   - wait_running: { stack: ctn-router, service: router, timeout: 180 }
   - assert_exec:
       node: n2
-      cmd: "cx ctn-client_client_0 ip route; cx ctn-client_client_0 cat /tmp/last"
-      matches: "default via 10\\.244\\..*src=203\\.0\\.113\\.1"
+      cmd: "cx ctn-client_client_0 ip route"
+      matches: "default via 10\\.244\\."
       absent: "prohibit"
+      timeout: 120
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 cat /tmp/last"
+      matches: "src=203\\.0\\.113\\.1$"
       timeout: 120
 
   # No daemon died on the way.

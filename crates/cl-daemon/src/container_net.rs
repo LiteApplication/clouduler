@@ -215,7 +215,13 @@ impl Desired {
                 allowed: &allowed,
             });
             apply_plan(&filter).context("container network filter")?;
-            apply_plan(&mangle_iptables_plan(&network, &bridge, &veth, router_ip))
+            apply_plan(&mangle_iptables_plan(
+                &network,
+                &bridge,
+                &veth,
+                &host_peer_name(&network),
+                router_ip,
+            ))
                 .context("container network mangle")?;
             apply_plan(&l2_isolation_plan(&bridge, segment, router_ip, &node_ips))
                 .context("container network isolation")?;

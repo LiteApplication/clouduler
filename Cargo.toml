@@ -98,6 +98,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lto = "thin"
 strip = true
 
+# Fast-to-build profile for the QEMU harness (tests/qemu/build-binary.sh):
+# no LTO, many codegen units, incremental, so a one-file change relinks in
+# well under a minute instead of re-running thin LTO over the workspace.
+[profile.qemu]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
+opt-level = 1
+strip = true
+
 [profile.dev]
 # Full debug info isn't needed for day-to-day iteration and is the slowest
 # part of a debug build to emit; line tables alone still give useful panic

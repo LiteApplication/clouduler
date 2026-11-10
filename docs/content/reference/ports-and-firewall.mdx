@@ -179,6 +179,8 @@ Clouduler keeps its own iptables chains for container traffic. They are applied 
 | `CLDR-CTNN-<net>` | nat, `PREROUTING` | DNAT for open ports with a different `target_port`, and for 80/443 to the node's segment address. |
 | `CLDR-CTNP-<net>` | nat, `POSTROUTING` | Masquerade of traffic leaving through the segment host port `clch-<net>`, and of router traffic to allowed subnets. Traffic leaving through the segment bridge is accepted untouched, ahead of `CLDR-OVL-SNAT`. |
 | `CLDR-CTNM-<net>`, `CLDR-CTNR-<net>` | mangle, `PREROUTING`, `OUTPUT` | Connmark for connections that start at the router, so replies return to it. |
+| `CLDR-CTNX-<net>` | mangle, `POSTROUTING` | Clears the reply mark on frames leaving through the segment bridge, so the vxlan tunnel traffic is not routed back into the segment. |
+| `CLDR-CTNT-<net>` | raw, `PREROUTING` | Does not track frames the host sends onto the segment through its host port a second time, which would otherwise renumber the source port of DNAT replies. |
 
 What this means for you:
 

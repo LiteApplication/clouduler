@@ -539,6 +539,7 @@ pub struct HostObjects {
     /// Links carrying [`WIREGUARD_LINK_ALIAS`].
     pub wg_links: Vec<String>,
     pub mangle_chains: Vec<String>,
+    pub raw_chains: Vec<String>,
     /// Every `ip rule` that `container_net` would own.
     pub container_rules: Vec<crate::container_net::IpRule>,
     /// `clch-*` links.
@@ -600,6 +601,7 @@ pub fn plan_sweep(host: &HostObjects, wanted: &Wanted) -> Vec<SweepAction> {
         ("filter", &host.filter_chains),
         ("nat", &host.nat_chains),
         ("mangle", &host.mangle_chains),
+        ("raw", &host.raw_chains),
     ] {
         for chain in chains {
             if is_swept_chain(chain) && !wanted_chains.contains(chain) {
@@ -731,6 +733,7 @@ pub fn scan_host() -> Result<HostObjects> {
         filter_chains: iptables::list_chains("filter")?,
         nat_chains: iptables::list_chains("nat")?,
         mangle_chains: iptables::list_chains("mangle")?,
+        raw_chains: iptables::list_chains("raw")?,
         policy_rules: parse_policy_rules(&String::from_utf8_lossy(&rules.stdout)),
         container_rules: crate::container_net::parse_ip_rules(&String::from_utf8_lossy(
             &rules.stdout,
@@ -1245,7 +1248,12 @@ mod tests {
                 "DOCKER-USER".into(),
             ],
             nat_chains: vec![c::nat_chain("live"), c::masq_chain("dead")],
-            mangle_chains: vec![c::mangle_chain("live"), c::mangle_output_chain("dead")],
+            mangle_chains: vec![
+                c::mangle_chain("live"),
+                c::mangle_output_chain("dead"),
+                c::mangle_post_chain("dead"),
+            ],
+            raw_chains: vec![c::raw_chain("live"), c::raw_chain("dead")],
             container_rules: vec![
                 rule(
                     5050,
@@ -1306,6 +1314,8 @@ mod tests {
                 c::l2_chain(&c::container_bridge_name("dead")),
                 c::masq_chain("dead"),
                 c::mangle_output_chain("dead"),
+                c::mangle_post_chain("dead"),
+                c::raw_chain("dead"),
             ]
             .into()
         );
@@ -1338,6 +1348,7 @@ mod tests {
         host.filter_chains = vec![c::input_chain("live"), c::forward_chain("dead")];
         host.nat_chains = vec![c::masq_chain("dead")];
         host.mangle_chains = vec![c::mangle_chain("live")];
+        host.raw_chains = vec![c::raw_chain("live")];
         assert!(plan_sweep(&host, &container_wanted(&["live", "dead"])).is_empty());
     }
 }
