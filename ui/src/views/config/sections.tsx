@@ -3,11 +3,15 @@
 // loses an edit because the draft lives in the Configuration shell above them.
 
 import { generateX25519Identity, identityToRecipient } from 'age-encryption';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { parseDocument } from 'yaml';
+import { useClusterState } from '../../state/store';
 import { api, ApiError, encodeText } from '../../api/client';
 import type {
   CloudflareTokenStatus,
   ClusterConfig,
+  ContainerNetwork,
+  ContainerOpenPort,
   EgressFallback,
   GitBackupStatus,
   GitBackupWebhookSecretStatus,
@@ -215,7 +219,14 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
             id={`net-${name}-type`}
             label="Network type"
             value={net.type}
-            onChange={(type) => updateNetwork(name, { type: type as NetworkKind })}
+            onChange={(type) => {
+              const kind = type as NetworkKind;
+              if (kind === net.type) return;
+              const next = { ...draft.networks[name], type: kind };
+              if (kind === 'container') next.container = emptyContainer();
+              else delete next.container;
+              setDraft({ ...draft, networks: { ...draft.networks, [name]: next } });
+            }}
             options={[
               { value: 'internal', label: 'Internal' },
               { value: 'private', label: 'Private' },
@@ -223,13 +234,14 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               { value: 'egress', label: 'Egress' },
               { value: 'wireguard', label: 'WireGuard' },
               { value: 'nat', label: 'NAT' },
+              { value: 'container', label: 'Container' },
             ]}
             hint="What this network is used for."
-            help="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below. NAT routes a service's outbound traffic through the node's own routing table, masqueraded like ordinary NAT, instead of a named interface — no per-node setup needed."
+            help="Internal carries raft, drive sync and the container overlay, and is required exactly once. Private is a subnetted network for other trusted traffic. Public has no subnet; nodes get an IPv4/IPv6/domain address block instead. Egress routes a service's outbound traffic out a named host interface instead of the node's normal route; pick that interface per node below. WireGuard is configured per node by importing a wg-quick config below. NAT routes a service's outbound traffic through the node's own routing table, masqueraded like ordinary NAT, instead of a named interface — no per-node setup needed. Container routes an address space through a router container in a stack (a VPN or tunnel client, for example); stacks listing the network and the chosen hosts send traffic for that range through it."
             configKey={`networks.${name}.type`}
             disabled={disabled}
           />
-          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
+          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && net.type !== 'container' && (
             <CidrField
               id={`net-${name}-subnet`}
               label="Address range"
@@ -241,7 +253,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               disabled={disabled}
             />
           )}
-          {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
+          {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && net.type !== 'container' && (
             <TextField
               id={`net-${name}-domain`}
               label="DNS domain"
@@ -275,6 +287,15 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               Not addressable by subnet: pick a host interface per node below. Clouduler does not manage the interface
               itself — it must already exist and be up.
             </p>
+          )}
+          {net.type === 'container' && (
+            <ContainerNetworkForm
+              name={name}
+              value={net.container ?? emptyContainer()}
+              onChange={(container) => updateNetwork(name, { container })}
+              draft={draft}
+              disabled={disabled}
+            />
           )}
           {net.type === 'nat' && (
             <p className="field-hint">
@@ -606,6 +627,7 @@ export function NodeCard({
     ([netName, net]) =>
       net.type !== 'internal' &&
       net.type !== 'nat' &&
+      net.type !== 'container' &&
       !(netName in node.network) &&
       !pendingWireguard.includes(netName),
   );
@@ -729,7 +751,7 @@ export function NodeCard({
       </h4>
       {networkEntries.map(([netName, net]) => {
         const addr = node.network[netName];
-        if (net.type === 'nat') {
+        if (net.type === 'nat' || net.type === 'container') {
           // Not addressable per node: nothing to render here at all.
           return null;
         } else if (net.type === 'internal') {
@@ -929,6 +951,175 @@ export function NodeCard({
   );
 }
 
+export function emptyContainer(): ContainerNetwork {
+  return { stack: '', service: '', subnet: '', hosts: [], allowed_networks: [], open_ports: [], proxy: false };
+}
+
+/** Service names of a stack spec (compose yaml); null when it can't be parsed. */
+export function serviceNamesOf(spec: string | undefined): string[] | null {
+  if (!spec) return null;
+  try {
+    const doc = parseDocument(spec);
+    if (doc.errors.length) return null;
+    const services = (doc.toJS() as { services?: Record<string, unknown> } | null)?.services;
+    if (!services || typeof services !== 'object') return null;
+    return Object.keys(services);
+  } catch {
+    return null;
+  }
+}
+
+function MultiPick({
+  label,
+  options,
+  selected,
+  onChange,
+  disabled,
+  empty,
+}: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onChange: (v: string[]) => void;
+  disabled: boolean;
+  empty: string;
+}) {
+  // Keep selections that no longer exist visible so they can be unticked.
+  const all = Array.from(new Set([...options, ...selected])).sort();
+  return (
+    <div className="field" role="group" aria-label={label}>
+      <div className="fld__head">
+        <label>{label}</label>
+      </div>
+      {all.length === 0 && <p className="field-hint">{empty}</p>}
+      {all.map((o) => (
+        <CheckOption
+          key={o}
+          checked={selected.includes(o)}
+          disabled={disabled}
+          onChange={(on) => onChange(on ? [...selected, o].sort() : selected.filter((x) => x !== o))}
+        >
+          {o}
+        </CheckOption>
+      ))}
+    </div>
+  );
+}
+
+/** The router + routing options of a `container`-kind network. */
+function ContainerNetworkForm({
+  name,
+  value,
+  onChange,
+  draft,
+  disabled,
+}: {
+  name: string;
+  value: ContainerNetwork;
+  onChange: (c: ContainerNetwork) => void;
+  draft: ClusterConfig;
+  disabled: boolean;
+}) {
+  const cluster = useClusterState();
+  const stacks = cluster?.stacks ?? {};
+  const stackNames = Object.keys(stacks).sort();
+  const services = useMemo(() => serviceNamesOf(stacks[value.stack]?.spec), [stacks, value.stack]);
+  const set = (patch: Partial<ContainerNetwork>) => onChange({ ...value, ...patch });
+  const allowedOptions = Object.entries(draft.networks)
+    .filter(([n, c]) => n !== name && (c.type === 'internal' || c.type === 'private' || c.type === 'public'))
+    .map(([n]) => n);
+
+  return (
+    <>
+      <SelectField
+        id={`net-${name}-container-stack`}
+        label="Router stack"
+        value={value.stack}
+        onChange={(stack) => set({ stack, service: '' })}
+        options={[
+          { value: '', label: '(choose a stack)' },
+          ...Array.from(new Set([...stackNames, ...(value.stack ? [value.stack] : [])])).map((s) => ({ value: s, label: s })),
+        ]}
+        hint="The stack running the router container."
+        help="The stack containing the router service. It may be deployed after the network; until then the network just reports the router as missing."
+        configKey={`networks.${name}.container.stack`}
+        disabled={disabled}
+      />
+      {services ? (
+        <SelectField
+          id={`net-${name}-container-service`}
+          label="Router service"
+          value={value.service}
+          onChange={(service) => set({ service })}
+          options={[
+            { value: '', label: '(choose a service)' },
+            ...Array.from(new Set([...services, ...(value.service ? [value.service] : [])])).map((s) => ({ value: s, label: s })),
+          ]}
+          hint="Must run a single replica."
+          help="The service inside the router stack that forwards the traffic. It must run a single replica."
+          configKey={`networks.${name}.container.service`}
+          disabled={disabled}
+        />
+      ) : (
+        <TextField
+          id={`net-${name}-container-service`}
+          label="Router service"
+          value={value.service}
+          onChange={(service) => set({ service })}
+          hint="Service name in the router stack."
+          help="The service inside the router stack that forwards the traffic. It must run a single replica."
+          configKey={`networks.${name}.container.service`}
+          disabled={disabled}
+        />
+      )}
+      <CidrField
+        id={`net-${name}-container-subnet`}
+        label="Routed address range"
+        value={value.subnet}
+        onChange={(subnet) => set({ subnet })}
+        hint="CIDR reached through the router, e.g. 100.64.0.0/10. 0.0.0.0/0 routes everything."
+        help="The address space behind the router. Stacks listing this network, and the hosts below, send traffic for it through the router container."
+        configKey={`networks.${name}.container.subnet`}
+        disabled={disabled}
+      />
+      <MultiPick
+        label="Hosts routed through the router"
+        options={Object.keys(draft.nodes)}
+        selected={value.hosts ?? []}
+        onChange={(hosts) => set({ hosts })}
+        disabled={disabled}
+        empty="No nodes in the cluster."
+      />
+      <MultiPick
+        label="Networks the router may reach"
+        options={allowedOptions}
+        selected={value.allowed_networks ?? []}
+        onChange={(allowed_networks) => set({ allowed_networks })}
+        disabled={disabled}
+        empty="No internal, private or public network to allow."
+      />
+      <OpenPortsEditor
+        idPrefix={`net-${name}-container`}
+        hint="Host ports the router side may connect to. The target port is where the traffic is forwarded (default: the same port)."
+        ports={value.open_ports ?? []}
+        onChange={(open_ports) => set({ open_ports })}
+        disabled={disabled}
+        withTarget
+      />
+      <CheckboxField
+        id={`net-${name}-container-proxy`}
+        label="Let the router reach the reverse proxy (80/443)"
+        value={value.proxy ?? false}
+        onChange={(proxy) => set({ proxy })}
+        hint="Lets clients behind the router open proxied routes."
+        help="When on, the router side can reach the reverse proxy on ports 80 and 443 of the node it connects through."
+        configKey={`networks.${name}.container.proxy`}
+        disabled={disabled}
+      />
+    </>
+  );
+}
+
 /** Ports a node has open on one network's address: a router forwarding them
  *  in (public) or a VPN tunnel's far end forwarding them back (wireguard). */
 function OpenPortsEditor({
@@ -937,21 +1128,27 @@ function OpenPortsEditor({
   ports,
   onChange,
   disabled,
+  withTarget = false,
 }: {
   idPrefix: string;
   hint: string;
-  ports: OpenPort[];
-  onChange: (ports: OpenPort[]) => void;
+  ports: ContainerOpenPort[];
+  onChange: (ports: ContainerOpenPort[]) => void;
   disabled: boolean;
+  /** Also edit `target_port` (the host port the traffic is forwarded to). */
+  withTarget?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   const [port, setPort] = useState(0);
+  const [targetPort, setTargetPort] = useState(0);
   const [protocol, setProtocol] = useState<PortProtocol>('tcp');
 
   const add = () => {
     if (!port || ports.some((p) => p.port === port && p.protocol === protocol)) return;
-    onChange([...ports, { port, protocol }].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol)));
+    const entry: ContainerOpenPort = withTarget && targetPort && targetPort !== port ? { port, protocol, target_port: targetPort } : { port, protocol };
+    onChange([...ports, entry].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol)));
     setPort(0);
+    setTargetPort(0);
     setAdding(false);
   };
 
@@ -969,6 +1166,7 @@ function OpenPortsEditor({
         <div key={`${p.protocol}-${p.port}`} className="flex-row" style={{ gap: 8, marginBottom: 4 }}>
           <span className="mono">
             {p.port}/{p.protocol}
+            {withTarget && p.target_port && p.target_port !== p.port ? ` → ${p.target_port}` : ''}
           </span>
           {!disabled && (
             <button type="button" onClick={() => remove(p)} aria-label={`remove ${p.port}/${p.protocol}`}>
@@ -985,6 +1183,15 @@ function OpenPortsEditor({
       {!disabled && adding && (
         <div className="flex-row" style={{ gap: 8 }}>
           <PortField id={`${idPrefix}-open-port`} label="Port" value={port} onChange={setPort} disabled={disabled} />
+          {withTarget && (
+            <PortField
+              id={`${idPrefix}-open-port-target`}
+              label="Target port (blank = same)"
+              value={targetPort}
+              onChange={setTargetPort}
+              disabled={disabled}
+            />
+          )}
           <SelectField
             id={`${idPrefix}-open-port-protocol`}
             label="Protocol"

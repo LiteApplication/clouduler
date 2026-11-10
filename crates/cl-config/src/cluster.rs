@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
@@ -365,6 +365,11 @@ pub enum NetworkKind {
     /// (a Tailscale/VPN peer, say) rather than the internet at large, which
     /// an `egress` network's single fixed interface cannot do.
     Nat,
+    /// Traffic to `container.subnet` is routed through a router container
+    /// (a Tailscale/VPN client, say) instead of a host interface. Like `Nat`,
+    /// no node address is declared: every node implements it. The routed
+    /// range lives under `container.subnet`, never in `Network::subnet`.
+    Container,
 }
 
 impl NetworkKind {
@@ -391,6 +396,51 @@ pub struct Network {
     /// for a public network.
     #[serde(default = "default_true_bool", skip_serializing_if = "is_true")]
     pub publish_dns: bool,
+    /// Required for, and only allowed on, a `container` network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerNetwork>,
+}
+
+/// A `container` network: the address space behind a router container.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerNetwork {
+    /// Stack holding the router service.
+    pub stack: String,
+    /// Router service; it must run a single replica.
+    pub service: String,
+    /// Address space behind the router, `0.0.0.0/0` allowed. IPv4 only.
+    pub subnet: Ipv4Net,
+    /// Nodes whose host-level traffic to `subnet` goes through the router.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// internal/private/public networks the router side may reach.
+    #[serde(default)]
+    pub allowed_networks: Vec<String>,
+    /// Host ports the router side may reach.
+    #[serde(default)]
+    pub open_ports: Vec<ContainerOpenPort>,
+    /// Let the router side reach the reverse proxy on 80/443.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy: bool,
+}
+
+/// One host port opened to the router side of a container network.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerOpenPort {
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: Protocol,
+    /// Port on the host the traffic lands on; defaults to `port`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_port: Option<u16>,
+}
+
+impl ContainerOpenPort {
+    pub fn effective_target_port(&self) -> u16 {
+        self.target_port.unwrap_or(self.port)
+    }
 }
 
 fn is_true(b: &bool) -> bool {
@@ -1259,16 +1309,31 @@ impl ClusterConfig {
             .collect()
     }
 
-    /// Names of every network of kind `Nat`. Unlike `Egress` or `Wireguard`,
-    /// a nat network takes no per-node interface at all, so every node
-    /// implements it automatically: placement treats membership in this set
-    /// as an automatic pass the same way `served_drives` bypasses
-    /// `NodeState::implements` for a served drive (see
-    /// `cl_sched::place::rejection`).
-    pub fn nat_networks(&self) -> std::collections::BTreeSet<String> {
+    /// Every `container` network with its config.
+    pub fn container_networks(&self) -> impl Iterator<Item = (&String, &ContainerNetwork)> {
         self.networks
             .iter()
-            .filter(|(_, net)| net.kind == NetworkKind::Nat)
+            .filter(|(_, net)| net.kind == NetworkKind::Container)
+            .filter_map(|(name, net)| net.container.as_ref().map(|c| (name, c)))
+    }
+
+    /// The container network whose router is `stack`/`service`, if any.
+    pub fn container_router_of(&self, stack: &str, service: &str) -> Option<&str> {
+        self.container_networks()
+            .find(|(_, c)| c.stack == stack && c.service == service)
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Names of every network that every node implements without any
+    /// per-node setup: kinds `Nat` and `Container`. Unlike `Egress` or
+    /// `Wireguard`, these take no entry under `nodes.<name>.network`.
+    /// Placement treats membership in this set as an automatic pass in
+    /// `cl_sched::place::rejection`, the same way `served_drives` bypasses
+    /// `NodeState::implements` for a served drive.
+    pub fn everywhere_networks(&self) -> std::collections::BTreeSet<String> {
+        self.networks
+            .iter()
+            .filter(|(_, net)| matches!(net.kind, NetworkKind::Nat | NetworkKind::Container))
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -1419,6 +1484,7 @@ impl fmt::Display for NetworkKind {
             NetworkKind::Egress => f.write_str("egress"),
             NetworkKind::Wireguard => f.write_str("wireguard"),
             NetworkKind::Nat => f.write_str("nat"),
+            NetworkKind::Container => f.write_str("container"),
         }
     }
 }

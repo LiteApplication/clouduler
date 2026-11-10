@@ -4930,7 +4930,9 @@ mod tests {
             at: 0,
         });
         let refused = state.apply(&Request::RemoveVolume { id: id.clone() });
-        assert!(refused.error.is_some_and(|e| e.contains("used by stack site")));
+        assert!(refused
+            .error
+            .is_some_and(|e| e.contains("used by stack site")));
         assert!(state.volumes.contains_key(&id));
     }
 

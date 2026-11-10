@@ -604,38 +604,43 @@ async fn pending_placements(
         colocate_proxy_hosts,
     );
     let served_drives = config.served_drives();
-    let nat_networks = config.nat_networks();
+    let everywhere_networks = config.everywhere_networks();
     drop(config);
 
-    cl_sched::place(cluster_state, &desired, &served_drives, &nat_networks)
-        .unplaceable
-        .into_iter()
-        .map(|u| InstanceSummary {
-            id: u.instance.to_string(),
-            node: String::new(),
-            desired: "running".to_string(),
-            state: STATE_PENDING_PLACEMENT.to_string(),
-            running: None,
-            health: "none".to_string(),
-            image: None,
-            image_digest: None,
-            running_digest: None,
-            started_at: None,
-            migration: None,
-            migration_problem: None,
-            reason: None,
-            step: None,
-            placement_error: Some(u.reason),
-            proxy: None,
-            exit_code: None,
-            oom_killed: false,
-            restart_count: 0,
-            restart_limit: None,
-            finished_at: None,
-            memory_limit_bytes: None,
-            crash_moves: 0,
-        })
-        .collect()
+    cl_sched::place(
+        cluster_state,
+        &desired,
+        &served_drives,
+        &everywhere_networks,
+    )
+    .unplaceable
+    .into_iter()
+    .map(|u| InstanceSummary {
+        id: u.instance.to_string(),
+        node: String::new(),
+        desired: "running".to_string(),
+        state: STATE_PENDING_PLACEMENT.to_string(),
+        running: None,
+        health: "none".to_string(),
+        image: None,
+        image_digest: None,
+        running_digest: None,
+        started_at: None,
+        migration: None,
+        migration_problem: None,
+        reason: None,
+        step: None,
+        placement_error: Some(u.reason),
+        proxy: None,
+        exit_code: None,
+        oom_killed: false,
+        restart_count: 0,
+        restart_limit: None,
+        finished_at: None,
+        memory_limit_bytes: None,
+        crash_moves: 0,
+    })
+    .collect()
 }
 
 fn parse_id(raw: &str) -> Result<InstanceId, ApiError> {
@@ -723,7 +728,7 @@ pub(crate) async fn restart_instance(
         colocate_proxy_hosts,
     );
     let served_drives = config.served_drives();
-    let nat_networks = config.nat_networks();
+    let everywhere_networks = config.everywhere_networks();
     drop(config);
 
     let item = desired
@@ -740,7 +745,7 @@ pub(crate) async fn restart_instance(
         &probe,
         std::slice::from_ref(&item),
         &served_drives,
-        &nat_networks,
+        &everywhere_networks,
     );
     let target = outcome
         .decisions
@@ -977,11 +982,15 @@ async fn rebalance(
         colocate_proxy_hosts,
     );
     let served_drives = config.served_drives();
-    let nat_networks = config.nat_networks();
+    let everywhere_networks = config.everywhere_networks();
     drop(config);
 
-    let planned =
-        cl_sched::rebalance::plan(&cluster_state, &desired, &served_drives, &nat_networks);
+    let planned = cl_sched::rebalance::plan(
+        &cluster_state,
+        &desired,
+        &served_drives,
+        &everywhere_networks,
+    );
 
     let mut moves = Vec::new();
     for m in planned {

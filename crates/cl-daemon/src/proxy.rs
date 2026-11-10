@@ -27,7 +27,7 @@ use cl_net::relay::Dialer;
 use cl_net::Allocations;
 use cl_proxy::{
     ensure_crypto_provider, issue_certificate, issue_certificate_http01, AcmeConfig, CertStore,
-    Http01Store, RedirectTarget, Route, RouteOptions, RouteTable, ZoneResolver,
+    Http01Store, LocalClients, RedirectTarget, Route, RouteOptions, RouteTable, ZoneResolver,
     DEFAULT_PROPAGATION_TIMEOUT, LETS_ENCRYPT_STAGING_URL,
 };
 use cl_raft::node::ClusterNode;
@@ -94,6 +94,33 @@ fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &
     subnets
 }
 
+/// Clients of `network` that arrive through a container network's router:
+/// their connections land on the node's own address on that network's
+/// segment, so the local address is the identity. Every container network
+/// that is `network` or lists it in `allowed_networks` contributes its nodes'
+/// segment addresses.
+fn local_clients(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> LocalClients {
+    let only = cfg
+        .networks
+        .get(network)
+        .is_some_and(|n| n.kind == NetworkKind::Container);
+    let mut addrs = Vec::new();
+    if let Some(allocations) = Allocations::decode(state.overlay.as_deref()) {
+        for (name, c) in cfg.container_networks() {
+            if name != network && !c.allowed_networks.iter().any(|n| n == network) {
+                continue;
+            }
+            let segment = cl_net::container_net::container_docker_name(name);
+            addrs.extend(
+                allocations
+                    .node_ips(&segment)
+                    .map(|(_, ip)| std::net::IpAddr::V4(ip)),
+            );
+        }
+    }
+    LocalClients { addrs, only }
+}
+
 /// Addresses that count as "inside the cluster" for the `authenticated`
 /// middleware's internal bypass: every container overlay subnet, every nat
 /// network's subnet, and each node's own internal address (a container on
@@ -103,9 +130,17 @@ fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &
 fn internal_peer_subnets(cfg: &ClusterConfig, state: &ClusterState) -> Vec<IpNet> {
     let mut subnets: Vec<IpNet> = Vec::new();
     if let Some(allocations) = Allocations::decode(state.overlay.as_deref()) {
+        // A container network's segment is left out: its router forwards
+        // outside traffic and masquerades it to an address inside the segment,
+        // so trusting the segment would let that traffic skip authentication.
+        // Its client containers are covered by their own stack overlay.
         subnets.extend(
             allocations
-                .subnets_of_overlays(allocations.network_names())
+                .subnets_of_overlays(
+                    allocations
+                        .network_names()
+                        .filter(|name| !name.starts_with("CTN_")),
+                )
                 .map(IpNet::V4),
         );
     }
@@ -562,6 +597,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
                     http2: entry.http2,
                     allowed_subnet: allowed_subnet(cfg, &entry.network),
                     trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
+                    local_clients: local_clients(cfg, state, &entry.network),
                     network: Some(entry.network.clone()),
                 }),
             );
@@ -603,6 +639,7 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
             .with_options(RouteOptions {
                 allowed_subnet: allowed_subnet(cfg, &rule.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &rule.network),
+                local_clients: local_clients(cfg, state, &rule.network),
                 network: Some(rule.network.clone()),
                 ..RouteOptions::default()
             })
@@ -655,6 +692,7 @@ fn dashboard_route(cfg: &ClusterConfig, state: &ClusterState) -> Option<Route> {
             // dashboard reaches the proxy with its raw overlay address, which
             // is outside `allowed_subnet`; see `trusted_overlay_subnets`.
             trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &cfg.web.network),
+            local_clients: local_clients(cfg, state, &cfg.web.network),
             network: Some(cfg.web.network.clone()),
             ..RouteOptions::default()
         }),
@@ -716,6 +754,7 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
                 http2: false,
                 allowed_subnet: allowed_subnet(cfg, &entry.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
+                local_clients: local_clients(cfg, state, &entry.network),
                 network: Some(entry.network.clone()),
             }),
         );
@@ -1932,6 +1971,7 @@ services:
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                container: None,
             },
         );
 
@@ -2288,5 +2328,33 @@ services:
             Some("parent")
         );
         assert_eq!(zones.zone_id_for("example.org"), None);
+    }
+
+    #[test]
+    fn container_segment_addresses_are_clients_of_the_allowed_networks_and_their_own() {
+        let cfg = cfg();
+        let mut state = state_with(SPEC, 0);
+        let mut allocations =
+            Allocations::decode(state.overlay.as_deref()).expect("state_with sets an overlay");
+        let seg = cl_net::container_net::container_docker_name("tailnet");
+        allocations.allocate_network(&seg, &[]).unwrap();
+        let n1 = allocations.allocate_node_ip(&seg, "n1").unwrap();
+        let n2 = allocations.allocate_node_ip(&seg, "n2").unwrap();
+        state.overlay = Some(serde_json::to_string(&allocations).unwrap());
+
+        // `lan` is in the example's allowed_networks: both nodes' segment
+        // addresses count as its clients, and it is not container-only.
+        let lan = local_clients(&cfg, &state, "lan");
+        assert_eq!(
+            lan.addrs,
+            vec![std::net::IpAddr::V4(n1), std::net::IpAddr::V4(n2)]
+        );
+        assert!(!lan.only);
+        // `wan` is not allowed: nothing arriving through the router counts.
+        assert!(local_clients(&cfg, &state, "wan").addrs.is_empty());
+        // A route on the container network itself is for its clients only.
+        let own = local_clients(&cfg, &state, "tailnet");
+        assert!(own.only);
+        assert_eq!(own.addrs.len(), 2);
     }
 }

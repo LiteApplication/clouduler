@@ -114,6 +114,7 @@ pub(crate) async fn harness() -> Harness {
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                container: None,
             },
         )]),
         drives: BTreeMap::new(),
@@ -1425,6 +1426,7 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
                     subnet: None,
                     domain: None,
                     publish_dns: true,
+                    container: None,
                 },
             );
         }
@@ -2238,6 +2240,46 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
             },
         );
     }
+    // A container network whose router is `web.app.0` (assigned below), with
+    // an address book entry for the segment, the router and n0, so
+    // `/api/networks/{name}/status` returns a real router and node row rather
+    // than `null` and `{}`.
+    {
+        let mut cfg = h.state.cluster_config.write().await;
+        cfg.networks.insert(
+            "tailnet".to_string(),
+            cl_config::Network {
+                kind: cl_config::NetworkKind::Container,
+                subnet: None,
+                domain: None,
+                publish_dns: true,
+                container: Some(cl_config::ContainerNetwork {
+                    stack: "web".to_string(),
+                    service: "app".to_string(),
+                    subnet: "100.64.0.0/10".parse().unwrap(),
+                    hosts: vec!["n0".to_string()],
+                    allowed_networks: Vec::new(),
+                    open_ports: Vec::new(),
+                    proxy: false,
+                }),
+            },
+        );
+    }
+    {
+        let segment = cl_net::container_net::container_docker_name("tailnet");
+        let mut book = cl_net::Allocations::default();
+        book.allocate_network(&segment, &[]).expect("segment");
+        book.allocate_ip(&segment, &cl_raft::ids::InstanceId::new("web", "app", 0))
+            .expect("router address");
+        book.allocate_node_ip(&segment, "n0").expect("node address");
+        h.state
+            .cluster
+            .submit(cl_raft::Request::SetOverlayAllocations {
+                allocations: serde_json::to_string(&book).unwrap(),
+            })
+            .await
+            .expect("submit allocations");
+    }
     let node = h.state.cluster.state().await.nodes["n0"].clone();
     h.state
         .cluster
@@ -2530,6 +2572,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
         ("state", "/api/state"),
         ("identity", "/auth/me"),
         ("clusterConfig", "/api/config"),
+        ("networkStatus", "/api/networks/tailnet/status"),
         ("cloudflareTokenStatus", "/api/cloudflare/token"),
         ("oidcClientSecretStatus", "/api/oidc/client-secret"),
         ("clusterKeyStatus", "/api/secrets/key"),

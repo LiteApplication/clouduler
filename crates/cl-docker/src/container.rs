@@ -195,9 +195,44 @@ pub struct ContainerSpec {
     pub pinned_routes: Vec<Ipv4Addr>,
     /// Next hop for `pinned_routes`: the overlay gateway of `network`.
     pub pinned_gateway: Option<Ipv4Addr>,
+    /// Attachments to `container`-kind cluster networks, connected after
+    /// creation like `egress_network`. See [`ContainerAttachment`].
+    pub container_networks: Vec<ContainerAttachment>,
+}
+
+/// One attachment to a container-kind cluster network (a cluster-wide L2
+/// segment with a router container on it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerAttachment {
+    /// Docker network backing the segment.
+    pub docker_network: String,
+    /// Pinned address of this container on the segment.
+    pub ip: Ipv4Addr,
+    /// `ip route` argument lists (without the leading `ip route`'s `ip`, e.g.
+    /// `["route", "replace", "100.64.0.0/10", "via", "10.0.0.5"]`) applied in
+    /// the container's namespace. Not part of the container's identity: they
+    /// are re-applied every tick.
+    pub routes: Vec<Vec<String>>,
+    /// Interface name docker should give the endpoint
+    /// (`com.docker.network.endpoint.ifname`), so a router image can name it.
+    pub ifname: Option<String>,
+    /// The routed subnet is `0.0.0.0/0`: this attachment carries the default
+    /// route, so the proxy addresses must stay pinned to the overlay.
+    pub default_route: bool,
 }
 
 impl ContainerSpec {
+    /// The container was created directly on one of its container-kind
+    /// segments (a client that lists no other network). That attachment is
+    /// already made, and the segment's own default route has to go.
+    pub fn container_on_primary(&self) -> bool {
+        self.network.as_ref().is_some_and(|n| {
+            self.container_networks
+                .iter()
+                .any(|a| &a.docker_network == n)
+        })
+    }
+
     /// The full label set this container will carry: the caller's labels plus
     /// the clouduler ownership labels, which always win on conflict.
     fn all_labels(&self) -> HashMap<String, String> {

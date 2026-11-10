@@ -40,6 +40,7 @@ import type {
   Identity,
   InstanceState,
   NodeDetail,
+  NetworkStatus,
   NodeMetrics,
   StackDetailResponse,
   VolumeState,
@@ -66,6 +67,7 @@ const certificates: CertificateState[] = shapes.certificates as unknown as Certi
 const dns: DnsRecordState[] = shapes.dns as unknown as DnsRecordState[];
 const nodeDetail: NodeDetail = shapes.nodeDetail as unknown as NodeDetail;
 const nodeMetrics: NodeMetrics = shapes.nodeMetrics as unknown as NodeMetrics;
+const networkStatus: NetworkStatus = shapes.networkStatus as unknown as NetworkStatus;
 
 /** Keys the ui reads by name, per endpoint. */
 const READ_BY_UI: Record<string, [object, string[]]> = {
@@ -90,6 +92,8 @@ const READ_BY_UI: Record<string, [object, string[]]> = {
   dnsRecord: [dns[0], ['fqdn', 'record_type', 'status']],
   nodeDetail: [nodeDetail, ['name', 'usage', 'container_count']],
   nodeMetricsRow: [nodeMetrics[0], ['name', 'container_count', 'usage']],
+  networkStatus: [networkStatus, ['router', 'nodes']],
+  networkRouter: [networkStatus.router as object, ['stack', 'service', 'instance', 'node', 'ip', 'running', 'state']],
   nodeUsage: [nodeMetrics[0].usage, ['cpu_percent', 'version', 'drives']],
 };
 

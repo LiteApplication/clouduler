@@ -53,6 +53,10 @@ The dashboard page where you approve or deny an AI client's access request. [Rea
 
 A running Docker container. In Clouduler every container is an instance of a service. [Read more](/docs/features/stacks).
 
+### Container network {#container-network}
+
+A network kind that sends traffic for an address range through a router container (a VPN client, say). Stacks that list it fail closed while the router is missing; listed hosts fail open. [Read more](/docs/features/networking#container-networks).
+
 ### Crash loop {#crash-loop}
 
 An instance that keeps dying and restarting. After repeated kills the cluster moves it to another node. [Read more](/docs/features/placement).
@@ -169,7 +173,7 @@ A network kind with no per-node address, for outbound access that needs no per-n
 
 ### Network kinds {#network-kinds}
 
-`internal` (exactly one, node-to-node), `private` (extra trusted subnet), `public` (no subnet, reachable from outside), `egress`, `wireguard`. [Read more](/docs/features/networking).
+`internal` (exactly one, node-to-node), `private` (extra trusted subnet), `public` (no subnet, reachable from outside), `egress`, `wireguard`, `nat`, `container`. [Read more](/docs/features/networking).
 
 ### Node {#node}
 
@@ -251,11 +255,19 @@ A stack's version number; it rises on each deploy. [Read more](/docs/features/st
 
 A rule that sends a host name (and optional path) to a service port on a network. [Read more](/docs/features/proxy-and-tls).
 
+### Router container {#router-container}
+
+The service that a container network names as its router. It holds the tunnel and forwards the routed range. Runs exactly one replica. [Read more](/docs/features/networking#container-networks).
+
 ## S
 
 ### Scheduler {#scheduler}
 
 The leader's logic that places instances. [Read more](/docs/features/placement).
+
+### Segment {#segment}
+
+The cluster-wide layer 2 network (a bridge and a VXLAN device on every node) that carries a container network's traffic between the router, its clients and the nodes. [Read more](/docs/features/networking#container-networks).
 
 ### Secret {#secret}
 

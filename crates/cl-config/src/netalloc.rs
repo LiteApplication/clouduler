@@ -61,6 +61,31 @@ pub fn egress_table_id(network: &str) -> u32 {
     EGRESS_TABLE_BASE + (hasher.finish() % 1000) as u32
 }
 
+/// The two policy routing tables of a container network: `(reply, dst)`.
+/// `reply` carries the return path of connections the router originated,
+/// `dst` carries traffic towards the routed subnet. Same SipHash scheme as
+/// `egress_table_id`, keyed on `<network>/ctn-reply` and `<network>/ctn-dst`.
+pub fn container_table_ids(network: &str) -> (u32, u32) {
+    let derive = |suffix: &str| {
+        let mut hasher = stable_hasher();
+        format!("{network}/{suffix}").hash(&mut hasher);
+        EGRESS_TABLE_BASE + (hasher.finish() % 1000) as u32
+    };
+    (derive("ctn-reply"), derive("ctn-dst"))
+}
+
+/// High bits of every container-network connmark/fwmark (bits 24-27 = 0xC).
+pub const CONTAINER_MARK_BASE: u32 = 0x0C00_0000;
+
+/// The connmark/fwmark of a container network: [`CONTAINER_MARK_BASE`] plus a
+/// deterministic non-zero 16 bit value. Two names can derive the same one;
+/// config validation refuses that, because a shared mark would mix up the
+/// reply tables.
+pub fn container_mark(network: &str) -> u32 {
+    let low = (fnv1a(network.as_bytes()) % 0xFFFF) as u32 + 1;
+    CONTAINER_MARK_BASE | low
+}
+
 /// Checks a host interface name the way the kernel will: non-empty, at most 15
 /// bytes, none of `/`, whitespace or `:` (which `ip` and `iptables` also
 /// reject or misparse), and only `[A-Za-z0-9_.-]`. Interface names reach

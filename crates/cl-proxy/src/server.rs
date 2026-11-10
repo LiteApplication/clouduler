@@ -2,7 +2,7 @@
 //! (TLS terminated here, then proxied).
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -232,12 +232,14 @@ impl ProxyServer {
         debug!(addr = ?listener.local_addr().ok(), "http listener started");
         loop {
             let (stream, peer) = listener.accept().await?;
+            let local = stream.local_addr().ok().map(|a| a.ip());
             let routes = self.routes.clone();
             let backends = self.backends();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
-                let svc =
-                    service_fn(move |req| handle_http(req, routes.clone(), backends.clone(), peer));
+                let svc = service_fn(move |req| {
+                    handle_http(req, routes.clone(), backends.clone(), peer, local)
+                });
                 if let Err(e) = http1::Builder::new()
                     .serve_connection(io, svc)
                     .with_upgrades()
@@ -272,12 +274,15 @@ impl ProxyServer {
         debug!(addr = ?listener.local_addr().ok(), "https listener started");
         loop {
             let (stream, peer) = listener.accept().await?;
+            let local = stream.local_addr().ok().map(|a| a.ip());
             let routes = self.routes.clone();
             let backends = self.backends();
             let certs = self.certs.clone();
             let config = config.clone();
             tokio::spawn(async move {
-                if let Err(e) = accept_tls(stream, peer, config, certs, routes, backends).await {
+                if let Err(e) =
+                    accept_tls(stream, peer, local, config, certs, routes, backends).await
+                {
                     debug!(error = %e, "https connection closed");
                 }
             });
@@ -288,6 +293,7 @@ impl ProxyServer {
 async fn accept_tls(
     stream: TcpStream,
     peer: SocketAddr,
+    local: Option<IpAddr>,
     config: Arc<ServerConfig>,
     certs: Arc<CertStore>,
     routes: Arc<RouteTable>,
@@ -311,7 +317,8 @@ async fn accept_tls(
 
     let tls_stream = start.into_stream(config).await?;
     let io = TokioIo::new(tls_stream);
-    let svc = service_fn(move |req| handle_https(req, routes.clone(), backends.clone(), peer));
+    let svc =
+        service_fn(move |req| handle_https(req, routes.clone(), backends.clone(), peer, local));
     // Negotiated by ALPN: HTTP/1.1 keeps its upgrade support (websockets), h2
     // clients (gRPC) get streams and trailers.
     let mut builder = auto::Builder::new(TokioExecutor::new());
@@ -411,9 +418,25 @@ fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 /// restriction (a public network) always passes. This is a check on the real
 /// socket peer, not a header, so it cannot be spoofed by a client claiming a
 /// different address.
-fn gate_by_network(route: &Route, peer: SocketAddr) -> Option<Response<ProxyBody>> {
+fn gate_by_network(
+    route: &Route,
+    peer: SocketAddr,
+    local: Option<IpAddr>,
+) -> Option<Response<ProxyBody>> {
+    let via_router = route.options.local_clients.contains(local);
+    if route.options.local_clients.only {
+        // A route on a container network: reachable by its clients only.
+        if via_router {
+            return None;
+        }
+        return Some(status_response(
+            StatusCode::FORBIDDEN,
+            "this route is only reachable from its own network",
+        ));
+    }
     let subnet = route.options.allowed_subnet?;
-    if subnet.contains(&peer.ip())
+    if via_router
+        || subnet.contains(&peer.ip())
         || route
             .options
             .trusted_overlay_subnets
@@ -531,6 +554,7 @@ async fn handle_http(
     routes: Arc<RouteTable>,
     backends: Backends,
     peer: SocketAddr,
+    local: Option<IpAddr>,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     merge_cookie_headers(req.headers_mut());
     let host = req
@@ -557,7 +581,7 @@ async fn handle_http(
         return Ok(not_found(&host, &path));
     };
 
-    if let Some(resp) = gate_by_network(&route, peer) {
+    if let Some(resp) = gate_by_network(&route, peer, local) {
         return Ok(resp);
     }
 
@@ -609,6 +633,7 @@ async fn handle_https(
     routes: Arc<RouteTable>,
     backends: Backends,
     peer: SocketAddr,
+    local: Option<IpAddr>,
 ) -> std::result::Result<Response<ProxyBody>, Infallible> {
     ensure_host_header(&mut req);
     merge_cookie_headers(req.headers_mut());
@@ -632,7 +657,7 @@ async fn handle_https(
         return Ok(not_found(&host, &path));
     };
 
-    if let Some(resp) = gate_by_network(&route, peer) {
+    if let Some(resp) = gate_by_network(&route, peer, local) {
         return Ok(resp);
     }
 
@@ -1059,6 +1084,57 @@ mod tests {
             http2,
             ..RouteOptions::default()
         })
+    }
+
+    fn gated_route(options: RouteOptions) -> Route {
+        Route::new(
+            "app.example.com",
+            None,
+            false,
+            vec![],
+            false,
+            "s.app.0",
+            vec![],
+        )
+        .with_options(options)
+    }
+
+    #[test]
+    fn a_connection_on_a_container_segment_address_is_a_client_of_the_network() {
+        let lan: ipnet::IpNet = "192.168.1.0/24".parse().unwrap();
+        let ctn: IpAddr = "10.244.9.2".parse().unwrap();
+        let router_peer: SocketAddr = "10.244.9.5:4000".parse().unwrap();
+        let route = gated_route(RouteOptions {
+            allowed_subnet: Some(lan),
+            local_clients: crate::LocalClients {
+                addrs: vec![ctn],
+                only: false,
+            },
+            ..RouteOptions::permissive()
+        });
+        // Same peer, but only the segment address makes it a client.
+        assert!(gate_by_network(&route, router_peer, Some(ctn)).is_none());
+        let other: IpAddr = "192.168.1.9".parse().unwrap();
+        assert!(gate_by_network(&route, router_peer, Some(other)).is_some());
+        assert!(gate_by_network(&route, router_peer, None).is_some());
+        // An in-subnet peer still passes on its own.
+        assert!(gate_by_network(&route, "192.168.1.7:1".parse().unwrap(), None).is_none());
+    }
+
+    #[test]
+    fn a_route_on_a_container_network_admits_its_clients_only() {
+        let ctn: IpAddr = "10.244.9.2".parse().unwrap();
+        let route = gated_route(RouteOptions {
+            local_clients: crate::LocalClients {
+                addrs: vec![ctn],
+                only: true,
+            },
+            ..RouteOptions::permissive()
+        });
+        let peer: SocketAddr = "203.0.113.5:1".parse().unwrap();
+        assert!(gate_by_network(&route, peer, Some(ctn)).is_none());
+        assert!(gate_by_network(&route, peer, Some("10.10.0.1".parse().unwrap())).is_some());
+        assert!(gate_by_network(&route, peer, None).is_some());
     }
 
     #[test]

@@ -225,8 +225,14 @@ impl Scheduler {
             &live.port_gated_networks(),
             colocate_proxy_hosts,
         );
+        let desired = with_container_routers(desired, state, &live);
 
-        let outcome = place::place(state, &desired, &live.served_drives(), &live.nat_networks());
+        let outcome = place::place(
+            state,
+            &desired,
+            &live.served_drives(),
+            &live.everywhere_networks(),
+        );
         for unplaceable in &outcome.unplaceable {
             warn!(instance = %unplaceable.instance, reason = %unplaceable.reason, "cannot place instance");
         }
@@ -817,6 +823,7 @@ impl Scheduler {
             &live.port_gated_networks(),
             colocate_proxy_hosts,
         );
+        let desired = with_container_routers(desired, state, &live);
         let Some(item) = desired.iter().find(|d| &d.id == id) else {
             return false;
         };
@@ -826,9 +833,12 @@ impl Scheduler {
             return false;
         }
 
-        let Ok((eligible, _)) =
-            place::candidates(state, item, &live.served_drives(), &live.nat_networks())
-        else {
+        let Ok((eligible, _)) = place::candidates(
+            state,
+            item,
+            &live.served_drives(),
+            &live.everywhere_networks(),
+        ) else {
             return false;
         };
         let now = unix_now().max(0) as u64;
@@ -986,6 +996,27 @@ impl Scheduler {
                     },
                 );
 
+            // Container-kind networks: this instance's own address on each
+            // segment (pinned, so part of the revision) and the routes into
+            // its namespace (not: they follow the router and are re-applied
+            // every tick). Nothing to run until the leader has allocated.
+            match crate::container_net::plan(
+                instance,
+                &file.container_networks(&instance.service, &live),
+                &live,
+                allocations.as_ref(),
+                &self.node,
+            ) {
+                Ok(plan) => {
+                    placement.container_networks = plan.attachments;
+                    placement.ip_forward = plan.router;
+                }
+                Err(pending) => {
+                    debug!(instance = %instance, reason = %pending.0, "no container network address yet");
+                    continue;
+                }
+            }
+
             // Node addresses on the internal network, where the proxy answers
             // for routes published on it. Only a service that is a member of
             // that network gets them kept off the egress default route.
@@ -1020,8 +1051,15 @@ impl Scheduler {
                 assignment.desired = DesiredState::Stopped;
             }
 
-            let revision =
-                revision_with_mounts(stack.revision, service, &dynamic_mounts, placement.ip);
+            let container_ips: Vec<std::net::Ipv4Addr> =
+                placement.container_networks.iter().map(|a| a.ip).collect();
+            let revision = revision_with_mounts(
+                stack.revision,
+                service,
+                &dynamic_mounts,
+                placement.ip,
+                &container_ips,
+            );
 
             let mut spec = match spec::build(
                 instance,
@@ -1147,6 +1185,7 @@ fn revision_with_mounts(
     service: &cl_config::Service,
     dynamic_mounts: &BTreeSet<String>,
     ip: Option<std::net::Ipv4Addr>,
+    container_ips: &[std::net::Ipv4Addr],
 ) -> u64 {
     let mut drives: Vec<&str> = service
         .volumes
@@ -1168,6 +1207,13 @@ fn revision_with_mounts(
     revision.hash(&mut hasher);
     bits.hash(&mut hasher);
     ip.hash(&mut hasher);
+    // Only the instance's own addresses on container networks: the router's
+    // address and the routes are deliberately left out, so a router appearing
+    // or moving never recreates its clients. Skipped when empty to keep every
+    // other revision as it was.
+    if !container_ips.is_empty() {
+        container_ips.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -1500,6 +1546,49 @@ pub fn desired_instances(
     desired
 }
 
+/// Fill `near` on every container network's router: the services listing
+/// that network, so the router prefers the node most of its users run on.
+/// Routers are moved after the instances they prefer to sit with, so the
+/// placement pass has already counted those when it reaches them. The order
+/// is otherwise untouched.
+pub fn with_container_routers(
+    mut desired: Vec<Desired>,
+    state: &ClusterState,
+    cfg: &ClusterConfig,
+) -> Vec<Desired> {
+    if cfg.container_networks().next().is_none() {
+        return desired;
+    }
+    // network -> (stack, service) of every client
+    let mut clients: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    for (name, stack) in &state.stacks {
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        for service in file.services.keys() {
+            for net in file.container_networks(service, cfg) {
+                clients
+                    .entry(net)
+                    .or_default()
+                    .insert((name.clone(), service.clone()));
+            }
+        }
+    }
+    for item in &mut desired {
+        if let Some(net) = cfg.container_router_of(&item.id.stack, &item.id.service) {
+            if let Some(users) = clients.get(net) {
+                item.near = users
+                    .iter()
+                    .filter(|(s, svc)| !(s == &item.id.stack && svc == &item.id.service))
+                    .cloned()
+                    .collect();
+            }
+        }
+    }
+    desired.sort_by_key(|d| !d.near.is_empty());
+    desired
+}
+
 /// Drives whose mode is `Served`, read from the replicated cluster config.
 /// Empty (falling back to strict replicated-drive eligibility) if no config
 /// has been published yet or it fails to parse.
@@ -1535,12 +1624,12 @@ pub fn configured_stop_grace(state: &ClusterState) -> std::time::Duration {
 /// Nat-kind network names, read from the replicated cluster config the same
 /// way `served_drives` is. Empty (falling back to strict per-node network
 /// eligibility) if no config has been published yet or it fails to parse.
-fn nat_networks(state: &ClusterState) -> BTreeSet<String> {
+fn everywhere_networks(state: &ClusterState) -> BTreeSet<String> {
     state
         .cluster_config
         .as_ref()
         .and_then(|entry| ClusterConfig::parse(&entry.yaml).ok())
-        .map(|cfg| cfg.nat_networks())
+        .map(|cfg| cfg.everywhere_networks())
         .unwrap_or_default()
 }
 
@@ -1549,7 +1638,12 @@ fn nat_networks(state: &ClusterState) -> BTreeSet<String> {
 pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
     let desired = desired_instances(state, &BTreeSet::new(), &BTreeSet::new(), false);
 
-    let outcome = place::place(state, &desired, &served_drives(state), &nat_networks(state));
+    let outcome = place::place(
+        state,
+        &desired,
+        &served_drives(state),
+        &everywhere_networks(state),
+    );
     Ok(outcome
         .decisions
         .into_iter()
@@ -1667,7 +1761,7 @@ mod tests {
                 1u64.hash(&mut old);
                 ip.hash(&mut old);
                 assert_eq!(
-                    revision_with_mounts(revision, &service, &dynamic, ip),
+                    revision_with_mounts(revision, &service, &dynamic, ip, &[]),
                     old.finish()
                 );
             }
@@ -1679,7 +1773,7 @@ mod tests {
         let service = mounts_service();
         let dynamic: BTreeSet<String> = ["fast".to_string()].into();
         assert_eq!(
-            revision_with_mounts(7, &service, &dynamic, None),
+            revision_with_mounts(7, &service, &dynamic, None, &[]),
             5074014468841562254
         );
         assert_eq!(
@@ -1687,7 +1781,8 @@ mod tests {
                 7,
                 &service,
                 &BTreeSet::new(),
-                Some(std::net::Ipv4Addr::new(10, 1, 2, 3))
+                Some(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+                &[]
             ),
             12979125382987782001
         );
@@ -2181,9 +2276,14 @@ web: { address: cloud, network: tailscale }
     #[test]
     fn a_drive_switching_between_local_and_fuse_mounted_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
-        let local = revision_with_mounts(1, &service, &BTreeSet::new(), None);
-        let fuse_mounted =
-            revision_with_mounts(1, &service, &BTreeSet::from(["fast".to_string()]), None);
+        let local = revision_with_mounts(1, &service, &BTreeSet::new(), None, &[]);
+        let fuse_mounted = revision_with_mounts(
+            1,
+            &service,
+            &BTreeSet::from(["fast".to_string()]),
+            None,
+            &[],
+        );
         assert_ne!(local, fuse_mounted);
     }
 
@@ -2192,8 +2292,14 @@ web: { address: cloud, network: tailscale }
     #[test]
     fn an_unrelated_drive_switching_does_not_change_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
-        let a = revision_with_mounts(1, &service, &BTreeSet::new(), None);
-        let b = revision_with_mounts(1, &service, &BTreeSet::from(["slow".to_string()]), None);
+        let a = revision_with_mounts(1, &service, &BTreeSet::new(), None, &[]);
+        let b = revision_with_mounts(
+            1,
+            &service,
+            &BTreeSet::from(["slow".to_string()]),
+            None,
+            &[],
+        );
         assert_eq!(a, b);
     }
 
@@ -2205,8 +2311,8 @@ web: { address: cloud, network: tailscale }
         let service = service_with_volumes("      - fast/data:/data\n");
         let dynamic = BTreeSet::from(["fast".to_string()]);
         assert_ne!(
-            revision_with_mounts(1, &service, &dynamic, None),
-            revision_with_mounts(2, &service, &dynamic, None)
+            revision_with_mounts(1, &service, &dynamic, None, &[]),
+            revision_with_mounts(2, &service, &dynamic, None, &[])
         );
     }
 
@@ -2222,11 +2328,45 @@ web: { address: cloud, network: tailscale }
     fn an_instance_getting_a_new_overlay_address_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
         let dynamic = BTreeSet::new();
-        let none = revision_with_mounts(1, &service, &dynamic, None);
-        let a = revision_with_mounts(1, &service, &dynamic, Some("10.244.0.23".parse().unwrap()));
-        let b = revision_with_mounts(1, &service, &dynamic, Some("10.244.0.30".parse().unwrap()));
+        let none = revision_with_mounts(1, &service, &dynamic, None, &[]);
+        let a = revision_with_mounts(
+            1,
+            &service,
+            &dynamic,
+            Some("10.244.0.23".parse().unwrap()),
+            &[],
+        );
+        let b = revision_with_mounts(
+            1,
+            &service,
+            &dynamic,
+            Some("10.244.0.30".parse().unwrap()),
+            &[],
+        );
         assert_ne!(none, a);
         assert_ne!(a, b);
+    }
+
+    /// A client's own address on a container network is part of what it was
+    /// built with; the router's address and the routes are not an input at
+    /// all, so a router appearing or moving never recreates a client.
+    #[test]
+    fn only_the_clients_own_container_address_changes_the_revision() {
+        let service = service_with_volumes("      - fast/data:/data\n");
+        let dynamic = BTreeSet::new();
+        let none = revision_with_mounts(1, &service, &dynamic, None, &[]);
+        let a: std::net::Ipv4Addr = "10.246.0.5".parse().unwrap();
+        let b: std::net::Ipv4Addr = "10.246.0.6".parse().unwrap();
+        let with_a = revision_with_mounts(1, &service, &dynamic, None, &[a]);
+        assert_ne!(none, with_a);
+        assert_ne!(
+            with_a,
+            revision_with_mounts(1, &service, &dynamic, None, &[b])
+        );
+        assert_eq!(
+            with_a,
+            revision_with_mounts(1, &service, &dynamic, None, &[a])
+        );
     }
 
     #[test]
@@ -2326,5 +2466,49 @@ web: { address: cloud, network: tailscale }
             base + CRASH_LOOP_WINDOW + Duration::from_secs(2)
         ));
         assert_eq!(deque.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod container_router_tests {
+    use super::*;
+    use cl_raft::state::Request;
+
+    #[test]
+    fn a_router_prefers_its_clients_and_follows_them_in_order() {
+        let yaml = include_str!("../../../examples/cluster.yaml").replace(
+            "stack: tailscale-router\n      service: tailscale",
+            "stack: rt\n      service: router",
+        );
+        let cfg = ClusterConfig::parse(&yaml).unwrap();
+        let mut state = ClusterState::default();
+        for (name, spec) in [
+            ("rt", "services:\n  router:\n    image: x\n"),
+            (
+                "site",
+                "networks:\n  tailnet: {}\nservices:\n  web:\n    image: x\n    networks: [tailnet]\n  db:\n    image: x\n",
+            ),
+        ] {
+            state.apply(&Request::DeployStack {
+                name: name.into(),
+                spec: spec.into(),
+                at: 0,
+            });
+        }
+        let desired = desired_instances(&state, &BTreeSet::new(), &BTreeSet::new(), false);
+        let desired = with_container_routers(desired, &state, &cfg);
+        let router = desired
+            .iter()
+            .position(|d| d.id.service == "router")
+            .unwrap();
+        assert_eq!(router, desired.len() - 1, "routers come last");
+        assert_eq!(
+            desired[router].near,
+            BTreeSet::from([("site".to_string(), "web".to_string())])
+        );
+        assert!(desired
+            .iter()
+            .filter(|d| d.id.service != "router")
+            .all(|d| d.near.is_empty()));
     }
 }

@@ -69,7 +69,7 @@ export function usePlacementContext(): PlacementContext {
           ),
           natNetworks: new Set(
             Object.entries(config?.networks ?? {})
-              .filter(([, net]) => net.type === 'nat')
+              .filter(([, net]) => net.type === 'nat' || net.type === 'container')
               .map(([name]) => name),
           ),
           portGatedNetworks: new Set(

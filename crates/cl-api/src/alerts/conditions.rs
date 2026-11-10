@@ -41,6 +41,8 @@ const DERIVED: &[&str] = &[
     "cert.expiring",
     "cert.issuance_failed",
     "dns.reconcile_failed",
+    "network.container_router_missing",
+    "network.container_router_down",
     "update.failed",
     "update.stuck",
 ];
@@ -258,6 +260,21 @@ fn from_problem(b: &mut Builder, state: &ClusterState, p: Problem) {
             };
             o.node = Some(p.subject.clone());
             o.links = vec![link("Open node", format!("/nodes/{}", p.subject))];
+            o
+        }
+        "container_router_missing" | "container_router_down" => {
+            let event = if p.kind == "container_router_missing" {
+                "network.container_router_missing"
+            } else {
+                "network.container_router_down"
+            };
+            let title = if p.kind == "container_router_missing" {
+                format!("Router of container network {} is missing", p.subject)
+            } else {
+                format!("Router of container network {} is down", p.subject)
+            };
+            let mut o = base(event, &p.subject, title, p.detail.clone());
+            o.links = vec![link("Open network", format!("/networks/{}", p.subject))];
             o
         }
         "emergency_mode" => {

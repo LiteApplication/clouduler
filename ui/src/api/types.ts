@@ -818,7 +818,7 @@ export interface TlsFingerprint {
 
 // ---- config ----
 
-export type NetworkKind = 'internal' | 'private' | 'public' | 'egress' | 'wireguard' | 'nat';
+export type NetworkKind = 'internal' | 'private' | 'public' | 'egress' | 'wireguard' | 'nat' | 'container';
 
 export interface OpenPort {
   port: number;
@@ -852,6 +852,30 @@ export interface InterfaceAddress {
 
 export type NodeAddress = string | PublicAddress | InterfaceAddress;
 
+/** An open port on a `container` network: the router side reaches
+ *  `port` on the host, forwarded to `target_port` (absent = same as `port`). */
+export interface ContainerOpenPort {
+  port: number;
+  protocol: PortProtocol;
+  target_port?: number | null;
+}
+
+/** Only meaningful on a `container`-kind network: traffic to `subnet` is
+ *  routed through the `service` container of `stack`. */
+export interface ContainerNetwork {
+  stack: string;
+  service: string;
+  subnet: string;
+  /** Absent = empty. Nodes whose host-level traffic to `subnet` uses the router. */
+  hosts?: string[];
+  /** Absent = empty. internal/private/public networks the router side may reach. */
+  allowed_networks?: string[];
+  /** Absent = empty. */
+  open_ports?: ContainerOpenPort[];
+  /** Let the router reach the reverse proxy on 80/443. Absent = false. */
+  proxy?: boolean;
+}
+
 export interface NetworkConfig {
   type: NetworkKind;
   subnet: string | null;
@@ -859,6 +883,8 @@ export interface NetworkConfig {
   /** Publish this network's hostnames to the DNS provider (Cloudflare).
    *  Default true; omitted when true. Only meaningful for internal/private. */
   publish_dns?: boolean;
+  /** Present iff `type` is `container`. */
+  container?: ContainerNetwork | null;
 }
 
 export type DriveModeConfig = 'replicated' | 'served';
@@ -1583,4 +1609,23 @@ export type AlertTestRequest =
 export interface AlertTestResult {
   ok: boolean;
   error?: string;
+}
+
+export type ContainerRouterState = 'missing' | 'down' | 'up';
+
+export interface ContainerRouterStatus {
+  stack: string;
+  service: string;
+  instance: string;
+  node: string | null;
+  ip: string | null;
+  running: boolean;
+  state: ContainerRouterState;
+}
+
+/** GET /api/networks/{name}/status. `router` is null for any other kind. */
+export interface NetworkStatus {
+  router: ContainerRouterStatus | null;
+  /** Each node's address on a container network's shared segment. */
+  nodes: Record<string, string>;
 }

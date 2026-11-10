@@ -39,6 +39,7 @@ pub use middleware::{
     redirect_https, strip_hop_by_hop, strip_prefix,
 };
 pub use route::{
-    Picked, RedirectTarget, Route, RouteOptions, RouteTable, SharedRoutes, STICKY_COOKIE,
+    LocalClients, Picked, RedirectTarget, Route, RouteOptions, RouteTable, SharedRoutes,
+    STICKY_COOKIE,
 };
 pub use server::{ProxyBody, ProxyServer};

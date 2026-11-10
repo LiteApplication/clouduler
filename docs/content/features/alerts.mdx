@@ -98,6 +98,8 @@ Defaults can be changed per event (severity and route) on the **Events** tab or 
 | `cert.expiring` | Edge | Warning | A certificate expires within `cert_warning_days` (14). Critical within `cert_critical_days` (7). |
 | `cert.issuance_failed` | Edge | Warning | Certificate issuance keeps failing. |
 | `dns.reconcile_failed` | Edge | Warning | DNS records could not be updated. |
+| `network.container_router_missing` | Edge | Warning | The router stack or service of a [container network](/docs/features/networking#container-networks) is not deployed. |
+| `network.container_router_down` | Edge | Warning | The router of a container network is assigned to a node but is not running. |
 | `self_update.rolled_back` | Deployments | Critical | A node went back to its previous binary (see [Updates](/docs/features/updates#self-update)). |
 | `self_update.completed` | Deployments | Info | Clouduler updated on a node (sent after the new binary clears probation). |
 | `update.failed` | Deployments | Warning | An image update failed. |

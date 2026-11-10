@@ -36,6 +36,23 @@ networks:
   vpn:
     type: egress
 
+  # Traffic to `container.subnet` is routed through a router container (a
+  # Tailscale/VPN client, say) instead of a host interface. Every node
+  # implements it, so no node declares an address. Stacks list the network
+  # to route through the router; `hosts` also route their own traffic.
+  # The router service must run a single replica.
+  tailnet:
+    type: container
+    container:
+      stack: tailscale-router
+      service: tailscale
+      subnet: 100.64.0.0/10 # 0.0.0.0/0 is allowed
+      hosts: [n1]
+      allowed_networks: [lan]
+      open_ports:
+        - { port: 2222, protocol: tcp, target_port: 22 }
+      proxy: true
+
 # Cluster wide directory namespaces. Volumes live inside a drive.
 drives:
   fast:

@@ -372,6 +372,8 @@ pub async fn run(
         wan,
     );
 
+    let container_net = crate::container_net::start(&cfg, &node_name, &cluster);
+
     let self_update = start_self_update(
         &cfg,
         &node_name,
@@ -519,6 +521,7 @@ pub async fn run(
     migrations.abort();
     overlay.abort();
     egress.abort();
+    container_net.abort();
     wan_sources.abort();
     if let Some(internal_dns) = internal_dns {
         internal_dns.abort();

@@ -192,14 +192,22 @@ async fn deploy(
 /// The cluster-aware half of validation (networks, drives, node pins, domains
 /// exist): the same check the CLI runs before it sends a deploy. Every
 /// caller of `deploy_stack` (web UI, API, MCP) goes through it.
-async fn validate_against_cluster(state: &AppState, parsed: &StackFile) -> Result<(), ApiError> {
+async fn validate_against_cluster(
+    state: &AppState,
+    name: &str,
+    parsed: &StackFile,
+) -> Result<(), ApiError> {
     let cfg = state.cluster_config.read().await;
-    cluster_check(parsed, &cfg)
+    cluster_check(name, parsed, &cfg)
 }
 
-fn cluster_check(parsed: &StackFile, cfg: &cl_config::ClusterConfig) -> Result<(), ApiError> {
+fn cluster_check(
+    name: &str,
+    parsed: &StackFile,
+    cfg: &cl_config::ClusterConfig,
+) -> Result<(), ApiError> {
     parsed
-        .validate(cfg)
+        .validate_named(name, cfg)
         .map_err(|e| ApiError::BadRequest(e.to_string()))
 }
 
@@ -219,7 +227,7 @@ pub(crate) async fn deploy_stack(
     let secrets_to_write = {
         let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         check_overlay_collision(state, name, &parsed).await?;
-        validate_against_cluster(state, &parsed).await?;
+        validate_against_cluster(state, name, &parsed).await?;
         let requirements = parsed.requirements();
         let cluster_state = state.cluster.state().await;
         for config_name in &requirements.file_configs {
@@ -442,7 +450,7 @@ pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> 
         }
         Ok(parsed) => {
             let cfg = state.cluster_config.read().await;
-            if let Err(e) = parsed.validate(&cfg) {
+            if let Err(e) = parsed.validate_named(name, &cfg) {
                 return ValidateResponse {
                     valid: false,
                     errors: vec![ValidationError {
@@ -633,11 +641,11 @@ web:
     fn deploy_checks_the_spec_against_the_cluster() {
         let cfg = cl_config::ClusterConfig::parse(CLUSTER).unwrap();
         let ok = StackFile::parse("services:\n  a:\n    image: x\n").unwrap();
-        assert!(cluster_check(&ok, &cfg).is_ok());
+        assert!(cluster_check("a", &ok, &cfg).is_ok());
         let bad = StackFile::parse(
             "services:\n  a:\n    image: x\n    volumes:\n      - nodrive/vol:/data\n",
         )
         .unwrap();
-        assert!(cluster_check(&bad, &cfg).is_err());
+        assert!(cluster_check("a", &bad, &cfg).is_err());
     }
 }

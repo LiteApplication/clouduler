@@ -24,6 +24,16 @@ const reqs = (extra: Partial<StackRequirements>): StackRequirements => ({
 });
 
 describe('placement rows', () => {
+  it('treats a container network as implemented by every node', () => {
+    const rows = buildPlacementRows(reqs({ networks: ['tun'] }), cluster, { ...ctx, natNetworks: new Set(['tun']) });
+    const row = rows.find((r) => r.id === 'network: tun')!;
+    expect(row.ok('a')).toBe(true);
+    expect(row.ok('b')).toBe(true);
+    const strict = buildPlacementRows(reqs({ networks: ['tun'] }), cluster, ctx).find((r) => r.id === 'network: tun')!;
+    expect(strict.ok('a')).toBe(false);
+  });
+
+
   it('parses swarm constraints with != taking precedence', () => {
     expect(parseConstraint('node.labels.fast!=true')).toEqual({ key: 'node.labels.fast', equal: false, value: 'true' });
     expect(parseConstraint('nonsense')).toBeNull();

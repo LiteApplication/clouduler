@@ -332,7 +332,8 @@ export class ScenarioBuilder {
       dns_status: dnsStatus,
       unreachable: down,
       removed: [],
-      overlay: null,
+      // the IPAM state, serialized as a json string like the server does
+      overlay: JSON.stringify({ pool: '10.244.0.0/16', subnet_prefix: 24, networks: {} }),
       wrapped_keys: Object.fromEntries(
         this.nodeInputs.map((n) => [
           n.name,

@@ -430,6 +430,34 @@
       "title": "DNS records could not be updated"
     },
     {
+      "category": "edge",
+      "effective_severity": "warning",
+      "key": "network.container_router_missing",
+      "note": "",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "warning",
+      "stack_scoped": false,
+      "stateful": true,
+      "title": "Container network router is not deployed"
+    },
+    {
+      "category": "edge",
+      "effective_severity": "warning",
+      "key": "network.container_router_down",
+      "note": "",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "warning",
+      "stack_scoped": false,
+      "stateful": true,
+      "title": "Container network router is down"
+    },
+    {
       "category": "deployments",
       "effective_severity": "critical",
       "key": "self_update.rolled_back",
@@ -728,6 +756,19 @@
     "networks": {
       "internal": {
         "type": "internal"
+      },
+      "tailnet": {
+        "container": {
+          "allowed_networks": [],
+          "hosts": [
+            "n0"
+          ],
+          "open_ports": [],
+          "service": "app",
+          "stack": "web",
+          "subnet": "100.64.0.0/10"
+        },
+        "type": "container"
       }
     },
     "nodes": {
@@ -900,6 +941,20 @@
     }
   ],
   "lastRebalance": null,
+  "networkStatus": {
+    "nodes": {
+      "n0": "10.244.0.3"
+    },
+    "router": {
+      "instance": "web.app.0",
+      "ip": "10.244.0.2",
+      "node": "n0",
+      "running": false,
+      "service": "app",
+      "stack": "web",
+      "state": "down"
+    }
+  },
   "nodeConnectivity": {
     "reports": [
       {
@@ -1205,7 +1260,7 @@
         "version": ""
       }
     },
-    "overlay": null,
+    "overlay": "{\"pool\":\"10.244.0.0/16\",\"subnet_prefix\":24,\"networks\":{\"CTN_tailnet\":{\"subnet\":\"10.244.0.0/24\",\"instances\":{\"web.app.0\":\"10.244.0.2\"},\"reserved\":[\"10.244.0.2\",\"10.244.0.3\"],\"cooldown\":[],\"nodes\":{\"n0\":\"10.244.0.3\"}}}}",
     "previous_image_digests": {},
     "proxy_sessions": {},
     "proxy_tokens": {},
@@ -1254,7 +1309,7 @@
       }
     },
     "unreachable": [],
-    "version": 23,
+    "version": 24,
     "volume_removals": {},
     "volumes": {
       "fast/v0": {

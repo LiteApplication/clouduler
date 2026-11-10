@@ -40,6 +40,11 @@ x-clouduler: {...}
   outbound traffic out that network's host interface, and the scheduler
   restricts it to nodes that implement that network automatically; no
   `deploy.placement.constraints` entry is needed for that part.
+  A `container` network (traffic for an address range routed through a router
+  container, see `docs/networking.md`'s "Container networks") can be listed
+  too; every node implements it. A container network with subnet `0.0.0.0/0`
+  counts toward the one-egress-network limit. It takes no `allowed` list, and
+  the router service itself must not list its own network.
 - `volumes` is accepted for compose compatibility but not used: a service
   references drives directly through its own `volumes:` list (see below).
 - `configs`/`secrets` declare cluster objects. An entry with `file:` bundles
@@ -93,6 +98,8 @@ networks:
   the firewall does and does not grant.
 * `egress`, `wireguard` and `nat` networks take a list too, which works
   differently: see "Restricting the outside" below.
+* A `container` network takes no list: the router container decides what is
+  reachable, and a list is a validation error.
 
 Things to know before relying on it:
 

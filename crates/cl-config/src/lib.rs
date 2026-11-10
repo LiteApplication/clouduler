@@ -10,17 +10,18 @@ mod validate;
 
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{
-    qualify, AuthConfig, CloudflareConfig, ClusterConfig, ClusterMeta, DnsPublishMode, Drive,
-    DriveMode, EgressFallback, Failback, FailoverConfig, GitBackupConfig, ImageUpdatesConfig,
-    InterfaceAddress, McpConfig, Network, NetworkKind, Node, NodeAddress, NodeRole, OidcConfig,
-    OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig, PublicAddress, SecretsConfig,
-    SelfUpdateConfig, WebConfig, DEFAULT_RPC_PORT, DEFAULT_STOP_GRACE, DEFAULT_WEB_BACKEND_PORT,
-    MAX_STOP_GRACE, MIN_IMAGE_CHECK_INTERVAL,
+    qualify, AuthConfig, CloudflareConfig, ClusterConfig, ClusterMeta, ContainerNetwork,
+    ContainerOpenPort, DnsPublishMode, Drive, DriveMode, EgressFallback, Failback, FailoverConfig,
+    GitBackupConfig, ImageUpdatesConfig, InterfaceAddress, McpConfig, Network, NetworkKind, Node,
+    NodeAddress, NodeRole, OidcConfig, OpenPort, PortalPalette, ProxyAuthConfig, ProxyConfig,
+    PublicAddress, SecretsConfig, SelfUpdateConfig, WebConfig, DEFAULT_RPC_PORT,
+    DEFAULT_STOP_GRACE, DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE, MIN_IMAGE_CHECK_INTERVAL,
 };
 pub use error::{ConfigError, Result};
 pub use netalloc::{
-    check_interface_name, egress_table_id, fnv1a, stable_hasher, subnet_octet, EGRESS_POOL_BASE,
-    EGRESS_TABLE_BASE, IFNAME_MAX_BYTES, NAT_POOL_BASE,
+    check_interface_name, container_mark, container_table_ids, egress_table_id, fnv1a,
+    stable_hasher, subnet_octet, CONTAINER_MARK_BASE, EGRESS_POOL_BASE, EGRESS_TABLE_BASE,
+    IFNAME_MAX_BYTES, NAT_POOL_BASE,
 };
 pub use stack::{
     mute_matches, validate_stack_name, AlertSeverity, AllowedHost, AllowedPorts, AllowedTarget,

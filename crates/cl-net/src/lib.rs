@@ -10,6 +10,7 @@
 //! internal network over anything you don't already trust.
 
 pub mod client_dns;
+pub mod container_net;
 pub mod dns;
 pub mod egress;
 pub mod error;

@@ -46,7 +46,10 @@ async fn deploy_bundle(
     );
 
     // Catch what the cluster would reject anyway, but locally.
-    bundle.parsed.validate(cfg).context("validating stack")?;
+    bundle
+        .parsed
+        .validate_named(&name, cfg)
+        .context("validating stack")?;
 
     for (name, f) in &bundle.files {
         if f.content.len() > MAX_OBJECT_BYTES {

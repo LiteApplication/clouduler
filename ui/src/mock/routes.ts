@@ -895,6 +895,29 @@ export function buildHttpRoutes(): HttpRoute[] {
       if (!c?.cluster?.name) errors.push({ path: 'cluster.name', message: 'a cluster needs a name' });
       return { valid: errors.length === 0, errors };
     }),
+    route('GET', '/api/networks/:name/status', ({ db, params }) => {
+      const net = db.config.networks[params.name];
+      need(net, `network ${params.name}`);
+      const c = net.type === 'container' ? net.container : undefined;
+      if (!c) return { router: null, nodes: {} };
+      const instance = `${c.stack}.${c.service}.0`;
+      const assigned = db.state.assignments?.[instance];
+      const running = !!assigned && db.state.container_status?.[instance]?.running === true;
+      const nodes: Record<string, string> = {};
+      Object.keys(db.config.nodes).forEach((n, i) => { nodes[n] = `10.244.200.${i + 2}`; });
+      return {
+        router: {
+          stack: c.stack,
+          service: c.service,
+          instance,
+          node: assigned?.node ?? null,
+          ip: assigned ? '10.244.200.50' : null,
+          running,
+          state: !assigned ? 'missing' : running ? 'up' : 'down',
+        },
+        nodes,
+      };
+    }),
     route('POST', '/api/config/networks/:name/rename', ({ db, params, body }) => {
       const to = String(body?.new_name ?? '');
       if (!to) throw new HttpError(400, 'new_name is required');

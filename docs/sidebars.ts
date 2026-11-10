@@ -78,6 +78,7 @@ const sidebars: SidebarsConfig = {
         {type: 'doc', id: 'examples/forgejo', label: 'Forgejo'},
         {type: 'doc', id: 'examples/headscale', label: 'Headscale'},
         {type: 'doc', id: 'examples/stalwart', label: 'Stalwart'},
+        {type: 'doc', id: 'examples/netbird-router', label: 'NetBird router'},
       ],
     },
     {

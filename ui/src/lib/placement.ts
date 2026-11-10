@@ -13,8 +13,8 @@ export interface PlacementContext {
    *  regardless of which one declared it locally. Not consulted for a drive
    *  that also appears in `requirements.whole_drive_mounts`: see `driveHolders`. */
   servedDrives: Set<string>;
-  /** Names of networks of kind `nat`: they take no per-node config at all, so
-   *  every node implements them automatically. */
+  /** Names of networks of kind `nat` or `container`: they take no per-node
+   *  config at all, so every node implements them automatically. */
   natNetworks: Set<string>;
   /** Drive name -> nodes holding its real (non-mountpoint) directory: every
    *  implementing node for a replicated drive, or `served_by` for a served

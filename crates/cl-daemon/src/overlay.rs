@@ -21,6 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
 use cl_docker::{Docker, NetworkSpec};
+use cl_net::container_net::container_docker_name;
 use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
 use cl_net::Allocations;
@@ -80,7 +81,66 @@ fn peers_of(cfg: &ClusterConfig, node_name: &str) -> BTreeSet<Ipv4Addr> {
 /// The subnets the overlay pool must not overlap, or a container's route to a
 /// peer node collides with its route to another container.
 fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
-    cfg.networks.values().filter_map(|n| n.subnet).collect()
+    // A container network's routed range lives in `container.subnet`, never
+    // in `Network.subnet`; it must not reserve (or, as `0.0.0.0/0`, starve)
+    // the overlay pool, so only subnetted networks of other kinds count.
+    cfg.networks
+        .values()
+        .filter(|n| n.kind != NetworkKind::Container)
+        .filter_map(|n| n.subnet)
+        .collect()
+}
+
+/// The instances that sit on each container network's segment, keyed by the
+/// segment's docker/allocation name (`CTN_<network>`): the router instance
+/// (index 0 of the configured stack/service, only once it is assigned) and
+/// every instance of a service that lists the network.
+pub fn container_members(
+    state: &cl_raft::state::ClusterState,
+    cfg: &ClusterConfig,
+) -> BTreeMap<String, BTreeSet<InstanceId>> {
+    let mut out: BTreeMap<String, BTreeSet<InstanceId>> = cfg
+        .container_networks()
+        .map(|(name, _)| (container_docker_name(name), BTreeSet::new()))
+        .collect();
+    if out.is_empty() {
+        return out;
+    }
+    for (name, c) in cfg.container_networks() {
+        let router = InstanceId::new(c.stack.clone(), c.service.clone(), 0);
+        if state.assignments.contains_key(&router) {
+            out.entry(container_docker_name(name))
+                .or_default()
+                .insert(router);
+        }
+    }
+    for (stack, stack_state) in &state.stacks {
+        let Ok(file) = StackFile::parse(&stack_state.spec) else {
+            continue;
+        };
+        for service in file.services.keys() {
+            for network in file.container_networks(service, cfg) {
+                let members = out.entry(container_docker_name(&network)).or_default();
+                for assignment in state.assignments.values() {
+                    if assignment.instance.stack == *stack
+                        && assignment.instance.service == *service
+                    {
+                        members.insert(assignment.instance.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Node names per container segment, for the leader's node-address
+/// allocation. Every node of the config gets one on every segment.
+fn container_node_names(cfg: &ClusterConfig) -> BTreeMap<String, BTreeSet<String>> {
+    let nodes: BTreeSet<String> = cfg.nodes.keys().cloned().collect();
+    cfg.container_networks()
+        .map(|(name, _)| (container_docker_name(name), nodes.clone()))
+        .collect()
 }
 
 /// Whether a stack network can only ever have its containers scheduled on one
@@ -194,9 +254,17 @@ impl Context_ {
             }
         }
 
+        // Container-kind segments exist cluster-wide whether or not anything
+        // runs on them yet, and on every node (each holds a host port there).
+        for (segment, members) in container_members(&state, &cfg) {
+            all.entry(segment.clone()).or_default().extend(members);
+            mine.insert(segment);
+        }
+        let node_names = container_node_names(&cfg);
+
         let mut allocations = load_allocations(state.overlay.as_deref());
         if self.cluster.is_leader() {
-            self.allocate_missing(&mut allocations, &all, &cluster_subnets)
+            self.allocate_missing(&mut allocations, &all, &cluster_subnets, &node_names)
                 .await?;
         }
 
@@ -307,6 +375,7 @@ impl Context_ {
         allocations: &mut Allocations,
         networks: &BTreeMap<String, BTreeSet<InstanceId>>,
         cluster_subnets: &[IpNet],
+        node_names: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<()> {
         let mut changed = false;
 
@@ -359,6 +428,32 @@ impl Context_ {
                     .with_context(|| format!("allocating an address for {instance}"))?;
                 changed = true;
                 info!(network = %network, %instance, %ip, "allocated an overlay address");
+            }
+
+            // A container segment also gives each node its own host-port
+            // address; nodes that left the config give theirs back.
+            if let Some(nodes) = node_names.get(network) {
+                let gone: Vec<String> = allocations
+                    .node_ips(network)
+                    .filter(|(node, _)| !nodes.contains(*node))
+                    .map(|(node, _)| node.to_string())
+                    .collect();
+                for node in gone {
+                    allocations.release_node_ip(network, &node);
+                    changed = true;
+                }
+                for node in nodes {
+                    if allocations.node_ip(network, node).is_some() {
+                        continue;
+                    }
+                    let ip = allocations
+                        .allocate_node_ip(network, node)
+                        .with_context(|| {
+                            format!("allocating a node address for {node} on {network}")
+                        })?;
+                    changed = true;
+                    info!(network = %network, %node, %ip, "allocated a node address");
+                }
             }
         }
 
@@ -612,5 +707,80 @@ mod tests {
         let subnets = cluster_subnets_of(&cfg());
         assert!(subnets.contains(&"10.10.0.0/24".parse().unwrap()));
         assert!(subnets.contains(&"192.168.1.0/24".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_container_networks_routed_range_never_reserves_overlay_space() {
+        let mut c = cfg();
+        c.networks
+            .get_mut("tailnet")
+            .unwrap()
+            .container
+            .as_mut()
+            .unwrap()
+            .subnet = "0.0.0.0/0".parse().unwrap();
+        let subnets = cluster_subnets_of(&c);
+        assert!(subnets.iter().all(|s| s.prefix_len() > 0), "{subnets:?}");
+        assert!(!subnets.contains(&"100.64.0.0/10".parse().unwrap()));
+    }
+
+    #[test]
+    fn container_segments_list_the_router_and_the_clients() {
+        use cl_raft::state::{ClusterState, Request};
+        let c = cfg();
+        let mut state = ClusterState::default();
+        state.apply(&Request::UpsertNode(cl_raft::state::NodeState {
+            name: "n1".into(),
+            id: uuid::Uuid::new_v4(),
+            role: cl_raft::state::Role::Manager,
+            rpc_addr: "10.10.0.1:7373".parse().unwrap(),
+            drives: Default::default(),
+            availability: cl_raft::state::Availability::Active,
+            labels: Default::default(),
+            last_resort: false,
+            egress_networks: Default::default(),
+            networks: Default::default(),
+            open_ports: Default::default(),
+            arch: Default::default(),
+            binary_hash: Default::default(),
+            node_pubkey: Default::default(),
+            memory_total_bytes: Default::default(),
+            gpus: Default::default(),
+            version: Default::default(),
+        }));
+        let spec = |net: &str| {
+            format!("networks:\n  {net}: {{}}\nservices:\n  app:\n    image: x\n    networks: [{net}]\n")
+        };
+        for (name, body) in [
+            (
+                "tailscale-router",
+                "services:\n  tailscale:\n    image: x\n".to_string(),
+            ),
+            ("web", spec("tailnet")),
+            ("other", spec("lan")),
+        ] {
+            state.apply(&Request::DeployStack {
+                name: name.into(),
+                spec: body,
+                at: 0,
+            });
+        }
+        let assign = |state: &mut ClusterState, stack: &str, service: &str| {
+            state.apply(&Request::Assign {
+                instance: InstanceId::new(stack, service, 0),
+                node: "n1".into(),
+                drives: BTreeSet::new(),
+            });
+        };
+        // Nothing assigned yet: the segment exists but has no members.
+        assert!(container_members(&state, &c)["CTN_tailnet"].is_empty());
+        assign(&mut state, "tailscale-router", "tailscale");
+        assign(&mut state, "web", "app");
+        assign(&mut state, "other", "app");
+        let members = &container_members(&state, &c)["CTN_tailnet"];
+        assert_eq!(
+            members.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            vec!["tailscale-router.tailscale.0", "web.app.0"]
+        );
     }
 }

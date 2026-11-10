@@ -13,9 +13,10 @@ mod network;
 
 pub use client::{Docker, DOCKER_SOCKET_PATH};
 pub use container::{
-    BindMount, ContainerSpec, ContainerState, DeviceMount, GpuRequest, HealthState, Healthcheck,
-    PathKind, PathRead, PortMapping, PortProtocol, ResourceLimits, RestartPolicy, RunState,
-    TmpfsMount, LABEL_INSTANCE, LABEL_MANAGED, LABEL_SERVICE, LABEL_STACK, MANAGED_VALUE,
+    BindMount, ContainerAttachment, ContainerSpec, ContainerState, DeviceMount, GpuRequest,
+    HealthState, Healthcheck, PathKind, PathRead, PortMapping, PortProtocol, ResourceLimits,
+    RestartPolicy, RunState, TmpfsMount, LABEL_INSTANCE, LABEL_MANAGED, LABEL_SERVICE, LABEL_STACK,
+    MANAGED_VALUE,
 };
 pub use error::{DockerError, Result};
 pub use events::ContainerEvent;

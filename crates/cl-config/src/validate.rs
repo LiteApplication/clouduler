@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cluster::{ClusterConfig, NetworkKind, NodeAddress};
+use crate::cluster::{ClusterConfig, ContainerNetwork, NetworkKind, NodeAddress};
 use crate::error::{ConfigError, Result};
 use crate::netalloc::{
-    check_interface_name, egress_table_id, subnet_octet, EGRESS_POOL_BASE, NAT_POOL_BASE,
+    check_interface_name, container_mark, container_table_ids, egress_table_id, subnet_octet,
+    EGRESS_POOL_BASE, NAT_POOL_BASE,
 };
 
 impl ClusterConfig {
@@ -107,7 +108,10 @@ impl ClusterConfig {
             }
             if matches!(
                 net.kind,
-                NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat
+                NetworkKind::Egress
+                    | NetworkKind::Wireguard
+                    | NetworkKind::Nat
+                    | NetworkKind::Container
             ) && net.domain.is_some()
             {
                 return Err(ConfigError::invalid(
@@ -117,6 +121,22 @@ impl ClusterConfig {
                         net.kind
                     ),
                 ));
+            }
+            match (net.kind, &net.container) {
+                (NetworkKind::Container, None) => {
+                    return Err(ConfigError::invalid(
+                        format!("{at}.container"),
+                        "a container network needs a container block (stack, service, subnet)",
+                    ))
+                }
+                (NetworkKind::Container, Some(c)) => self.validate_container_network(name, c)?,
+                (_, Some(_)) => {
+                    return Err(ConfigError::invalid(
+                        format!("{at}.container"),
+                        format!("a {} network must not declare a container block", net.kind),
+                    ))
+                }
+                _ => {}
             }
             if let Some(domain) = &net.domain {
                 if domain.trim().is_empty() || domain.starts_with('.') || domain.ends_with('.') {
@@ -153,6 +173,105 @@ impl ClusterConfig {
         }
     }
 
+    fn validate_container_network(&self, name: &str, c: &ContainerNetwork) -> Result<()> {
+        let at = format!("networks.{name}.container");
+        let bad = |field: &str, msg: String| ConfigError::invalid(format!("{at}.{field}"), msg);
+
+        if c.stack.trim().is_empty() {
+            return Err(bad("stack", "must name the router stack".into()));
+        }
+        if c.service.trim().is_empty() {
+            return Err(bad("service", "must name the router service".into()));
+        }
+
+        let mut seen = BTreeSet::new();
+        for host in &c.hosts {
+            if !self.nodes.contains_key(host) {
+                return Err(bad("hosts", format!("no node named {host}")));
+            }
+            if !seen.insert(host) {
+                return Err(bad("hosts", format!("{host} is listed more than once")));
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        for allowed in &c.allowed_networks {
+            let Some(target) = self.networks.get(allowed) else {
+                return Err(bad(
+                    "allowed_networks",
+                    format!("no network named {allowed}"),
+                ));
+            };
+            if allowed == name {
+                return Err(bad(
+                    "allowed_networks",
+                    "a container network cannot allow itself".into(),
+                ));
+            }
+            if !matches!(
+                target.kind,
+                NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
+            ) {
+                return Err(bad(
+                    "allowed_networks",
+                    format!(
+                        "{allowed} is a {} network, only internal, private and public networks can be allowed",
+                        target.kind
+                    ),
+                ));
+            }
+            if !seen.insert(allowed) {
+                return Err(bad(
+                    "allowed_networks",
+                    format!("{allowed} is listed more than once"),
+                ));
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        for port in &c.open_ports {
+            if !seen.insert((port.port, port.protocol)) {
+                return Err(bad(
+                    "open_ports",
+                    format!("{}/{} is listed more than once", port.port, port.protocol),
+                ));
+            }
+            if port.port == 0 || port.target_port == Some(0) {
+                return Err(bad("open_ports", "port 0 is not valid".into()));
+            }
+        }
+
+        // A route for `subnet` that sits inside a range the underlay uses would
+        // hijack it. A subnet that contains those ranges (0.0.0.0/0) is fine:
+        // the more specific routes win.
+        let inside = |other: ipnet::Ipv4Net, what: &str| -> Result<()> {
+            if other.contains(&c.subnet) {
+                return Err(bad(
+                    "subnet",
+                    format!("{} lies inside {what} {other}", c.subnet),
+                ));
+            }
+            Ok(())
+        };
+        for (other_name, other) in &self.networks {
+            if let (true, Some(ipnet::IpNet::V4(v4))) = (other.kind.is_subnetted(), other.subnet) {
+                inside(v4, &format!("the subnet of network {other_name}"))?;
+            }
+        }
+        for (octet, what) in [
+            (244u8, "the overlay pool"),
+            (EGRESS_POOL_BASE, "the egress pool"),
+            (NAT_POOL_BASE, "the nat pool"),
+        ] {
+            inside(
+                ipnet::Ipv4Net::new(std::net::Ipv4Addr::new(10, octet, 0, 0), 16)
+                    .expect("valid prefix"),
+                what,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Egress, wireguard and nat networks get their bridge subnet and (for the
     /// first two) policy routing table from a hash of their name, so every node
     /// agrees without coordinating. Two names that hash alike would silently
@@ -164,6 +283,7 @@ impl ClusterConfig {
         let mut egress_octets: BTreeMap<u8, &str> = BTreeMap::new();
         let mut nat_octets: BTreeMap<u8, &str> = BTreeMap::new();
         let mut tables: BTreeMap<u32, &str> = BTreeMap::new();
+        let mut marks: BTreeMap<u32, &str> = BTreeMap::new();
 
         for (name, net) in &self.networks {
             let at = format!("networks.{name}");
@@ -188,6 +308,30 @@ impl ClusterConfig {
                                  from their names; rename one of them"
                             ),
                         ));
+                    }
+                }
+                NetworkKind::Container => {
+                    let mark = container_mark(name);
+                    if let Some(other) = marks.insert(mark, name) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "networks {other} and {name} both derive the packet mark {mark:#x} \
+                                 from their names; rename one of them"
+                            ),
+                        ));
+                    }
+                    let (reply, dst) = container_table_ids(name);
+                    for table in [reply, dst] {
+                        if let Some(other) = tables.insert(table, name) {
+                            return Err(ConfigError::invalid(
+                                at,
+                                format!(
+                                    "networks {other} and {name} both derive the policy routing table {table} \
+                                     from their names; rename one of them"
+                                ),
+                            ));
+                        }
                     }
                 }
                 NetworkKind::Nat => {
@@ -308,6 +452,12 @@ impl ClusterConfig {
                         return Err(ConfigError::invalid(
                             at,
                             format!("a {} network takes a bare host interface name", net.kind),
+                        ))
+                    }
+                    (NetworkKind::Container, _) => {
+                        return Err(ConfigError::invalid(
+                            at,
+                            "a container network takes no node address, list the node under container.hosts to route its traffic through the router",
                         ))
                     }
                     (NetworkKind::Nat, _) => {
@@ -1630,5 +1780,236 @@ cloudflare:
         )
         .expect("valid");
         assert_eq!(cfg.backup.expect("backup set").branch, "main");
+    }
+
+    const WAN_ANCHOR: &str = "  wan:       { type: public,   domain: example.com }";
+
+    fn with_container(block: &str) -> Result<ClusterConfig> {
+        parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  ctn:\n    type: container\n    container:\n{block}"),
+        )])
+    }
+
+    const CTN_OK: &str = "      stack: ts\n      service: ts\n      subnet: 100.64.0.0/10\n";
+
+    fn ctn_err(block: &str) -> String {
+        with_container(block).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_container_network_validates() {
+        let cfg = with_container(&format!(
+            "{CTN_OK}      hosts: [n1]\n      allowed_networks: [lan, wan, tailscale]\n      proxy: true\n      open_ports:\n        - {{ port: 2222, target_port: 22 }}\n        - {{ port: 2222, protocol: udp }}\n"
+        ))
+        .expect("valid");
+        let (name, c) = cfg.container_networks().next().unwrap();
+        assert_eq!(name, "ctn");
+        assert_eq!(c.open_ports[0].effective_target_port(), 22);
+        assert_eq!(c.open_ports[1].effective_target_port(), 2222);
+        assert_eq!(cfg.container_router_of("ts", "ts"), Some("ctn"));
+        assert_eq!(cfg.container_router_of("ts", "other"), None);
+        let again = ClusterConfig::parse(&serde_yaml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(again, cfg);
+    }
+
+    #[test]
+    fn a_container_block_is_required_and_exclusive() {
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container }}"),
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("needs a container block"), "{err}");
+        let err = parse(&[(
+            "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }",
+            "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, container: { stack: a, service: b, subnet: 100.64.0.0/10 } }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not declare a container block"), "{err}");
+    }
+
+    #[test]
+    fn a_container_network_takes_no_subnet_domain_or_node_address() {
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, subnet: 10.1.0.0/24, container: {{ stack: a, service: b, subnet: 100.64.0.0/10 }} }}"),
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not declare a subnet"), "{err}");
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, domain: x.example.com, container: {{ stack: a, service: b, subnet: 100.64.0.0/10 }} }}"),
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("domain"), "{err}");
+        let err = parse(&[
+            (
+                WAN_ANCHOR,
+                &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, container: {{ stack: a, service: b, subnet: 100.64.0.0/10 }} }}"),
+            ),
+            ("      tailscale: 10.10.0.2\n", "      tailscale: 10.10.0.2\n      ctn: 1.2.3.4\n"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("takes no node address"), "{err}");
+    }
+
+    #[test]
+    fn container_hosts_and_allowed_networks_are_checked() {
+        assert!(ctn_err(&format!("{CTN_OK}      hosts: [nope]\n")).contains("no node named nope"));
+        assert!(ctn_err(&format!("{CTN_OK}      hosts: [n1, n1]\n")).contains("more than once"));
+        assert!(
+            ctn_err(&format!("{CTN_OK}      allowed_networks: [nope]\n"))
+                .contains("no network named nope")
+        );
+        assert!(ctn_err(&format!("{CTN_OK}      allowed_networks: [ctn]\n"))
+            .contains("cannot allow itself"));
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}\n  ctn: {{ type: container, container: {{ stack: a, service: b, subnet: 100.64.0.0/10, allowed_networks: [vpn] }} }}"),
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only internal, private and public"), "{err}");
+    }
+
+    #[test]
+    fn container_open_ports_may_not_repeat() {
+        let err = ctn_err(&format!(
+            "{CTN_OK}      open_ports:\n        - {{ port: 22 }}\n        - {{ port: 22, target_port: 2222 }}\n"
+        ));
+        assert!(err.contains("22/tcp"), "{err}");
+    }
+
+    #[test]
+    fn container_router_names_must_not_be_empty() {
+        assert!(
+            ctn_err("      stack: \"\"\n      service: ts\n      subnet: 100.64.0.0/10\n")
+                .contains("router stack")
+        );
+        assert!(
+            ctn_err("      stack: ts\n      service: \"\"\n      subnet: 100.64.0.0/10\n")
+                .contains("router service")
+        );
+    }
+
+    #[test]
+    fn container_subnet_may_not_sit_inside_the_underlay() {
+        for bad in [
+            "10.10.0.0/24",
+            "10.10.0.128/25",
+            "192.168.1.0/28",
+            "10.244.3.0/24",
+            "10.244.0.0/16",
+            "10.245.1.0/24",
+            "10.246.0.0/20",
+        ] {
+            let err = ctn_err(&format!(
+                "      stack: ts\n      service: ts\n      subnet: {bad}\n"
+            ));
+            assert!(err.contains("lies inside"), "{bad}: {err}");
+        }
+        // Containing or merely adjacent ranges are fine.
+        for ok in ["0.0.0.0/0", "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"] {
+            with_container(&format!(
+                "      stack: ts\n      service: ts\n      subnet: {ok}\n"
+            ))
+            .unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+    }
+
+    #[test]
+    fn container_subnet_must_be_ipv4() {
+        let err = ctn_err("      stack: ts\n      service: ts\n      subnet: \"fd00::/8\"\n");
+        assert!(err.contains("subnet") || err.contains("invalid"), "{err}");
+    }
+
+    #[test]
+    fn container_routing_tables_may_not_collide() {
+        // Find two names whose (reply, dst) tables overlap.
+        let mut seen: std::collections::BTreeMap<u32, String> = Default::default();
+        let mut pair = None;
+        'outer: for i in 0.. {
+            let name = format!("c{i}");
+            let (r, d) = crate::netalloc::container_table_ids(&name);
+            for t in [r, d] {
+                if let Some(other) = seen.get(&t) {
+                    if *other != name {
+                        pair = Some((other.clone(), name.clone()));
+                        break 'outer;
+                    }
+                }
+            }
+            seen.insert(r, name.clone());
+            seen.insert(d, name);
+        }
+        let (a, b) = pair.unwrap();
+        let block = "container: { stack: ts, service: ts, subnet: 100.64.0.0/10 }";
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  {a}: {{ type: container, {block} }}\n  {b}: {{ type: container, {block} }}"),
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(&a) && err.contains(&b) && err.contains("routing table"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn container_packet_marks_may_not_collide() {
+        let mut seen: std::collections::BTreeMap<u32, String> = Default::default();
+        let mut pair = None;
+        for i in 0.. {
+            let name = format!("m{i}");
+            let mark = crate::netalloc::container_mark(&name);
+            if let Some(other) = seen.insert(mark, name.clone()) {
+                pair = Some((other, name));
+                break;
+            }
+        }
+        let (a, b) = pair.unwrap();
+        let block = "container: { stack: ts, service: ts, subnet: 100.64.0.0/10 }";
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  {a}: {{ type: container, {block} }}\n  {b}: {{ type: container, {block} }}"),
+        )])
+        .unwrap_err()
+        .to_string();
+        // The tables may collide first for some pairs; either refusal is right.
+        assert!(
+            err.contains(&a)
+                && err.contains(&b)
+                && (err.contains("packet mark") || err.contains("routing table")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_default_route_container_network_classifies_no_client() {
+        let cfg = with_container("      stack: ts\n      service: ts\n      subnet: 0.0.0.0/0\n")
+            .expect("0.0.0.0/0 is allowed");
+        for ip in [
+            "8.8.8.8",
+            "100.64.1.1",
+            "10.10.0.7",
+            "192.168.1.9",
+            "172.20.0.1",
+        ] {
+            let ip: std::net::IpAddr = ip.parse().unwrap();
+            assert!(!cfg.ip_in_network("ctn", ip), "{ip}");
+            assert_ne!(cfg.client_network(ip), Some("ctn"), "{ip}");
+        }
+        assert_eq!(cfg.client_network("8.8.8.8".parse().unwrap()), Some("wan"));
+        assert_eq!(
+            cfg.client_network("10.10.0.7".parse().unwrap()),
+            Some("tailscale")
+        );
     }
 }

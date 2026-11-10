@@ -173,11 +173,18 @@ Clouduler keeps its own iptables chains for container traffic. They are applied 
 | `CLDR-WGIN-<iface>` | filter and nat | WireGuard ingress: default deny for new packets from the tunnel, accept only the opened ports. Ports that differ from their target get a DNAT to the node's internal address. |
 | `CLDR-ALLOW` | filter, `DOCKER-USER` first | Per-stack `allowed` enforcement for routed packets. Exists only when some stack has an `allowed` list. |
 | `CLDR-ALLOW-NAT` | nat, `PREROUTING` first | Redirects proxy traffic from a restricted stack to another node to this node's own proxy, so the proxy can tell the stack apart by source address. |
+| `CLDR-CTN-<net>` | filter, `INPUT` before `CLDR-IN` | [Container network](/docs/features/networking#container-networks): from the router, accepts replies, the `open_ports` and (with `proxy: true`) 80/443; drops the rest. |
+| `CLDR-CTNF-<net>` | filter, `DOCKER-USER` (else `FORWARD`) | The same for traffic the router forwards through the node, plus the allowed subnets. |
+| `CLDR-CTNL2-<bridge>` | filter, `DOCKER-USER` (else `FORWARD`) | Drops frames between two clients on a container network's segment. |
+| `CLDR-CTNN-<net>` | nat, `PREROUTING` | DNAT for open ports with a different `target_port`, and for 80/443 to the node's segment address. |
+| `CLDR-CTNP-<net>` | nat, `POSTROUTING` | Masquerade of traffic leaving through the segment host port `clch-<net>`, and of router traffic to allowed subnets. |
+| `CLDR-CTNM-<net>`, `CLDR-CTNR-<net>` | mangle, `PREROUTING`, `OUTPUT` | Connmark for connections that start at the router, so replies return to it. |
 
 What this means for you:
 
 - A container can reach the proxy (80/443) on any node, DNS on its overlay gateway, and `expose` ports on any node. It cannot reach 8443, 7373 to 7375 or any other host listener.
 - A container reaching another node's address is only NATed for TCP to the proxy ports and ICMP echo. Its other traffic there is dropped.
+- A container network also uses policy routing rules (priority 5050 for replies, 5200 and above for the router-bound routes) and two routing tables per network. Inspect them with `ip rule` and `ip route show table N`. The segment uses the same VXLAN port (4789) as every overlay, and a veth `clch-<net>` on each node.
 - You can inspect the rules with `sudo iptables -S CLDR-IN` and `sudo iptables -t nat -S CLDR-OVL-SNAT`. Do not edit them.
 
 ## Quirks and gotchas

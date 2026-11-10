@@ -336,6 +336,7 @@ impl Reconciler {
             })
             .await;
             self.reconcile_egress_attachments(targets, actual).await;
+            self.reconcile_container_attachments(targets, actual).await;
             return Ok(());
         }
 
@@ -365,6 +366,7 @@ impl Reconciler {
         }
 
         self.reconcile_egress_attachments(targets, actual).await;
+        self.reconcile_container_attachments(targets, actual).await;
         Ok(())
     }
 
@@ -465,8 +467,11 @@ impl Reconciler {
                         .connect_network(&container_id, egress, None)
                         .await?;
                 }
+                self.connect_container_networks(&container_id, &target.spec)
+                    .await?;
                 self.docker.start(&name).await?;
                 self.route_egress(&name, &target.spec).await?;
+                self.route_container_networks(&name, &target.spec).await?;
             }
             Action::Start(id) => {
                 info!(instance = %id, "starting");
@@ -482,6 +487,7 @@ impl Reconciler {
                 // on create.
                 if let Some(target) = target {
                     self.route_egress(&name, &target.spec).await?;
+                    self.route_container_networks(&name, &target.spec).await?;
                 }
             }
             Action::Stop(id) => {
@@ -550,8 +556,120 @@ impl Reconciler {
                 .connect_network(&container_id, egress, None)
                 .await?;
         }
+        self.connect_container_networks(&container_id, &target.spec)
+            .await?;
         self.docker.start(name).await?;
-        self.route_egress(name, &target.spec).await
+        self.route_egress(name, &target.spec).await?;
+        self.route_container_networks(name, &target.spec).await
+    }
+
+    /// Attach a created (not yet started) container to every container-kind
+    /// network it uses, with its pinned address and, for a router, the
+    /// interface name its image expects.
+    async fn connect_container_networks(
+        &self,
+        container: &str,
+        spec: &ContainerSpec,
+    ) -> Result<()> {
+        for att in &spec.container_networks {
+            // Already attached at create time.
+            if spec.network.as_deref() == Some(att.docker_network.as_str()) {
+                continue;
+            }
+            self.docker
+                .connect_network_named(
+                    container,
+                    &att.docker_network,
+                    Some(att.ip),
+                    att.ifname.as_deref(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Put the routes of every container-kind attachment into the container's
+    /// namespace (`ip route replace`, so safe to repeat: this is also what
+    /// swaps a client's `prohibit` for the real route once the router
+    /// exists), then keep the proxy addresses on the overlay when a
+    /// `0.0.0.0/0` network took the default route.
+    async fn route_container_networks(&self, name: &str, spec: &ContainerSpec) -> Result<()> {
+        if spec.container_networks.is_empty() {
+            return Ok(());
+        }
+        for att in &spec.container_networks {
+            self.docker.apply_netns_routes(name, &att.routes).await?;
+        }
+        if spec.container_on_primary() && !spec.container_networks.iter().any(|a| a.default_route) {
+            // Docker gave the segment's own gateway as the default route; a
+            // client of a narrower range must have none but the router's.
+            // Fails when there is none, which is fine.
+            let _ = self
+                .docker
+                .apply_netns_routes(name, &[vec!["del".into(), "default".into()]])
+                .await;
+        }
+        if spec.egress_network.is_none() {
+            self.pin_proxy_routes(name, spec).await?;
+        }
+        Ok(())
+    }
+
+    /// Per-tick catch-up for container-kind networks, the same idea as
+    /// `reconcile_egress_attachments`: a client started before its router
+    /// existed gets the real route once it appears, a router that moved or a
+    /// node set that changed gets its routes refreshed, and a container
+    /// running without an attachment gets connected. Everything is idempotent.
+    async fn reconcile_container_attachments(&self, targets: &[Target], actual: &[ContainerState]) {
+        let running: BTreeMap<InstanceId, &ContainerState> = actual
+            .iter()
+            .filter_map(|c| {
+                let id = c.labels.get(LABEL_INSTANCE)?.parse::<InstanceId>().ok()?;
+                Some((id, c))
+            })
+            .collect();
+
+        for target in targets {
+            if target.assignment.desired != DesiredState::Running
+                || target.spec.container_networks.is_empty()
+            {
+                continue;
+            }
+            let id = &target.assignment.instance;
+            let Some(state) = running.get(id) else {
+                continue;
+            };
+            if !state.running {
+                continue;
+            }
+            let mut attached = true;
+            for att in &target.spec.container_networks {
+                if state.networks.contains(&att.docker_network) {
+                    continue;
+                }
+                info!(instance = %id, network = %att.docker_network, "attaching a running container to its container network");
+                if let Err(e) = self
+                    .docker
+                    .connect_network_named(
+                        &state.id,
+                        &att.docker_network,
+                        Some(att.ip),
+                        att.ifname.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(instance = %id, network = %att.docker_network, error = %e, "cannot attach the container network");
+                    attached = false;
+                }
+            }
+            if !attached {
+                continue;
+            }
+            let name = id.container_name();
+            if let Err(e) = self.route_container_networks(&name, &target.spec).await {
+                warn!(instance = %id, error = %e, "cannot apply the container network routes");
+            }
+        }
     }
 
     /// Points a started container's default route at its egress network, if

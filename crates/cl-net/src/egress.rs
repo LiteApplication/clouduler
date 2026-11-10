@@ -514,6 +514,10 @@ pub struct Wanted {
     pub bridges: BTreeSet<String>,
     /// Wireguard interface names this node should hold.
     pub wg_ifaces: BTreeSet<String>,
+    /// Container-kind network names this node implements.
+    pub container_networks: BTreeSet<String>,
+    /// Their routing tables (`container_net::container_tables`, both of each).
+    pub container_tables: BTreeSet<u32>,
 }
 
 /// One `ip rule` of ours, as `ip rule show` prints it.
@@ -534,6 +538,11 @@ pub struct HostObjects {
     pub bridges: Vec<String>,
     /// Links carrying [`WIREGUARD_LINK_ALIAS`].
     pub wg_links: Vec<String>,
+    pub mangle_chains: Vec<String>,
+    /// Every `ip rule` that `container_net` would own.
+    pub container_rules: Vec<crate::container_net::IpRule>,
+    /// `clch-*` links.
+    pub container_links: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -544,6 +553,8 @@ pub enum SweepAction {
         chain: String,
     },
     DelRule(PolicyRule),
+    /// A container-network rule (`container_net::IpRule`).
+    DelIpRule(crate::container_net::IpRule),
     FlushTable(u32),
     DelLink(String),
 }
@@ -554,6 +565,7 @@ fn is_swept_chain(name: &str) -> bool {
         NAT_CHAIN_PREFIX,
         FWD_CHAIN_PREFIX,
         crate::wireguard::INGRESS_CHAIN_PREFIX,
+        crate::container_net::CHAIN_PREFIX,
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
@@ -577,8 +589,18 @@ pub fn plan_sweep(host: &HostObjects, wanted: &Wanted) -> Vec<SweepAction> {
         wanted_chains.insert(crate::wireguard::wireguard_ingress_chain(iface));
     }
 
+    for network in &wanted.container_networks {
+        for (_, chain) in crate::container_net::all_chains(network) {
+            wanted_chains.insert(chain);
+        }
+    }
+
     let mut actions = Vec::new();
-    for (table, chains) in [("filter", &host.filter_chains), ("nat", &host.nat_chains)] {
+    for (table, chains) in [
+        ("filter", &host.filter_chains),
+        ("nat", &host.nat_chains),
+        ("mangle", &host.mangle_chains),
+    ] {
         for chain in chains {
             if is_swept_chain(chain) && !wanted_chains.contains(chain) {
                 actions.push(SweepAction::RemoveChain {
@@ -602,6 +624,29 @@ pub fn plan_sweep(host: &HostObjects, wanted: &Wanted) -> Vec<SweepAction> {
         }
     }
 
+    // Container-network rules. A rule that looks up a table is stale when the
+    // table is not wanted; the main-table ones (exemptions, suppress) carry no
+    // network, so they go only once no container network is wanted at all
+    // (the reconcile loop's own diff handles finer changes).
+    for rule in &host.container_rules {
+        use crate::container_net::RuleAction;
+        if !rule.is_container_rule() {
+            continue;
+        }
+        let stale = match &rule.action {
+            RuleAction::Lookup(table) => !wanted.container_tables.contains(table),
+            _ => wanted.container_networks.is_empty(),
+        };
+        if stale {
+            actions.push(SweepAction::DelIpRule(rule.clone()));
+            if let RuleAction::Lookup(table) = rule.action {
+                if flushed.insert(table) {
+                    actions.push(SweepAction::FlushTable(table));
+                }
+            }
+        }
+    }
+
     for bridge in &host.bridges {
         if bridge.starts_with("clex-") && !wanted.bridges.contains(bridge) {
             actions.push(SweepAction::DelLink(bridge.clone()));
@@ -609,6 +654,16 @@ pub fn plan_sweep(host: &HostObjects, wanted: &Wanted) -> Vec<SweepAction> {
     }
     for link in &host.wg_links {
         if !wanted.wg_ifaces.contains(link) {
+            actions.push(SweepAction::DelLink(link.clone()));
+        }
+    }
+    let wanted_veths: BTreeSet<String> = wanted
+        .container_networks
+        .iter()
+        .map(|n| crate::container_net::host_veth_name(n))
+        .collect();
+    for link in &host.container_links {
+        if link.starts_with(crate::container_net::VETH_PREFIX) && !wanted_veths.contains(link) {
             actions.push(SweepAction::DelLink(link.clone()));
         }
     }
@@ -675,7 +730,14 @@ pub fn scan_host() -> Result<HostObjects> {
     let mut host = HostObjects {
         filter_chains: iptables::list_chains("filter")?,
         nat_chains: iptables::list_chains("nat")?,
+        mangle_chains: iptables::list_chains("mangle")?,
         policy_rules: parse_policy_rules(&String::from_utf8_lossy(&rules.stdout)),
+        container_rules: crate::container_net::parse_ip_rules(&String::from_utf8_lossy(
+            &rules.stdout,
+        ))
+        .into_iter()
+        .filter(|r| r.is_container_rule())
+        .collect(),
         ..HostObjects::default()
     };
     if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
@@ -684,6 +746,9 @@ pub fn scan_host() -> Result<HostObjects> {
             let path = entry.path();
             if name.starts_with("clex-") && path.join("bridge").exists() {
                 host.bridges.push(name.clone());
+            }
+            if name.starts_with(crate::container_net::VETH_PREFIX) {
+                host.container_links.push(name.clone());
             }
             let alias = std::fs::read_to_string(path.join("ifalias")).unwrap_or_default();
             if alias.trim() == WIREGUARD_LINK_ALIAS {
@@ -724,6 +789,12 @@ pub fn run_sweep(actions: &[SweepAction]) -> SweepReport {
                     &rule.priority.to_string(),
                 ]),
             ),
+            SweepAction::DelIpRule(rule) => {
+                let mut args = vec!["rule", "del"];
+                let spec = rule.spec_args();
+                args.extend(spec.iter().map(String::as_str));
+                (format!("ip rule {}", spec.join(" ")), run_ip(&args))
+            }
             SweepAction::FlushTable(table) => (
                 format!("routing table {table}"),
                 run_ip(&["route", "flush", "table", &table.to_string()]),
@@ -1038,6 +1109,7 @@ mod tests {
             ),
             bridges: vec![live_bridge, dead_bridge],
             wg_links: vec!["wg-live".into(), "wg-dead".into()],
+            ..HostObjects::default()
         }
     }
 
@@ -1045,6 +1117,7 @@ mod tests {
         Wanted {
             bridges: [egress_bridge_name("live")].into(),
             wg_ifaces: ["wg-live".to_string()].into(),
+            ..Wanted::default()
         }
     }
 
@@ -1124,7 +1197,7 @@ mod tests {
         let actions = plan_sweep(&host(), &wanted());
         let rank = |a: &SweepAction| match a {
             SweepAction::RemoveChain { .. } => 0,
-            SweepAction::DelRule(_) => 1,
+            SweepAction::DelRule(_) | SweepAction::DelIpRule(_) => 1,
             SweepAction::FlushTable(_) => 2,
             SweepAction::DelLink(_) => 3,
         };
@@ -1152,5 +1225,119 @@ mod tests {
                 table: 5123
             }]
         );
+    }
+
+    fn container_host() -> HostObjects {
+        use crate::container_net as c;
+        let (live_reply, live_dst) = c::container_tables("live");
+        let (dead_reply, dead_dst) = c::container_tables("dead");
+        let rule = |priority, selector, action| c::IpRule {
+            priority,
+            selector,
+            action,
+        };
+        HostObjects {
+            filter_chains: vec![
+                c::input_chain("live"),
+                c::input_chain("dead"),
+                c::forward_chain("dead"),
+                c::l2_chain(&c::container_bridge_name("dead")),
+                "DOCKER-USER".into(),
+            ],
+            nat_chains: vec![c::nat_chain("live"), c::masq_chain("dead")],
+            mangle_chains: vec![c::mangle_chain("live"), c::mangle_output_chain("dead")],
+            container_rules: vec![
+                rule(
+                    5050,
+                    c::RuleSelector::Fwmark {
+                        mark: c::container_mark("live"),
+                        mask: c::MARK_MASK,
+                    },
+                    c::RuleAction::Lookup(live_reply),
+                ),
+                rule(
+                    5050,
+                    c::RuleSelector::Fwmark {
+                        mark: c::container_mark("dead"),
+                        mask: c::MARK_MASK,
+                    },
+                    c::RuleAction::Lookup(dead_reply),
+                ),
+                rule(5211, c::RuleSelector::All, c::RuleAction::Lookup(live_dst)),
+                rule(5211, c::RuleSelector::All, c::RuleAction::Lookup(dead_dst)),
+                rule(
+                    5210,
+                    c::RuleSelector::All,
+                    c::RuleAction::LookupMainSuppress(10),
+                ),
+            ],
+            container_links: vec!["clch-live".into(), "clch-dead".into()],
+            ..HostObjects::default()
+        }
+    }
+
+    fn container_wanted(names: &[&str]) -> Wanted {
+        let mut w = Wanted::default();
+        for n in names {
+            w.container_networks.insert(n.to_string());
+            let (a, b) = crate::container_net::container_tables(n);
+            w.container_tables.extend([a, b]);
+        }
+        w
+    }
+
+    #[test]
+    fn the_sweep_removes_everything_of_a_gone_container_network() {
+        use crate::container_net as c;
+        let actions = plan_sweep(&container_host(), &container_wanted(&["live"]));
+        let (dead_reply, dead_dst) = c::container_tables("dead");
+        let removed_chains: BTreeSet<String> = actions
+            .iter()
+            .filter_map(|a| match a {
+                SweepAction::RemoveChain { chain, .. } => Some(chain.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            removed_chains,
+            [
+                c::input_chain("dead"),
+                c::forward_chain("dead"),
+                c::l2_chain(&c::container_bridge_name("dead")),
+                c::masq_chain("dead"),
+                c::mangle_output_chain("dead"),
+            ]
+            .into()
+        );
+        assert!(actions.contains(&SweepAction::DelLink("clch-dead".into())));
+        assert!(!actions.contains(&SweepAction::DelLink("clch-live".into())));
+        assert!(actions.contains(&SweepAction::FlushTable(dead_reply)));
+        assert!(actions.contains(&SweepAction::FlushTable(dead_dst)));
+        let removed_rules = actions
+            .iter()
+            .filter(|a| matches!(a, SweepAction::DelIpRule(_)))
+            .count();
+        assert_eq!(removed_rules, 2, "only the dead network's table rules");
+    }
+
+    #[test]
+    fn the_sweep_drops_the_main_table_rules_once_no_container_network_is_left() {
+        let actions = plan_sweep(&container_host(), &container_wanted(&[]));
+        let removed_rules = actions
+            .iter()
+            .filter(|a| matches!(a, SweepAction::DelIpRule(_)))
+            .count();
+        assert_eq!(removed_rules, 5);
+        assert!(actions.contains(&SweepAction::DelLink("clch-live".into())));
+    }
+
+    #[test]
+    fn a_sweep_with_all_container_networks_wanted_does_nothing() {
+        use crate::container_net as c;
+        let mut host = container_host();
+        host.filter_chains = vec![c::input_chain("live"), c::forward_chain("dead")];
+        host.nat_chains = vec![c::masq_chain("dead")];
+        host.mangle_chains = vec![c::mangle_chain("live")];
+        assert!(plan_sweep(&host, &container_wanted(&["live", "dead"])).is_empty());
     }
 }

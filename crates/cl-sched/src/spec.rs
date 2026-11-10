@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use cl_config::{Command, DockerSocketMode, RestartPolicy as StackRestart, Service};
 use cl_docker::{
-    BindMount, ContainerSpec, DeviceMount, GpuRequest, Healthcheck, PortMapping, PortProtocol,
-    ResourceLimits, RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
+    BindMount, ContainerAttachment, ContainerSpec, DeviceMount, GpuRequest, Healthcheck,
+    PortMapping, PortProtocol, ResourceLimits, RestartPolicy, TmpfsMount, DOCKER_SOCKET_PATH,
 };
 use cl_raft::ids::InstanceId;
 
@@ -35,6 +35,11 @@ pub struct Placement {
     /// Node addresses the proxy answers on, kept on the overlay attachment
     /// rather than the egress default route. See `ContainerSpec::pinned_routes`.
     pub proxy_addresses: Vec<std::net::Ipv4Addr>,
+    /// Attachments to container-kind networks (client or router side).
+    pub container_networks: Vec<ContainerAttachment>,
+    /// This service is a container network's router: turn on IPv4 forwarding
+    /// (unless the service sets the sysctl itself).
+    pub ip_forward: bool,
 }
 
 /// The configs and secrets already written to disk for an instance:
@@ -153,6 +158,26 @@ pub fn build(
     let mut env: BTreeMap<String, String> = service.environment.clone();
     env.extend(object_env.iter().cloned());
 
+    // The default route leaves the overlay: through an egress network, or
+    // through the router of a `0.0.0.0/0` container network.
+    let default_routed = placement.egress_network.is_some()
+        || placement.container_networks.iter().any(|a| a.default_route);
+    // A client whose only network is a container one has no overlay to be
+    // primary on, and without a primary docker would put it on its default
+    // bridge, with internet access around the router. Create it on the
+    // segment instead, at its pinned address. A router keeps the legacy
+    // layout (it may have no other way to the internet), and so does a
+    // service that also has an egress network.
+    let (network, ip) = match placement.container_networks.first() {
+        Some(att)
+            if placement.network.is_none()
+                && placement.egress_network.is_none()
+                && !placement.ip_forward =>
+        {
+            (Some(att.docker_network.clone()), Some(att.ip))
+        }
+        _ => (placement.network.clone(), placement.ip),
+    };
     Ok(ContainerSpec {
         name: instance.container_name(),
         // A pinned digest wins, so a restart cannot silently pull something new.
@@ -171,14 +196,22 @@ pub fn build(
         working_dir: service.working_dir.clone(),
         cap_add: service.cap_add.clone(),
         cap_drop: service.cap_drop.clone(),
-        sysctls: service.sysctls.clone(),
+        sysctls: {
+            let mut sysctls = service.sysctls.clone();
+            if placement.ip_forward {
+                sysctls
+                    .entry("net.ipv4.ip_forward".to_string())
+                    .or_insert_with(|| "1".to_string());
+            }
+            sysctls
+        },
         labels,
         mounts,
         tmpfs,
         read_only: service.read_only,
         ports: service.ports.iter().flat_map(port_mappings).collect(),
-        network: placement.network,
-        ip: placement.ip,
+        network,
+        ip,
         dns: placement
             .resolver
             .into_iter()
@@ -227,13 +260,14 @@ pub fn build(
             .collect(),
         healthcheck: healthcheck(service),
         stop_signal: service.stop_signal.clone(),
-        pinned_gateway: placement.egress_network.as_ref().and(placement.resolver),
-        pinned_routes: placement
-            .egress_network
-            .as_ref()
-            .map(|_| placement.proxy_addresses.clone())
-            .unwrap_or_default(),
+        pinned_gateway: default_routed.then_some(placement.resolver).flatten(),
+        pinned_routes: if default_routed {
+            placement.proxy_addresses.clone()
+        } else {
+            Vec::new()
+        },
         egress_network: placement.egress_network,
+        container_networks: placement.container_networks,
     })
 }
 
@@ -464,6 +498,8 @@ mod tests {
             zone: Some("int.example.com".into()),
             egress_network: None,
             proxy_addresses: Vec::new(),
+            container_networks: Vec::new(),
+            ip_forward: false,
         };
         let spec = build(
             &instance(),
@@ -533,6 +569,141 @@ mod tests {
         let without = build_with(None);
         assert!(without.pinned_routes.is_empty());
         assert_eq!(without.pinned_gateway, None);
+    }
+
+    fn attachment(default_route: bool) -> ContainerAttachment {
+        ContainerAttachment {
+            docker_network: "CTN_tailnet".into(),
+            ip: std::net::Ipv4Addr::new(10, 246, 0, 9),
+            routes: vec![vec![
+                "route".into(),
+                "replace".into(),
+                "prohibit".into(),
+                "0.0.0.0/0".into(),
+            ]],
+            ifname: None,
+            default_route,
+        }
+    }
+
+    fn build_placed(yaml: &str, placement: Placement) -> ContainerSpec {
+        build(
+            &instance(),
+            &service(yaml),
+            Materialization {
+                objects: &[],
+                env: &[],
+                drive_roots: &roots(),
+                docker_api_socket: Path::new("/data/docker-api/docker.sock"),
+            },
+            placement,
+            None,
+            1,
+        )
+    }
+
+    #[test]
+    fn container_attachments_reach_the_spec_and_a_default_route_pins_the_proxy() {
+        let node = std::net::Ipv4Addr::new(100, 64, 0, 1);
+        let gateway = std::net::Ipv4Addr::new(10, 244, 0, 1);
+        let placed = |default_route| Placement {
+            network: Some("site_default".into()),
+            resolver: Some(gateway),
+            proxy_addresses: vec![node],
+            container_networks: vec![attachment(default_route)],
+            ..Default::default()
+        };
+        let yaml = "services:\n  web:\n    image: nginx\n";
+        let all = build_placed(yaml, placed(true));
+        assert_eq!(all.container_networks, vec![attachment(true)]);
+        assert_eq!(all.pinned_routes, vec![node]);
+        assert_eq!(all.pinned_gateway, Some(gateway));
+        let some = build_placed(yaml, placed(false));
+        assert_eq!(some.container_networks.len(), 1);
+        assert!(some.pinned_routes.is_empty());
+        assert_eq!(some.pinned_gateway, None);
+    }
+
+    /// A service listing only a container network must be created on that
+    /// network's segment (not docker's default bridge), at its pinned
+    /// address. Anything else keeps its own primary network.
+    #[test]
+    fn a_container_only_client_is_created_on_the_segment() {
+        let yaml = "services:\n  web:\n    image: nginx\n";
+        let only = build_placed(
+            yaml,
+            Placement {
+                container_networks: vec![attachment(false)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(only.network.as_deref(), Some("CTN_tailnet"));
+        assert_eq!(only.ip, Some(std::net::Ipv4Addr::new(10, 246, 0, 9)));
+        assert!(only.container_on_primary());
+
+        let with_overlay = build_placed(
+            yaml,
+            Placement {
+                network: Some("site_default".into()),
+                ip: Some(std::net::Ipv4Addr::new(10, 244, 0, 5)),
+                container_networks: vec![attachment(false)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(with_overlay.network.as_deref(), Some("site_default"));
+        assert!(!with_overlay.container_on_primary());
+
+        let with_egress = build_placed(
+            yaml,
+            Placement {
+                egress_network: Some("egress_vpn".into()),
+                container_networks: vec![attachment(false)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(with_egress.network, None);
+
+        let router = build_placed(
+            yaml,
+            Placement {
+                ip_forward: true,
+                container_networks: vec![attachment(false)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(router.network, None);
+    }
+
+    #[test]
+    fn a_router_gets_ip_forwarding_unless_the_service_sets_it() {
+        let router = Placement {
+            ip_forward: true,
+            container_networks: vec![ContainerAttachment {
+                ifname: Some("ctn0".into()),
+                ..attachment(false)
+            }],
+            ..Default::default()
+        };
+        let spec = build_placed("services:\n  web:\n    image: nginx\n", router.clone());
+        assert_eq!(
+            spec.sysctls.get("net.ipv4.ip_forward").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(spec.container_networks[0].ifname.as_deref(), Some("ctn0"));
+
+        let own = build_placed(
+            "services:\n  web:\n    image: nginx\n    sysctls:\n      net.ipv4.ip_forward: \"0\"\n",
+            router,
+        );
+        assert_eq!(
+            own.sysctls.get("net.ipv4.ip_forward").map(String::as_str),
+            Some("0")
+        );
+        let client = build_placed(
+            "services:\n  web:\n    image: nginx\n",
+            Placement::default(),
+        );
+        assert!(!client.sysctls.contains_key("net.ipv4.ip_forward"));
     }
 
     #[test]

@@ -59,6 +59,10 @@ pub struct Jump {
     /// Insert at position 1 instead of appending. Needed to run ahead of
     /// docker's own accept rules.
     pub first: bool,
+    /// Another clouduler chain this jump must be evaluated before. Both being
+    /// `first` jumps does not order them (whichever was applied last sits on
+    /// top), so a chain whose verdicts the other would pre-empt names it here.
+    pub before: Option<String>,
 }
 
 impl Jump {
@@ -68,7 +72,14 @@ impl Jump {
             parents: parents.iter().map(|p| p.to_string()).collect(),
             chain: chain.to_string(),
             first,
+            before: None,
         }
+    }
+
+    /// Require this jump to sit ahead of the jump to `chain` in its parent.
+    pub fn before(mut self, chain: &str) -> Self {
+        self.before = Some(chain.to_string());
+        self
     }
 }
 
@@ -123,9 +134,16 @@ pub fn restore_payload(chains: &[ChainSpec]) -> String {
 /// is acceptable when nothing but other clouduler jumps (`-j CLDR-...`) sits
 /// ahead of it. Strictly "position 1" would make two clouduler chains that both
 /// want the top of the same parent evict each other on every tick.
-fn jump_state(listing: &str, parent: &str, chain: &str, first: bool) -> Option<bool> {
+fn jump_state(
+    listing: &str,
+    parent: &str,
+    chain: &str,
+    first: bool,
+    before: Option<&str>,
+) -> Option<bool> {
     let prefix = format!("-A {parent} ");
     let mut only_ours_before = true;
+    let mut passed_before = false;
     for line in listing.lines().filter(|l| l.starts_with(&prefix)) {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         let target = tokens
@@ -133,7 +151,10 @@ fn jump_state(listing: &str, parent: &str, chain: &str, first: bool) -> Option<b
             .find(|w| w[0] == "-j" || w[0] == "-g")
             .map(|w| w[1]);
         if target == Some(chain) {
-            return Some(!first || only_ours_before);
+            return Some((!first || only_ours_before) && !passed_before);
+        }
+        if before.is_some() && target == before {
+            passed_before = true;
         }
         if !target.is_some_and(|t| t.starts_with("CLDR-")) {
             only_ours_before = false;
@@ -163,7 +184,13 @@ pub fn jump_commands(jump: &Jump, listing: &dyn Fn(&str) -> Option<String>) -> V
     let mut present_ok = false;
     for (parent, listing) in &listings {
         let Some(listing) = listing else { continue };
-        let state = jump_state(listing, parent, &jump.chain, jump.first);
+        let state = jump_state(
+            listing,
+            parent,
+            &jump.chain,
+            jump.first,
+            jump.before.as_deref(),
+        );
         if *parent == target {
             match state {
                 Some(true) => present_ok = true,
@@ -418,6 +445,26 @@ mod tests {
         let jump = Jump::new("filter", &["INPUT"], "CLDR-B", true);
         let l = "-A INPUT -j CLDR-A\n-A INPUT -j CLDR-B\n-A INPUT -j ACCEPT\n";
         assert!(jump_commands(&jump, &listings(&[("INPUT", l)])).is_empty());
+    }
+
+    #[test]
+    fn a_jump_that_must_precede_another_is_moved_ahead_of_it() {
+        let jump = Jump::new("filter", &["INPUT"], "CLDR-CTN-a", true).before("CLDR-IN");
+        // Both are ours, so `first` alone would leave this order alone.
+        let l = "-A INPUT -j CLDR-IN\n-A INPUT -j CLDR-CTN-a\n-A INPUT -j ACCEPT\n";
+        assert_eq!(
+            jump_commands(&jump, &listings(&[("INPUT", l)])),
+            vec![
+                argv(&["-D", "INPUT", "-j", "CLDR-CTN-a"]),
+                argv(&["-I", "INPUT", "1", "-j", "CLDR-CTN-a"]),
+            ]
+        );
+        let ok = "-A INPUT -j CLDR-CTN-a\n-A INPUT -j CLDR-IN\n";
+        assert!(jump_commands(&jump, &listings(&[("INPUT", ok)])).is_empty());
+        // No CLDR-IN at all: nothing to order against.
+        assert!(
+            jump_commands(&jump, &listings(&[("INPUT", "-A INPUT -j CLDR-CTN-a\n")])).is_empty()
+        );
     }
 
     #[test]

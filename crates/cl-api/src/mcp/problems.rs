@@ -249,6 +249,33 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
         });
     };
 
+    if let Some(cfg) = crate::container_router::config_of(state) {
+        use crate::container_router::RouterState;
+        for (network, router) in crate::container_router::all_statuses(state, &cfg) {
+            match router.state {
+                RouterState::Up => {}
+                RouterState::Missing => add(
+                    "container_router_missing",
+                    network.clone(),
+                    format!(
+                        "the router of container network {network} ({}/{}) is not deployed or not placed; \
+                         clients fail closed and listed hosts route normally until it runs",
+                        router.stack, router.service
+                    ),
+                ),
+                RouterState::Down => add(
+                    "container_router_down",
+                    network.clone(),
+                    format!(
+                        "the router of container network {network} ({}) is assigned to {} but not running; \
+                         clients fail closed and listed hosts route normally until it runs",
+                        router.instance,
+                        router.node.as_deref().unwrap_or("no node")
+                    ),
+                ),
+            }
+        }
+    }
     if let Some(stack) = &state.emergency_stack {
         add(
             "emergency_mode",

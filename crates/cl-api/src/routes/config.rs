@@ -20,6 +20,40 @@ pub fn router() -> Router<AppState> {
         .route("/api/config/validate", post(validate_config))
         .route("/api/config/networks/{name}/rename", post(rename_network))
         .route("/api/config/drives/{name}/rename", post(rename_drive))
+        .route("/api/networks/{name}/status", get(network_status))
+}
+
+#[derive(Serialize)]
+struct NetworkStatus {
+    /// Only for a container network.
+    router: Option<crate::container_router::RouterStatus>,
+    /// Each node's address on the container network's shared segment.
+    nodes: std::collections::BTreeMap<String, std::net::Ipv4Addr>,
+}
+
+/// The live side of a container network: where its router is and what it is
+/// doing, and each node's segment address. Empty for any other kind.
+async fn network_status(
+    _identity: Identity,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<NetworkStatus>, ApiError> {
+    let cfg = state.cluster_config.read().await.clone();
+    if !cfg.networks.contains_key(&name) {
+        return Err(ApiError::NotFound(format!("no network named {name}")));
+    }
+    let cluster_state = state.cluster.state().await;
+    let allocations = crate::container_router::allocations_of(&cluster_state);
+    let router = crate::container_router::router_status(&cluster_state, &cfg, &allocations, &name);
+    let nodes = if router.is_some() {
+        allocations
+            .node_ips(&cl_net::container_net::container_docker_name(&name))
+            .map(|(node, ip)| (node.to_string(), ip))
+            .collect()
+    } else {
+        Default::default()
+    };
+    Ok(Json(NetworkStatus { router, nodes }))
 }
 
 async fn get_config(_identity: Identity, State(state): State<AppState>) -> Json<ClusterConfig> {
@@ -160,6 +194,7 @@ async fn rename_network(
     if config.web.network == old_name {
         config.web.network = new_name.clone();
     }
+    rename_in_allowed_networks(&mut config, &old_name, &new_name);
     config
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -223,6 +258,21 @@ async fn rename_network(
     rename_in_wireguard_ingress(&state, &old_name, &new_name).await?;
 
     Ok(StatusCode::OK)
+}
+
+/// A container network lists the networks its router may reach by name; a
+/// renamed network must keep matching.
+fn rename_in_allowed_networks(config: &mut cl_config::ClusterConfig, old: &str, new: &str) {
+    for net in config.networks.values_mut() {
+        let Some(container) = net.container.as_mut() else {
+            continue;
+        };
+        for allowed in container.allowed_networks.iter_mut() {
+            if allowed == old {
+                *allowed = new.to_string();
+            }
+        }
+    }
 }
 
 /// Renames `old` to `new` everywhere a stack file can name a network: the
@@ -591,6 +641,39 @@ networks:
 
         // Renaming again for a network the stack never mentioned is a no-op.
         assert!(!rename_network_in_stack(&mut file, "unrelated", "other"));
+    }
+
+    #[test]
+    fn renaming_a_network_rewrites_container_allowed_networks() {
+        let mut config =
+            cl_config::ClusterConfig::parse(include_str!("../../../../examples/cluster.yaml"))
+                .expect("example parses");
+        assert_eq!(
+            config.networks["tailnet"]
+                .container
+                .as_ref()
+                .unwrap()
+                .allowed_networks,
+            vec!["lan".to_string()]
+        );
+        rename_in_allowed_networks(&mut config, "lan", "home");
+        assert_eq!(
+            config.networks["tailnet"]
+                .container
+                .as_ref()
+                .unwrap()
+                .allowed_networks,
+            vec!["home".to_string()]
+        );
+        rename_in_allowed_networks(&mut config, "nothing", "x");
+        assert_eq!(
+            config.networks["tailnet"]
+                .container
+                .as_ref()
+                .unwrap()
+                .allowed_networks,
+            vec!["home".to_string()]
+        );
     }
 
     /// Re-serializing a stack file after a rename must not pad it with every

@@ -176,15 +176,39 @@ impl Docker {
         network: &str,
         ipv4: Option<Ipv4Addr>,
     ) -> Result<()> {
-        let request = NetworkConnectRequest {
-            container: container.to_string(),
-            endpoint_config: ipv4.map(|ip| bollard::models::EndpointSettings {
-                ipam_config: Some(bollard::models::EndpointIpamConfig {
+        self.connect_network_named(container, network, ipv4, None)
+            .await
+    }
+
+    /// `connect_network`, optionally asking docker to name the interface
+    /// (`com.docker.network.endpoint.ifname`, honoured by docker 28+).
+    pub async fn connect_network_named(
+        &self,
+        container: &str,
+        network: &str,
+        ipv4: Option<Ipv4Addr>,
+        ifname: Option<&str>,
+    ) -> Result<()> {
+        let endpoint_config = if ipv4.is_none() && ifname.is_none() {
+            None
+        } else {
+            Some(bollard::models::EndpointSettings {
+                ipam_config: ipv4.map(|ip| bollard::models::EndpointIpamConfig {
                     ipv4_address: Some(ip.to_string()),
                     ..Default::default()
                 }),
+                driver_opts: ifname.map(|n| {
+                    HashMap::from([(
+                        "com.docker.network.endpoint.ifname".to_string(),
+                        n.to_string(),
+                    )])
+                }),
                 ..Default::default()
-            }),
+            })
+        };
+        let request = NetworkConnectRequest {
+            container: container.to_string(),
+            endpoint_config,
         };
         match self.inner.connect_network(network, request).await {
             Ok(()) => Ok(()),
@@ -240,6 +264,21 @@ impl Docker {
                 ],
             )
             .await?;
+        }
+        Ok(())
+    }
+
+    /// Run each `ip route` argument list (e.g. `["route", "replace", ...]`
+    /// minus the leading `ip`) inside the container's network namespace.
+    /// Stops at the first failure.
+    pub async fn apply_netns_routes(&self, container: &str, routes: &[Vec<String>]) -> Result<()> {
+        for route in routes {
+            let args: Vec<&str> = route
+                .iter()
+                .map(String::as_str)
+                .skip_while(|a| *a == "route")
+                .collect();
+            self.ip_route_in_netns(container, &args).await?;
         }
         Ok(())
     }

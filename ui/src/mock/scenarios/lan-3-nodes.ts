@@ -32,6 +32,21 @@ export default function lan3Nodes() {
     (db.config.networks as Record<string, unknown>).vpn = { type: 'wireguard', subnet: null, domain: null };
     (db.config.nodes.atlas.network as Record<string, unknown>).vpn = 'wg-vpn';
     db.state.nodes.atlas.networks.push('vpn');
+    // A container network: 100.64.0.0/10 routed through the netbird router stack.
+    (db.config.networks as Record<string, unknown>).netbird = {
+      type: 'container',
+      subnet: null,
+      domain: null,
+      container: {
+        stack: 'netbird',
+        service: 'router',
+        subnet: '100.64.0.0/10',
+        hosts: ['atlas'],
+        allowed_networks: ['lan'],
+        open_ports: [{ port: 2222, protocol: 'tcp', target_port: 22 }],
+        proxy: true,
+      },
+    };
     db.state.secrets['_clouduler_wg_vpn_atlas'] = {
       name: '_clouduler_wg_vpn_atlas',
       sealed: '',

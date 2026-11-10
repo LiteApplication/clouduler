@@ -101,7 +101,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
     maps: ['.networks', '.drives', '.nodes', '.nodes.*.network', '.nodes.*.drives'],
     optional: [
       '.cloudflare', '.self_update', '.backup', '.proxy.acme.contact_email', '.proxy.acme.directory_url',
-      '.proxy.auth', '.auth.oidc', '.networks.*.subnet', '.networks.*.domain', '.networks.*.publish_dns',
+      '.proxy.auth', '.auth.oidc', '.networks.*.subnet', '.networks.*.domain', '.networks.*.publish_dns', '.networks.*.container', '.networks.*.container.proxy',
       '.drives.*.served_by', '.drives.*.failback', '.nodes.*.data_dir', '.nodes.*.docker_data_dir', '.nodes.*.last_resort',
       '.nodes.*.generate_secret_key',
     ],
@@ -115,6 +115,8 @@ const OPTIONS: Record<string, ShapeOptions> = {
   instances: { optional: INSTANCE_OPTIONAL },
   lastRebalance: {},
   // null when the node did not report, the probe failed, or disk_probe is off
+  // router is null while no router stack is deployed; node and ip are null while it is unplaced
+  networkStatus: { maps: ['.nodes'], optional: ['.router', '.router.node', '.router.ip'] },
   nodeConnectivity: { optional: ['.reports[].disk_ms'] },
   nodeDetail: { optional: ['.usage.version'] },
   nodeMetrics: {},
@@ -171,6 +173,13 @@ const ENDPOINTS: Endpoint[] = [
   { fixture: 'lastRebalance', path: () => '/api/rebalance/last' },
   { fixture: 'nodeConnectivity', path: () => '/api/nodes/connectivity' },
   { fixture: 'nodeDetail', path: (db) => `/api/nodes/${Object.keys(db.state.nodes)[0]}` },
+  {
+    fixture: 'networkStatus',
+    path: (db) => {
+      const name = Object.keys(db.config.networks).find((n) => db.config.networks[n].type === 'container');
+      return `/api/networks/${name ?? 'none'}/status`;
+    },
+  },
   { fixture: 'nodeMetrics', path: () => '/api/nodes/metrics' },
   { fixture: 'oidcClientSecretStatus', path: () => '/api/oidc/client-secret' },
   { fixture: 'proxyRoutes', path: () => '/api/proxy/routes' },
@@ -253,6 +262,8 @@ for (const name of Object.keys(scenarios)) {
       it(`${fixture} (${path(db)}) has the shape the rust api sends`, async () => {
         setTransport(createMockTransport(db));
         if (fixture === 'stackDetail' && Object.keys(db.state.stacks).length === 0) return;
+        // only scenarios with a container network have a status to ask for
+        if (fixture === 'networkStatus' && !Object.values(db.config.networks).some((n) => n.type === 'container')) return;
         const body = await getJson<unknown>(path(db));
         const diffs = shapeDiffs(body, shapes[fixture], OPTIONS[fixture]);
         expect(diffs, `${fixture} drifted from the real api:\n${diffs.join('\n')}`).toEqual([]);

@@ -347,6 +347,40 @@ impl StackFile {
         Ok(())
     }
 
+    /// `validate`, plus the checks that need this stack's own name: a service
+    /// may not list a container network it is the router of (the router is
+    /// attached automatically), and a router service runs exactly one replica.
+    pub fn validate_named(&self, name: &str, cluster: &ClusterConfig) -> Result<()> {
+        self.validate(cluster)?;
+        self.validate_container_router(name, cluster)
+    }
+
+    fn validate_container_router(&self, stack: &str, cluster: &ClusterConfig) -> Result<()> {
+        for (name, svc) in &self.services {
+            if let Some(net) = cluster.container_router_of(stack, name) {
+                if svc.networks.iter().any(|n| n == net) {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.networks"),
+                        format!(
+                            "{name} is the router of container network {net} and is attached to it automatically, remove it from networks"
+                        ),
+                    ));
+                }
+                let deploy = svc.deploy.as_ref();
+                let global = deploy.and_then(|d| d.mode) == Some(super::DeployMode::Global);
+                if global || deploy.and_then(|d| d.replicas).unwrap_or(1) > 1 {
+                    return Err(ConfigError::invalid(
+                        format!("services.{name}.deploy"),
+                        format!(
+                            "{name} is the router of container network {net} and must run exactly one replica (no global mode, replicas at most 1)"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_service_names(&self) -> Result<()> {
         for name in self.services.keys() {
             if !is_dns_label(name) {
@@ -519,7 +553,11 @@ impl StackFile {
                 // node implements it identically, so there is nothing to
                 // check here the way there is for an egress or wireguard
                 // interface.
-                if cluster.networks.get(net).map(|n| n.kind) == Some(NetworkKind::Nat) {
+                // A container network is likewise implemented by every node.
+                if matches!(
+                    cluster.networks.get(net).map(|n| n.kind),
+                    Some(NetworkKind::Nat | NetworkKind::Container)
+                ) {
                     continue;
                 }
                 if !cluster.nodes.values().any(|n| n.network.contains_key(net)) {
@@ -775,10 +813,21 @@ impl StackFile {
             let mut egress = None;
             for net in &svc.networks {
                 // Already checked to exist by validate_networks_exist.
-                if !matches!(
-                    cluster.networks.get(net).map(|n| n.kind),
-                    Some(NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat)
-                ) {
+                let counts = match cluster.networks.get(net) {
+                    Some(n) if n.kind == NetworkKind::Container => {
+                        // Only a default-route (0.0.0.0/0) container network
+                        // competes with an egress network for the default route.
+                        n.container
+                            .as_ref()
+                            .is_some_and(|c| c.subnet.prefix_len() == 0)
+                    }
+                    Some(n) => matches!(
+                        n.kind,
+                        NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat
+                    ),
+                    None => false,
+                };
+                if !counts {
                     continue;
                 }
                 if let Some(existing) = &egress {
@@ -834,6 +883,14 @@ impl StackFile {
             };
             let at = format!("networks.{name}.allowed");
             let kind = cluster.networks.get(name).map(|n| n.kind);
+            if kind == Some(NetworkKind::Container) {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!(
+                        "network {name} is a container network, the router container decides what is reachable: remove its allowed list"
+                    ),
+                ));
+            }
             if matches!(
                 kind,
                 Some(NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat)
@@ -896,8 +953,10 @@ impl StackFile {
                 // A nat network needs no interface address anywhere: every
                 // node implements it the same way, so a pin to any node is
                 // always fine.
-                let is_nat = cluster.networks.get(&net).map(|n| n.kind)
-                    == Some(crate::cluster::NetworkKind::Nat);
+                let is_nat = matches!(
+                    cluster.networks.get(&net).map(|n| n.kind),
+                    Some(crate::cluster::NetworkKind::Nat | crate::cluster::NetworkKind::Container)
+                );
                 let implements = is_nat
                     || cluster
                         .nodes
@@ -1793,5 +1852,82 @@ services:
         assert_eq!(f.overlay_network(&cluster()), Some("wan"));
         let f = stack("services:\n  web:\n    image: x\nnetworks:\n  vpn: {}\n");
         assert_eq!(f.overlay_network(&cluster()), None);
+    }
+
+    fn container_cluster(subnet: &str) -> ClusterConfig {
+        let yaml = CLUSTER_YAML.replace(
+            "  vpn:\n    type: egress\n",
+            &format!(
+                "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    container: {{ stack: rt, service: router, subnet: {subnet} }}\n"
+            ),
+        );
+        ClusterConfig::parse(&yaml).expect("patched cluster is valid")
+    }
+
+    #[test]
+    fn a_container_network_needs_no_implementing_node() {
+        let raw = "networks:\n  ctn2: {}\nservices:\n  a:\n    image: x\n    networks: [ctn2]\n    x-clouduler: { node: n1 }\n";
+        let cluster = container_cluster("100.64.0.0/10");
+        let s = stack(raw);
+        s.validate(&cluster).expect("every node implements it");
+        assert_eq!(
+            s.container_networks("a", &cluster),
+            vec!["ctn2".to_string()]
+        );
+        assert!(s.container_networks("missing", &cluster).is_empty());
+        // Never an overlay, never a pinning egress network.
+        assert_eq!(s.overlay_network(&cluster), None);
+        assert_eq!(s.egress_network("a", &cluster), None);
+    }
+
+    #[test]
+    fn only_a_default_route_container_network_counts_as_an_egress_network() {
+        let raw = "networks:\n  vpn: {}\n  ctn2: {}\nservices:\n  a:\n    image: x\n    networks: [vpn, ctn2]\n";
+        stack(raw)
+            .validate(&container_cluster("100.64.0.0/10"))
+            .expect("a non-default container network is not an egress network");
+        let err = stack(raw)
+            .validate(&container_cluster("0.0.0.0/0"))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("only one egress network is allowed per service"));
+    }
+
+    #[test]
+    fn the_router_is_attached_automatically_and_runs_one_replica() {
+        let cluster = container_cluster("100.64.0.0/10");
+        let own =
+            "networks:\n  ctn2: {}\nservices:\n  router:\n    image: x\n    networks: [ctn2]\n";
+        let err = stack(own).validate_named("rt", &cluster).unwrap_err();
+        assert!(err.to_string().contains("attached to it automatically"));
+        // The same service in a different stack is an ordinary client.
+        stack(own).validate_named("other", &cluster).unwrap();
+
+        let ok = "services:\n  router:\n    image: x\n";
+        stack(ok).validate_named("rt", &cluster).unwrap();
+        for deploy in ["replicas: 2", "mode: global"] {
+            let raw = format!("services:\n  router:\n    image: x\n    deploy:\n      {deploy}\n");
+            let err = stack(&raw).validate_named("rt", &cluster).unwrap_err();
+            assert!(err.to_string().contains("exactly one replica"), "{deploy}");
+            stack(&raw).validate_named("other", &cluster).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_container_network_takes_no_allowed_list() {
+        let raw = "networks:\n  ctn2:\n    allowed: [example.com]\nservices:\n  a:\n    image: x\n    networks: [ctn2]\n";
+        let err = stack(raw)
+            .validate(&container_cluster("100.64.0.0/10"))
+            .unwrap_err();
+        assert!(err.to_string().contains("container network"), "{err}");
+    }
+
+    #[test]
+    fn a_node_pin_is_fine_on_a_default_route_container_network() {
+        let raw = "networks:\n  ctn2: {}\nservices:\n  a:\n    image: x\n    networks: [ctn2]\n    x-clouduler: { node: n1 }\n";
+        stack(raw)
+            .validate(&container_cluster("0.0.0.0/0"))
+            .expect("every node implements it");
     }
 }

@@ -105,6 +105,12 @@ pub struct Desired {
     pub memory_bytes: Option<u64>,
     /// GPUs and host devices this instance needs on its node.
     pub gpu_needs: GpuNeeds,
+    /// `(stack, service)` pairs this instance prefers to share a node with
+    /// (a container network's router, with the services using the network).
+    /// A soft preference only: placement orders otherwise-eligible nodes by
+    /// how many of these already sit on them, it never overrides eligibility,
+    /// pins or an existing valid placement.
+    pub near: BTreeSet<(String, String)>,
 }
 
 impl Desired {
@@ -213,6 +219,7 @@ pub fn expand(
                 colocate_key: file.colocate_group(service_name),
                 memory_bytes: service.memory_limit_bytes(),
                 gpu_needs: GpuNeeds::of(service),
+                near: BTreeSet::new(),
             });
         }
     }

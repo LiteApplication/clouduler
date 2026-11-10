@@ -30,7 +30,8 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, yes: bool) -> Result<()
     );
     let served_drives = cfg.served_drives();
 
-    let planned = cl_sched::rebalance::plan(&state, &desired, &served_drives, &cfg.nat_networks());
+    let planned =
+        cl_sched::rebalance::plan(&state, &desired, &served_drives, &cfg.everywhere_networks());
     if planned.is_empty() {
         println!("already balanced, nothing to move");
         return Ok(());

@@ -451,6 +451,9 @@ pub fn place(
     let mut decisions = Vec::new();
     let mut unplaceable = Vec::new();
     let mut wanted: BTreeSet<InstanceId> = BTreeSet::new();
+    // Where this pass put each instance it placed, so `near` counts see
+    // decisions that are not in `state` yet.
+    let mut pass_node: BTreeMap<InstanceId, String> = BTreeMap::new();
     // Track what we hand out in this pass so spreading sees its own decisions.
     let mut load: BTreeMap<String, usize> = state
         .nodes
@@ -564,6 +567,7 @@ pub fn place(
                 let id = InstanceId::new(&item.id.stack, &item.id.service, index);
                 wanted.insert(id.clone());
                 if state.assignments.get(&id).map(|a| a.node.as_str()) != Some(&node.name) {
+                    pass_node.insert(id.clone(), node.name.clone());
                     decisions.push(Decision::Place {
                         instance: id,
                         node: node.name.clone(),
@@ -637,9 +641,31 @@ pub fn place(
             }
         }
 
+        let users_on = |node: &str| -> usize {
+            if item.near.is_empty() {
+                return 0;
+            }
+            let near =
+                |id: &InstanceId| item.near.contains(&(id.stack.clone(), id.service.clone()));
+            let from_state = state
+                .assignments
+                .iter()
+                .filter(|(id, a)| {
+                    near(id) && pass_node.get(*id).map_or(a.node == node, |n| n == node)
+                })
+                .count();
+            let new_in_pass = pass_node
+                .iter()
+                .filter(|(id, n)| {
+                    n.as_str() == node && near(id) && !state.assignments.contains_key(*id)
+                })
+                .count();
+            from_state + new_in_pass
+        };
         let target = eligible.iter().min_by_key(|node| {
             (
                 node.last_resort,
+                std::cmp::Reverse(users_on(&node.name)),
                 load.get(&node.name).copied().unwrap_or(0),
                 node.name.clone(),
             )
@@ -665,6 +691,7 @@ pub fn place(
         };
 
         *load.entry(target.name.clone()).or_insert(0) += 1;
+        pass_node.insert(item.id.clone(), target.name.clone());
         for key in item.anchor_keys() {
             host_node.entry(key).or_insert(&target.name);
         }
@@ -951,6 +978,7 @@ mod tests {
             colocate_key: None,
             memory_bytes: None,
             gpu_needs: Default::default(),
+            near: BTreeSet::new(),
         }
     }
 
@@ -1802,5 +1830,73 @@ mod tests {
             outcome.unplaceable[0].instance,
             InstanceId::new("site", "admin", 0)
         );
+    }
+
+    fn assign_to(state: &mut ClusterState, stack: &str, service: &str, index: u32, node: &str) {
+        state.apply(&Request::Assign {
+            instance: InstanceId::new(stack, service, index),
+            node: node.into(),
+            drives: BTreeSet::new(),
+        });
+    }
+
+    fn router(near: &[(&str, &str)]) -> Desired {
+        let mut r = desired("router", 0);
+        r.id = InstanceId::new("rt", "router", 0);
+        r.near = near
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
+        r
+    }
+
+    #[test]
+    fn a_router_lands_where_most_of_its_clients_are() {
+        let mut state = cluster();
+        assign_to(&mut state, "site", "a", 0, "n2");
+        assign_to(&mut state, "site", "a", 1, "n2");
+        assign_to(&mut state, "site", "b", 0, "n1");
+        let r = router(&[("site", "a"), ("site", "b")]);
+        let decisions = place(&state, &[r], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "router", 0).as_deref(), Some("n2"));
+    }
+
+    #[test]
+    fn clients_placed_in_the_same_pass_count_for_the_router() {
+        let state = cluster();
+        let mut a0 = desired("a", 0);
+        a0.pinned_node = Some("n3".into());
+        let mut a1 = desired("a", 1);
+        a1.pinned_node = Some("n3".into());
+        let r = router(&[("site", "a")]);
+        let decisions = place(&state, &[a0, a1, r], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "router", 0).as_deref(), Some("n3"));
+    }
+
+    #[test]
+    fn a_pin_and_last_resort_still_beat_the_client_preference() {
+        let mut state = cluster();
+        assign_to(&mut state, "site", "a", 0, "n2");
+        let mut pinned = router(&[("site", "a")]);
+        pinned.pinned_node = Some("n1".into());
+        let decisions = place(&state, &[pinned], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "router", 0).as_deref(), Some("n1"));
+
+        let mut n2 = node("n2", Role::Manager, &["fast"]);
+        n2.last_resort = true;
+        state.apply(&Request::UpsertNode(n2));
+        let r = router(&[("site", "a")]);
+        let decisions = place(&state, &[r], &no_served(), &no_everywhere()).decisions;
+        assert_ne!(placed(&decisions, "router", 0).as_deref(), Some("n2"));
+    }
+
+    #[test]
+    fn an_already_placed_router_is_not_moved_towards_its_clients() {
+        let mut state = cluster();
+        assign_to(&mut state, "site", "a", 0, "n2");
+        assign_to(&mut state, "rt", "router", 0, "n1");
+        let r = router(&[("site", "a")]);
+        let decisions = place(&state, &[r], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "router", 0), None);
     }
 }

@@ -43,6 +43,12 @@ struct NetworkAllocation {
     /// container doesn't immediately reuse an address that may still have
     /// live conntrack or ARP cache entries elsewhere on the overlay.
     cooldown: VecDeque<Ipv4Addr>,
+    /// Per-node addresses on this network (container-kind segments give each
+    /// node a host port). They live in `reserved`/`cooldown` like instance
+    /// addresses, so the two kinds can never collide. Absent in books written
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    nodes: BTreeMap<String, Ipv4Addr>,
 }
 
 impl Allocations {
@@ -174,6 +180,7 @@ impl Allocations {
                     instances: BTreeMap::new(),
                     reserved: BTreeSet::new(),
                     cooldown: VecDeque::new(),
+                    nodes: BTreeMap::new(),
                 },
             );
             return Ok(candidate);
@@ -203,31 +210,51 @@ impl Allocations {
             return Ok(*existing);
         }
 
-        let subnet = net.subnet;
-        let gateway = gateway_of(subnet);
-
-        // Prefer an address nobody has ever held: walk the host range in
-        // order, skipping the gateway, anything reserved right now, and
-        // anything sitting in the cooldown queue.
-        let fresh = subnet
-            .hosts()
-            .find(|ip| *ip != gateway && !net.reserved.contains(ip) && !net.cooldown.contains(ip));
-
-        let chosen = if let Some(ip) = fresh {
-            ip
-        } else if let Some(ip) = net.cooldown.pop_front() {
-            // Nothing fresh left: fall back to the oldest released address.
-            ip
-        } else {
-            return Err(NetError::AddressExhausted {
-                network: network.to_string(),
-                subnet: subnet.to_string(),
-            });
-        };
-
-        net.reserved.insert(chosen);
+        let chosen = net.pick_address(network)?;
         net.instances.insert(instance.clone(), chosen);
         Ok(chosen)
+    }
+
+    /// Address already held by a node on a network, if any.
+    pub fn node_ip(&self, network: &str, node: &str) -> Option<Ipv4Addr> {
+        self.networks.get(network)?.nodes.get(node).copied()
+    }
+
+    /// Every node address on a network, by node name.
+    pub fn node_ips(&self, network: &str) -> impl Iterator<Item = (&str, Ipv4Addr)> {
+        self.networks
+            .get(network)
+            .into_iter()
+            .flat_map(|n| n.nodes.iter().map(|(node, ip)| (node.as_str(), *ip)))
+    }
+
+    /// Allocate a node's address on a network. Same rules as `allocate_ip`:
+    /// idempotent, never the gateway, never an address an instance (or another
+    /// node) holds, and the same cooldown and exhaustion behaviour.
+    pub fn allocate_node_ip(&mut self, network: &str, node: &str) -> Result<Ipv4Addr> {
+        let net = self
+            .networks
+            .get_mut(network)
+            .ok_or_else(|| NetError::UnknownNetwork(network.to_string()))?;
+        if let Some(existing) = net.nodes.get(node) {
+            return Ok(*existing);
+        }
+        let chosen = net.pick_address(network)?;
+        net.nodes.insert(node.to_string(), chosen);
+        Ok(chosen)
+    }
+
+    /// Release a node's address (to the back of the cooldown queue). A no-op
+    /// if the node holds none.
+    pub fn release_node_ip(&mut self, network: &str, node: &str) {
+        let Some(net) = self.networks.get_mut(network) else {
+            return;
+        };
+        let Some(ip) = net.nodes.remove(node) else {
+            return;
+        };
+        net.reserved.remove(&ip);
+        net.cooldown.push_back(ip);
     }
 
     /// Release an instance's address. A no-op if the instance holds none.
@@ -242,6 +269,34 @@ impl Allocations {
         };
         net.reserved.remove(&ip);
         net.cooldown.push_back(ip);
+    }
+}
+
+impl NetworkAllocation {
+    /// Choose and reserve a free host address: a never-used one if any is
+    /// left, else the oldest released one. Never the gateway.
+    fn pick_address(&mut self, network: &str) -> Result<Ipv4Addr> {
+        let subnet = self.subnet;
+        let gateway = gateway_of(subnet);
+        // Prefer an address nobody has ever held: walk the host range in
+        // order, skipping the gateway, anything reserved right now, and
+        // anything sitting in the cooldown queue.
+        let fresh = subnet.hosts().find(|ip| {
+            *ip != gateway && !self.reserved.contains(ip) && !self.cooldown.contains(ip)
+        });
+        let chosen = if let Some(ip) = fresh {
+            ip
+        } else if let Some(ip) = self.cooldown.pop_front() {
+            // Nothing fresh left: fall back to the oldest released address.
+            ip
+        } else {
+            return Err(NetError::AddressExhausted {
+                network: network.to_string(),
+                subnet: subnet.to_string(),
+            });
+        };
+        self.reserved.insert(chosen);
+        Ok(chosen)
     }
 }
 
@@ -493,5 +548,94 @@ mod tests {
         let encoded = serde_json::to_vec(&a).unwrap();
         let decoded: Allocations = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(a, decoded);
+    }
+
+    #[test]
+    fn node_addresses_never_collide_with_instances_or_the_gateway() {
+        let mut a = Allocations::default();
+        a.allocate_network("CTN_tn", &[]).unwrap();
+        let gw = a.gateway("CTN_tn").unwrap();
+        let n1 = a.allocate_node_ip("CTN_tn", "n1").unwrap();
+        let i0 = a.allocate_ip("CTN_tn", &instance(0)).unwrap();
+        let n2 = a.allocate_node_ip("CTN_tn", "n2").unwrap();
+        let i1 = a.allocate_ip("CTN_tn", &instance(1)).unwrap();
+        let all = [n1, i0, n2, i1];
+        assert_eq!(all.iter().collect::<BTreeSet<_>>().len(), 4);
+        assert!(!all.contains(&gw));
+        assert_eq!(a.node_ip("CTN_tn", "n1"), Some(n1));
+        assert_eq!(
+            a.node_ips("CTN_tn").collect::<Vec<_>>(),
+            vec![("n1", n1), ("n2", n2)]
+        );
+    }
+
+    #[test]
+    fn node_allocation_is_idempotent_and_unknown_networks_fail() {
+        let mut a = Allocations::default();
+        a.allocate_network("tn", &[]).unwrap();
+        let ip = a.allocate_node_ip("tn", "n1").unwrap();
+        assert_eq!(a.allocate_node_ip("tn", "n1").unwrap(), ip);
+        assert!(matches!(
+            a.allocate_node_ip("ghost", "n1"),
+            Err(NetError::UnknownNetwork(_))
+        ));
+        assert_eq!(a.node_ip("ghost", "n1"), None);
+        assert_eq!(a.node_ips("ghost").count(), 0);
+    }
+
+    #[test]
+    fn node_addresses_share_cooldown_and_exhaustion_with_instances() {
+        // /30: one usable address besides the gateway.
+        let pool: Ipv4Net = "10.244.0.0/30".parse().unwrap();
+        let mut a = Allocations::new(pool, 30);
+        a.allocate_network("tn", &[]).unwrap();
+        let ip = a.allocate_node_ip("tn", "n1").unwrap();
+        assert!(matches!(
+            a.allocate_ip("tn", &instance(0)),
+            Err(NetError::AddressExhausted { .. })
+        ));
+        assert!(matches!(
+            a.allocate_node_ip("tn", "n2"),
+            Err(NetError::AddressExhausted { .. })
+        ));
+        // Released, it cools down and is reused once nothing fresh is left.
+        a.release_node_ip("tn", "n1");
+        assert_eq!(a.node_ip("tn", "n1"), None);
+        assert_eq!(a.allocate_ip("tn", &instance(0)).unwrap(), ip);
+        a.release_node_ip("tn", "never-allocated");
+    }
+
+    #[test]
+    fn a_released_node_address_is_not_reused_while_fresh_ones_remain() {
+        let mut a = Allocations::default();
+        a.allocate_network("tn", &[]).unwrap();
+        let first = a.allocate_node_ip("tn", "n1").unwrap();
+        a.release_node_ip("tn", "n1");
+        assert_ne!(a.allocate_node_ip("tn", "n2").unwrap(), first);
+    }
+
+    #[test]
+    fn releasing_a_network_releases_its_node_addresses() {
+        let mut a = Allocations::default();
+        a.allocate_network("tn", &[]).unwrap();
+        a.allocate_node_ip("tn", "n1").unwrap();
+        a.release_network("tn");
+        assert_eq!(a.node_ip("tn", "n1"), None);
+        a.allocate_network("tn", &[]).unwrap();
+        assert_eq!(a.node_ips("tn").count(), 0);
+    }
+
+    #[test]
+    fn a_book_without_node_addresses_decodes_and_encodes_unchanged() {
+        let old = r#"{"pool":"10.244.0.0/16","subnet_prefix":24,"networks":{"gitlab":{"subnet":"10.244.0.0/24","instances":{},"reserved":[],"cooldown":[]}}}"#;
+        let mut a = Allocations::decode(Some(old)).expect("old book decodes");
+        assert_eq!(a.node_ips("gitlab").count(), 0);
+        let reencoded = serde_json::to_string(&a).unwrap();
+        assert!(!reencoded.contains("nodes"), "{reencoded}");
+
+        a.allocate_node_ip("gitlab", "n1").unwrap();
+        let encoded = serde_json::to_string(&a).unwrap();
+        assert!(encoded.contains("nodes"));
+        assert_eq!(Allocations::decode(Some(&encoded)), Some(a));
     }
 }

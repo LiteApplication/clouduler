@@ -9,7 +9,7 @@
 //! label (`foo.example.com`, not `example.com` and not `a.b.example.com`).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -52,6 +52,29 @@ pub struct RouteOptions {
     /// restricted that network (see `PeerPolicies`) may only reach the hosts
     /// it listed. `None` skips that check.
     pub network: Option<String>,
+    /// Clients that arrive through a container network's router, recognised
+    /// by the local address the connection was accepted on.
+    pub local_clients: LocalClients,
+}
+
+/// Container-network clients. Traffic from a container network's router is
+/// DNAT-ed to the node's own address on that network's segment (`X_ctn`), so
+/// the peer address says nothing about who is calling but the local one does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalClients {
+    /// Local addresses (every node's `X_ctn`) whose connections count as
+    /// clients of the route's network: those of each container network that
+    /// is this network or lists it in `allowed_networks`.
+    pub addrs: Vec<IpAddr>,
+    /// The route is published on a container network itself: only `addrs`
+    /// may reach it, regardless of `allowed_subnet`.
+    pub only: bool,
+}
+
+impl LocalClients {
+    pub fn contains(&self, local: Option<IpAddr>) -> bool {
+        local.is_some_and(|ip| self.addrs.contains(&ip))
+    }
 }
 
 impl RouteOptions {

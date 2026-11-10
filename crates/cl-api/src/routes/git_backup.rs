@@ -718,7 +718,7 @@ fn validate_parsed(
         }
         let stack = StackFile::parse(spec).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
         stack
-            .validate(&cluster_config)
+            .validate_named(name, &cluster_config)
             .map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
 
         let requirements = stack.requirements();

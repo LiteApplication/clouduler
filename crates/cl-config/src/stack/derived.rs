@@ -168,6 +168,20 @@ impl StackFile {
             .cloned()
     }
 
+    /// The container networks `service` lists, in declaration order.
+    pub fn container_networks(&self, service: &str, cluster: &ClusterConfig) -> Vec<String> {
+        let Some(svc) = self.services.get(service) else {
+            return Vec::new();
+        };
+        svc.networks
+            .iter()
+            .filter(|net| {
+                cluster.networks.get(net.as_str()).map(|n| n.kind) == Some(NetworkKind::Container)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// How often `volume` on `service` should replicate: the per-volume
     /// override on the service, then the stack wide default for that volume,
     /// then the backing drive's own default.

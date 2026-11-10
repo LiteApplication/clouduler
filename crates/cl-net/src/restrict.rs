@@ -939,6 +939,33 @@ mod tests {
             ),
             input,
         ];
+        let mut plans = plans.to_vec();
+        {
+            use crate::container_net::*;
+            let nets: [ipnet::Ipv4Net; 1] = ["192.168.1.0/24".parse().unwrap()];
+            plans.push(filter_iptables_plan(&FilterInput {
+                network: "tn",
+                bridge: "clbr-x",
+                veth: "clch-tn",
+                router_ip: Some(ip("10.244.9.5")),
+                node_ctn: ip("10.244.9.2"),
+                open_ports: &[(2222, Protocol::Tcp, 22), (53, Protocol::Udp, 53)],
+                target_addr: Some(ip("192.168.1.2")),
+                proxy_ports: &[80, 443],
+                allowed: &nets,
+            }));
+            plans.push(mangle_iptables_plan(
+                "tn",
+                "clbr-x",
+                "clch-tn",
+                Some(ip("10.244.9.5")),
+            ));
+            plans.push(l2_isolation_plan(
+                "clbr-x",
+                Some(ip("10.244.9.5")),
+                &[ip("10.244.9.2")],
+            ));
+        }
         for plan in plans {
             let payload = crate::iptables::restore_payload(&plan.chains);
             let mut child = Command::new("iptables-restore")

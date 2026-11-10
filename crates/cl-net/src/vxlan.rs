@@ -20,7 +20,7 @@ use rtnetlink::packet_route::neighbour::{
 };
 use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::packet_route::RouteNetlinkMessage;
-use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVxlan};
+use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVeth, LinkVxlan};
 
 use tracing::warn;
 
@@ -648,6 +648,79 @@ impl Overlay {
         Ok(())
     }
 
+    /// Give this node a host port on a segment bridge: a veth pair whose peer
+    /// is enslaved to `bridge`, with `mac` on the host end and `addr`/32 on it.
+    ///
+    /// The unique MAC is what lets a router reach this specific node over
+    /// VXLAN (the bridge's anycast gateway MAC never leaves its node). Both
+    /// ends take the bridge's MTU and come up. `arp_ignore=1` on the veth and
+    /// the bridge keeps either from answering ARP for the other's address
+    /// (the bridge holds the anycast `.1`, and the veth sees the segment's
+    /// flooded ARP); `rp_filter=2` on the veth is loose reverse-path
+    /// filtering, the same rationale as for egress bridges. Idempotent.
+    pub async fn ensure_host_port(
+        &self,
+        bridge: &str,
+        veth: &str,
+        peer: &str,
+        mac: [u8; 6],
+        addr: Ipv4Addr,
+    ) -> Result<()> {
+        let bridge_index = self
+            .find_link(bridge)
+            .await?
+            .ok_or_else(|| NetError::UnknownNetwork(bridge.to_string()))?;
+        let veth_index = match self.find_link(veth).await? {
+            Some(index) => index,
+            None => {
+                self.handle
+                    .link()
+                    .add(LinkVeth::new(veth, peer).build())
+                    .execute()
+                    .await
+                    .map_err(|e| NetError::from_netlink(format!("{veth} (create)"), e))?;
+                self.find_link(veth)
+                    .await?
+                    .ok_or_else(|| NetError::UnknownNetwork(veth.to_string()))?
+            }
+        };
+        let peer_index = self
+            .find_link(peer)
+            .await?
+            .ok_or_else(|| NetError::UnknownNetwork(peer.to_string()))?;
+
+        let mtu = std::fs::read_to_string(format!("/sys/class/net/{bridge}/mtu"))
+            .ok()
+            .and_then(|m| m.trim().parse::<u16>().ok())
+            .unwrap_or(DEFAULT_UNDERLAY_MTU);
+        self.ensure_mtu(&format!("{veth} (mtu)"), veth_index, mtu)
+            .await?;
+        self.ensure_mtu(&format!("{peer} (mtu)"), peer_index, mtu)
+            .await?;
+        self.ensure_mac(veth, veth_index, mac).await?;
+        self.ensure_controller(&format!("{peer} (enslave)"), peer_index, bridge_index)
+            .await?;
+        self.ensure_address(veth, veth_index, addr, 32).await?;
+        set_sysctl(&format!("net/ipv4/conf/{veth}/arp_ignore"), "1")?;
+        set_sysctl(&format!("net/ipv4/conf/{bridge}/arp_ignore"), "1")?;
+        set_sysctl(&format!("net/ipv4/conf/{veth}/rp_filter"), "2")?;
+        self.ensure_up(peer, peer_index).await?;
+        self.ensure_up(veth, veth_index).await
+    }
+
+    /// Remove a host port (deleting one end removes the pair). Missing is fine.
+    pub async fn teardown_host_port(&self, veth: &str) -> Result<()> {
+        if let Some(index) = self.find_link(veth).await? {
+            self.handle
+                .link()
+                .del(index)
+                .execute()
+                .await
+                .map_err(|e| NetError::from_netlink(veth, e))?;
+        }
+        Ok(())
+    }
+
     /// Remove a network's bridge and VXLAN device. Missing links are not an
     /// error, since deleting an already-gone device is the reconcile loop's
     /// steady state after a network is torn down.
@@ -664,6 +737,14 @@ impl Overlay {
         }
         Ok(())
     }
+}
+
+/// Write a `/proc/sys` value, `path` relative to `/proc/sys`.
+fn set_sysctl(path: &str, value: &str) -> Result<()> {
+    std::fs::write(format!("/proc/sys/{path}"), value).map_err(|e| NetError::Io {
+        context: format!("sysctl {path}"),
+        source: e,
+    })
 }
 
 /// Turn off TX checksum offload (and, as a dependency, TSO) on a

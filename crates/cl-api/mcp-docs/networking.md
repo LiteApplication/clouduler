@@ -152,6 +152,60 @@ changed to avoid collisions, because that would renumber networks that already
 exist. Host interface names in a node's `network` map are validated as real
 interface names (letters, digits, `_`, `.`, `-`; at most 15 bytes).
 
+## Container networks
+
+A `container` network (`type: container` plus a `container:` block: `stack`,
+`service`, `subnet`, `hosts`, `allowed_networks`, `open_ports`, `proxy`) sends
+traffic for `container.subnet` through a router container that the operator
+runs as an ordinary single-replica service. The routed range lives in
+`container.subnet`, never in the network's own `subnet`; `0.0.0.0/0` is
+allowed, IPv4 only. Every node implements the network, so no node declares an
+address for it (use `hosts` to route a node's own traffic).
+
+* Segment: one cluster-wide L2 network per container network (bridge plus VXLAN
+  on every node, docker name `CTN_<net>`, addresses from `10.244.0.0/16`).
+  Every node's bridge holds the same anycast `.1`; each node also has a veth
+  `clch-<net>` with its own `/32` and MAC so the router can reach one node.
+  Clients and the router are isolated from each other on the segment
+  (`CLDR-CTNL2-<bridge>`).
+* Clients (services that list the network) get a pinned address and
+  `ip route replace <subnet> via <router>` (`default via` for `0.0.0.0/0`) in
+  their namespace. With no router address yet the route is `prohibit`: clients
+  fail closed. The router's address is not part of a client's identity.
+* The router (named by `stack`/`service`) is attached automatically, with
+  interface name `ctn0` (docker 28+), `ip_forward=1` and routes to each node's
+  allowed-network addresses (`/32 via` that node's segment address, source
+  kept; a node's public IPv4 on a public network) and to allowed subnets via
+  its local node (masqueraded). The router
+  stack must not list the network, and must also be on a nat or egress network
+  for its own internet. The router image forwards and NATs itself.
+* Listed hosts get `ip rule` pairs (`lookup main suppress_prefixlength <plen>`,
+  then a table with `<subnet> via <router> dev clch-<net>`), so more specific
+  routes win. Installed only while the router runs: hosts fail open. Stacks on
+  an allowed network get the same pair with `from <overlay subnet>`. Priorities:
+  5200 (`from <router>`) and 5201 (`iif <router bridge>`) go to main; network
+  of rank `r` uses 5210+2r (suppress) and 5211+2r (lookup). Rank is prefix
+  length descending, `0.0.0.0/0` last, ties by name. Two networks deriving the
+  same mark or routing table are a validation error.
+* Return path: new connections from the router get a connmark; `ip rule
+  fwmark` (priority 5050) sends their replies to the router over the segment.
+  Connections that arrived another way are unmarked and use the main table.
+* Chains: `CLDR-CTN-<net>` (INPUT, before `CLDR-IN`), `CLDR-CTNF-<net>`
+  (DOCKER-USER), `CLDR-CTNN-<net>` (nat PREROUTING, DNAT of open ports whose
+  `target_port` differs and 80/443 with `proxy: true`), `CLDR-CTNP-<net>`
+  (nat POSTROUTING masquerade), `CLDR-CTNM-<net>`/`CLDR-CTNR-<net>` (mangle).
+* Proxy gating: with `proxy: true` a router connection to 80/443 is DNATed to
+  the node's own segment address; `gate_by_network` treats a connection whose
+  local address is a segment address of a container network that is, or lists
+  as allowed, the route's network as a client of it. A route on the container
+  network itself admits only those connections (else 403).
+* Status: `GET /api/networks/NAME/status` returns `{router: {stack, service,
+  instance, node, ip, running, state: missing|down|up}, nodes: {NODE: ip}}`;
+  problems `container_router_missing` and `container_router_down`, alert
+  events `network.container_router_missing` / `network.container_router_down`.
+* Placement prefers the node that runs most of the router's clients (soft:
+  never overrides eligibility, pins or `last_resort`).
+
 ## Host firewall
 
 All rules are installed with `iptables -w`, re-checked every reconcile tick (so
@@ -610,7 +664,7 @@ No node address is declared or needed — a `nat` network takes no entry
 under `nodes.<name>.network` at all, and one is rejected as invalid if
 given. Every node implements it identically, so unlike `egress` or
 `wireguard` it never restricts which node a service attached to it can land
-on: the scheduler treats membership in `ClusterConfig::nat_networks()` as an
+on: the scheduler treats membership in `ClusterConfig::everywhere_networks()` as an
 automatic pass in `cl_sched::place::rejection`, the same way a served
 drive's name in `served_drives` bypasses the "does this node have a local
 copy" check for a drive. The placement table in the ui (`ConstraintTable`)

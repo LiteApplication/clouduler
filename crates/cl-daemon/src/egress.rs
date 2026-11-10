@@ -436,6 +436,18 @@ async fn ensure_overlay_snat(cfg: &ClusterConfig, node_name: &str) -> Result<()>
         .context("applying the overlay source NAT")
 }
 
+/// The container-kind networks every node implements, with their routing
+/// tables, so the sweep keeps their veths, rules and chains.
+fn wanted_container_networks(cfg: &ClusterConfig) -> Wanted {
+    let mut wanted = Wanted::default();
+    for (network, _) in cfg.container_networks() {
+        wanted.container_networks.insert(network.clone());
+        let (reply, dst) = cl_net::container_net::container_tables(network);
+        wanted.container_tables.extend([reply, dst]);
+    }
+    wanted
+}
+
 /// Remove what a network that is gone from this node left behind: its docker
 /// network, kill-switch and ingress chains with their jumps, policy route and
 /// bridge, and a wireguard tunnel (which would otherwise stay up holding its
@@ -450,7 +462,7 @@ async fn sweep_orphans(
     docker: &Docker,
     interfaces: &BTreeMap<String, (NetworkKind, InterfaceAddress)>,
 ) {
-    let mut wanted = Wanted::default();
+    let mut wanted = wanted_container_networks(cfg);
     for (network, (kind, addr)) in interfaces {
         wanted.bridges.insert(egress_bridge_name(network));
         if *kind == NetworkKind::Wireguard {
@@ -844,6 +856,7 @@ mod tests {
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                container: None,
             },
         );
         cfg.networks.insert(
@@ -853,6 +866,7 @@ mod tests {
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                container: None,
             },
         );
         cfg
@@ -937,5 +951,15 @@ mod tests {
             effective_interface(NetworkKind::Egress, &addr, "vpn").await,
             "end0"
         );
+    }
+
+    #[test]
+    fn the_sweep_keeps_every_configured_container_network() {
+        let cfg = ClusterConfig::parse(include_str!("../../../examples/cluster.yaml")).unwrap();
+        let wanted = wanted_container_networks(&cfg);
+        assert!(wanted.container_networks.contains("tailnet"));
+        let (reply, dst) = cl_net::container_net::container_tables("tailnet");
+        assert!(wanted.container_tables.contains(&reply) && wanted.container_tables.contains(&dst));
+        assert!(wanted.bridges.is_empty());
     }
 }

@@ -301,6 +301,7 @@ mod tests {
             colocate_key: None,
             memory_bytes,
             gpu_needs: Default::default(),
+            near: BTreeSet::new(),
         }
     }
 

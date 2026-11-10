@@ -98,8 +98,8 @@ services:
 <OptionTable rows={[
   {"key": "version", "type": "str", "reload": "n/a", "description": "Compose schema version. Accepted and ignored."},
   {"key": "services", "type": "map", "reload": "n/a", "required": true, "description": "The containers of the stack, keyed by service name. Each key must be a DNS label."},
-  {"key": "networks", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster networks this stack uses. Clouduler does not create Docker networks from this block. Each name must exist in the cluster and be implemented by some node (nat networks excepted)."},
-  {"key": "networks.<name>.allowed", "type": "list of str", "default": "unrestricted", "reload": "n/a", "description": "Restricts what the stack can reach through that network. Entries: host, *.suffix, host:port, host:lo-hi, host:port/udp, or an IPv4 literal. See Networking.", "quirks": "A bare allowed: with no value is an error. Write allowed: [] to deny everything."},
+  {"key": "networks", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster networks this stack uses. Clouduler does not create Docker networks from this block. Each name must exist in the cluster and be implemented by some node (nat and container networks excepted)."},
+  {"key": "networks.<name>.allowed", "type": "list of str", "default": "unrestricted", "reload": "n/a", "description": "Restricts what the stack can reach through that network. Entries: host, *.suffix, host:port, host:lo-hi, host:port/udp, or an IPv4 literal. See Networking.", "quirks": "A bare allowed: with no value is an error. Write allowed: [] to deny everything. On a container network any allowed list is an error: the router container decides what is reachable."},
   {"key": "volumes", "type": "map", "default": "{}", "reload": "n/a", "description": "Accepted for Compose compatibility but not used. Services reference drives directly.", "quirks": "Parsed but currently not acted on."},
   {"key": "configs", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster configs. With file: the content is bundled at deploy time (path relative to the stack file, or absolute). Without file: the config must already exist in the cluster."},
   {"key": "secrets", "type": "map", "default": "{}", "reload": "n/a", "description": "Cluster secrets. Same rules as configs. The content is sealed with the cluster key."},
@@ -124,7 +124,7 @@ Each key under `services:` must be a DNS label (lowercase letters, digits and hy
   {"key": "labels", "type": "map or list of key=value", "reload": "n/a", "description": "Docker labels on the container. Clouduler adds its own revision label."},
   {"key": "volumes", "type": "list", "reload": "n/a", "description": "Mounts from drives, or in-memory tmpfs. See Volumes below."},
   {"key": "ports", "type": "list", "reload": "n/a", "description": "Ports published on the node that runs the container. See Ports below."},
-  {"key": "networks", "type": "list of names", "reload": "n/a", "description": "Networks this service attaches to. Each must be declared in the stack's top-level networks.", "quirks": "At most one egress, wireguard or nat network per service."},
+  {"key": "networks", "type": "list of names", "reload": "n/a", "description": "Networks this service attaches to. Each must be declared in the stack's top-level networks.", "quirks": "At most one egress, wireguard or nat network per service. A container network with subnet 0.0.0.0/0 counts as one of them. Listing a container network routes its subnet through the router container (see Container networks in Networking). The router service of a container network must not list that network and must run one replica."},
   {"key": "depends_on", "type": "list of service names", "reload": "n/a", "description": "Start-order gate: an instance is not first created until every dependency has at least one instance running on any node.", "quirks": "Waits for running, not healthy. Cycles and self-references are errors."},
   {"key": "healthcheck", "type": "map", "reload": "n/a", "description": "Docker healthcheck. See Healthcheck below.", "quirks": "Without test: the whole block is silently dropped."},
   {"key": "restart", "type": "str", "default": "no", "reload": "n/a", "description": "Docker restart policy: no, always, on-failure, on-failure:N, unless-stopped."},
@@ -301,7 +301,7 @@ Each entry of `x-clouduler.proxy`. See [Proxy and TLS](/docs/features/proxy-and-
   {"key": "preserve_host", "type": "bool", "default": "false", "reload": "n/a", "description": "Forward the client's Host header."},
   {"key": "response_timeout", "type": "duration", "default": "30s (none when http2 is true)", "reload": "n/a", "description": "Maximum wait for the backend's response headers; 0s means no limit."},
   {"key": "http2", "type": "bool", "default": "false", "reload": "n/a", "description": "Speak cleartext HTTP/2 (h2c) to the container, for gRPC. Chosen per route, so path_prefix routes on one port can differ."},
-  {"key": "cloudflare_proxy", "type": "bool", "default": "false", "reload": "n/a", "description": "Publish the hostname through Cloudflare's proxy. Public networks only; on only if every route behind the host sets it (static backends, redirects and the login portal count too)."}
+  {"key": "cloudflare_proxy", "type": "bool", "default": "false", "reload": "n/a", "description": "Publish the hostname through Cloudflare's proxy. Public networks only; on only if every route behind the host sets it (static backends, redirects and the login portal count too)."},
   {"key": "private_shortcut", "type": "bool", "default": "true", "reload": "live", "description": "The private-network shortcut. By default the client DNS server (proxy.dns_server) answers a client inside an internal or private network with the node's address on that network, so a public route is reachable over the private network. false makes the client DNS server (proxy.dns_server) answer every client with the route's own public address instead. Public networks only; off for the hostname if any route behind it sets false."},
 ]} />
 
@@ -386,7 +386,10 @@ The format is `invalid config at PATH: MESSAGE`, where PATH is a dotted path suc
 
 - `no network named NET declared in the cluster`
 - `no node implements network NET, this service could never be placed`
-- `only one egress network is allowed per service, found A and B`
+- `only one egress network is allowed per service, found A and B` (a default-route container network counts)
+- `SERVICE is the router of container network NET and is attached to it automatically, remove it from networks`
+- `SERVICE is the router of container network NET and must run exactly one replica (no global mode, replicas at most 1)`
+- `network NET is a container network, the router container decides what is reachable: remove its allowed list`
 - `no drive named DRIVE declared in the cluster`
 - `no node named NODE in the cluster`
 - `network NET has no domain, so it cannot serve an HTTP route`

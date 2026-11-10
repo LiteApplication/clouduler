@@ -469,7 +469,7 @@ fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)>
     );
     let served_drives = cfg.served_drives();
 
-    let outcome = cl_sched::place(state, &desired, &served_drives, &cfg.nat_networks());
+    let outcome = cl_sched::place(state, &desired, &served_drives, &cfg.everywhere_networks());
 
     let unplaceable = outcome.unplaceable.into_iter().map(|u| {
         (

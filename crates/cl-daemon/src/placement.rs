@@ -323,6 +323,7 @@ services:
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                container: None,
             },
         );
         let state = state_with(spec, 1);

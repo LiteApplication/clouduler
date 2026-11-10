@@ -1,0 +1,193 @@
+---
+title: NetBird router
+sidebar_position: 9
+---
+
+# NetBird router
+
+This example runs a NetBird client as a **router container** and makes a `container` network send traffic for the NetBird address range through it. Stacks that list the network reach your NetBird peers, a listed node reaches them from the host and from all its containers, and the NetBird peers can reach a few things inside the cluster in return.
+
+The router image is [`ghcr.io/liteapplication/netbird-router`](https://github.com/LiteApplication/netbird-router). It is a NetBird client that forwards and masquerades between one LAN interface and the `wt0` tunnel, and does its own port forwards. Read [Container networks](/docs/features/networking#container-networks) first for what the network does.
+
+## What you'll learn
+
+- A **`container` network** in `cluster.yaml`: the router, the routed subnet, listed hosts, allowed networks, open ports.
+- A router stack: `NET_ADMIN`, `/dev/net/tun`, a **secret** for the setup key, and a `nat` network so the client has its own internet.
+- A **client stack** that reaches the tailnet by listing the network.
+- Which parts of the image's own documentation to **skip**, because Clouduler does them.
+
+## Prerequisites
+
+**Cluster.** A `private` network `lan` (subnet `192.168.1.0/24`) and a `nat` network `home`, plus the `container` network below. The router stack runs on any node, and Docker 28 or later is needed for the stable interface name `ctn0` (older Docker names the interface `ethN`, and you would set `LAN_INTERFACE` to that).
+
+**NetBird.** A setup key from your NetBird management server (reusable, so the router can restart and rejoin). The key is created in the NetBird dashboard, not here.
+
+**Secrets.** Create this one before the first deploy:
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `netbird_setup_key` | The NetBird setup key. | **Paste string** with the key from the NetBird dashboard. |
+
+## Cluster config
+
+```yaml title="cluster.yaml (excerpt)"
+networks:
+  lan:
+    type: private
+    subnet: 192.168.1.0/24
+    domain: lan.example.com
+  home:
+    type: nat
+  netbird:
+    type: container
+    container:
+      stack: netbird-router        # the router stack below
+      service: netbird             # its service
+      subnet: 100.64.0.0/10        # the NetBird address range
+      hosts: [atlas]               # atlas itself, and its containers, reach the tailnet
+      allowed_networks: [lan]      # NetBird peers may reach every node's address on lan, and the lan subnet
+      open_ports:
+        - { port: 2222, protocol: tcp, target_port: 22 }   # peers reach the nodes' SSH on 2222
+      proxy: true                  # peers may reach the reverse proxy on 80/443
+```
+
+`subnet` must equal what the router announces to NetBird as its range: the same value goes into `NETBIRD_SUBNET` below. Everything in that range is sent to the router, the rest of the traffic is untouched.
+
+## Router stack
+
+```yaml title="netbird-router.yaml"
+networks:
+  home: {}                                   # the router's own way to the internet
+
+services:
+  netbird:
+    image: ghcr.io/liteapplication/netbird-router:latest
+    # Do NOT list the "netbird" container network here: the router is attached
+    # to it automatically (as ctn0).
+    networks: [home]
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun
+    environment:
+      NB_MANAGEMENT_URL: https://netbird.example.com
+      NB_HOSTNAME: clouduler-router
+      NETBIRD_SUBNET: 100.64.0.0/10          # equal to container.subnet
+      NB_INTERFACE: wt0
+      LAN_INTERFACE: ctn0                    # the segment interface Clouduler names
+      ENABLE_MASQUERADE_TO_NETBIRD: "true"
+      ENABLE_MASQUERADE_TO_HOST: "false"     # keep the real peer address (see below)
+      PORT_FORWARDS: "2222:10.244.7.1:2222"  # ext_port:target_ip:target_port, see below
+    secrets:
+      - source: netbird_setup_key
+        env: NB_SETUP_KEY
+    restart: unless-stopped
+    deploy:
+      replicas: 1                            # a router runs exactly one replica
+      resources:
+        limits:
+          memory: 256M
+
+secrets:
+  netbird_setup_key:
+```
+
+Notes on the router service:
+
+- **`cap_add: [NET_ADMIN]` and `/dev/net/tun`** are what the image needs to create `wt0` and its routes.
+- **A `nat` network** (`home`) gives the client a default route and an internet path to NetBird's management and relay servers. The segment itself has no default route.
+- **`LAN_INTERFACE: ctn0`**: Clouduler asks Docker to name the router's segment interface `ctn0`, so this value is stable.
+- **IP forwarding**: Clouduler sets the sysctl `net.ipv4.ip_forward=1` on the router container unless the service sets it itself. The image still does its own masquerading.
+- **`NETBIRD_SUBNET`** is the range the image routes into `wt0`. Keep it equal to `container.subnet`.
+- **`ENABLE_MASQUERADE_TO_HOST: "false"`**: with it off, traffic from a NetBird peer arrives at a node with the peer's tailnet address as its source. That is what lets the proxy recognise the client and apply network gating; with masquerading on, every peer would look like the router. Leave `ENABLE_MASQUERADE_TO_NETBIRD` on so peers can answer containers that reach them.
+- **`PORT_FORWARDS`** use the segment's `.1` as the target. It is "this host, on whichever node the router runs", and never changes when the router moves. Its value is the first address of the segment's subnet, which Clouduler allocates from `10.244.0.0/16` the first time the network exists. Deploy the network and the router once, read the subnet, then fix the value:
+
+  ```bash
+  clouduler exec netbird-router.netbird.0 -- ip -4 addr show dev ctn0
+  # inet 10.244.7.5/24 ...  -> the segment is 10.244.7.0/24, so .1 is 10.244.7.1
+  ```
+
+  The target port is the port in `open_ports` (2222 here), not the node's SSH port: the node's firewall matches the original destination port, and Clouduler's DNAT then turns 2222 into `target_port` 22. If all you need is to reach a node's own listener, `open_ports` in the cluster config does the same job without `PORT_FORWARDS`; use `PORT_FORWARDS` when the NetBird side should reach the port on the router's own address.
+- **Replicas**: Clouduler refuses a router stack with `replicas` above 1 or `mode: global`.
+
+## Client stack
+
+```yaml title="web.yaml"
+networks:
+  lan: {}
+  netbird: {}                    # the container network
+
+services:
+  app:
+    image: example/app:1
+    networks: [lan, netbird]
+    environment:
+      INTERNAL_API: http://100.64.0.42:8080     # a NetBird peer
+    restart: unless-stopped
+```
+
+The container gets an address on the segment and a route `100.64.0.0/10 via` the router. Until the router has an address the route is `prohibit`: the app cannot reach the range, and nothing leaks out of its other interface. When the router comes up the route is replaced without recreating the container.
+
+## Skip what Clouduler does
+
+The image's README describes a systemd routing service in `host/` that adds `ip route NETBIRD_SUBNET via CONTAINER_IP`, and firewall snippets that allow the container's traffic through the host. **Do not use either.** Clouduler already:
+
+- adds the routes, on the listed nodes (`hosts`) and in every client container;
+- keeps the return path for connections that start at the tailnet, over the cluster VXLAN;
+- opens the firewall for the ports you list, and nothing else.
+
+Using both would add a second set of routes next to Clouduler's.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**. Create `netbird_setup_key` with **Paste string**.
+2. Open **Settings**, **Network**, **Networks**, add `home` (NAT) and `netbird` (Container). Fill in the router stack `netbird-router`, service `netbird`, the subnet, the node `atlas` as a host, `lan` as an allowed network, the open port and tick the reverse proxy box. Save.
+3. Open **Stacks**, **Deploy stack**, name it `netbird-router`, paste the router YAML. Deploy it.
+4. Deploy the client stack the same way.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+printf '%s' 'THE_SETUP_KEY' | clouduler secret set netbird_setup_key
+
+# add the networks to /etc/clouduler/cluster.yaml, then:
+clouduler check
+clouduler config reload
+
+clouduler stack deploy ./netbird-router.yaml
+clouduler stack deploy ./web.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+You can deploy the network before the router stack. Until the router exists the problem list shows it as missing, clients stay closed, and listed hosts keep their normal routes.
+
+## Check it
+
+1. The router joins NetBird: `clouduler exec netbird-router.netbird.0 -- netbird status`.
+2. From a client: `clouduler exec web.app.0 -- ip route` shows `100.64.0.0/10 via ...` and `ping 100.64.0.42` answers.
+3. From a NetBird peer: with the router's port forward in place, `ssh -p 2222 ROUTER_SEGMENT_ADDRESS` reaches port 22 of the node the router runs on, a node's `lan` address is reachable because `lan` is allowed, and an https request to a node on port 443 works because of `proxy: true`.
+
+## Quirks
+
+<Quirk title="The router decides what the tailnet can do" severity="warn">
+`allowed_networks`, `open_ports` and `proxy` are the whole list of what NetBird peers can reach inside the cluster. The setup key and the NetBird access policies are still the first line of defence: Clouduler cannot see which peer is which beyond its address.
+</Quirk>
+
+<Quirk title="Fix PORT_FORWARDS only after the segment exists" severity="info">
+The segment subnet is allocated the first time the network and a member exist. Read it as shown above.
+</Quirk>
+
+<Quirk title="A downed router fails differently for hosts and clients" severity="info">
+Listed hosts fall back to their normal routes, so a router outage never cuts a node off. Client containers fail closed. If you want a service to keep working without the tailnet, do not list the network on it, and put the node in `hosts` instead.
+</Quirk>
+
+## Related
+
+- [Container networks](/docs/features/networking#container-networks)
+- [Ports and firewall](/docs/reference/ports-and-firewall)
+- [Tailscale and Headscale guide](/docs/guides/tailscale-headscale)

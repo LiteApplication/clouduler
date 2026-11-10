@@ -103,6 +103,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         kind: NetworkKind::Internal,
         subnet: Some(plan.subnet),
         publish_dns: true,
+        container: None,
         domain: plan.internal_domain.clone(),
     };
 
