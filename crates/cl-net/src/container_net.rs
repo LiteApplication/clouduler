@@ -722,7 +722,8 @@ pub struct FilterInput<'a> {
 /// * `nat_chain` (nat, from `PREROUTING`): DNAT for renumbered ports and
 ///   80/443 to `X_ctn` (so the proxy sees a local-subnet peer). Only for
 ///   `--dst-type LOCAL`: a router forwarding to a LAN host is not captured.
-/// * `masq_chain` (nat, from `POSTROUTING`): `-o clch ! -s X_ctn` masquerade
+/// * `masq_chain` (nat, from `POSTROUTING`, ahead of the overlay source NAT):
+///   accepts what leaves through the segment bridge untouched, then `-o clch ! -s X_ctn` masquerade
 ///   (stack/host traffic towards the routed subnet gets `X_ctn` as source)
 ///   and router-sourced traffic towards `allowed` destinations.
 ///
@@ -856,6 +857,13 @@ pub fn filter_iptables_plan(input: &FilterInput<'_>) -> IptablesPlan {
         }
     }
 
+    // Frames that stay on the segment (bridged out of the bridge) keep their
+    // source. The overlay source NAT (`CLDR-OVL-SNAT`) covers the whole
+    // overlay pool, which the segment is carved from, and would otherwise
+    // replace a router's address with the anycast bridge address on its way to
+    // another node's proxy ports: the peer owns that address itself and drops
+    // the packet as a martian.
+    masq.push(&["-o", input.bridge, "-j", "ACCEPT"]);
     masq.push(&[
         "-o",
         input.veth,
@@ -885,7 +893,10 @@ pub fn filter_iptables_plan(input: &FilterInput<'_>) -> IptablesPlan {
                 .before(crate::egress::CONTAINER_INPUT_CHAIN),
             Jump::new("filter", &["DOCKER-USER", "FORWARD"], &fwd_name, true),
             Jump::new("nat", &["PREROUTING"], &nat_name, false),
-            Jump::new("nat", &["POSTROUTING"], &masq_name, false),
+            // `first`: a plain `before` is not enough, since a non-first jump
+            // is only ever appended and would land behind the overlay NAT.
+            Jump::new("nat", &["POSTROUTING"], &masq_name, true)
+                .before(crate::egress::OVERLAY_SNAT_CHAIN),
         ],
     }
 }
@@ -951,11 +962,17 @@ pub fn mangle_iptables_plan(
 }
 
 /// Client-to-client isolation on the shared segment: bridged frames
-/// (`-i br -o br`, via br_netfilter) are accepted only when the source or
-/// destination is the router or a node address; everything else, i.e. one
-/// client talking to another, is dropped.
+/// (`-i br -o br`, via br_netfilter) between two segment addresses are
+/// dropped unless one of them is the router or a node address.
+///
+/// Only a frame with *both* addresses on the segment is dropped. A client's
+/// packet to the routed range has an off-segment destination and a
+/// router MAC, and the router's reply to it has an off-segment source and a
+/// client destination; dropping everything that is not to or from the router
+/// IP killed exactly that traffic, i.e. every client of a `0.0.0.0/0` router.
 pub fn l2_isolation_plan(
     bridge: &str,
+    subnet: Ipv4Net,
     router_ip: Option<Ipv4Addr>,
     node_ips: &[Ipv4Addr],
 ) -> IptablesPlan {
@@ -970,7 +987,10 @@ pub fn l2_isolation_plan(
         chain.push(&["-i", bridge, "-o", bridge, "-s", &ip, "-j", "ACCEPT"]);
         chain.push(&["-i", bridge, "-o", bridge, "-d", &ip, "-j", "ACCEPT"]);
     }
-    chain.push(&["-i", bridge, "-o", bridge, "-j", "DROP"]);
+    let subnet = subnet.to_string();
+    chain.push(&[
+        "-i", bridge, "-o", bridge, "-s", &subnet, "-d", &subnet, "-j", "DROP",
+    ]);
     IptablesPlan {
         chains: vec![chain],
         jumps: vec![Jump::new(
@@ -1543,6 +1563,7 @@ mod tests {
         assert_eq!(
             rules(&plan, &masq_chain("tn")),
             vec![
+                "-o clbr-x -j ACCEPT",
                 "-o clch-tn ! -s 10.244.9.2/32 -j MASQUERADE",
                 "-s 10.244.9.5/32 -d 192.168.1.0/24 -j MASQUERADE"
             ]
@@ -1562,6 +1583,11 @@ mod tests {
         assert!(by(forward_chain("tn")).first);
         assert_eq!(by(nat_chain("tn")).parents, vec!["PREROUTING"]);
         assert_eq!(by(masq_chain("tn")).parents, vec!["POSTROUTING"]);
+        assert!(by(masq_chain("tn")).first);
+        assert_eq!(
+            by(masq_chain("tn")).before.as_deref(),
+            Some(crate::egress::OVERLAY_SNAT_CHAIN)
+        );
     }
 
     #[test]
@@ -1585,9 +1611,10 @@ mod tests {
     }
 
     #[test]
-    fn l2_isolation_accepts_only_router_and_node_addresses() {
+    fn l2_isolation_drops_only_traffic_between_two_segment_addresses() {
         let plan = l2_isolation_plan(
             "clbr-x",
+            net("10.244.9.0/24"),
             Some(ip("10.244.9.5")),
             &[ip("10.244.9.2"), ip("10.244.9.3")],
         );
@@ -1595,11 +1622,24 @@ mod tests {
         assert_eq!(r.len(), 3 * 2 + 1);
         assert!(r.contains(&"-i clbr-x -o clbr-x -s 10.244.9.5/32 -j ACCEPT".to_string()));
         assert!(r.contains(&"-i clbr-x -o clbr-x -d 10.244.9.3/32 -j ACCEPT".to_string()));
-        assert_eq!(r.last().unwrap(), "-i clbr-x -o clbr-x -j DROP");
+        // Client to client is dropped; a packet to an address off the segment
+        // (routed through the router) and the reply to it are not matched, so
+        // they fall through the chain.
+        assert_eq!(
+            r.last().unwrap(),
+            "-i clbr-x -o clbr-x -s 10.244.9.0/24 -d 10.244.9.0/24 -j DROP"
+        );
+        assert!(r.iter().all(|rule| !rule.ends_with("-o clbr-x -j DROP")));
         assert_eq!(plan.jumps[0].parents, vec!["DOCKER-USER", "FORWARD"]);
         // No router yet: clients can only talk to node addresses.
-        let r = rules(&l2_isolation_plan("clbr-x", None, &[]), &l2_chain("clbr-x"));
-        assert_eq!(r, vec!["-i clbr-x -o clbr-x -j DROP"]);
+        let r = rules(
+            &l2_isolation_plan("clbr-x", net("10.244.9.0/24"), None, &[]),
+            &l2_chain("clbr-x"),
+        );
+        assert_eq!(
+            r,
+            vec!["-i clbr-x -o clbr-x -s 10.244.9.0/24 -d 10.244.9.0/24 -j DROP"]
+        );
     }
 
     #[test]

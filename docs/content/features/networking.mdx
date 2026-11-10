@@ -450,7 +450,7 @@ Each container network has a **segment**: a cluster-wide layer 2 network, one br
 - **The `.1` address.** Every node's bridge holds the same `.1`, with the same MAC, exactly like a stack overlay gateway. For the router it means "this host, whichever node I am on", and it never changes when the router moves. It plays the role of the LAN address (`172.28.0.1`) that router images such as netbird-router document for `PORT_FORWARDS`.
 - **A per-node address.** Each node also has its own `/32` on a veth pair `clch-NAME` (its peer `clcp-NAME` is plugged into the bridge), with a MAC of its own. That unique MAC is how the router reaches a specific remote node over VXLAN. Host routes towards the router use this interface, so they never go through the shared `.1`.
 
-Routers and clients are isolated from each other on the segment: frames between two clients are dropped. Only traffic to or from the router and the node addresses is accepted. A client cannot talk to another client through the segment.
+Clients are isolated from each other on the segment: a frame whose source and destination are both addresses on the segment is dropped, unless one of them is the router or a node address. Packets from a client to the routed range (an address outside the segment) and the router's replies to them are not affected. A client cannot talk to another client through the segment.
 
 **What the router side can reach.** Inside the router container Clouduler maintains routes, re-applied every pass and after a restart:
 
@@ -530,7 +530,7 @@ Clouduler manages host firewall rules with iptables. It only touches chains with
 | `CLDR-CTNF-NET` (filter, `DOCKER-USER`, else `FORWARD`) | The same for traffic the router forwards through the node, plus forwarding to the allowed subnets. |
 | `CLDR-CTNL2-BRIDGE` (filter, `DOCKER-USER`, else `FORWARD`) | Client isolation on a container network's segment: bridged frames are accepted only to or from the router and the node addresses. |
 | `CLDR-CTNN-NET` (nat, `PREROUTING`) | DNAT of `open_ports` whose `target_port` differs, and of 80/443 to the node's segment address. |
-| `CLDR-CTNP-NET` (nat, `POSTROUTING`) | Masquerades traffic leaving through `clch-NET` and router traffic towards allowed subnets. |
+| `CLDR-CTNP-NET` (nat, `POSTROUTING`) | Masquerades traffic leaving through `clch-NET` and router traffic towards allowed subnets. Traffic that leaves through the segment bridge keeps its source address (the rule ahead of the overlay source NAT, which would otherwise replace a router's address with the gateway address). |
 | `CLDR-CTNM-NET`, `CLDR-CTNR-NET` (mangle, `PREROUTING`, `OUTPUT`) | Marks new connections that arrive from the router and restores the mark on their packets, so replies go back to the router. |
 
 Long network names are shortened with a hash so the chain and interface names fit Linux's limits. A container network also adds policy routing rules (priority 5050, and 5200 and above) and two routing tables per network, which Clouduler removes when the network goes away.

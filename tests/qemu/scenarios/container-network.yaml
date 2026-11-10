@@ -1,0 +1,239 @@
+# A `container` network sends an address range through a router container.
+#
+#   n1  runs the router (alpine, NET_ADMIN, masquerade out of its nat interface)
+#   n2  runs the clients, a web server behind a gated proxy route, and nothing else
+#   n3  is a listed host of `ctn` and a canary: its :8080 answers with the
+#       address it saw the client come from
+#
+# `ctn` routes 0.0.0.0/0 through the router, `narrow` routes 198.51.100.0/24
+# through another one. Every assertion about routes, rules and chains is read
+# off the guests with assert_exec (see the probe script).
+#
+# The network is declared before the router stack exists, and the clients are
+# deployed before it too: the router is reported missing, the clients fail
+# closed, nothing crashes, and everything converges once the router is up.
+name: container-network
+description: a container network routes a range through a router container, with fail-open hosts, fail-closed clients, a return path and open ports.
+
+wan_on_mesh: true
+
+guest_probe: container-network-probe.sh
+
+networks:
+  nat0: { type: nat }
+  ctn:
+    type: container
+    container:
+      stack: ctn-router
+      service: router
+      subnet: 0.0.0.0/0
+      hosts: [n3]
+      allowed_networks: [cluster]
+      open_ports:
+        - { port: 2200, protocol: tcp, target_port: 8080 }
+      proxy: true
+  narrow:
+    type: container
+    container:
+      stack: ctn-router
+      service: router2
+      subnet: 198.51.100.0/24
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1 }
+  - { name: n2, role: manager, ip: 10.10.0.2 }
+  - { name: n3, role: manager, ip: 10.10.0.3 }
+
+steps:
+  - wait_quorum: { timeout: 60 }
+  - exec_info: { node: n1, cmd: "docker version --format 'docker server {{.Server.Version}}'" }
+
+  # 7. The network exists, the router does not.
+  - assert_router: { network: ctn, state: missing }
+  - assert_router: { network: narrow, state: missing }
+  - assert_exec:
+      node: n3
+      cmd: "ip rule; ip -o link show"
+      matches: "clch-"
+      absent: "suppress_prefixlength"
+  - deploy_stack: { file: stacks/ctn-web.yaml, name: ctn-web }
+  - deploy_stack: { file: stacks/ctn-client.yaml, name: ctn-client }
+  - wait_running: { stack: ctn-web, service: web, timeout: 180 }
+  - wait_running: { stack: ctn-client, service: client, timeout: 180 }
+  - wait_running: { stack: ctn-client, service: narrowc, timeout: 60 }
+
+  # 4 (before the router): a client of a missing router fails closed.
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 ip route; cx ctn-client_client_0 cat /tmp/last"
+      matches: "prohibit"
+      absent: "default via"
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 cat /tmp/last"
+      matches: "FAIL"
+
+  # The router comes up and the network converges.
+  - deploy_stack: { file: stacks/ctn-router.yaml, name: ctn-router }
+  - wait_running: { stack: ctn-router, service: router, timeout: 180 }
+  - wait_running: { stack: ctn-router, service: router2, timeout: 60 }
+  - assert_router: { network: ctn, state: up, timeout: 90 }
+  - assert_router: { network: narrow, state: up, timeout: 90 }
+
+  # 1. The router: forwarding set by clouduler, masquerade done by the image,
+  #    the interface named ctn0 where docker supports it.
+  - exec_info: { node: n1, cmd: "cx ctn-router_router_0 ip -o addr; cx ctn-router_router_0 ip route" }
+  - assert_exec:
+      node: n1
+      cmd: "cx ctn-router_router_0 cat /proc/sys/net/ipv4/ip_forward"
+      matches: "^1$"
+  - assert_exec:
+      node: n1
+      cmd: "cx ctn-router_router_0 iptables-legacy -t nat -S POSTROUTING"
+      matches: "MASQUERADE"
+      timeout: 120
+  # ctn0 needs docker 28 (com.docker.network.endpoint.ifname); the vm has
+  # 26.1.5, where the segment interface is simply the next ethN.
+  - exec_info: { node: n1, cmd: "cx ctn-router_router_0 ip -o link" }
+
+  # 2. The client's traffic leaves through the router: its default route is the
+  #    router, and the canary sees n1 (the router node masquerades, n1 wan address 203.0.113.1), not n2.
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 ip route"
+      matches: "default via 10\\.244\\."
+      absent: "prohibit"
+      timeout: 90
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 cat /tmp/last"
+      matches: "src=203\\.0\\.113\\.1$"
+      timeout: 90
+
+  # 3. n3 is a listed host: while the router runs its traffic for the range is
+  #    routed through it.
+  - assert_exec:
+      node: n3
+      cmd: "ip rule; ip route get 8.8.8.8"
+      matches: "suppress_prefixlength 0"
+  - assert_exec:
+      node: n3
+      cmd: "ip route get 8.8.8.8"
+      matches: "via 10\\.244\\.[0-9.]+ dev clch-"
+
+  # 5. Return path and proxy gate: from the router, n3's internal address on the
+  #    proxy ports gets an answer over vxlan, and a gated route answers it.
+  - assert_exec:
+      node: n1
+      cmd: "cx ctn-router_router_0 wget -q -T 5 -O - --header 'Host: gated.cl.test' http://10.10.0.3/"
+      matches: "gated-ok"
+      timeout: 60
+  - exec_info: { node: n1, cmd: "cx ctn-router_router_0 sh -c 'nc -w 3 10.10.0.3 443 </dev/null; echo nc443 rc=$?'" }
+
+  # 6. open_ports with a target_port: 2200 on the host address, from the router
+  #    side, lands on the host's :8080 (the canary), which saw the router.
+  - assert_exec:
+      node: n1
+      cmd: "gw=$(cx ctn-router_router_0 ip -o -4 addr show | awk '$4 ~ /^10\\.244\\./ {sub(/\\.[0-9]+\\/.*/, \".1\", $4); print $4; exit}'); echo gw=$gw; cx ctn-router_router_0 wget -q -T 5 -O - http://$gw:2200/"
+      matches: "src=10\\.244\\."
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "cx ctn-router_router_0 wget -q -T 3 -O - http://10.10.0.1:2200/; echo wget rc=$?"
+      matches: "rc="
+
+  # 8. A client of only a narrow network: created on its segment, no default
+  #    route of its own, a route to the subnet through the router.
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_narrowc_0 ip route; docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}net={{$k}} {{end}}' $(docker ps --format '{{.Names}}' | grep -m1 ctn-client_narrowc_0)"
+      matches: "198\\.51\\.100\\.0/24 via 10\\.244\\.[0-9.]+"
+      absent: "default|prohibit"
+  - assert_exec:
+      node: n2
+      cmd: "docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}net={{$k}} {{end}}' $(docker ps --format '{{.Names}}' | grep -m1 ctn-client_narrowc_0)"
+      matches: "net=CTN_narrow $"
+      absent: "bridge"
+
+  # 3 and 4. The router stops (assigned, not running): the listed host fails
+  #    open, the client fails closed.
+  - stop_stack: { name: ctn-router }
+  - assert_router: { network: ctn, state: down, timeout: 90 }
+  - assert_exec:
+      node: n3
+      cmd: "ip rule; ip route get 8.8.8.8"
+      absent: "suppress_prefixlength|clch-.*src"
+      timeout: 60
+  - assert_exec:
+      node: n3
+      cmd: "ip route get 8.8.8.8"
+      matches: "via 10\\.0\\.2\\.2"
+      absent: "clch-"
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 cat /tmp/last"
+      matches: "FAIL"
+      timeout: 60
+  - start_stack: { name: ctn-router }
+  - assert_router: { network: ctn, state: up, timeout: 120 }
+  - assert_exec:
+      node: n3
+      cmd: "ip route get 8.8.8.8"
+      matches: "via 10\\.244\\.[0-9.]+ dev clch-"
+      timeout: 60
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 cat /tmp/last"
+      matches: "src=203\\.0\\.113\\.1$"
+      timeout: 120
+
+  # 4. The router is removed altogether: the client's route is a prohibit, and
+  #    it is swapped back to `via` when the router is deployed again.
+  - remove_stack: { name: ctn-router }
+  - assert_router: { network: ctn, state: missing, timeout: 90 }
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 ip route"
+      matches: "prohibit"
+      absent: "default via"
+      timeout: 60
+  - assert_exec:
+      node: n3
+      cmd: "ip route get 8.8.8.8"
+      absent: "clch-"
+  - deploy_stack: { file: stacks/ctn-router.yaml, name: ctn-router }
+  - wait_running: { stack: ctn-router, service: router, timeout: 180 }
+  - assert_exec:
+      node: n2
+      cmd: "cx ctn-client_client_0 ip route; cx ctn-client_client_0 cat /tmp/last"
+      matches: "default via 10\\.244\\..*src=203\\.0\\.113\\.1"
+      absent: "prohibit"
+      timeout: 120
+
+  # No daemon died on the way.
+  - assert_serial_absent: { node: n1, regex: "panicked|PANIC" }
+  - assert_serial_absent: { node: n2, regex: "panicked|PANIC" }
+  - assert_serial_absent: { node: n3, regex: "panicked|PANIC" }
+
+  # 9. Remove the networks from the config: the sweep leaves nothing behind.
+  - remove_stack: { name: ctn-client }
+  - remove_stack: { name: ctn-router }
+  - remove_networks: ["ctn", "narrow"]
+  - assert_exec:
+      node: n1
+      cmd: "ip -o link | grep -E 'clch-|clcp-'; iptables-save | grep CLDR-CTN; ip rule | grep -E 'fwmark|suppress'; ip rule | grep lookup | grep -vE 'lookup (local|main|default)$'; ip route show table all | grep -E 'table [0-9a-z_]+' | grep -vE 'table (local|main|default)'; echo swept"
+      matches: "^swept$"
+      absent: "clch-|clcp-|CLDR-CTN|fwmark|suppress|lookup|table"
+      timeout: 90
+  - assert_exec:
+      node: n2
+      cmd: "ip -o link | grep -E 'clch-|clcp-'; iptables-save | grep CLDR-CTN; ip rule | grep -E 'fwmark|suppress'; ip rule | grep lookup | grep -vE 'lookup (local|main|default)$'; echo swept"
+      matches: "^swept$"
+      absent: "clch-|clcp-|CLDR-CTN|fwmark|suppress|lookup"
+      timeout: 90
+  - assert_exec:
+      node: n3
+      cmd: "ip -o link | grep -E 'clch-|clcp-'; iptables-save | grep CLDR-CTN; ip rule | grep -E 'fwmark|suppress'; ip rule | grep lookup | grep -vE 'lookup (local|main|default)$'; echo swept"
+      matches: "^swept$"
+      absent: "clch-|clcp-|CLDR-CTN|fwmark|suppress|lookup"
+      timeout: 90

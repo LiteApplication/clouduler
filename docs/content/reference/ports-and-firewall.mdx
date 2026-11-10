@@ -177,7 +177,7 @@ Clouduler keeps its own iptables chains for container traffic. They are applied 
 | `CLDR-CTNF-<net>` | filter, `DOCKER-USER` (else `FORWARD`) | The same for traffic the router forwards through the node, plus the allowed subnets. |
 | `CLDR-CTNL2-<bridge>` | filter, `DOCKER-USER` (else `FORWARD`) | Drops frames between two clients on a container network's segment. |
 | `CLDR-CTNN-<net>` | nat, `PREROUTING` | DNAT for open ports with a different `target_port`, and for 80/443 to the node's segment address. |
-| `CLDR-CTNP-<net>` | nat, `POSTROUTING` | Masquerade of traffic leaving through the segment host port `clch-<net>`, and of router traffic to allowed subnets. |
+| `CLDR-CTNP-<net>` | nat, `POSTROUTING` | Masquerade of traffic leaving through the segment host port `clch-<net>`, and of router traffic to allowed subnets. Traffic leaving through the segment bridge is accepted untouched, ahead of `CLDR-OVL-SNAT`. |
 | `CLDR-CTNM-<net>`, `CLDR-CTNR-<net>` | mangle, `PREROUTING`, `OUTPUT` | Connmark for connections that start at the router, so replies return to it. |
 
 What this means for you:

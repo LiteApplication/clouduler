@@ -631,6 +631,89 @@ _logs_contain() {
   return 1
 }
 
+# ---- guest inspection (scenarios that start an exec listener) --------------
+
+# Runs `cmd` in a guest's shell, through the listener in the scenario's probe
+# script, and prints the output. Only ever aimed at a node whose vm is running:
+# polling a killed node here would burn the whole timeout on connect errors.
+guest_exec() {
+  local node="$1" cmd="$2"
+  vm_running "$node" || { echo "node $node is not running"; return 0; }
+  python3 "$LIB_DIR/guest_exec.py" "$(cat "$RUN_DIR/$node.host_ip")" "$(cat "$RUN_DIR/$node.expose_port")" "$cmd" 2>&1
+}
+
+# Shell helpers every exec starts with: `cx NAME args...` runs args in the
+# first running container whose name contains NAME.
+_GUEST_PRELUDE='cx() { n=$(docker ps --format "{{.Names}}" | grep -m1 -- "$1"); shift; docker exec "$n" "$@"; }; '
+
+# assert_exec: { node: n3, cmd: "ip rule", matches: "regex", absent: "regex", timeout: 60 }
+#
+# Polls until the command's output matches `matches` (grep -E) and, when given,
+# does not match `absent`. On timeout the last output is printed.
+step_assert_exec() {
+  local node cmd matches absent timeout
+  node="$(echo "$1" | jq -r '.node')"
+  cmd="$(echo "$1" | jq -r '.cmd')"
+  matches="$(echo "$1" | jq -r '.matches // empty')"
+  absent="$(echo "$1" | jq -r '.absent // empty')"
+  timeout="$(echo "$1" | jq -r '.timeout // 60')"
+  local deadline=$(( SECONDS + timeout )) out=""
+  while (( SECONDS < deadline )); do
+    out="$(guest_exec "$node" "$_GUEST_PRELUDE$cmd")"
+    if [[ -z "$matches" ]] || grep -Eq -- "$matches" <<<"$out"; then
+      if [[ -z "$absent" ]] || ! grep -Eq -- "$absent" <<<"$out"; then
+        log "$node: ok (${matches:+matches /$matches/}${absent:+ absent /$absent/})"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  log "last output of '$cmd' on $node:"
+  sed 's/^/    /' <<<"$out"
+  die "$node: '$cmd' never satisfied matches=/$matches/ absent=/$absent/"
+}
+
+# exec_info: { node: n1, cmd: "ip route" } - prints the output, asserts nothing.
+step_exec_info() {
+  local node cmd
+  node="$(echo "$1" | jq -r '.node')"
+  cmd="$(echo "$1" | jq -r '.cmd')"
+  log "$node \$ $cmd"
+  guest_exec "$node" "$_GUEST_PRELUDE$cmd" | sed 's/^/    /'
+}
+
+# assert_router: { network: ctn, state: missing|down|up, timeout: 60 }
+# What GET /api/networks/NAME/status says about the router of a container network.
+step_assert_router() {
+  local network state timeout
+  network="$(echo "$1" | jq -r '.network')"
+  state="$(echo "$1" | jq -r '.state')"
+  timeout="$(echo "$1" | jq -r '.timeout // 60')"
+  wait_for "router of $network is $state" "$timeout" \
+    "api_get \"\$(any_manager)\" /api/networks/$network/status 2>/dev/null | jq -e '.router.state == \"$state\"' >/dev/null 2>&1"
+  log "router of $network is $state"
+}
+
+# remove_stack: { name: ctn-router } / stop_stack / start_stack
+step_remove_stack() { cli stack remove "$(echo "$1" | jq -r '.name')" --via "$(any_manager)" >/dev/null || die "stack remove failed"; log "removed stack"; }
+step_stop_stack()   { cli stack stop "$(echo "$1" | jq -r '.name')" --via "$(any_manager)" >/dev/null || die "stack stop failed"; log "stopped stack"; }
+step_start_stack()  { cli stack start "$(echo "$1" | jq -r '.name')" --via "$(any_manager)" >/dev/null || die "stack start failed"; log "started stack"; }
+
+# remove_networks: ["ctn", "narrow"] - drops those networks from the live cluster config.
+step_remove_networks() {
+  local mgr cfg names
+  mgr="$(any_manager)"
+  names="$1"
+  cfg="$(api_get "$mgr" /api/config)" || die "could not read the cluster config"
+  cfg="$(jq -c --argjson n "$names" '{config: (.networks |= with_entries(select(.key as $k | $n | index($k) | not)))}' <<<"$cfg")"
+  local status
+  status="$(curl -sk -o "$RUN_DIR/remove_networks.out" -w '%{http_code}' -m 10 -X PUT \
+    -H "Authorization: Bearer $(api_key)" -H "Content-Type: application/json" -d "$cfg" \
+    "https://$(cat "$RUN_DIR/$mgr.host_ip"):$(cat "$RUN_DIR/$mgr.web_port")/api/config")"
+  [[ "$status" == "200" ]] || die "removing networks failed (http $status): $(cat "$RUN_DIR/remove_networks.out")"
+  log "removed networks $names from the cluster config"
+}
+
 dispatch_step() {
   local key val
   key="$(echo "$1" | jq -r 'keys[0]')"

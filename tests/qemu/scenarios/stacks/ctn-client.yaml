@@ -1,0 +1,39 @@
+# Two clients, one per container network. Neither lists any other network, so
+# they have no overlay and live on the segment only.
+#
+# `client` is on `ctn` (0.0.0.0/0): everything it sends goes through the
+# router. The canary on n3 answers on its wan address, which is not an allowed
+# network, so the router sends it out of its nat interface, and the canary
+# reports the address it saw. The result of the last attempt is kept in
+# /tmp/last. `narrowc` is on `narrow` and is only
+# looked at from the outside (its routes and its network).
+version: "3.8"
+
+networks:
+  ctn: {}
+  narrow: {}
+
+services:
+  client:
+    image: alpine:3.20
+    restart: always
+    networks: [ctn]
+    x-clouduler:
+      node: n2
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          r=$(wget -q -T 3 -O - http://203.0.113.3:8080/ 2>/dev/null | tr -d '\r' | grep -m1 '^src=')
+          echo "${r:-FAIL}" > /tmp/last
+          sleep 2
+        done
+
+  narrowc:
+    image: alpine:3.20
+    restart: always
+    networks: [narrow]
+    x-clouduler:
+      node: n2
+    command: ["sh", "-c", "exec sleep 100000"]

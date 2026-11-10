@@ -54,6 +54,8 @@ pub struct Desired {
     pub allowed: Vec<Ipv4Net>,
     /// Every node's address on the segment.
     pub node_ips: Vec<Ipv4Addr>,
+    /// The segment's own subnet.
+    pub segment: Ipv4Net,
 }
 
 fn v4(ip: Option<IpAddr>) -> Option<Ipv4Addr> {
@@ -98,7 +100,7 @@ pub fn desired(
         .container_networks()
         .find(|(name, _)| *name == network)?;
     let segment = cl_net::container_net::container_docker_name(network);
-    allocations.subnet(&segment)?;
+    let segment_subnet = allocations.subnet(&segment)?;
     let node_ctn = allocations.node_ip(&segment, node)?;
     let router = router_status(state, cfg, allocations, network)?;
 
@@ -171,6 +173,7 @@ pub fn desired(
         proxy_ports,
         allowed: allowed_destinations(cfg, &c.allowed_networks),
         node_ips: allocations.node_ips(&segment).map(|(_, ip)| ip).collect(),
+        segment: segment_subnet,
     })
 }
 
@@ -191,8 +194,12 @@ impl Desired {
             self.proxy_ports.clone(),
             self.allowed.clone(),
         );
-        let (bridge, router_ip, node_ips) =
-            (self.bridge.clone(), self.router.ip, self.node_ips.clone());
+        let (bridge, router_ip, node_ips, segment) = (
+            self.bridge.clone(),
+            self.router.ip,
+            self.node_ips.clone(),
+            self.segment,
+        );
         let (network, veth) = (self.network.clone(), self.veth.clone());
         tokio::task::spawn_blocking(move || -> Result<()> {
             let (net, br, vt, rip, ctn, ports, target, proxy, allowed) = filter_input;
@@ -210,7 +217,7 @@ impl Desired {
             apply_plan(&filter).context("container network filter")?;
             apply_plan(&mangle_iptables_plan(&network, &bridge, &veth, router_ip))
                 .context("container network mangle")?;
-            apply_plan(&l2_isolation_plan(&bridge, router_ip, &node_ips))
+            apply_plan(&l2_isolation_plan(&bridge, segment, router_ip, &node_ips))
                 .context("container network isolation")?;
             Ok(())
         })

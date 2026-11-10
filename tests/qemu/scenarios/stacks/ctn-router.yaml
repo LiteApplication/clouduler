@@ -1,0 +1,37 @@
+# The router of the container networks `ctn` and `narrow`, as an ordinary stack.
+#
+# `router` stands in for a VPN client: NET_ADMIN, and a nat network for its own
+# way out (that is where its default route comes from). Clouduler sets
+# net.ipv4.ip_forward itself; the masquerade out of the nat interface is the
+# image's job, so it is done here. `router2` is the router of the narrow
+# network and only has to exist.
+version: "3.8"
+
+networks:
+  nat0: {}
+
+services:
+  router:
+    image: alpine:3.20
+    restart: always
+    cap_add: [NET_ADMIN]
+    networks: [nat0]
+    x-clouduler:
+      node: n1
+    command:
+      - sh
+      - -c
+      - |
+        until apk add --no-cache iptables iptables-legacy >/dev/null 2>&1; do sleep 2; done
+        dev=$(ip -o -4 route show default | awk '{print $5}')
+        iptables-legacy -t nat -A POSTROUTING -o "$dev" -j MASQUERADE
+        echo "ready dev=$dev"
+        exec sleep 100000
+
+  router2:
+    image: alpine:3.20
+    restart: always
+    networks: [nat0]
+    x-clouduler:
+      node: n1
+    command: ["sh", "-c", "exec sleep 100000"]

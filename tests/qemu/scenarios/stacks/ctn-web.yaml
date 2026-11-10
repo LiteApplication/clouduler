@@ -1,0 +1,33 @@
+# A tiny http server behind a proxy route on the internal `cluster` network.
+# That network is subnetted, so the proxy gate refuses any peer outside it:
+# the container-network scenario uses this to prove that a request coming
+# from the router side passes the gate (the router side counts as a client of
+# the network through the node's segment address) and gets this body.
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  web:
+    image: alpine:3.20
+    restart: always
+    networks: [cluster]
+    x-clouduler:
+      node: n2
+      proxy:
+        - host: gated
+          network: cluster
+          port: 80
+          tls: false
+    command:
+      - sh
+      - -c
+      - |
+        cat > /h.sh <<'EOF'
+        #!/bin/sh
+        while read -r h; do [ "$h" = "$(printf '\r')" ] && break; done
+        printf 'HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ngated-ok'
+        EOF
+        chmod +x /h.sh
+        while true; do nc -l -p 80 -e /h.sh >/dev/null 2>&1; done

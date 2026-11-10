@@ -962,6 +962,7 @@ mod tests {
             ));
             plans.push(l2_isolation_plan(
                 "clbr-x",
+                "10.244.9.0/24".parse().unwrap(),
                 Some(ip("10.244.9.5")),
                 &[ip("10.244.9.2")],
             ));
