@@ -262,8 +262,7 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
     }
 
     /// Removes this node's copy of every volume deleted on purpose, then says
-    /// so. A copy that has gained a file since is left alone and not
-    /// acknowledged: only a file-less tree is ever deleted here.
+    /// so. The cluster has already checked that no stack uses the volume.
     async fn remove_deleted_volumes(
         &self,
         removals: &std::collections::BTreeMap<VolumeId, BTreeSet<String>>,
@@ -277,19 +276,17 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                     continue;
                 };
                 if path.exists() {
-                    match crate::scan::scan_off_runtime(path.clone(), false).await {
-                        Ok(m) if m.files.is_empty() => {
-                            if let Err(e) = std::fs::remove_dir_all(&path) {
-                                warn!(%id, error = %e, "could not delete the volume directory");
-                                continue;
-                            }
-                        }
-                        Ok(_) => {
-                            warn!(%id, "kept a deleted volume's directory: it holds files");
+                    let target = path.clone();
+                    let removed =
+                        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(target)).await;
+                    match removed {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            warn!(%id, error = %e, "could not delete the volume directory");
                             continue;
                         }
                         Err(e) => {
-                            warn!(%id, error = %e, "could not check the volume before deleting it");
+                            warn!(%id, error = %e, "the volume deletion task failed");
                             continue;
                         }
                     }

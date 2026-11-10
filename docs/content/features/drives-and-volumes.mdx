@@ -162,7 +162,7 @@ Syncs also pause while the cluster has no quorum. See [Failover](/docs/features/
 
 Clouduler refuses a sync that would wipe a populated copy: a source that is empty over a populated destination, or a destination of 200 or more files where the source has less than a twentieth of them. The volume row shows **`fast/vaultwarden` refused to sync** with the reason. A volume is marked **Looks empty** only after two consecutive empty scans. The UI deliberately has no "pick the winner" button. Inspect the copies (**Inspect** shows file count, bytes and newest file per node), decide which one is right, and fix it by hand with freeze and unfreeze.
 
-**Delete everywhere** (in the Inspect sheet) removes the volume from every node and cannot be undone; you must type the volume id to confirm.
+**Delete everywhere** (in the Inspect sheet) removes the volume, files included, from every node and cannot be undone; you must type the volume id to confirm. It is refused while the volume is frozen or any deployed stack mounts it (remove it from the stack first), even if that stack has no running instance.
 
 ## Disk space
 

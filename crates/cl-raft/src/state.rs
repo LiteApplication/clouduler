@@ -1236,9 +1236,8 @@ pub enum Request {
         id: VolumeId,
         refusal: Option<SyncRefusal>,
     },
-    /// Deletes a volume that holds no files, on every node that implements its
-    /// drive. Refused unless the volume is flagged `looks_empty`, is not
-    /// frozen, and no instance mounts it.
+    /// Deletes a volume, files included, on every node that implements its
+    /// drive. Refused while the volume is frozen or any stack mounts it.
     RemoveVolume {
         id: VolumeId,
     },
@@ -2545,11 +2544,6 @@ impl ClusterState {
                 if id.volume == "." {
                     return Err("a whole-drive mount is not a volume that can be deleted".into());
                 }
-                if !volume.looks_empty {
-                    return Err(format!(
-                        "{id} is not flagged as empty, so it is not deleted"
-                    ));
-                }
                 if volume.frozen.is_some() {
                     return Err(format!("{id} is frozen"));
                 }
@@ -2559,6 +2553,13 @@ impl ClusterState {
                     return Err(format!(
                         "{id} is still mounted by {}; remove it from the stack first",
                         names.join(", ")
+                    ));
+                }
+                let stacks = stacks_declaring_volume(self, id);
+                if !stacks.is_empty() {
+                    return Err(format!(
+                        "{id} is used by stack {}; remove it from the stack first",
+                        stacks.join(", ")
                     ));
                 }
                 let holders: BTreeSet<String> = self
@@ -3310,6 +3311,28 @@ pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Instances whose stack mounts the given volume.
+/// Stacks whose spec mounts the volume (or the whole drive), whether or not
+/// any instance is currently assigned.
+pub fn stacks_declaring_volume(state: &ClusterState, id: &crate::ids::VolumeId) -> Vec<String> {
+    use cl_config::StackFile;
+
+    state
+        .stacks
+        .iter()
+        .filter(|(_, stack)| {
+            StackFile::parse(&stack.spec).is_ok_and(|file| {
+                file.services.values().any(|svc| {
+                    svc.volumes.iter().any(|m| {
+                        m.drive.as_deref() == Some(id.drive.as_str())
+                            && matches!(m.volume.as_deref(), Some(v) if v == id.volume || v == ".")
+                    })
+                })
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 pub fn instances_using_volume(
     state: &ClusterState,
     id: &crate::ids::VolumeId,
@@ -4837,20 +4860,12 @@ mod tests {
     }
 
     #[test]
-    fn only_an_empty_flagged_volume_can_be_removed_and_every_holder_must_ack() {
+    fn an_unused_volume_can_be_removed_and_every_holder_must_ack() {
         let mut state = cluster();
         let id = VolumeId::new("fast", "data");
         state.apply(&Request::UpsertVolume {
             id: id.clone(),
             primary: "n1".into(),
-        });
-        let refused = state.apply(&Request::RemoveVolume { id: id.clone() });
-        assert!(refused.error.unwrap().contains("not flagged as empty"));
-        assert!(state.volumes.contains_key(&id));
-
-        state.apply(&Request::SetVolumeEmpty {
-            id: id.clone(),
-            empty: true,
         });
         assert!(state
             .apply(&Request::RemoveVolume { id: id.clone() })
@@ -4897,6 +4912,25 @@ mod tests {
             refused.error.is_some_and(|e| e.contains("still mounted")),
             "a mounted volume must not be deleted"
         );
+        assert!(state.volumes.contains_key(&id));
+    }
+
+    #[test]
+    fn a_volume_declared_by_a_stack_cannot_be_removed_even_unassigned() {
+        let mut state = cluster();
+        let id = VolumeId::new("fast", "data");
+        state.apply(&Request::UpsertVolume {
+            id: id.clone(),
+            primary: "n1".into(),
+        });
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "services:\n  web:\n    image: nginx\n    volumes:\n      - fast/data:/data\n"
+                .into(),
+            at: 0,
+        });
+        let refused = state.apply(&Request::RemoveVolume { id: id.clone() });
+        assert!(refused.error.is_some_and(|e| e.contains("used by stack site")));
         assert!(state.volumes.contains_key(&id));
     }
 
