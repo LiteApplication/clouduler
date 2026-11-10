@@ -935,7 +935,7 @@
       "memory_total_bytes": 0,
       "memory_used_bytes": 0,
       "uptime_seconds": 0,
-      "version": "0.9.21"
+      "version": "0.9.22"
     }
   },
   "nodeMetrics": [
@@ -958,7 +958,7 @@
         "memory_total_bytes": 0,
         "memory_used_bytes": 0,
         "uptime_seconds": 0,
-        "version": "0.9.21"
+        "version": "0.9.22"
       }
     }
   ],
@@ -1287,7 +1287,7 @@
     "node": "n0",
     "reachable": 1,
     "state_version": 0,
-    "version": "0.9.21",
+    "version": "0.9.22",
     "voters": 1
   },
   "updates": [
