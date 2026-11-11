@@ -92,6 +92,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Fix APT Mirrors
+        run: |
+          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
         if: github.ref_type == 'branch'
 
