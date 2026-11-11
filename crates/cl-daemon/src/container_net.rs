@@ -67,7 +67,8 @@ fn v4(ip: Option<IpAddr>) -> Option<Ipv4Addr> {
     }
 }
 
-/// Destinations the router side may forward to: the subnets of the allowed
+/// Destinations the router side may forward to (`access_of(C)`, so public
+/// networks only when listed explicitly): the subnets of the allowed
 /// networks that have one, plus every node's own address on each of them.
 pub fn allowed_destinations(cfg: &ClusterConfig, allowed_networks: &[String]) -> Vec<Ipv4Net> {
     let mut out: BTreeSet<Ipv4Net> = BTreeSet::new();

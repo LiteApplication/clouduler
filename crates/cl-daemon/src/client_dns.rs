@@ -284,17 +284,12 @@ fn views_for(
             ..View::default()
         };
         for (fqdn, entries) in &by_name {
-            // The proxy serves a route on a subnetted network only to peers
-            // inside its subnet; a public route to anyone.
+            // The proxy serves a route on network B to a client on network A
+            // exactly when `reaches(A, B)`: B itself, any public B, or a B in
+            // A's `access` list (container networks included).
             let reachable: Vec<&Entry> = entries
                 .iter()
-                .filter(|e| {
-                    cfg.networks[&e.network].kind == NetworkKind::Public
-                        || e.network == *client_net
-                        // The proxy gate lets a container network's peers
-                        // into every network it may reach.
-                        || container.is_some() && cfg.access_of(client_net).contains(&e.network)
-                })
+                .filter(|e| cfg.reaches(client_net, &e.network))
                 .collect();
             let answers = answers_for(cfg, allocations, fqdn, client_net, container, &reachable);
             if answers.is_empty() {
@@ -705,6 +700,33 @@ mod tests {
         assert_eq!(
             answer(&views, "tailnet", "blog.example.com"),
             Some(&[a([203, 0, 113, 5])][..])
+        );
+    }
+
+    /// A subnetted client network with `access` to another subnetted one is
+    /// served its routes, answered with the node's address on its own
+    /// network; without access the name is refused; opting out of the
+    /// shortcut answers with the route network's address.
+    #[test]
+    fn a_subnetted_network_with_access_gets_the_shortcut_answer() {
+        let mut cfg = cfg();
+        let rows = hosts(&[("nas", "lan", &["n1"])]);
+        let denied = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert!(denied["tailscale"].refused.contains("nas.lan.example.com"));
+        assert!(answer(&denied, "tailscale", "nas.lan.example.com").is_none());
+
+        cfg.networks.get_mut("tailscale").unwrap().access = Some(vec!["lan".to_string()]);
+        let views = views_for(&cfg, &alloc(), &rows, &BTreeSet::new(), None);
+        assert_eq!(
+            answer(&views, "tailscale", "nas.lan.example.com"),
+            Some(&[a([10, 10, 0, 1])][..])
+        );
+
+        let no_private = BTreeSet::from([("nas".to_string(), "lan".to_string())]);
+        let views = views_for(&cfg, &alloc(), &rows, &no_private, None);
+        assert_eq!(
+            answer(&views, "tailscale", "nas.lan.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
         );
     }
 }

@@ -677,15 +677,6 @@ impl StackFile {
                         ),
                     ));
                 }
-                if !route.private_shortcut && net.kind != crate::cluster::NetworkKind::Public {
-                    return Err(ConfigError::invalid(
-                        format!("{at}.private_shortcut"),
-                        format!(
-                            "private_shortcut needs a public network, and {} is not one",
-                            route.network
-                        ),
-                    ));
-                }
                 if route
                     .middlewares
                     .iter()
@@ -1402,7 +1393,7 @@ services:
     }
 
     #[test]
-    fn private_shortcut_false_is_public_networks_only() {
+    fn private_shortcut_false_is_accepted_on_any_route_network() {
         let cluster = ClusterConfig::parse(include_str!("../../../../examples/cluster.yaml"))
             .expect("reference cluster is valid");
         let spec = |net: &str| {
@@ -1410,15 +1401,12 @@ services:
                 "networks:\n  {net}: {{}}\nservices:\n  a:\n    image: x\n    networks: [{net}]\n    x-clouduler:\n      proxy:\n        - host: a\n          network: {net}\n          port: 80\n          private_shortcut: false\n"
             )
         };
-        StackFile::parse(&spec("wan"))
-            .unwrap()
-            .validate(&cluster)
-            .unwrap();
-        let err = StackFile::parse(&spec("lan"))
-            .unwrap()
-            .validate(&cluster)
-            .unwrap_err();
-        assert!(err.to_string().contains("private_shortcut"), "{err}");
+        for net in ["wan", "lan"] {
+            StackFile::parse(&spec(net))
+                .unwrap()
+                .validate(&cluster)
+                .unwrap();
+        }
     }
 
     #[test]
