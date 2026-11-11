@@ -17,9 +17,6 @@ jobs:
   rust:
     runs-on: ubuntu-24.04
     steps:
-      - name: Fix APT Mirrors
-        run: |
-          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -28,7 +25,10 @@ jobs:
       # .cargo/config.toml wires the host target to clang+mold and sccache
       # for local build speed; CI needs the same tools on PATH.
       - run: |
-          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y mold && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done
+          # IPv4 only, and let apt retry failed downloads itself
+          printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n' | sudo tee /etc/apt/apt.conf.d/99ci >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Regenerate before the real test run so the fixture the ui typechecks
@@ -49,9 +49,6 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - name: Fix APT Mirrors
-        run: |
-          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -72,14 +69,14 @@ jobs:
   examples:
     runs-on: ubuntu-24.04
     steps:
-      - name: Fix APT Mirrors
-        run: |
-          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y mold && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done
+          # IPv4 only, and let apt retry failed downloads itself
+          printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n' | sudo tee /etc/apt/apt.conf.d/99ci >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo build -p clouduler
       # The shipped examples have to stay valid, or the first thing a new user
@@ -103,9 +100,6 @@ jobs:
     # looks exactly like a broken scenario.
     timeout-minutes: 240
     steps:
-      - name: Fix APT Mirrors
-        run: |
-          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -115,7 +109,10 @@ jobs:
       # its docker fallback. The guest rootfs is Alpine, so a glibc binary will
       # not start there.
       - run: |
-          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y qemu-system-x86 musl-tools e2fsprogs && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done
+          # IPv4 only, and let apt retry failed downloads itself
+          printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n' | sudo tee /etc/apt/apt.conf.d/99ci >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 musl-tools e2fsprogs
       # .cargo/config.toml sets [build] rustc-wrapper = "sccache" globally, so
       # build-binary.sh's cargo invocation needs sccache on PATH too.
       - uses: mozilla-actions/sccache-action@v0.0.7

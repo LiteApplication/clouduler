@@ -19,18 +19,16 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            cc: ""
+            runner: ubuntu-24.04
+          # built natively on an arm runner: no cross toolchain to install
           - target: aarch64-unknown-linux-gnu
-            cc: aarch64-linux-gnu-gcc
+            runner: ubuntu-24.04-arm
     steps:
-      - name: Fix APT Mirrors
-        run: |
-          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -54,26 +52,20 @@ jobs:
           key: ${{ matrix.target }}
           save-if: ${{ github.ref_type == 'branch' }}
 
-      - name: install the aarch64 cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done
-
       # .cargo/config.toml wires the host target to clang+mold and sets
       # [build] rustc-wrapper = "sccache" globally, so both targets need
       # sccache on PATH and the x86_64 leg needs mold too.
       - name: install mold
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
-          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y mold && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done
+          # IPv4 only, and let apt retry failed downloads itself
+          printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n' | sudo tee /etc/apt/apt.conf.d/99ci >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cc }}
-          CC_aarch64_unknown_linux_gnu: ${{ matrix.cc }}
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: cargo build --release --target ${{ matrix.target }} -p clouduler
 
       - name: package
@@ -92,9 +84,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Fix APT Mirrors
-        run: |
-          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/apt-mirrors.txt 2>/dev/null || true
       - uses: actions/checkout@v4
         if: github.ref_type == 'branch'
 
