@@ -109,8 +109,19 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: pre-release ${{ github.run_number }} (${{ github.sha }})
           prerelease: true
+          # The repo has immutable releases: assets can only be attached
+          # while the release is still a draft, so publish it afterwards.
+          draft: true
           files: dist/*
           generate_release_notes: true
+
+      - name: publish the pre-release
+        if: github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "pre-${{ github.run_number }}-${{ github.sha }}" \
+            --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
 
       # Only the newest pre-release is kept: drop every earlier one and its tag.
       - name: delete the previous pre-releases
