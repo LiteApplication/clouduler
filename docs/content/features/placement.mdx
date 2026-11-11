@@ -173,7 +173,7 @@ Each node looks for its own GPUs when the daemon starts and again every five min
 - the NVIDIA device nodes (`/dev/nvidia0`, `/dev/nvidia1`, ...), and the GPUs `nvidia-smi` lists (index, uuid, name) when `nvidia-smi` is installed;
 - whether the NVIDIA container toolkit is available: an `nvidia` runtime registered in Docker, or `nvidia-container-runtime-hook` or `nvidia-container-cli` in `/usr/bin`, `/usr/local/bin` or `/usr/sbin` (Docker serves GPU requests with either);
 - the DRI render nodes (`/dev/dri/renderD*`) and the kernel driver behind each (`i915`, `xe`, `amdgpu`, ...);
-- the device paths a `devices:` entry can name: the entries directly under `/dev` and the entries in `/dev/dri`, `/dev/snd`, `/dev/input`, `/dev/dvb`, `/dev/nvidia-caps`, `/dev/serial/by-id` and `/dev/serial/by-path`. USB and on-board serial adapters (`ttyUSB*`, `ttyACM*`, `ttyAMA*`, for Zigbee and Z-Wave dongles) are included; console terminals, loop and ram devices and raw disks (`sd*`, `nvme*`, `vd*`, `mmcblk*`, `dm-*`, `md*`) are left out.
+- the device paths a `devices:` entry can name: the entries directly under `/dev` and the entries in `/dev/dri`, `/dev/snd`, `/dev/input`, `/dev/dvb`, `/dev/nvidia-caps`, `/dev/net` (so `/dev/net/tun`), `/dev/serial/by-id` and `/dev/serial/by-path`. USB and on-board serial adapters (`ttyUSB*`, `ttyACM*`, `ttyAMA*`, for Zigbee and Z-Wave dongles) are included; console terminals, loop and ram devices and raw disks (`sd*`, `nvme*`, `vd*`, `mmcblk*`, `dm-*`, `md*`) are left out.
 
 The node page lists the GPUs it found.
 

@@ -37,6 +37,7 @@ const DEV_SUBDIRS: &[&str] = &[
     "input",
     "dvb",
     "nvidia-caps",
+    "net",
     "serial/by-id",
     "serial/by-path",
 ];
@@ -340,6 +341,8 @@ mod tests {
         std::fs::write(dev.join("sda"), "").unwrap();
         std::fs::create_dir_all(dev.join("serial/by-id")).unwrap();
         std::fs::create_dir_all(dev.join("serial/by-path")).unwrap();
+        std::fs::create_dir_all(dev.join("net")).unwrap();
+        std::fs::write(dev.join("net/tun"), "").unwrap();
         std::fs::write(dev.join("serial/by-id/usb-Zigbee_Dongle-if00"), "").unwrap();
         std::fs::write(dev.join("serial/by-path/pci-0000:00:14.0-usb-0:1:1.0"), "").unwrap();
         let drm = sys.join("class/drm/renderD128/device");
@@ -364,6 +367,7 @@ mod tests {
         assert!(gpus.has_device("/dev/ttyUSB0"));
         assert!(gpus.has_device("/dev/serial/by-id/usb-Zigbee_Dongle-if00"));
         assert!(gpus.has_device("/dev/serial/by-path/pci-0000:00:14.0-usb-0:1:1.0"));
+        assert!(gpus.has_device("/dev/net/tun"));
         assert!(!gpus.has_device("/dev/video0"));
     }
 
