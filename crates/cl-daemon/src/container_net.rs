@@ -168,6 +168,15 @@ pub fn desired(
             .open_ports
             .iter()
             .map(|p| (p.port, p.protocol, p.effective_target_port()))
+            // The client DNS server answers the router side on this node's
+            // segment address, so its port is opened to it.
+            .chain(
+                cfg.container_dns_networks()
+                    .any(|(name, _)| name == network)
+                    .then_some(cfg.proxy.dns_server.port)
+                    .into_iter()
+                    .flat_map(|port| [(port, Protocol::Udp, port), (port, Protocol::Tcp, port)]),
+            )
             .collect(),
         target_addr,
         proxy_ports,
@@ -222,7 +231,7 @@ impl Desired {
                 &host_peer_name(&network),
                 router_ip,
             ))
-                .context("container network mangle")?;
+            .context("container network mangle")?;
             apply_plan(&l2_isolation_plan(&bridge, segment, router_ip, &node_ips))
                 .context("container network isolation")?;
             Ok(())

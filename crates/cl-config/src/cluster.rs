@@ -1019,6 +1019,32 @@ impl ClusterConfig {
                 })
             })
             .map(|(name, _)| name.as_str())
+            .or_else(|| self.container_client_network(ip))
+    }
+
+    /// The container network whose routed range holds `ip`, for one that
+    /// lets its router side reach the reverse proxy: those peers are served
+    /// like a private network's clients. A default-route network
+    /// (`0.0.0.0/0`) claims no client, since it would claim everyone.
+    fn container_client_network(&self, ip: std::net::IpAddr) -> Option<&str> {
+        let std::net::IpAddr::V4(ip) = ip.to_canonical() else {
+            return None;
+        };
+        self.container_networks()
+            .find(|(_, c)| c.proxy && c.subnet.prefix_len() > 0 && c.subnet.contains(&ip))
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// The container networks the client DNS server answers for, and so
+    /// listens for on each node's segment address: those that let the router
+    /// side reach the proxy, when both the proxy and the DNS server are on
+    /// (and, if `proxy.dns_server.networks` is set, listed there).
+    pub fn container_dns_networks(&self) -> impl Iterator<Item = (&String, &ContainerNetwork)> {
+        let dns = &self.proxy.dns_server;
+        let on = self.proxy.enabled && dns.enabled;
+        self.container_networks().filter(move |(name, c)| {
+            on && c.proxy && (dns.networks.is_empty() || dns.networks.contains(name))
+        })
     }
 
     /// Is `ip` an address of `network`'s own clients? A subnetted network
@@ -1096,8 +1122,9 @@ pub struct DnsServerConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Networks to listen on, at this node's address on each. Empty means
-    /// every subnetted network the node has an address on; a public network
-    /// is only served when listed.
+    /// every subnetted network the node has an address on, and every
+    /// container network with `proxy: true` (on the node's segment address);
+    /// a public network is only served when listed.
     #[serde(default)]
     pub networks: Vec<String>,
     #[serde(default = "default_dns_port")]

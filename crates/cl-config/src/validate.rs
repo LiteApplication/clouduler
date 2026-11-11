@@ -669,7 +669,10 @@ impl ClusterConfig {
             };
             if !matches!(
                 net.kind,
-                NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
+                NetworkKind::Internal
+                    | NetworkKind::Private
+                    | NetworkKind::Public
+                    | NetworkKind::Container
             ) {
                 return Err(ConfigError::invalid(
                     "proxy.dns_server.networks",

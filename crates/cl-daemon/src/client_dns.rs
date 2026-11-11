@@ -19,9 +19,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::{qualify, ClusterConfig, NetworkKind, Node};
+use cl_config::{qualify, ClusterConfig, ContainerNetwork, NetworkKind, Node};
 use cl_dns::{records_for, DesiredRecord, RecordType};
 use cl_net::client_dns::{Classifier, ClientDns, View, ViewAnswer, ViewRecord};
+use cl_net::container_net::container_docker_name;
+use cl_net::ipam::Allocations;
 use cl_raft::node::ClusterNode;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -76,8 +78,11 @@ async fn run(
         let state = cluster.state().await;
         let cfg = crate::daemon::live_config(&state, &boot_cfg);
 
+        let allocations = cl_api::container_router::allocations_of(&state);
         let wanted: BTreeSet<SocketAddr> = if cfg.proxy.dns_server.enabled {
-            listen_addrs(&cfg, &node_name).into_iter().collect()
+            listen_addrs(&cfg, &allocations, &node_name)
+                .into_iter()
+                .collect()
         } else {
             BTreeSet::new()
         };
@@ -103,12 +108,23 @@ async fn run(
                 .find(|node| cl_raft::node_id(node.id) == id)
         });
         let no_private = crate::proxy::private_shortcut_denied_hosts(&cfg, &state);
-        let views = views_for(&cfg, &hosts, &no_private, leader);
+        let views = views_for(&cfg, &allocations, &hosts, &no_private, leader);
         let live = Arc::new(cfg.clone());
+        let segments = segments_of(&cfg, &allocations);
         let classify: Classifier = Arc::new(move |ip| {
             live.client_network(ip)
-                .unwrap_or(UNKNOWN_CLIENT)
-                .to_string()
+                .map(str::to_string)
+                // The router container itself asks from its segment address.
+                .or_else(|| {
+                    let std::net::IpAddr::V4(v4) = ip.to_canonical() else {
+                        return None;
+                    };
+                    segments
+                        .iter()
+                        .find(|(_, subnet)| subnet.contains(&v4))
+                        .map(|(name, _)| name.clone())
+                })
+                .unwrap_or_else(|| UNKNOWN_CLIENT.to_string())
         });
         if let Err(e) = dns.reload(&views, classify).await {
             warn!(error = %e, "could not rebuild the client dns views");
@@ -138,8 +154,23 @@ async fn run(
     }
 }
 
+/// The segment subnet of every container network the server answers for.
+fn segments_of(cfg: &ClusterConfig, allocations: &Allocations) -> Vec<(String, ipnet::Ipv4Net)> {
+    cfg.container_dns_networks()
+        .filter_map(|(name, _)| {
+            allocations
+                .subnet(&container_docker_name(name))
+                .map(|subnet| (name.clone(), subnet))
+        })
+        .collect()
+}
+
 /// This node's address on every network the server listens on.
-fn listen_addrs(cfg: &ClusterConfig, node_name: &str) -> Vec<SocketAddr> {
+fn listen_addrs(
+    cfg: &ClusterConfig,
+    allocations: &Allocations,
+    node_name: &str,
+) -> Vec<SocketAddr> {
     let Some(node) = cfg.node(node_name) else {
         return Vec::new();
     };
@@ -151,7 +182,15 @@ fn listen_addrs(cfg: &ClusterConfig, node_name: &str) -> Vec<SocketAddr> {
             .map(|(name, _)| name.as_str())
             .collect()
     } else {
-        dns.networks.iter().map(String::as_str).collect()
+        dns.networks
+            .iter()
+            .map(String::as_str)
+            .filter(|name| {
+                cfg.networks
+                    .get(*name)
+                    .is_some_and(|n| n.kind != NetworkKind::Container)
+            })
+            .collect()
     };
     let mut addrs: Vec<SocketAddr> = Vec::new();
     for network in networks {
@@ -169,6 +208,12 @@ fn listen_addrs(cfg: &ClusterConfig, node_name: &str) -> Vec<SocketAddr> {
             _ => node.ip_on(network).into_iter().collect(),
         };
         addrs.extend(ips.into_iter().map(|ip| SocketAddr::new(ip, dns.port)));
+    }
+    // A container network's peers reach the node on its segment address.
+    for (network, _) in cfg.container_dns_networks() {
+        if let Some(ip) = allocations.node_ip(&container_docker_name(network), node_name) {
+            addrs.push(SocketAddr::new(IpAddr::V4(ip), dns.port));
+        }
     }
     addrs.sort();
     addrs.dedup();
@@ -189,6 +234,7 @@ struct Entry {
 /// `proxy::desired_dns_hosts`) plus the dashboard on the leader alone.
 fn views_for(
     cfg: &ClusterConfig,
+    allocations: &Allocations,
     hosts: &BTreeMap<(String, String), BTreeSet<String>>,
     no_private: &BTreeSet<(String, String)>,
     leader: Option<&Node>,
@@ -223,12 +269,17 @@ fn views_for(
 
     let mut views = BTreeMap::new();
     for (client_net, net) in &cfg.networks {
-        if !matches!(
-            net.kind,
-            NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
-        ) {
-            continue;
-        }
+        let container = match net.kind {
+            NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public => None,
+            // Only a network that lets its peers reach the proxy has clients.
+            NetworkKind::Container => {
+                match cfg.container_dns_networks().find(|(n, _)| *n == client_net) {
+                    Some((_, c)) => Some(c),
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
         let mut view = View {
             forward: net.kind.is_subnetted(),
             ..View::default()
@@ -239,10 +290,14 @@ fn views_for(
             let reachable: Vec<&Entry> = entries
                 .iter()
                 .filter(|e| {
-                    cfg.networks[&e.network].kind == NetworkKind::Public || e.network == *client_net
+                    cfg.networks[&e.network].kind == NetworkKind::Public
+                        || e.network == *client_net
+                        // The proxy gate lets a container network's peers
+                        // into every network it may reach.
+                        || container.is_some_and(|c| c.allowed_networks.contains(&e.network))
                 })
                 .collect();
-            let answers = answers_for(cfg, fqdn, client_net, &reachable);
+            let answers = answers_for(cfg, allocations, fqdn, client_net, container, &reachable);
             if answers.is_empty() {
                 // Either no access, or nobody to send the client to. Both are
                 // refusals: forwarding would hand out whatever the public DNS
@@ -264,16 +319,40 @@ fn views_for(
 /// address on the client's own network, or failing that on the route's.
 fn answers_for(
     cfg: &ClusterConfig,
+    allocations: &Allocations,
     fqdn: &str,
     client_net: &str,
+    container: Option<&ContainerNetwork>,
     entries: &[&Entry],
 ) -> Vec<ViewAnswer> {
     let mut records: Vec<DesiredRecord> = Vec::new();
+    let mut segment: Vec<ViewAnswer> = Vec::new();
     for entry in entries {
         for node_name in &entry.nodes {
             let Some(node) = cfg.nodes.get(node_name) else {
                 continue;
             };
+            // A container network's client (the router or a peer behind it)
+            // is sent to the node's address on a network the router may
+            // reach; the proxy gate lets it in by the segment address its
+            // connection is DNATed to. Without such an address, the segment
+            // address itself.
+            if let (Some(c), true) = (container, entry.private_shortcut) {
+                let own = c.allowed_networks.iter().find_map(|net| {
+                    records_for(cfg, fqdn, net, node)
+                        .ok()
+                        .filter(|r| !r.is_empty())
+                });
+                if let Some(found) = own {
+                    records.extend(found);
+                    continue;
+                }
+                if let Some(ip) = allocations.node_ip(&container_docker_name(client_net), node_name)
+                {
+                    segment.push(ViewAnswer::A(ip));
+                    continue;
+                }
+            }
             // A dotted name is used as is, so the network only picks the
             // address.
             let own_net = if entry.private_shortcut {
@@ -299,6 +378,7 @@ fn answers_for(
             _ => None,
         })
         .collect();
+    answers.extend(segment);
     answers.dedup();
     answers
 }
@@ -324,6 +404,13 @@ mod tests {
             .collect()
     }
 
+    fn alloc() -> Allocations {
+        Allocations::new(
+            cl_net::ipam::DEFAULT_OVERLAY_POOL.parse().unwrap(),
+            cl_net::ipam::DEFAULT_SUBNET_PREFIX,
+        )
+    }
+
     fn a(ip: [u8; 4]) -> ViewAnswer {
         ViewAnswer::A(Ipv4Addr::from(ip))
     }
@@ -346,6 +433,7 @@ mod tests {
     fn a_lan_client_gets_the_node_address_on_its_own_network() {
         let views = views_for(
             &cfg(),
+            &alloc(),
             &hosts(&[("blog", "wan", &["n1"])]),
             &BTreeSet::new(),
             None,
@@ -367,6 +455,7 @@ mod tests {
         let no_private = BTreeSet::from([("blog".to_string(), "wan".to_string())]);
         let views = views_for(
             &cfg(),
+            &alloc(),
             &hosts(&[("blog", "wan", &["n1"])]),
             &no_private,
             None,
@@ -383,6 +472,7 @@ mod tests {
         cfg.nodes.get_mut("n2").unwrap().network.remove("lan");
         let views = views_for(
             &cfg,
+            &alloc(),
             &hosts(&[("blog", "wan", &["n2"])]),
             &BTreeSet::new(),
             None,
@@ -397,6 +487,7 @@ mod tests {
     fn a_public_client_gets_the_public_addresses() {
         let views = views_for(
             &cfg(),
+            &alloc(),
             &hosts(&[("blog", "wan", &["n1"])]),
             &BTreeSet::new(),
             None,
@@ -419,6 +510,7 @@ mod tests {
     fn a_host_on_a_private_network_is_refused_to_everyone_else() {
         let views = views_for(
             &cfg(),
+            &alloc(),
             &hosts(&[("printer", "lan", &["n1"])]),
             &BTreeSet::new(),
             None,
@@ -437,6 +529,7 @@ mod tests {
     fn only_the_listed_nodes_are_named() {
         let views = views_for(
             &cfg(),
+            &alloc(),
             &hosts(&[("svc", "tailscale", &["n1", "n3"])]),
             &BTreeSet::new(),
             None,
@@ -451,19 +544,19 @@ mod tests {
     fn the_dashboard_names_the_leader_alone() {
         let cfg = cfg();
         let leader = cfg.node("n3");
-        let views = views_for(&cfg, &BTreeMap::new(), &BTreeSet::new(), leader);
+        let views = views_for(&cfg, &alloc(), &BTreeMap::new(), &BTreeSet::new(), leader);
         assert_eq!(
             answer(&views, "tailscale", "cloud.int.example.com"),
             Some(&[a([10, 10, 0, 3])][..])
         );
         // No leader, no answer, and no stale guess: the name just isn't ours.
-        let none = views_for(&cfg, &BTreeMap::new(), &BTreeSet::new(), None);
+        let none = views_for(&cfg, &alloc(), &BTreeMap::new(), &BTreeSet::new(), None);
         assert!(answer(&none, "tailscale", "cloud.int.example.com").is_none());
     }
 
     #[test]
     fn egress_networks_have_no_view() {
-        let views = views_for(&cfg(), &BTreeMap::new(), &BTreeSet::new(), None);
+        let views = views_for(&cfg(), &alloc(), &BTreeMap::new(), &BTreeSet::new(), None);
         assert!(!views.contains_key("vpn"));
         assert_eq!(views.len(), 3);
     }
@@ -472,7 +565,7 @@ mod tests {
     fn the_server_listens_on_this_nodes_subnetted_addresses_by_default() {
         let mut cfg = cfg();
         cfg.proxy.dns_server.enabled = true;
-        let addrs = listen_addrs(&cfg, "n1");
+        let addrs = listen_addrs(&cfg, &alloc(), "n1");
         assert_eq!(
             addrs,
             vec![
@@ -482,18 +575,114 @@ mod tests {
         );
         // n3 is only on the tailnet.
         assert_eq!(
-            listen_addrs(&cfg, "n3"),
+            listen_addrs(&cfg, &alloc(), "n3"),
             vec!["10.10.0.3:53".parse().unwrap()]
         );
 
         cfg.proxy.dns_server.networks = vec!["wan".into()];
         cfg.proxy.dns_server.port = 5353;
         assert_eq!(
-            listen_addrs(&cfg, "n1"),
+            listen_addrs(&cfg, &alloc(), "n1"),
             vec![
                 "203.0.113.5:5353".parse().unwrap(),
                 "[2001:db8::5]:5353".parse().unwrap()
             ]
+        );
+    }
+
+    /// The example cluster's `tailnet` container network, with the DNS server
+    /// on and every node given an address on its segment.
+    fn tailnet() -> (ClusterConfig, Allocations) {
+        let mut cfg = cfg();
+        cfg.proxy.dns_server.enabled = true;
+        let mut alloc = alloc();
+        let segment = container_docker_name("tailnet");
+        alloc.allocate_network(&segment, &[]).expect("segment");
+        for node in ["n1", "n2"] {
+            alloc
+                .allocate_node_ip(&segment, node)
+                .expect("node address");
+        }
+        (cfg, alloc)
+    }
+
+    /// A tailnet peer is sent to the node's address on a network the router
+    /// may reach (the shortcut), for public routes and for routes on a
+    /// network the container network may reach; not for the rest.
+    #[test]
+    fn a_container_network_peer_gets_the_node_address_on_an_allowed_network() {
+        let (cfg, alloc) = tailnet();
+        let segment = container_docker_name("tailnet");
+        let n1 = alloc.node_ip(&segment, "n1").unwrap();
+        let views = views_for(
+            &cfg,
+            &alloc,
+            &hosts(&[
+                ("blog", "wan", &["n1"]),
+                ("nas", "lan", &["n1"]),
+                ("vpn", "tailscale", &["n1"]),
+            ]),
+            &BTreeSet::new(),
+            None,
+        );
+        assert_eq!(
+            answer(&views, "tailnet", "blog.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
+        );
+        // `lan` is in allowed_networks, `tailscale` is not.
+        assert_eq!(
+            answer(&views, "tailnet", "nas.lan.example.com"),
+            Some(&[a([192, 168, 1, 1])][..])
+        );
+        assert!(views["tailnet"].refused.contains("vpn.int.example.com"));
+        assert!(!views["tailnet"].forward);
+        // They reach the server on that address.
+        assert!(listen_addrs(&cfg, &alloc, "n1").contains(&SocketAddr::new(n1.into(), 53)));
+    }
+
+    #[test]
+    fn a_container_network_peer_can_be_denied_the_shortcut() {
+        let (cfg, alloc) = tailnet();
+        let no_private = BTreeSet::from([("blog".to_string(), "wan".to_string())]);
+        let views = views_for(
+            &cfg,
+            &alloc,
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &no_private,
+            None,
+        );
+        assert_eq!(
+            answer(&views, "tailnet", "blog.example.com"),
+            Some(
+                &[
+                    a([203, 0, 113, 5]),
+                    ViewAnswer::Aaaa("2001:db8::5".parse().unwrap())
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn a_container_network_without_proxy_access_has_no_view() {
+        let (mut cfg, alloc) = tailnet();
+        cfg.networks
+            .get_mut("tailnet")
+            .unwrap()
+            .container
+            .as_mut()
+            .unwrap()
+            .proxy = false;
+        let views = views_for(&cfg, &alloc, &hosts(&[]), &BTreeSet::new(), None);
+        assert!(!views.contains_key("tailnet"));
+        assert_eq!(cfg.client_network("100.64.1.1".parse().unwrap()), None);
+    }
+
+    #[test]
+    fn a_tailnet_address_is_classified_as_that_container_network() {
+        let (cfg, _) = tailnet();
+        assert_eq!(
+            cfg.client_network("100.64.1.1".parse().unwrap()),
+            Some("tailnet")
         );
     }
 }

@@ -953,7 +953,14 @@ pub fn mangle_iptables_plan(
     // router) instead of out of the node. Clear our bits on the way out.
     let post_name = mangle_post_chain(network);
     let mut post = ChainSpec::new("mangle", &post_name);
-    post.push(&["-o", bridge, "-j", "MARK", "--set-xmark", &format!("0x0/{mask}")]);
+    post.push(&[
+        "-o",
+        bridge,
+        "-j",
+        "MARK",
+        "--set-xmark",
+        &format!("0x0/{mask}"),
+    ]);
     // A reply the host sends to the router leaves through `veth`, which
     // is a bridge port, so the bridge sees the very same packet again with a
     // fresh conntrack lookup. By then a DNAT'd reply carries the original
@@ -1635,7 +1642,8 @@ mod tests {
 
     #[test]
     fn connmark_is_set_on_new_router_connections_and_restored_everywhere() {
-        let plan = mangle_iptables_plan("tn", "clbr-x", "clch-tn", "clcp-tn", Some(ip("10.244.9.5")));
+        let plan =
+            mangle_iptables_plan("tn", "clbr-x", "clch-tn", "clcp-tn", Some(ip("10.244.9.5")));
         let v = format!("{:#x}/{MARK_MASK:#x}", container_mark("tn"));
         let pre = rules(&plan, &mangle_chain("tn"));
         assert!(pre[0].contains("--restore-mark"));
@@ -1649,7 +1657,10 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("--restore-mark"));
         let parents: Vec<&str> = plan.jumps.iter().map(|j| j.parents[0].as_str()).collect();
-        assert_eq!(parents, vec!["PREROUTING", "PREROUTING", "OUTPUT", "POSTROUTING"]);
+        assert_eq!(
+            parents,
+            vec!["PREROUTING", "PREROUTING", "OUTPUT", "POSTROUTING"]
+        );
         assert_eq!(plan.jumps[0].table, "raw");
         assert!(plan.jumps[1..].iter().all(|j| j.table == "mangle"));
         assert_eq!(
