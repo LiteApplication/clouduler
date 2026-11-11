@@ -1,0 +1,187 @@
+---
+title: WireGuard router
+sidebar_position: 9
+---
+
+# WireGuard router
+
+This example runs a plain WireGuard client as a **router container** and makes a `container` network send traffic for the remote WireGuard range through it. Stacks that list the network reach the peers behind the tunnel, a listed node reaches them from the host and from all its containers, and the remote peers can reach a few things inside the cluster in return.
+
+The router image is [`lscr.io/linuxserver/wireguard`](https://docs.linuxserver.io/images/docker-wireguard/), an ordinary WireGuard container. Nothing in it is specific to Clouduler: it brings up `wg0` from a `wg-quick` file, and the file's `PostUp` lines do the forwarding and masquerading. Read [Container networks](/docs/features/networking#container-networks) first for what the network does.
+
+This is different from the [`wireguard` network kind](/docs/features/networking), where Clouduler itself brings the tunnel up. Use a router container when you want a stock image, or any tunnel software that you already run as a container.
+
+## What you'll learn
+
+- A **`container` network** in `cluster.yaml`: the router, the routed subnet, listed hosts, allowed networks, the proxy.
+- A router stack: `NET_ADMIN`, a **secret** holding the whole `wg0.conf`, and a `nat` network so the client has its own internet.
+- A **client stack** that reaches the remote range by listing the network.
+- What the router image has to do itself (forward and masquerade), because Clouduler only routes packets to it.
+
+## Prerequisites
+
+**Cluster.** A `private` network `lan` (subnet `192.168.1.0/24`) and a `nat` network `home`, plus the `container` network below. The router stack runs on any node, and Docker 28 or later is needed for the stable interface name `ctn0` (older Docker names the interface `ethN`, and you would use that name in the `PostUp` lines).
+
+**A WireGuard server.** A remote WireGuard peer you control, with a public endpoint (`vpn.example.com:51820`), the tunnel network `10.8.0.0/24`, and a peer entry for the router: the router's public key, and `10.8.0.2/32` as its allowed address. Generate the router's key pair with `wg genkey | tee router.key | wg pubkey`.
+
+**Secrets.** The whole `wg0.conf` is a secret, because it holds the private key. Create it before the first deploy:
+
+| Name | What it is | Suggested setting |
+|---|---|---|
+| `wg0_conf` | The `wg-quick` file shown below, with the real keys. | **Paste string** with the file's content. |
+
+```ini title="wg0.conf (the secret's value)"
+[Interface]
+Address = 10.8.0.2/24
+PrivateKey = THE_ROUTER_PRIVATE_KEY
+# Forward between the segment (ctn0) and the tunnel, and rewrite the source of
+# traffic going into the tunnel so the remote side needs no route to the cluster.
+PostUp = iptables -A FORWARD -i ctn0 -o wg0 -j ACCEPT; iptables -A FORWARD -i wg0 -o ctn0 -j ACCEPT; iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i ctn0 -o wg0 -j ACCEPT; iptables -D FORWARD -i wg0 -o ctn0 -j ACCEPT; iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
+
+[Peer]
+PublicKey = THE_SERVER_PUBLIC_KEY
+Endpoint = vpn.example.com:51820
+AllowedIPs = 10.8.0.0/24
+PersistentKeepalive = 25
+```
+
+`AllowedIPs` is the range the router sends into the tunnel. It must equal `container.subnet` below.
+
+## Cluster config
+
+```yaml title="cluster.yaml (excerpt)"
+networks:
+  lan:
+    type: private
+    subnet: 192.168.1.0/24
+    domain: lan.example.com
+  home:
+    type: nat
+  vpn:
+    type: container
+    container:
+      stack: wireguard-router      # the router stack below
+      service: wireguard           # its service
+      subnet: 10.8.0.0/24          # the WireGuard range, equal to AllowedIPs
+      hosts: [atlas]               # atlas itself, and its containers, reach the remote range
+      allowed_networks: [lan]      # remote peers may reach every node's address on lan, and the lan subnet
+      open_ports:
+        - { port: 2222, protocol: tcp, target_port: 22 }   # peers reach the nodes' SSH on 2222
+      proxy: true                  # peers may reach the reverse proxy on 80/443
+```
+
+Everything in `subnet` is sent to the router, the rest of the traffic is untouched.
+
+## Router stack
+
+```yaml title="wireguard-router.yaml"
+networks:
+  home: {}                                   # the router's own way to the internet
+
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    # Do NOT list the "vpn" container network here: the router is attached
+    # to it automatically (as ctn0).
+    networks: [home]
+    cap_add: [NET_ADMIN]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+    secrets:
+      - source: wg0_conf
+        target: /config/wg_confs/wg0.conf
+    restart: unless-stopped
+    deploy:
+      replicas: 1                            # a router runs exactly one replica
+      resources:
+        limits:
+          memory: 256M
+
+secrets:
+  wg0_conf:
+```
+
+Notes on the router service:
+
+- **`cap_add: [NET_ADMIN]`** lets the image create `wg0` and its routes. The image uses the kernel's WireGuard module, or falls back to the userspace one on kernels without it.
+- **A `nat` network** (`home`) gives the client a default route and an internet path to the remote endpoint. The segment itself has no default route.
+- **`ctn0`**: Clouduler asks Docker to name the router's segment interface `ctn0`, so the `PostUp` lines can rely on it.
+- **IP forwarding**: Clouduler sets the sysctl `net.ipv4.ip_forward=1` on the router container unless the service sets it itself. The `FORWARD` and `MASQUERADE` rules in `PostUp` are the image's part of the job.
+- **Masquerade into `wg0`**: with it on, the remote side sees every cluster client as `10.8.0.2`, so the server needs no route back to the cluster. If you want it to see the real cluster addresses instead, drop the `MASQUERADE` rule and add the cluster's ranges to the server's peer `AllowedIPs`.
+- **Replicas**: Clouduler refuses a router stack with `replicas` above 1 or `mode: global`.
+
+## Client stack
+
+```yaml title="web.yaml"
+networks:
+  lan: {}
+  vpn: {}                        # the container network
+
+services:
+  app:
+    image: example/app:1
+    networks: [lan, vpn]
+    environment:
+      INTERNAL_API: http://10.8.0.1:8080        # a host behind the tunnel
+    restart: unless-stopped
+```
+
+The container gets an address on the segment and a route `10.8.0.0/24 via` the router. Until the router has an address the route is `prohibit`: the app cannot reach the range, and nothing leaks out of its other interface. When the router comes up the route is replaced without recreating the container.
+
+## Deploy
+
+<UiCli>
+<UiCli.Ui>
+
+1. Open **Settings**, **Secrets and configs**. Create `wg0_conf` with **Paste string**, using the `wg0.conf` above.
+2. Open **Settings**, **Network**, **Networks**, add `home` (NAT) and `vpn` (Container). Fill in the router stack `wireguard-router`, service `wireguard`, the subnet, the node `atlas` as a host, `lan` as an allowed network, the open port and tick the reverse proxy box. Save.
+3. Open **Stacks**, **Deploy stack**, name it `wireguard-router`, paste the router YAML. Deploy it.
+4. Deploy the client stack the same way.
+
+</UiCli.Ui>
+<UiCli.Cli>
+
+```bash
+clouduler secret set wg0_conf < ./wg0.conf
+
+# add the networks to /etc/clouduler/cluster.yaml, then:
+clouduler check
+clouduler config reload
+
+clouduler stack deploy ./wireguard-router.yaml
+clouduler stack deploy ./web.yaml
+```
+
+</UiCli.Cli>
+</UiCli>
+
+You can deploy the network before the router stack. Until the router exists the problem list shows it as missing, clients stay closed, and listed hosts keep their normal routes.
+
+## Check it
+
+1. The tunnel is up: `clouduler exec wireguard-router.wireguard.0 -- wg show` lists the peer with a recent handshake.
+2. From a client: `clouduler exec web.app.0 -- ip route` shows `10.8.0.0/24 via ...` and `ping 10.8.0.1` answers.
+3. From a remote peer: a node's `lan` address is reachable because `lan` is allowed, and an https request to a node on port 443 works because of `proxy: true`. The peer's route to the node must go through the router's tunnel address `10.8.0.2`.
+
+## Quirks
+
+<Quirk title="The router decides what the remote side can do" severity="warn">
+`allowed_networks`, `open_ports` and `proxy` are the whole list of what remote peers can reach inside the cluster. The WireGuard server's own `AllowedIPs` and firewall are still the first line of defence: Clouduler cannot see which peer is which beyond its address.
+</Quirk>
+
+<Quirk title="Keep AllowedIPs and subnet equal" severity="info">
+`wg-quick` only routes what `AllowedIPs` lists into `wg0`, and Clouduler only sends what `container.subnet` lists to the router. If the two differ, the traffic is dropped on one side.
+</Quirk>
+
+<Quirk title="A downed router fails differently for hosts and clients" severity="info">
+Listed hosts fall back to their normal routes, so a router outage never cuts a node off. Client containers fail closed. If you want a service to keep working without the tunnel, do not list the network on it, and put the node in `hosts` instead.
+</Quirk>
+
+## Related
+
+- [Container networks](/docs/features/networking#container-networks)
+- [Ports and firewall](/docs/reference/ports-and-firewall)
+- [Tailscale and Headscale guide](/docs/guides/tailscale-headscale)

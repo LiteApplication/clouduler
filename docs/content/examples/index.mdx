@@ -20,7 +20,7 @@ Every name in them is a placeholder: the domain is `example.com`, the tailnet do
 | [Forgejo](/docs/examples/forgejo) | Git forge | A raw TCP port (SSH) published with `expose`, large uploads with `max_body_size`, `depends_on`, a wildcard egress allow list. |
 | [Headscale](/docs/examples/headscale) | Tailscale control server and Headplane admin UI | Two services on one host split by `path_prefix`, writable configs, the Docker socket, a CORS middleware, OIDC sign-in through Authentik. |
 | [Stalwart](/docs/examples/stalwart) | Full mail server | Raw mail ports on a public network with `open_ports` and `proxy_protocol`, several public routes limited by path, a hostname, resource limits. |
-| [NetBird router](/docs/examples/netbird-router) | A NetBird client run as a router container | A `container` network: stacks and listed hosts routed through a stack, fail-open hosts, fail-closed clients, open ports and the proxy for the peers behind it. |
+| [WireGuard router](/docs/examples/wireguard-router) | A plain WireGuard client run as a router container | A `container` network: stacks and listed hosts routed through a stack, fail-open hosts, fail-closed clients, open ports and the proxy for the peers behind it. |
 
 ## How to use an example
 
@@ -43,7 +43,7 @@ If you run several of them, this order avoids dead ends:
 
 ## Cluster prerequisites
 
-The first seven stacks assume a cluster (the NetBird router example lists its own prerequisites) with the networks and drives below. This is the part of `cluster.yaml` they use, not a complete file. See the [cluster.yaml reference](/docs/reference/cluster-yaml) for the rest, and [Networking](/docs/features/networking) and [Drives and volumes](/docs/features/drives-and-volumes) for what each key does.
+The first seven stacks assume a cluster (the WireGuard router example lists its own prerequisites) with the networks and drives below. This is the part of `cluster.yaml` they use, not a complete file. See the [cluster.yaml reference](/docs/reference/cluster-yaml) for the rest, and [Networking](/docs/features/networking) and [Drives and volumes](/docs/features/drives-and-volumes) for what each key does.
 
 ```yaml title="cluster.yaml (the parts these stacks need)"
 cluster:

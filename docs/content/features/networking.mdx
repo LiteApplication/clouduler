@@ -36,7 +36,7 @@ flowchart LR
 | `private` | An extra trusted LAN-style network with a subnet. | required | optional | an IP, on nodes that use it |
 | `public` | Reachable from the internet. No subnet. Hostnames resolve to each node's public address. | none | needed for web routes and DNS | an `ipv4` / `ipv6` / `domain` block and optional `open_ports` |
 | `egress` | Forces a service's outbound traffic out of one named host interface (for example a VPN), with a kill-switch. | none | not allowed | the host interface name |
-| `wireguard` | Like egress, but Clouduler creates the WireGuard tunnel from a config you import. | none | not allowed | set by importing a config |
+| `wireguard` | Like egress, but Clouduler creates the WireGuard tunnel from a config you import. **Pending deprecation**, see [WireGuard networks](#wireguard-networks). | none | not allowed | set by importing a config |
 | `nat` | Like egress, but uses the node's normal routing (ordinary masquerade). No setup. | none | not allowed | nothing |
 | `container` | Sends traffic for an address range (a tailnet, say) through a router container that you run as a stack. See [Container networks](#container-networks). | none (the routed range is `container.subnet`) | not allowed | nothing |
 
@@ -106,10 +106,10 @@ networks:
   tailnet:                # container: route 100.64.0.0/10 through a router stack
     type: container
     container:
-      stack: netbird-router
-      service: netbird
+      stack: wireguard-router
+      service: wireguard
       subnet: 100.64.0.0/10
-  tunnel:                 # wireguard: Clouduler brings the tunnel up
+  tunnel:                 # wireguard (pending deprecation): Clouduler brings the tunnel up
     type: wireguard
 
 nodes:
@@ -296,6 +296,10 @@ services:
 
 ## WireGuard networks
 
+<Quirk title="Pending deprecation: use a container network instead" severity="warn">
+The `wireguard` network type is pending deprecation. It will be replaced by [container networks](#container-networks) that run a WireGuard router container, which needs no tunnel code in Clouduler and works with any stock image. It keeps working for now, but do not build new setups on it: follow the [WireGuard router example](/docs/examples/wireguard-router) instead.
+</Quirk>
+
 A `wireguard` network lets Clouduler bring up a tunnel for you on each node, and send a service's traffic through it. It is the easy way to route a service through a VPN provider.
 
 1. Declare the network with `type: wireguard` in the cluster config.
@@ -350,7 +354,7 @@ A rule opens the port on the tunnel interface only, not on the internal network 
 
 ## Container networks
 
-A `container` network sends traffic for an address range through a **router container**, a container that you run yourself as an ordinary stack service. The classic router is a VPN client such as NetBird, Tailscale or a gluetun-style container: it holds the tunnel, and Clouduler makes the right traffic go through it. The routed range can be a tailnet (`100.64.0.0/10`) or everything (`0.0.0.0/0`).
+A `container` network sends traffic for an address range through a **router container**, a container that you run yourself as an ordinary stack service. The classic router is a VPN client such as WireGuard, Tailscale or a gluetun-style container: it holds the tunnel, and Clouduler makes the right traffic go through it. The routed range can be a tailnet (`100.64.0.0/10`) or everything (`0.0.0.0/0`).
 
 Three things use the network:
 
@@ -358,7 +362,7 @@ Three things use the network:
 - **Listed hosts** (`container.hosts`) send the host's own traffic for the range, and the traffic of every container on that host, through the router.
 - **The router side** (the router container and, through it, the peers behind it) can reach the networks you allow, a few host ports you open, and optionally the reverse proxy on 80 and 443.
 
-Everything is kernel routing, policy rules and iptables, rebuilt every few seconds. No packet is relayed by Clouduler in userspace. A worked example with NetBird is in [NetBird router](/docs/examples/netbird-router).
+Everything is kernel routing, policy rules and iptables, rebuilt every few seconds. No packet is relayed by Clouduler in userspace. A worked example with WireGuard is in [WireGuard router](/docs/examples/wireguard-router).
 
 ### Declare it
 
@@ -371,8 +375,8 @@ networks:
   tailnet:
     type: container
     container:
-      stack: netbird-router        # the stack that holds the router
-      service: netbird             # the service inside it (one replica)
+      stack: wireguard-router      # the stack that holds the router
+      service: wireguard           # the service inside it (one replica)
       subnet: 100.64.0.0/10        # the address space behind the router; 0.0.0.0/0 is allowed
       hosts: [atlas]               # nodes whose own traffic to subnet uses the router
       allowed_networks: [lan]      # networks the router side may reach
@@ -447,7 +451,7 @@ Hosts **fail open**. The rules exist only while the router is running (according
 
 Each container network has a **segment**: a cluster-wide layer 2 network, one bridge and one VXLAN device on every node, using the same machinery as stack overlays. The router and every client are attached to it with a fixed address from the `10.244.0.0/16` pool. Its docker network is called `CTN_NAME` (a name no stack can have), and the host's bridge is `clbr-` plus a shortened `CTN_NAME`. Two kinds of address belong to the host on a segment:
 
-- **The `.1` address.** Every node's bridge holds the same `.1`, with the same MAC, exactly like a stack overlay gateway. For the router it means "this host, whichever node I am on", and it never changes when the router moves. It plays the role of the LAN address (`172.28.0.1`) that router images such as netbird-router document for `PORT_FORWARDS`.
+- **The `.1` address.** Every node's bridge holds the same `.1`, with the same MAC, exactly like a stack overlay gateway. For the router it means "this host, whichever node I am on", and it never changes when the router moves. It plays the role of the LAN address (`172.28.0.1`) that router images such as linuxserver/wireguard use in their firewall rules.
 - **A per-node address.** Each node also has its own `/32` on a veth pair `clch-NAME` (its peer `clcp-NAME` is plugged into the bridge), with a MAC of its own. That unique MAC is how the router reaches a specific remote node over VXLAN. Host routes towards the router use this interface, so they never go through the shared `.1`.
 
 Clients are isolated from each other on the segment: a frame whose source and destination are both addresses on the segment is dropped, unless one of them is the router or a node address. Packets from a client to the routed range (an address outside the segment) and the router's replies to them are not affected. A client cannot talk to another client through the segment.
@@ -481,7 +485,7 @@ Router status is shown in the problem list: `container_router_missing` when no i
 
 Clouduler routes packets to the router and back, but the image must do its own part:
 
-- **Forward packets** between its segment interface and its tunnel. Clouduler sets `net.ipv4.ip_forward=1` on the router container, but the image must also **masquerade or route** towards the tunnel, and masquerade towards the segment when it wants replies to be mapped to its tunnel address. Images built for this (netbird-router, for instance) already do it.
+- **Forward packets** between its segment interface and its tunnel. Clouduler sets `net.ipv4.ip_forward=1` on the router container, but the image must also **masquerade or route** towards the tunnel, and masquerade towards the segment when it wants replies to be mapped to its tunnel address. A stock WireGuard image does it with `PostUp` iptables rules, as in the [WireGuard router example](/docs/examples/wireguard-router).
 - **Capabilities.** Most VPN clients need `cap_add: [NET_ADMIN]` and the device `/dev/net/tun`. Declare them in the service.
 - **A stable interface name.** Clouduler asks docker to name the router's segment interface `ctn0` (the `com.docker.network.endpoint.ifname` option, honoured by Docker 28 and later). On older daemons the interface gets an `ethN` name instead. Point the image's "LAN interface" setting at `ctn0`.
 - **Its own internet.** The tunnel needs a way out to its coordination server and peers. The segment carries only the specific routes above and no default route, so put the router service on a `nat` or `egress` network as well. That network provides its default route.
@@ -581,6 +585,6 @@ The overlay pool (`10.244.0.0/16`, which also holds the segments of container ne
 - [Placement](/docs/features/placement)
 - [Proxy and TLS](/docs/features/proxy-and-tls)
 - [DNS publishing](/docs/features/dns-publishing)
-- [NetBird router example](/docs/examples/netbird-router)
+- [WireGuard router example](/docs/examples/wireguard-router)
 - [Ports and firewall](/docs/reference/ports-and-firewall)
 - [cluster.yaml reference](/docs/reference/cluster-yaml)
