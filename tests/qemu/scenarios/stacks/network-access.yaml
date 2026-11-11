@@ -1,0 +1,16 @@
+# Two routes on two private networks, so the proxy's network gating and the
+# client dns server each have a lan and a dmz name to answer (or refuse).
+version: "3.8"
+
+networks:
+  cluster: {}
+
+services:
+  site:
+    image: nginx:1.27-alpine
+    restart: always
+    networks: [cluster]
+    x-clouduler:
+      proxy:
+        - { host: web, network: dmz, port: 80, tls: false }
+        - { host: intranet, network: lan, port: 80, tls: false }

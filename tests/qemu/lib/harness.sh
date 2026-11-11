@@ -154,9 +154,11 @@ vm_restart() {
   local pidfile="$RUN_DIR/$node.pid"
   local accel
   accel="$(qemu_accel)"
-  local mac0 mac1
+  local mac0 mac1 aliases
   mac0="$(printf '52:54:00:aa:00:%02x' "$idx")"
   mac1="$(printf '52:54:00:bb:00:%02x' "$idx")"
+  # A reboot keeps the node's extra addresses (scenario `addresses:`).
+  aliases="$(jq -r --arg n "$node" '.nodes[] | select(.name==$n) | .aliases // ""' "$RUN_DIR/topology.json")"
 
   rm -f "$qmp" "$pidfile"
   qemu-system-x86_64 \
@@ -164,7 +166,7 @@ vm_restart() {
     -m 512 -smp 1 \
     -accel "$accel" \
     -kernel "$CACHE_DIR/vmlinuz" -initrd "$CACHE_DIR/initramfs" \
-    -append "$(kernel_cmdline "$node" "$ip")" \
+    -append "$(kernel_cmdline "$node" "$ip" "" "" "$aliases")" \
     -drive file="$disk",if=virtio,format=raw \
     -netdev socket,mcast="$mcast":4321,localaddr="$MCAST_LOCALADDR",id=net0 -device virtio-net-pci,netdev=net0,mac="$mac0" \
     -netdev user,id=net1,hostfwd=tcp:"$host_ip":"$web_port"-:8443,hostfwd=tcp:"$host_ip":"$rpc_port"-:7373,hostfwd=tcp:"$host_ip":"$http_port"-:"$GUEST_HTTP_PORT",hostfwd=tcp:"$host_ip":"$expose_port"-:"$GUEST_EXPOSE_PORT" \

@@ -714,6 +714,20 @@ step_remove_networks() {
   log "removed networks $names from the cluster config"
 }
 
+# set_network_access: { lan: [dmz], dmz: [] } / { lan: null } - sets (or, with
+# null, removes) the `access` list of those networks in the live cluster config.
+step_set_network_access() {
+  local mgr cfg status
+  mgr="$(any_manager)"
+  cfg="$(api_get "$mgr" /api/config)" || die "could not read the cluster config"
+  cfg="$(jq -c --argjson a "$1" '{config: (reduce ($a | to_entries[]) as $e (.; if $e.value == null then del(.networks[$e.key].access) else .networks[$e.key].access = $e.value end))}' <<<"$cfg")"
+  status="$(curl -sk -o "$RUN_DIR/set_network_access.out" -w '%{http_code}' -m 10 -X PUT \
+    -H "Authorization: Bearer $(api_key)" -H "Content-Type: application/json" -d "$cfg" \
+    "https://$(cat "$RUN_DIR/$mgr.host_ip"):$(cat "$RUN_DIR/$mgr.web_port")/api/config")"
+  [[ "$status" == "200" ]] || die "setting network access failed (http $status): $(cat "$RUN_DIR/set_network_access.out")"
+  log "set network access $1"
+}
+
 dispatch_step() {
   local key val
   key="$(echo "$1" | jq -r 'keys[0]')"

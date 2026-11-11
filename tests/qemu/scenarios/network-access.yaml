@@ -1,0 +1,232 @@
+# Network access lists: `access` on a private/internal network names the
+# networks it may reach, enforced by the host firewall (CLDR-NET / CLDR-NETF),
+# the proxy's peer gating and the client dns server.
+#
+#   cluster  10.10.0.0/24     internal, every node, no access list (unrestricted)
+#   lan      192.168.50.0/24  private, every node, access: [dmz]
+#   dmz      192.168.60.0/24  private, every node, access: []
+#
+# So lan reaches dmz (and itself) but not cluster; dmz reaches only itself;
+# dmz and lan are not public, so nothing else is implicitly reachable. The
+# attempts are made from inside n1 towards n2 with an explicit source address
+# (nc -s) or, for http, the on-link address asked (wget), which is what makes n2's firewall see a lan or a dmz client; the
+# probe script (network-access-probe.sh) provides the exec listener and a :9000
+# service. The harness mesh is one L2 segment, so a route from lan to a dmz
+# address is simply the shared eth0.
+#
+# Outcomes worth knowing:
+#  - lan -> dmz route over the dns shortcut: answered with the node's lan
+#    address, proxy admits the lan peer (200).
+#  - dmz -> lan route: dns REFUSED; a direct connect to the proxy on n2's dmz
+#    address is 403 (the firewall does not drop it: same network source and
+#    destination address, the gate is the proxy's peer check).
+#  - dmz -> n2's lan address / lan -> n2's cluster address: dropped by CLDR-NET
+#    (connect times out, nothing is answered).
+#  - replies to a lan-initiated connection arrive from the dmz address at n1;
+#    CLDR-NET's ESTABLISHED return is what lets them through.
+#  - the dashboard port (8443) is exempt, so dmz still reaches it on the
+#    cluster address it is denied everything else on.
+name: network-access
+description: network access lists are enforced by the host firewall, the proxy and the client dns server, and lifted again live.
+
+wan_on_mesh: true
+guest_probe: network-access-probe.sh
+
+networks:
+  lan: { type: private, subnet: 192.168.50.0/24, domain: lan.test, access: [dmz] }
+  dmz: { type: private, subnet: 192.168.60.0/24, domain: dmz.test, access: [] }
+
+proxy:
+  dns_server:
+    enabled: true
+    networks: [cluster, lan, dmz, wan]
+
+nodes:
+  - { name: n1, role: manager, ip: 10.10.0.1, addresses: { lan: 192.168.50.1, dmz: 192.168.60.1 } }
+  - { name: n2, role: manager, ip: 10.10.0.2, addresses: { lan: 192.168.50.2, dmz: 192.168.60.2 } }
+  - { name: n3, role: manager, ip: 10.10.0.3, addresses: { lan: 192.168.50.3, dmz: 192.168.60.3 } }
+
+steps:
+  - wait_quorum: { timeout: 60 }
+  - deploy_stack: { file: stacks/network-access.yaml, name: network-access }
+  - wait_running: { stack: network-access, service: site, timeout: 150 }
+
+  # 1. Enforcement is on, on every node.
+  - assert_exec:
+      node: n1
+      cmd: "iptables -S CLDR-NET | grep -c -- \"-s 192.168.50.0/24 -d 10.10.0.[0-9]/32 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "iptables -S CLDR-NET | grep -c -- \"-s 192.168.60.0/24 -d 192.168.50.[0-9]/32 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 20
+  - assert_exec:
+      node: n1
+      cmd: "iptables -S CLDR-NETF | grep -c -- \"-s 192.168.60.0/24 -d 192.168.50.0/24 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 20
+  - assert_exec:
+      node: n2
+      cmd: "iptables -S CLDR-NET | grep -c -- \"-s 192.168.50.0/24 -d 10.10.0.[0-9]/32 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 60
+  - assert_exec:
+      node: n2
+      cmd: "iptables -S CLDR-NET | grep -c -- \"-s 192.168.60.0/24 -d 192.168.50.[0-9]/32 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 20
+  - assert_exec:
+      node: n2
+      cmd: "iptables -S CLDR-NETF | grep -c -- \"-s 192.168.60.0/24 -d 192.168.50.0/24 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 20
+  - assert_exec:
+      node: n3
+      cmd: "iptables -S CLDR-NET | grep -c -- \"-s 192.168.50.0/24 -d 10.10.0.[0-9]/32 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 60
+  - assert_exec:
+      node: n3
+      cmd: "iptables -S CLDR-NET | grep -c -- \"-s 192.168.60.0/24 -d 192.168.50.[0-9]/32 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 20
+  - assert_exec:
+      node: n3
+      cmd: "iptables -S CLDR-NETF | grep -c -- \"-s 192.168.60.0/24 -d 192.168.50.0/24 -j DROP\""
+      matches: "^[1-9]"
+      timeout: 20
+  - assert_exec:
+      node: n1
+      cmd: "iptables -S CLDR-NET | grep -c -- \"--dport 8443 -j RETURN\""
+      matches: "^1"
+      timeout: 20
+  - assert_exec:
+      node: n1
+      cmd: "iptables -S INPUT | grep -c -- \"-j CLDR-NET\""
+      matches: "^1"
+      timeout: 20
+
+  # 2. lan -> dmz is allowed. The dns answer for the dmz route is the lan
+  #    address, and the proxy admits the lan peer.
+  - assert_exec:
+      node: n1
+      cmd: "nslookup -type=A web.dmz.test 192.168.50.2"
+      matches: "Address.*192\\.168\\.50\\."
+      absent: "REFUSED|192\\.168\\.60\\.[0-9]+$"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "wget -S -T 4 -O /dev/null --header 'Host: web.dmz.test' http://192.168.50.2/ 2>&1 | grep -m1 HTTP/"
+      matches: "HTTP/1\\.[01] 200"
+      timeout: 60
+
+  # 4. Replies flow: n2's dmz address, asked from the lan, answers although
+  #    the answer comes back from dmz to lan, a denied direction.
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 192.168.50.1 -w 3 192.168.60.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[pong\\]"
+      timeout: 60
+
+  # 3. dmz -> lan is denied: dns refuses the lan name, the proxy 403s the dmz
+  #    peer, and a plain connect to n2's lan address is dropped. lan is also
+  #    kept off the cluster addresses.
+  - assert_exec:
+      node: n1
+      cmd: "nslookup -type=A intranet.lan.test 192.168.60.2"
+      matches: "REFUSED"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "wget -S -T 4 -O /dev/null --header 'Host: intranet.lan.test' http://192.168.60.2/ 2>&1 | grep -m1 HTTP/"
+      matches: "HTTP/1\\.[01] 403"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 192.168.60.1 -w 3 192.168.50.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[\\]"
+      absent: "pong"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 192.168.50.1 -w 3 10.10.0.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[\\]"
+      absent: "pong"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 10.10.0.1 -w 3 10.10.0.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[pong\\]"
+      timeout: 60
+
+  # 5. The dashboard port is exempt from the drop: the same dmz source that is
+  #    refused the cluster address on :9000 can still connect to :8443.
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 192.168.60.1 -w 3 10.10.0.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[\\]"
+      absent: "pong"
+      timeout: 60
+  - assert_exec:
+      node: n1
+      cmd: "echo | nc -s 192.168.60.1 -w 3 10.10.0.2 8443 >/dev/null 2>&1; echo \"dash=$?\""
+      matches: "dash=0"
+      timeout: 60
+
+  # Enforcement survives a leader failover and the returning node.
+  - kill_leader: { save_as: victim }
+  - assert_leader_elected: { timeout: 40 }
+  - start_node: "${victim}"
+  - assert_reachable: "${victim}"
+  - wait_quorum: { timeout: 90 }
+  - assert_exec:
+      node: ${victim}
+      cmd: "iptables -S CLDR-NET"
+      matches: "-A CLDR-NET -s 192\\.168\\.60\\.0/24"
+      timeout: 90
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 192.168.60.1 -w 3 192.168.50.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[\\]"
+      absent: "pong"
+      timeout: 60
+
+  # 6. Removing every access list lifts it all, live: the chains go, jumps
+  #    included, and the former L3 denials connect.
+  - set_network_access: { lan: null, dmz: null }
+  - assert_exec:
+      node: n1
+      cmd: "iptables -S | grep -c CLDR-NET"
+      matches: "^0"
+      timeout: 40
+  - assert_exec:
+      node: n2
+      cmd: "iptables -S | grep -c CLDR-NET"
+      matches: "^0"
+      timeout: 40
+  - assert_exec:
+      node: n3
+      cmd: "iptables -S | grep -c CLDR-NET"
+      matches: "^0"
+      timeout: 40
+  - assert_exec:
+      node: n1
+      cmd: "r=$(echo | nc -s 192.168.60.1 -w 3 192.168.50.2 9000 2>&1); echo \"tcp=[$r]\""
+      matches: "tcp=\\[pong\\]"
+      timeout: 60
+  # The proxy and the client dns server read the lists differently from the
+  # firewall: an absent list still means "itself and public networks" there
+  # (ClusterConfig::reaches), only the L3 firewall treats it as unrestricted.
+  # So the dmz peer is still refused by the proxy and dns, as it always was.
+  - assert_exec:
+      node: n1
+      cmd: "wget -S -T 4 -O /dev/null --header 'Host: intranet.lan.test' http://192.168.60.2/ 2>&1 | grep -m1 HTTP/"
+      matches: "HTTP/1\\.[01] 403"
+      timeout: 30
+  - assert_exec:
+      node: n1
+      cmd: "nslookup -type=A intranet.lan.test 192.168.60.2"
+      matches: "REFUSED"
+      timeout: 30
