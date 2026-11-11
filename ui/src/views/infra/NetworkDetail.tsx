@@ -103,7 +103,7 @@ export function NetworkDetail() {
             <KV items={[
               ['Stack', container.stack || 'none'],
               ['Service', container.service || 'none'],
-              ['Routed subnet', container.subnet || 'none'],
+              ['Routed subnet', net.subnet || 'none'],
               ['Allowed networks', (container.allowed_networks ?? []).join(', ') || 'none'],
               ['Open ports', (container.open_ports ?? []).map(describeContainerPort).join(', ') || 'none'],
               ['Reverse proxy (80/443)', container.proxy ? 'reachable' : 'blocked'],

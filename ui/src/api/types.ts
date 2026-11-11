@@ -860,13 +860,12 @@ export interface ContainerOpenPort {
   target_port?: number | null;
 }
 
-/** Only meaningful on a `container`-kind network: traffic to `subnet` is
+/** Only meaningful on a `container`-kind network: traffic to the network's `subnet` is
  *  routed through the `service` container of `stack`. */
 export interface ContainerNetwork {
   stack: string;
   service: string;
-  subnet: string;
-  /** Absent = empty. Nodes whose host-level traffic to `subnet` uses the router. */
+  /** Absent = empty. Nodes whose host-level traffic to the network's `subnet` uses the router. */
   hosts?: string[];
   /** Absent = empty. internal/private/public networks the router side may reach. */
   allowed_networks?: string[];

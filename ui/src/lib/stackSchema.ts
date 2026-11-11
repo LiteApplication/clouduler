@@ -189,7 +189,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
-  'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup', 'alerts'],
+  'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup', 'alerts', 'subnet'],
   'x-clouduler.alerts': ['enabled', 'mute', 'severity', 'logs'],
   'x-clouduler.alerts.logs': ['match', 'regex', 'ignore_case', 'severity', 'title', 'cooldown', 'stream', 'services'],
   'services.*.x-clouduler.alerts': ['enabled', 'mute', 'severity', 'logs'],

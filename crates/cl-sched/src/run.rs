@@ -1487,6 +1487,34 @@ pub fn overlay_collision<'a>(
     None
 }
 
+/// The overlay subnet a stack pins with `x-clouduler.subnet`, if any.
+pub fn overlay_subnet_of(file: &StackFile, cfg: &ClusterConfig) -> Option<ipnet::Ipv4Net> {
+    overlay_network_name(file, cfg)?;
+    file.x_clouduler.as_ref()?.subnet
+}
+
+/// The first pair of distinct stacks that pin overlapping overlay subnets, as
+/// `(subnet, stack, other stack)`.
+pub fn overlay_subnet_collision<'a>(
+    cfg: &ClusterConfig,
+    stacks: impl IntoIterator<Item = (&'a str, &'a StackFile)>,
+) -> Option<(ipnet::Ipv4Net, String, String)> {
+    let mut seen: Vec<(ipnet::Ipv4Net, &str)> = Vec::new();
+    for (stack, file) in stacks {
+        let Some(subnet) = overlay_subnet_of(file, cfg) else {
+            continue;
+        };
+        if let Some((other_net, other)) = seen.iter().find(|(n, o)| {
+            *o != stack && (n.contains(&subnet.network()) || subnet.contains(&n.network()))
+        }) {
+            let _ = other_net;
+            return Some((subnet, (*other).to_string(), stack.to_string()));
+        }
+        seen.push((subnet, stack));
+    }
+    None
+}
+
 /// Drives every instance of a stack needs, for the placement call.
 pub fn drives_for(file: &StackFile) -> BTreeSet<String> {
     file.drives_used()

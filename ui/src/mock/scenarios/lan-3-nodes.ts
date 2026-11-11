@@ -35,12 +35,11 @@ export default function lan3Nodes() {
     // A container network: 100.64.0.0/10 routed through the netbird router stack.
     (db.config.networks as Record<string, unknown>).netbird = {
       type: 'container',
-      subnet: null,
+      subnet: '100.64.0.0/10',
       domain: null,
       container: {
         stack: 'netbird',
         service: 'router',
-        subnet: '100.64.0.0/10',
         hosts: ['atlas'],
         allowed_networks: ['lan'],
         open_ports: [{ port: 2222, protocol: 'tcp', target_port: 22 }],

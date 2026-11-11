@@ -92,7 +92,7 @@ impl ClusterConfig {
                         format!("a {} network needs a subnet", net.kind),
                     ))
                 }
-                (false, Some(_)) => {
+                (false, Some(_)) if net.kind != NetworkKind::Container => {
                     return Err(ConfigError::invalid(
                         at,
                         format!("a {} network must not declare a subnet", net.kind),
@@ -108,10 +108,7 @@ impl ClusterConfig {
             }
             if matches!(
                 net.kind,
-                NetworkKind::Egress
-                    | NetworkKind::Wireguard
-                    | NetworkKind::Nat
-                    | NetworkKind::Container
+                NetworkKind::Egress | NetworkKind::Wireguard | NetworkKind::Nat
             ) && net.domain.is_some()
             {
                 return Err(ConfigError::invalid(
@@ -126,10 +123,18 @@ impl ClusterConfig {
                 (NetworkKind::Container, None) => {
                     return Err(ConfigError::invalid(
                         format!("{at}.container"),
-                        "a container network needs a container block (stack, service, subnet)",
+                        "a container network needs a container block (stack, service) and a subnet",
                     ))
                 }
-                (NetworkKind::Container, Some(c)) => self.validate_container_network(name, c)?,
+                (NetworkKind::Container, Some(c)) => {
+                    let Some(routed) = net.routed_subnet() else {
+                        return Err(ConfigError::invalid(
+                            format!("{at}.subnet"),
+                            "a container network needs an IPv4 subnet, the address space routed through its router",
+                        ));
+                    };
+                    self.validate_container_network(name, c, routed)?
+                }
                 (_, Some(_)) => {
                     return Err(ConfigError::invalid(
                         format!("{at}.container"),
@@ -173,9 +178,15 @@ impl ClusterConfig {
         }
     }
 
-    fn validate_container_network(&self, name: &str, c: &ContainerNetwork) -> Result<()> {
+    fn validate_container_network(
+        &self,
+        name: &str,
+        c: &ContainerNetwork,
+        routed: ipnet::Ipv4Net,
+    ) -> Result<()> {
         let at = format!("networks.{name}.container");
         let bad = |field: &str, msg: String| ConfigError::invalid(format!("{at}.{field}"), msg);
+        let bad_subnet = |msg: String| ConfigError::invalid(format!("networks.{name}.subnet"), msg);
 
         if c.stack.trim().is_empty() {
             return Err(bad("stack", "must name the router stack".into()));
@@ -245,11 +256,8 @@ impl ClusterConfig {
         // hijack it. A subnet that contains those ranges (0.0.0.0/0) is fine:
         // the more specific routes win.
         let inside = |other: ipnet::Ipv4Net, what: &str| -> Result<()> {
-            if other.contains(&c.subnet) {
-                return Err(bad(
-                    "subnet",
-                    format!("{} lies inside {what} {other}", c.subnet),
-                ));
+            if other.contains(&routed) {
+                return Err(bad_subnet(format!("{routed} lies inside {what} {other}")));
             }
             Ok(())
         };
@@ -858,6 +866,9 @@ impl ClusterConfig {
         }
         // Every network domain must sit under a zone or its records cannot be written.
         for (name, net) in &self.networks {
+            if net.kind == NetworkKind::Container {
+                continue;
+            }
             if let Some(domain) = &net.domain {
                 if !cf.zones.iter().any(|z| is_within(domain, z)) {
                     return Err(ConfigError::invalid(
@@ -1798,13 +1809,17 @@ cloudflare:
     const WAN_ANCHOR: &str = "  wan:       { type: public,   domain: example.com }";
 
     fn with_container(block: &str) -> Result<ClusterConfig> {
+        with_container_at("100.64.0.0/10", block)
+    }
+
+    fn with_container_at(subnet: &str, block: &str) -> Result<ClusterConfig> {
         parse(&[(
             WAN_ANCHOR,
-            &format!("{WAN_ANCHOR}\n  ctn:\n    type: container\n    container:\n{block}"),
+            &format!("{WAN_ANCHOR}\n  ctn:\n    type: container\n    subnet: \"{subnet}\"\n    container:\n{block}"),
         )])
     }
 
-    const CTN_OK: &str = "      stack: ts\n      service: ts\n      subnet: 100.64.0.0/10\n";
+    const CTN_OK: &str = "      stack: ts\n      service: ts\n";
 
     fn ctn_err(block: &str) -> String {
         with_container(block).unwrap_err().to_string()
@@ -1837,7 +1852,7 @@ cloudflare:
         assert!(err.contains("needs a container block"), "{err}");
         let err = parse(&[(
             "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }",
-            "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, container: { stack: a, service: b, subnet: 100.64.0.0/10 } }",
+            "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, container: { stack: a, service: b } }",
         )])
         .unwrap_err()
         .to_string();
@@ -1845,25 +1860,34 @@ cloudflare:
     }
 
     #[test]
-    fn a_container_network_takes_no_subnet_domain_or_node_address() {
+    fn a_container_network_needs_a_subnet_may_have_a_domain_and_takes_no_node_address() {
         let err = parse(&[(
             WAN_ANCHOR,
-            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, subnet: 10.1.0.0/24, container: {{ stack: a, service: b, subnet: 100.64.0.0/10 }} }}"),
+            &format!(
+                "{WAN_ANCHOR}\n  ctn: {{ type: container, container: {{ stack: a, service: b }} }}"
+            ),
         )])
         .unwrap_err()
         .to_string();
-        assert!(err.contains("must not declare a subnet"), "{err}");
+        assert!(err.contains("needs an IPv4 subnet"), "{err}");
+        let cfg = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, domain: x.example.com, container: {{ stack: a, service: b }} }}"),
+        )])
+        .expect("a container network may have a domain");
+        assert_eq!(cfg.networks["ctn"].domain.as_deref(), Some("x.example.com"));
+        // A second network may not claim the same domain.
         let err = parse(&[(
             WAN_ANCHOR,
-            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, domain: x.example.com, container: {{ stack: a, service: b, subnet: 100.64.0.0/10 }} }}"),
+            &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, domain: example.com, container: {{ stack: a, service: b }} }}"),
         )])
         .unwrap_err()
         .to_string();
-        assert!(err.contains("domain"), "{err}");
+        assert!(err.contains("already claimed"), "{err}");
         let err = parse(&[
             (
                 WAN_ANCHOR,
-                &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, container: {{ stack: a, service: b, subnet: 100.64.0.0/10 }} }}"),
+                &format!("{WAN_ANCHOR}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, container: {{ stack: a, service: b }} }}"),
             ),
             ("      tailscale: 10.10.0.2\n", "      tailscale: 10.10.0.2\n      ctn: 1.2.3.4\n"),
         ])
@@ -1884,7 +1908,7 @@ cloudflare:
             .contains("cannot allow itself"));
         let err = parse(&[(
             WAN_ANCHOR,
-            &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}\n  ctn: {{ type: container, container: {{ stack: a, service: b, subnet: 100.64.0.0/10, allowed_networks: [vpn] }} }}"),
+            &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, container: {{ stack: a, service: b, allowed_networks: [vpn] }} }}"),
         )])
         .unwrap_err()
         .to_string();
@@ -1901,14 +1925,8 @@ cloudflare:
 
     #[test]
     fn container_router_names_must_not_be_empty() {
-        assert!(
-            ctn_err("      stack: \"\"\n      service: ts\n      subnet: 100.64.0.0/10\n")
-                .contains("router stack")
-        );
-        assert!(
-            ctn_err("      stack: ts\n      service: \"\"\n      subnet: 100.64.0.0/10\n")
-                .contains("router service")
-        );
+        assert!(ctn_err("      stack: \"\"\n      service: ts\n").contains("router stack"));
+        assert!(ctn_err("      stack: ts\n      service: \"\"\n").contains("router service"));
     }
 
     #[test]
@@ -1922,24 +1940,21 @@ cloudflare:
             "10.245.1.0/24",
             "10.246.0.0/20",
         ] {
-            let err = ctn_err(&format!(
-                "      stack: ts\n      service: ts\n      subnet: {bad}\n"
-            ));
+            let err = with_container_at(bad, CTN_OK).unwrap_err().to_string();
             assert!(err.contains("lies inside"), "{bad}: {err}");
         }
         // Containing or merely adjacent ranges are fine.
         for ok in ["0.0.0.0/0", "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"] {
-            with_container(&format!(
-                "      stack: ts\n      service: ts\n      subnet: {ok}\n"
-            ))
-            .unwrap_or_else(|e| panic!("{ok}: {e}"));
+            with_container_at(ok, CTN_OK).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
     }
 
     #[test]
     fn container_subnet_must_be_ipv4() {
-        let err = ctn_err("      stack: ts\n      service: ts\n      subnet: \"fd00::/8\"\n");
-        assert!(err.contains("subnet") || err.contains("invalid"), "{err}");
+        let err = with_container_at("fd00::/8", CTN_OK)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("IPv4 subnet"), "{err}");
     }
 
     #[test]
@@ -1962,7 +1977,7 @@ cloudflare:
             seen.insert(d, name);
         }
         let (a, b) = pair.unwrap();
-        let block = "container: { stack: ts, service: ts, subnet: 100.64.0.0/10 }";
+        let block = "subnet: 100.64.0.0/10, container: { stack: ts, service: ts }";
         let err = parse(&[(
             WAN_ANCHOR,
             &format!("{WAN_ANCHOR}\n  {a}: {{ type: container, {block} }}\n  {b}: {{ type: container, {block} }}"),
@@ -1988,7 +2003,7 @@ cloudflare:
             }
         }
         let (a, b) = pair.unwrap();
-        let block = "container: { stack: ts, service: ts, subnet: 100.64.0.0/10 }";
+        let block = "subnet: 100.64.0.0/10, container: { stack: ts, service: ts }";
         let err = parse(&[(
             WAN_ANCHOR,
             &format!("{WAN_ANCHOR}\n  {a}: {{ type: container, {block} }}\n  {b}: {{ type: container, {block} }}"),
@@ -2006,8 +2021,7 @@ cloudflare:
 
     #[test]
     fn a_default_route_container_network_classifies_no_client() {
-        let cfg = with_container("      stack: ts\n      service: ts\n      subnet: 0.0.0.0/0\n")
-            .expect("0.0.0.0/0 is allowed");
+        let cfg = with_container_at("0.0.0.0/0", CTN_OK).expect("0.0.0.0/0 is allowed");
         for ip in [
             "8.8.8.8",
             "100.64.1.1",

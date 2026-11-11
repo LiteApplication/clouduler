@@ -146,6 +146,14 @@ async fn check_overlay_collision(
         .iter()
         .map(|(n, f)| (*n, f))
         .chain(std::iter::once((name, parsed)));
+    let all: Vec<(&str, &StackFile)> = all.collect();
+    if let Some((subnet, a, b)) = cl_sched::run::overlay_subnet_collision(&cfg, all.iter().copied())
+    {
+        return Err(ApiError::Conflict(format!(
+            "stacks {a} and {b} both pin overlay subnets overlapping {subnet}: \
+             give them distinct, non-overlapping subnets"
+        )));
+    }
     match cl_sched::run::overlay_collision(&cfg, all) {
         Some((overlay, a, b)) => Err(ApiError::Conflict(format!(
             "stacks {a} and {b} would both use the overlay network {overlay} \

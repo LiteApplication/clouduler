@@ -46,7 +46,7 @@ AllowedIPs = 10.8.0.0/24
 PersistentKeepalive = 25
 ```
 
-`AllowedIPs` is the range the router sends into the tunnel. It must equal `container.subnet` below.
+`AllowedIPs` is the range the router sends into the tunnel. It must equal the network's `subnet` below.
 
 ## Cluster config
 
@@ -60,10 +60,10 @@ networks:
     type: nat
   vpn:
     type: container
+    subnet: 10.8.0.0/24          # the WireGuard range, equal to AllowedIPs
     container:
       stack: wireguard-router      # the router stack below
       service: wireguard           # its service
-      subnet: 10.8.0.0/24          # the WireGuard range, equal to AllowedIPs
       hosts: [atlas]               # atlas itself, and its containers, reach the remote range
       allowed_networks: [lan]      # remote peers may reach every node's address on lan, and the lan subnet
       open_ports:
@@ -173,7 +173,7 @@ You can deploy the network before the router stack. Until the router exists the 
 </Quirk>
 
 <Quirk title="Keep AllowedIPs and subnet equal" severity="info">
-`wg-quick` only routes what `AllowedIPs` lists into `wg0`, and Clouduler only sends what `container.subnet` lists to the router. If the two differ, the traffic is dropped on one side.
+`wg-quick` only routes what `AllowedIPs` lists into `wg0`, and Clouduler only sends what the network's `subnet` lists to the router. If the two differ, the traffic is dropped on one side.
 </Quirk>
 
 <Quirk title="A downed router fails differently for hosts and clients" severity="info">

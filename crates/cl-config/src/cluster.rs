@@ -365,10 +365,10 @@ pub enum NetworkKind {
     /// (a Tailscale/VPN peer, say) rather than the internet at large, which
     /// an `egress` network's single fixed interface cannot do.
     Nat,
-    /// Traffic to `container.subnet` is routed through a router container
+    /// Traffic to the network's `subnet` is routed through a router container
     /// (a Tailscale/VPN client, say) instead of a host interface. Like `Nat`,
-    /// no node address is declared: every node implements it. The routed
-    /// range lives under `container.subnet`, never in `Network::subnet`.
+    /// no node address is declared: every node implements it. The subnet is
+    /// the routed range, not a range the nodes have addresses in.
     Container,
 }
 
@@ -384,10 +384,14 @@ impl NetworkKind {
 pub struct Network {
     #[serde(rename = "type")]
     pub kind: NetworkKind,
-    /// Required for internal and private networks, must contain the node addresses.
+    /// Required for internal and private networks, where it must contain the
+    /// node addresses, and for a container network, where it is the address
+    /// space routed through the router (IPv4 only, `0.0.0.0/0` allowed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<IpNet>,
     /// Records under this domain resolve to node addresses on this network.
+    /// On a container network it only qualifies the names the client DNS
+    /// answers for the router side; nothing is published to a DNS provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     /// Whether hostnames on this network are published to the DNS provider
@@ -401,7 +405,8 @@ pub struct Network {
     pub container: Option<ContainerNetwork>,
 }
 
-/// A `container` network: the address space behind a router container.
+/// A `container` network: the router and what its side may reach. The routed
+/// range is the network's own `subnet`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerNetwork {
@@ -409,8 +414,6 @@ pub struct ContainerNetwork {
     pub stack: String,
     /// Router service; it must run a single replica.
     pub service: String,
-    /// Address space behind the router, `0.0.0.0/0` allowed. IPv4 only.
-    pub subnet: Ipv4Net,
     /// Nodes whose host-level traffic to `subnet` goes through the router.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
@@ -435,6 +438,33 @@ pub struct ContainerOpenPort {
     /// Port on the host the traffic lands on; defaults to `port`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_port: Option<u16>,
+}
+
+/// A container network's block together with its routed range, which lives
+/// on the owning [`Network`]. Derefs to the block.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerView<'a> {
+    container: &'a ContainerNetwork,
+    /// Address space behind the router, `0.0.0.0/0` allowed.
+    pub subnet: Ipv4Net,
+}
+
+impl std::ops::Deref for ContainerView<'_> {
+    type Target = ContainerNetwork;
+    fn deref(&self) -> &ContainerNetwork {
+        self.container
+    }
+}
+
+impl Network {
+    /// The address space a container network routes through its router, when
+    /// this is a container network with an IPv4 subnet.
+    pub fn routed_subnet(&self) -> Option<Ipv4Net> {
+        match (self.kind, self.subnet) {
+            (NetworkKind::Container, Some(IpNet::V4(v4))) => Some(v4),
+            _ => None,
+        }
+    }
 }
 
 impl ContainerOpenPort {
@@ -1039,7 +1069,7 @@ impl ClusterConfig {
     /// listens for on each node's segment address: those that let the router
     /// side reach the proxy, when both the proxy and the DNS server are on
     /// (and, if `proxy.dns_server.networks` is set, listed there).
-    pub fn container_dns_networks(&self) -> impl Iterator<Item = (&String, &ContainerNetwork)> {
+    pub fn container_dns_networks(&self) -> impl Iterator<Item = (&String, ContainerView<'_>)> {
         let dns = &self.proxy.dns_server;
         let on = self.proxy.enabled && dns.enabled;
         self.container_networks().filter(move |(name, c)| {
@@ -1065,6 +1095,7 @@ impl ClusterConfig {
                 !self
                     .networks
                     .values()
+                    .filter(|n| n.kind.is_subnetted())
                     .filter_map(|n| n.subnet)
                     .any(|s| s.contains(&ip))
                     && is_globally_routable(ip)
@@ -1336,12 +1367,14 @@ impl ClusterConfig {
             .collect()
     }
 
-    /// Every `container` network with its config.
-    pub fn container_networks(&self) -> impl Iterator<Item = (&String, &ContainerNetwork)> {
-        self.networks
-            .iter()
-            .filter(|(_, net)| net.kind == NetworkKind::Container)
-            .filter_map(|(name, net)| net.container.as_ref().map(|c| (name, c)))
+    /// Every `container` network with its config and routed range. One whose
+    /// block or IPv4 subnet is missing is skipped; validation rejects it.
+    pub fn container_networks(&self) -> impl Iterator<Item = (&String, ContainerView<'_>)> {
+        self.networks.iter().filter_map(|(name, net)| {
+            let container = net.container.as_ref()?;
+            let subnet = net.routed_subnet()?;
+            Some((name, ContainerView { container, subnet }))
+        })
     }
 
     /// The container network whose router is `stack`/`service`, if any.

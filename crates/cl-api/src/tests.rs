@@ -2250,13 +2250,12 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
             "tailnet".to_string(),
             cl_config::Network {
                 kind: cl_config::NetworkKind::Container,
-                subnet: None,
+                subnet: Some("100.64.0.0/10".parse().unwrap()),
                 domain: None,
                 publish_dns: true,
                 container: Some(cl_config::ContainerNetwork {
                     stack: "web".to_string(),
                     service: "app".to_string(),
-                    subnet: "100.64.0.0/10".parse().unwrap(),
                     hosts: vec!["n0".to_string()],
                     allowed_networks: Vec::new(),
                     open_ports: Vec::new(),

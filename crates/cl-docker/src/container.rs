@@ -172,6 +172,9 @@ pub struct ContainerSpec {
     pub dns_search: Vec<String>,
     /// Resolver options, written into the container's `/etc/resolv.conf`.
     pub dns_options: Vec<String>,
+    /// Extra `/etc/hosts` entries as `name:address`, e.g.
+    /// `host.docker.internal:10.244.3.1`.
+    pub extra_hosts: Vec<String>,
     pub restart_policy: RestartPolicy,
     pub resources: ResourceLimits,
     /// Host devices (`devices:`), e.g. `/dev/dri`.
@@ -321,6 +324,7 @@ impl ContainerSpec {
             dns: (!self.dns.is_empty()).then(|| self.dns.iter().map(|d| d.to_string()).collect()),
             dns_search: (!self.dns_search.is_empty()).then(|| self.dns_search.clone()),
             dns_options: (!self.dns_options.is_empty()).then(|| self.dns_options.clone()),
+            extra_hosts: (!self.extra_hosts.is_empty()).then(|| self.extra_hosts.clone()),
             restart_policy: Some(self.bollard_restart_policy()),
             network_mode: self.network.clone(),
             memory: self.resources.memory_bytes,

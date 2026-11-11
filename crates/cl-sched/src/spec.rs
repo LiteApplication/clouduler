@@ -10,6 +10,9 @@ use cl_docker::{
 };
 use cl_raft::ids::InstanceId;
 
+/// Names every container can use for the node it runs on.
+const HOST_ALIASES: [&str; 2] = ["host.docker.internal", "host-gateway"];
+
 use crate::materialize::Materialized;
 use crate::reconcile::LABEL_REVISION;
 
@@ -236,6 +239,17 @@ pub fn build(
         dns_options: placement
             .zone
             .map(|_| vec!["ndots:2".to_string()])
+            .unwrap_or_default(),
+        // The overlay gateway is the host's own address on the stack's bridge,
+        // so this is the name a container uses to reach a service on its node.
+        extra_hosts: placement
+            .resolver
+            .map(|gateway| {
+                HOST_ALIASES
+                    .iter()
+                    .map(|alias| format!("{alias}:{gateway}"))
+                    .collect()
+            })
             .unwrap_or_default(),
         restart_policy: restart_policy(service),
         resources: resources(service),
@@ -529,6 +543,13 @@ mod tests {
             ]
         );
         assert_eq!(spec.dns_options, vec!["ndots:2".to_string()]);
+        assert_eq!(
+            spec.extra_hosts,
+            vec![
+                format!("host.docker.internal:{}", spec.dns[0]),
+                format!("host-gateway:{}", spec.dns[0]),
+            ]
+        );
     }
 
     /// A service with an egress network gets its default route moved there,

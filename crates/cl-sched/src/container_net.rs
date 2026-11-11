@@ -44,7 +44,10 @@ pub fn plan(
     let mut out = ContainerPlan::default();
 
     for net in client_of {
-        let Some(c) = cfg.networks.get(net).and_then(|n| n.container.as_ref()) else {
+        let Some(c) = cfg
+            .container_networks()
+            .find_map(|(name, c)| (name == net).then_some(c))
+        else {
             continue;
         };
         // A router is attached to its own network below, never as a client.
@@ -134,7 +137,7 @@ mod tests {
     fn cfg() -> ClusterConfig {
         let yaml = CLUSTER.replace(
             "  vpn:\n    type: egress\n",
-            "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    container: { stack: rt, service: router, subnet: 100.64.0.0/10, allowed_networks: [lan] }\n",
+            "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    subnet: 100.64.0.0/10\n    container: { stack: rt, service: router, allowed_networks: [lan] }\n",
         );
         ClusterConfig::parse(&yaml).expect("cluster parses")
     }

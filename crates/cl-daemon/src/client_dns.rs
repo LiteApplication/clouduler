@@ -19,7 +19,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::{qualify, ClusterConfig, ContainerNetwork, NetworkKind, Node};
+use cl_config::{qualify, ClusterConfig, ContainerView, NetworkKind, Node};
 use cl_dns::{records_for, DesiredRecord, RecordType};
 use cl_net::client_dns::{Classifier, ClientDns, View, ViewAnswer, ViewRecord};
 use cl_net::container_net::container_docker_name;
@@ -321,7 +321,7 @@ fn answers_for(
     allocations: &Allocations,
     fqdn: &str,
     client_net: &str,
-    container: Option<&ContainerNetwork>,
+    container: Option<ContainerView<'_>>,
     entries: &[&Entry],
 ) -> Vec<ViewAnswer> {
     let mut records: Vec<DesiredRecord> = Vec::new();

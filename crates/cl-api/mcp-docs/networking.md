@@ -155,11 +155,12 @@ interface names (letters, digits, `_`, `.`, `-`; at most 15 bytes).
 ## Container networks
 
 A `container` network (`type: container` plus a `container:` block: `stack`,
-`service`, `subnet`, `hosts`, `allowed_networks`, `open_ports`, `proxy`) sends
-traffic for `container.subnet` through a router container that the operator
-runs as an ordinary single-replica service. The routed range lives in
-`container.subnet`, never in the network's own `subnet`; `0.0.0.0/0` is
-allowed, IPv4 only. Every node implements the network, so no node declares an
+`service`, `hosts`, `allowed_networks`, `open_ports`, `proxy`) sends
+traffic for the network's own `subnet` through a router container that the
+operator runs as an ordinary single-replica service. The routed range is the
+network's `subnet` (not `container.subnet`, which is no longer accepted);
+`0.0.0.0/0` is allowed, IPv4 only. A `domain` is optional: it qualifies the
+proxy hostnames the client DNS answers for the router side. Every node implements the network, so no node declares an
 address for it (use `hosts` to route a node's own traffic).
 
 * Segment: one cluster-wide L2 network per container network (bridge plus VXLAN

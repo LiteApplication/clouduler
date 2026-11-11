@@ -241,19 +241,19 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
             configKey={`networks.${name}.type`}
             disabled={disabled}
           />
-          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && net.type !== 'container' && (
+          {net.type !== 'public' && net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <CidrField
               id={`net-${name}-subnet`}
-              label="Address range"
+              label={net.type === 'container' ? 'Routed address range' : 'Address range'}
               value={net.subnet ?? ''}
               onChange={(subnet) => updateNetwork(name, { subnet: subnet || null })}
-              hint="CIDR, e.g. 10.10.0.0/24."
-              help="The address range nodes on this network get their addresses from."
+              hint={net.type === 'container' ? 'CIDR reached through the router, e.g. 100.64.0.0/10. 0.0.0.0/0 routes everything.' : 'CIDR, e.g. 10.10.0.0/24.'}
+              help={net.type === 'container' ? 'The address space behind the router. Stacks listing this network, and the hosts below, send traffic for it through the router container.' : 'The address range nodes on this network get their addresses from.'}
               configKey={`networks.${name}.subnet`}
               disabled={disabled}
             />
           )}
-          {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && net.type !== 'container' && (
+          {net.type !== 'wireguard' && net.type !== 'egress' && net.type !== 'nat' && (
             <TextField
               id={`net-${name}-domain`}
               label="DNS domain"
@@ -952,7 +952,7 @@ export function NodeCard({
 }
 
 export function emptyContainer(): ContainerNetwork {
-  return { stack: '', service: '', subnet: '', hosts: [], allowed_networks: [], open_ports: [], proxy: false };
+  return { stack: '', service: '', hosts: [], allowed_networks: [], open_ports: [], proxy: false };
 }
 
 /** Service names of a stack spec (compose yaml); null when it can't be parsed. */
@@ -1072,16 +1072,6 @@ function ContainerNetworkForm({
           disabled={disabled}
         />
       )}
-      <CidrField
-        id={`net-${name}-container-subnet`}
-        label="Routed address range"
-        value={value.subnet}
-        onChange={(subnet) => set({ subnet })}
-        hint="CIDR reached through the router, e.g. 100.64.0.0/10. 0.0.0.0/0 routes everything."
-        help="The address space behind the router. Stacks listing this network, and the hosts below, send traffic for it through the router container."
-        configKey={`networks.${name}.container.subnet`}
-        disabled={disabled}
-      />
       <MultiPick
         label="Hosts routed through the router"
         options={Object.keys(draft.nodes)}

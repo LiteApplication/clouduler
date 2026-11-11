@@ -23,10 +23,10 @@ networks:
   nat0: { type: nat }
   ctn:
     type: container
+    subnet: 0.0.0.0/0
     container:
       stack: ctn-router
       service: router
-      subnet: 0.0.0.0/0
       hosts: [n3]
       allowed_networks: [cluster]
       open_ports:
@@ -34,10 +34,10 @@ networks:
       proxy: true
   narrow:
     type: container
+    subnet: 198.51.100.0/24
     container:
       stack: ctn-router
       service: router2
-      subnet: 198.51.100.0/24
 
 nodes:
   - { name: n1, role: manager, ip: 10.10.0.1 }

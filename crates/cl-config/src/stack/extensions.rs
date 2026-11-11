@@ -686,6 +686,12 @@ pub struct StackDefaults {
     /// `alerts: false` or a map. See [`super::StackAlerts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<super::StackAlerts>,
+    /// Pins the subnet of the stack's overlay network (the one its containers
+    /// reach each other on) instead of taking the next free one from the
+    /// pool. Only applied when the overlay is first created: docker cannot
+    /// re-address a live network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<ipnet::Ipv4Net>,
 }
 
 #[cfg(test)]

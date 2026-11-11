@@ -765,9 +765,9 @@
           ],
           "open_ports": [],
           "service": "app",
-          "stack": "web",
-          "subnet": "100.64.0.0/10"
+          "stack": "web"
         },
+        "subnet": "100.64.0.0/10",
         "type": "container"
       }
     },

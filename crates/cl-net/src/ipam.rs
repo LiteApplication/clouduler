@@ -141,6 +141,18 @@ impl Allocations {
         network: &str,
         cluster_subnets: &[IpNet],
     ) -> Result<Ipv4Net> {
+        self.allocate_network_in(network, None, cluster_subnets)
+    }
+
+    /// Like [`allocate_network`](Self::allocate_network), but claims exactly
+    /// `requested` when given, failing if it overlaps a cluster network or
+    /// another stack network's subnet instead of picking another one.
+    pub fn allocate_network_in(
+        &mut self,
+        network: &str,
+        requested: Option<Ipv4Net>,
+        cluster_subnets: &[IpNet],
+    ) -> Result<Ipv4Net> {
         if let Some(existing) = self.subnet(network) {
             return Ok(existing);
         }
@@ -153,6 +165,31 @@ impl Allocations {
                 IpNet::V6(_) => None,
             })
             .collect();
+
+        if let Some(want) = requested {
+            let conflict = claimed
+                .iter()
+                .chain(cluster_v4.iter())
+                .find(|c| nets_overlap(**c, want));
+            if let Some(conflict) = conflict {
+                return Err(NetError::SubnetOverlap {
+                    network: network.to_string(),
+                    subnet: want.to_string(),
+                    conflicts: conflict.to_string(),
+                });
+            }
+            self.networks.insert(
+                network.to_string(),
+                NetworkAllocation {
+                    subnet: want,
+                    instances: BTreeMap::new(),
+                    reserved: BTreeSet::new(),
+                    cooldown: VecDeque::new(),
+                    nodes: BTreeMap::new(),
+                },
+            );
+            return Ok(want);
+        }
 
         let candidates =
             self.pool
@@ -362,6 +399,24 @@ mod tests {
         let s2 = a.allocate_network("monitoring", &[]).unwrap();
         assert_ne!(s1, s2);
         assert_eq!(s1.prefix_len(), DEFAULT_SUBNET_PREFIX);
+    }
+
+    #[test]
+    fn a_requested_subnet_is_claimed_and_collisions_are_refused() {
+        let mut a = Allocations::default();
+        let want: Ipv4Net = "172.30.5.0/24".parse().unwrap();
+        assert_eq!(a.allocate_network_in("x", Some(want), &[]).unwrap(), want);
+        let inner: Ipv4Net = "172.30.5.128/25".parse().unwrap();
+        assert!(matches!(
+            a.allocate_network_in("y", Some(inner), &[]),
+            Err(NetError::SubnetOverlap { .. })
+        ));
+        let cluster: IpNet = "192.168.1.0/24".parse().unwrap();
+        let clash: Ipv4Net = "192.168.1.0/25".parse().unwrap();
+        assert!(a.allocate_network_in("z", Some(clash), &[cluster]).is_err());
+        // Auto allocation steers clear of the pinned one.
+        let auto = a.allocate_network("w", &[]).unwrap();
+        assert!(!nets_overlap(auto, want));
     }
 
     #[test]

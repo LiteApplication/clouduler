@@ -342,6 +342,7 @@ impl StackFile {
         self.validate_proxy_expose_networks(cluster)?;
         self.validate_service_network_kinds(cluster)?;
         self.validate_allowed(cluster)?;
+        self.validate_network_subnets(cluster)?;
         self.validate_node_pins(cluster)?;
         self.validate_placement_constraints(cluster)?;
         Ok(())
@@ -817,9 +818,7 @@ impl StackFile {
                     Some(n) if n.kind == NetworkKind::Container => {
                         // Only a default-route (0.0.0.0/0) container network
                         // competes with an egress network for the default route.
-                        n.container
-                            .as_ref()
-                            .is_some_and(|c| c.subnet.prefix_len() == 0)
+                        n.routed_subnet().is_some_and(|s| s.prefix_len() == 0)
                     }
                     Some(n) => matches!(
                         n.kind,
@@ -860,6 +859,58 @@ impl StackFile {
                     .find(|n| kind_of(n) == Some(NetworkKind::Public))
             })
             .map(String::as_str)
+    }
+
+    /// A pinned `x-clouduler.subnet` needs a stack with an overlay network,
+    /// must be a real network address no smaller than a /29, and must not
+    /// overlap any subnet declared in the cluster config. Collisions with
+    /// other stacks are checked at deploy time, where those stacks are known.
+    fn validate_network_subnets(&self, cluster: &ClusterConfig) -> Result<()> {
+        use crate::cluster::NetworkKind;
+
+        let Some(subnet) = self.x_clouduler.as_ref().and_then(|x| x.subnet) else {
+            return Ok(());
+        };
+        {
+            let at = "x-clouduler.subnet";
+            if self.overlay_network(cluster).is_none() {
+                return Err(ConfigError::invalid(
+                    at,
+                    "this stack has no overlay network (it needs an internal, private or public network) to give a subnet to",
+                ));
+            }
+            if subnet.prefix_len() > 29 || subnet.prefix_len() < 8 {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!("{subnet}: the prefix length must be between /8 and /29"),
+                ));
+            }
+            if subnet.network() != subnet.addr() {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!(
+                        "{subnet} has host bits set, did you mean {}?",
+                        subnet.trunc()
+                    ),
+                ));
+            }
+            for (cname, cnet) in &cluster.networks {
+                if cnet.kind == NetworkKind::Container {
+                    continue;
+                }
+                if let Some(ipnet::IpNet::V4(other)) = cnet.subnet {
+                    if other.contains(&subnet.network()) || subnet.contains(&other.network()) {
+                        return Err(ConfigError::invalid(
+                            at,
+                            format!(
+                                "{subnet} overlaps the subnet {other} of cluster network {cname}"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `allowed` restricts what the stack reaches through a network.
@@ -1858,7 +1909,7 @@ services:
         let yaml = CLUSTER_YAML.replace(
             "  vpn:\n    type: egress\n",
             &format!(
-                "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    container: {{ stack: rt, service: router, subnet: {subnet} }}\n"
+                "  vpn:\n    type: egress\n  ctn2:\n    type: container\n    subnet: {subnet}\n    container: {{ stack: rt, service: router }}\n"
             ),
         );
         ClusterConfig::parse(&yaml).expect("patched cluster is valid")
@@ -1929,5 +1980,24 @@ services:
         stack(raw)
             .validate(&container_cluster("0.0.0.0/0"))
             .expect("every node implements it");
+    }
+
+    #[test]
+    fn a_pinned_subnet_is_validated() {
+        let cluster = container_cluster("100.64.0.0/10");
+        let ok = "x-clouduler:\n  subnet: 172.30.5.0/24\nservices:\n  a:\n    image: x\n    networks: [tailscale]\nnetworks:\n  tailscale: {}\n";
+        stack(ok).validate(&cluster).expect("a free subnet is fine");
+        for (subnet, want) in [
+            ("172.30.5.7/24", "host bits"),
+            ("172.30.5.0/30", "between /8 and /29"),
+            ("10.10.0.0/25", "overlaps"),
+        ] {
+            let raw = ok.replace("172.30.5.0/24", subnet);
+            let err = stack(&raw).validate(&cluster).unwrap_err();
+            assert!(err.to_string().contains(want), "{subnet}: {err}");
+        }
+        let none = "x-clouduler:\n  subnet: 172.30.5.0/24\nservices:\n  a:\n    image: x\n";
+        let err = stack(none).validate(&cluster).unwrap_err();
+        assert!(err.to_string().contains("no overlay network"), "{err}");
     }
 }

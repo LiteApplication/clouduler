@@ -38,11 +38,22 @@ flowchart LR
 | `egress` | Forces a service's outbound traffic out of one named host interface (for example a VPN), with a kill-switch. | none | not allowed | the host interface name |
 | `wireguard` | Like egress, but Clouduler creates the WireGuard tunnel from a config you import. **Pending deprecation**, see [WireGuard networks](#wireguard-networks). | none | not allowed | set by importing a config |
 | `nat` | Like egress, but uses the node's normal routing (ordinary masquerade). No setup. | none | not allowed | nothing |
-| `container` | Sends traffic for an address range (a tailnet, say) through a router container that you run as a stack. See [Container networks](#container-networks). | none (the routed range is `container.subnet`) | not allowed | nothing |
+| `container` | Sends traffic for an address range (a tailnet, say) through a router container that you run as a stack. See [Container networks](#container-networks). | none (the network's `subnet` is the routed range) | optional, only names for the router side's DNS | nothing |
 
 ### The container overlay
 
 Containers on different machines reach each other through an **overlay**: a virtual network built on VXLAN (a tunnel that carries ethernet frames over UDP port 4789). You do not set it up. For each stack and each internal, private or public network it uses, every node builds a bridge plus a VXLAN device, with a static list of peers (no multicast). Containers get addresses from a cluster-wide pool, `10.244.0.0/16`, carved into one `/24` per overlay. The gateway is `.1` and is the same on every node.
+
+To choose the subnet yourself, set `subnet` in the stack's top-level `x-clouduler` block. It applies to the stack's overlay, whichever cluster network hosts it:
+
+```yaml
+x-clouduler:
+  subnet: 172.30.5.0/24
+```
+
+The subnet must be a network address between `/8` and `/29`, must not overlap any subnet in the cluster config, and must not overlap one pinned by another stack (a deploy that would is refused). The automatic pick avoids pinned subnets. It is only used when the overlay is first created, so to change it, remove the stack and redeploy.
+
+Every container also gets `host.docker.internal` and `host-gateway` entries in `/etc/hosts`, both pointing at the overlay gateway, which is the node's own address on the stack's bridge. Use it to reach something listening on the node the container runs on (the firewall still only lets through DNS, the proxy ports and `expose` ports).
 
 Containers find each other by name. The cluster DNS answers on the overlay gateway:
 
@@ -105,10 +116,10 @@ networks:
     type: nat
   tailnet:                # container: route 100.64.0.0/10 through a router stack
     type: container
+    subnet: 100.64.0.0/10
     container:
       stack: wireguard-router
       service: wireguard
-      subnet: 100.64.0.0/10
   tunnel:                 # wireguard (pending deprecation): Clouduler brings the tunnel up
     type: wireguard
 
@@ -151,10 +162,10 @@ There is no CLI command for networks themselves.
 
 <OptionTable rows={[
   {"key": "networks.NAME.type", "type": "enum", "reload": "live", "required": true, "description": "One of internal, private, public, egress, wireguard, nat, container.", "quirks": "Exactly one internal network is required."},
-  {"key": "networks.NAME.subnet", "type": "CIDR", "reload": "live", "description": "Address range for node IPs. Required for internal and private, forbidden for the other kinds (a container network routes `container.subnet` instead).", "quirks": "Every node IP on the network must be inside it. The container overlay skips this range."},
+  {"key": "networks.NAME.subnet", "type": "CIDR", "reload": "live", "description": "Address range for node IPs. Required for internal and private, forbidden for egress, wireguard, nat and public. On a container network it is the address space routed through the router, not a range nodes have addresses in.", "quirks": "Every node IP on the network must be inside it (internal and private). The container overlay skips this range. A container network's range never reserves overlay space."},
   {"key": "networks.NAME.domain", "type": "DNS name", "reload": "live", "description": "Names under it resolve to node addresses on this network. Required for proxy routes and DNS on a public network. Forbidden for egress, wireguard, nat and container.", "quirks": "No leading or trailing dot, unique across networks. When Cloudflare is configured the domain must be inside a configured zone: DOMAIN is not covered by any configured cloudflare zone."},
   {"key": "networks.NAME.publish_dns", "type": "bool", "default": "true", "reload": "live", "description": "false keeps the network's hostnames out of Cloudflare; only the cluster DNS server answers them.", "quirks": "Only internal and private networks may set false. A public network always publishes."},
-  {"key": "networks.NAME.container", "type": "map", "reload": "live", "description": "The router, the routed range and what the router side may reach. Required for, and only allowed on, a container network. Options in [Container networks](#container-networks).", "quirks": "A container network may not declare subnet, domain or a node address."}
+  {"key": "networks.NAME.container", "type": "map", "reload": "live", "description": "The router, the routed range and what the router side may reach. Required for, and only allowed on, a container network. Options in [Container networks](#container-networks).", "quirks": "A container network takes the routed range in its own `subnet`, and may not declare a node address."}
 ]} />
 
 ### Node address options
@@ -374,10 +385,10 @@ networks:
     domain: lan.example.com
   tailnet:
     type: container
+    subnet: 100.64.0.0/10        # the address space behind the router; 0.0.0.0/0 is allowed
     container:
       stack: wireguard-router      # the stack that holds the router
       service: wireguard           # the service inside it (one replica)
-      subnet: 100.64.0.0/10        # the address space behind the router; 0.0.0.0/0 is allowed
       hosts: [atlas]               # nodes whose own traffic to subnet uses the router
       allowed_networks: [lan]      # networks the router side may reach
       open_ports:
@@ -388,7 +399,7 @@ networks:
 <OptionTable rows={[
   {"key": "networks.NAME.container.stack", "type": "str", "reload": "live", "required": true, "description": "Stack that holds the router service.", "quirks": "Not checked against the deployed stacks when the config is saved, because stacks live in the cluster state. A router that is not deployed is reported as the problem container_router_missing."},
   {"key": "networks.NAME.container.service", "type": "str", "reload": "live", "required": true, "description": "Router service. It must run exactly one replica (no global mode, replicas at most 1).", "quirks": "Checked when the router stack is deployed. The router service must not list the container network itself: it is attached automatically."},
-  {"key": "networks.NAME.container.subnet", "type": "IPv4 CIDR", "reload": "live", "required": true, "description": "The address space behind the router. 0.0.0.0/0 is allowed and makes the network a default route.", "quirks": "IPv4 only. A subnet that lies inside a node network subnet or inside 10.244.0.0/16, 10.245.0.0/16 or 10.246.0.0/16 is refused. A subnet that contains them (0.0.0.0/0, 10.0.0.0/8) is fine, because the more specific routes win."},
+  {"key": "networks.NAME.subnet (container)", "type": "IPv4 CIDR", "reload": "live", "required": true, "description": "The address space behind the router, set on the network itself like any other subnet. 0.0.0.0/0 is allowed and makes the network a default route.", "quirks": "IPv4 only. The old `container.subnet` key is no longer accepted." A subnet that lies inside a node network subnet or inside 10.244.0.0/16, 10.245.0.0/16 or 10.246.0.0/16 is refused. A subnet that contains them (0.0.0.0/0, 10.0.0.0/8) is fine, because the more specific routes win."},
   {"key": "networks.NAME.container.hosts", "type": "list of node names", "default": "[]", "reload": "live", "description": "Nodes whose own traffic to subnet, and the traffic of all containers on them, goes through the router.", "quirks": "Each name must be a node. Hosts fail open: while the router is not running, their rules are removed and they use their normal routes."},
   {"key": "networks.NAME.container.allowed_networks", "type": "list of network names", "default": "[]", "reload": "live", "description": "Internal, private and public networks the router side may reach: on each node, its address on the network, and for subnetted networks the whole subnet. Containers of stacks on these networks also reach subnet through the router.", "quirks": "Renaming a network in Settings also rewrites this list."},
   {"key": "networks.NAME.container.open_ports", "type": "list of {port, protocol, target_port}", "default": "[]", "reload": "live", "description": "Host ports the router side may reach. protocol defaults to tcp. target_port is the host port the traffic lands on, default port.", "quirks": "No duplicate port and protocol pair, and no port 0."},
@@ -502,7 +513,7 @@ The segment drops client-to-client frames. Clients use their normal overlay netw
 </Quirk>
 
 <Quirk title="IPv4 only" severity="info">
-`container.subnet` is an IPv4 CIDR. IPv6 traffic is not routed through the router.
+A container network's `subnet` is an IPv4 CIDR. IPv6 traffic is not routed through the router.
 </Quirk>
 
 <Quirk title="The proxy sees the node's segment address" severity="info">

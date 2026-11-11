@@ -373,7 +373,7 @@ impl RoutingPlan {
 #[derive(Debug, Clone)]
 pub struct RoutingInput {
     pub network: String,
-    /// The routed address space (`container.subnet`).
+    /// The routed address space (the network's `subnet`).
     pub subnet: Ipv4Net,
     /// The router's address on the segment; `None` while it has none, which
     /// yields an empty plan (so every rule and route is removed).

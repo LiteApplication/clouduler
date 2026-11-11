@@ -1281,9 +1281,12 @@ fn leader_node(
 }
 
 /// Whether hostnames on `network` go to the DNS provider. A network switched
-/// to `publish_dns: false` is answered only by the client-facing DNS server.
+/// to `publish_dns: false` is answered only by the client-facing DNS server,
+/// and a container network never has a provider to publish to.
 fn publishes_dns(cfg: &ClusterConfig, network: &str) -> bool {
-    cfg.networks.get(network).is_none_or(|n| n.publish_dns)
+    cfg.networks
+        .get(network)
+        .is_none_or(|n| n.publish_dns && n.kind != cl_config::NetworkKind::Container)
 }
 
 /// Resolves `desired_dns_hosts` against every node, deduplicated, plus the

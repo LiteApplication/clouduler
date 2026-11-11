@@ -81,8 +81,8 @@ fn peers_of(cfg: &ClusterConfig, node_name: &str) -> BTreeSet<Ipv4Addr> {
 /// The subnets the overlay pool must not overlap, or a container's route to a
 /// peer node collides with its route to another container.
 fn cluster_subnets_of(cfg: &ClusterConfig) -> Vec<IpNet> {
-    // A container network's routed range lives in `container.subnet`, never
-    // in `Network.subnet`; it must not reserve (or, as `0.0.0.0/0`, starve)
+    // A container network's `subnet` is the range routed through its router,
+    // not one the nodes live in; it must not reserve (or, as `0.0.0.0/0`, starve)
     // the overlay pool, so only subnetted networks of other kinds count.
     cfg.networks
         .values()
@@ -228,6 +228,7 @@ impl Context_ {
         let mut all: BTreeMap<String, BTreeSet<InstanceId>> = BTreeMap::new();
         let mut mine = BTreeSet::new();
         let mut single_node: BTreeSet<String> = BTreeSet::new();
+        let mut requested: BTreeMap<String, ipnet::Ipv4Net> = BTreeMap::new();
 
         for (name, stack) in &state.stacks {
             let Ok(file) = StackFile::parse(&stack.spec) else {
@@ -238,6 +239,9 @@ impl Context_ {
                 continue;
             };
             let overlay = overlay_name(name, network);
+            if let Some(subnet) = cl_sched::run::overlay_subnet_of(&file, &cfg) {
+                requested.insert(overlay.clone(), subnet);
+            }
             if is_single_node_network(&cfg, network) {
                 single_node.insert(overlay.clone());
             }
@@ -264,8 +268,14 @@ impl Context_ {
 
         let mut allocations = load_allocations(state.overlay.as_deref());
         if self.cluster.is_leader() {
-            self.allocate_missing(&mut allocations, &all, &cluster_subnets, &node_names)
-                .await?;
+            self.allocate_missing(
+                &mut allocations,
+                &all,
+                &requested,
+                &cluster_subnets,
+                &node_names,
+            )
+            .await?;
         }
 
         if let Err(e) = self.sweep_orphans(netlink, &all).await {
@@ -374,6 +384,7 @@ impl Context_ {
         &self,
         allocations: &mut Allocations,
         networks: &BTreeMap<String, BTreeSet<InstanceId>>,
+        requested: &BTreeMap<String, ipnet::Ipv4Net>,
         cluster_subnets: &[IpNet],
         node_names: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<()> {
@@ -394,10 +405,23 @@ impl Context_ {
             info!(network = %network, "released an overlay subnet no longer in use");
         }
 
+        // Pinned subnets first, so an automatic pick in this same pass cannot
+        // take one before its owner has claimed it.
+        for (network, subnet) in requested {
+            if networks.contains_key(network) && allocations.subnet(network).is_none() {
+                match allocations.allocate_network_in(network, Some(*subnet), cluster_subnets) {
+                    Ok(_) => changed = true,
+                    Err(e) => {
+                        warn!(network = %network, %subnet, error = %e, "cannot claim the pinned subnet")
+                    }
+                }
+            }
+        }
+
         for (network, instances) in networks {
             if allocations.subnet(network).is_none() {
                 allocations
-                    .allocate_network(network, cluster_subnets)
+                    .allocate_network_in(network, requested.get(network).copied(), cluster_subnets)
                     .with_context(|| format!("allocating a subnet for {network}"))?;
                 changed = true;
                 info!(
@@ -712,13 +736,7 @@ mod tests {
     #[test]
     fn a_container_networks_routed_range_never_reserves_overlay_space() {
         let mut c = cfg();
-        c.networks
-            .get_mut("tailnet")
-            .unwrap()
-            .container
-            .as_mut()
-            .unwrap()
-            .subnet = "0.0.0.0/0".parse().unwrap();
+        c.networks.get_mut("tailnet").unwrap().subnet = Some("0.0.0.0/0".parse().unwrap());
         let subnets = cluster_subnets_of(&c);
         assert!(subnets.iter().all(|s| s.prefix_len() > 0), "{subnets:?}");
         assert!(!subnets.contains(&"100.64.0.0/10".parse().unwrap()));
