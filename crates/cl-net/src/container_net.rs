@@ -28,6 +28,7 @@ use ipnet::Ipv4Net;
 use crate::egress::{short_name, CHAIN_USABLE, IFNAMSIZ_USABLE};
 use crate::error::{NetError, Result};
 use crate::iptables::{ChainSpec, IptablesPlan, Jump};
+use cl_config::EGRESS_TABLE_BASE;
 
 /// Every chain this module creates starts with this prefix; the orphan sweep
 /// relies on it (and `CLDR-CTN-` etc. cannot be confused with any other
@@ -253,15 +254,31 @@ impl IpRule {
     }
 
     /// Is this rule one this module installs (see the priority list above)?
+    ///
+    /// Priority alone is not enough: other software owns rules in the same
+    /// range (Tailscale uses 5210, 5230, 5250 and 5270, the last one looking
+    /// up table 52). So the shape must match too, and a table lookup must
+    /// point into the range clouduler derives its tables from.
     pub fn is_container_rule(&self) -> bool {
+        let ours_table = |t: u32| (EGRESS_TABLE_BASE..EGRESS_TABLE_BASE + 1000).contains(&t);
         match self.priority {
             FWMARK_PRIORITY => matches!(
-                self.selector,
-                RuleSelector::Fwmark { mark, mask }
-                    if mask == MARK_MASK && mark & 0x0F00_0000 == MARK_BASE
+                (&self.selector, &self.action),
+                (RuleSelector::Fwmark { mark, mask }, RuleAction::Lookup(t))
+                    if *mask == MARK_MASK && mark & 0x0F00_0000 == MARK_BASE && ours_table(*t)
             ),
-            EXEMPT_PRIORITY | EXEMPT_IIF_PRIORITY => true,
-            p => is_pair_priority(p),
+            EXEMPT_PRIORITY | EXEMPT_IIF_PRIORITY => {
+                matches!(self.action, RuleAction::LookupMain)
+                    && matches!(self.selector, RuleSelector::From(_) | RuleSelector::Iif(_))
+            }
+            p if is_pair_priority(p) => {
+                if (p - SUPPRESS_PRIORITY).is_multiple_of(2) {
+                    matches!(self.action, RuleAction::LookupMainSuppress(_))
+                } else {
+                    matches!(self.action, RuleAction::Lookup(t) if ours_table(t))
+                }
+            }
+            _ => false,
         }
     }
 }
@@ -1394,6 +1411,17 @@ mod tests {
             .unwrap()
             .replace_args();
         assert_eq!(args[2], "default");
+    }
+
+    #[test]
+    fn tailscale_rules_are_not_container_rules() {
+        let text = "0:\tfrom all lookup local\n\
+            5210:\tfrom all fwmark 0x80000/0xff0000 lookup main\n\
+            5230:\tfrom all fwmark 0x80000/0xff0000 lookup default\n\
+            5250:\tfrom all fwmark 0x80000/0xff0000 unreachable\n\
+            5270:\tfrom all lookup 52\n\
+            32766:\tfrom all lookup main\n";
+        assert!(parse_ip_rules(text).iter().all(|r| !r.is_container_rule()));
     }
 
     #[test]
