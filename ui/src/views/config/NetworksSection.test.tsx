@@ -23,7 +23,11 @@ const base = {
   nodes: { n1: { network: {}, drives: {} }, n2: { network: {}, drives: {} } },
 } as unknown as ClusterConfig;
 
-const openNet = (name: string) => fireEvent.click(screen.getByLabelText(`${name} network settings`));
+const openNet = (name: string) => {
+  const node = screen.getByLabelText(`${name} network settings`);
+  fireEvent.pointerDown(node, { clientX: 10, clientY: 10, button: 0, pointerId: 1 });
+  fireEvent.pointerUp(node, { clientX: 10, clientY: 10, button: 0, pointerId: 1 });
+};
 
 describe('NetworksSection container kind', () => {
   it('initialises the container block on switch and drops it on switching away', () => {

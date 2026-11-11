@@ -76,7 +76,6 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
   const [, setFrame] = useState(0);
   const [rubber, setRubber] = useState<{ from: string; x: number; y: number } | null>(null);
   const drag = useRef<Drag | null>(null);
-  const suppressClick = useRef(false);
 
   const ids = useMemo(() => Object.keys(networks).sort(), [networks]);
   const explicit = useMemo(() => explicitEdges(networks), [networks]);
@@ -215,7 +214,6 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
     }
     const n = pos.get(d.id);
     if (n) n.pinned = false;
-    if (d.moved) suppressClick.current = true;
     if (d.mode === 'link') {
       setRubber(null);
       const p = toSvg(e);
@@ -223,6 +221,8 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
       if (d.moved && to) tryAdd(d.id, to);
     } else if (d.moved) {
       savePositions(stateRef.current);
+    } else {
+      onOpen(d.id);
     }
   };
 
@@ -233,14 +233,6 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
     if (!canHaveAccess(a.type) || !isAccessTarget(b.type)) return;
     if (explicit.some(([x, y]) => x === from && y === to)) return;
     onAddEdge(from, to);
-  };
-
-  const open = (id: string) => {
-    if (suppressClick.current) {
-      suppressClick.current = false;
-      return;
-    }
-    onOpen(id);
   };
 
   const removeEdge = async (from: string, to: string) => {
@@ -356,7 +348,6 @@ export function NetworkGraph({ networks, editable, onOpen, onAddEdge, onRemoveEd
               tabIndex={0}
               aria-label={`${n.id} network settings`}
               onPointerDown={(e) => begin(e, n.id, e.shiftKey)}
-              onClick={() => open(n.id)}
               onKeyDown={(e) => onKey(e, n.id)}
             >
               <rect className="cl-ng__box" x={-w / 2} y={-NODE_H / 2} width={w} height={NODE_H} rx={NODE_H / 2} />

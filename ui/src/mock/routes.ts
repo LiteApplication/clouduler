@@ -925,6 +925,8 @@ export function buildHttpRoutes(): HttpRoute[] {
       for (const net of Object.values(db.config.networks)) {
         if (net.access) net.access = net.access.map((a) => (a === params.name ? to : a));
       }
+      const dns = db.config.proxy?.dns_server;
+      if (dns) dns.networks = dns.networks.map((a) => (a === params.name ? to : a));
       for (const n of Object.values(db.config.nodes)) if (params.name in n.network) renameKey(n.network, params.name, to);
       for (const s of Object.values(db.state.stacks)) s.spec = renameInSpec(s.spec, params.name, to, 'network');
       for (const r of db.proxyRoutes) if (r.network === params.name) r.network = to;

@@ -107,7 +107,7 @@ If you do not use Cloudflare, or set `publish_dns: false` on a network, nothing 
 <UiCli>
 <UiCli.Ui>
 
-Open **Settings > Network > Reverse proxy**. Switch on **Run a cluster DNS server**, tick the **DNS server networks** to listen on, and optionally change the **DNS server port** (default 53). Then point your router or clients at a node's address on one of those networks.
+Open **Settings > Network > Reverse proxy** and switch on **Run a cluster DNS server**, and optionally change the **DNS server port** (default 53). Then open each network from the graph under **Settings > Network** and switch **Serve cluster DNS on this network** on or off; with none changed, every internal and private network (and container networks with `proxy: true`) is served, and a public network only when switched on. Point your router or clients at a node's address on a served network.
 
 <UiScreen scenario="lan-3-nodes" route="/settings/network?page=proxy" caption="Settings, Network, Reverse proxy: the cluster DNS server fields." alt="Cluster DNS server settings" />
 

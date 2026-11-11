@@ -28,6 +28,7 @@ import type {
   ProxyAuthConfig,
   PublicAddress,
 } from '../../api/types';
+import { canServeDns, isLastServed, isServingDns, removeDnsNetwork, renameDnsNetwork, toggleDnsNetwork } from './dnsServerNetworks';
 import { BottomSheet, CheckOption, HelpTip, Tag, useConfirm } from '../../ds';
 import { NetworkGraph } from './NetworkGraph';
 import { canHaveAccess, validTargets } from './networkAccess';
@@ -100,10 +101,17 @@ export function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newN
     }
   }
 
+  const dns = draft.proxy?.dns_server;
+  const proxy =
+    dns && dns.networks.includes(oldName)
+      ? { ...draft.proxy, dns_server: { ...dns, networks: renameDnsNetwork(dns.networks, oldName, newName) } }
+      : draft.proxy;
+
   return {
     ...draft,
     networks,
     nodes,
+    proxy,
     web: draft.web.network === oldName ? { ...draft.web, network: newName } : draft.web,
   };
 }
@@ -231,7 +239,12 @@ function NetworkForm({
   const removeNetwork = (n: string) => {
     const next = { ...draft.networks };
     delete next[n];
-    setDraft({ ...draft, networks: next });
+    const dns = draft.proxy?.dns_server;
+    const proxy =
+      dns && dns.networks.includes(n)
+        ? { ...draft.proxy, dns_server: { ...dns, networks: removeDnsNetwork(dns.networks, n) } }
+        : draft.proxy;
+    setDraft({ ...draft, networks: next, proxy });
     onRemoved();
   };
 
@@ -378,6 +391,37 @@ function NetworkForm({
               disabled={disabled}
             />
           )}
+          {canServeDns(net) && (() => {
+            const dns = draft.proxy?.dns_server;
+            const list = dns?.networks ?? [];
+            const off = !draft.proxy?.enabled || !dns?.enabled;
+            const noRouter = net.type === 'container' && net.container?.proxy !== true;
+            const on = !noRouter && isServingDns(draft.networks, list, name);
+            const last = on && isLastServed(draft.networks, list, name);
+            const hint = noRouter
+              ? 'Needs the router side to reach the proxy (proxy: true).'
+              : off
+                ? 'The cluster DNS server is off; enable it under Reverse proxy.'
+                : last
+                  ? "The node's address on this network answers DNS queries. At least one network must stay served."
+                  : "The node's address on this network answers DNS queries.";
+            return (
+              <CheckboxField
+                id={`net-${name}-dns-server`}
+                label="Serve cluster DNS on this network"
+                value={on}
+                onChange={(v) => {
+                  const next = toggleDnsNetwork(draft.networks, list, name, v);
+                  if (next === null || !dns) return;
+                  setDraft({ ...draft, proxy: { ...draft.proxy, dns_server: { ...dns, networks: next } } });
+                }}
+                hint={hint}
+                help="The cluster DNS server listens on the node's address on this network and answers cluster hostnames. Leaving every network at its default serves all internal and private networks (and container networks with proxy: true); a public network is served only when switched on."
+                configKey="proxy.dns_server.networks"
+                disabled={disabled || off || noRouter || last}
+              />
+            );
+          })()}
           {net.type === 'wireguard' && (
             <p className="field-hint">
               Not addressable: import each node's WireGuard config below, under its own card.
@@ -2673,7 +2717,6 @@ function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, 'draf
       ...draft,
       proxy: { ...draft.proxy, dns_server: { ...d, ...patch } },
     });
-  const nets = Object.entries(draft.networks).filter(([, n]) => ['internal', 'private', 'public'].includes(n.type));
   return (
     <>
       <CheckboxField
@@ -2688,28 +2731,6 @@ function DnsServerFields({ draft, setDraft, disabled }: Pick<SectionProps, 'draf
       />
       {d.enabled && (
         <>
-          <div className="field">
-            <label>DNS server networks</label>
-            <span className="field-hint">
-              Leave all unchecked to serve every internal/private network the node has an address on; a public network
-              is served only if listed.
-            </span>
-            {nets.map(([name, net]) => (
-              <CheckOption
-                key={name}
-                checked={d.networks.includes(name)}
-                disabled={disabled}
-                hint={`(${net.type})`}
-                onChange={(on) =>
-                  set({
-                    networks: on ? [...d.networks, name] : d.networks.filter((n) => n !== name),
-                  })
-                }
-              >
-                {name}
-              </CheckOption>
-            ))}
-          </div>
           <PortField
             id="proxy-dns-server-port"
             label="DNS server port"
