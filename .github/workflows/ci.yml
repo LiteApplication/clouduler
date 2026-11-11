@@ -103,7 +103,7 @@ jobs:
       # its docker fallback. The guest rootfs is Alpine, so a glibc binary will
       # not start there.
       - run: |
-          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y qemu-system-x86 && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done musl-tools e2fsprogs
+          for i in 1 2 3 4 5; do sudo apt-get update && sudo apt-get install -y qemu-system-x86 musl-tools e2fsprogs && break; [ $i = 5 ] && exit 1; sleep $((i*15)); done
       # .cargo/config.toml sets [build] rustc-wrapper = "sccache" globally, so
       # build-binary.sh's cargo invocation needs sccache on PATH too.
       - uses: mozilla-actions/sccache-action@v0.0.7
