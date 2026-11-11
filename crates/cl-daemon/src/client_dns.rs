@@ -112,18 +112,17 @@ async fn run(
         let live = Arc::new(cfg.clone());
         let segments = segments_of(&cfg, &allocations);
         let classify: Classifier = Arc::new(move |ip| {
-            live.client_network(ip)
-                .map(str::to_string)
-                // The router container itself asks from its segment address.
-                .or_else(|| {
-                    let std::net::IpAddr::V4(v4) = ip.to_canonical() else {
-                        return None;
-                    };
-                    segments
-                        .iter()
-                        .find(|(_, subnet)| subnet.contains(&v4))
-                        .map(|(name, _)| name.clone())
-                })
+            // The router itself asks from its segment address, which a wide
+            // container subnet may also contain: the segment wins.
+            let segment = match ip.to_canonical() {
+                std::net::IpAddr::V4(v4) => segments
+                    .iter()
+                    .find(|(_, subnet)| subnet.contains(&v4))
+                    .map(|(name, _)| name.clone()),
+                _ => None,
+            };
+            segment
+                .or_else(|| live.client_network(ip).map(str::to_string))
                 .unwrap_or_else(|| UNKNOWN_CLIENT.to_string())
         });
         if let Err(e) = dns.reload(&views, classify).await {

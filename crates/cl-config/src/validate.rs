@@ -679,6 +679,16 @@ impl ClusterConfig {
                     format!("{network} has no node address to listen on"),
                 ));
             }
+            if net
+                .container
+                .as_ref()
+                .is_some_and(|c| net.kind == NetworkKind::Container && !c.proxy)
+            {
+                return Err(ConfigError::invalid(
+                    "proxy.dns_server.networks",
+                    format!("{network} has no node address to listen on without proxy: true"),
+                ));
+            }
         }
         if proxy.http_port == proxy.https_port {
             return Err(ConfigError::invalid(

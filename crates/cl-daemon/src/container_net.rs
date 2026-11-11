@@ -51,6 +51,8 @@ pub struct Desired {
     pub open_ports: Vec<(u16, Protocol, u16)>,
     pub target_addr: Option<Ipv4Addr>,
     pub proxy_ports: Vec<u16>,
+    /// The client DNS server's port, when it answers this network's router side.
+    pub dns_port: Option<u16>,
     pub allowed: Vec<Ipv4Net>,
     /// Every node's address on the segment.
     pub node_ips: Vec<Ipv4Addr>,
@@ -168,18 +170,13 @@ pub fn desired(
             .open_ports
             .iter()
             .map(|p| (p.port, p.protocol, p.effective_target_port()))
-            // The client DNS server answers the router side on this node's
-            // segment address, so its port is opened to it.
-            .chain(
-                cfg.container_dns_networks()
-                    .any(|(name, _)| name == network)
-                    .then_some(cfg.proxy.dns_server.port)
-                    .into_iter()
-                    .flat_map(|port| [(port, Protocol::Udp, port), (port, Protocol::Tcp, port)]),
-            )
             .collect(),
         target_addr,
         proxy_ports,
+        dns_port: cfg
+            .container_dns_networks()
+            .any(|(name, _)| name == network)
+            .then_some(cfg.proxy.dns_server.port),
         allowed: allowed_destinations(cfg, &c.allowed_networks),
         node_ips: allocations.node_ips(&segment).map(|(_, ip)| ip).collect(),
         segment: segment_subnet,
@@ -201,6 +198,7 @@ impl Desired {
             self.open_ports.clone(),
             self.target_addr,
             self.proxy_ports.clone(),
+            self.dns_port,
             self.allowed.clone(),
         );
         let (bridge, router_ip, node_ips, segment) = (
@@ -211,7 +209,7 @@ impl Desired {
         );
         let (network, veth) = (self.network.clone(), self.veth.clone());
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let (net, br, vt, rip, ctn, ports, target, proxy, allowed) = filter_input;
+            let (net, br, vt, rip, ctn, ports, target, proxy, dns, allowed) = filter_input;
             let filter = filter_iptables_plan(&FilterInput {
                 network: &net,
                 bridge: &br,
@@ -221,6 +219,7 @@ impl Desired {
                 open_ports: &ports,
                 target_addr: target,
                 proxy_ports: &proxy,
+                dns_port: dns,
                 allowed: &allowed,
             });
             apply_plan(&filter).context("container network filter")?;

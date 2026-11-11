@@ -717,6 +717,9 @@ pub struct FilterInput<'a> {
     /// Reverse-proxy ports to open and DNAT to `node_ctn`; empty when
     /// `proxy: false`.
     pub proxy_ports: &'a [u16],
+    /// Port of the client DNS server, answering on `node_ctn`; accepted for
+    /// UDP and TCP to that address only, and only as input to the node.
+    pub dns_port: Option<u16>,
     /// Destinations the router may forward to.
     pub allowed: &'a [Ipv4Net],
 }
@@ -852,6 +855,27 @@ pub fn filter_iptables_plan(input: &FilterInput<'_>) -> IptablesPlan {
                     &ctn,
                 ],
             );
+        }
+    }
+
+    if let Some(port) = input.dns_port {
+        for proto in ["udp", "tcp"] {
+            for m in &matches {
+                push_with(
+                    &mut inp,
+                    m,
+                    &[
+                        "-p",
+                        proto,
+                        "-d",
+                        &format!("{ctn}/32"),
+                        "--dport",
+                        &port.to_string(),
+                        "-j",
+                        "ACCEPT",
+                    ],
+                );
+            }
         }
     }
 
@@ -1530,6 +1554,7 @@ mod tests {
             open_ports: open,
             target_addr: Some(ip("192.168.1.2")),
             proxy_ports: proxy,
+            dns_port: None,
             allowed,
         }
     }
@@ -1771,6 +1796,7 @@ mod tests {
             open_ports: &[],
             target_addr: None,
             proxy_ports: &[],
+            dns_port: None,
             allowed: &[],
         });
         let input = plan

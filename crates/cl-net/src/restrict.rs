@@ -952,6 +952,7 @@ mod tests {
                 open_ports: &[(2222, Protocol::Tcp, 22), (53, Protocol::Udp, 53)],
                 target_addr: Some(ip("192.168.1.2")),
                 proxy_ports: &[80, 443],
+                dns_port: Some(53),
                 allowed: &nets,
             }));
             plans.push(mangle_iptables_plan(
