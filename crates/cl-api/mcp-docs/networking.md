@@ -155,7 +155,7 @@ interface names (letters, digits, `_`, `.`, `-`; at most 15 bytes).
 ## Container networks
 
 A `container` network (`type: container` plus a `container:` block: `stack`,
-`service`, `hosts`, `allowed_networks`, `open_ports`, `proxy`) sends
+`service`, `hosts`, `open_ports`, `proxy`) sends
 traffic for the network's own `subnet` through a router container that the
 operator runs as an ordinary single-replica service. The routed range is the
 network's `subnet` (not `container.subnet`, which is no longer accepted);
@@ -197,8 +197,8 @@ address for it (use `hosts` to route a node's own traffic).
   (nat POSTROUTING masquerade), `CLDR-CTNM-<net>`/`CLDR-CTNR-<net>` (mangle).
 * Proxy gating: with `proxy: true` a router connection to 80/443 is DNATed to
   the node's own segment address; `gate_by_network` treats a connection whose
-  local address is a segment address of a container network that is, or lists
-  as allowed, the route's network as a client of it. A route on the container
+  local address is a segment address of a container network that is, or has
+  in its `access`, the route's network (`reaches`) as a client of it. A route on the container
   network itself admits only those connections (else 403).
 * Status: `GET /api/networks/NAME/status` returns `{router: {stack, service,
   instance, node, ip, running, state: missing|down|up}, nodes: {NODE: ip}}`;
@@ -206,6 +206,34 @@ address for it (use `hosts` to route a node's own traffic).
   events `network.container_router_missing` / `network.container_router_down`.
 * Placement prefers the node that runs most of the router's clients (soft:
   never overrides eligibility, pins or `last_resort`).
+
+## Network access
+
+`networks.<n>.access: [..]` (internal, private and container networks only;
+targets internal, private, public or container; no self, duplicates or unknown
+names, see `validate_access`) says which networks `n` may reach.
+`ClusterConfig::reaches(a, b)` is `a == b || b is public || b in access(a)`.
+An absent `access` means no host firewall for that source and, at layer 7, the
+same as `[]`. The legacy `container.allowed_networks` is deserialize-only:
+`deserialize_networks` folds each entry into the container network's `access`
+(deduplicated) and clears it; it is never serialized. The fold is one way, `X.access` is not touched.
+
+Users: the proxy gate (`allowed_subnets`, `local_clients`), client DNS
+(`views_for`, `answers_for`: unreachable names are `REFUSED`), container
+networks (the router side's reach) and the host firewall in
+`cl-net::netaccess` / `cl_daemon::netaccess`, reconciled every 10 seconds:
+
+* `CLDR-NET` (filter `INPUT`, before `CLDR-IN`): from a restricted source
+  subnet to this node's own address on a denied network, DROP.
+* `CLDR-NETF` (filter, into `DOCKER-USER` else `FORWARD`, at the top): from the
+  source subnet to the denied subnet, DROP.
+
+Both chains only RETURN or DROP (never ACCEPT), and start with
+`ESTABLISHED,RELATED` RETURN; `CLDR-NET` also returns `lo` and `web.port`.
+IPv4 internal/private subnets only; a pair with overlapping subnets is skipped
+with a warning; container-network targets are not handled; an empty plan
+removes both chains. The settings graph (`ui/src/views/config/NetworkGraph.tsx`)
+edits the lists.
 
 ## Host firewall
 

@@ -13,7 +13,7 @@ This is different from the [`wireguard` network kind](/docs/features/networking)
 
 ## What you'll learn
 
-- A **`container` network** in `cluster.yaml`: the router, the routed subnet, listed hosts, allowed networks, the proxy.
+- A **`container` network** in `cluster.yaml`: the router, the routed subnet, listed hosts, its `access` list, the proxy.
 - A router stack: `NET_ADMIN`, a **secret** holding the whole `wg0.conf`, and a `nat` network so the client has its own internet.
 - A **client stack** that reaches the remote range by listing the network.
 - What the router image has to do itself (forward and masquerade), because Clouduler only routes packets to it.
@@ -61,11 +61,11 @@ networks:
   vpn:
     type: container
     subnet: 10.8.0.0/24          # the WireGuard range, equal to AllowedIPs
+    access: [lan]                # remote peers may reach every node's address on lan, and the lan subnet
     container:
       stack: wireguard-router      # the router stack below
       service: wireguard           # its service
       hosts: [atlas]               # atlas itself, and its containers, reach the remote range
-      allowed_networks: [lan]      # remote peers may reach every node's address on lan, and the lan subnet
       open_ports:
         - { port: 2222, protocol: tcp, target_port: 22 }   # peers reach the nodes' SSH on 2222
       proxy: true                  # peers may reach the reverse proxy on 80/443
@@ -137,7 +137,7 @@ The container gets an address on the segment and a route `10.8.0.0/24 via` the r
 <UiCli.Ui>
 
 1. Open **Settings**, **Secrets and configs**. Create `wg0_conf` with **Paste string**, using the `wg0.conf` above.
-2. Open **Settings**, **Network**, **Networks**, add `home` (NAT) and `vpn` (Container). Fill in the router stack `wireguard-router`, service `wireguard`, the subnet, the node `atlas` as a host, `lan` as an allowed network, the open port and tick the reverse proxy box. Save.
+2. Open **Settings**, **Network**, **Networks**, add `home` (NAT) and `vpn` (Container). Fill in the router stack `wireguard-router`, service `wireguard`, the subnet, the node `atlas` as a host, `lan` in the network's access list (the settings graph, drag from `vpn` to `lan`), the open port and tick the reverse proxy box. Save.
 3. Open **Stacks**, **Deploy stack**, name it `wireguard-router`, paste the router YAML. Deploy it.
 4. Deploy the client stack the same way.
 
@@ -164,12 +164,12 @@ You can deploy the network before the router stack. Until the router exists the 
 
 1. The tunnel is up: `clouduler exec wireguard-router.wireguard.0 -- wg show` lists the peer with a recent handshake.
 2. From a client: `clouduler exec web.app.0 -- ip route` shows `10.8.0.0/24 via ...` and `ping 10.8.0.1` answers.
-3. From a remote peer: a node's `lan` address is reachable because `lan` is allowed, and an https request to a node on port 443 works because of `proxy: true`. The peer's route to the node must go through the router's tunnel address `10.8.0.2`.
+3. From a remote peer: a node's `lan` address is reachable because `lan` is in the network's `access`, and an https request to a node on port 443 works because of `proxy: true`. The peer's route to the node must go through the router's tunnel address `10.8.0.2`.
 
 ## Quirks
 
 <Quirk title="The router decides what the remote side can do" severity="warn">
-`allowed_networks`, `open_ports` and `proxy` are the whole list of what remote peers can reach inside the cluster. The WireGuard server's own `AllowedIPs` and firewall are still the first line of defence: Clouduler cannot see which peer is which beyond its address.
+`access`, `open_ports` and `proxy` are the whole list of what remote peers can reach inside the cluster. The WireGuard server's own `AllowedIPs` and firewall are still the first line of defence: Clouduler cannot see which peer is which beyond its address.
 </Quirk>
 
 <Quirk title="Keep AllowedIPs and subnet equal" severity="info">

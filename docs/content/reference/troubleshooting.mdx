@@ -30,7 +30,7 @@ In the web UI the same information is on the dashboard problem list and on each 
 | `Failed to determine group credentials` or `status=216/GROUP` | The `clouduler` group is missing. Current releases create it when `init` writes the unit; on a unit written by an older release, run `sudo groupadd -f clouduler` then `sudo systemctl enable --now clouduler.service`. |
 | `this machine is not running systemd` | `init` installed no unit; you have to start the daemon yourself. |
 | Browser certificate warning | Expected until ACME issues a certificate; the proxy serves a self-signed fallback (`no issued certificate yet, serving a self-signed fallback`). See [Certificate not issued](#a-certificate-is-not-issued). |
-| 403 on a route | Routes on a subnetted network only answer clients whose address is inside the subnet; a VPN client outside it gets 403. Publish through a public network instead. See [502 and 403 from the proxy](#502-and-403-from-the-proxy). |
+| 403 on a route | Routes on a subnetted network only answer clients inside its subnet or inside a network that lists it in `access`; a VPN client outside gets 403. Add the route's network to the client network's `access` (Settings, Network, graph), or publish through a public network instead. See [502 and 403 from the proxy](#502-and-403-from-the-proxy). |
 
 ### Sign-in problems
 
@@ -153,7 +153,9 @@ Details: [Networking](/docs/features/networking), [Stack spec](/docs/reference/s
 |---|---|
 | `bad gateway: {reason}` or `backend {addr} unreachable` | The container is down or listens on another port. The backend connect timeout is 5 seconds. Check `clouduler stack unhealthy` and the route's target port. |
 | `no route matches {host}{path}` | No route fits the request. Check the stack's `x-clouduler.proxy` entries and the hostname. |
-| 403 | The route is on a subnetted network and the client's TCP peer is outside the subnet, including a VPN. Use a public network to publish externally; a public route is open to the whole internet. |
+| 403 | The route is on a subnetted network and the client's TCP peer is outside its subnet and outside every network whose `access` lists it, including a VPN. Add the route's network to the client network's `access` ([Network access](/docs/features/networking#network-access)), or use a public network to publish externally; a public route is open to the whole internet. |
+| `REFUSED` from `proxy.dns_server` for a cluster name, or a cluster name that is reachable by IP but not by hostname | The client's network does not reach the hostname's network. Check `access` on the client's network. A network always reaches itself and public networks only. |
+| Traffic between two private or internal networks is dropped by the host | The source network has an `access` list that omits the target (the `CLDR-NET` and `CLDR-NETF` chains). Add the target to `access`, or clear the list with **Unrestricted host firewall** in the settings graph. |
 | 503 `this route requires login, but proxy.auth does not offer it on this network` | Add the network to `proxy.auth.networks`. |
 | 401 `login required` | The route has a login gate and you have no session. |
 | `403 "this route is only reachable from its own network"` on `/mcp` | The dashboard is on a private network and the client is outside. Use a public network for the web route. |

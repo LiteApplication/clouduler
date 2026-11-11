@@ -117,7 +117,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | GET | `/api/config` | user | none | Cluster config JSON | |
 | PUT | `/api/config` | admin | `{"config": {...}}` | 200 | Applies the config at once. |
 | POST | `/api/config/validate` | user | `{"config": {...}}` | `{valid, errors: [{path, message}]}` | |
-| POST | `/api/config/networks/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks, redirects, static routes, WireGuard and the `allowed_networks` of container networks. |
+| POST | `/api/config/networks/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks, redirects, static routes, WireGuard and the `access` lists of networks. |
 | GET | `/api/networks/{name}/status` | any | none | 200 | For a container network: `router` (stack, service, instance, node, ip, running, state `missing`, `down` or `up`) and `nodes`, each node's address on the shared segment. Empty for other kinds. 404 for an unknown network. |
 | POST | `/api/config/drives/{name}/rename` | admin | `{"new_name": "..."}` | 200 | Also rewrites stacks' volume mounts. |
 

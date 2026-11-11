@@ -165,6 +165,7 @@ There is no CLI command for networks themselves.
   {"key": "networks.NAME.subnet", "type": "CIDR", "reload": "live", "description": "Address range for node IPs. Required for internal and private, forbidden for egress, wireguard, nat and public. On a container network it is the address space routed through the router, not a range nodes have addresses in.", "quirks": "Every node IP on the network must be inside it (internal and private). The container overlay skips this range. A container network's range never reserves overlay space."},
   {"key": "networks.NAME.domain", "type": "DNS name", "reload": "live", "description": "Names under it resolve to node addresses on this network. Required for proxy routes and DNS on a public network. Forbidden for egress, wireguard, nat and container.", "quirks": "No leading or trailing dot, unique across networks. When Cloudflare is configured the domain must be inside a configured zone: DOMAIN is not covered by any configured cloudflare zone."},
   {"key": "networks.NAME.publish_dns", "type": "bool", "default": "true", "reload": "live", "description": "false keeps the network's hostnames out of Cloudflare; only the cluster DNS server answers them.", "quirks": "Only internal and private networks may set false. A public network always publishes."},
+  {"key": "networks.NAME.access", "type": "list of network names", "reload": "live", "description": "Networks this one may reach. Only on internal, private and container networks. See [Network access](#network-access).", "quirks": "A network always reaches itself and every public network. Absent means no host firewall for this source; `[]` or a list turns enforcement on."},
   {"key": "networks.NAME.container", "type": "map", "reload": "live", "description": "The router, the routed range and what the router side may reach. Required for, and only allowed on, a container network. Options in [Container networks](#container-networks).", "quirks": "A container network takes the routed range in its own `subnet`, and may not declare a node address."}
 ]} />
 
@@ -364,6 +365,64 @@ Import errors you may see (wrapped as `parsing wireguard config: ...`): `missing
 A rule opens the port on the tunnel interface only, not on the internal network or any other interface. Packets from the tunnel are dropped unless a rule or `open_ports` entry allows them.
 </Quirk>
 
+## Network access
+
+Networks are islands. A client on one network cannot use another network's routes unless you say so, and the host firewall can enforce it at layer 3. The `access` list on a network says which other networks its clients may reach. It is allowed on `internal`, `private` and `container` networks only (a public, egress, wireguard or nat network has no clients of its own).
+
+```yaml title="cluster.yaml (excerpt)"
+networks:
+  tailscale:
+    type: internal
+    subnet: 10.10.0.0/24
+    domain: int.example.com
+    access: [lan]            # tailscale clients may reach lan; nothing else private
+  lan:
+    type: private
+    subnet: 192.168.1.0/24
+    domain: lan.example.com
+    access: []               # lan reaches only itself and public networks
+  wan:
+    type: public
+    domain: example.com
+```
+
+The rule: network `a` reaches `b` when `a` is `b`, when `b` is public (public networks are reachable by everyone), or when `b` is in `a`'s `access`. Access is directed: `tailscale` listing `lan` says nothing about `lan` reaching `tailscale`.
+
+Targets may be internal, private, public or container networks. The config is refused when the list is on a network kind that cannot have it (`a public network has no clients of its own; access is only allowed on internal, private and container networks`), names an unknown network (`no network named X`), lists the network itself (`a network always reaches itself; remove it from its own access list`), lists one twice (`X is listed more than once`), or names an egress, wireguard or nat network (`X is a egress network, only internal, private, public and container networks can be reached`).
+
+An absent `access` and `access: []` differ in one place, the host firewall:
+
+| Where | `access` absent | `access: [..]` or `[]` |
+|---|---|---|
+| Proxy gate and client DNS (layer 7) | Own network and public networks | The same, plus the listed networks |
+| Host firewall (layer 3) | Nothing is dropped for this source | Traffic to every internal or private network not listed is dropped |
+
+### What it controls
+
+- **The proxy.** A route on network B is served to a client when the client's network reaches B. The gate admits the client's own subnet plus the subnet of every internal or private network whose `access` lists B. Anyone else gets `403 this route is only reachable from its own network`. See [Proxy and TLS](/docs/features/proxy-and-tls#network-gating-why-you-get-a-403).
+- **Client DNS** (`proxy.dns_server`). A client on network A is answered for a hostname on network B only when A reaches B, with the node's address on A (the [private-network shortcut](/docs/features/dns-publishing)) or, failing that, on B. Otherwise the name is `REFUSED`, never forwarded, so a name the cluster owns is not answered by public DNS either.
+- **Container networks.** The router side reaches what the container network's `access` lists. This replaces `container.allowed_networks`, which is still read (each entry is added to the network's `access`, merged and deduplicated with an existing list) but is no longer written back. The folding is one way: a stack on a listed network is still routed into the container network, but the listed network's own `access` is not changed.
+- **Saved logins.** A remembered IP address (`proxy.auth.remember_ip`) is saved under the client's own network, not the route's network, so that network must be the one listed.
+- **The host firewall.** See below.
+
+### Host firewall
+
+Every node enforces `access` for each internal or private network that has an `access` list, against every internal or private network it may not reach. Two chains are used, reconciled every 10 seconds (see [The firewall chains](#the-firewall-chains)):
+
+- `CLDR-NET` (filter, `INPUT`, before `CLDR-IN`) drops traffic from the source's subnet to this node's own address on a denied network.
+- `CLDR-NETF` (filter, `DOCKER-USER`, else `FORWARD`) drops traffic routed from the source's subnet to a denied subnet.
+
+Replies to allowed connections always flow: established and related packets, loopback traffic and the dashboard port (`web.port`) are never dropped. Limits to know:
+
+- IPv4 only. A network with an IPv6 subnet is not enforced.
+- If two subnets overlap, that pair is not enforced and the daemon logs a warning.
+- Container networks as targets are not handled by the host firewall; they have their own chains.
+- With nothing to drop, both chains are removed.
+
+### The settings graph
+
+In **Settings**, tab **Network**, the access lists are edited as a graph. Each network is a floating node you can drag around. Drag from a node's handle, or shift-drag, onto another node to add an edge (the source may now reach the target). Click an edge to remove it. Click a node to open its settings sheet, which has a **Can reach** picker for the same list and an **Unrestricted host firewall** button that clears `access` (absent: no host firewall for that source).
+
 ## Container networks
 
 A `container` network sends traffic for an address range through a **router container**, a container that you run yourself as an ordinary stack service. The classic router is a VPN client such as WireGuard, Tailscale or a gluetun-style container: it holds the tunnel, and Clouduler makes the right traffic go through it. The routed range can be a tailnet (`100.64.0.0/10`) or everything (`0.0.0.0/0`).
@@ -387,11 +446,11 @@ networks:
   tailnet:
     type: container
     subnet: 100.64.0.0/10        # the address space behind the router; 0.0.0.0/0 is allowed
+    access: [lan]                # networks the router side may reach (see Network access)
     container:
       stack: wireguard-router      # the stack that holds the router
       service: wireguard           # the service inside it (one replica)
       hosts: [atlas]               # nodes whose own traffic to subnet uses the router
-      allowed_networks: [lan]      # networks the router side may reach
       open_ports:
         - { port: 2222, protocol: tcp, target_port: 22 }   # target_port defaults to port
       proxy: true                  # the router side may reach the reverse proxy on 80/443
@@ -402,7 +461,7 @@ networks:
   {"key": "networks.NAME.container.service", "type": "str", "reload": "live", "required": true, "description": "Router service. It must run exactly one replica (no global mode, replicas at most 1).", "quirks": "Checked when the router stack is deployed. The router service must not list the container network itself: it is attached automatically."},
   {"key": "networks.NAME.subnet (container)", "type": "IPv4 CIDR", "reload": "live", "required": true, "description": "The address space behind the router, set on the network itself like any other subnet. 0.0.0.0/0 is allowed and makes the network a default route.", "quirks": "IPv4 only. The old `container.subnet` key is no longer accepted." A subnet that lies inside a node network subnet or inside 10.244.0.0/16, 10.245.0.0/16 or 10.246.0.0/16 is refused. A subnet that contains them (0.0.0.0/0, 10.0.0.0/8) is fine, because the more specific routes win."},
   {"key": "networks.NAME.container.hosts", "type": "list of node names", "default": "[]", "reload": "live", "description": "Nodes whose own traffic to subnet, and the traffic of all containers on them, goes through the router.", "quirks": "Each name must be a node. Hosts fail open: while the router is not running, their rules are removed and they use their normal routes."},
-  {"key": "networks.NAME.container.allowed_networks", "type": "list of network names", "default": "[]", "reload": "live", "description": "Internal, private and public networks the router side may reach: on each node, its address on the network, and for subnetted networks the whole subnet. Containers of stacks on these networks also reach subnet through the router.", "quirks": "Renaming a network in Settings also rewrites this list."},
+  {"key": "networks.NAME.access (container)", "type": "list of network names", "default": "[]", "reload": "live", "description": "Networks the router side may reach: on each node, its address on the network, and for subnetted networks the whole subnet. Containers of stacks on these networks also reach subnet through the router. It is the network-level `access` list described in [Network access](#network-access).", "quirks": "The old `container.allowed_networks` is still read and folded into `access` when the file is parsed, but it is never written back."},
   {"key": "networks.NAME.container.open_ports", "type": "list of {port, protocol, target_port}", "default": "[]", "reload": "live", "description": "Host ports the router side may reach. protocol defaults to tcp. target_port is the host port the traffic lands on, default port.", "quirks": "No duplicate port and protocol pair, and no port 0."},
   {"key": "networks.NAME.container.proxy", "type": "bool", "default": "false", "reload": "live", "description": "Let the router side reach the reverse proxy on ports 80 and 443 of every node."}
 ]} />
@@ -518,7 +577,7 @@ A container network's `subnet` is an IPv4 CIDR. IPv6 traffic is not routed throu
 </Quirk>
 
 <Quirk title="The proxy sees the node's segment address" severity="info">
-With `proxy: true`, router-side traffic to 80 and 443 is addressed to the node's own segment address, and a connection to such an address counts as a client of this container network and of its allowed networks, so the router side passes the network gate of a route published on an allowed network (the gate looks at the local address the connection was accepted on, not only at the peer). A route published on the container network itself is reachable only this way: every other client gets 403 `this route is only reachable from its own network`. Without `proxy: true` the ports are closed.
+With `proxy: true`, router-side traffic to 80 and 443 is addressed to the node's own segment address, and a connection to such an address counts as a client of this container network, so the router side passes the network gate of a route published on any network the container network's `access` lists (the gate looks at the local address the connection was accepted on, not only at the peer). A route published on the container network itself is reachable only this way: every other client gets 403 `this route is only reachable from its own network`. Without `proxy: true` the ports are closed.
 </Quirk>
 
 <Quirk title="Check the router before you rely on it" severity="warn">
@@ -542,6 +601,8 @@ Clouduler manages host firewall rules with iptables. It only touches chains with
 | `CLDR-WGIN-IFACE` (filter, nat) | Default deny from a WireGuard tunnel, then each ingress rule. Adds a DNAT to the node's internal IP when the target port differs. |
 | `CLDR-ALLOW` (filter, `DOCKER-USER`) | Enforces `allowed` entries with ports. Exists only when some stack has an `allowed` list. |
 | `CLDR-ALLOW-NAT` (nat, `PREROUTING`) | Sends a restricted stack's proxy traffic to this node's own proxy so the proxy can tell stacks apart. |
+| `CLDR-NET` (filter, `INPUT`, before `CLDR-IN`) | [Network access](#network-access): drops traffic from a restricted network's subnet to this node's own address on a network it may not reach. Replies, loopback and the dashboard port are exempt. |
+| `CLDR-NETF` (filter, `DOCKER-USER`, else `FORWARD`) | The same for traffic routed between the two subnets. |
 | `CLDR-CTN-NET` (filter, `INPUT`, before `CLDR-IN`) | [Container network](#container-networks), traffic from the router to this node: accepts replies, `open_ports`, and 80/443 with `proxy: true`; drops the rest. |
 | `CLDR-CTNF-NET` (filter, `DOCKER-USER`, else `FORWARD`) | The same for traffic the router forwards through the node, plus forwarding to the allowed subnets. |
 | `CLDR-CTNL2-BRIDGE` (filter, `DOCKER-USER`, else `FORWARD`) | Client isolation on a container network's segment: bridged frames are accepted only to or from the router and the node addresses. |
@@ -559,7 +620,7 @@ For a host process to reach a container on another node, Clouduler uses a relay 
 
 ## Rename a network
 
-Renaming rewrites the network everywhere: the cluster config, node address maps, `web.network`, every deployed stack, redirects, static routes, WireGuard ingress rules, sealed WireGuard secrets and the `allowed_networks` of container networks. Use the pencil button on the network card in Settings (it calls `POST /api/config/networks/NAME/rename` with `{"new_name": "..."}`). There is no CLI command.
+Renaming rewrites the network everywhere: the cluster config, node address maps, `web.network`, every deployed stack, redirects, static routes, WireGuard ingress rules, sealed WireGuard secrets and the `access` lists of every network. Use the pencil button on the network card in Settings (it calls `POST /api/config/networks/NAME/rename` with `{"new_name": "..."}`). There is no CLI command.
 
 <Quirk title="Rename is not atomic" severity="warn">
 The config changes first, then each stack is redeployed, then redirects, routes and ingress rules. If a later step fails, earlier ones are already committed. The error says which stack failed (`renaming network in stack STACK: ...`). Fix it and retry. A rename is refused if the new name exists, if the result does not validate, or if two stacks would end up sharing an overlay name.

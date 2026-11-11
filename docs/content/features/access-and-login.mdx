@@ -237,7 +237,7 @@ Cookies the gate uses (all HttpOnly, SameSite=Lax): `cl_proxy_portal` on the por
 
 **Cloudflare proxy.** On the **Service login** settings page, **Proxy the portal through Cloudflare** (`proxy.auth.cloudflare_proxy`, off by default) publishes the portal's DNS records with Cloudflare's proxy on. It only affects the public networks you listed, and the checkbox appears only when one is listed. It follows the same rule as route hostnames: see `cloudflare_proxy` in [Proxy and TLS](/docs/features/proxy-and-tls).
 
-**Remember this IP address.** Networks listed in `proxy.auth.remember_ip` offer a checkbox "Let visitors remember their IP address". A visitor whose address is inside that network is then trusted for `remember_ip_ttl` (default 30 days). Everyone sharing that address, such as everyone behind a NAT router, is let in too. Off by default.
+**Remember this IP address.** Networks listed in `proxy.auth.remember_ip` offer a checkbox "Let visitors remember their IP address". A visitor whose own network (the network whose subnet holds their address, not the route's network) is listed is then trusted for `remember_ip_ttl` (default 30 days). Everyone sharing that address, such as everyone behind a NAT router, is let in too. Off by default.
 
 <Quirk title="Internal callers skip the login" severity="warn">
 `allow_internal` defaults to true. Containers on the cluster's networks reach a protected app without logging in. Set it to false on routes where that matters.

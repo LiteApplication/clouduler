@@ -151,8 +151,10 @@ resolve to any node. That means a route published on a `private` (or
 `internal`) network would otherwise be reachable from any interface a node
 has, including a public one. To prevent that, every route built from a
 network with a subnet (`internal` or `private`) only accepts a connection
-whose real TCP peer address falls inside that subnet; anything else gets
-`403`. A route on a `public` network has no subnet and so no restriction —
+whose real TCP peer address falls inside that subnet, or inside the subnet of
+an internal or private network whose `access` lists it
+(`allowed_subnets` in `cl_daemon::proxy`, `gate_by_network` in
+`cl-proxy`); anything else gets `403`. A route on a `public` network has no subnet and so no restriction —
 it is meant to be reachable from anywhere.
 
 This is a check on the actual socket peer, not a header, so it cannot be
@@ -266,7 +268,7 @@ session that produced it (`session_ttl`, fixed at login).
 **Remembering an IP address.** On the networks listed in `remember_ip`, the
 login page shows a "Remember this IP address" checkbox, and ticking it asks for
 confirmation before logging in. The checkbox only appears when the visitor's
-TCP peer address belongs to that network: inside its subnet for an internal or
+TCP peer address belongs to that network (the client's own network, not the route's, so the key is the network `ClusterConfig::client_network` finds): inside its subnet for an internal or
 private network, a globally routable address for a public one (never a header,
 so it cannot be spoofed). A network not listed offers nothing, and a saved
 address stops working if its network is removed from the list. The saved
@@ -407,6 +409,7 @@ client's source address (`ClusterConfig::client_network`): the subnetted
 network whose subnet holds it, else the public network for a globally
 routable address. Answers follow:
 
+- A client on network A is answered for a hostname on network B only when `reaches(A, B)` (`ClusterConfig::reaches`): A is B, B is public, or B is in A's `networks.A.access`. Otherwise the name is `REFUSED`, never forwarded.
 - A hostname on a **public** network is answered to everyone (a route can set `private_shortcut: false` to skip the next sentence's shortcut and answer private clients with the route's own address). A client inside
   a private network gets each serving node's address *on that network* (a LAN
   client gets the node's LAN address, so it skips the router and the proxy
@@ -414,7 +417,8 @@ routable address. Answers follow:
   with no address on the client's network falls back to its address on the
   route's network.
 - A hostname on a **subnetted** network is answered only to clients inside
-  that subnet, exactly the proxy's network gate. Anyone else gets `REFUSED`.
+  that subnet or inside a network whose `access` lists it, exactly the
+  proxy's network gate. Anyone else gets `REFUSED`.
 - Which nodes are named follows `proxy.dns_publish`, and the web ui hostname
   names the leader alone, as in the published records.
 - Names the cluster does not own are forwarded to `proxy.dns_server.upstream`
