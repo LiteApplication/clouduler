@@ -1157,7 +1157,7 @@ async fn a_subnet_restricted_route_is_gated_for_h2_clients_by_their_socket_addre
         None,
         backend,
         RouteOptions {
-            allowed_subnet: Some("10.0.0.0/8".parse().unwrap()),
+            allowed_subnets: vec!["10.0.0.0/8".parse().unwrap()],
             ..RouteOptions::permissive()
         },
     );
@@ -1173,7 +1173,7 @@ async fn a_subnet_restricted_route_is_gated_for_h2_clients_by_their_socket_addre
         None,
         backend,
         RouteOptions {
-            allowed_subnet: Some("127.0.0.0/8".parse().unwrap()),
+            allowed_subnets: vec!["127.0.0.0/8".parse().unwrap()],
             ..RouteOptions::permissive()
         },
     );

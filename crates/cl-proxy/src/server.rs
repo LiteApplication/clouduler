@@ -413,7 +413,7 @@ fn status_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 }
 
 /// Rejects a request whose TCP peer does not sit inside the route's
-/// `allowed_subnet`, or one of its `trusted_overlay_subnets` (see that
+/// `allowed_subnets`, or one of its `trusted_overlay_subnets` (see that
 /// field's doc for why a same-node client needs the latter). A route with no
 /// restriction (a public network) always passes. This is a check on the real
 /// socket peer, not a header, so it cannot be spoofed by a client claiming a
@@ -434,9 +434,15 @@ fn gate_by_network(
             "this route is only reachable from its own network",
         ));
     }
-    let subnet = route.options.allowed_subnet?;
+    if route.options.allowed_subnets.is_empty() {
+        return None;
+    }
     if via_router
-        || subnet.contains(&peer.ip())
+        || route
+            .options
+            .allowed_subnets
+            .iter()
+            .any(|s| s.contains(&peer.ip()))
         || route
             .options
             .trusted_overlay_subnets
@@ -1105,7 +1111,7 @@ mod tests {
         let ctn: IpAddr = "10.244.9.2".parse().unwrap();
         let router_peer: SocketAddr = "10.244.9.5:4000".parse().unwrap();
         let route = gated_route(RouteOptions {
-            allowed_subnet: Some(lan),
+            allowed_subnets: vec![lan],
             local_clients: crate::LocalClients {
                 addrs: vec![ctn],
                 only: false,
@@ -1119,6 +1125,21 @@ mod tests {
         assert!(gate_by_network(&route, router_peer, None).is_some());
         // An in-subnet peer still passes on its own.
         assert!(gate_by_network(&route, "192.168.1.7:1".parse().unwrap(), None).is_none());
+    }
+
+    #[test]
+    fn a_route_admits_any_allowed_subnet_and_no_subnets_means_public() {
+        let lan: ipnet::IpNet = "192.168.1.0/24".parse().unwrap();
+        let ts: ipnet::IpNet = "10.10.0.0/24".parse().unwrap();
+        let route = gated_route(RouteOptions {
+            allowed_subnets: vec![lan, ts],
+            ..RouteOptions::permissive()
+        });
+        assert!(gate_by_network(&route, "192.168.1.7:1".parse().unwrap(), None).is_none());
+        assert!(gate_by_network(&route, "10.10.0.7:1".parse().unwrap(), None).is_none());
+        assert!(gate_by_network(&route, "203.0.113.5:1".parse().unwrap(), None).is_some());
+        let public = gated_route(RouteOptions::permissive());
+        assert!(gate_by_network(&public, "203.0.113.5:1".parse().unwrap(), None).is_none());
     }
 
     #[test]

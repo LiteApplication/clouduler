@@ -40,11 +40,40 @@ use ipnet::IpNet;
 use tracing::{info, warn};
 
 /// Restricts a route to clients on `network`, when that network is subnetted
-/// (internal or private). A public network is reachable from anywhere, so it
-/// gets no restriction.
-fn allowed_subnet(cfg: &ClusterConfig, network: &str) -> Option<IpNet> {
-    let net = cfg.networks.get(network)?;
-    net.kind.is_subnetted().then_some(net.subnet).flatten()
+/// (internal or private): its own subnet plus the subnet of every subnetted
+/// network whose `access` lists it. A public network is reachable from
+/// anywhere, so it gets no restriction (an empty list).
+fn allowed_subnets(cfg: &ClusterConfig, network: &str) -> Vec<IpNet> {
+    let Some(net) = cfg.networks.get(network) else {
+        return Vec::new();
+    };
+    if !net.kind.is_subnetted() {
+        return Vec::new();
+    }
+    let mut out: Vec<IpNet> = net.subnet.into_iter().collect();
+    for (name, other) in &cfg.networks {
+        if name != network && other.kind.is_subnetted() && cfg.reaches(name, network) {
+            out.extend(other.subnet);
+        }
+    }
+    out
+}
+
+/// `network` plus every other network that reaches it, the networks whose
+/// clients a route on `network` serves.
+fn client_networks<'a>(cfg: &'a ClusterConfig, network: &'a str) -> Vec<&'a str> {
+    let mut out = vec![network];
+    out.extend(
+        cfg.networks
+            .iter()
+            .filter(|(name, net)| {
+                name.as_str() != network
+                    && net.kind != NetworkKind::Public
+                    && cfg.reaches(name, network)
+            })
+            .map(|(name, _)| name.as_str()),
+    );
+    out
 }
 
 /// Overlay names of every deployed stack whose overlay network (the one the
@@ -77,7 +106,10 @@ fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &
         Some(allocations) => {
             // Exact keys from state, never a parse of the overlay name back:
             // `x_a_b` is stack `x` on `a_b` as much as stack `x_a` on `b`.
-            let overlays = overlays_on_network(cfg, state, network);
+            let overlays: Vec<String> = client_networks(cfg, network)
+                .into_iter()
+                .flat_map(|n| overlays_on_network(cfg, state, n))
+                .collect();
             allocations
                 .subnets_of_overlays(overlays.iter().map(String::as_str))
                 .map(IpNet::V4)
@@ -107,7 +139,7 @@ fn local_clients(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> Lo
     let mut addrs = Vec::new();
     if let Some(allocations) = Allocations::decode(state.overlay.as_deref()) {
         for (name, _) in cfg.container_networks() {
-            if name != network && !cfg.access_of(name).iter().any(|n| n == network) {
+            if !cfg.reaches(name, network) {
                 continue;
             }
             let segment = cl_net::container_net::container_docker_name(name);
@@ -595,7 +627,7 @@ fn routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> {
                     preserve_host: entry.preserve_host,
                     response_timeout: entry.response_timeout,
                     http2: entry.http2,
-                    allowed_subnet: allowed_subnet(cfg, &entry.network),
+                    allowed_subnets: allowed_subnets(cfg, &entry.network),
                     trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
                     local_clients: local_clients(cfg, state, &entry.network),
                     network: Some(entry.network.clone()),
@@ -637,7 +669,7 @@ fn redirect_routes_for(cfg: &ClusterConfig, state: &ClusterState) -> Vec<Route> 
                 Vec::new(),
             )
             .with_options(RouteOptions {
-                allowed_subnet: allowed_subnet(cfg, &rule.network),
+                allowed_subnets: allowed_subnets(cfg, &rule.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &rule.network),
                 local_clients: local_clients(cfg, state, &rule.network),
                 network: Some(rule.network.clone()),
@@ -687,10 +719,10 @@ fn dashboard_route(cfg: &ClusterConfig, state: &ClusterState) -> Option<Route> {
             // No body cap and no response timeout: a stack file upload can be
             // large, and the event stream never returns headers late but does
             // stay open indefinitely.
-            allowed_subnet: allowed_subnet(cfg, &cfg.web.network),
+            allowed_subnets: allowed_subnets(cfg, &cfg.web.network),
             // A client (e.g. an MCP client container) on the node serving the
             // dashboard reaches the proxy with its raw overlay address, which
-            // is outside `allowed_subnet`; see `trusted_overlay_subnets`.
+            // is outside `allowed_subnets`; see `trusted_overlay_subnets`.
             trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &cfg.web.network),
             local_clients: local_clients(cfg, state, &cfg.web.network),
             network: Some(cfg.web.network.clone()),
@@ -752,7 +784,7 @@ async fn static_backend_routes(cfg: &ClusterConfig, state: &ClusterState) -> Vec
                 preserve_host: entry.preserve_host,
                 response_timeout: entry.response_timeout,
                 http2: false,
-                allowed_subnet: allowed_subnet(cfg, &entry.network),
+                allowed_subnets: allowed_subnets(cfg, &entry.network),
                 trusted_overlay_subnets: trusted_overlay_subnets(cfg, state, &entry.network),
                 local_clients: local_clients(cfg, state, &entry.network),
                 network: Some(entry.network.clone()),
@@ -1767,8 +1799,9 @@ services:
 
         assert!(route
             .options
-            .allowed_subnet
-            .is_some_and(|s| !s.contains(&container_peer)));
+            .allowed_subnets
+            .iter()
+            .all(|s| !s.contains(&container_peer)));
         assert!(route
             .options
             .trusted_overlay_subnets
@@ -1858,10 +1891,8 @@ services:
           port: 80
 ";
         let routes = service_routes(&cfg(), &state_with(LAN_SPEC, 1));
-        let subnet = routes[0]
-            .options
-            .allowed_subnet
-            .expect("private network is gated");
+        let subnet = routes[0].options.allowed_subnets[0];
+        assert_eq!(routes[0].options.allowed_subnets.len(), 1);
         assert!(subnet.contains(&std::net::IpAddr::from([192, 168, 1, 50])));
         assert!(!subnet.contains(&std::net::IpAddr::from([8, 8, 8, 8])));
     }
@@ -1901,8 +1932,9 @@ services:
 
         assert!(route
             .options
-            .allowed_subnet
-            .is_some_and(|s| !s.contains(&container_peer)));
+            .allowed_subnets
+            .iter()
+            .all(|s| !s.contains(&container_peer)));
         assert!(route
             .options
             .trusted_overlay_subnets
@@ -1985,8 +2017,9 @@ services:
 
         assert!(route
             .options
-            .allowed_subnet
-            .is_some_and(|s| !s.contains(&nat_peer)));
+            .allowed_subnets
+            .iter()
+            .all(|s| !s.contains(&nat_peer)));
         assert!(route
             .options
             .trusted_overlay_subnets
@@ -1997,7 +2030,7 @@ services:
     #[test]
     fn a_route_on_the_public_network_is_not_gated() {
         let routes = service_routes(&cfg(), &state_with(SPEC, 1));
-        assert_eq!(routes[0].options.allowed_subnet, None);
+        assert!(routes[0].options.allowed_subnets.is_empty());
     }
 
     #[test]
@@ -2091,7 +2124,7 @@ services:
             routes[0].backends(),
             &[SocketAddr::from(([127, 0, 0, 1], 9999))]
         );
-        assert!(routes[0].options.allowed_subnet.is_some());
+        assert!(!routes[0].options.allowed_subnets.is_empty());
     }
 
     #[test]
@@ -2354,11 +2387,28 @@ services:
             vec![std::net::IpAddr::V4(n1), std::net::IpAddr::V4(n2)]
         );
         assert!(!lan.only);
-        // `wan` is not allowed: nothing arriving through the router counts.
-        assert!(local_clients(&cfg, &state, "wan").addrs.is_empty());
+        // A network the container network does not list gets nothing.
+        let mut other = cfg.clone();
+        other.networks.get_mut("tailnet").unwrap().access = Some(Vec::new());
+        assert!(local_clients(&other, &state, "lan").addrs.is_empty());
         // A route on the container network itself is for its clients only.
         let own = local_clients(&cfg, &state, "tailnet");
         assert!(own.only);
         assert_eq!(own.addrs.len(), 2);
+    }
+
+    #[test]
+    fn a_route_admits_the_subnets_of_networks_whose_access_lists_it() {
+        let mut cfg = cfg();
+        let lan = cfg.networks["lan"].subnet.unwrap();
+        let ts = cfg.networks["tailscale"].subnet.unwrap();
+        assert_eq!(allowed_subnets(&cfg, "lan"), vec![lan]);
+
+        cfg.networks.get_mut("tailscale").unwrap().access = Some(vec!["lan".into()]);
+        assert_eq!(allowed_subnets(&cfg, "lan"), vec![lan, ts]);
+        // The grant is one way: tailscale's own route does not admit lan.
+        assert_eq!(allowed_subnets(&cfg, "tailscale"), vec![ts]);
+        // A public route is ungated.
+        assert!(allowed_subnets(&cfg, "wan").is_empty());
     }
 }

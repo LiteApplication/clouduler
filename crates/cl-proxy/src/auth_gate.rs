@@ -244,40 +244,44 @@ impl AuthGate {
         self.key_rx.borrow().clone()
     }
 
-    /// Whether `ip` may be saved on `network` right now: the network offers
-    /// it and the address is one of that network's own clients.
-    fn can_remember(&self, network: &str, ip: IpAddr) -> bool {
+    /// The network `ip` is a client of, whatever the portal or route it is
+    /// talking to belongs to.
+    fn client_net(&self, ip: IpAddr) -> Option<String> {
+        self.config_rx.borrow().client_network(ip).map(str::to_string)
+    }
+
+    /// The client network `ip` may be saved under right now: the one whose
+    /// own clients include it, when that network offers saving addresses.
+    fn can_remember(&self, ip: IpAddr) -> Option<String> {
         let cfg = self.config_rx.borrow();
+        let net = cfg.client_network(ip)?;
         cfg.proxy
             .auth
             .as_ref()
-            .is_some_and(|a| a.remembers_ip(network))
-            && cfg.ip_in_network(network, ip)
+            .is_some_and(|a| a.remembers_ip(net))
+            .then(|| net.to_string())
     }
 
     fn remember_offer(
         &self,
         settings: &ProxyAuthConfig,
-        network: &str,
         peer: IpAddr,
         callback: Option<&str>,
     ) -> Option<RememberOffer> {
-        self.can_remember(network, peer).then(|| RememberOffer {
+        self.can_remember(peer).map(|network| RememberOffer {
             ip: peer.to_canonical(),
-            network: network.to_string(),
+            network,
             lasts: human_duration(settings.remember_ip_ttl),
             callback: callback.map(str::to_string),
         })
     }
 
-    /// The saved login for `ip` on `network`, if it is still valid and the
-    /// network still offers saving addresses.
-    async fn trusted_ip(&self, network: &str, ip: IpAddr) -> Option<ProxySessionRecord> {
-        if !self.can_remember(network, ip) {
-            return None;
-        }
-        let key = trusted_key(network, ip);
-        let host = trusted_host(network, ip);
+    /// The saved login for `ip`, keyed by the client's own network, if it is
+    /// still valid and that network still offers saving addresses.
+    async fn trusted_ip(&self, ip: IpAddr) -> Option<ProxySessionRecord> {
+        let network = self.can_remember(ip)?;
+        let key = trusted_key(&network, ip);
+        let host = trusted_host(&network, ip);
         let now = now_unix() as i64;
         self.cluster
             .read(|state| {
@@ -402,7 +406,7 @@ impl AuthGate {
         let Portal {
             auth: settings,
             fqdn: portal,
-            network,
+            ..
         } = portal;
         let Some(host) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) else {
             return GateOutcome::Respond(status_response(
@@ -435,7 +439,7 @@ impl AuthGate {
                 &format!("{scheme}://{host}{}", return_target(req.uri())),
             ));
         }
-        if let Some(saved) = self.trusted_ip(&network, peer).await {
+        if let Some(saved) = self.trusted_ip(peer).await {
             if permitted(policy, &saved.groups) {
                 return GateOutcome::Allow;
             }
@@ -558,7 +562,6 @@ impl AuthGate {
         let safe_callback = callback.and_then(|c| parse_callback(c, routes, &network));
         let offer = self.remember_offer(
             &settings,
-            &network,
             peer,
             safe_callback.as_ref().map(|c| c.url.as_str()),
         );
@@ -602,7 +605,7 @@ impl AuthGate {
                     .await
             }
             (&Method::GET | &Method::HEAD | &Method::POST, "/logout") => {
-                self.portal_logout(req, &portal, safe_callback.map(|c| c.url), &network, peer)
+                self.portal_logout(req, &portal, safe_callback.map(|c| c.url), peer)
                     .await
             }
             _ => status_response(StatusCode::NOT_FOUND, "not found"),
@@ -715,16 +718,17 @@ impl AuthGate {
         req: &Request<Incoming>,
         portal: &str,
         callback: Option<String>,
-        network: &str,
         peer: IpAddr,
     ) -> Response<ProxyBody> {
         // Signing out also forgets this address, or "sign out" on a shared
         // machine would leave the door open.
-        let _ = self
-            .submit(RaftRequest::RemoveProxySession {
-                key: trusted_key(network, peer),
-            })
-            .await;
+        if let Some(client) = self.client_net(peer) {
+            let _ = self
+                .submit(RaftRequest::RemoveProxySession {
+                    key: trusted_key(&client, peer),
+                })
+                .await;
+        }
         if let Some(id) = extract_cookie(req.headers(), PORTAL_COOKIE_NAME) {
             if id.len() == ID_LEN {
                 let _ = self
@@ -876,18 +880,21 @@ impl AuthGate {
         // Save the address only if it is the one the visitor agreed to and is
         // still allowed to be saved: the browser may have moved networks, or
         // the network's setting may have changed, during the round trip.
-        if pending.remember_ip.as_deref() == Some(peer.to_canonical().to_string().as_str())
-            && self.can_remember(network, peer)
-        {
+        let client = pending
+            .remember_ip
+            .as_deref()
+            .filter(|ip| *ip == peer.to_canonical().to_string().as_str())
+            .and_then(|_| self.can_remember(peer));
+        if let Some(client) = client {
             let saved = ProxySessionRecord {
-                host: trusted_host(network, peer),
+                host: trusted_host(&client, peer),
                 expires_at: now
                     + settings.remember_ip_ttl.as_secs().min(i64::MAX as u64 / 2) as i64,
                 ..record.clone()
             };
             if let Err(e) = self
                 .submit(RaftRequest::PutProxySession {
-                    key: trusted_key(network, peer),
+                    key: trusted_key(&client, peer),
                     session: saved,
                     now,
                 })

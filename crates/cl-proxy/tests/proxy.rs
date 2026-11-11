@@ -617,7 +617,7 @@ async fn a_route_restricted_to_a_subnet_that_excludes_the_client_is_forbidden() 
     let addr = serve_route(plain_route(
         backend,
         cl_proxy::RouteOptions {
-            allowed_subnet: Some("10.0.0.0/8".parse().unwrap()),
+            allowed_subnets: vec!["10.0.0.0/8".parse().unwrap()],
             ..cl_proxy::RouteOptions::permissive()
         },
     ))
@@ -633,7 +633,7 @@ async fn a_route_restricted_to_a_subnet_that_includes_the_client_is_served() {
     let addr = serve_route(plain_route(
         backend,
         cl_proxy::RouteOptions {
-            allowed_subnet: Some("127.0.0.0/8".parse().unwrap()),
+            allowed_subnets: vec!["127.0.0.0/8".parse().unwrap()],
             ..cl_proxy::RouteOptions::permissive()
         },
     ))

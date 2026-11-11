@@ -36,16 +36,17 @@ pub struct RouteOptions {
     /// Speak h2c (HTTP/2 with prior knowledge) to the backend, for gRPC.
     pub http2: bool,
     /// Restricts this route to clients whose TCP peer address falls inside
-    /// this subnet. Set for a route published on an internal or private
-    /// network; `None` for a public one, which is reachable from anywhere.
-    pub allowed_subnet: Option<IpNet>,
+    /// one of these subnets: the route network's own and those of the
+    /// networks that reach it. Empty for a public network, which is
+    /// reachable from anywhere.
+    pub allowed_subnets: Vec<IpNet>,
     /// Additional subnets a client may connect from even when outside
-    /// `allowed_subnet`: the overlay subnets of every stack published on
+    /// `allowed_subnets`: the overlay subnets of every stack published on
     /// this route's network. A same-node client and backend on that network
     /// can have their traffic delivered locally by the kernel rather than
     /// actually traversing the network, so the peer address `gate_by_network`
     /// sees is the client's raw overlay address, not one inside
-    /// `allowed_subnet`. Always empty for a public route (`allowed_subnet` is
+    /// `allowed_subnets`. Always empty for a public route (`allowed_subnets` is
     /// `None`, so this is never consulted).
     pub trusted_overlay_subnets: Vec<IpNet>,
     /// The cluster network this route is published on. A caller whose stack
@@ -67,7 +68,7 @@ pub struct LocalClients {
     /// is this network or lists it in `access`.
     pub addrs: Vec<IpAddr>,
     /// The route is published on a container network itself: only `addrs`
-    /// may reach it, regardless of `allowed_subnet`.
+    /// may reach it, regardless of `allowed_subnets`.
     pub only: bool,
 }
 
