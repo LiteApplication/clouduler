@@ -856,6 +856,7 @@ mod tests {
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                access: None,
                 container: None,
             },
         );
@@ -866,6 +867,7 @@ mod tests {
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                access: None,
                 container: None,
             },
         );

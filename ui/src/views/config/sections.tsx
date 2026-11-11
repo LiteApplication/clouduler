@@ -92,6 +92,12 @@ function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newName: st
     }),
   );
 
+  for (const [n, c] of Object.entries(networks)) {
+    if (c.access?.includes(oldName)) {
+      networks[n] = { ...c, access: c.access.map((a) => (a === oldName ? newName : a)) };
+    }
+  }
+
   return {
     ...draft,
     networks,
@@ -294,6 +300,8 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               value={net.container ?? emptyContainer()}
               onChange={(container) => updateNetwork(name, { container })}
               draft={draft}
+              access={net.access ?? []}
+              onAccessChange={(access) => updateNetwork(name, { access })}
               disabled={disabled}
             />
           )}
@@ -952,7 +960,7 @@ export function NodeCard({
 }
 
 export function emptyContainer(): ContainerNetwork {
-  return { stack: '', service: '', hosts: [], allowed_networks: [], open_ports: [], proxy: false };
+  return { stack: '', service: '', hosts: [], open_ports: [], proxy: false };
 }
 
 /** Service names of a stack spec (compose yaml); null when it can't be parsed. */
@@ -1012,12 +1020,16 @@ function ContainerNetworkForm({
   value,
   onChange,
   draft,
+  access,
+  onAccessChange,
   disabled,
 }: {
   name: string;
   value: ContainerNetwork;
   onChange: (c: ContainerNetwork) => void;
   draft: ClusterConfig;
+  access: string[];
+  onAccessChange: (access: string[]) => void;
   disabled: boolean;
 }) {
   const cluster = useClusterState();
@@ -1083,8 +1095,8 @@ function ContainerNetworkForm({
       <MultiPick
         label="Networks the router may reach"
         options={allowedOptions}
-        selected={value.allowed_networks ?? []}
-        onChange={(allowed_networks) => set({ allowed_networks })}
+        selected={access}
+        onChange={onAccessChange}
         disabled={disabled}
         empty="No internal, private or public network to allow."
       />

@@ -97,7 +97,7 @@ fn trusted_overlay_subnets(cfg: &ClusterConfig, state: &ClusterState, network: &
 /// Clients of `network` that arrive through a container network's router:
 /// their connections land on the node's own address on that network's
 /// segment, so the local address is the identity. Every container network
-/// that is `network` or lists it in `allowed_networks` contributes its nodes'
+/// that is `network` or lists it in `access` contributes its nodes'
 /// segment addresses.
 fn local_clients(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> LocalClients {
     let only = cfg
@@ -106,8 +106,8 @@ fn local_clients(cfg: &ClusterConfig, state: &ClusterState, network: &str) -> Lo
         .is_some_and(|n| n.kind == NetworkKind::Container);
     let mut addrs = Vec::new();
     if let Some(allocations) = Allocations::decode(state.overlay.as_deref()) {
-        for (name, c) in cfg.container_networks() {
-            if name != network && !c.allowed_networks.iter().any(|n| n == network) {
+        for (name, _) in cfg.container_networks() {
+            if name != network && !cfg.access_of(name).iter().any(|n| n == network) {
                 continue;
             }
             let segment = cl_net::container_net::container_docker_name(name);
@@ -1974,6 +1974,7 @@ services:
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                access: None,
                 container: None,
             },
         );

@@ -101,7 +101,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
     maps: ['.networks', '.drives', '.nodes', '.nodes.*.network', '.nodes.*.drives'],
     optional: [
       '.cloudflare', '.self_update', '.backup', '.proxy.acme.contact_email', '.proxy.acme.directory_url',
-      '.proxy.auth', '.auth.oidc', '.networks.*.subnet', '.networks.*.domain', '.networks.*.publish_dns', '.networks.*.container', '.networks.*.container.proxy',
+      '.proxy.auth', '.auth.oidc', '.networks.*.subnet', '.networks.*.domain', '.networks.*.publish_dns', '.networks.*.access', '.networks.*.container', '.networks.*.container.proxy',
       '.drives.*.served_by', '.drives.*.failback', '.nodes.*.data_dir', '.nodes.*.docker_data_dir', '.nodes.*.last_resort',
       '.nodes.*.generate_secret_key',
     ],

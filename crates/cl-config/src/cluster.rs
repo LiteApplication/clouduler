@@ -18,6 +18,7 @@ pub const DEFAULT_RPC_PORT: u16 = 7373;
 #[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     pub cluster: ClusterMeta,
+    #[serde(deserialize_with = "deserialize_networks")]
     pub networks: BTreeMap<String, Network>,
     #[serde(default)]
     pub drives: BTreeMap<String, Drive>,
@@ -403,6 +404,14 @@ pub struct Network {
     /// Required for, and only allowed on, a `container` network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerNetwork>,
+    /// Networks this one may reach, allowed on internal, private and
+    /// container networks. Absent means no host firewall for this source
+    /// network (legacy, unrestricted at L3) and only its own network plus
+    /// public networks at L7; `[]` or a list turns enforcement on. A network
+    /// always reaches itself, and public networks are implicitly reachable by
+    /// everyone. See [`ClusterConfig::reaches`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Vec<String>>,
 }
 
 /// A `container` network: the router and what its side may reach. The routed
@@ -417,8 +426,10 @@ pub struct ContainerNetwork {
     /// Nodes whose host-level traffic to `subnet` goes through the router.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
-    /// internal/private/public networks the router side may reach.
-    #[serde(default)]
+    /// Legacy: deserialize-only, never serialized. Folded into the network's
+    /// `access` while parsing (see [`deserialize_networks`]) and then empty,
+    /// so everything reads `access` instead.
+    #[serde(default, skip_serializing)]
     pub allowed_networks: Vec<String>,
     /// Host ports the router side may reach.
     #[serde(default)]
@@ -454,6 +465,36 @@ impl std::ops::Deref for ContainerView<'_> {
     fn deref(&self) -> &ContainerNetwork {
         self.container
     }
+}
+
+/// Deserializes `networks` and folds the legacy `container.allowed_networks`
+/// into network-level `access`: each entry X of container network C is added
+/// to `C.access` (created when absent, deduplicated), then the legacy list is
+/// cleared. Going through the field's deserializer means every construction
+/// path (YAML, JSON, raft state, API bodies) is normalized.
+///
+/// Reverse direction, deliberately not folded: `X.access` is NOT touched.
+/// stack_sources keeps routing X's stacks into C when C.access contains X.
+fn deserialize_networks<'de, D>(d: D) -> std::result::Result<BTreeMap<String, Network>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut networks = BTreeMap::<String, Network>::deserialize(d)?;
+    for net in networks.values_mut() {
+        if let Some(c) = net.container.as_mut() {
+            if c.allowed_networks.is_empty() {
+                continue;
+            }
+            let legacy = std::mem::take(&mut c.allowed_networks);
+            let access = net.access.get_or_insert_with(Vec::new);
+            for x in legacy {
+                if !access.contains(&x) {
+                    access.push(x);
+                }
+            }
+        }
+    }
+    Ok(networks)
 }
 
 impl Network {
@@ -1346,6 +1387,26 @@ impl ClusterConfig {
 
     pub fn node(&self, name: &str) -> Option<&Node> {
         self.nodes.get(name)
+    }
+
+    /// The `access` list of network `name`; empty when absent or unknown.
+    pub fn access_of(&self, name: &str) -> &[String] {
+        self.networks
+            .get(name)
+            .and_then(|n| n.access.as_deref())
+            .unwrap_or(&[])
+    }
+
+    /// Whether traffic from network `from` may reach network `to`: always for
+    /// itself, always for a public `to`, otherwise when `from`'s `access`
+    /// lists `to`. An absent `access` counts as empty here.
+    pub fn reaches(&self, from: &str, to: &str) -> bool {
+        from == to
+            || self
+                .networks
+                .get(to)
+                .is_some_and(|n| n.kind == NetworkKind::Public)
+            || self.access_of(from).iter().any(|n| n == to)
     }
 
     /// Names of every network of kind `Egress`, `Wireguard` or `Nat`, the

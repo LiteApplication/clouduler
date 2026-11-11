@@ -70,10 +70,6 @@ pub fn plan(
     }
 
     if let Some(net) = cfg.container_router_of(&instance.stack, &instance.service) {
-        let c = cfg.networks[net]
-            .container
-            .as_ref()
-            .expect("router_of only names networks with a container block");
         let key = container_docker_name(net);
         let ip = allocations
             .and_then(|a| a.instance_ip(&key, instance))
@@ -81,7 +77,7 @@ pub fn plan(
 
         let mut node_dests: Vec<(Ipv4Addr, Ipv4Addr)> = Vec::new();
         let mut subnets = Vec::new();
-        for allowed in &c.allowed_networks {
+        for allowed in cfg.access_of(net) {
             let Some(network) = cfg.networks.get(allowed) else {
                 continue;
             };

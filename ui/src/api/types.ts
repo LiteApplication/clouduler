@@ -867,8 +867,6 @@ export interface ContainerNetwork {
   service: string;
   /** Absent = empty. Nodes whose host-level traffic to the network's `subnet` uses the router. */
   hosts?: string[];
-  /** Absent = empty. internal/private/public networks the router side may reach. */
-  allowed_networks?: string[];
   /** Absent = empty. */
   open_ports?: ContainerOpenPort[];
   /** Let the router reach the reverse proxy on 80/443. Absent = false. */
@@ -884,6 +882,12 @@ export interface NetworkConfig {
   publish_dns?: boolean;
   /** Present iff `type` is `container`. */
   container?: ContainerNetwork | null;
+  /** Networks this one may reach (internal, private and container networks
+   *  only carry it). Absent = unrestricted at the host firewall and only its
+   *  own network plus public networks at the proxy; `[]` or a list turns
+   *  enforcement on. A network always reaches itself and public networks are
+   *  implicitly reachable. */
+  access?: string[] | null;
 }
 
 export type DriveModeConfig = 'replicated' | 'served';

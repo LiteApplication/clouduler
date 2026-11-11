@@ -114,6 +114,7 @@ pub(crate) async fn harness() -> Harness {
                 subnet: None,
                 domain: None,
                 publish_dns: true,
+                access: None,
                 container: None,
             },
         )]),
@@ -1426,6 +1427,7 @@ async fn renaming_a_network_into_an_overlay_collision_is_rejected() {
                     subnet: None,
                     domain: None,
                     publish_dns: true,
+                    access: None,
                     container: None,
                 },
             );
@@ -2253,6 +2255,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                 subnet: Some("100.64.0.0/10".parse().unwrap()),
                 domain: None,
                 publish_dns: true,
+                access: Some(vec!["internal".to_string()]),
                 container: Some(cl_config::ContainerNetwork {
                     stack: "web".to_string(),
                     service: "app".to_string(),

@@ -64,7 +64,7 @@ pub struct RouteOptions {
 pub struct LocalClients {
     /// Local addresses (every node's `X_ctn`) whose connections count as
     /// clients of the route's network: those of each container network that
-    /// is this network or lists it in `allowed_networks`.
+    /// is this network or lists it in `access`.
     pub addrs: Vec<IpAddr>,
     /// The route is published on a container network itself: only `addrs`
     /// may reach it, regardless of `allowed_subnet`.

@@ -194,7 +194,7 @@ async fn rename_network(
     if config.web.network == old_name {
         config.web.network = new_name.clone();
     }
-    rename_in_allowed_networks(&mut config, &old_name, &new_name);
+    rename_in_access(&mut config, &old_name, &new_name);
     config
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -260,14 +260,14 @@ async fn rename_network(
     Ok(StatusCode::OK)
 }
 
-/// A container network lists the networks its router may reach by name; a
-/// renamed network must keep matching.
-fn rename_in_allowed_networks(config: &mut cl_config::ClusterConfig, old: &str, new: &str) {
+/// Every network's `access` list names the networks it may reach; a renamed
+/// network must keep matching.
+fn rename_in_access(config: &mut cl_config::ClusterConfig, old: &str, new: &str) {
     for net in config.networks.values_mut() {
-        let Some(container) = net.container.as_mut() else {
+        let Some(access) = net.access.as_mut() else {
             continue;
         };
-        for allowed in container.allowed_networks.iter_mut() {
+        for allowed in access.iter_mut() {
             if allowed == old {
                 *allowed = new.to_string();
             }
@@ -644,34 +644,28 @@ networks:
     }
 
     #[test]
-    fn renaming_a_network_rewrites_container_allowed_networks() {
+    fn renaming_a_network_rewrites_access_lists() {
         let mut config =
             cl_config::ClusterConfig::parse(include_str!("../../../../examples/cluster.yaml"))
                 .expect("example parses");
         assert_eq!(
-            config.networks["tailnet"]
-                .container
-                .as_ref()
-                .unwrap()
-                .allowed_networks,
+            config.networks["tailnet"].access.clone().unwrap(),
             vec!["lan".to_string()]
         );
-        rename_in_allowed_networks(&mut config, "lan", "home");
+        rename_in_access(&mut config, "lan", "home");
         assert_eq!(
-            config.networks["tailnet"]
-                .container
-                .as_ref()
-                .unwrap()
-                .allowed_networks,
+            config.networks["tailnet"].access.clone().unwrap(),
             vec!["home".to_string()]
         );
-        rename_in_allowed_networks(&mut config, "nothing", "x");
+        config.networks.get_mut("lan").unwrap().access = Some(vec!["tailnet".to_string()]);
+        rename_in_access(&mut config, "tailnet", "vpn");
         assert_eq!(
-            config.networks["tailnet"]
-                .container
-                .as_ref()
-                .unwrap()
-                .allowed_networks,
+            config.networks["lan"].access.clone().unwrap(),
+            vec!["vpn".to_string()]
+        );
+        rename_in_access(&mut config, "nothing", "x");
+        assert_eq!(
+            config.networks["tailnet"].access.clone().unwrap(),
             vec!["home".to_string()]
         );
     }

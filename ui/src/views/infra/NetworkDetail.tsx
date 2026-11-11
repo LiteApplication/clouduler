@@ -104,7 +104,7 @@ export function NetworkDetail() {
               ['Stack', container.stack || 'none'],
               ['Service', container.service || 'none'],
               ['Routed subnet', net.subnet || 'none'],
-              ['Allowed networks', (container.allowed_networks ?? []).join(', ') || 'none'],
+              ['Access', (net.access ?? []).join(', ') || 'none'],
               ['Open ports', (container.open_ports ?? []).map(describeContainerPort).join(', ') || 'none'],
               ['Reverse proxy (80/443)', container.proxy ? 'reachable' : 'blocked'],
             ]} />

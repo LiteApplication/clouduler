@@ -100,6 +100,9 @@ impl ClusterConfig {
                 }
                 _ => {}
             }
+            if let Some(access) = &net.access {
+                self.validate_access(name, net.kind, access)?;
+            }
             if net.kind == NetworkKind::Public && !net.publish_dns {
                 return Err(ConfigError::invalid(
                     at,
@@ -178,6 +181,61 @@ impl ClusterConfig {
         }
     }
 
+    /// `access` is the source side of the network graph: only networks that
+    /// have clients can reach anything, and every target must be a network
+    /// that traffic can actually be addressed to.
+    fn validate_access(&self, name: &str, kind: NetworkKind, access: &[String]) -> Result<()> {
+        let at = format!("networks.{name}.access");
+        if !matches!(
+            kind,
+            NetworkKind::Internal | NetworkKind::Private | NetworkKind::Container
+        ) {
+            return Err(ConfigError::invalid(
+                at,
+                format!(
+                    "a {kind} network has no clients of its own; access is only allowed on internal, private and container networks"
+                ),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for target in access {
+            let Some(t) = self.networks.get(target) else {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!("no network named {target}"),
+                ));
+            };
+            if target == name {
+                return Err(ConfigError::invalid(
+                    at,
+                    "a network always reaches itself; remove it from its own access list",
+                ));
+            }
+            if !matches!(
+                t.kind,
+                NetworkKind::Internal
+                    | NetworkKind::Private
+                    | NetworkKind::Public
+                    | NetworkKind::Container
+            ) {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!(
+                        "{target} is a {} network, only internal, private, public and container networks can be reached",
+                        t.kind
+                    ),
+                ));
+            }
+            if !seen.insert(target) {
+                return Err(ConfigError::invalid(
+                    at,
+                    format!("{target} is listed more than once"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_container_network(
         &self,
         name: &str,
@@ -202,40 +260,6 @@ impl ClusterConfig {
             }
             if !seen.insert(host) {
                 return Err(bad("hosts", format!("{host} is listed more than once")));
-            }
-        }
-
-        let mut seen = BTreeSet::new();
-        for allowed in &c.allowed_networks {
-            let Some(target) = self.networks.get(allowed) else {
-                return Err(bad(
-                    "allowed_networks",
-                    format!("no network named {allowed}"),
-                ));
-            };
-            if allowed == name {
-                return Err(bad(
-                    "allowed_networks",
-                    "a container network cannot allow itself".into(),
-                ));
-            }
-            if !matches!(
-                target.kind,
-                NetworkKind::Internal | NetworkKind::Private | NetworkKind::Public
-            ) {
-                return Err(bad(
-                    "allowed_networks",
-                    format!(
-                        "{allowed} is a {} network, only internal, private and public networks can be allowed",
-                        target.kind
-                    ),
-                ));
-            }
-            if !seen.insert(allowed) {
-                return Err(bad(
-                    "allowed_networks",
-                    format!("{allowed} is listed more than once"),
-                ));
             }
         }
 
@@ -1837,8 +1861,98 @@ cloudflare:
         assert_eq!(c.open_ports[1].effective_target_port(), 2222);
         assert_eq!(cfg.container_router_of("ts", "ts"), Some("ctn"));
         assert_eq!(cfg.container_router_of("ts", "other"), None);
-        let again = ClusterConfig::parse(&serde_yaml::to_string(&cfg).unwrap()).unwrap();
+        // The legacy list is folded into the network's `access` and cleared.
+        assert_eq!(cfg.access_of("ctn"), ["lan", "wan", "tailscale"]);
+        assert!(cfg.networks["ctn"]
+            .container
+            .as_ref()
+            .unwrap()
+            .allowed_networks
+            .is_empty());
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(yaml.contains("access:"), "{yaml}");
+        assert!(!yaml.contains("allowed_networks"), "{yaml}");
+        let again = ClusterConfig::parse(&yaml).unwrap();
         assert_eq!(again, cfg);
+    }
+
+    #[test]
+    fn legacy_allowed_networks_merge_into_an_existing_access_list() {
+        let cfg = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  ctn:\n    type: container\n    subnet: 100.64.0.0/10\n    access: [wan, lan]\n    container:\n      stack: ts\n      service: ts\n      allowed_networks: [lan, tailscale]\n"),
+        )])
+        .expect("valid");
+        assert_eq!(cfg.access_of("ctn"), ["wan", "lan", "tailscale"]);
+    }
+
+    #[test]
+    fn reaches_is_reflexive_public_implicit_and_directed() {
+        let cfg = with_container(&format!("{CTN_OK}      allowed_networks: [lan]\n")).unwrap();
+        assert!(cfg.reaches("ctn", "ctn"));
+        assert!(cfg.reaches("ctn", "lan"));
+        assert!(!cfg.reaches("lan", "ctn"));
+        // Public targets are implicit, even for a network with no access.
+        assert!(cfg.reaches("lan", "wan"));
+        assert!(!cfg.reaches("lan", "tailscale"));
+        assert!(cfg.access_of("lan").is_empty());
+        assert!(cfg.access_of("nope").is_empty());
+    }
+
+    const LAN_LINE: &str =
+        "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com }";
+    const TS_LINE: &str =
+        "  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com }";
+
+    fn lan_access(access: &str) -> Result<ClusterConfig> {
+        parse(&[(
+            LAN_LINE,
+            &format!("  lan:       {{ type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, access: {access} }}"),
+        )])
+    }
+
+    #[test]
+    fn access_is_checked() {
+        let cfg = lan_access("[tailscale, wan]").expect("valid");
+        assert!(cfg.reaches("lan", "tailscale"));
+        assert!(!cfg.reaches("tailscale", "lan"));
+        assert_eq!(cfg.access_of("lan"), ["tailscale", "wan"]);
+        assert!(lan_access("[]").is_ok());
+        // An internal network may carry one too.
+        assert!(parse(&[(
+            TS_LINE,
+            "  tailscale: { type: internal, subnet: 10.10.0.0/24, domain: int.example.com, access: [lan] }",
+        )])
+        .is_ok());
+
+        let err = parse(&[(
+            WAN_ANCHOR,
+            "  wan:       { type: public,   domain: example.com, access: [lan] }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("access is only allowed"), "{err}");
+        let err = lan_access("[nope]").unwrap_err().to_string();
+        assert!(err.contains("no network named nope"), "{err}");
+        let err = lan_access("[lan]").unwrap_err().to_string();
+        assert!(err.contains("reaches itself"), "{err}");
+        let err = lan_access("[tailscale, tailscale]")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
+        let err = parse(&[(
+            WAN_ANCHOR,
+            &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}"),
+        ), (
+            LAN_LINE,
+            "  lan:       { type: private,  subnet: 192.168.1.0/24, domain: lan.example.com, access: [vpn] }",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("only internal, private, public and container"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1904,15 +2018,19 @@ cloudflare:
             ctn_err(&format!("{CTN_OK}      allowed_networks: [nope]\n"))
                 .contains("no network named nope")
         );
-        assert!(ctn_err(&format!("{CTN_OK}      allowed_networks: [ctn]\n"))
-            .contains("cannot allow itself"));
+        assert!(
+            ctn_err(&format!("{CTN_OK}      allowed_networks: [ctn]\n")).contains("reaches itself")
+        );
         let err = parse(&[(
             WAN_ANCHOR,
             &format!("{WAN_ANCHOR}\n  vpn: {{ type: egress }}\n  ctn: {{ type: container, subnet: 100.64.0.0/10, container: {{ stack: a, service: b, allowed_networks: [vpn] }} }}"),
         )])
         .unwrap_err()
         .to_string();
-        assert!(err.contains("only internal, private and public"), "{err}");
+        assert!(
+            err.contains("only internal, private, public and container"),
+            "{err}"
+        );
     }
 
     #[test]

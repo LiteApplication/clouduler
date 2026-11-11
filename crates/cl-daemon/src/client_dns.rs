@@ -293,7 +293,7 @@ fn views_for(
                         || e.network == *client_net
                         // The proxy gate lets a container network's peers
                         // into every network it may reach.
-                        || container.is_some_and(|c| c.allowed_networks.contains(&e.network))
+                        || container.is_some() && cfg.access_of(client_net).contains(&e.network)
                 })
                 .collect();
             let answers = answers_for(cfg, allocations, fqdn, client_net, container, &reachable);
@@ -336,8 +336,8 @@ fn answers_for(
             // reach; the proxy gate lets it in by the segment address its
             // connection is DNATed to. Without such an address, the segment
             // address itself.
-            if let (Some(c), true) = (container, entry.private_shortcut) {
-                let own = c.allowed_networks.iter().find_map(|net| {
+            if let (Some(_), true) = (container, entry.private_shortcut) {
+                let own = cfg.access_of(client_net).iter().find_map(|net| {
                     // Only IPv4 node addresses are routed through the segment.
                     let found: Vec<DesiredRecord> = records_for(cfg, fqdn, net, node)
                         .ok()?
@@ -694,13 +694,7 @@ mod tests {
     #[test]
     fn the_container_shortcut_answers_ipv4_only() {
         let (mut cfg, alloc) = tailnet();
-        cfg.networks
-            .get_mut("tailnet")
-            .unwrap()
-            .container
-            .as_mut()
-            .unwrap()
-            .allowed_networks = vec!["wan".to_string()];
+        cfg.networks.get_mut("tailnet").unwrap().access = Some(vec!["wan".to_string()]);
         let views = views_for(
             &cfg,
             &alloc,

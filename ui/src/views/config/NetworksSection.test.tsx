@@ -29,7 +29,7 @@ describe('NetworksSection container kind', () => {
     fireEvent.change(screen.getByLabelText('Network type', { selector: '#net-tun-type' }), { target: { value: 'container' } });
     expect(latest.networks.tun.type).toBe('container');
     expect(latest.networks.tun.container).toEqual({
-      stack: '', service: '', hosts: [], allowed_networks: [], open_ports: [], proxy: false,
+      stack: '', service: '', hosts: [], open_ports: [], proxy: false,
     });
     expect(screen.getAllByLabelText('DNS domain').length).toBeGreaterThan(0);
     fireEvent.change(document.querySelector('#net-tun-type')!, { target: { value: 'private' } });
@@ -50,9 +50,10 @@ describe('NetworksSection container kind', () => {
     fireEvent.change(screen.getByLabelText('Target port (blank = same)'), { target: { value: '22' } });
     fireEvent.click(screen.getByText('Add'));
     expect(latest.networks.tun.container).toEqual({
-      stack: 'netbird', service: 'router', hosts: ['n1'], allowed_networks: ['lan'],
+      stack: 'netbird', service: 'router', hosts: ['n1'],
       open_ports: [{ port: 2222, protocol: 'tcp', target_port: 22 }], proxy: true,
     });
+    expect(latest.networks.tun.access).toEqual(['lan']);
     expect(latest.networks.tun.subnet).toBe('100.64.0.0/10');
   });
 

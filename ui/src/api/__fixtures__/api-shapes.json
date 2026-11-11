@@ -758,8 +758,10 @@
         "type": "internal"
       },
       "tailnet": {
+        "access": [
+          "internal"
+        ],
         "container": {
-          "allowed_networks": [],
           "hosts": [
             "n0"
           ],

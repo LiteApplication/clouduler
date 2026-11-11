@@ -37,11 +37,11 @@ export default function lan3Nodes() {
       type: 'container',
       subnet: '100.64.0.0/10',
       domain: null,
+      access: ['lan'],
       container: {
         stack: 'netbird',
         service: 'router',
         hosts: ['atlas'],
-        allowed_networks: ['lan'],
         open_ports: [{ port: 2222, protocol: 'tcp', target_port: 22 }],
         proxy: true,
       },

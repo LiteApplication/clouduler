@@ -122,7 +122,7 @@ pub fn desired(
             router_bridge = Some(bridge_name(&overlay));
             continue;
         }
-        if !c.allowed_networks.iter().any(|n| n == overlay_net) {
+        if !cfg.access_of(network).iter().any(|n| n == overlay_net) {
             continue;
         }
         let here = state
@@ -177,7 +177,7 @@ pub fn desired(
             .container_dns_networks()
             .any(|(name, _)| name == network)
             .then_some(cfg.proxy.dns_server.port),
-        allowed: allowed_destinations(cfg, &c.allowed_networks),
+        allowed: allowed_destinations(cfg, cfg.access_of(network)),
         node_ips: allocations.node_ips(&segment).map(|(_, ip)| ip).collect(),
         segment: segment_subnet,
     })

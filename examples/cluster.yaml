@@ -44,11 +44,14 @@ networks:
   tailnet:
     type: container
     subnet: 100.64.0.0/10 # 0.0.0.0/0 is allowed
+    # Networks this one may reach (internal, private and container networks
+    # only). Public networks and the network itself are always reachable.
+    # Absent means no host firewall for this network as a source.
+    access: [lan]
     container:
       stack: tailscale-router
       service: tailscale
       hosts: [n1]
-      allowed_networks: [lan]
       open_ports:
         - { port: 2222, protocol: tcp, target_port: 22 }
       proxy: true

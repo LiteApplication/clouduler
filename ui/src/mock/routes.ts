@@ -922,6 +922,9 @@ export function buildHttpRoutes(): HttpRoute[] {
       const to = String(body?.new_name ?? '');
       if (!to) throw new HttpError(400, 'new_name is required');
       renameKey(db.config.networks, params.name, to);
+      for (const net of Object.values(db.config.networks)) {
+        if (net.access) net.access = net.access.map((a) => (a === params.name ? to : a));
+      }
       for (const n of Object.values(db.config.nodes)) if (params.name in n.network) renameKey(n.network, params.name, to);
       for (const s of Object.values(db.state.stacks)) s.spec = renameInSpec(s.spec, params.name, to, 'network');
       for (const r of db.proxyRoutes) if (r.network === params.name) r.network = to;
