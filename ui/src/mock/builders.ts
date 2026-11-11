@@ -101,7 +101,7 @@ export class ScenarioBuilder {
     this.info = info;
   }
 
-  network(name: string, cfg: { type: NetworkConfig['type']; subnet?: string; domain?: string }) {
+  network(name: string, cfg: { type: NetworkConfig['type']; subnet?: string; domain?: string; access?: string[] }) {
     this.networks[name] = cfg as NetworkConfig;
     return this;
   }

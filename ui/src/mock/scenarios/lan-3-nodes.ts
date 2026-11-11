@@ -11,7 +11,9 @@ export default function lan3Nodes() {
     description: 'Three nodes on one LAN running vaultwarden, nextcloud and immich.',
     cluster: 'homelab',
   })
-    .network('lan', { type: 'private', subnet: '192.168.1.0/24', domain: 'home.example.com' })
+    .network('lan', { type: 'private', subnet: '192.168.1.0/24', domain: 'home.example.com', access: ['guest', 'iot'] })
+    .network('iot', { type: 'private', subnet: '192.168.20.0/24', access: ['lan'] })
+    .network('guest', { type: 'private', subnet: '192.168.30.0/24', access: [] })
     .drive('fast', { mode: 'replicated', syncInterval: '15m' })
     .drive('bulk', { mode: 'served', servedBy: ['atlas', 'boreas'], syncInterval: '1h' })
     .node({ name: 'atlas', ip: '192.168.1.10', cpus: 8, memGiB: 32, cpuPercent: 14, memUsedPercent: 46, drives: { fast: '/mnt/fast', bulk: '/mnt/bulk' } })

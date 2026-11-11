@@ -10,7 +10,8 @@ export default function multisiteHeadscale() {
     description: 'Three sites (a cloud VPS, home and an office) joined over a tailnet, running headscale.',
     cluster: 'mesh',
   })
-    .network('tailnet', { type: 'private', subnet: '100.64.0.0/10', domain: 'mesh.example.com' })
+    .network('tailnet', { type: 'private', subnet: '100.64.0.0/10', domain: 'mesh.example.com', access: ['office', 'public'] })
+    .network('office', { type: 'private', subnet: '10.20.0.0/24', access: ['tailnet'] })
     .network('public', { type: 'public', domain: 'example.com' })
     .drive('fast', { mode: 'replicated', syncInterval: '5m' })
     .node({

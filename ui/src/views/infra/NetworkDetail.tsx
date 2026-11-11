@@ -8,6 +8,7 @@ import { Banner, KV, PageHeader, Panel, Tag } from '../../ds';
 import { useClusterState } from '../../state/store';
 import { describeAddress } from './NodeDetail';
 import { DataTable } from './table';
+import { canReach, reachedBy } from '../config/networkAccess';
 
 function describeContainerPort(p: { port: number; protocol: string; target_port?: number | null }): string {
   return p.target_port && p.target_port !== p.port ? `${p.port}/${p.protocol} -> ${p.target_port}` : `${p.port}/${p.protocol}`;
@@ -86,6 +87,13 @@ export function NetworkDetail() {
     ? (container.hosts ?? []).filter((n) => n in config.nodes).map((n) => [n, config.nodes[n]] as const)
     : Object.entries(config.nodes).filter(([, node]) => name in node.network);
 
+  const reach = canReach(config.networks, name);
+  const reachList = [...reach.explicit, ...reach.implicit.map((n) => `${n} (public)`)];
+  const reachText = reach.unrestricted
+    ? 'unrestricted'
+    : reachList.join(', ') || 'none';
+  const reachedByList = reachedBy(config.networks, name);
+
   return (
     <>
       <PageHeader breadcrumb={[{ label: 'Networks' }, { label: name }]} title={name} sub={net.type} />
@@ -96,6 +104,8 @@ export function NetworkDetail() {
             ['Subnet', net.subnet ?? 'none'],
             ['Domain', net.domain ?? 'none'],
             ['Nodes', onNet.length],
+            ['Can reach', reachText],
+            ['Reached by', reachedByList.length ? reachedByList.join(', ') : 'none'],
           ]} />
         </Panel>
         {container && (
@@ -104,7 +114,6 @@ export function NetworkDetail() {
               ['Stack', container.stack || 'none'],
               ['Service', container.service || 'none'],
               ['Routed subnet', net.subnet || 'none'],
-              ['Access', (net.access ?? []).join(', ') || 'none'],
               ['Open ports', (container.open_ports ?? []).map(describeContainerPort).join(', ') || 'none'],
               ['Reverse proxy (80/443)', container.proxy ? 'reachable' : 'blocked'],
             ]} />

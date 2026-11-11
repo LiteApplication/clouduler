@@ -28,7 +28,9 @@ import type {
   ProxyAuthConfig,
   PublicAddress,
 } from '../../api/types';
-import { CheckOption, HelpTip, Tag, useConfirm } from '../../ds';
+import { BottomSheet, CheckOption, HelpTip, Tag, useConfirm } from '../../ds';
+import { NetworkGraph } from './NetworkGraph';
+import { canHaveAccess, validTargets } from './networkAccess';
 import { Icon } from '../../components/Icon';
 import { RememberedIps } from './RememberedIps';
 import {
@@ -75,7 +77,7 @@ export function ClusterSection({ draft, setDraft, disabled }: SectionProps) {
 /** Applies the same key rename the server does, to every place a network
  *  name appears in a `ClusterConfig`, so the draft stays in sync with a
  *  `renameNetwork` call without wiping any other unrelated staged edit. */
-function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newName: string): ClusterConfig {
+export function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newName: string): ClusterConfig {
   const networks = { ...draft.networks };
   const net = networks[oldName];
   delete networks[oldName];
@@ -107,21 +109,7 @@ function renameNetworkInDraft(draft: ClusterConfig, oldName: string, newName: st
 }
 
 export function NetworksSection({ draft, setDraft, disabled, original }: SectionProps) {
-  const entries = Object.entries(draft.networks);
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [renameBusy, setRenameBusy] = useState(false);
-
-  const updateNetwork = (name: string, patch: Partial<NetworkConfig>) => {
-    setDraft({
-      ...draft,
-      networks: {
-        ...draft.networks,
-        [name]: { ...draft.networks[name], ...patch },
-      },
-    });
-  };
+  const [selected, setSelected] = useState<string | null>(null);
 
   const addNetwork = () => {
     let name = 'network';
@@ -134,18 +122,129 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
         [name]: { type: 'private', subnet: null, domain: null },
       },
     });
+    setSelected(name);
   };
 
-  const removeNetwork = (name: string) => {
+  const setAccess = (from: string, access: string[] | undefined) => {
+    const next = { ...draft.networks[from] };
+    if (access === undefined) delete next.access;
+    else next.access = access;
+    setDraft({ ...draft, networks: { ...draft.networks, [from]: next } });
+  };
+
+  const sheetName = selected && selected in draft.networks ? selected : null;
+  const sheetNet = sheetName ? draft.networks[sheetName] : null;
+
+  return (
+    <>
+      <NetworkGraph
+        networks={draft.networks}
+        editable={!disabled}
+        onOpen={setSelected}
+        onAddEdge={(from, to) => setAccess(from, [...(draft.networks[from].access ?? []), to].sort())}
+        onRemoveEdge={(from, to) => setAccess(from, (draft.networks[from].access ?? []).filter((x) => x !== to))}
+      />
+      {!disabled && (
+        <button onClick={addNetwork}>
+          <Icon name="plus" /> Add network
+        </button>
+      )}
+      <BottomSheet open={sheetName !== null} title={sheetName ? `${sheetName} network` : 'Network'} onClose={() => setSelected(null)}>
+        {sheetName && sheetNet && (
+          <>
+            <NetworkForm
+              key={sheetName}
+              name={sheetName}
+              net={sheetNet}
+              draft={draft}
+              setDraft={setDraft}
+              disabled={disabled}
+              original={original}
+              onRenamed={setSelected}
+              onRemoved={() => setSelected(null)}
+            />
+            {canHaveAccess(sheetNet.type) && (
+              <div className="net-access">
+                <MultiPick
+                  label="Can reach"
+                  options={validTargets(draft.networks, sheetName)}
+                  selected={sheetNet.access ?? []}
+                  onChange={(access) => setAccess(sheetName, access)}
+                  disabled={disabled}
+                  empty="No other internal, private, public or container network."
+                />
+                <p className="field-hint">
+                  Public networks are always reachable, listed or not.{' '}
+                  {sheetNet.access == null
+                    ? 'Unrestricted: no host firewall applies to this network. Ticking a network turns the firewall on.'
+                    : sheetNet.access.length === 0
+                      ? 'Enforced: this network reaches nothing but itself and public networks.'
+                      : 'Enforced: only the networks above (and public ones) are reachable.'}
+                </p>
+                {!disabled && sheetNet.access != null && (
+                  <button onClick={() => setAccess(sheetName, undefined)}>Unrestricted host firewall</button>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </BottomSheet>
+    </>
+  );
+}
+
+/** One network's settings: rename, type, address range, DNS, kind-specific options, remove. */
+function NetworkForm({
+  name,
+  net,
+  draft,
+  setDraft,
+  disabled,
+  original,
+  onRenamed,
+  onRemoved,
+}: {
+  name: string;
+  net: NetworkConfig;
+  draft: ClusterConfig;
+  setDraft: (d: ClusterConfig) => void;
+  disabled: boolean;
+  original: ClusterConfig;
+  onRenamed: (name: string) => void;
+  onRemoved: () => void;
+}) {
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+
+  const updateNetwork = (n: string, patch: Partial<NetworkConfig>) => {
+    setDraft({
+      ...draft,
+      networks: {
+        ...draft.networks,
+        [n]: { ...draft.networks[n], ...patch },
+      },
+    });
+  };
+
+  const removeNetwork = (n: string) => {
     const next = { ...draft.networks };
-    delete next[name];
+    delete next[n];
     setDraft({ ...draft, networks: next });
+    onRemoved();
   };
 
-  const startRename = (name: string) => {
-    setRenaming(name);
-    setRenameValue(name);
+  const startRename = (n: string) => {
+    setRenaming(n);
+    setRenameValue(n);
     setRenameError(null);
+  };
+
+  const finishRename = (oldName: string, newName: string) => {
+    setDraft(renameNetworkInDraft(draft, oldName, newName));
+    setRenaming(null);
+    onRenamed(newName);
   };
 
   const submitRename = async (oldName: string) => {
@@ -162,16 +261,14 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
     // server knows to rename: renaming it is just a local key swap on the
     // draft, the same as `addNetwork` picking the name in the first place.
     if (!(oldName in original.networks)) {
-      setDraft(renameNetworkInDraft(draft, oldName, newName));
-      setRenaming(null);
+      finishRename(oldName, newName);
       return;
     }
     setRenameBusy(true);
     setRenameError(null);
     try {
       await api.renameNetwork(oldName, newName);
-      setDraft(renameNetworkInDraft(draft, oldName, newName));
-      setRenaming(null);
+      finishRename(oldName, newName);
     } catch (e) {
       setRenameError(e instanceof ApiError ? e.message : 'rename failed');
     } finally {
@@ -180,9 +277,7 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
   };
 
   return (
-    <>
-      {entries.map(([name, net]) => (
-        <div className="card section" key={name}>
+        <div className="net-form">
           <div className="section-head">
             {renaming === name ? (
               <div className="flex-row" style={{ gap: 8 }}>
@@ -300,8 +395,6 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
               value={net.container ?? emptyContainer()}
               onChange={(container) => updateNetwork(name, { container })}
               draft={draft}
-              access={net.access ?? []}
-              onAccessChange={(access) => updateNetwork(name, { access })}
               disabled={disabled}
             />
           )}
@@ -313,15 +406,9 @@ export function NetworksSection({ draft, setDraft, disabled, original }: Section
             </p>
           )}
         </div>
-      ))}
-      {!disabled && (
-        <button onClick={addNetwork}>
-          <Icon name="plus" /> Add network
-        </button>
-      )}
-    </>
   );
 }
+
 
 /** Applies the same key rename the server does, to every place a drive name
  *  appears in a `ClusterConfig`, so the draft stays in sync with a
@@ -1020,16 +1107,12 @@ function ContainerNetworkForm({
   value,
   onChange,
   draft,
-  access,
-  onAccessChange,
   disabled,
 }: {
   name: string;
   value: ContainerNetwork;
   onChange: (c: ContainerNetwork) => void;
   draft: ClusterConfig;
-  access: string[];
-  onAccessChange: (access: string[]) => void;
   disabled: boolean;
 }) {
   const cluster = useClusterState();
@@ -1037,9 +1120,6 @@ function ContainerNetworkForm({
   const stackNames = Object.keys(stacks).sort();
   const services = useMemo(() => serviceNamesOf(stacks[value.stack]?.spec), [stacks, value.stack]);
   const set = (patch: Partial<ContainerNetwork>) => onChange({ ...value, ...patch });
-  const allowedOptions = Object.entries(draft.networks)
-    .filter(([n, c]) => n !== name && (c.type === 'internal' || c.type === 'private' || c.type === 'public'))
-    .map(([n]) => n);
 
   return (
     <>
@@ -1091,14 +1171,6 @@ function ContainerNetworkForm({
         onChange={(hosts) => set({ hosts })}
         disabled={disabled}
         empty="No nodes in the cluster."
-      />
-      <MultiPick
-        label="Networks the router may reach"
-        options={allowedOptions}
-        selected={access}
-        onChange={onAccessChange}
-        disabled={disabled}
-        empty="No internal, private or public network to allow."
       />
       <OpenPortsEditor
         idPrefix={`net-${name}-container`}

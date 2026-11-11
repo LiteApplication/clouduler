@@ -23,9 +23,12 @@ const base = {
   nodes: { n1: { network: {}, drives: {} }, n2: { network: {}, drives: {} } },
 } as unknown as ClusterConfig;
 
+const openNet = (name: string) => fireEvent.click(screen.getByLabelText(`${name} network settings`));
+
 describe('NetworksSection container kind', () => {
   it('initialises the container block on switch and drops it on switching away', () => {
     render(<Harness initial={base} />);
+    openNet('tun');
     fireEvent.change(screen.getByLabelText('Network type', { selector: '#net-tun-type' }), { target: { value: 'container' } });
     expect(latest.networks.tun.type).toBe('container');
     expect(latest.networks.tun.container).toEqual({
@@ -38,6 +41,7 @@ describe('NetworksSection container kind', () => {
 
   it('writes the form fields into the draft', () => {
     render(<Harness initial={base} />);
+    openNet('tun');
     fireEvent.change(document.querySelector('#net-tun-type')!, { target: { value: 'container' } });
     fireEvent.change(document.querySelector('#net-tun-container-stack')!, { target: { value: 'netbird' } });
     fireEvent.change(screen.getByLabelText('Router service'), { target: { value: 'router' } });
