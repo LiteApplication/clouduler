@@ -18,6 +18,7 @@ pub mod gpu;
 pub mod internal_dns;
 pub mod log_alerts;
 pub mod migration;
+pub mod netaccess;
 pub mod overlay;
 pub mod placement;
 pub mod proxy;

@@ -17,6 +17,7 @@ pub mod error;
 pub mod expose;
 pub mod ipam;
 pub mod iptables;
+pub mod netaccess;
 pub mod relay;
 pub mod restrict;
 pub mod vxlan;
