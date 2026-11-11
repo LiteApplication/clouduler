@@ -338,9 +338,13 @@ fn answers_for(
             // address itself.
             if let (Some(c), true) = (container, entry.private_shortcut) {
                 let own = c.allowed_networks.iter().find_map(|net| {
-                    records_for(cfg, fqdn, net, node)
-                        .ok()
-                        .filter(|r| !r.is_empty())
+                    // Only IPv4 node addresses are routed through the segment.
+                    let found: Vec<DesiredRecord> = records_for(cfg, fqdn, net, node)
+                        .ok()?
+                        .into_iter()
+                        .filter(|r| r.kind == RecordType::A)
+                        .collect();
+                    (!found.is_empty()).then_some(found)
                 });
                 if let Some(found) = own {
                     records.extend(found);
@@ -682,6 +686,31 @@ mod tests {
         assert_eq!(
             cfg.client_network("100.64.1.1".parse().unwrap()),
             Some("tailnet")
+        );
+    }
+
+    /// Only IPv4 addresses are routed through the segment, so the shortcut
+    /// never answers with an AAAA, even from a dual-stack public network.
+    #[test]
+    fn the_container_shortcut_answers_ipv4_only() {
+        let (mut cfg, alloc) = tailnet();
+        cfg.networks
+            .get_mut("tailnet")
+            .unwrap()
+            .container
+            .as_mut()
+            .unwrap()
+            .allowed_networks = vec!["wan".to_string()];
+        let views = views_for(
+            &cfg,
+            &alloc,
+            &hosts(&[("blog", "wan", &["n1"])]),
+            &BTreeSet::new(),
+            None,
+        );
+        assert_eq!(
+            answer(&views, "tailnet", "blog.example.com"),
+            Some(&[a([203, 0, 113, 5])][..])
         );
     }
 }
