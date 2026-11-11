@@ -1,0 +1,109 @@
+---
+title: Mail server and its clients
+sidebar_position: 7
+---
+
+# Mail server and its clients
+
+This guide shows how to wire a mail server stack and a second stack (an app, an identity provider, anything that sends mail) so the second one can submit mail to the first on a raw TCP port such as 587. The two stacks can run on the same node or on different nodes. The example names are placeholders: `mail.example.com`, stacks `mailserver` and `app`.
+
+## What you'll end up with
+
+The app connects to `mail.example.com:587` and reaches the mail server through the **expose forwarder** on its own node. The forwarder relays the connection to whichever node runs the mail server and, if you ask for it, prepends a PROXY v2 header so the mail server sees the real client address.
+
+## How it works
+
+Three things make this path work, and all three must be in place:
+
+1. The mail server **publishes** the port with `x-clouduler.expose`. Every node then listens on it and forwards to the node running the container.
+2. The mail server sets **`hostname:`** to the name the clients use. Clouduler matches a client's allowed `host:port` entry against this field.
+3. The client lists **`mail.example.com:587`** in an `allowed` list of one of its networks.
+
+When 1 to 3 match, the client container gets an `/etc/hosts` entry that maps `mail.example.com` to its node's gateway address on the stack bridge (the same address as `host.docker.internal`). Without it, Docker's own resolver would answer a service's `hostname` with that container's address on a shared bridge, where the port is not reachable through the firewall and where no PROXY header is added.
+
+For a client whose stack is restricted (its overlay network declares an `allowed` list), the host firewall also opens exactly that port towards the gateway. Only ports clouduler itself publishes can be opened this way.
+
+## Prerequisites
+
+- A mail server image that listens on the port inside its container, and, if you use `proxy_protocol`, can be told to expect a PROXY v2 header from the node (see step 1).
+- Each node that may run the mail server lists the port under `open_ports` of the public network it is published on, otherwise the scheduler will not place a raw `expose` there. See [Ports and firewall](/docs/reference/ports-and-firewall).
+- A name for the server, here `mail.example.com`. The same name is used by outside clients through DNS and by your stacks through the mechanism above.
+
+## Step 1: the mail server stack
+
+```yaml title="mailserver/stack.yaml"
+services:
+  mail:
+    image: example/mailserver:1
+    # The name clients put in their allowed lists. Must equal it exactly
+    # (case does not matter).
+    hostname: mail.example.com
+    networks: [internal, public]
+    x-clouduler:
+      expose:
+        - { port: 587, published: 587, protocol: tcp, network: public, proxy_protocol: true }
+        # more ports as needed, for example 25 and 465
+```
+
+- `port` is the port inside the container. `published` is the port every node listens on. The client's `host:port` entry must use the **published** port.
+- `protocol` must match what the client's entry says. A client entry without `/udp` means TCP.
+- `proxy_protocol: true` sends the real client address to the server. For a client in another stack that address is the client container's address on its overlay. Turn it on **only after the mail server is configured to accept a PROXY v2 header from the node**, because a server that does not expect it sees a malformed request. Most servers want a trusted-networks list that includes the nodes' bridge addresses. Leave it off for a server that cannot parse it.
+- Two services cannot publish the same port and protocol. The first by name wins and the rest are ignored with a warning.
+
+Deploy it and check that the instance is running and that the port answers from outside (or from a node) before wiring the client.
+
+## Step 2: the client stack
+
+```yaml title="app/stack.yaml"
+networks:
+  # Any network the client uses can carry the entry; an egress network is the
+  # usual place because that is where a mail destination used to be listed.
+  wan:
+    allowed:
+      - "mail.example.com:587"
+
+services:
+  app:
+    image: example/app:1
+    networks: [internal, wan]
+    environment:
+      SMTP_HOST: mail.example.com
+      SMTP_PORT: "587"
+```
+
+- Use the same name in `allowed` and in the app's own SMTP settings. The app must connect to the name, not to an address.
+- The entry is `host:port` or `host:port/udp`. A bare `host` entry only concerns the proxy and does not open a port.
+- If the stack declares an `allowed` list on its overlay network (even an empty one), it is restricted: everything not listed is dropped. The entry above is then what lets the mail through. If no list restricts the stack, the port is reachable anyway and the entry only selects the name mapping.
+
+Redeploy the client stack. The `/etc/hosts` entry is written when a container is created, so existing containers pick it up only after they are recreated (a redeploy that changes the stack does this).
+
+## Verify
+
+From the client container:
+
+```sh
+getent hosts mail.example.com   # the node gateway address, e.g. 10.244.x.1
+nc -v mail.example.com 587      # the SMTP banner
+```
+
+If the address is not the stack's gateway, one of the three conditions in "How it works" is not met. If the connection opens but the server drops it, check the PROXY header setting on both sides.
+
+## Quirks
+
+<Quirk title="The name has to be the server's hostname" severity="warn">
+The match is on the mail service's `hostname:`, not on its service or stack name, and not on a proxy route host. An entry for a name nobody publishes by `hostname:` and `expose` is treated like any other `host:port` entry: resolved by the node's resolver and checked against the firewall only.
+</Quirk>
+
+<Quirk title="Applies at container creation" severity="info">
+Changing the mail server's `expose` or `hostname`, or the client's `allowed` list, changes nothing for containers that already run. Recreate the client.
+</Quirk>
+
+<Quirk title="Always through this node's forwarder" severity="info">
+The client connects to its own node even when the mail server runs elsewhere, so the path is client, local forwarder, owning node, server. A moved server is followed by the forwarder without touching the client.
+</Quirk>
+
+## See also
+
+- [Networking](/docs/features/networking): `allowed` lists and `x-clouduler.expose`.
+- [Stalwart example](/docs/examples/stalwart): a full mail server stack.
+- [SMTP](/docs/guides/smtp): the SMTP server Clouduler itself uses for alerts.

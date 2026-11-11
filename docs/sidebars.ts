@@ -59,6 +59,7 @@ const sidebars: SidebarsConfig = {
         {type: 'doc', id: 'guides/tailscale-headscale', label: 'Tailscale and Headscale'},
         {type: 'doc', id: 'guides/discord-alerts', label: 'Discord alerts'},
         {type: 'doc', id: 'guides/smtp', label: 'SMTP'},
+        {type: 'doc', id: 'guides/mail-server-clients', label: 'Mail server and its clients'},
         {type: 'doc', id: 'guides/backup-targets', label: 'Backup targets (B2 / S3)'},
         {type: 'doc', id: 'guides/git-webhooks', label: 'Git webhooks (GitHub / Forgejo)'},
         {type: 'doc', id: 'guides/private-registries', label: 'Private registries'},
