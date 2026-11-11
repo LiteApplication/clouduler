@@ -9,6 +9,8 @@ on:
     branches: [master]
     tags:
       - "v*"
+      # pre-release tags (v<version>-next-<sha>) must not start a release run
+      - "!v*-next-*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -85,6 +87,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        if: github.ref_type == 'branch'
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -99,15 +104,21 @@ jobs:
 
       # Every master push is published as a pre-release. The updater's
       # "latest" lookup skips pre-releases, so these are only picked up when
-      # pinned by their tag url. The tag does not match v*, so creating it
-      # does not start this workflow again.
+      # pinned by their tag url (v<version>-next-<sha>). That tag matches v*,
+      # so the tag filter at the top excludes it from starting this workflow.
+      - name: name the pre-release
+        if: github.ref_type == 'branch'
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "PRE_TAG=v${version}-next-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
       - name: create the pre-release
         if: github.ref_type == 'branch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: pre-${{ github.run_number }}-${{ github.sha }}
+          tag_name: ${{ env.PRE_TAG }}
           target_commitish: ${{ github.sha }}
-          name: pre-release ${{ github.run_number }} (${{ github.sha }})
+          name: ${{ env.PRE_TAG }}
           prerelease: true
           # The repo has immutable releases: assets can only be attached
           # while the release is still a draft, so publish it afterwards.
@@ -120,7 +131,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release edit "pre-${{ github.run_number }}-${{ github.sha }}" \
+          gh release edit "$PRE_TAG" \
             --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
 
       # Only the newest pre-release is kept: drop every earlier one and its tag.
@@ -128,10 +139,10 @@ jobs:
         if: github.ref_type == 'branch'
         env:
           GH_TOKEN: ${{ github.token }}
-          CURRENT: pre-${{ github.run_number }}-${{ github.sha }}
+          CURRENT: ${{ env.PRE_TAG }}
         run: |
           gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
-            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease and (.tagName | startswith("pre-"))) | .tagName' |
+            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease and (.tagName | (startswith("pre-") or test("-next-")))) | .tagName' |
           while read -r tag; do
             [ "$tag" = "$CURRENT" ] && continue
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
