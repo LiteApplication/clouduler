@@ -40,6 +40,13 @@ pub struct RestrictedStack {
     /// The network the containers live on. The firewall restricts the stack
     /// only when that network declared a list.
     pub overlay_network: String,
+    /// The host's address on the stack's bridge, where the node's expose
+    /// forwarders answer.
+    pub gateway: Option<Ipv4Addr>,
+    /// Lower case names from the lists that are another service's exposed
+    /// port (`cl_sched::run::exposed_allowed_hosts`): the container resolves
+    /// them to `gateway`.
+    pub exposed: BTreeSet<String>,
 }
 
 impl RestrictedStack {
@@ -107,6 +114,8 @@ pub fn restricted_stacks(
             networks,
             own_routes,
             overlay_network: overlay.to_string(),
+            gateway: allocations.gateway(&overlay_name(name, overlay)),
+            exposed: cl_sched::run::exposed_allowed_hosts(state, &file),
         });
     }
     Some(out)
@@ -193,6 +202,25 @@ pub fn restrictions(
                     ports: ports.range,
                 }));
             }
+            // A name that is another service's exposed port leads to the
+            // node's own forwarder (the container's /etc/hosts says so), on
+            // whichever list the entry sits: the port is opened towards the
+            // gateway. `input_rules` still only honours ports clouduler
+            // itself publishes.
+            if let Some(gateway) = s.gateway {
+                for entry in s.networks.values().flatten() {
+                    let (AllowedHost::Name(n), Some(ports)) = (&entry.host, entry.ports) else {
+                        continue;
+                    };
+                    if s.exposed.contains(&n.to_ascii_lowercase()) {
+                        grants.push(PortGrant {
+                            protocol: ports.protocol,
+                            addr: gateway,
+                            ports: ports.range,
+                        });
+                    }
+                }
+            }
             Some(Restriction {
                 subnet: s.subnet,
                 stack_subnets: vec![s.subnet],
@@ -269,7 +297,33 @@ mod tests {
                 .collect(),
             own_routes: BTreeMap::new(),
             overlay_network: overlay.into(),
+            gateway: Some("10.244.1.1".parse().unwrap()),
+            exposed: BTreeSet::new(),
         }
+    }
+
+    /// Authentik's mail: `mail.example.org:587` on the wan list is another
+    /// service's exposed port, so the firewalled overlay list (empty) still
+    /// gets a grant towards the node's gateway, where the forwarder listens.
+    #[test]
+    fn an_exposed_port_on_a_wan_list_is_granted_towards_the_gateway() {
+        let mut s = stack(
+            "tailscale",
+            &[
+                ("tailscale", &[]),
+                ("wan", &["mail.example.org:587", "other.example.org:22"]),
+            ],
+        );
+        s.exposed = BTreeSet::from(["mail.example.org".to_string()]);
+        let r = restrictions(&[s], &BTreeMap::new());
+        assert_eq!(
+            r[0].grants,
+            vec![PortGrant {
+                protocol: Protocol::Tcp,
+                addr: ip("10.244.1.1"),
+                ports: PortRange { start: 587, end: 587 }
+            }]
+        );
     }
 
     const CLUSTER: &str = include_str!("../../../examples/cluster.yaml");

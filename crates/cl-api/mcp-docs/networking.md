@@ -307,9 +307,20 @@ once a second (`docker network inspect`, joined to the `clouduler.stack` label).
   stack that is not attached to `public` (it only needs an overlay network, so
   the proxy can identify it); such a stack can run on a node with no public
   address and still reach them. Their
-  non-proxy ports (a mail submission port exposed by another stack, say) are
-  not covered by either list: a `host:port` firewall entry is resolved by the
-  node's own resolver, which returns the public address, not the override.
+  non-proxy ports are not covered by the override: a `host:port` firewall
+  entry is resolved by the node's own resolver, which returns the public
+  address.
+* A `host:port` entry (on any of the stack's lists) whose name is the
+  `hostname:` of another service that publishes that port with
+  `x-clouduler.expose` is handled specially: the container's `/etc/hosts` maps
+  the name to its node's gateway address on the stack bridge (as for
+  `host.docker.internal`), so the connection lands on this node's expose
+  forwarder, which relays it to wherever the service runs and adds the PROXY
+  header when the `expose` entry sets `proxy_protocol`. Without this, docker's
+  resolver answers a service's `hostname` with its address on a shared bridge.
+  The firewall opens exactly that port towards the gateway for a restricted
+  stack, even when the entry sits on a `wan` list. Takes effect when the
+  stack's containers are next created.
 
 ## MTU
 

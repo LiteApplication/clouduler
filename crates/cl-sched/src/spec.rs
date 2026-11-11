@@ -43,6 +43,12 @@ pub struct Placement {
     /// This service is a container network's router: turn on IPv4 forwarding
     /// (unless the service sets the sysctl itself).
     pub ip_forward: bool,
+    /// Hostnames of another service's `x-clouduler.expose`d ports that this
+    /// service's `allowed` list names with that port. They resolve to the
+    /// node's own gateway address so the connection lands on this node's
+    /// expose forwarder (PROXY header included) instead of whatever address
+    /// docker's resolver has for the name. See `run::exposed_allowed_hosts`.
+    pub published_hosts: Vec<String>,
 }
 
 /// The configs and secrets already written to disk for an instance:
@@ -247,6 +253,8 @@ pub fn build(
             .map(|gateway| {
                 HOST_ALIASES
                     .iter()
+                    .map(|alias| alias.to_string())
+                    .chain(placement.published_hosts.iter().cloned())
                     .map(|alias| format!("{alias}:{gateway}"))
                     .collect()
             })
@@ -514,6 +522,7 @@ mod tests {
             proxy_addresses: Vec::new(),
             container_networks: Vec::new(),
             ip_forward: false,
+            published_hosts: vec!["mail.example.org".into()],
         };
         let spec = build(
             &instance(),
@@ -548,6 +557,7 @@ mod tests {
             vec![
                 format!("host.docker.internal:{}", spec.dns[0]),
                 format!("host-gateway:{}", spec.dns[0]),
+                format!("mail.example.org:{}", spec.dns[0]),
             ]
         );
     }

@@ -984,6 +984,9 @@ impl Scheduler {
                 placement.ip = Some(ip);
                 placement.resolver = allocations.as_ref().and_then(|a| a.gateway(network));
                 placement.zone = self.zone.clone();
+                placement.published_hosts = exposed_allowed_hosts(state, &file)
+                    .into_iter()
+                    .collect();
             }
             placement.egress_network = service
                 .networks
@@ -1308,6 +1311,61 @@ fn volumes_ready(
 /// server, which has nothing to do with where instances run) or for an
 /// instance mid-migration (`cl_drive::migration` hands the primary over
 /// itself, at `Switching`, and must not be raced).
+/// Hostnames this stack's `allowed` lists reach on a port that another
+/// service publishes with `x-clouduler.expose`: an entry `host:port` where some
+/// service has `hostname: host` and an `expose` entry with that published port
+/// and protocol. Lower case.
+///
+/// Such a name must lead to the expose forwarder on the caller's own node, not
+/// to the backend container's address (docker's resolver answers a service's
+/// `hostname` with its address on a shared bridge, where the port is neither
+/// reachable through the firewall nor behind the PROXY header the backend
+/// expects). The container resolves it to its node's gateway
+/// (`Placement::published_hosts`) and the firewall opens that port for it
+/// (`cl_daemon::restrict`).
+pub fn exposed_allowed_hosts(state: &ClusterState, file: &StackFile) -> BTreeSet<String> {
+    use cl_config::AllowedHost;
+    let wanted: Vec<(String, cl_config::AllowedPorts)> = file
+        .networks
+        .values()
+        .filter_map(|def| def.as_ref()?.allowed.as_ref())
+        .flatten()
+        .filter_map(|t| match (&t.host, t.ports) {
+            (AllowedHost::Name(n), Some(ports)) => Some((n.to_ascii_lowercase(), ports)),
+            _ => None,
+        })
+        .collect();
+    if wanted.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut out = BTreeSet::new();
+    for stack in state.stacks.values() {
+        let Ok(other) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        for service in other.services.values() {
+            let Some(host) = service.hostname.as_deref() else {
+                continue;
+            };
+            let host = host.to_ascii_lowercase();
+            let Some(ext) = service.x_clouduler.as_ref() else {
+                continue;
+            };
+            for (name, ports) in &wanted {
+                if *name == host
+                    && ext.expose.iter().any(|e| {
+                        e.protocol == ports.protocol
+                            && (ports.range.start..=ports.range.end).contains(&e.published)
+                    })
+                {
+                    out.insert(name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Request> {
     let mut requests = Vec::new();
     // Every replica of a service mounts the same volume, so the same id comes
@@ -1759,6 +1817,43 @@ mod tests {
 
     fn mounts_service() -> cl_config::Service {
         service_with_volumes("      - fast/data:/data\n")
+    }
+
+    fn state_of(stacks: &[(&str, &str)]) -> ClusterState {
+        let mut state = ClusterState::default();
+        for (name, spec) in stacks {
+            state.stacks.insert(
+                name.to_string(),
+                serde_json::from_value(serde_json::json!({
+                    "name": name, "spec": spec, "revision": 1
+                }))
+                .unwrap(),
+            );
+        }
+        state
+    }
+
+    const MAIL: &str = "services:
+  mail:
+    image: x
+    hostname: Mail.example.org
+    x-clouduler:
+      expose:
+        - { port: 587, published: 587, network: public }
+";
+
+    #[test]
+    fn an_allowed_port_that_another_service_exposes_is_found() {
+        let client = StackFile::parse(
+            "services:\n  app:\n    image: x\nnetworks:\n  wan:\n    allowed: [\"mail.example.org:587\", \"mail.example.org:25\", \"other.example.org:587\"]\n",
+        )
+        .unwrap();
+        let state = state_of(&[("mail", MAIL)]);
+        assert_eq!(
+            exposed_allowed_hosts(&state, &client),
+            BTreeSet::from(["mail.example.org".to_string()])
+        );
+        assert!(exposed_allowed_hosts(&state_of(&[]), &client).is_empty());
     }
 
     #[test]

@@ -304,6 +304,7 @@ services:
 - **On an egress, wireguard or nat network**, every entry is enforced by the firewall, with hostnames resolved through the stack's DNS. The stack must also declare an internal, private or public network, otherwise you get `network NET has an allowed list ... the stack needs an internal, private or public network as well`.
 - A wildcard host cannot take a port on an overlay network: `a wildcard host is checked by the proxy here and cannot take a port`.
 - An allowed entry can only narrow what routing already carries. It cannot open a host port the firewall keeps closed.
+- A `host:port` entry whose host is the `hostname:` of another service that publishes that port with `x-clouduler.expose` resolves, inside the container, to the node's gateway address on the stack bridge (via `/etc/hosts`). The connection reaches this node's expose forwarder, which relays it to wherever the service runs and prepends the PROXY header when the `expose` entry sets `proxy_protocol`. The firewall opens that one port towards the gateway for a restricted stack, whichever list the entry is on. It applies when the stack's containers are next created.
 
 ## WireGuard networks
 
