@@ -17,7 +17,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-26.04
+    # Debian image: playwright's --with-deps apt install runs against deb.debian.org
+    # instead of the ubuntu mirrors whose DNS keeps failing on the runners.
+    container: node:22-trixie
     steps:
+      - run: |
+          printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99ci
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
