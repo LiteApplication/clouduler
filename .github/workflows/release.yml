@@ -1,12 +1,19 @@
 name: release
 
+# Pushes to master also run the build, and publish it as a pre-release. GitHub only
+# lets a tag ref restore caches saved from the default branch, never from
+# another tag, so master is what keeps the release-profile cache warm. Tag runs
+# restore it and do not save.
 on:
   push:
+    branches: [master]
     tags:
       - "v*"
 
 env:
   CARGO_TERM_COLOR: always
+  # sccache's GitHub backend.
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   build:
@@ -40,6 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          save-if: ${{ github.ref_type == 'branch' }}
 
       - name: install the aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -83,7 +91,37 @@ jobs:
           merge-multiple: true
 
       - name: create the release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+
+      # Every master push is published as a pre-release. The updater's
+      # "latest" lookup skips pre-releases, so these are only picked up when
+      # pinned by their tag url. The tag does not match v*, so creating it
+      # does not start this workflow again.
+      - name: create the pre-release
+        if: github.ref_type == 'branch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pre-${{ github.run_number }}-${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          name: pre-release ${{ github.run_number }} (${{ github.sha }})
+          prerelease: true
+          files: dist/*
+          generate_release_notes: true
+
+      # Only the newest pre-release is kept: drop every earlier one and its tag.
+      - name: delete the previous pre-releases
+        if: github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: pre-${{ github.run_number }}-${{ github.sha }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease and (.tagName | startswith("pre-"))) | .tagName' |
+          while read -r tag; do
+            [ "$tag" = "$CURRENT" ] && continue
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
