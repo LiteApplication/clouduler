@@ -73,6 +73,14 @@ impl Service {
 }
 
 impl StackFile {
+    /// `x-clouduler.priority`: lower is more important, 0 when unset.
+    pub fn priority(&self) -> i32 {
+        self.x_clouduler
+            .as_ref()
+            .and_then(|x| x.priority)
+            .unwrap_or(0)
+    }
+
     /// Union of every drive any service mounts a volume from.
     pub fn drives_used(&self) -> BTreeSet<String> {
         self.services
@@ -296,6 +304,16 @@ impl StackFile {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn priority_defaults_to_zero_and_reads_the_stack_block() {
+        let plain = StackFile::parse("services:\n  a:\n    image: x\n").unwrap();
+        assert_eq!(plain.priority(), 0);
+        let ranked =
+            StackFile::parse("x-clouduler:\n  priority: -1\nservices:\n  a:\n    image: x\n")
+                .unwrap();
+        assert_eq!(ranked.priority(), -1);
+    }
+
     use crate::stack::StackFile;
 
     fn parse(yaml: &str) -> StackFile {

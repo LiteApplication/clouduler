@@ -462,10 +462,10 @@ export interface ClusterState {
    *  `/api/config` instead; this is raft's own copy. */
   cluster_config: ClusterConfigEntry | null;
   /** Set only by `clouduler emergency`'s offline recovery write: while this
-   *  holds a stack name, the scheduler places and starts only that stack,
+   *  holds stack names, the scheduler places and starts only those stacks,
    *  leaving every other assignment untouched. Cleared automatically once
    *  another manager is reachable again. */
-  emergency_stack: string | null;
+  emergency_stacks: string[];
   restic_destinations: Record<string, BackupDestination>;
   restic_targets: Record<string, DriveBackupTarget>;
   restic_runs: Record<string, BackupRun>;

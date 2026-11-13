@@ -101,12 +101,12 @@ pub async fn emergency(
     id: uuid::Uuid,
     addr: SocketAddr,
     this_name: &str,
-    stack: &str,
+    stacks: &std::collections::BTreeSet<String>,
     stack_volumes: &std::collections::BTreeSet<crate::ids::VolumeId>,
 ) -> Result<()> {
     let store = Store::open(data_dir.join("raft.redb"))?;
     store
-        .emergency(node_id(id), addr, this_name, stack, stack_volumes)
+        .emergency(node_id(id), addr, this_name, stacks, stack_volumes)
         .await?;
     Ok(())
 }

@@ -45,8 +45,9 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
         status.version,
         status.node,
     );
-    if let Some(stack) = &state.emergency_stack {
-        println!("  EMERGENCY MODE: only stack {stack} is being scheduled");
+    if state.in_emergency() {
+        let stacks = state.emergency_stacks.iter().cloned().collect::<Vec<_>>();
+        println!("  EMERGENCY MODE: only {} scheduled", stacks.join(", "));
     }
 
     println!("nodes");

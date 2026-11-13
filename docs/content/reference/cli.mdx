@@ -282,11 +282,11 @@ The restore commands ask for confirmation unless `--yes`, stop the affected cont
 
 ## Disaster recovery
 
-Both commands rewrite this node's own raft database. **Stop the daemon on that node first.** They use no `--via` and `emergency` needs no key. See [Emergency mode](/docs/features/emergency-mode).
+Both commands rewrite this node's own raft database. `restore` needs the daemon stopped; `emergency` stops and restarts it through systemd itself. Neither uses `--via`. See [Emergency mode](/docs/features/emergency-mode).
 
 | Command | What it does |
 |---|---|
-| `emergency STACK [--node NAME] [--yes]` | For a cluster that lost quorum for good. Makes this node the only voter and brings up only STACK. Asks to confirm. |
+| `emergency [STACK...] [--node NAME] [--yes]` | For a cluster that lost quorum for good. Makes this node the only voter and brings up only the named stacks, or every stack with `x-clouduler.priority: -1` when none is named. Asks to confirm, restarts the daemon, then waits until the containers run, printing what holds them back. Ctrl+C stops the waiting only. |
 | `restore SOURCE [--age-identity-file PATH \| --age-identity-stdin] [--branch B] [--node NAME] [--yes]` | Restores cluster config, stacks, configs and secrets from the git backup repo. SOURCE is a local clone or a `git@` / `ssh://` URL. `--branch` defaults to `main` and is ignored for local paths. |
 
 `restore` requires one of the age identity flags (`pass the admin's age identity with --age-identity-file or --age-identity-stdin`), decrypts secrets in memory and reseals them under this node's key, skips secrets it cannot open, and does not change raft membership. Run `emergency` first if quorum is also gone.

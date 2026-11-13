@@ -171,7 +171,7 @@ impl Store {
 
     /// `force_quorum`, plus the extra state `clouduler emergency` needs: only
     /// `stack`'s instances are allowed to start once this node comes back up
-    /// (`ClusterState::emergency_stack`, cleared automatically once another
+    /// (`ClusterState::emergency_stacks`, cleared automatically once another
     /// voter is reachable again - see `Request::ClearEmergency`), every other
     /// currently known node is marked unreachable (so a served drive `stack`
     /// uses picks this node as its active server, the same
@@ -188,13 +188,13 @@ impl Store {
         id: NodeId,
         addr: std::net::SocketAddr,
         this_name: &str,
-        stack: &str,
+        stacks: &std::collections::BTreeSet<String>,
         stack_volumes: &std::collections::BTreeSet<crate::ids::VolumeId>,
     ) -> Result<openraft::Membership<NodeId, crate::types::Node>, StorageError> {
         let mut sm = self.sm.write().await;
         let membership = self.rewrite_membership(&mut sm, id, addr).await?;
 
-        sm.data.emergency_stack = Some(stack.to_string());
+        sm.data.emergency_stacks = stacks.clone();
 
         // The other managers' fate is unknown - some worker may still be
         // running an instance this node's stale copy of the state also
@@ -202,7 +202,7 @@ impl Store {
         // resurrect a container that conflicts with one still alive
         // elsewhere. Marking them unreachable rather than touching any
         // assignment's `desired` means nothing needs restoring by hand once
-        // `emergency_stack` clears: every stack's own desired state was never
+        // `emergency_stacks` clears: every stack's own desired state was never
         // altered.
         let others: Vec<String> = sm
             .data
@@ -254,7 +254,7 @@ impl Store {
     /// *content*, not *quorum*. The two compose: a full disaster recovery
     /// runs `force_quorum`/`emergency` first to get a reachable cluster,
     /// then `restore` to refill it. `assignments`/`volumes`/`certificates`/
-    /// `dns_records`/`unreachable`/`emergency_stack` are left untouched for
+    /// `dns_records`/`unreachable`/`emergency_stacks` are left untouched for
     /// the same reason `emergency` leaves them alone: the scheduler
     /// reconciles assignments against the bumped `StackState.revision` on
     /// its own, and touching them here risks orphaning containers this node

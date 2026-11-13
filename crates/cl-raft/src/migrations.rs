@@ -27,7 +27,21 @@ pub type Migration = fn(Value) -> Value;
 /// Index `n` migrates schema_version `n` to `n + 1`. Append here, never edit
 /// or remove an existing entry - each one must keep working for as long as
 /// any node in the field might still be running data at that version.
-pub const MIGRATIONS: &[Migration] = &[];
+pub const MIGRATIONS: &[Migration] = &[|v| v, emergency_stack_to_set];
+
+/// Version 1 held a single `emergency_stack` name (or null); version 2 holds
+/// the set `emergency_stacks`.
+fn emergency_stack_to_set(mut value: Value) -> Value {
+    if let Some(data) = value.get_mut("data").and_then(Value::as_object_mut) {
+        let old = data.remove("emergency_stack");
+        let stacks = match old {
+            Some(Value::String(name)) => vec![Value::String(name)],
+            _ => Vec::new(),
+        };
+        data.insert("emergency_stacks".into(), Value::Array(stacks));
+    }
+    value
+}
 
 /// Runs every migration needed to bring `value` from `from_version` up to
 /// `state::CURRENT_SCHEMA_VERSION`. A no-op when already current (or, in
@@ -53,6 +67,14 @@ pub fn migrate_to_current(mut value: Value, from_version: u32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_emergency_stack_becomes_a_set() {
+        let old = serde_json::json!({"schema_version": 1, "data": {"emergency_stack": "site"}});
+        let new = migrate_to_current(old, 1);
+        assert_eq!(new["data"]["emergency_stacks"], serde_json::json!(["site"]));
+        assert!(new["data"].get("emergency_stack").is_none());
+    }
 
     #[test]
     fn migrating_from_the_current_version_is_a_no_op() {

@@ -276,11 +276,17 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
             }
         }
     }
-    if let Some(stack) = &state.emergency_stack {
+    if state.in_emergency() {
+        let stacks = state
+            .emergency_stacks
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         add(
             "emergency_mode",
-            stack.clone(),
-            format!("emergency mode: only stack {stack} is being scheduled"),
+            stacks.clone(),
+            format!("emergency mode: only {stacks} is being scheduled"),
         );
     }
     for node in &state.unreachable {

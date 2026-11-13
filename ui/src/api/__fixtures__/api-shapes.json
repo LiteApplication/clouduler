@@ -1200,7 +1200,7 @@
     "dns_status": {
       "new.example.test": "Pending"
     },
-    "emergency_stack": null,
+    "emergency_stacks": [],
     "image_checks": {},
     "image_checks_at": 0,
     "instance_updates": {},

@@ -3,7 +3,7 @@
 //! commands do, and mirror what the web ui's `/api/nodes` routes do to the
 //! replicated roster and the config file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -149,16 +149,18 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
 
 /// Disaster recovery for a cluster that has lost quorum for good: force
 /// `name`'s own local raft state to make it the cluster's sole voter, and let
-/// only `stack` come back up, trusting this node's own local data for it.
+/// only `stacks` (or, with none named, every stack with `x-clouduler.priority:
+/// -1`) come back up, trusting this node's own local data for them.
 ///
-/// Unlike every other command in this module, this never talks to a running
-/// daemon - it edits `name`'s own data directory directly, so its daemon
-/// must be stopped first, and `via` does not apply. See `cl_raft::node::emergency`
-/// for what actually changes.
+/// The rewrite goes straight at this node's own data directory, so a running
+/// daemon is stopped through systemd first and started again afterwards; `via`
+/// does not apply. Then this waits until the stacks' containers run, saying
+/// what holds them back otherwise. See `cl_raft::node::emergency` for what
+/// actually changes.
 pub async fn emergency(
     cfg: &ClusterConfig,
     name: &str,
-    stack: &str,
+    stacks: &[String],
     data_dir_override: Option<PathBuf>,
     yes: bool,
 ) -> Result<()> {
@@ -172,86 +174,196 @@ pub async fn emergency(
         .unwrap_or_else(|| node.data_dir(cfg).to_path_buf())
         .join("raft");
 
-    // Read `stack`'s own spec straight out of this node's own local raft
-    // state, before rewriting anything, to work out which volumes it uses.
-    // Scoped so the store is closed again before `cl_raft::node::emergency`
-    // reopens the same file for real.
-    let spec = {
-        let store =
-            cl_raft::store::Store::open(data_dir.join("raft.redb")).map_err(|e| anyhow!("{e}"))?;
-        let shared = store.shared_state();
-        let guard = shared.read().await;
-        guard
-            .data
-            .stacks
-            .get(stack)
-            .map(|entry| entry.spec.clone())
-            .ok_or_else(|| {
-                anyhow!(
-                    "{stack} is not a stack this node's own local state knows about - check the \
-                     name, or deploy it once quorum is otherwise recovered"
-                )
-            })?
+    // The stacks' specs come out of this node's own local raft state. A
+    // running daemon holds that file open, so it is read from a copy.
+    let was_running = daemon_running();
+    let specs = local_stack_specs(cfg, name, &data_dir, was_running).await?;
+    let chosen: BTreeSet<String> = if stacks.is_empty() {
+        specs
+            .iter()
+            .filter(|(_, spec)| {
+                cl_config::StackFile::parse(spec).is_ok_and(|file| file.priority() == -1)
+            })
+            .map(|(stack, _)| stack.clone())
+            .collect()
+    } else {
+        stacks.iter().cloned().collect()
     };
-    let file = cl_config::StackFile::parse(&spec).map_err(|e| anyhow!("{e}"))?;
-    let mut stack_volumes = std::collections::BTreeSet::new();
-    for service in file.services.values() {
-        for mount in &service.volumes {
-            if let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) {
-                stack_volumes.insert(cl_raft::ids::VolumeId::new(drive, volume));
+    if chosen.is_empty() {
+        bail!("no stack named and none has `x-clouduler.priority: -1`");
+    }
+    let mut stack_volumes = BTreeSet::new();
+    for stack in &chosen {
+        let spec = specs.get(stack).ok_or_else(|| {
+            anyhow!("{stack} is not a stack this node's own local state knows about")
+        })?;
+        let file = cl_config::StackFile::parse(spec).map_err(|e| anyhow!("{e}"))?;
+        for service in file.services.values() {
+            for mount in &service.volumes {
+                if let (Some(drive), Some(volume)) = (mount.drive.as_ref(), mount.volume.as_ref()) {
+                    stack_volumes.insert(cl_raft::ids::VolumeId::new(drive, volume));
+                }
             }
         }
     }
+    let list = chosen.iter().cloned().collect::<Vec<_>>().join(", ");
 
     let mut prompt = Prompt::new(std::io::stdin().lock(), std::io::stdout(), !yes);
-    prompt.say(&format!(
-        "this rewrites the raft log and state machine at {} directly, bypassing consensus, so \
-         that {name} becomes the cluster's sole voter.",
-        data_dir.join("raft.redb").display()
-    ))?;
-    prompt.say(
-        "only do this once every other manager's raft state is confirmed lost for good: a \
-         manager that comes back with its old state intact would now conflict with this node. \
-         make sure this node's own daemon is stopped before continuing.",
-    )?;
-    prompt.say(&format!(
-        "only {stack} is allowed to start once the daemon comes back up; every other stack's \
-         own desired state is left exactly as it was, containers of those stacks already \
-         running on this node are left running untouched, and new work for them resumes on its own, \
-         no restore step needed, the moment another manager is reachable again and emergency mode ends. \
-         every node but {name} is marked unreachable, so any served drive {stack} needs treats \
-         {name} as the active server, and {name}'s own copy of every volume {stack} uses \
-         ({}) is trusted as current, whether or not anything else agrees.",
-        if stack_volumes.is_empty() {
-            "none".to_string()
-        } else {
-            stack_volumes
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    ))?;
     if !prompt.confirm(
-        &format!("force {name} to be the cluster's sole voter and bring up {stack} on it?"),
+        &format!(
+            "make {name} the sole voter, bypassing consensus, and start only {list} on its local data?"
+        ),
         yes,
     )? {
         bail!("aborted");
     }
 
-    cl_raft::node::emergency(&data_dir, node.id, rpc_addr, name, stack, &stack_volumes)
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
+    if was_running {
+        systemctl(&["stop", DAEMON_UNIT])?;
+    }
+    let rewrite =
+        cl_raft::node::emergency(&data_dir, node.id, rpc_addr, name, &chosen, &stack_volumes)
+            .await
+            .map_err(|e| anyhow!("{e}"));
+    // Back up even when the rewrite failed, so a failed attempt does not
+    // leave the node down.
+    let started = if was_running || rewrite.is_ok() {
+        systemctl(&["start", DAEMON_UNIT])
+    } else {
+        Ok(())
+    };
+    rewrite?;
+    println!("{name} is the sole voter; only {list} will start");
+    if let Err(e) = started {
+        bail!("{e}; start the daemon by hand");
+    }
+    wait_until_up(cfg, name, &chosen).await
+}
 
-    println!(
-        "{name} is now the cluster's sole voter, in emergency mode for {stack}. Start its \
-         daemon; {stack} comes up normally, every other stack stays held off. Once another \
-         manager is reachable again - promoted back to a voter on its own, the same as after \
-         `clouduler node remove`'s opposite case, once its daemon is reachable - emergency mode \
-         ends automatically and every other stack resumes on its own. If a lost manager is never \
-         coming back, `clouduler node remove` it instead."
-    );
+const DAEMON_UNIT: &str = "clouduler.service";
+
+fn daemon_running() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", DAEMON_UNIT])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn systemctl(args: &[&str]) -> Result<()> {
+    let out = std::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .with_context(|| format!("running systemctl {}", args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "systemctl {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     Ok(())
+}
+
+/// Every stack spec in this node's own raft state: asked of the running
+/// daemon, which answers reads from its own copy even without quorum, or read
+/// from the database when it is stopped.
+async fn local_stack_specs(
+    cfg: &ClusterConfig,
+    name: &str,
+    data_dir: &std::path::Path,
+    daemon_running: bool,
+) -> Result<BTreeMap<String, String>> {
+    if daemon_running {
+        let state = client_for(cfg, Some(name))?
+            .state()
+            .await
+            .map_err(|e| anyhow!("cannot read this node's state from its daemon: {e}"))?;
+        return Ok(state
+            .stacks
+            .into_iter()
+            .map(|(name, entry)| (name, entry.spec))
+            .collect());
+    }
+    let store =
+        cl_raft::store::Store::open(data_dir.join("raft.redb")).map_err(|e| anyhow!("{e}"))?;
+    let shared = store.shared_state();
+    let guard = shared.read().await;
+    Ok(guard
+        .data
+        .stacks
+        .iter()
+        .map(|(name, entry)| (name.clone(), entry.spec.clone()))
+        .collect())
+}
+
+/// Polls until every wanted instance of `stacks` runs. Ctrl+C only stops the
+/// waiting: emergency mode is already applied and stays on.
+async fn wait_until_up(cfg: &ClusterConfig, name: &str, stacks: &BTreeSet<String>) -> Result<()> {
+    let mut last: BTreeMap<String, String> = BTreeMap::new();
+    let mut note = |key: &str, line: String| {
+        if last.get(key) != Some(&line) {
+            println!("{line}");
+            last.insert(key.to_string(), line);
+        }
+    };
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+    let stop = tokio::signal::ctrl_c();
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            _ = &mut stop => {
+                println!("stopped waiting; emergency mode stays on");
+                return Ok(());
+            }
+            _ = ticker.tick() => {}
+        }
+
+        let docker = match cl_docker::Docker::connect() {
+            Ok(docker) => docker.ping().await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let state = match client_for(cfg, Some(name)) {
+            Ok(client) => client.state().await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let state = match state {
+            Ok(state) => state,
+            Err(e) => {
+                note("", format!("waiting for the daemon: {e}"));
+                continue;
+            }
+        };
+        let rows = match crate::health::stack_status(cfg, &state, stacks).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                note("", format!("cannot read status: {e}"));
+                continue;
+            }
+        };
+
+        if let Err(e) = &docker {
+            note("docker", format!("docker daemon unreachable: {e}"));
+        }
+        if rows.is_empty() {
+            note("", "waiting for placement".to_string());
+            continue;
+        }
+        for row in &rows {
+            let line = match (&row.reason, row.is_up()) {
+                (_, true) => format!("  {} running", row.instance),
+                (Some(reason), false) => format!("  {} {}: {reason}", row.instance, row.state),
+                (None, false) if docker.is_err() => {
+                    format!("  {} {}: docker daemon is down", row.instance, row.state)
+                }
+                (None, false) => format!("  {} {}", row.instance, row.state),
+            };
+            note(&row.instance, line);
+        }
+        if rows.iter().all(|r| r.is_up()) {
+            println!("up");
+            return Ok(());
+        }
+    }
 }
 
 pub async fn set_availability(

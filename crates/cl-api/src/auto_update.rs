@@ -168,7 +168,7 @@ pub fn settle(
 /// What blocks `instance` from being updated right now.
 pub fn blockers(state: &ClusterState, instance: &InstanceId) -> Blockers {
     Blockers {
-        emergency: state.emergency_stack.is_some(),
+        emergency: state.in_emergency(),
         in_flight: state
             .instance_updates
             .get(instance)

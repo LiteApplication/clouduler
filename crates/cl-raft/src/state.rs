@@ -787,7 +787,7 @@ pub const MAX_RESTORE_REQUESTS: usize = 50;
 /// needs a `crate::migrations` entry to read, or that is otherwise unsafe
 /// for a node behind this version to have installed - see `store.rs`'s use
 /// of this alongside `StateMachine::schema_version`.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// How long `RecordCrashMove` keeps a node on an instance's crash-move list
 /// before the next record prunes it. Also the window the scheduler avoids a
@@ -844,15 +844,15 @@ pub struct ClusterState {
     #[serde(default)]
     pub overlay: Option<String>,
     /// Set by `Store::emergency`'s offline recovery write, never by a normal
-    /// `Request`: while this holds a stack name, the scheduler places and
-    /// starts only that stack's instances, leaving every other assignment's
+    /// `Request`: while this holds stack names, the scheduler places and
+    /// starts only those stacks' instances, leaving every other assignment's
     /// `desired` untouched rather than forcing it to `Stopped` - so nothing
     /// has to be restored by hand once this clears. `ClearEmergency` is the
     /// only way out, submitted by `watch_leadership` the moment this node can
     /// once again reach another voter (see `QuorumStatus::reachable`), which
     /// is the cluster's own signal that another manager has come back.
     #[serde(default)]
-    pub emergency_stack: Option<String>,
+    pub emergency_stacks: BTreeSet<String>,
     /// Where a drive can back up to. See `BackupDestination`.
     #[serde(default)]
     pub restic_destinations: BTreeMap<String, BackupDestination>,
@@ -1507,10 +1507,10 @@ pub enum Request {
     },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
-    /// Ends emergency mode: clears `ClusterState::emergency_stack`, letting
+    /// Ends emergency mode: clears `ClusterState::emergency_stacks`, letting
     /// every stack's own `desired` state (never touched by emergency) govern
     /// placement again. Submitted by `watch_leadership` once this node can
-    /// reach another voter, not by an operator - see `emergency_stack`.
+    /// reach another voter, not by an operator - see `emergency_stacks`.
     ClearEmergency,
     /// Changes who holds a served drive, or a handover between holders. See
     /// `served::ServedOp`.
@@ -2165,7 +2165,7 @@ impl ClusterState {
             }
 
             Request::ClearEmergency => {
-                self.emergency_stack = None;
+                self.emergency_stacks.clear();
                 Ok(())
             }
 
@@ -3279,6 +3279,17 @@ impl ClusterState {
         copy.proxy_sessions.clear();
         copy.proxy_tokens.clear();
         copy
+    }
+
+    /// Whether `clouduler emergency` is in force.
+    pub fn in_emergency(&self) -> bool {
+        !self.emergency_stacks.is_empty()
+    }
+
+    /// Whether `stack` may be scheduled: always outside emergency mode, only
+    /// the emergency stacks during it.
+    pub fn emergency_allows(&self, stack: &str) -> bool {
+        self.emergency_stacks.is_empty() || self.emergency_stacks.contains(stack)
     }
 
     /// Instances a node should be running right now.

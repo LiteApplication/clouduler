@@ -55,7 +55,7 @@ sequenceDiagram
 4. **The scheduler moves the work.** Each instance goes to the least-loaded node that passes every check: schedulable, reachable, holds a usable copy of each replicated volume, has the networks and ports needed. See [Placement](/docs/features/placement).
 5. **Volumes follow.** The new node becomes the volume's primary and its generation increases.
 6. **The new node starts the containers**, pulling the image first if needed.
-7. **Cirrus's fence fires** about 16 to 22 seconds after the cut and stops its containers. A container that stops on SIGTERM is down in a second or two; one that ignores it is killed at its grace period.
+7. **Cirrus's fence fires** about 16 to 22 seconds after the cut and stops its containers. A container that stops on SIGTERM is down in a second or two; one that ignores it is killed at its grace period. Stacks are stopped in descending `x-clouduler.priority` order, one priority at a time, so the most important (lowest number) go down last; the same number orders restarts the other way round.
 
 Instances stay where they land. When cirrus comes back, nothing moves back automatically. Use [Rebalance](/docs/features/node-lifecycle#rebalance) if you want that.
 

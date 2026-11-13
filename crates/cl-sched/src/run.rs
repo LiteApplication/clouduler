@@ -336,7 +336,11 @@ impl Scheduler {
         self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
         let mut actions = reconcile::diff(&targets, &actual, gate);
-        reconcile::restrict_to_emergency_stack(&mut actions, state.emergency_stack.as_deref());
+        reconcile::restrict_to_emergency_stacks(&mut actions, &state.emergency_stacks);
+
+        // Most important stacks first, so they are also the first to come back.
+        let priorities = stack_priorities(state);
+        reconcile::sort_by_priority(&mut actions, &priorities);
 
         // `depends_on`: hold back the first creation of an instance until the
         // services it depends on are up. Only `Create` is gated, so an existing
@@ -407,7 +411,7 @@ impl Scheduler {
         // A fence's stops are the only batch that can be cut short by a release.
         let fencing = fenced.then_some(still_fenced);
         reconciler
-            .apply(&actions, &targets, &actual, fencing)
+            .apply(&actions, &targets, &actual, fencing, &priorities)
             .await?;
         self.report_container_status(state, &actual).await;
         self.expire_updates(state, &actual).await;
@@ -627,7 +631,7 @@ impl Scheduler {
     ) {
         // With the wanted set not fully known, cleanup could mistake a
         // service's image for an unwanted one.
-        if state.emergency_stack.is_some() {
+        if state.in_emergency() {
             return;
         }
         let mut busy = !self.pulling.read().await.is_empty();
@@ -914,11 +918,7 @@ impl Scheduler {
             // updated). Its existing container is left alone rather than
             // removed: `reconcile::restrict_to_emergency_stack` drops the
             // actions that would otherwise treat it as no longer assigned.
-            if state
-                .emergency_stack
-                .as_deref()
-                .is_some_and(|only| only != instance.stack)
-            {
+            if !state.emergency_allows(&instance.stack) {
                 continue;
             }
             let Some(stack) = state.stacks.get(&instance.stack) else {
@@ -984,9 +984,8 @@ impl Scheduler {
                 placement.ip = Some(ip);
                 placement.resolver = allocations.as_ref().and_then(|a| a.gateway(network));
                 placement.zone = self.zone.clone();
-                placement.published_hosts = exposed_allowed_hosts(state, &file)
-                    .into_iter()
-                    .collect();
+                placement.published_hosts =
+                    exposed_allowed_hosts(state, &file).into_iter().collect();
             }
             placement.egress_network = service
                 .networks
@@ -1588,13 +1587,24 @@ pub fn instances_of(state: &ClusterState, stack: &str) -> Vec<InstanceId> {
         .collect()
 }
 
+/// `x-clouduler.priority` of every deployed stack that parses.
+pub fn stack_priorities(state: &ClusterState) -> reconcile::Priorities {
+    state
+        .stacks
+        .iter()
+        .filter_map(|(name, stack)| {
+            Some((name.clone(), StackFile::parse(&stack.spec).ok()?.priority()))
+        })
+        .collect()
+}
+
 /// Every instance every deployed stack wants, expanded from its spec against
 /// the cluster's egress/public network sets (see `ClusterConfig::egress_networks`
 /// / `port_gated_networks`). Shared by the scheduler and by anything else (the
 /// api's "why is this instance unplaced" reporting) that needs the same
 /// expansion without duplicating it.
 ///
-/// While `state.emergency_stack` holds a name (see `clouduler emergency`),
+/// While `state.emergency_stacks` holds names (see `clouduler emergency`),
 /// every other stack is left out entirely, rather than reported unplaceable:
 /// its instances are not a placement problem, they are simply not wanted
 /// until an operator ends emergency mode. Nothing here mutates any
@@ -1609,11 +1619,7 @@ pub fn desired_instances(
 ) -> Vec<Desired> {
     let mut desired = Vec::new();
     for (name, stack) in &state.stacks {
-        if state
-            .emergency_stack
-            .as_deref()
-            .is_some_and(|only| only != name)
-        {
+        if !state.emergency_allows(name) {
             continue;
         }
         match StackFile::parse(&stack.spec) {
@@ -2203,7 +2209,7 @@ web: { address: cloud, network: tailscale }
             spec: STACK.into(),
             at: 0,
         });
-        state.emergency_stack = Some("site".into());
+        state.emergency_stacks = ["site".to_string()].into();
 
         let requests = plan_requests(&state).expect("plan");
         assert_eq!(requests.len(), 2, "only site's two replicas");

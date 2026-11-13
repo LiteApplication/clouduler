@@ -692,6 +692,12 @@ pub struct StackDefaults {
     /// re-address a live network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<ipnet::Ipv4Net>,
+    /// Lower is more important (default 0). Stacks start and restart in
+    /// ascending order and are stopped in descending order when a node is
+    /// fenced. -1 also marks the stacks `clouduler emergency` brings back when
+    /// it is given no stack name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 #[cfg(test)]

@@ -195,6 +195,68 @@ pub(crate) async fn print_problems(
     Ok(any)
 }
 
+/// One instance's current state, for callers that wait on it.
+pub(crate) struct InstanceStatus {
+    pub instance: String,
+    pub state: String,
+    pub health: String,
+    pub reason: Option<String>,
+}
+
+impl InstanceStatus {
+    pub fn is_up(&self) -> bool {
+        self.state == "running" && !matches!(self.health.as_str(), "starting" | "unhealthy")
+    }
+}
+
+/// Every instance of `stacks` the cluster wants, with what it is doing now and
+/// why not, if it is not running.
+pub(crate) async fn stack_status(
+    cfg: &ClusterConfig,
+    state: &ClusterState,
+    stacks: &std::collections::BTreeSet<String>,
+) -> Result<Vec<InstanceStatus>> {
+    let key = Arc::new(ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
+        format!(
+            "loading the cluster key from {}",
+            cfg.secrets.key_file.display()
+        )
+    })?);
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("building the http client")?;
+
+    let mut rows: Vec<Row> = futures::future::join_all(
+        state
+            .assignments
+            .values()
+            .filter(|a| stacks.contains(&a.instance.stack) && a.desired == DesiredState::Running)
+            .map(|a| row_for_assignment(cfg, &http, &key, state, a)),
+    )
+    .await
+    .into_iter()
+    .map(|(_, row)| row)
+    .collect();
+    rows.extend(
+        pending_rows(cfg, state)
+            .into_iter()
+            .filter(|(stack, _)| stacks.contains(stack))
+            .map(|(_, row)| row),
+    );
+    rows.sort_by(|a, b| a.instance.cmp(&b.instance));
+    Ok(rows
+        .into_iter()
+        .map(|r| InstanceStatus {
+            instance: r.instance,
+            state: r.state,
+            health: r.health,
+            reason: r.reason,
+        })
+        .collect())
+}
+
 /// Faults that belong to no single instance, and so had nowhere to be
 /// reported before.
 ///

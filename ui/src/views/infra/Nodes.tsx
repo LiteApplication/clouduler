@@ -154,7 +154,7 @@ export function Nodes() {
         {status && !status.has_quorum && (
           <Banner tone="danger" title="No quorum">
             This node can reach {status.reachable} of {status.voters} voters, so changes are paused. Bring a manager back online.
-            {cluster.emergency_stack && <> Emergency mode is on for <code>{cluster.emergency_stack}</code>. It clears when the managers reconnect.</>}
+            {cluster.emergency_stacks.length > 0 && <> Emergency mode is on for <code>{cluster.emergency_stacks.join(', ')}</code>. It clears when the managers reconnect.</>}
           </Banner>
         )}
         {unreachable.length > 0 && status?.has_quorum && (

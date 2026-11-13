@@ -259,12 +259,12 @@ async fn main() -> Result<()> {
             };
             cl_cli::folder_import::run(&cfg, &node, *args).await
         }
-        Command::Emergency { stack, node, yes } => {
+        Command::Emergency { stacks, node, yes } => {
             let node = match &node {
                 Some(n) => n.clone(),
                 None => detect::hostname()?,
             };
-            cl_cli::node::emergency(&cfg, &node, &stack, cli.data_dir, yes).await
+            cl_cli::node::emergency(&cfg, &node, &stacks, cli.data_dir, yes).await
         }
         Command::Restore {
             source,

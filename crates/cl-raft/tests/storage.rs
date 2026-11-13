@@ -183,7 +183,7 @@ async fn force_quorum_leaves_assignments_desired_state_alone() {
     let guard = shared.read().await;
     let assignment = guard.data.assignments.get(&instance).expect("assignment");
     assert_eq!(assignment.desired, DesiredState::Running);
-    assert_eq!(guard.data.emergency_stack, None);
+    assert!(guard.data.emergency_stacks.is_empty());
 }
 
 #[tokio::test]
@@ -221,7 +221,7 @@ async fn emergency_sets_the_flag_marks_other_nodes_unreachable_and_stamps_volume
             1,
             "10.10.0.1:7373".parse().expect("addr"),
             "n1",
-            "site",
+            &["site".to_string()].into(),
             &[volume.clone()].into(),
         )
         .await
@@ -229,7 +229,7 @@ async fn emergency_sets_the_flag_marks_other_nodes_unreachable_and_stamps_volume
 
     let shared = store.shared_state();
     let guard = shared.read().await;
-    assert_eq!(guard.data.emergency_stack.as_deref(), Some("site"));
+    assert_eq!(guard.data.emergency_stacks, ["site".to_string()].into());
     assert!(guard.data.unreachable.contains("n2"));
     assert!(!guard.data.unreachable.contains("n1"));
 
@@ -262,7 +262,7 @@ async fn emergency_registers_a_volume_it_has_never_seen_before() {
             1,
             "10.10.0.1:7373".parse().expect("addr"),
             "n1",
-            "site",
+            &["site".to_string()].into(),
             &[volume.clone()].into(),
         )
         .await

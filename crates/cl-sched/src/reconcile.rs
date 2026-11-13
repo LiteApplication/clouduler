@@ -77,10 +77,42 @@ impl Action {
 /// outside the emergency stack. Other stacks are not scheduled, but whatever
 /// of theirs is already running on this node is left exactly as it is: not
 /// stopped, not removed, not recreated.
-pub fn restrict_to_emergency_stack(actions: &mut Vec<Action>, emergency_stack: Option<&str>) {
-    if let Some(only) = emergency_stack {
-        actions.retain(|a| a.instance().stack == only);
+pub fn restrict_to_emergency_stacks(
+    actions: &mut Vec<Action>,
+    emergency_stacks: &BTreeSet<String>,
+) {
+    if !emergency_stacks.is_empty() {
+        actions.retain(|a| emergency_stacks.contains(&a.instance().stack));
     }
+}
+
+/// `x-clouduler.priority` per stack name (lower is more important). A stack
+/// missing from the map counts as 0.
+pub type Priorities = BTreeMap<String, i32>;
+
+fn priority_of(priorities: &Priorities, action: &Action) -> i32 {
+    priorities
+        .get(&action.instance().stack)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Puts the most important stacks first, keeping the order within a priority.
+pub fn sort_by_priority(actions: &mut [Action], priorities: &Priorities) {
+    actions.sort_by_key(|a| priority_of(priorities, a));
+}
+
+/// A fence's stops grouped by priority, least important group first, so the
+/// most important stacks are the last to go down.
+fn fence_stages(actions: &[Action], priorities: &Priorities) -> Vec<Vec<Action>> {
+    let mut stages: BTreeMap<std::cmp::Reverse<i32>, Vec<Action>> = BTreeMap::new();
+    for action in actions.iter().filter(|a| matches!(a, Action::Stop(_))) {
+        stages
+            .entry(std::cmp::Reverse(priority_of(priorities, action)))
+            .or_default()
+            .push(action.clone());
+    }
+    stages.into_values().collect()
 }
 
 /// What this node should be running, keyed by instance.
@@ -315,6 +347,7 @@ impl Reconciler {
         targets: &[Target],
         actual: &[ContainerState],
         fencing: Option<&(dyn Fn() -> bool + Sync)>,
+        priorities: &Priorities,
     ) -> Result<()> {
         let specs: BTreeMap<&InstanceId, &Target> = targets
             .iter()
@@ -322,19 +355,23 @@ impl Reconciler {
             .collect();
 
         if let Some(still_fenced) = fencing {
-            stop_while_fenced(actions, still_fenced, |action| async {
-                let id = action.instance();
-                let target = specs.get(id).copied();
-                // One hung docker call must not hold the whole pass, and with
-                // it the start of everything else once the fence lifts.
-                let deadline = stop_timeout(target, self.stop_grace) + FENCE_STOP_SLACK;
-                match tokio::time::timeout(deadline, self.apply_one(action, target)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => warn!(instance = %id, error = %e, "reconcile step failed"),
-                    Err(_) => warn!(instance = %id, ?deadline, "stop timed out, moving on"),
-                }
-            })
-            .await;
+            // One stage per priority, so a stack that matters more outlives
+            // the ones it depends on being gone.
+            for stage in fence_stages(actions, priorities) {
+                stop_while_fenced(&stage, still_fenced, |action| async {
+                    let id = action.instance();
+                    let target = specs.get(id).copied();
+                    // One hung docker call must not hold the whole pass, and with
+                    // it the start of everything else once the fence lifts.
+                    let deadline = stop_timeout(target, self.stop_grace) + FENCE_STOP_SLACK;
+                    match tokio::time::timeout(deadline, self.apply_one(action, target)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(instance = %id, error = %e, "reconcile step failed"),
+                        Err(_) => warn!(instance = %id, ?deadline, "stop timed out, moving on"),
+                    }
+                })
+                .await;
+            }
             self.reconcile_egress_attachments(targets, actual).await;
             self.reconcile_container_attachments(targets, actual).await;
             return Ok(());
@@ -768,6 +805,35 @@ fn stop_timeout(target: Option<&Target>, fallback: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn important_stacks_start_first_and_stop_last() {
+        let id = |stack: &str| InstanceId::new(stack, "web", 0);
+        let priorities: Priorities = [("db".into(), -1), ("app".into(), 5)].into();
+        let mut actions = vec![
+            Action::Create(id("app")),
+            Action::Create(id("misc")),
+            Action::Create(id("db")),
+        ];
+        sort_by_priority(&mut actions, &priorities);
+        let order: Vec<_> = actions
+            .iter()
+            .map(|a| a.instance().stack.as_str())
+            .collect();
+        assert_eq!(order, ["db", "misc", "app"]);
+
+        let stops = vec![
+            Action::Stop(id("db")),
+            Action::Stop(id("app")),
+            Action::Stop(id("misc")),
+            Action::Start(id("misc")),
+        ];
+        let stages: Vec<Vec<_>> = fence_stages(&stops, &priorities)
+            .iter()
+            .map(|s| s.iter().map(|a| a.instance().stack.clone()).collect())
+            .collect();
+        assert_eq!(stages, [vec!["app"], vec!["misc"], vec!["db"]]);
+    }
+
+    #[test]
     fn emergency_mode_only_acts_on_the_emergency_stacks_containers() {
         let mut actions = vec![
             Action::Remove(InstanceId::new("other", "db", 0)),
@@ -775,9 +841,9 @@ mod tests {
             Action::Recreate(InstanceId::new("site", "web", 0)),
             Action::Create(InstanceId::new("site", "db", 0)),
         ];
-        restrict_to_emergency_stack(&mut actions, None);
+        restrict_to_emergency_stacks(&mut actions, &BTreeSet::new());
         assert_eq!(actions.len(), 4, "no emergency: nothing is filtered");
-        restrict_to_emergency_stack(&mut actions, Some("site"));
+        restrict_to_emergency_stacks(&mut actions, &["site".to_string()].into());
         assert_eq!(actions.len(), 2);
         assert!(actions.iter().all(|a| a.instance().stack == "site"));
     }

@@ -1395,7 +1395,7 @@ async fn watch_leadership(
             // emergency mode right here rather than wait for an operator, so
             // every other stack resumes on its own. See
             // `ClusterState::emergency_stack`.
-            if status.reachable.len() > 1 && cluster.state().await.emergency_stack.is_some() {
+            if status.reachable.len() > 1 && cluster.state().await.in_emergency() {
                 match cluster.submit(Request::ClearEmergency).await {
                     Ok(response) if response.error.is_none() => {
                         info!("another manager is reachable again, ending emergency mode");
