@@ -1383,6 +1383,39 @@ fn desired_records(
     cl_dns::normalize_desired(&out)
 }
 
+/// Hostnames that should be published but that no node can answer for: every
+/// node meant to serve them has no address on the hostname's network. Without
+/// this the hostname just never gets a record and nothing says why. Keyed by
+/// the qualified name, the value is the message for its DNS status.
+fn unaddressed_hosts(cfg: &ClusterConfig, state: &ClusterState) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for ((host, network), nodes) in desired_dns_hosts(cfg, state) {
+        if !publishes_dns(cfg, &network) || nodes.is_empty() {
+            continue;
+        }
+        let answered = nodes.iter().any(|name| {
+            cfg.nodes
+                .get(name)
+                .is_some_and(|node| cl_dns::records_for(cfg, &host, &network, node).is_ok())
+        });
+        if answered {
+            continue;
+        }
+        let Some(net) = cfg.networks.get(&network) else {
+            continue;
+        };
+        let fqdn = cl_config::qualify(&host, net.domain.as_deref());
+        out.insert(
+            fqdn,
+            format!(
+                "no node has an address on network {network}, so no record can be published; \
+                 add one under nodes.<name>.network.{network}"
+            ),
+        );
+    }
+    out
+}
+
 /// Appends `records` to `out`, skipping any already seen by (type, fqdn,
 /// content) - the same hostname/network combination can turn up more than
 /// once (a stack route and a static route sharing a host, say).
@@ -1413,6 +1446,25 @@ async fn reconcile_dns(
     zones: &Zones,
     state: &ClusterState,
 ) {
+    for (fqdn, message) in unaddressed_hosts(cfg, state) {
+        warn!(%fqdn, "{message}");
+        let same = matches!(
+            state.dns_status.get(&fqdn),
+            Some(ReconcileStatus::Error { message: m, .. }) if *m == message
+        );
+        if !same {
+            set_dns_status(
+                cluster,
+                &fqdn,
+                ReconcileStatus::Error {
+                    message,
+                    at: now(),
+                },
+            )
+            .await;
+        }
+    }
+
     let mut by_zone: std::collections::HashMap<(String, String), Vec<DesiredRecord>> =
         std::collections::HashMap::new();
     for record in desired_records(cfg, cluster.quorum().leader(), state) {
@@ -1537,7 +1589,12 @@ async fn prune_stale_status(
     }
     if check_dns {
         let desired = desired_records(cfg, cluster.quorum().leader(), state);
+        let unaddressed = unaddressed_hosts(cfg, state);
         for fqdn in state.dns_status.keys() {
+            // No records at all would read as "all live" below.
+            if unaddressed.contains_key(fqdn) {
+                continue;
+            }
             let mine: Vec<_> = desired.iter().filter(|r| &r.fqdn == fqdn).collect();
             let all_live = mine.iter().all(|r| {
                 state.dns_records.contains_key(&dns_key(
@@ -2296,6 +2353,27 @@ services:
         let off = desired_records(&cfg, None, &state);
         assert!(!off.iter().any(|r| r.fqdn.starts_with("printer.")));
         assert!(off.iter().any(|r| r.fqdn == "blog.example.com"));
+    }
+
+    /// A hostname whose network no node has an address on never gets a record;
+    /// it has to be reported rather than skipped silently.
+    #[test]
+    fn a_host_no_node_can_answer_for_is_reported() {
+        let state = state_with(SPEC, 1);
+        let mut cfg = cfg();
+        assert!(unaddressed_hosts(&cfg, &state).is_empty());
+
+        let network = cfg.networks.keys().next().cloned().unwrap();
+        let blog_network = desired_dns_hosts(&cfg, &state)
+            .into_keys()
+            .find(|(h, _)| h == "blog")
+            .map(|(_, n)| n)
+            .unwrap_or(network);
+        for node in cfg.nodes.values_mut() {
+            node.network.remove(&blog_network);
+        }
+        let missing = unaddressed_hosts(&cfg, &state);
+        assert!(missing.contains_key("blog.example.com"), "{missing:?}");
     }
 
     /// Under `DnsPublishMode::OwningNode`, only the node actually running

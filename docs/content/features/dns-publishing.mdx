@@ -145,7 +145,7 @@ The server answers according to the network the client is on. A client on a subn
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| Record never appears | Hostname outside every `cloudflare.zones` entry, or the network has no `domain`. | Check **DNS** status for `no cloudflare zone covers this hostname`. Add the zone. |
+| Record never appears | Hostname outside every `cloudflare.zones` entry, the network has no `domain`, or no node has an address on the hostname's network (`nodes.<name>.network.<network>`). | Check **DNS** status for `no cloudflare zone covers this hostname` or `no node has an address on network ...`. Add the zone or the node address. Either one also raises the **DNS records could not be updated** alert. |
 | `cloudflare auth failed: ...` | Bad or under-privileged token. The token is not verified when saved. | Rotate the token under **Settings > Network > Cloudflare DNS**. It needs Zone, DNS and Edit permissions. |
 | `zone X not found` | The zone name does not exist in the account behind the token. | Fix the zone list or token. |
 | `cloudflare api error CODE: MESSAGE` | Cloudflare rejected a record. | Read the code; several failures are summarised as `N records failed to apply: ...`. |
