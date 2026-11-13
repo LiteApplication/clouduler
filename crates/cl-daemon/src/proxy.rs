@@ -228,6 +228,9 @@ struct Desired {
     listen: Option<(u16, u16)>,
     acme: Option<(Vec<String>, String)>,
     dns: bool,
+    /// Not a task input: the loops re-read the zone list every pass. It is
+    /// here so a change wakes them instead of waiting out their ticker.
+    zones: Vec<String>,
 }
 
 fn desired_of(cfg: &ClusterConfig) -> Desired {
@@ -239,6 +242,11 @@ fn desired_of(cfg: &ClusterConfig) -> Desired {
         acme: acme_setup(cfg, Path::new(""))
             .map(|a| (a.config.contact_emails, a.config.directory_url)),
         dns: cfg.cloudflare.is_some(),
+        zones: cfg
+            .cloudflare
+            .as_ref()
+            .map(|c| c.zones.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -370,6 +378,16 @@ pub fn start(
             cfg = (**config_rx.borrow()).clone();
             let live = desired_of(&cfg);
             if live == desired {
+                continue;
+            }
+            if live.zones != desired.zones {
+                info!("cloudflare zones changed, waking the dns and certificate loops");
+                nudges.dns.notify_one();
+                nudges.acme.notify_one();
+            }
+            if live.listen == desired.listen && live.acme == desired.acme && live.dns == desired.dns
+            {
+                desired = live;
                 continue;
             }
             info!("reverse proxy config changed, restarting the affected tasks");
