@@ -55,7 +55,7 @@ pub async fn run(
 
     // Claimed before anything else so a restart never leaves the proxy ports
     // refusing connections while raft and the rest come up.
-    crate::proxy::prebind(&cfg);
+    crate::proxy::prebind(&cfg, &node_name);
 
     let Some(node) = cfg.node(&node_name) else {
         bail!(
@@ -263,6 +263,7 @@ pub async fn run(
     let nudges = cl_api::Nudges::default();
     let proxy = crate::proxy::start(
         &cfg,
+        &node_name,
         &cluster,
         &data_dir,
         config_rx.clone(),

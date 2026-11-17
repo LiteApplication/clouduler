@@ -946,6 +946,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "serde_yaml",
+ "socket2",
  "tempfile",
  "tokio",
  "tracing",

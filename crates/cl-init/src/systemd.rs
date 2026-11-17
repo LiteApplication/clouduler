@@ -21,6 +21,8 @@ pub struct Unit {
     pub node: String,
     /// The reverse proxy's http and https ports, when it is enabled.
     pub proxy_ports: Option<(u16, u16)>,
+    /// Also hold the proxy ports on `[::]`, for a node with a public IPv6.
+    pub proxy_v6: bool,
 }
 
 impl Unit {
@@ -77,6 +79,11 @@ impl Unit {
     /// (`LISTEN_FDS`), and binds the ports itself when run without this.
     pub fn render_socket(&self) -> Option<String> {
         let (http, https) = self.proxy_ports?;
+        let v6 = if self.proxy_v6 {
+            format!("ListenStream=[::]:{http}\nListenStream=[::]:{https}\nBindIPv6Only=ipv6-only\n")
+        } else {
+            String::new()
+        };
         Some(format!(
             "[Unit]\n\
              Description=Clouduler reverse proxy sockets\n\
@@ -85,6 +92,7 @@ impl Unit {
              [Socket]\n\
              ListenStream=0.0.0.0:{http}\n\
              ListenStream=0.0.0.0:{https}\n\
+             {v6}\
              Backlog=1024\n\
              \n\
              [Install]\n\
@@ -185,6 +193,7 @@ mod tests {
             config: PathBuf::from("/etc/clouduler/cluster.yaml"),
             node: "n1".into(),
             proxy_ports: Some((80, 443)),
+            proxy_v6: false,
         }
     }
 
@@ -194,6 +203,17 @@ mod tests {
         assert!(text.contains("ListenStream=0.0.0.0:80\n"));
         assert!(text.contains("ListenStream=0.0.0.0:443\n"));
         assert!(text.contains("WantedBy=sockets.target"));
+    }
+
+    #[test]
+    fn a_node_with_public_ipv6_also_holds_the_ports_on_v6_only() {
+        let mut u = unit();
+        u.proxy_v6 = true;
+        let text = u.render_socket().expect("proxy enabled");
+        assert!(text.contains("ListenStream=[::]:80\n"));
+        assert!(text.contains("ListenStream=[::]:443\n"));
+        assert!(text.contains("BindIPv6Only=ipv6-only\n"));
+        assert!(!unit().render_socket().unwrap().contains("[::]"));
     }
 
     #[test]

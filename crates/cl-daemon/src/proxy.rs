@@ -226,6 +226,9 @@ impl Proxy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Desired {
     listen: Option<(u16, u16)>,
+    /// Also listen on `[::]` (IPv6 only): this node has a public network
+    /// with an `ipv6` address, so AAAA records point clients at it.
+    v6: bool,
     acme: Option<(Vec<String>, String)>,
     dns: bool,
     /// Not a task input: the loops re-read the zone list every pass. It is
@@ -233,12 +236,13 @@ struct Desired {
     zones: Vec<String>,
 }
 
-fn desired_of(cfg: &ClusterConfig) -> Desired {
+fn desired_of(cfg: &ClusterConfig, node: &str) -> Desired {
     Desired {
         listen: cfg
             .proxy
             .enabled
             .then_some((cfg.proxy.http_port, cfg.proxy.https_port)),
+        v6: cfg.proxy.enabled && cfg.node_has_public_v6(node),
         acme: acme_setup(cfg, Path::new(""))
             .map(|a| (a.config.contact_emails, a.config.directory_url)),
         dns: cfg.cloudflare.is_some(),
@@ -266,13 +270,34 @@ impl Group {
 /// Proxy ports bound at the very start of the daemon, before raft is up, so a
 /// restart leaves clients queued in the listen backlog instead of refused.
 /// Taken by `build_listen`; a port that was not pre-bound is bound there.
-static PREBOUND: std::sync::Mutex<BTreeMap<u16, std::net::TcpListener>> =
+/// Keyed by port and whether the socket is the IPv6-only one.
+static PREBOUND: std::sync::Mutex<BTreeMap<(u16, bool), std::net::TcpListener>> =
     std::sync::Mutex::new(BTreeMap::new());
+
+/// A non-blocking listener on `[::]:port` that accepts only IPv6, so it
+/// coexists with the `0.0.0.0` one whatever `net.ipv6.bindv6only` says.
+fn bind_v6(port: u16) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(true)?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
+fn bind_v4(port: u16) -> std::io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
 
 /// Bind the proxy's ports now. Failures are ignored: `build_listen` binds
 /// again and reports the error where it always did.
-pub fn prebind(cfg: &ClusterConfig) {
-    let Some((http_port, https_port)) = desired_of(cfg).listen else {
+pub fn prebind(cfg: &ClusterConfig, node: &str) {
+    let desired = desired_of(cfg, node);
+    let Some((http_port, https_port)) = desired.listen else {
         return;
     };
     let mut bound = PREBOUND.lock().unwrap_or_else(|e| e.into_inner());
@@ -280,32 +305,35 @@ pub fn prebind(cfg: &ClusterConfig) {
     // best case: they were bound before this process existed.
     for listener in crate::systemd::take_listen_fds() {
         if let Ok(addr) = listener.local_addr() {
-            bound.insert(addr.port(), listener);
+            bound.insert((addr.port(), addr.is_ipv6()), listener);
         }
     }
+    use std::collections::btree_map::Entry;
     for port in [http_port, https_port] {
-        if bound.contains_key(&port) {
-            continue;
+        if let Entry::Vacant(slot) = bound.entry((port, false)) {
+            if let Ok(listener) = bind_v4(port) {
+                slot.insert(listener);
+            }
         }
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        if let Ok(listener) = std::net::TcpListener::bind(addr) {
-            if listener.set_nonblocking(true).is_ok() {
-                bound.insert(port, listener);
+        if desired.v6 {
+            if let Entry::Vacant(slot) = bound.entry((port, true)) {
+                if let Ok(listener) = bind_v6(port) {
+                    slot.insert(listener);
+                }
             }
         }
     }
 }
 
-fn take_listener(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+fn take_listener(port: u16, v6: bool) -> std::io::Result<tokio::net::TcpListener> {
     let prebound = PREBOUND
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&port);
+        .remove(&(port, v6));
     match prebound {
         Some(listener) => tokio::net::TcpListener::from_std(listener),
         None => {
-            let std = std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
-            std.set_nonblocking(true)?;
+            let std = if v6 { bind_v6(port)? } else { bind_v4(port)? };
             tokio::net::TcpListener::from_std(std)
         }
     }
@@ -313,6 +341,7 @@ fn take_listener(port: u16) -> std::io::Result<tokio::net::TcpListener> {
 
 pub fn start(
     cfg: &ClusterConfig,
+    node: &str,
     cluster: &Arc<ClusterNode>,
     data_dir: &Path,
     config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
@@ -325,6 +354,7 @@ pub fn start(
     let cluster = cluster.clone();
     let data_dir = data_dir.to_path_buf();
     let boot_cfg = cfg.clone();
+    let node = node.to_string();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let health = cl_proxy::HealthTable::default();
     let task_health = health.clone();
@@ -340,7 +370,7 @@ pub fn start(
         let health = task_health;
         let shared_routes = task_routes;
         let mut cfg = boot_cfg;
-        let mut desired = desired_of(&cfg);
+        let mut desired = desired_of(&cfg, &node);
         let mut listen = build_listen(
             &desired,
             &cluster,
@@ -376,7 +406,7 @@ pub fn start(
             }
 
             cfg = (**config_rx.borrow()).clone();
-            let live = desired_of(&cfg);
+            let live = desired_of(&cfg, &node);
             if live == desired {
                 continue;
             }
@@ -385,14 +415,17 @@ pub fn start(
                 nudges.dns.notify_one();
                 nudges.acme.notify_one();
             }
-            if live.listen == desired.listen && live.acme == desired.acme && live.dns == desired.dns
+            if live.listen == desired.listen
+                && live.v6 == desired.v6
+                && live.acme == desired.acme
+                && live.dns == desired.dns
             {
                 desired = live;
                 continue;
             }
             info!("reverse proxy config changed, restarting the affected tasks");
 
-            if live.listen != desired.listen {
+            if live.listen != desired.listen || live.v6 != desired.v6 {
                 if let Some(group) = listen.take() {
                     group.teardown();
                 }
@@ -474,12 +507,20 @@ fn build_listen(
     // Flipped by `reconcile_loop` once the first full route set is in place.
     let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
 
-    for (port, tls) in [(http_port, false), (https_port, true)] {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let families: &[bool] = if desired.v6 { &[false, true] } else { &[false] };
+    for (port, tls, v6) in [(http_port, false), (https_port, true)]
+        .into_iter()
+        .flat_map(|(port, tls)| families.iter().map(move |&v6| (port, tls, v6)))
+    {
+        let addr = if v6 {
+            SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port))
+        } else {
+            SocketAddr::from(([0, 0, 0, 0], port))
+        };
         let server = server.clone();
         let mut ready = ready_rx.clone();
         // Bound here, synchronously, so the port is held from now on.
-        let listener = take_listener(port);
+        let listener = take_listener(port, v6);
         tasks.push(tokio::spawn(async move {
             // Connections made before the routes load wait in the backlog
             // rather than being answered 404 for every host. Bounded, so a
@@ -1702,6 +1743,17 @@ mod tests {
             .expect("example parses")
     }
 
+    /// The v6 listener is IPv6-only, so it shares a port with the v4 one
+    /// instead of colliding with it. Skipped quietly without IPv6.
+    #[test]
+    fn the_v6_listener_shares_its_port_with_the_v4_one() {
+        let v4 = bind_v4(0).expect("v4 binds");
+        let port = v4.local_addr().unwrap().port();
+        let Ok(v6) = bind_v6(port) else { return };
+        assert!(v6.local_addr().unwrap().is_ipv6());
+        assert_eq!(v6.local_addr().unwrap().port(), port);
+    }
+
     /// `desired_of` is what the supervisor diffs on every pass to decide
     /// which task groups to restart; these are the changes that must (and
     /// must not) trip that diff.
@@ -1712,32 +1764,38 @@ mod tests {
         fn disabling_the_proxy_changes_the_listen_key() {
             let mut disabled = cfg();
             disabled.proxy.enabled = false;
-            assert_ne!(desired_of(&cfg()).listen, desired_of(&disabled).listen);
-            assert!(desired_of(&disabled).listen.is_none());
+            assert_ne!(
+                desired_of(&cfg(), "").listen,
+                desired_of(&disabled, "").listen
+            );
+            assert!(desired_of(&disabled, "").listen.is_none());
         }
 
         #[test]
         fn changing_a_listen_port_changes_the_listen_key() {
             let mut edited = cfg();
             edited.proxy.https_port += 1;
-            assert_ne!(desired_of(&cfg()).listen, desired_of(&edited).listen);
+            assert_ne!(
+                desired_of(&cfg(), "").listen,
+                desired_of(&edited, "").listen
+            );
         }
 
         #[test]
         fn an_unrelated_edit_changes_neither_key() {
             let mut edited = cfg();
             edited.cluster.name = "renamed".to_string();
-            assert_eq!(desired_of(&cfg()), desired_of(&edited));
+            assert_eq!(desired_of(&cfg(), ""), desired_of(&edited, ""));
         }
 
         #[test]
         fn adding_a_cloudflare_section_flips_the_dns_key_and_offers_acme() {
             let mut without = cfg();
             without.cloudflare = None;
-            let before = desired_of(&without);
+            let before = desired_of(&without, "");
             assert!(!before.dns);
 
-            let after = desired_of(&cfg());
+            let after = desired_of(&cfg(), "");
             assert!(cfg().cloudflare.is_some());
             assert!(after.dns);
             assert_ne!(before.dns, after.dns);
@@ -1748,10 +1806,10 @@ mod tests {
             let mut edited = cfg();
             edited.proxy.acme.enabled = true;
             edited.proxy.acme.contact_email = Some("ops@example.com".to_string());
-            let base = desired_of(&edited);
+            let base = desired_of(&edited, "");
 
             edited.proxy.acme.contact_email = Some("someone-else@example.com".to_string());
-            let changed = desired_of(&edited);
+            let changed = desired_of(&edited, "");
             assert_ne!(base.acme, changed.acme);
         }
     }

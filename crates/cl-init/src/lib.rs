@@ -834,6 +834,7 @@ fn setup_systemd<R: BufRead, W: Write>(
             .proxy
             .enabled
             .then_some((config.proxy.http_port, config.proxy.https_port)),
+        proxy_v6: config.proxy.enabled && config.node_has_public_v6(node_name),
     };
 
     let path = systemd::install(&unit)?;

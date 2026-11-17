@@ -1389,6 +1389,17 @@ impl ClusterConfig {
         self.nodes.get(name)
     }
 
+    /// True when `node` has a public network address block with an `ipv6`,
+    /// i.e. clients are given an AAAA record that points at it.
+    pub fn node_has_public_v6(&self, node: &str) -> bool {
+        self.node(node).is_some_and(|n| {
+            n.network
+                .values()
+                .filter_map(|a| a.as_public())
+                .any(|p| p.ipv6.is_some())
+        })
+    }
+
     /// The `access` list of network `name`; empty when absent or unknown.
     pub fn access_of(&self, name: &str) -> &[String] {
         self.networks
