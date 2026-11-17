@@ -243,6 +243,14 @@ struct PutTargetRequest {
     #[serde(default)]
     keep_within_secs: Option<u64>,
     #[serde(default)]
+    keep_daily: Option<u32>,
+    #[serde(default)]
+    keep_weekly: Option<u32>,
+    #[serde(default)]
+    keep_monthly: Option<u32>,
+    #[serde(default)]
+    keep_yearly: Option<u32>,
+    #[serde(default)]
     stop_containers: Option<bool>,
 }
 
@@ -274,6 +282,10 @@ async fn put_target(
             time_of_day: body.time_of_day,
             keep_last: body.keep_last,
             keep_within_secs: body.keep_within_secs,
+            keep_daily: body.keep_daily,
+            keep_weekly: body.keep_weekly,
+            keep_monthly: body.keep_monthly,
+            keep_yearly: body.keep_yearly,
             stop_containers: body.stop_containers,
             last_run,
         }))

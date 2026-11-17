@@ -553,6 +553,10 @@ export interface DriveBackupTarget {
   time_of_day?: string | null;
   keep_last?: number | null;
   keep_within_secs?: number | null;
+  keep_daily?: number | null;
+  keep_weekly?: number | null;
+  keep_monthly?: number | null;
+  keep_yearly?: number | null;
   /** Overrides the resolved x-clouduler stop-before-backup default when set. */
   stop_containers?: boolean | null;
   /** Unix seconds this target last started a run. Null before its first run. */

@@ -17,6 +17,10 @@ interface ScheduleDraft {
   time_of_day: string;
   keep_last: number;
   keep_within_days: number;
+  keep_daily: number;
+  keep_weekly: number;
+  keep_monthly: number;
+  keep_yearly: number;
   stop_containers: 'default' | 'yes' | 'no';
 }
 
@@ -29,7 +33,7 @@ export function ScheduleSheet({ open, editing, drives, destinations, onClose, on
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const blank = (): ScheduleDraft => ({ drive: drives[0]?.name ?? '', destination_id: destinations[0]?.id ?? '', enabled: true, frequency_hours: 24, time_of_day: '', keep_last: 7, keep_within_days: 0, stop_containers: 'default' });
+  const blank = (): ScheduleDraft => ({ drive: drives[0]?.name ?? '', destination_id: destinations[0]?.id ?? '', enabled: true, frequency_hours: 24, time_of_day: '', keep_last: 7, keep_within_days: 0, keep_daily: 0, keep_weekly: 0, keep_monthly: 0, keep_yearly: 0, stop_containers: 'default' });
   const [draft, setDraft] = useState<ScheduleDraft>(blank);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,6 +50,10 @@ export function ScheduleSheet({ open, editing, drives, destinations, onClose, on
             time_of_day: editing.time_of_day ?? '',
             keep_last: editing.keep_last ?? 0,
             keep_within_days: editing.keep_within_secs ? Math.round(editing.keep_within_secs / 86400) : 0,
+            keep_daily: editing.keep_daily ?? 0,
+            keep_weekly: editing.keep_weekly ?? 0,
+            keep_monthly: editing.keep_monthly ?? 0,
+            keep_yearly: editing.keep_yearly ?? 0,
             stop_containers: editing.stop_containers == null ? 'default' : editing.stop_containers ? 'yes' : 'no',
           }
         : blank(),
@@ -65,6 +73,10 @@ export function ScheduleSheet({ open, editing, drives, destinations, onClose, on
         time_of_day: draft.time_of_day || null,
         keep_last: draft.keep_last > 0 ? draft.keep_last : null,
         keep_within_secs: draft.keep_within_days > 0 ? draft.keep_within_days * 86400 : null,
+        keep_daily: draft.keep_daily > 0 ? draft.keep_daily : null,
+        keep_weekly: draft.keep_weekly > 0 ? draft.keep_weekly : null,
+        keep_monthly: draft.keep_monthly > 0 ? draft.keep_monthly : null,
+        keep_yearly: draft.keep_yearly > 0 ? draft.keep_yearly : null,
         stop_containers: draft.stop_containers === 'default' ? null : draft.stop_containers === 'yes',
       });
       toast(editing ? 'Saved the schedule.' : 'Created the schedule.');
@@ -75,7 +87,7 @@ export function ScheduleSheet({ open, editing, drives, destinations, onClose, on
     }
   };
 
-  const num = (label: string, key: 'frequency_hours' | 'keep_last' | 'keep_within_days', hint: string) => (
+  const num = (label: string, key: 'frequency_hours' | 'keep_last' | 'keep_within_days' | 'keep_daily' | 'keep_weekly' | 'keep_monthly' | 'keep_yearly', hint: string) => (
     <TextField label={label} type="number" inputMode="numeric" mono value={String(draft[key])} onChange={(e) => setDraft({ ...draft, [key]: Number(e.target.value) })} hint={hint} />
   );
 
@@ -87,6 +99,10 @@ export function ScheduleSheet({ open, editing, drives, destinations, onClose, on
       <TextField label="Time of day (UTC)" type="time" mono value={draft.time_of_day} onChange={(e) => setDraft({ ...draft, time_of_day: e.target.value })} hint="Optional. Blank runs as soon as the frequency has elapsed." />
       {num('Keep last N snapshots', 'keep_last', '0 means no limit on count.')}
       {num('Keep snapshots within (days)', 'keep_within_days', '0 means no age-based limit.')}
+      {num('Keep daily', 'keep_daily', 'Newest snapshot of each of the last N days. 0 means off.')}
+      {num('Keep weekly', 'keep_weekly', 'Newest snapshot of each of the last N weeks. 0 means off.')}
+      {num('Keep monthly', 'keep_monthly', 'Newest snapshot of each of the last N months. 0 means off.')}
+      {num('Keep yearly', 'keep_yearly', 'Newest snapshot of each of the last N years. 0 means off.')}
       <SelectField
         id="sched-stop"
         label="Stop containers before backup"

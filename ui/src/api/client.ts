@@ -454,6 +454,10 @@ export const api = {
     time_of_day?: string | null;
     keep_last?: number | null;
     keep_within_secs?: number | null;
+    keep_daily?: number | null;
+    keep_weekly?: number | null;
+    keep_monthly?: number | null;
+    keep_yearly?: number | null;
     stop_containers?: boolean | null;
   }) => put<void>('/api/restic/targets', body),
   removeBackupTarget: (id: string) => del<void>(`/api/restic/targets/${encodeURIComponent(id)}`),

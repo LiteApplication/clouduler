@@ -269,7 +269,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | DELETE | `/api/restic/destinations/{id}` | admin | none | 204 | |
 | GET | `/api/restic/destinations/{id}/snapshots` | user | none | `[SnapshotInfo]` | |
 | GET | `/api/restic/targets` | user | none | `[DriveBackupTarget]` | |
-| PUT | `/api/restic/targets` | admin | `{id, drive, destination_id, enabled, frequency_secs, time_of_day?, keep_last?, keep_within_secs?, stop_containers?}` | 204 | |
+| PUT | `/api/restic/targets` | admin | `{id, drive, destination_id, enabled, frequency_secs, time_of_day?, keep_last?, keep_within_secs?, keep_daily?, keep_weekly?, keep_monthly?, keep_yearly?, stop_containers?}` | 204 | |
 | DELETE | `/api/restic/targets/{id}` | admin | none | 204 | |
 | POST | `/api/restic/targets/{id}/run` | admin | none | run id | Runs outside the schedule. |
 | GET | `/api/restic/runs?target=` | user | none | `[BackupRun]` | Newest first. |

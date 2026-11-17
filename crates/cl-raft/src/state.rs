@@ -624,6 +624,16 @@ pub struct DriveBackupTarget {
     pub keep_last: Option<u32>,
     #[serde(default)]
     pub keep_within_secs: Option<u64>,
+    /// Keep the newest snapshot of each of the last N days / ISO weeks /
+    /// months / years (restic `--keep-daily` and friends).
+    #[serde(default)]
+    pub keep_daily: Option<u32>,
+    #[serde(default)]
+    pub keep_weekly: Option<u32>,
+    #[serde(default)]
+    pub keep_monthly: Option<u32>,
+    #[serde(default)]
+    pub keep_yearly: Option<u32>,
     /// Overrides the resolved x-clouduler stop-before-backup default when
     /// set. `None` defers to the stack/service override, then a hardcoded
     /// `true` (see `cl_config::stack::StackFile::effective_backup_stop_before`).
@@ -3806,6 +3816,10 @@ mod tests {
                 time_of_day: None,
                 keep_last: None,
                 keep_within_secs: None,
+                keep_daily: None,
+                keep_weekly: None,
+                keep_monthly: None,
+                keep_yearly: None,
                 stop_containers: None,
                 last_run: None,
             }),
@@ -5287,6 +5301,10 @@ mod tests {
             time_of_day: None,
             keep_last: Some(7),
             keep_within_secs: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
             stop_containers: None,
             last_run: None,
         }

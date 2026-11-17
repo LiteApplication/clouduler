@@ -1040,6 +1040,18 @@ pub enum BackupTargetCommand {
         /// Keep every snapshot within this duration, e.g. "30d".
         #[arg(long)]
         keep_within: Option<String>,
+        /// Keep the newest snapshot of each of the last N days.
+        #[arg(long)]
+        keep_daily: Option<u32>,
+        /// Keep the newest snapshot of each of the last N weeks.
+        #[arg(long)]
+        keep_weekly: Option<u32>,
+        /// Keep the newest snapshot of each of the last N months.
+        #[arg(long)]
+        keep_monthly: Option<u32>,
+        /// Keep the newest snapshot of each of the last N years.
+        #[arg(long)]
+        keep_yearly: Option<u32>,
         /// Stop containers using the drive before backing up. Defaults to
         /// the x-clouduler stack/service override, then true.
         #[arg(long)]

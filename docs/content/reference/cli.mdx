@@ -272,7 +272,7 @@ All accept `--via NODE`. `backup destination add` flags:
 | `--region R`, `--prefix P` | never | |
 | `--s3-access-key-id ID`, `--s3-secret-access-key KEY` | never | Must be given together. |
 
-`backup target set` flags: `--drive` (required), `--destination` (required), `--frequency` (required, for example `1d` or `12h`), `--time-of-day HH:MM` (UTC), `--keep-last N`, `--keep-within DURATION`, `--stop-containers true|false`, `--enabled`.
+`backup target set` flags: `--drive` (required), `--destination` (required), `--frequency` (required, for example `1d` or `12h`), `--time-of-day HH:MM` (UTC), `--keep-last N`, `--keep-within DURATION`, `--keep-daily N`, `--keep-weekly N`, `--keep-monthly N`, `--keep-yearly N`, `--stop-containers true|false`, `--enabled`.
 
 The restore commands ask for confirmation unless `--yes`, stop the affected containers, and restart them. They answer `aborted` if you say no. `--snapshot` defaults to `latest`.
 

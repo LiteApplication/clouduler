@@ -137,7 +137,7 @@ export function Backups() {
               {
                 key: 'keep',
                 header: 'Keeps',
-                render: (t) => [t.keep_last ? `last ${t.keep_last}` : '', t.keep_within_secs ? `${Math.round(t.keep_within_secs / 86400)}d` : ''].filter(Boolean).join(', ') || 'forever',
+                render: (t) => [t.keep_last ? `last ${t.keep_last}` : '', t.keep_within_secs ? `${Math.round(t.keep_within_secs / 86400)}d` : '', t.keep_daily ? `${t.keep_daily} daily` : '', t.keep_weekly ? `${t.keep_weekly} weekly` : '', t.keep_monthly ? `${t.keep_monthly} monthly` : '', t.keep_yearly ? `${t.keep_yearly} yearly` : ''].filter(Boolean).join(', ') || 'forever',
               },
               { key: 'last', header: 'Last run', render: (t) => (t.last_run ? relativeTime(t.last_run) : 'never') },
               {

@@ -1456,10 +1456,7 @@ async fn reconcile_dns(
             set_dns_status(
                 cluster,
                 &fqdn,
-                ReconcileStatus::Error {
-                    message,
-                    at: now(),
-                },
+                ReconcileStatus::Error { message, at: now() },
             )
             .await;
         }

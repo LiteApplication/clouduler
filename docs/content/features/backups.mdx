@@ -83,7 +83,7 @@ Use **Run NAME now** on the row to test, then check **Recent runs**. A failed la
 ```bash
 clouduler backup target set fast-nas --drive fast --destination nas \
   --frequency 24h --time-of-day 03:00 \
-  --keep-last 7 --keep-within 30d --enabled
+  --keep-last 7 --keep-within 30d --keep-weekly 4 --keep-monthly 12 --keep-yearly 3 --enabled
 
 clouduler backup target list
 clouduler backup run fast-nas          # run now (works even if disabled)
@@ -97,6 +97,8 @@ clouduler backup snapshots nas         # list what a destination holds
 </UiCli>
 
 Containers that use the drive are stopped during the backup by default so the files are consistent, then restarted. A stack can set its own preference; the schedule can force it either way. For databases, consider a dump job in addition.
+
+Retention rules combine: a snapshot is kept if **any** rule keeps it. `--keep-daily 2 --keep-weekly 1 --keep-monthly 1 --keep-yearly 1` keeps the newest snapshot of each of the last 2 days that have one, the last week, the last month and the last year. Days, weeks (ISO) and months are calendar buckets in UTC, and a bucket with no snapshot does not count against N. A value of 0 for the daily, weekly, monthly or yearly count is ignored.
 
 <Quirk title="keep-within 0 is not 'no limit' in the CLI" severity="danger">
 In the UI, leaving **Keep snapshots within** at 0 stores no age limit. On the CLI, `--keep-within 0s` is sent as a real value, and restic is then told to keep snapshots within `1h`, so retention can prune almost everything. Omit the flag instead of passing zero. Likewise omit `--keep-last` for no count limit.
@@ -182,6 +184,7 @@ Restoring onto a replica is refused, since the next sync would overwrite it: `dr
   {key: '--frequency', type: 'duration', reload: 'n/a', required: true, description: 'How often to run, e.g. 12h, 1d. Minimum 1 second.'},
   {key: '--time-of-day', type: 'HH:MM (UTC)', default: 'any time', reload: 'n/a', description: 'Earliest time of day to run once due.', quirks: 'A malformed value is rejected by the CLI.'},
   {key: '--keep-last', type: 'int', default: 'no limit', reload: 'n/a', description: 'Keep at least this many recent snapshots.'},
+  {key: '--keep-daily / --keep-weekly / --keep-monthly / --keep-yearly', type: 'int', default: 'no limit', reload: 'n/a', description: 'Keep the newest snapshot of each of the last N days, weeks, months or years (restic --keep-daily etc.). Combine them, for example 2 / 1 / 1 / 1.'},
   {key: '--keep-within', type: 'duration', default: 'no limit', reload: 'n/a', description: 'Keep every snapshot within this age, e.g. 30d.', quirks: 'Do not pass 0s (becomes 1h).'},
   {key: '--stop-containers', type: 'bool', default: 'stack setting, then true', reload: 'n/a', description: 'Stop containers using the drive during the backup.'},
   {key: '--enabled', type: 'flag', default: 'off', reload: 'n/a', description: 'Enable the schedule. Without it, it is created disabled.', quirks: 'The UI form defaults to enabled.'},

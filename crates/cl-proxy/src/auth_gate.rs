@@ -247,7 +247,10 @@ impl AuthGate {
     /// The network `ip` is a client of, whatever the portal or route it is
     /// talking to belongs to.
     fn client_net(&self, ip: IpAddr) -> Option<String> {
-        self.config_rx.borrow().client_network(ip).map(str::to_string)
+        self.config_rx
+            .borrow()
+            .client_network(ip)
+            .map(str::to_string)
     }
 
     /// The client network `ip` may be saved under right now: the one whose

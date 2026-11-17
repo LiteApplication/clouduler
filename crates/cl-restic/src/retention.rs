@@ -4,7 +4,8 @@
 use cl_raft::state::DriveBackupTarget;
 
 /// `restic forget` arguments for one target's retention policy. Empty when
-/// the target sets neither `keep_last` nor `keep_within_secs` - restic's own
+/// the target sets none of `keep_last`, `keep_within_secs` or the
+/// daily/weekly/monthly/yearly counts - restic's own
 /// `forget` refuses to prune anything without at least one `--keep-*` flag,
 /// so an unset target intentionally keeps every snapshot forever, which the
 /// caller should treat as "skip the forget call" (see `restic::ResticRepo::forget`).
@@ -17,6 +18,18 @@ pub fn forget_args(target: &DriveBackupTarget) -> Vec<String> {
     if let Some(secs) = target.keep_within_secs {
         args.push("--keep-within".to_string());
         args.push(format_within(secs));
+    }
+    for (flag, value) in [
+        ("--keep-daily", target.keep_daily),
+        ("--keep-weekly", target.keep_weekly),
+        ("--keep-monthly", target.keep_monthly),
+        ("--keep-yearly", target.keep_yearly),
+    ] {
+        // 0 would mean "keep none" to restic, never "off", so it is skipped.
+        if let Some(n) = value.filter(|n| *n > 0) {
+            args.push(flag.to_string());
+            args.push(n.to_string());
+        }
     }
     args
 }
@@ -49,6 +62,10 @@ mod tests {
             time_of_day: None,
             keep_last,
             keep_within_secs,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
             stop_containers: None,
             last_run: None,
         }
@@ -84,6 +101,28 @@ mod tests {
         assert_eq!(
             forget_args(&target(None, Some(0))),
             vec!["--keep-within", "1h"]
+        );
+    }
+
+    #[test]
+    fn calendar_buckets_are_passed_through() {
+        let mut t = target(None, None);
+        t.keep_daily = Some(2);
+        t.keep_weekly = Some(1);
+        t.keep_monthly = Some(1);
+        t.keep_yearly = Some(1);
+        assert_eq!(
+            forget_args(&t),
+            vec![
+                "--keep-daily",
+                "2",
+                "--keep-weekly",
+                "1",
+                "--keep-monthly",
+                "1",
+                "--keep-yearly",
+                "1"
+            ]
         );
     }
 

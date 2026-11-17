@@ -321,7 +321,10 @@ mod tests {
             vec![PortGrant {
                 protocol: Protocol::Tcp,
                 addr: ip("10.244.1.1"),
-                ports: PortRange { start: 587, end: 587 }
+                ports: PortRange {
+                    start: 587,
+                    end: 587
+                }
             }]
         );
     }

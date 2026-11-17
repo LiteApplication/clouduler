@@ -1074,6 +1074,10 @@ mod tests {
             time_of_day: None,
             keep_last: None,
             keep_within_secs: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
             stop_containers,
             last_run: None,
         }

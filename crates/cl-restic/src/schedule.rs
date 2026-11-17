@@ -76,6 +76,10 @@ mod tests {
             time_of_day: time_of_day.map(str::to_string),
             keep_last: None,
             keep_within_secs: None,
+            keep_daily: None,
+            keep_weekly: None,
+            keep_monthly: None,
+            keep_yearly: None,
             stop_containers: None,
             last_run,
         }
