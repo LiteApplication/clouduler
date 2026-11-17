@@ -438,6 +438,7 @@ mod tests {
             node_pubkey: None,
             memory_total_bytes: 0,
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }
     }

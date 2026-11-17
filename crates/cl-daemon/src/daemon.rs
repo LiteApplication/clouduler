@@ -433,6 +433,7 @@ pub async fn run(
         cluster.clone(),
         node_pubkey,
         gpus_rx,
+        docker.clone(),
     ));
     let reaper = tokio::spawn(reap_removed_nodes(cluster.clone(), failover.probe_interval));
     let git_backup = tokio::spawn(watch_git_backup(
@@ -1766,6 +1767,7 @@ fn to_state(
         memory_total_bytes: current.map(|c| c.memory_total_bytes).unwrap_or_default(),
         version: current.map(|c| c.version.clone()).unwrap_or_default(),
         gpus: current.map(|c| c.gpus.clone()).unwrap_or_default(),
+        images: current.map(|c| c.images.clone()).unwrap_or_default(),
     }
 }
 
@@ -1784,6 +1786,7 @@ async fn report_self(
     cluster: Arc<ClusterNode>,
     node_pubkey: Option<String>,
     gpus_rx: tokio::sync::watch::Receiver<Option<cl_raft::state::NodeGpus>>,
+    docker: Arc<tokio::sync::RwLock<Option<cl_docker::Docker>>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -1803,7 +1806,21 @@ async fn report_self(
             .clone()
             .map(Box::new)
             .unwrap_or_else(|| current.gpus.clone());
+        // Keep what is stored while docker cannot be asked.
+        let client = docker.read().await.clone();
+        let images = match client {
+            Some(d) => match d.list_local_images().await {
+                Ok(list) => list
+                    .into_iter()
+                    .flat_map(|i| i.repo_tags.into_iter().chain(i.repo_digests))
+                    .filter(|r| !r.starts_with("<none>"))
+                    .collect(),
+                Err(_) => current.images.clone(),
+            },
+            None => current.images.clone(),
+        };
         if current.version == version
+            && current.images == images
             && current.gpus == gpus
             && current.arch == arch
             && current.binary_hash == binary_hash
@@ -1819,6 +1836,7 @@ async fn report_self(
             memory_total_bytes,
             version,
             gpus,
+            images,
             ..current.clone()
         };
         if let Err(e) = cluster.submit(Request::UpsertNode(desired)).await {

@@ -88,6 +88,10 @@ Placement reasons you may see: `NODE is unreachable`, `NODE is Drain`, `NODE is 
 
 Replicated volumes reach other nodes only on their sync interval (default 15 minutes). A primary that dies takes its unsynced writes with it, and failover starts the service from the freshest copy that exists. See [Drives and volumes](/docs/features/drives-and-volumes#data-loss-window). Pinned services (`x-clouduler.node`) are not moved and wait for their node. An instance with nowhere to go stays assigned to the dead node and a `cannot place instance` warning is logged.
 
+### Images and a registry that is down
+
+A container only needs its image to be on the node, so an image that is already local is never pulled again, even if it carries no registry digest. Each node reports the image tags and digests it holds. When an instance that is pinned to an image digest has to move, placement prefers a node that already holds those exact bits, so it still starts while the registry is unreachable. It is a preference only: if no node holds the image, the instance is placed as usual and pulls it.
+
 ### Restarts and returning nodes
 
 - A daemon that restarts within `node_timeout` of its last quorum keeps its containers running while it re-establishes quorum (state **Hold**). After a longer gap it starts **Closed**: it stops containers until it sees quorum.

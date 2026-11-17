@@ -145,6 +145,7 @@ fn node_state(name: &str) -> NodeState {
         memory_total_bytes: Default::default(),
         version: Default::default(),
         gpus: Default::default(),
+        images: Default::default(),
     }
 }
 

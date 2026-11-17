@@ -106,6 +106,26 @@ pub struct NodeState {
     /// from growing.
     #[serde(default)]
     pub gpus: Box<NodeGpus>,
+    /// Image references present in this node's docker (`repo:tag` and
+    /// `repo@sha256:...`), self-reported by `report_self`. Lets the scheduler
+    /// prefer a node that already holds a pinned image when a registry is
+    /// unreachable. Empty until the node has reported.
+    #[serde(default)]
+    pub images: BTreeSet<String>,
+}
+
+impl NodeState {
+    /// Whether this node reported holding `image`, pinned to `digest` when
+    /// one is given (the digest alone identifies the bits).
+    pub fn holds_image(&self, image: &str, digest: Option<&str>) -> bool {
+        match digest {
+            Some(d) => {
+                let suffix = format!("@{d}");
+                self.images.iter().any(|r| r.ends_with(&suffix))
+            }
+            None => self.images.contains(image),
+        }
+    }
 }
 
 /// One NVIDIA GPU, as `nvidia-smi` lists it.
@@ -4042,6 +4062,18 @@ mod tests {
         assert_eq!(stored.generation, 2);
     }
 
+    #[test]
+    fn holds_image_matches_a_pinned_digest_or_a_tag() {
+        let mut n = node("n1", &[]);
+        n.images.insert("nginx:1.25".into());
+        n.images.insert("ghcr.io/o/app@sha256:abc".into());
+        assert!(n.holds_image("nginx:1.25", None));
+        assert!(!n.holds_image("nginx:1.26", None));
+        assert!(n.holds_image("ghcr.io/o/app:v2", Some("sha256:abc")));
+        assert!(!n.holds_image("ghcr.io/o/app:v2", Some("sha256:def")));
+        assert!(!node("n2", &[]).holds_image("nginx:1.25", None));
+    }
+
     fn node(name: &str, drives: &[&str]) -> NodeState {
         NodeState {
             name: name.to_string(),
@@ -4063,6 +4095,7 @@ mod tests {
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }
     }

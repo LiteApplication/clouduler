@@ -49,6 +49,7 @@ fn node(name: &str) -> NodeState {
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
         gpus: Default::default(),
+        images: Default::default(),
         version: Default::default(),
     }
 }

@@ -105,6 +105,7 @@ async fn serve(config: &ClusterConfig, key: Option<cl_secret::ClusterKey>) -> Se
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }))
         .await
@@ -333,6 +334,7 @@ async fn a_joining_node_receives_the_cluster_key_automatically_with_no_manual_st
             node_pubkey: Some(n2_keypair.public_key_encoded()),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }))
         .await

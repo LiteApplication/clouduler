@@ -277,6 +277,7 @@ mod tests {
             node_pubkey: Default::default(),
             memory_total_bytes,
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }
     }

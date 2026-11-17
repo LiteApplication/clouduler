@@ -662,10 +662,19 @@ pub fn place(
                 .count();
             from_state + new_in_pass
         };
+        // An instance already pinned to an image digest (a move or failover)
+        // prefers a node that holds those bits, so it still starts when the
+        // registry is down. Only pinned instances: ranking every instance by
+        // who happens to hold the tag would pile replicas onto one node.
+        let pinned_digest = state
+            .assignments
+            .get(&item.id)
+            .and_then(|a| a.image_digest.as_deref());
         let target = eligible.iter().min_by_key(|node| {
             (
                 node.last_resort,
                 std::cmp::Reverse(users_on(&node.name)),
+                pinned_digest.is_some_and(|d| !node.holds_image(&item.image, Some(d))),
                 load.get(&node.name).copied().unwrap_or(0),
                 node.name.clone(),
             )
@@ -744,6 +753,7 @@ mod tests {
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }
     }
@@ -1596,6 +1606,39 @@ mod tests {
         let decisions =
             place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
         assert_ne!(placed(&decisions, "web", 0), Some("piosny".to_string()));
+    }
+
+    #[test]
+    fn a_pinned_instance_moves_to_a_node_that_already_holds_its_image() {
+        let mut state = cluster();
+        let mut n3 = node("n3", Role::Worker, &[]);
+        n3.images.insert("nginx@sha256:aaa".into());
+        state.apply(&Request::UpsertNode(n3));
+        let item = desired("web", 0);
+        state.assignments.insert(
+            item.id.clone(),
+            cl_raft::state::Assignment {
+                instance: item.id.clone(),
+                node: "gone".into(),
+                desired: cl_raft::state::DesiredState::Running,
+                image_digest: Some("sha256:aaa".into()),
+                migration: None,
+            },
+        );
+        let decisions = place(&state, &[item], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "web", 0), Some("n3".to_string()));
+    }
+
+    #[test]
+    fn an_unpinned_instance_ignores_which_node_holds_its_tag() {
+        // Otherwise replicas would pile onto the one node that has the image.
+        let mut state = cluster();
+        let mut n3 = node("n3", Role::Worker, &[]);
+        n3.images.insert("nginx".into());
+        state.apply(&Request::UpsertNode(n3));
+        let decisions =
+            place(&state, &[desired("web", 0)], &no_served(), &no_everywhere()).decisions;
+        assert_eq!(placed(&decisions, "web", 0), Some("n1".to_string()));
     }
 
     #[test]

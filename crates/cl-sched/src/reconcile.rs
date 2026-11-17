@@ -473,7 +473,9 @@ impl Reconciler {
     /// an image the node has never seen fails, and on a fresh node that is
     /// every image.
     async fn ensure_image(&self, id: &InstanceId, image: &str) -> Result<()> {
-        if self.docker.resolve_digest(image).await?.is_some() {
+        // Presence, not a repo digest: a local image without one is still
+        // usable, and pulling it would fail whenever its registry is down.
+        if self.docker.image_exists(image).await? {
             return Ok(());
         }
         info!(%image, "pulling");

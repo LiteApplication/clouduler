@@ -283,6 +283,19 @@ impl Docker {
         })
     }
 
+    /// Whether `image` is present locally, digest or not. Unlike
+    /// `resolve_digest`, an image with no repo digest (built or loaded locally,
+    /// or pulled through a store that records none) still counts as present.
+    pub async fn image_exists(&self, image: &str) -> Result<bool> {
+        match self.inner.inspect_image(image).await {
+            Ok(_) => Ok(true),
+            Err(e) => match classify(e) {
+                DockerError::NotFound(_) => Ok(false),
+                other => Err(other),
+            },
+        }
+    }
+
     /// Inspect a local image and return its content digest, if any. `Ok(None)`
     /// covers both "image not present locally" and "image has no repo digest"
     /// (e.g. it was built locally rather than pulled).

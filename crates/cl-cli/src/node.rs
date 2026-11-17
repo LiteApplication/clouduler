@@ -63,6 +63,7 @@ pub async fn add(
             node_pubkey: None,
             memory_total_bytes: 0,
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }))
         .await

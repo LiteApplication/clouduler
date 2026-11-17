@@ -86,6 +86,7 @@ pub(crate) async fn harness() -> Harness {
         node_pubkey: Default::default(),
         memory_total_bytes: Default::default(),
         gpus: Default::default(),
+        images: Default::default(),
         version: Default::default(),
     }))
     .await
@@ -1739,6 +1740,7 @@ async fn an_instance_on_another_node_reports_unknown_rather_than_stopped() {
             node_pubkey: Default::default(),
             memory_total_bytes: Default::default(),
             gpus: Default::default(),
+            images: Default::default(),
             version: Default::default(),
         }))
         .await
