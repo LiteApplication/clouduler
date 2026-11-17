@@ -336,6 +336,12 @@ impl Scheduler {
         self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
         let mut actions = reconcile::diff(&targets, &actual, gate);
+        // A standalone action has stopped an instance and put its own
+        // container in its place: leave that instance alone until it is done.
+        let holds = docker.action_holds().await?;
+        if !holds.is_empty() {
+            actions.retain(|a| !holds.contains(&a.instance().to_string()));
+        }
         reconcile::restrict_to_emergency_stacks(&mut actions, &state.emergency_stacks);
 
         // Most important stacks first, so they are also the first to come back.

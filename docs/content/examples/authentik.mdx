@@ -116,6 +116,7 @@ services:
       actions:
         Reset WAL:
           cmd: pg_resetwal "$PGDATA"
+          standalone: true
           user: postgres
           timeout: 1m
           confirm: true

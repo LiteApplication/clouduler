@@ -2,6 +2,7 @@
 //! Wraps bollard with clouduler's own container spec/state types and the
 //! ownership labels that distinguish clouduler's containers from the user's.
 
+mod action;
 mod client;
 mod container;
 mod error;
@@ -11,6 +12,7 @@ mod image;
 mod logs;
 mod network;
 
+pub use action::LABEL_ACTION_HOLD;
 pub use client::{Docker, DOCKER_SOCKET_PATH};
 pub use container::{
     BindMount, ContainerAttachment, ContainerSpec, ContainerState, DeviceMount, GpuRequest,

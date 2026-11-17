@@ -178,13 +178,15 @@ services:
         limits:
           memory: 512M
     # Reset WAL is the last resort for "invalid checkpoint record" or a crash
-    # loop after WAL corruption. It only runs while the container is up. If it
-    # crash-loops first, freeze the volume and run pg_resetwal from a one-off
-    # container. Checkpoint runs before each replication of the volume.
+    # loop after WAL corruption. It is standalone: the database container is
+    # stopped and a one-off copy runs pg_resetwal on its data directory, so it
+    # works even when the database crash-loops. Checkpoint runs before each
+    # replication of the volume.
     x-clouduler:
       actions:
         Reset WAL:
           cmd: pg_resetwal "$PGDATA"
+          standalone: true
           user: postgres
           timeout: 1m
           confirm: true

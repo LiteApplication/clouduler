@@ -599,6 +599,7 @@ actions:
     timeout: 1m                                     # optional, default 30s, max 5m
     confirm: true                                   # optional, default false: ask before running
     show_in_ui: true                                # optional, default true: false hides the button
+    standalone: true                                # optional, default false: run in its own container
 ```
 
 Predefined commands shown as buttons on the instance page. The key is the
@@ -606,6 +607,14 @@ button's label. Clicking one runs the command immediately in that instance's
 container and shows its exit code and output. `confirm: true` asks first in
 the UI. `show_in_ui: false` removes the button and refuses running the action
 from the UI or API; it can then only run as a `volume_sync` hook (below).
+
+`standalone: true` runs the command in a one-off container instead of inside
+the service's own. The service is stopped meanwhile and the one-off container
+takes its place (same image, env, mounts, devices, limits, primary network and
+address; no published ports or healthcheck; the image entrypoint is cleared so
+`cmd` is the whole command). Use it for work that needs the service down,
+such as `pg_resetwal` on a data directory. The service is started again
+afterwards. A standalone action cannot be a `volume_sync` hook.
 
 An action can also run around a volume's replication, with `before` and
 `after` on that volume's `volume_sync` entry (service level only):

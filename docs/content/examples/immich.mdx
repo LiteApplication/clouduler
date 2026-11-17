@@ -98,15 +98,15 @@ services:
         limits:
           memory: 2G
     # Reset WAL is the last resort for "invalid checkpoint record" or a crash
-    # loop after WAL corruption. It only runs while the container is up, because
-    # exec needs a running target. If the container crash-loops before you can
-    # run it, freeze the volume and run pg_resetwal from a one-off container.
-    # Checkpoint runs before each replication of the volume, so the replicated
+    # loop after WAL corruption. It is standalone: the database container is
+    # stopped and a one-off copy runs pg_resetwal on its data directory, so it
+    # works even when the database crash-loops. Checkpoint runs before each replication of the volume, so the replicated
     # copy has almost no WAL left to replay on crash recovery.
     x-clouduler:
       actions:
         Reset WAL:
           cmd: pg_resetwal "$PGDATA"
+          standalone: true
           user: postgres
           timeout: 1m
           confirm: true
@@ -238,7 +238,7 @@ The proxy reads this as `/app/config.json` inside its container, set by `target:
 - **`configs.immich_public_proxy_config.file`** is bundled at deploy time and stored in the cluster under that name. See [Configs and secrets](/docs/features/configs-and-secrets).
 - **`database.stop_signal: SIGINT`** and **`stop_grace_period: 120s`**: PostgreSQL shuts down cleanly on SIGINT, and the grace period gives it time to flush before Clouduler kills it. The maximum is 600 seconds.
 - **`fast/immich-postgres:/var/lib/postgresql/data`** puts the database on a replicated drive. That is why it has a `Checkpoint` action, wired in by `volume_sync.immich-postgres.before`: a `CHECKPOINT` runs before each scheduled copy.
-- **`Reset WAL` with `confirm: true`**: a destructive recovery command. The UI asks before running it.
+- **`Reset WAL` with `confirm: true` and `standalone: true`**: a destructive recovery command. The UI asks before running it, and it runs in a one-off copy of the database container while the real one is stopped.
 - **`server.secrets` with `source` and `env`**: the password reaches the server as the environment variable `DB_PASSWORD` rather than as a file. The database uses the same secret as a file.
 - **`server.x-clouduler.actions`**: three break-glass commands for when OAuth locks you out.
 - **`server.x-clouduler.proxy`** with `network: tailscale`: the route is reachable only from the tailnet. `websockets: true` lets the live-update connection upgrade.

@@ -6,6 +6,7 @@
 //! its own architecture straight from GitHub instead of compiling it.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -105,10 +106,44 @@ fn client(token: Option<&str>) -> Result<octocrab::Octocrab, String> {
         .map_err(|e| format!("building github client: {e}"))
 }
 
+/// How long GitHub may take to answer a release lookup. octocrab sets no
+/// timeout of its own, so without this a stalled connection would hang the
+/// caller forever.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a connection to GitHub may take to open.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long a download may go without receiving a single byte before it is
+/// abandoned. An idle limit rather than a total one: a large binary on a
+/// slow link is fine as long as it keeps moving, a dead connection is not.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The http client asset downloads use: unlike the daemon's shared internal
+/// client it fails a connection that stalls instead of waiting forever.
+pub fn download_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(IDLE_TIMEOUT)
+        .build()
+        .map_err(|e| format!("building the download client: {e}"))
+}
+
 /// Resolve `source` (a repo url or a release tag url) to the release it
 /// names and the assets it published for the architectures clouduler builds
 /// for.
 pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedRelease, String> {
+    tokio::time::timeout(RESOLVE_TIMEOUT, resolve_inner(source, token))
+        .await
+        .map_err(|_| {
+            format!(
+                "github did not answer within {}s",
+                RESOLVE_TIMEOUT.as_secs()
+            )
+        })?
+}
+
+async fn resolve_inner(source: &str, token: Option<&str>) -> Result<ResolvedRelease, String> {
     let repo_ref = parse_source(source)?;
     let octocrab = client(token)?;
     let repo_handler = octocrab.repos(&repo_ref.owner, &repo_ref.repo);

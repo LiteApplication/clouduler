@@ -263,6 +263,14 @@ impl StackFile {
                             format!("no action named {action:?} on this service"),
                         ));
                     }
+                    if ext.actions[action].standalone {
+                        return Err(ConfigError::invalid(
+                            format!("services.{name}.x-clouduler.volume_sync.{volume}.{key}"),
+                            format!(
+                                "action {action:?} is standalone, which stops the service: a sync hook runs inside the running container"
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1143,6 +1151,14 @@ mod tests {
         assert!(super::StackFile::parse(&bad).is_err());
         let stack_level = "x-clouduler:\n  volume_sync:\n    data: { after: Flush }\nservices:\n  db:\n    image: x\n";
         assert!(super::StackFile::parse(stack_level).is_err());
+    }
+
+    #[test]
+    fn a_standalone_action_cannot_be_a_sync_hook() {
+        let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      actions:\n        Flush: { cmd: sync, standalone: true }\n      volume_sync:\n        data: { before: Flush }\n";
+        assert!(super::StackFile::parse(ok).is_err());
+        super::StackFile::parse(&ok.replace(", standalone: true", ""))
+            .unwrap();
     }
 
     #[test]

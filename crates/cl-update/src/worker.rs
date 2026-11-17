@@ -90,7 +90,8 @@ impl Worker {
         };
 
         let token = self.unseal_github_token().await;
-        match release::download_asset(&self.http, &owner, &repo, &asset, token.as_deref()).await {
+        let http = release::download_client()?;
+        match release::download_asset(&http, &owner, &repo, &asset, token.as_deref()).await {
             Ok(binary) => {
                 let hash = blake3::hash(&binary).to_hex().to_string();
                 // Releases publish no checksum to verify against, so the

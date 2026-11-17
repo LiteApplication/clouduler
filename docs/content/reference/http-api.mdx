@@ -163,7 +163,7 @@ curl -N -H "Authorization: Bearer $KEY" \
 | POST | `/api/instances/{id}/migration/retry` | admin | none | 200 | 409 `... has no failed move`, `... is still moving`. |
 | POST | `/api/instances/{id}/migration/dismiss` | admin | none | 200 | Clears a failed move. |
 | GET | `/api/instances/{id}/actions` | user | none | `[{name, confirm}]` | Actions with `show_in_ui` only. |
-| POST | `/api/instances/{id}/actions/{name}` | admin | none | `{stdout, stderr, exit_code, timed_out, stdout_truncated, stderr_truncated, duration_ms}` | Runs the action's argv in the container. |
+| POST | `/api/instances/{id}/actions/{name}` | admin | none | `{stdout, stderr, exit_code, timed_out, stdout_truncated, stderr_truncated, duration_ms}` | Runs the action's argv in the container, or in a one-off replacement container for a `standalone` action. 409 if a standalone action is already running on the instance. |
 | GET | `/api/instances/{id}/logs` | user | none | SSE | See streams. |
 | GET | `/api/instances/{id}/stats` | user | none | SSE `stats` | |
 | POST | `/api/rebalance` | admin | none | `{moves: [{instance, from, to}]}` | Starts the planned moves. |

@@ -246,7 +246,10 @@ pub async fn run(
     // HMAC header, not TLS trust, since every node's certificate is self
     // signed until ACME issues a real one, and there is no shared CA to check
     // it against.
+    // No read timeout: log and event follows through it are legitimately idle.
+    // A connect timeout is safe, though, and keeps a dead peer from hanging a call.
     let internal_http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
         .danger_accept_invalid_certs(true)
         .build()
         .context("building the internal node-to-node http client")?;

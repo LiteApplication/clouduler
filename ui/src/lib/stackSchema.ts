@@ -186,7 +186,7 @@ const SCHEMA: Record<string, string[]> = {
   'x-clouduler.auto_update': ['mode', 'delay'],
   'services.*.x-clouduler.docker_socket': ['target', 'read_only', 'mode'],
   'services.*.x-clouduler.backup': ['stop_before'],
-  'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui'],
+  'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui', 'standalone'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'x-clouduler': ['auto_update', 'node', 'volume_sync', 'backup', 'alerts', 'subnet'],
@@ -204,7 +204,7 @@ const SCHEMA: Record<string, string[]> = {
  *  none of them collide with a differently-typed field of the same name. */
 const BOOLEAN_KEYS = new Set([
   'tls', 'sticky', 'websockets', 'preserve_host', 'http2', 'cloudflare_proxy', 'private_shortcut', 'proxy_protocol', 'allow_credentials', 'permanent',
-  'stop_before', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui', 'ignore_case',
+  'stop_before', 'read_only', 'enabled', 'disable', 'confirm', 'show_in_ui', 'standalone', 'ignore_case',
 ]);
 
 const BARE_MIDDLEWARES = ['redirect_https', 'strip_prefix', 'authenticated'];

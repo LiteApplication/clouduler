@@ -659,6 +659,14 @@ pub struct ServiceAction {
     /// exists to be a `volume_sync` `before`/`after` hook. On by default.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_in_ui: bool,
+    /// Run in a separate one-off container instead of inside the service's
+    /// own. The service's container is stopped for the duration and the
+    /// one-off container takes its place (same image, mounts, environment,
+    /// network and address), so the command can touch files the service has
+    /// open, like `pg_resetwal` on a data directory. The service is started
+    /// again afterwards. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub standalone: bool,
 }
 
 impl ServiceAction {
@@ -1156,6 +1164,7 @@ mod action_tests {
         let wal = &ext.actions["Reset WAL"];
         assert_eq!(wal.argv()[..2], ["sh", "-c"]);
         assert_eq!(wal.user.as_deref(), Some("postgres"));
+        assert!(!wal.standalone);
         assert_eq!(wal.timeout, Some(Duration::from_secs(60)));
         assert!(wal.confirm);
         assert!(!wal.show_in_ui);

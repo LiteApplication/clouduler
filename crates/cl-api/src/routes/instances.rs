@@ -1902,6 +1902,10 @@ pub(crate) struct ExecRunRequest {
     /// Per stream, clamped to 1..=1 MiB.
     #[serde(default = "default_exec_output")]
     pub(crate) max_output: usize,
+    /// Run in a one-off container that replaces the instance's own for the
+    /// duration, rather than exec'ing inside it. `stdin` is not supported.
+    #[serde(default)]
+    pub(crate) standalone: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1981,7 +1985,128 @@ pub(crate) async fn exec_run_local(
     }
 
     let docker = state.docker().await?;
+    if req.standalone {
+        if req.stdin.is_some() {
+            return Err(ApiError::BadRequest(
+                "a standalone action takes no stdin".to_string(),
+            ));
+        }
+        return exec_standalone(&docker, instance, req).await;
+    }
     exec_run_docker(&docker, instance, req).await
+}
+
+/// How long the instance's own container gets to stop before a standalone
+/// action takes its place.
+const STANDALONE_STOP_GRACE: Duration = Duration::from_secs(30);
+
+/// Runs `req.cmd` in a one-off copy of the instance's container, with the
+/// instance itself stopped meanwhile. The copy exists (created, then running)
+/// the whole time, which is what keeps the reconciler from restarting the
+/// instance; see `Docker::action_holds`. The instance is started again at
+/// the end if it was running to begin with, whatever the command did.
+async fn exec_standalone(
+    docker: &Docker,
+    instance: &InstanceId,
+    req: ExecRunRequest,
+) -> Result<ExecRunResult, ApiError> {
+    let main = instance.container_name();
+    let name = format!("{main}-action");
+    let main_state = docker
+        .inspect(&main)
+        .await
+        .map_err(docker_error)?
+        .ok_or_else(|| ApiError::NotFound(format!("container {main} does not exist")))?;
+    if let Some(old) = docker.inspect(&name).await.map_err(docker_error)? {
+        if matches!(
+            old.status,
+            cl_docker::RunState::Running | cl_docker::RunState::Created
+        ) {
+            return Err(ApiError::Conflict(format!(
+                "an action is already running on {instance}"
+            )));
+        }
+        // Left behind by a daemon that died mid-action.
+        docker.remove(&name, true).await.map_err(docker_error)?;
+    }
+
+    let started = std::time::Instant::now();
+    let timeout = Duration::from_secs(req.timeout_secs.clamp(1, EXEC_RUN_MAX_SECS));
+    let cap = req.max_output.clamp(1, MAX_BUFFERED_BYTES);
+    // Created before the instance is stopped, so there is no moment when the
+    // reconciler sees a stopped instance and nothing standing in for it.
+    docker
+        .create_action_container(&main, &name, req.cmd, req.user)
+        .await
+        .map_err(docker_error)?;
+
+    let result = run_standalone(docker, &main, &name, main_state.running, timeout, cap).await;
+
+    if let Err(e) = docker.remove(&name, true).await {
+        warn!(%instance, error = %e, "could not remove the action container");
+    }
+    if main_state.running {
+        if let Err(e) = docker.start(&main).await {
+            let up = matches!(docker.inspect(&main).await, Ok(Some(s)) if s.running);
+            if !up {
+                warn!(%instance, error = %e, "could not start the instance after its action; the reconciler will retry");
+            }
+        }
+    }
+    let mut result = result?;
+    result.duration_ms = started.elapsed().as_millis() as u64;
+    Ok(result)
+}
+
+async fn run_standalone(
+    docker: &Docker,
+    main: &str,
+    name: &str,
+    main_running: bool,
+    timeout: Duration,
+    cap: usize,
+) -> Result<ExecRunResult, ApiError> {
+    if main_running {
+        docker
+            .stop(main, STANDALONE_STOP_GRACE)
+            .await
+            .map_err(docker_error)?;
+    }
+    docker.start(name).await.map_err(docker_error)?;
+    let (exit_code, timed_out) = match tokio::time::timeout(timeout, docker.wait(name)).await {
+        Ok(Ok(code)) => (Some(code), false),
+        Ok(Err(e)) => return Err(docker_error(e)),
+        Err(_) => (None, true),
+    };
+
+    let mut out = CappedBuf::new(cap);
+    let mut err = CappedBuf::new(cap);
+    let mut logs = Box::pin(docker.logs(name, LogOptions::default()));
+    while let Some(line) = logs.next().await {
+        let line = line.map_err(docker_error)?;
+        let (buf, text) = match line.stream {
+            cl_docker::LogStream::Stdout => (&mut out, line.text),
+            cl_docker::LogStream::Stderr => (&mut err, line.text),
+        };
+        buf.push(text.as_bytes());
+        buf.push(b"\n");
+    }
+    // A container that never started has no output; say why.
+    if let Some(line) = docker.start_failure_line(name).await {
+        err.push(line.text.as_bytes());
+        err.push(b"\n");
+    }
+    let (stdout, stdout_truncated) = out.into_text();
+    let (stderr, stderr_truncated) = err.into_text();
+    Ok(ExecRunResult {
+        stdout,
+        stderr,
+        exit_code,
+        timed_out,
+        stdout_truncated,
+        stderr_truncated,
+        duration_ms: 0,
+    })
 }
 
 async fn exec_run_docker(
@@ -2161,6 +2286,7 @@ fn action_request(action: &cl_config::ServiceAction) -> ExecRunRequest {
         stdin: None,
         timeout_secs: action.timeout.map_or(30, |d| d.as_secs()),
         max_output: default_exec_output(),
+        standalone: action.standalone,
     }
 }
 
@@ -2172,6 +2298,9 @@ pub async fn run_action_local(
     instance: &InstanceId,
     action: &cl_config::ServiceAction,
 ) -> Result<(), String> {
+    if action.standalone {
+        return Err("a standalone action cannot run as a hook".to_string());
+    }
     let r = exec_run_docker(docker, instance, action_request(action))
         .await
         .map_err(|e| e.to_string())?;
