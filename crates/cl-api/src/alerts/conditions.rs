@@ -516,6 +516,35 @@ mod tests {
     use cl_raft::Request;
 
     #[test]
+    fn a_prioritized_stack_raises_a_warning_with_a_reset_action() {
+        let mut st = ClusterState::default();
+        st.apply(&Request::DeployStack {
+            name: "media".into(),
+            spec: "services:\n  web:\n    image: nginx\n".into(),
+            at: 0,
+        });
+        let none = derive(&st, &[], 0, &AlertSettings::default());
+        assert!(none.observed.iter().all(|o| o.event != "stack.prioritized"));
+
+        st.apply(&Request::SetPrioritized {
+            stack: "media".into(),
+            on: true,
+        });
+        let d = derive(&st, &[], 0, &AlertSettings::default());
+        let alert = d
+            .observed
+            .iter()
+            .find(|o| o.event == "stack.prioritized")
+            .expect("alert while prioritized");
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert_eq!(alert.stack.as_deref(), Some("media"));
+        let reset = alert.links.iter().find(|l| l.method.is_some()).unwrap();
+        assert_eq!(reset.method.as_deref(), Some("DELETE"));
+        assert_eq!(reset.path, "/api/stacks/media/prioritize");
+        assert!(is_derived("stack.prioritized"));
+    }
+
+    #[test]
     fn expiring_certificates_escalate_with_the_thresholds() {
         let mut st = ClusterState::default();
         let mut put = |fqdn: &str, not_after: i64| {

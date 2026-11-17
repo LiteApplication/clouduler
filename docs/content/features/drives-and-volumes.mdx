@@ -158,6 +158,10 @@ Replicated sync is periodic. If the primary node dies, the new node starts from 
 
 Syncs also pause while the cluster has no quorum. See [Failover](/docs/features/failover).
 
+## Sync order and parallelism
+
+When several volumes are due in the same pass, a node syncs them in order of priority: the lowest `x-clouduler.priority` among the stacks using the volume's drive goes first, and a stack bumped with `clouduler prioritize` goes before all of them (see the [CLI reference](/docs/reference/cli)). Drives are handled one after another; `max_parallel_syncs` lets a drive replicate that many of its own volumes at once, the most important first. The default of 1 syncs them one by one.
+
 ## When a sync is refused
 
 Clouduler refuses a sync that would wipe a populated copy: a source that is empty over a populated destination, or a destination of 200 or more files where the source has less than a twentieth of them. The volume row shows **`fast/vaultwarden` refused to sync** with the reason. A volume is marked **Looks empty** only after two consecutive empty scans. The UI deliberately has no "pick the winner" button. Inspect the copies (**Inspect** shows file count, bytes and newest file per node), decide which one is right, and fix it by hand with freeze and unfreeze.
@@ -172,6 +176,7 @@ Each node reports disk use every 60 seconds. The alert `node.disk_low` fires at 
 
 <OptionTable rows={[
   {key: 'drives.<name>.sync_interval', type: 'duration', default: '15m', reload: 'live', description: 'How often the primary pushes each replicated volume to the other nodes.', quirks: 'A stack can override it per volume with x-clouduler.volume_sync.<vol>.interval (never under 30s).'},
+  {key: 'drives.<name>.max_parallel_syncs', type: 'int', default: '1', reload: 'live', description: 'How many of the drive\'s volumes one node replicates at the same time when several are due together.', quirks: '0 is rejected. Also in the config editor under Drives. Drives themselves always sync one after another.'},
   {key: 'drives.<name>.mode', type: 'replicated | served', default: 'replicated', reload: 'live', description: 'Replicated keeps a copy on every holder. Served keeps one active copy exported over NFS.', quirks: 'Lowercase only.'},
   {key: 'drives.<name>.served_by', type: 'list of node names', default: '[]', reload: 'live', description: 'Served drives only: nodes that can be the active server, in priority order.', quirks: 'Each node must implement the drive. Setting it on a replicated drive is an error.'},
   {key: 'nodes.<name>.drives.<drive>', type: 'absolute path', reload: 'live', required: true, description: 'Folder on this node that backs the drive. A node holds a drive only if it maps it.', quirks: 'The drive must be declared under drives:. Reaches the scheduler within one probe interval.'},

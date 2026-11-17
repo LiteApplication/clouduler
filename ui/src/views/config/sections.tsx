@@ -40,6 +40,7 @@ import {
   DurationField,
   IpField,
   KeyValueList,
+  NumberField,
   PortField,
   SelectField,
   TextField,
@@ -639,6 +640,16 @@ export function DrivesSection({ draft, setDraft, disabled, original }: SectionPr
               />
             </>
           )}
+          <NumberField
+            id={`drive-${name}-parallel`}
+            label="Parallel syncs"
+            value={drive.max_parallel_syncs ?? 1}
+            onChange={(n) => update(name, { max_parallel_syncs: Number.isInteger(n) && n > 1 ? n : undefined })}
+            hint="Volumes of this drive replicated at once."
+            help="When several volumes of this drive are due together, this many are replicated at the same time from a node; the rest wait their turn, most important stack first. 1 (the default) syncs them one by one."
+            configKey={`drives.${name}.max_parallel_syncs`}
+            disabled={disabled}
+          />
         </div>
       ))}
       {!disabled && (

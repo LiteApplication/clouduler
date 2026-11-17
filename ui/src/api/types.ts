@@ -907,6 +907,8 @@ export interface DriveConfig {
   served_by: string[];
   /** Served drives only; omitted when `auto` (the default). */
   failback?: DriveFailback;
+  /** How many of the drive's volumes replicate at once; omitted when 1 (the default). */
+  max_parallel_syncs?: number;
 }
 
 export type NodeRoleConfig = 'manager' | 'worker';

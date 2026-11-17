@@ -235,18 +235,8 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             // `max_parallel_syncs - 1` more due volumes of its drive; the next
             // batch starts once that one has finished.
             while !due.is_empty() {
-                let drive = due[0].1.drive.clone();
-                let width = intervals.parallelism_for(&drive).max(1);
-                let mut batch = Vec::new();
-                let mut rest = Vec::new();
-                for entry in std::mem::take(&mut due) {
-                    if entry.1.drive == drive && batch.len() < width {
-                        batch.push(entry.1);
-                    } else {
-                        rest.push(entry);
-                    }
-                }
-                due = rest;
+                let width = intervals.parallelism_for(&due[0].1.drive).max(1);
+                let batch = take_batch(&mut due, width);
                 let claimed =
                     futures::future::join_all(batch.iter().map(|id| self.sync_due(id, &state)))
                         .await;
@@ -609,6 +599,26 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
     }
 }
 
+/// Takes the next batch off the sorted `due` list: its first volume and up to
+/// `width - 1` further volumes of the same drive, keeping the order of what is
+/// left.
+fn take_batch(due: &mut Vec<(i32, VolumeId)>, width: usize) -> Vec<VolumeId> {
+    let Some(drive) = due.first().map(|(_, id)| id.drive.clone()) else {
+        return Vec::new();
+    };
+    let mut batch = Vec::new();
+    let mut rest = Vec::new();
+    for entry in std::mem::take(due) {
+        if entry.1.drive == drive && batch.len() < width {
+            batch.push(entry.1);
+        } else {
+            rest.push(entry);
+        }
+    }
+    *due = rest;
+    batch
+}
+
 /// A static map, for callers that have already resolved every volume's
 /// interval (the common case: the daemon does this once per stack deploy).
 pub struct StaticIntervals {
@@ -634,6 +644,22 @@ impl IntervalSource for StaticIntervals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_batch_is_the_first_drive_up_to_the_parallel_limit() {
+        let id = |d: &str, v: &str| VolumeId::new(d, v);
+        let mut due = vec![
+            (-5, id("fast", "a")),
+            (0, id("bulk", "x")),
+            (1, id("fast", "b")),
+            (2, id("fast", "c")),
+        ];
+        assert_eq!(take_batch(&mut due, 2), vec![id("fast", "a"), id("fast", "b")]);
+        assert_eq!(due, vec![(0, id("bulk", "x")), (2, id("fast", "c"))]);
+        assert_eq!(take_batch(&mut due, 1), vec![id("bulk", "x")]);
+        assert_eq!(take_batch(&mut due, 4), vec![id("fast", "c")]);
+        assert!(take_batch(&mut due, 4).is_empty());
+    }
 
     #[test]
     fn interval_falls_back_to_the_drive_default() {
