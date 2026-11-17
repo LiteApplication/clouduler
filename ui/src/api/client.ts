@@ -201,6 +201,14 @@ function del<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' });
 }
 
+/**
+ * The api call behind an alert's action button (`AlertLink.method`). The path
+ * comes from the server, so this is deliberately not part of `api`.
+ */
+export function runAlertAction(method: 'DELETE' | 'POST' | 'PUT', path: string): Promise<void> {
+  return request<void>(path, { method, body: method === 'DELETE' ? undefined : '{}' });
+}
+
 export const api = {
   // alerts
   alerts: () => get<AlertsResponse>('/api/alerts'),

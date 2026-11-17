@@ -3,6 +3,7 @@
 pub mod backup_cli;
 pub mod capture;
 pub mod clear_errors;
+pub mod prioritize;
 pub mod cli;
 pub mod completion;
 pub mod completions;

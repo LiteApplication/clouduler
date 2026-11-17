@@ -22,6 +22,7 @@ const cluster: ClusterState = {
   wrapped_keys: {},
   cluster_config: null,
   emergency_stacks: [],
+  prioritized: [],
   restic_destinations: {},
   restic_targets: {},
   restic_runs: {},

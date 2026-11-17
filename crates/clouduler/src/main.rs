@@ -388,6 +388,9 @@ async fn main() -> Result<()> {
                 .await
             }
         },
+        Command::Prioritize { stack, reset, via } => {
+            cl_cli::prioritize::run(&cfg, stack.as_deref(), reset, via.as_deref()).await
+        }
         Command::ClearErrors { via } => cl_cli::clear_errors::run(&cfg, via.as_deref()).await,
         Command::GitBackup { command } => match command {
             GitBackupCommand::Pull { via } => {

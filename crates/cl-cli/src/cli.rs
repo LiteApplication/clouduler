@@ -318,6 +318,20 @@ pub enum Command {
         #[command(subcommand)]
         command: GitBackupCommand,
     },
+    /// Put a stack ahead of every other one - its instances start first and
+    /// its drives' volumes sync first - until `--reset`. While it is in force
+    /// the alerts show a warning with a reset button.
+    Prioritize {
+        /// The stack to prioritize, or to reset with `--reset` (every
+        /// prioritized stack when omitted).
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        stack: Option<String>,
+        /// Go back to the normal priority instead of bumping it.
+        #[arg(long)]
+        reset: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
     /// Forget every recorded failure so it stops showing up as a problem:
     /// failed backup runs, restores, image updates and migrations,
     /// certificate/DNS errors and failed alert deliveries. A failure that is

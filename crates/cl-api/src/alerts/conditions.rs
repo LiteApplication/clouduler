@@ -45,6 +45,7 @@ const DERIVED: &[&str] = &[
     "network.container_router_down",
     "update.failed",
     "update.stuck",
+    "stack.prioritized",
 ];
 
 pub fn is_derived(event: &str) -> bool {
@@ -70,6 +71,7 @@ fn link(label: &str, path: String) -> AlertLink {
     AlertLink {
         label: label.to_string(),
         path,
+        method: None,
     }
 }
 
@@ -150,6 +152,25 @@ pub(crate) fn derive(
     backups(&mut b, state, now);
     restores(&mut b, state, now);
     certs(&mut b, state, now, settings);
+    for stack in &state.prioritized {
+        let mut o = base(
+            "stack.prioritized",
+            stack,
+            format!("{stack} is prioritized"),
+            "its instances start and its volumes sync ahead of every other stack until the priority is reset"
+                .to_string(),
+        );
+        o.stack = Some(stack.clone());
+        o.links = vec![
+            link("Open stack", format!("/stacks/{stack}")),
+            AlertLink {
+                label: "Reset priority".to_string(),
+                path: format!("/api/stacks/{stack}/prioritize"),
+                method: Some("DELETE".to_string()),
+            },
+        ];
+        b.add(o);
+    }
     for (fqdn, status) in &state.cert_status {
         if let ReconcileStatus::Error { message, .. } = status {
             let mut o = base(

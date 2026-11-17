@@ -108,6 +108,7 @@ fn link(label: &str, path: String) -> Vec<AlertLink> {
     vec![AlertLink {
         label: label.into(),
         path,
+        method: None,
     }]
 }
 

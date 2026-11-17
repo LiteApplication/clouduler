@@ -882,8 +882,8 @@ impl DriveIntervals {
         }
     }
 
-    /// Every deployed stack that parses, from the cache.
-    fn parsed(&self, state: &cl_raft::ClusterState) -> Vec<Arc<cl_config::StackFile>> {
+    /// Every deployed stack that parses, from the cache, with its name.
+    fn parsed(&self, state: &cl_raft::ClusterState) -> Vec<(String, Arc<cl_config::StackFile>)> {
         let mut cache = self.stacks.lock().expect("interval cache");
         cache.retain(|name, _| state.stacks.contains_key(name));
         state
@@ -899,7 +899,7 @@ impl DriveIntervals {
                         cl_config::StackFile::parse(&stack.spec).ok().map(Arc::new),
                     );
                 }
-                entry.1.clone()
+                Some((name.clone(), entry.1.clone()?))
             })
             .collect()
     }
@@ -908,20 +908,29 @@ impl DriveIntervals {
     fn stack_override(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Option<Duration> {
         self.parsed(state)
             .iter()
-            .filter_map(|file| file.volume_sync_override(&volume.drive, &volume.volume))
+            .filter_map(|(_, file)| file.volume_sync_override(&volume.drive, &volume.volume))
             .min()
             .map(|d| d.max(cl_config::MIN_VOLUME_SYNC_INTERVAL))
     }
 }
 
 impl IntervalSource for DriveIntervals {
-    /// The best (lowest) `x-clouduler.priority` among the stacks using the
-    /// volume's drive; a drive no stack uses syncs last.
+    fn parallelism_for(&self, drive: &str) -> usize {
+        self.config_rx
+            .borrow()
+            .drives
+            .get(drive)
+            .map_or(1, |d| d.max_parallel_syncs)
+    }
+
+    /// The best (lowest) priority among the stacks using the volume's drive
+    /// (a `clouduler prioritize`d stack beats all others); a drive no stack
+    /// uses syncs last.
     fn priority_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> i32 {
         self.parsed(state)
             .iter()
-            .filter(|file| file.drives_used().contains(&volume.drive))
-            .map(|file| file.priority())
+            .filter(|(_, file)| file.drives_used().contains(&volume.drive))
+            .map(|(name, file)| state.effective_priority(name, file.priority()))
             .min()
             .unwrap_or(i32::MAX)
     }

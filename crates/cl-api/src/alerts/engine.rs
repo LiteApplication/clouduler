@@ -479,15 +479,18 @@ fn links_for(sig: &AlertSignal) -> Vec<cl_raft::alerts::AlertLink> {
         out.push(L {
             label: "Open instance".into(),
             path: format!("/instances/{i}"),
+            method: None,
         });
         out.push(L {
             label: "Logs".into(),
             path: format!("/logs?instance={i}"),
+            method: None,
         });
     } else if let Some(n) = &sig.node {
         out.push(L {
             label: "Open node".into(),
             path: format!("/nodes/{n}"),
+            method: None,
         });
     }
     out
@@ -589,6 +592,7 @@ pub fn message(
         Some(base) => r
             .links
             .iter()
+            .filter(|l| l.method.is_none())
             .map(|l| Link {
                 label: l.label.clone(),
                 url: format!("{base}{}", l.path),
@@ -795,6 +799,7 @@ mod tests {
         r.links = vec![cl_raft::alerts::AlertLink {
             label: "Open".into(),
             path: "/instances/a".into(),
+            method: None,
         }];
         let red = Redactor::from_plaintexts(vec![("t".into(), b"hunter2secret".to_vec())]).unwrap();
         let m = message(&r, Kind::Opened, Some("https://c.example"), Some(&red));

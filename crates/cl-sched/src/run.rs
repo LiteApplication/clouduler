@@ -1587,13 +1587,15 @@ pub fn instances_of(state: &ClusterState, stack: &str) -> Vec<InstanceId> {
         .collect()
 }
 
-/// `x-clouduler.priority` of every deployed stack that parses.
+/// `x-clouduler.priority` of every deployed stack that parses, with the stacks
+/// `clouduler prioritize` bumped ahead of all the others.
 pub fn stack_priorities(state: &ClusterState) -> reconcile::Priorities {
     state
         .stacks
         .iter()
         .filter_map(|(name, stack)| {
-            Some((name.clone(), StackFile::parse(&stack.spec).ok()?.priority()))
+            let own = StackFile::parse(&stack.spec).ok()?.priority();
+            Some((name.clone(), state.effective_priority(name, own)))
         })
         .collect()
 }

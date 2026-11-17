@@ -883,6 +883,11 @@ pub struct ClusterState {
     /// is the cluster's own signal that another manager has come back.
     #[serde(default)]
     pub emergency_stacks: BTreeSet<String>,
+    /// Stacks `clouduler prioritize` has bumped ahead of every other stack,
+    /// for starting instances and for syncing their volumes, until it is
+    /// reset. See `Request::SetPrioritized`.
+    #[serde(default)]
+    pub prioritized: BTreeSet<String>,
     /// Where a drive can back up to. See `BackupDestination`.
     #[serde(default)]
     pub restic_destinations: BTreeMap<String, BackupDestination>,
@@ -1542,6 +1547,13 @@ pub enum Request {
     /// placement again. Submitted by `watch_leadership` once this node can
     /// reach another voter, not by an operator - see `emergency_stacks`.
     ClearEmergency,
+    /// Puts `stack` ahead of every other stack (`on`) or back at its own
+    /// `x-clouduler.priority` (`!on`), until reset. Turning it on for a
+    /// stack that is not deployed is refused; turning it off never is.
+    SetPrioritized {
+        stack: String,
+        on: bool,
+    },
     /// Changes who holds a served drive, or a handover between holders. See
     /// `served::ServedOp`.
     Served {
@@ -1644,6 +1656,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "RecordCrashMove",
     "NoOp",
     "ClearEmergency",
+    "SetPrioritized",
     "Served",
 ];
 
@@ -1920,6 +1933,10 @@ mod request_mirror {
         },
         NoOp,
         ClearEmergency,
+        SetPrioritized {
+            stack: String,
+            on: bool,
+        },
         Served {
             drive: String,
             op: crate::served::ServedOp,
@@ -2199,6 +2216,17 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::SetPrioritized { stack, on } => {
+                if !on {
+                    self.prioritized.remove(stack);
+                } else if self.stacks.contains_key(stack) {
+                    self.prioritized.insert(stack.clone());
+                } else {
+                    return Err(format!("no stack named {stack}"));
+                }
+                Ok(())
+            }
+
             Request::UpsertNode(node) => {
                 self.removed.remove(&node.id);
                 self.nodes.insert(node.name.clone(), node.clone());
@@ -2307,6 +2335,7 @@ impl ClusterState {
             Request::RemoveStack { name } => {
                 // Drop the stack first so the in-use check below sees it gone.
                 let removed = self.stacks.remove(name);
+                self.prioritized.remove(name);
                 self.assignments.retain(|id, _| &id.stack != name);
                 self.instance_updates.retain(|id, _| &id.stack != name);
                 self.auto_updates.retain(|id, _| &id.stack != name);
@@ -3311,6 +3340,16 @@ impl ClusterState {
         copy
     }
 
+    /// A stack's priority as the scheduler and the drive syncs see it: lower is
+    /// more important, and a prioritized stack beats every other one.
+    pub fn effective_priority(&self, stack: &str, own: i32) -> i32 {
+        if self.prioritized.contains(stack) {
+            i32::MIN
+        } else {
+            own
+        }
+    }
+
     /// Whether `clouduler emergency` is in force.
     pub fn in_emergency(&self) -> bool {
         !self.emergency_stacks.is_empty()
@@ -3979,6 +4018,10 @@ mod tests {
             },
             Request::NoOp,
             Request::ClearEmergency,
+            Request::SetPrioritized {
+                stack: "s".into(),
+                on: true,
+            },
             Request::Served {
                 drive: "fast".into(),
                 op: crate::served::ServedOp::RequestFailback,
@@ -4651,6 +4694,32 @@ mod tests {
         });
         state.apply(&Request::RemoveSession { key: "k".into() });
         assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn prioritizing_needs_a_deployed_stack_and_goes_away_with_it() {
+        let mut state = cluster();
+        let on = |stack: &str| Request::SetPrioritized {
+            stack: stack.into(),
+            on: true,
+        };
+        assert!(state.apply(&on("site")).error.is_some());
+        state.apply(&Request::DeployStack {
+            name: "site".into(),
+            spec: "services:\n  web:\n    image: nginx\n".into(),
+            at: 0,
+        });
+        assert!(state.apply(&on("site")).error.is_none());
+        assert_eq!(state.effective_priority("site", 5), i32::MIN);
+        assert_eq!(state.effective_priority("other", 5), 5);
+        state.apply(&Request::SetPrioritized {
+            stack: "site".into(),
+            on: false,
+        });
+        assert!(state.prioritized.is_empty());
+        state.apply(&on("site"));
+        state.apply(&Request::RemoveStack { name: "site".into() });
+        assert!(state.prioritized.is_empty());
     }
 
     #[test]

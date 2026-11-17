@@ -37,6 +37,8 @@ const RECENT_MAX: usize = 300;
 struct LinkView {
     label: String,
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -104,6 +106,7 @@ impl From<&AlertRecord> for AlertView {
                 .map(|l| LinkView {
                     label: l.label.clone(),
                     path: l.path.clone(),
+                    method: l.method.clone(),
                 })
                 .collect(),
             excerpt: r.excerpt.clone(),

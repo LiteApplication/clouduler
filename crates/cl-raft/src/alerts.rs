@@ -37,6 +37,11 @@ impl AlertState {
 pub struct AlertLink {
     pub label: String,
     pub path: String,
+    /// Set for a link that is not a page but an api call the ui makes when
+    /// the button is pressed, e.g. `DELETE` on `/api/stacks/media/prioritize`.
+    /// Such a link is left out of delivered messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 /// One attempt-series to one destination for one transition.

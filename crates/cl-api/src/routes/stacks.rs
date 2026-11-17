@@ -20,6 +20,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/stacks", get(list))
         .route("/api/stacks/{name}", get(detail).put(deploy).delete(remove))
         .route("/api/stacks/{name}/validate", post(validate))
+        .route(
+            "/api/stacks/{name}/prioritize",
+            axum::routing::put(prioritize).delete(unprioritize),
+        )
         .route("/api/stacks/{name}/update-webhook", get(update_webhook_url))
         .route(
             "/api/stacks/{name}/update-webhook/regenerate",
@@ -394,6 +398,40 @@ pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), A
         .submit(ClusterRequest::RemoveSecret { name: secret })
         .await;
     Ok(())
+}
+
+/// `PUT /api/stacks/{name}/prioritize`: see `Request::SetPrioritized`.
+async fn prioritize(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    set_prioritized(&state, name, true).await
+}
+
+/// `DELETE /api/stacks/{name}/prioritize`: back to the stack's own priority.
+async fn unprioritize(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    set_prioritized(&state, name, false).await
+}
+
+async fn set_prioritized(
+    state: &AppState,
+    stack: String,
+    on: bool,
+) -> Result<StatusCode, ApiError> {
+    let response = state
+        .cluster
+        .submit(ClusterRequest::SetPrioritized { stack, on })
+        .await
+        .map_err(ApiError::not_leader)?;
+    if let Some(msg) = response.error {
+        return Err(ApiError::Conflict(msg));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

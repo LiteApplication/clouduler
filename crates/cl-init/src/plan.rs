@@ -239,6 +239,7 @@ pub fn drive_definition(mode: DriveMode, server: &str) -> Drive {
             DriveMode::Replicated => Vec::new(),
         },
         failback: Default::default(),
+        max_parallel_syncs: 1,
     }
 }
 

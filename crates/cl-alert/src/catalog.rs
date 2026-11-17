@@ -397,6 +397,15 @@ pub const EVENTS: &[EventDef] = &[
         true,
     ),
     ev(
+        "stack.prioritized",
+        Deployments,
+        "A stack is prioritized",
+        Warning,
+        "Open until `clouduler prioritize --reset` (or the alert's reset button)",
+        true,
+        true,
+    ),
+    ev(
         "update.available",
         Deployments,
         "A newer image is available",

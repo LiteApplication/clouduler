@@ -516,6 +516,20 @@
     },
     {
       "category": "deployments",
+      "effective_severity": "warning",
+      "key": "stack.prioritized",
+      "note": "Open until `clouduler prioritize --reset` (or the alert's reset button)",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "warning",
+      "stack_scoped": true,
+      "stateful": true,
+      "title": "A stack is prioritized"
+    },
+    {
+      "category": "deployments",
       "effective_severity": "info",
       "key": "update.available",
       "note": "",
@@ -1222,6 +1236,7 @@
           "render_nodes": []
         },
         "id": "<volatile>",
+        "images": [],
         "labels": {},
         "last_resort": false,
         "memory_total_bytes": 0,
@@ -1250,6 +1265,7 @@
           "render_nodes": []
         },
         "id": "<volatile>",
+        "images": [],
         "labels": {},
         "last_resort": false,
         "memory_total_bytes": 0,
@@ -1264,6 +1280,7 @@
     },
     "overlay": "{\"pool\":\"10.244.0.0/16\",\"subnet_prefix\":24,\"networks\":{\"CTN_tailnet\":{\"subnet\":\"10.244.0.0/24\",\"instances\":{\"web.app.0\":\"10.244.0.2\"},\"reserved\":[\"10.244.0.2\",\"10.244.0.3\"],\"cooldown\":[],\"nodes\":{\"n0\":\"10.244.0.3\"}}}}",
     "previous_image_digests": {},
+    "prioritized": [],
     "proxy_sessions": {},
     "proxy_tokens": {},
     "removed": [],

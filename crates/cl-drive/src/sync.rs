@@ -93,6 +93,11 @@ pub trait IntervalSource: Send + Sync {
     fn priority_for(&self, _volume: &VolumeId, _state: &cl_raft::ClusterState) -> i32 {
         0
     }
+
+    /// How many of `drive`'s volumes may replicate at once from this node.
+    fn parallelism_for(&self, _drive: &str) -> usize {
+        1
+    }
 }
 
 /// Which side of a replication a hook runs on.
@@ -226,58 +231,84 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
             }
             due.sort();
 
-            for (_, id) in &due {
-                let Some(volume) = state.volumes.get(id) else {
-                    continue;
-                };
-                let is_served = self.registry.is_served(&id.drive);
-                let interval = intervals.interval_for(id, &state);
-                if !self.guard.try_start(id).await {
-                    // Previous run is still going; wait for the next tick
-                    // rather than piling up a second one.
-                    continue;
+            // The most important due volume goes first together with up to
+            // `max_parallel_syncs - 1` more due volumes of its drive; the next
+            // batch starts once that one has finished.
+            while !due.is_empty() {
+                let drive = due[0].1.drive.clone();
+                let width = intervals.parallelism_for(&drive).max(1);
+                let mut batch = Vec::new();
+                let mut rest = Vec::new();
+                for entry in std::mem::take(&mut due) {
+                    if entry.1.drive == drive && batch.len() < width {
+                        batch.push(entry.1);
+                    } else {
+                        rest.push(entry);
+                    }
                 }
-                next_due.insert(id.clone(), Instant::now() + interval);
-
-                let targets: Vec<ReplicaTarget> = if is_served {
-                    self.registry
-                        .served_candidates(&id.drive)
-                        .iter()
-                        .filter(|name| name.as_str() != self.registry.node())
-                        .filter_map(|name| {
-                            state.nodes.get(name).map(|n| ReplicaTarget {
-                                node: name.clone(),
-                                addr: n.rpc_addr,
-                            })
-                        })
-                        .collect()
-                } else {
-                    state
-                        .nodes
-                        .iter()
-                        .filter(|(name, n)| {
-                            *name != self.registry.node() && n.implements(&id.drive)
-                        })
-                        .map(|(name, n)| ReplicaTarget {
-                            node: name.clone(),
-                            addr: n.rpc_addr,
-                        })
-                        .collect()
-                };
-
-                self.check_empty(id, volume.looks_empty).await;
-                let authority = is_served
-                    .then(|| state.served.get(&id.drive).cloned())
-                    .flatten();
-                self.run_one(
-                    id.clone(),
-                    volume.generation,
-                    targets,
-                    is_served.then_some(authority),
-                )
-                .await;
+                due = rest;
+                let claimed =
+                    futures::future::join_all(batch.iter().map(|id| self.sync_due(id, &state)))
+                        .await;
+                for (id, claimed) in batch.into_iter().zip(claimed) {
+                    if claimed {
+                        let interval = intervals.interval_for(&id, &state);
+                        next_due.insert(id, now + interval);
+                    }
+                }
             }
         }
+    }
+
+    /// Claims and replicates one due volume. `false` when a sync of it was
+    /// already in flight and nothing was done.
+    async fn sync_due(&self, id: &VolumeId, state: &cl_raft::ClusterState) -> bool {
+        let Some(volume) = state.volumes.get(id) else {
+            return false;
+        };
+        let is_served = self.registry.is_served(&id.drive);
+        if !self.guard.try_start(id).await {
+            // Previous run is still going; wait for the next tick rather
+            // than piling up a second one.
+            return false;
+        }
+
+        let targets: Vec<ReplicaTarget> = if is_served {
+            self.registry
+                .served_candidates(&id.drive)
+                .iter()
+                .filter(|name| name.as_str() != self.registry.node())
+                .filter_map(|name| {
+                    state.nodes.get(name).map(|n| ReplicaTarget {
+                        node: name.clone(),
+                        addr: n.rpc_addr,
+                    })
+                })
+                .collect()
+        } else {
+            state
+                .nodes
+                .iter()
+                .filter(|(name, n)| *name != self.registry.node() && n.implements(&id.drive))
+                .map(|(name, n)| ReplicaTarget {
+                    node: name.clone(),
+                    addr: n.rpc_addr,
+                })
+                .collect()
+        };
+
+        self.check_empty(id, volume.looks_empty).await;
+        let authority = is_served
+            .then(|| state.served.get(&id.drive).cloned())
+            .flatten();
+        self.run_one(
+            id.clone(),
+            volume.generation,
+            targets,
+            is_served.then_some(authority),
+        )
+        .await;
+        true
     }
 
     /// Removes this node's copy of every volume deleted on purpose, then says

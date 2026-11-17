@@ -522,6 +522,12 @@ impl ClusterConfig {
 
     fn validate_drives(&self) -> Result<()> {
         for (name, drive) in &self.drives {
+            if drive.max_parallel_syncs == 0 {
+                return Err(ConfigError::invalid(
+                    format!("drives.{name}.max_parallel_syncs"),
+                    "must be at least 1",
+                ));
+            }
             // A drive nobody implements yet just can't host a volume until a
             // node is given a local path for it, because scheduling already rejects
             // placement onto a node that doesn't implement a drive, so this is
@@ -1680,6 +1686,24 @@ cloudflare:
         let cfg =
             parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).expect("valid");
         assert!(cfg.drives["fast"].served_by.is_empty());
+    }
+
+    #[test]
+    fn max_parallel_syncs_defaults_to_one_and_cannot_be_zero() {
+        let cfg = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { sync_interval: 5m, max_parallel_syncs: 3 }",
+        )])
+        .expect("valid");
+        assert_eq!(cfg.drives["fast"].max_parallel_syncs, 3);
+        let cfg = parse(&[]).expect("valid");
+        assert_eq!(cfg.drives["fast"].max_parallel_syncs, 1);
+        let err = parse(&[(
+            "fast: { sync_interval: 5m }",
+            "fast: { sync_interval: 5m, max_parallel_syncs: 0 }",
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("max_parallel_syncs"));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AlertView } from '../../api/types';
-import { Icon, StatusBadge, Tag } from '../../ds';
+import { runAlertAction, ApiError } from '../../api/client';
+import { Button, Icon, StatusBadge, Tag } from '../../ds';
+import { useAlerts } from '../../state/alertsStore';
 import { filedAt, sentSummary } from '../../lib/alerts';
 import { relativeTime } from '../../lib/format';
 
@@ -18,8 +20,24 @@ function SeverityBadge({ a }: { a: AlertView }) {
 
 export function AlertRow({ alert: a, isNew, active }: { alert: AlertView; isNew: boolean; active?: boolean }) {
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const { refresh } = useAlerts();
   const sent = sentSummary(a);
-  const primary = a.links[0];
+  const primary = a.links.find((l) => !l.method);
+  const actions = a.links.filter((l) => l.method);
+  const act = async (method: NonNullable<(typeof actions)[number]['method']>, path: string) => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await runAlertAction(method, path);
+      refresh();
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : 'The action failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
   const resolved = a.state === 'resolved';
   const when = active ? a.opened_at : filedAt(a);
   return (
@@ -68,6 +86,13 @@ export function AlertRow({ alert: a, isNew, active }: { alert: AlertView; isNew:
         <span className="al__when" title={new Date(when * 1000).toLocaleString()}>
           {relativeTime(when)}
         </span>
+        {!resolved &&
+          actions.map((l) => (
+            <Button key={l.path} variant="primary" loading={busy} onClick={() => void act(l.method!, l.path)}>
+              {l.label}
+            </Button>
+          ))}
+        {actionError && <span className="sub">{actionError}</span>}
         {primary && (
           <Link className="cl-btn cl-btn--secondary cl-btn--md" to={primary.path}>
             <span>{primary.label}</span>

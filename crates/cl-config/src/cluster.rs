@@ -580,12 +580,29 @@ pub struct Drive {
     /// takes the drive back after copying over what was written meanwhile.
     #[serde(default, skip_serializing_if = "Failback::is_default")]
     pub failback: Failback,
+
+    /// How many of this drive's volumes one node replicates at the same time
+    /// when several are due together. Volumes beyond that wait their turn,
+    /// the most important stack's first.
+    #[serde(
+        default = "default_max_parallel_syncs",
+        skip_serializing_if = "is_default_max_parallel_syncs"
+    )]
+    pub max_parallel_syncs: usize,
 }
 
 impl Drive {
     pub fn is_served(&self) -> bool {
         self.mode == DriveMode::Served
     }
+}
+
+fn default_max_parallel_syncs() -> usize {
+    1
+}
+
+fn is_default_max_parallel_syncs(n: &usize) -> bool {
+    *n == default_max_parallel_syncs()
 }
 
 fn default_sync_interval() -> Duration {

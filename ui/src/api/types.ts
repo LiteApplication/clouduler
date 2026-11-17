@@ -33,6 +33,8 @@ export interface NodeState {
    *  least once. Lets a key-holding node deliver the cluster key to it
    *  without the plaintext ever crossing the network. */
   node_pubkey: string | null;
+  /** Image references this node holds locally. */
+  images?: string[];
   /** Total system memory in bytes, self-reported alongside arch/binary_hash.
    *  0 until the node has reported in at least once. */
   memory_total_bytes: number;
@@ -466,6 +468,8 @@ export interface ClusterState {
    *  leaving every other assignment untouched. Cleared automatically once
    *  another manager is reachable again. */
   emergency_stacks: string[];
+  /** Stacks bumped ahead of every other one by `clouduler prioritize`. */
+  prioritized: string[];
   restic_destinations: Record<string, BackupDestination>;
   restic_targets: Record<string, DriveBackupTarget>;
   restic_runs: Record<string, BackupRun>;
@@ -1448,6 +1452,8 @@ export interface AlertLink {
   label: string;
   /** UI-relative path, e.g. `/stacks/media`. */
   path: string;
+  /** Set for a button that makes this api call (`path` is then an api path) instead of opening a page. */
+  method?: 'DELETE' | 'POST' | 'PUT';
 }
 
 export interface AlertDelivery {
