@@ -86,6 +86,13 @@ pub struct ReplicaTarget {
 /// the replicated state of this pass, which holds the stacks.
 pub trait IntervalSource: Send + Sync {
     fn interval_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Duration;
+
+    /// How important the volume's drive is: the best (lowest) `priority` of
+    /// any stack that uses the drive. When several volumes are due in the same
+    /// pass they sync one after the other in ascending order of this value.
+    fn priority_for(&self, _volume: &VolumeId, _state: &cl_raft::ClusterState) -> i32 {
+        0
+    }
 }
 
 /// Which side of a replication a hook runs on.
@@ -181,6 +188,9 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
 
             self.remove_deleted_volumes(&state.volume_removals).await;
 
+            // Everything due this pass, synced one volume at a time, most
+            // important stack first (ties by volume id).
+            let mut due: Vec<(i32, VolumeId)> = Vec::new();
             for (id, volume) in &state.volumes {
                 if !self.registry.implements(&id.drive) {
                     continue;
@@ -212,13 +222,22 @@ impl<E: SyncEngine + 'static> SyncScheduler<E> {
                 if now < *due_at {
                     continue;
                 }
+                due.push((intervals.priority_for(id, &state), id.clone()));
+            }
+            due.sort();
 
+            for (_, id) in &due {
+                let Some(volume) = state.volumes.get(id) else {
+                    continue;
+                };
+                let is_served = self.registry.is_served(&id.drive);
+                let interval = intervals.interval_for(id, &state);
                 if !self.guard.try_start(id).await {
                     // Previous run is still going; wait for the next tick
                     // rather than piling up a second one.
                     continue;
                 }
-                *due_at = now + interval;
+                next_due.insert(id.clone(), Instant::now() + interval);
 
                 let targets: Vec<ReplicaTarget> = if is_served {
                     self.registry

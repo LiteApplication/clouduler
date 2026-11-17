@@ -882,8 +882,8 @@ impl DriveIntervals {
         }
     }
 
-    /// The shortest override any stack sets for `volume`, clamped.
-    fn stack_override(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Option<Duration> {
+    /// Every deployed stack that parses, from the cache.
+    fn parsed(&self, state: &cl_raft::ClusterState) -> Vec<Arc<cl_config::StackFile>> {
         let mut cache = self.stacks.lock().expect("interval cache");
         cache.retain(|name, _| state.stacks.contains_key(name));
         state
@@ -899,17 +899,33 @@ impl DriveIntervals {
                         cl_config::StackFile::parse(&stack.spec).ok().map(Arc::new),
                     );
                 }
-                entry
-                    .1
-                    .as_ref()?
-                    .volume_sync_override(&volume.drive, &volume.volume)
+                entry.1.clone()
             })
+            .collect()
+    }
+
+    /// The shortest override any stack sets for `volume`, clamped.
+    fn stack_override(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Option<Duration> {
+        self.parsed(state)
+            .iter()
+            .filter_map(|file| file.volume_sync_override(&volume.drive, &volume.volume))
             .min()
             .map(|d| d.max(cl_config::MIN_VOLUME_SYNC_INTERVAL))
     }
 }
 
 impl IntervalSource for DriveIntervals {
+    /// The best (lowest) `x-clouduler.priority` among the stacks using the
+    /// volume's drive; a drive no stack uses syncs last.
+    fn priority_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> i32 {
+        self.parsed(state)
+            .iter()
+            .filter(|file| file.drives_used().contains(&volume.drive))
+            .map(|file| file.priority())
+            .min()
+            .unwrap_or(i32::MAX)
+    }
+
     fn interval_for(&self, volume: &VolumeId, state: &cl_raft::ClusterState) -> Duration {
         self.stack_override(volume, state).unwrap_or_else(|| {
             self.config_rx
@@ -969,6 +985,28 @@ web: { address: cloud, network: internal }
             ),
             Duration::from_secs(3600)
         );
+    }
+
+    #[test]
+    fn a_drive_syncs_at_the_best_priority_of_the_stacks_using_it() {
+        let intervals = intervals(config());
+        let mut state = cl_raft::ClusterState::default();
+        let mut deploy = |name: &str, drive: &str, priority: i32| {
+            state.apply(&cl_raft::Request::DeployStack {
+                name: name.into(),
+                spec: format!(
+                    "services:\n  s:\n    image: x\n    volumes:\n      - {drive}/data:/d\nx-clouduler:\n  priority: {priority}\n"
+                ),
+                at: 1,
+            });
+        };
+        deploy("low", "bulk", 5);
+        deploy("high", "bulk", -2);
+        deploy("other", "fast", 3);
+        let prio = |drive: &str| intervals.priority_for(&VolumeId::new(drive, "data"), &state);
+        assert_eq!(prio("bulk"), -2);
+        assert_eq!(prio("fast"), 3);
+        assert_eq!(prio("unused"), i32::MAX);
     }
 
     #[test]
