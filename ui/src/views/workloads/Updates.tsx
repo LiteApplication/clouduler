@@ -6,6 +6,7 @@ import { Banner, Button, Chip, DataTable, EmptyState, Icon, PageHeader, Panel, S
 import { relativeTime, shortDigest, shortImage } from '../../lib/format';
 import { UPDATE_STEPS, isUpdateActive } from '../../lib/updates';
 import { useClusterState } from '../../state/store';
+import { SelfUpdatePanel } from '../infra/SettingsUpdate';
 import { RegistryAccounts } from './RegistryAccounts';
 import './workloads.css';
 
@@ -671,6 +672,8 @@ export function Updates() {
           {failures.map((f) => `${f.id}: ${f.error ?? 'failed'}`).join('. ')}
         </Banner>
       )}
+
+      <SelfUpdatePanel />
 
       {inFlight.size > 0 && (
         <Panel title={`Updating ${batchDone} of ${batchAll.size}`}>

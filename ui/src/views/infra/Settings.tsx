@@ -39,7 +39,6 @@ export function Settings() {
   const { isAdmin } = useAuth();
   const cfg = useSettingsConfig();
   const [sheet, setSheet] = useState(false);
-  const [startSignal, setStartSignal] = useState(0);
 
   useEffect(() => setSheet(false), [tab]);
 
@@ -82,8 +81,6 @@ export function Settings() {
       primary = <Button variant="primary" icon="plus" onClick={() => setSheet(true)}>Create secret</Button>;
     } else if (current.id === 'access') {
       primary = <Button variant="primary" icon="plus" onClick={() => setSheet(true)}>Create API key</Button>;
-    } else {
-      primary = <Button variant="primary" icon="play" onClick={() => setStartSignal((n) => n + 1)}>Start update</Button>;
     }
   }
 
@@ -101,7 +98,7 @@ export function Settings() {
           {isConfig && <ConfigTab tab={current.id} cfg={cfg} />}
           {current.id === 'secrets' && <SettingsSecrets sheetOpen={sheet} onClose={() => setSheet(false)} />}
           {current.id === 'access' && <SettingsAccess sheetOpen={sheet} onClose={() => setSheet(false)} />}
-          {current.id === 'self-update' && <SettingsUpdate startSignal={startSignal} />}
+          {current.id === 'self-update' && <SettingsUpdate />}
         </div>
       </div>
     </div>

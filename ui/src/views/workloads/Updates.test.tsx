@@ -25,6 +25,8 @@ function row(id: string, over: Partial<UpdateRow> = {}): UpdateRow {
 }
 const behind = (id: string) => row(id, { latest_digest: 'sha256:' + 'b'.repeat(64), update_available: true });
 
+vi.mock('../infra/SettingsUpdate', () => ({ SelfUpdatePanel: () => null }));
+
 let instanceUpdates: Record<string, InstanceUpdate> = {};
 vi.mock('../../state/store', () => ({
   useClusterState: () => ({ instance_updates: instanceUpdates }) as unknown as ClusterState,

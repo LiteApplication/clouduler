@@ -27,8 +27,8 @@ export const SETTINGS_TABS: SettingsTab[] = [
   {
     id: 'self-update',
     label: 'Updates',
-    desc: 'Roll out a new release',
-    sub: 'Move every node to a new Clouduler release, one at a time.',
+    desc: 'Release source and checks',
+    sub: 'Where Clouduler finds new releases and how often it looks. Roll one out from the Updates page.',
     icon: 'download',
     group: 'Cluster',
   },

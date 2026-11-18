@@ -107,7 +107,7 @@ function Shell() {
                 <Route path="/certificates" element={<Navigate to="/dns" replace />} />
                 <Route path="/redirects" element={<Navigate to="/proxy/redirects" replace />} />
                 <Route path="/backup/*" element={<Redirect to={() => '/storage/backups'} />} />
-                <Route path="/self-update" element={<Navigate to="/settings/self-update" replace />} />
+                <Route path="/self-update" element={<Navigate to="/updates" replace />} />
                 <Route path="/ai-access" element={<Navigate to="/settings/access" replace />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

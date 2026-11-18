@@ -49,15 +49,18 @@ If a run fails or is cancelled, nodes that already restarted stay on the new ver
 <UiCli>
 <UiCli.Ui>
 
-Open **Settings**, then the **Updates** tab (`/settings/self-update`).
+Open **Settings**, then the **Updates** tab (`/settings/self-update`), to set where releases come from:
 
 - **Release source** panel: enter the **Repository** and click **Save release**. This works once. After that the field is read-only and the file is the only way to change it. Optionally paste a **GitHub token** and click **Save token** (or **Replace token**) for a private repo or to avoid GitHub's anonymous rate limit.
 - **Automatic checks** panel: shows **on** or **off**, the last check, **Check every** with **Save interval**, and **Turn on** / **Turn off**. It says "Nothing is installed automatically."
-- **Update** panel: **Running**, **Available** (with a `newer` tag) and **Rolling out**, with each node's architecture and phase (`idle`, `fetching`, `ready`, `restarting`, `done`, or the failure).
+
+Then open the **Updates** page (`/updates`) and use its **Clouduler** panel to roll a release out:
+
+- **Clouduler** panel: **Running**, **Available** (with a `newer` tag) and **Rolling out**, with each node's architecture and phase (`idle`, `fetching`, `ready`, `restarting`, `done`, or the failure).
 
 Click **Start update** (or **Start update to TAG**). The dialog `Update to TAG?` says "Nodes download the release, then restart one at a time once all are ready." While a run is active the button becomes **Cancel update** ("Nodes that already restarted stay on the new version."). A failed run shows **The update stopped** with the reason. When current, the page says `Already on the latest version.`
 
-<UiScreen scenario="lan-3-nodes" route="/settings/self-update" caption="A finished run: every node is done." alt="Settings, Updates tab" />
+<UiScreen scenario="lan-3-nodes" route="/updates" caption="A finished run: every node is done." alt="Updates page, Clouduler panel" />
 
 </UiCli.Ui>
 <UiCli.Cli>

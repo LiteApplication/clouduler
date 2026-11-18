@@ -1,5 +1,6 @@
-// Settings > Self-update: where releases come from, what is running against
-// what is available, the per-node phases, and Start / Cancel.
+// Self-update. SettingsUpdate (Settings > Updates) is where releases come from
+// and how they are checked; SelfUpdatePanel (the Updates page) is what is
+// running against what is available, the per-node phases, and Start / Cancel.
 
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../../api/client';
@@ -44,17 +45,12 @@ function phaseTone(phase: SelfUpdateNodePhase): TagTone | undefined {
   return phase === 'idle' ? undefined : 'warn';
 }
 
-export function SettingsUpdate({ startSignal }: { startSignal: number }) {
+export function SettingsUpdate() {
   const cluster = useClusterState();
   const { isAdmin } = useAuth();
-  const confirm = useConfirm();
   const toast = useToast();
   const [githubToken, setGithubToken] = useState<SelfUpdateGithubTokenStatus | null>(null);
   const [repo, setRepo] = useState<SelfUpdateConfig | null>(null);
-  const [latest, setLatest] = useState<SelfUpdateLatest | null>(null);
-  const newer = !!latest && isNewer(latest.tag, latest.running_version);
-  // Until the latest release is known, do not block; once known, nothing to do unless newer.
-  const upToDate = !!latest && !newer;
   const [releaseUrl, setReleaseUrl] = useState(DEFAULT_RELEASE_URL);
   const [tokenInput, setTokenInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -63,11 +59,8 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
   useEffect(() => {
     api.selfUpdateGithubToken().then(setGithubToken).catch(() => {});
     api.selfUpdateRepo().then(setRepo).catch(() => {});
-    api.selfUpdateLatest().then(setLatest).catch(() => {});
   }, []);
 
-  const run = decodeRun(cluster?.configs[RUN_CONFIG]?.content);
-  const inProgress = !!run && !run.finished_at;
   const check = decodeCheck(cluster?.configs[CHECK_CONFIG]?.content);
   const checking = repo?.check_updates ?? true;
   const [interval, setInterval_] = useState('');
@@ -84,37 +77,11 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
     }
   };
 
-  const start = async () => {
-    const tag = latest?.tag ?? 'the latest release';
-    const ok = await confirm({
-      title: `Update to ${tag}?`,
-      body: 'Nodes download the release, then restart one at a time once all are ready.',
-      confirmLabel: `Update to ${tag}`,
-      confirmVariant: 'primary',
-    });
-    if (ok) await attempt(() => api.startSelfUpdate(), 'Could not start the update.');
-  };
-  // The header's "Start update" button lives in Settings; it bumps this signal.
-  useEffect(() => {
-    if (startSignal > 0 && !inProgress && repo) {
-      if (upToDate) toast('Already on the latest version.');
-      else void start();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startSignal]);
-
-  const cancel = async () => {
-    if (!(await confirm({ title: 'Cancel the update?', body: 'Nodes that already restarted stay on the new version.', confirmLabel: 'Cancel update', confirmVariant: 'danger' }))) return;
-    await attempt(() => api.cancelSelfUpdate(), 'Could not cancel the update.');
-  };
-
   if (!cluster) return <p className="cl-muted">Loading…</p>;
-  const nodes = Object.values(cluster.nodes);
 
   return (
     <div className="stack">
       {error && <Banner tone="danger" onClose={() => setError(null)}>{error}</Banner>}
-      {run?.failure_reason && <Banner tone="warn" title="The update stopped">{run.failure_reason}</Banner>}
 
       <Panel title="Release source" actions={githubToken?.configured && <Tag tone="ok">GitHub token set</Tag>}>
         <p className="cl-sm cl-muted">
@@ -205,9 +172,67 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
           )}
         </Panel>
       )}
+    </div>
+  );
+}
 
+/** The cluster's own release: what runs, what is available, per-node phases, Start / Cancel. */
+export function SelfUpdatePanel() {
+  const cluster = useClusterState();
+  const { isAdmin } = useAuth();
+  const confirm = useConfirm();
+  const [repo, setRepo] = useState<SelfUpdateConfig | null>(null);
+  const [latest, setLatest] = useState<SelfUpdateLatest | null>(null);
+  const newer = !!latest && isNewer(latest.tag, latest.running_version);
+  const upToDate = !!latest && !newer;
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.selfUpdateRepo().then(setRepo).catch(() => {});
+    api.selfUpdateLatest().then(setLatest).catch(() => {});
+  }, []);
+
+  const run = decodeRun(cluster?.configs[RUN_CONFIG]?.content);
+  const inProgress = !!run && !run.finished_at;
+
+  const attempt = async (fn: () => Promise<unknown>, fallback: string) => {
+    setError(null);
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : fallback);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const start = async () => {
+    const tag = latest?.tag ?? 'the latest release';
+    const ok = await confirm({
+      title: `Update to ${tag}?`,
+      body: 'Nodes download the release, then restart one at a time once all are ready.',
+      confirmLabel: `Update to ${tag}`,
+      confirmVariant: 'primary',
+    });
+    if (ok) await attempt(() => api.startSelfUpdate(), 'Could not start the update.');
+  };
+
+  const cancel = async () => {
+    if (!(await confirm({ title: 'Cancel the update?', body: 'Nodes that already restarted stay on the new version.', confirmLabel: 'Cancel update', confirmVariant: 'danger' }))) return;
+    await attempt(() => api.cancelSelfUpdate(), 'Could not cancel the update.');
+  };
+
+  if (!cluster) return null;
+  const nodes = Object.values(cluster.nodes);
+
+  return (
+    <>
+      {error && <Banner tone="danger" onClose={() => setError(null)}>{error}</Banner>}
+      {run?.failure_reason && <Banner tone="warn" title="The update stopped">{run.failure_reason}</Banner>}
       <Panel
-        title="Update"
+        title="Clouduler"
         actions={isAdmin && (inProgress
           ? <Button variant="danger" icon="x" onClick={() => void cancel()}>Cancel update</Button>
           : <Button icon="play" disabled={busy || !repo || upToDate} onClick={() => void start()}>Start update{newer ? ` to ${latest.tag}` : ''}</Button>)}
@@ -237,6 +262,6 @@ export function SettingsUpdate({ startSignal }: { startSignal: number }) {
           <p className="cl-sm cl-muted">No update has been started yet.</p>
         )}
       </Panel>
-    </div>
+    </>
   );
 }
