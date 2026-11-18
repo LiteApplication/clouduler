@@ -52,6 +52,7 @@ use cl_raft::terraform::{
     terraform_key, OutputKind, OutputObject, TerraformConfigOutput, TerraformMode, TerraformModule,
     TerraformOutcome, TerraformRun, TerraformSecretOutput, MAX_TERRAFORM_LOG_BYTES,
 };
+use cl_sched::reconcile::LABEL_STACK_REVISION;
 use cl_secret::{ClusterKey, Sealed};
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -191,13 +192,40 @@ pub fn due(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub key: String,
+    /// `StackEntry::revision` when chosen; the target must carry it (see [`target_is_current`]).
+    pub stack_revision: u64,
     pub instance: InstanceId,
     pub fingerprint: String,
     pub mode: TerraformMode,
     pub trigger: &'static str,
 }
 
-/// Modules that are due and whose target instance runs on `node`.
+/// Whether any instance of `stack` is mid image update, redeploy or migration. A run started then
+/// would be claimed against a container that is about to be replaced.
+pub fn rollout_in_progress(state: &ClusterState, stack: &str) -> bool {
+    state
+        .instance_updates
+        .iter()
+        .any(|(id, u)| id.stack == stack && !u.phase.is_terminal())
+        || state.assignments.iter().any(|(id, a)| {
+            id.stack == stack && a.migration.as_ref().is_some_and(|m| !m.phase.is_terminal())
+        })
+}
+
+/// Whether a container was created for the stack's current revision. A container without the label
+/// (created before it existed) is given the benefit of the doubt.
+pub fn target_is_current(
+    labels: &std::collections::HashMap<String, String>,
+    stack_revision: u64,
+) -> bool {
+    labels
+        .get(LABEL_STACK_REVISION)
+        .and_then(|r| r.parse::<u64>().ok())
+        .is_none_or(|r| r >= stack_revision)
+}
+
+/// Modules that are due and whose target instance runs on `node`. Nothing is due while the stack is
+/// rolling out (manual requests included: they stay pending and run once it settles).
 pub fn candidates(state: &ClusterState, node: &str) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (stack, modules) in &state.terraform_modules {
@@ -205,7 +233,7 @@ pub fn candidates(state: &ClusterState, node: &str) -> Vec<Candidate> {
             let Some((tf, spec_image)) = service_terraform(state, stack, service) else {
                 continue;
             };
-            if !tf.enabled {
+            if !tf.enabled || rollout_in_progress(state, stack) {
                 continue;
             }
             let Some((id, assignment)) = pick_target(state, stack, service) else {
@@ -220,6 +248,7 @@ pub fn candidates(state: &ClusterState, node: &str) -> Vec<Candidate> {
             if let Some((mode, trigger)) = due(state, &key, &fp) {
                 out.push(Candidate {
                     key,
+                    stack_revision: state.stacks.get(stack).map_or(0, |s| s.revision),
                     instance: id.clone(),
                     fingerprint: fp,
                     mode,
@@ -1115,25 +1144,41 @@ async fn pass(ctx: &Arc<Ctx>, docker: &Docker, cfg: &TerraformConfig, key: &Arc<
     }
 
     for c in due {
-        if !target_ready(docker, &c.instance).await {
+        let Some(target_id) = target_ready(docker, &c.instance, c.stack_revision).await else {
             continue;
-        }
-        claim_and_spawn(ctx, docker, cfg, key, c).await;
+        };
+        claim_and_spawn(ctx, docker, cfg, key, c, target_id).await;
     }
 }
 
-/// Running, and healthy when it has a healthcheck.
-async fn target_ready(docker: &Docker, instance: &InstanceId) -> bool {
+/// The target's container id when it is running, healthy when it has a healthcheck, and created for
+/// the stack's current revision.
+async fn target_ready(
+    docker: &Docker,
+    instance: &InstanceId,
+    stack_revision: u64,
+) -> Option<String> {
     match docker.inspect(&instance.container_name()).await {
-        Ok(Some(c)) => {
-            c.running
+        Ok(Some(c))
+            if c.running
                 && matches!(
                     c.health,
                     None | Some(HealthState::None) | Some(HealthState::Healthy)
                 )
+                && target_is_current(&c.labels, stack_revision) =>
+        {
+            Some(c.id)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// Error recorded for an apply whose target container went away mid-run; it takes the one retry.
+const REPLACED_ERROR: &str = "interrupted: the target container was replaced during the run";
+
+/// Whether the claimed container is still the one running under the instance's name.
+async fn target_still_there(docker: &Docker, instance: &InstanceId, id: &str) -> bool {
+    matches!(docker.inspect(&instance.container_name()).await, Ok(Some(c)) if c.running && c.id == id)
 }
 
 async fn finish_failed(ctx: &Ctx, mut run: TerraformRun, error: String) {
@@ -1151,6 +1196,7 @@ async fn claim_and_spawn(
     cfg: &TerraformConfig,
     key: &Arc<ClusterKey>,
     c: Candidate,
+    target_id: String,
 ) {
     let run = TerraformRun {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1180,7 +1226,7 @@ async fn claim_and_spawn(
     info!(key = %c.key, run = %run.id, mode = ?c.mode, trigger = c.trigger, "terraform run claimed");
     let (ctx, docker, cfg, key) = (ctx.clone(), docker.clone(), cfg.clone(), key.clone());
     tokio::spawn(async move {
-        execute(&ctx, &docker, &cfg, &key, run.clone()).await;
+        execute(&ctx, &docker, &cfg, &key, run.clone(), &target_id).await;
         ctx.in_flight.lock().remove(&run.id);
     });
 }
@@ -1261,7 +1307,8 @@ async fn roll_consumers(ctx: &Ctx, tkey: &str, secrets: Vec<String>, configs: Ve
         else {
             continue;
         };
-        let started = cl_api::routes::secret_rotation::start_config_roll(api, &name, revision).await;
+        let started =
+            cl_api::routes::secret_rotation::start_config_roll(api, &name, revision).await;
         info!(key = %tkey, config = %name, restarting = ?started.restarting, "restarting the users of a rewritten config");
     }
 }
@@ -1272,6 +1319,7 @@ async fn execute(
     cfg: &TerraformConfig,
     key: &ClusterKey,
     mut run: TerraformRun,
+    target_id: &str,
 ) {
     let tkey = run.key();
     let inputs = ctx.cluster.read(|s| build_inputs(s, key, &run)).await;
@@ -1316,6 +1364,15 @@ async fn execute(
     }
 
     let mut log = result.log;
+    if let Err(original) = &outcome {
+        if run.mode == TerraformMode::Apply
+            && !original.starts_with(INTERRUPTED_PREFIX)
+            && !target_still_there(docker, &run.instance, target_id).await
+        {
+            log = cap_text(format!("{log}--- {original}\n"), MAX_TERRAFORM_LOG_BYTES);
+            outcome = Err(REPLACED_ERROR.to_string());
+        }
+    }
     let mut changed_secrets = Vec::new();
     let mut changed_configs = Vec::new();
     if outcome.is_ok() && run.mode == TerraformMode::Apply && !inputs.outputs.is_empty() {
@@ -1741,6 +1798,66 @@ mod tests {
         assert_eq!(due(&s, k, "f3"), Some((TerraformMode::Apply, "change")));
         s.terraform_requests.insert(k.into(), TerraformMode::Apply);
         assert_eq!(due(&s, k, "f2"), Some((TerraformMode::Apply, "manual")));
+    }
+
+    #[test]
+    fn no_run_starts_while_the_stack_is_rolling_out() {
+        use cl_raft::state::{InstanceUpdate, Migration, MigrationPhase, UpdatePhase};
+        let key = ClusterKey::generate();
+        let mut s = state_with(&key);
+        let id = run_instance(&mut s, 0, "n1", true);
+        run_instance(&mut s, 1, "n2", true);
+        assert_eq!(candidates(&s, "n1").len(), 1);
+        s.terraform_requests
+            .insert("app/web".into(), TerraformMode::Apply);
+
+        let update = |phase| InstanceUpdate {
+            node: "n2".into(),
+            phase,
+            started_at: 0,
+            at: 0,
+            error: None,
+        };
+        // An update of a sibling instance blocks, a finished one does not.
+        s.instance_updates.insert(
+            InstanceId::new("app", "web", 1),
+            update(UpdatePhase::Starting),
+        );
+        assert!(rollout_in_progress(&s, "app"));
+        assert!(candidates(&s, "n1").is_empty(), "manual requests wait too");
+        s.instance_updates.insert(
+            InstanceId::new("app", "web", 1),
+            update(UpdatePhase::Started),
+        );
+        assert!(!rollout_in_progress(&s, "app"));
+        assert_eq!(candidates(&s, "n1").len(), 1);
+
+        s.assignments.get_mut(&id).unwrap().migration = Some(Migration {
+            from: "n1".into(),
+            to: "n3".into(),
+            phase: MigrationPhase::Syncing,
+        });
+        assert!(rollout_in_progress(&s, "app"));
+        assert!(!rollout_in_progress(&s, "other"));
+    }
+
+    #[test]
+    fn a_target_from_an_older_stack_revision_is_stale() {
+        let mut labels = std::collections::HashMap::new();
+        assert!(target_is_current(&labels, 3), "unlabelled containers pass");
+        labels.insert(LABEL_STACK_REVISION.to_string(), "2".to_string());
+        assert!(!target_is_current(&labels, 3));
+        labels.insert(LABEL_STACK_REVISION.to_string(), "3".to_string());
+        assert!(target_is_current(&labels, 3));
+    }
+
+    #[test]
+    fn candidates_carry_the_stack_revision() {
+        let key = ClusterKey::generate();
+        let mut s = state_with(&key);
+        run_instance(&mut s, 0, "n1", true);
+        let rev = s.stacks["app"].revision;
+        assert_eq!(candidates(&s, "n1")[0].stack_revision, rev);
     }
 
     #[test]

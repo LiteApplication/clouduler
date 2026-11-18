@@ -164,6 +164,11 @@ pub const LABEL_SECRETS: &str = "clouduler.secrets";
 /// are live-edited). Containers created before the label existed carry none and are never called stale.
 pub const LABEL_CONFIGS: &str = "clouduler.configs";
 
+/// The stack's own revision (`StackEntry::revision`) the container was created for, unhashed, so a reader
+/// outside the scheduler can tell a container predates the latest deploy. Containers created before the
+/// label existed carry none and are never called stale.
+pub const LABEL_STACK_REVISION: &str = "clouduler.stack-revision";
+
 /// `name=revision` pairs for `LABEL_SECRETS` / `LABEL_CONFIGS`, sorted by name.
 pub fn encode_secret_revisions(revisions: &BTreeMap<String, u64>) -> String {
     revisions

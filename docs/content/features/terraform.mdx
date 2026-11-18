@@ -210,7 +210,7 @@ When the module is applied again and the client id or secret changes, Clouduler 
 
 ## How a run works
 
-1. **Target.** The run uses the lowest-numbered instance of the service that is running, assigned to a node and not moving. Until that instance is running and healthy (or has no healthcheck), nothing starts.
+1. **Target.** The run uses the lowest-numbered instance of the service that is running, assigned to a node and not moving. Until that instance is running and healthy (or has no healthcheck), nothing starts. Nothing starts either while the stack is rolling out: any of its instances mid image update, redeploy or migration, or a target container created for an older revision of the stack than the current one (it is about to be replaced). The run waits for the rollout to settle. This applies to manual requests too: they stay pending and start afterwards. When the run is claimed, Clouduler remembers the target container's id.
 2. **Claim.** Each node looks at the modules whose target runs on it. The node that finds one due claims it through raft. Raft allows one running run per module, so a module never runs twice at once.
 3. **Work directory.** `<data_dir>/tofu/work/<run id>`, mode 0700. It holds `main.tf`, the previous state if there is one, and the `path` configs. It is removed when the run ends.
 4. **Init.** `tofu init` runs in a helper container on `init_network`, so providers can be downloaded. It gets no secrets and no variables. Providers are cached per node in `<data_dir>/tofu/plugin-cache`, which every run on that node shares.
@@ -258,6 +258,7 @@ Secrets and configs written by [outputs](#write-outputs-to-secrets-and-configs) 
 - A failed run keeps its error and its redacted log. The error ends with the first `Error:` line of OpenTofu's output.
 - Until a newer run for that service starts or finishes, the failure shows up as a `terraform_failed` problem, which `list_problems` reports. Only the latest run per service is kept.
 - A failed **apply** raises the `terraform.failed` alert (Warning). A failed plan does not. See the [alerts catalog](/docs/features/alerts#events).
+- If an apply fails and the target container is no longer the one the run was claimed against (replaced, or stopped), the run is recorded as `interrupted: the target container was replaced during the run` instead of the tofu error (which stays in the run log), so the single automatic retry applies.
 - If the node running a run stops, the leader fails the run once it is older than `timeout` plus 90 seconds. If the daemon restarts during a run, that run fails with `interrupted: the daemon restarted during the run`.
 
 ## Commands

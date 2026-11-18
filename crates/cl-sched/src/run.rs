@@ -984,6 +984,11 @@ impl Scheduler {
                 }
             };
 
+            spec.labels.insert(
+                reconcile::LABEL_STACK_REVISION.to_string(),
+                stack.revision.to_string(),
+            );
+
             if !objects.secret_revisions.is_empty() {
                 spec.labels.insert(
                     reconcile::LABEL_SECRETS.to_string(),
