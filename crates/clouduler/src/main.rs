@@ -10,6 +10,10 @@ use clap::{CommandFactory, FromArgMatches};
 use clap_complete::CompleteEnv;
 use tracing_subscriber::EnvFilter;
 
+// mimalloc returns freed heap to the OS, unlike glibc malloc, which kept it across threads.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn install_crypto_provider() {
     // Err means someone already installed one, which is just as good.
     let _ = rustls::crypto::ring::default_provider().install_default();
