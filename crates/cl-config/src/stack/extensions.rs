@@ -598,6 +598,136 @@ pub struct ServiceExtensions {
     /// containers, merged over the stack's. See [`super::StackAlerts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<super::StackAlerts>,
+    /// Bindings for this service's OpenTofu module (stored beside the stack,
+    /// not in this file). Having a module is enough to enable the feature;
+    /// this block adds secrets, configs and plain variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terraform: Option<TerraformService>,
+}
+
+/// `x-clouduler.terraform`: what a service's module is handed as variables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TerraformService {
+    /// `false` pauses applies for this service. On by default.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Cluster secrets passed as `TF_VAR_<var>` (environment only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<TfSecretBinding>,
+    /// Cluster configs passed as `TF_VAR_<var>` and/or written as a file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configs: Vec<TfConfigBinding>,
+    /// Plain string variables.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, String>,
+}
+
+impl Default for TerraformService {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            secrets: Vec::new(),
+            configs: Vec::new(),
+            vars: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TfSecretBinding {
+    pub source: String,
+    pub var: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TfConfigBinding {
+    pub source: String,
+    /// Variable name receiving the config's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var: Option<String>,
+    /// File name (relative to the module's work dir) the config is written to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl TerraformService {
+    /// Checks var names, duplicates and paths. `prefix` is the yaml path used in errors.
+    pub fn validate(&self, prefix: &str) -> Result<(), crate::error::ConfigError> {
+        use crate::error::ConfigError;
+        let mut vars = std::collections::BTreeSet::new();
+        let mut take_var = |field: String, var: &str| -> Result<(), ConfigError> {
+            if !is_identifier(var) {
+                return Err(ConfigError::invalid(
+                    field,
+                    format!("{var:?} is not a valid variable name (letters, digits, _ and -, not starting with a digit)"),
+                ));
+            }
+            if !vars.insert(var.to_string()) {
+                return Err(ConfigError::invalid(
+                    field,
+                    format!("variable {var:?} is bound more than once"),
+                ));
+            }
+            Ok(())
+        };
+        for (i, s) in self.secrets.iter().enumerate() {
+            take_var(format!("{prefix}.secrets[{i}].var"), &s.var)?;
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        for (i, c) in self.configs.iter().enumerate() {
+            if c.var.is_none() && c.path.is_none() {
+                return Err(ConfigError::invalid(
+                    format!("{prefix}.configs[{i}]"),
+                    "needs at least one of `var` or `path`",
+                ));
+            }
+            if let Some(v) = &c.var {
+                take_var(format!("{prefix}.configs[{i}].var"), v)?;
+            }
+            if let Some(p) = &c.path {
+                let field = format!("{prefix}.configs[{i}].path");
+                check_tf_path(p).map_err(|m| ConfigError::invalid(field.clone(), m))?;
+                if !paths.insert(p.clone()) {
+                    return Err(ConfigError::invalid(
+                        field,
+                        format!("path {p:?} is used more than once"),
+                    ));
+                }
+            }
+        }
+        for v in self.vars.keys() {
+            take_var(format!("{prefix}.vars.{v}"), v)?;
+        }
+        Ok(())
+    }
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn check_tf_path(p: &str) -> Result<(), String> {
+    if p.is_empty() {
+        return Err("path is empty".into());
+    }
+    if p.starts_with('/') || p.starts_with('\\') || p.contains('\0') {
+        return Err("path must be relative".into());
+    }
+    if p.split(['/', '\\'])
+        .any(|c| c == ".." || c.is_empty() || c == ".")
+    {
+        return Err("path may not contain `..`, `.` or empty components".into());
+    }
+    let lower = p.to_ascii_lowercase();
+    if lower.ends_with(".tf") || lower.ends_with(".tfstate") {
+        return Err("path may not end in .tf or .tfstate".into());
+    }
+    Ok(())
 }
 
 /// A predefined command, run in a container when its action is triggered.

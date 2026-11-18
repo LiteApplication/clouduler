@@ -139,6 +139,7 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
         // the access they already had.
         mcp: McpConfig { enabled: false },
         updates: Default::default(),
+        terraform: None,
     };
 
     config

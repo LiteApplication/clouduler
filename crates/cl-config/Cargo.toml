@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 parking_lot.workspace = true
+hcl-rs.workspace = true
 humantime-serde.workspace = true
 ipnet.workspace = true
 regex.workspace = true

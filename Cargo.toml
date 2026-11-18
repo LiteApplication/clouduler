@@ -57,6 +57,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 blake3 = "1"
 fast_rsync = "0.2"
+hcl-rs = "0.20"
 futures = "0.3"
 hickory-proto = "0.26"
 hickory-resolver = "0.26"

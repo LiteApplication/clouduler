@@ -45,6 +45,17 @@ impl StackFile {
         self.validate_devices()?;
         self.validate_docker_sockets()?;
         self.validate_alerts()?;
+        self.validate_terraform()?;
+        Ok(())
+    }
+
+    /// `x-clouduler.terraform`: variable names, duplicates and file paths.
+    fn validate_terraform(&self) -> Result<()> {
+        for (name, svc) in &self.services {
+            if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
+                tf.validate(&format!("services.{name}.x-clouduler.terraform"))?;
+            }
+        }
         Ok(())
     }
 
@@ -1096,6 +1107,54 @@ fn is_dns_label(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn tf_stack(tf: &str) -> std::result::Result<super::StackFile, crate::error::ConfigError> {
+        super::StackFile::parse(&format!(
+            "services:\n  a:\n    image: x\n    x-clouduler:\n      terraform:\n{tf}"
+        ))
+    }
+
+    #[test]
+    fn terraform_bindings_are_validated() {
+        tf_stack("        secrets: [{source: s, var: pw}]\n        configs: [{source: c, var: cfg}, {source: d, path: d.json}]\n        vars: {url: x}\n").unwrap();
+        for bad in [
+            "        vars: {\"1x\": a}\n",
+            "        secrets: [{source: s, var: pw}]\n        vars: {pw: a}\n",
+            "        configs: [{source: c}]\n",
+            "        configs: [{source: c, path: /etc/x}]\n",
+            "        configs: [{source: c, path: ../x}]\n",
+            "        configs: [{source: c, path: main.tf}]\n",
+            "        configs: [{source: c, path: s.tfstate}]\n",
+            "        configs: [{source: c, path: a}, {source: d, path: a}]\n",
+            "        configs: [{source: c, var: v}, {source: d, var: v}]\n",
+        ] {
+            assert!(tf_stack(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn terraform_defaults_to_enabled() {
+        let s = tf_stack("        vars: {a: b}\n").unwrap();
+        let tf = s.services["a"]
+            .x_clouduler
+            .as_ref()
+            .unwrap()
+            .terraform
+            .as_ref()
+            .unwrap();
+        assert!(tf.enabled);
+        let s = tf_stack("        enabled: false\n").unwrap();
+        assert!(
+            !s.services["a"]
+                .x_clouduler
+                .as_ref()
+                .unwrap()
+                .terraform
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+    }
+
     #[test]
     fn clouduler_docker_socket_must_be_read_only() {
         let socket = |extra: &str| {

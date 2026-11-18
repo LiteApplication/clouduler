@@ -18,6 +18,7 @@ pub mod served;
 pub mod server;
 pub mod state;
 pub mod store;
+pub mod terraform;
 pub mod types;
 
 pub use client::{client_for, Client};
@@ -37,3 +38,7 @@ pub use state::{
     VolumeState, MAX_OBJECT_BYTES,
 };
 pub use store::Store;
+pub use terraform::{
+    terraform_key, TerraformMode, TerraformModule, TerraformOutcome, TerraformRun, TerraformState,
+    MAX_TERRAFORM_LOG_BYTES,
+};

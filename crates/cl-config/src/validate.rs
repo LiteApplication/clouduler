@@ -1508,6 +1508,25 @@ cloudflare:
     }
 
     #[test]
+    fn terraform_section_is_optional_with_defaults() {
+        assert!(ClusterConfig::parse(BASE).unwrap().terraform.is_none());
+        let cfg = ClusterConfig::parse(&format!("{BASE}terraform: {{}}\n")).unwrap();
+        let tf = cfg.terraform.unwrap();
+        assert_eq!(tf.image, "ghcr.io/opentofu/opentofu:1.10");
+        assert_eq!(tf.timeout, std::time::Duration::from_secs(600));
+        assert_eq!(tf.init_network, "bridge");
+        let cfg = ClusterConfig::parse(&format!(
+            "{BASE}terraform:\n  timeout: 2m\n  init_network: net\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.terraform.unwrap().timeout,
+            std::time::Duration::from_secs(120)
+        );
+        assert!(ClusterConfig::parse(&format!("{BASE}terraform:\n  bogus: 1\n")).is_err());
+    }
+
+    #[test]
     fn nodes_implementing_filters_on_every_drive() {
         let cfg = ClusterConfig::parse(BASE).unwrap();
         assert_eq!(cfg.nodes_implementing(&["fast".into()]).count(), 2);

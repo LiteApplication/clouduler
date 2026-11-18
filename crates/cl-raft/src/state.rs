@@ -730,6 +730,21 @@ pub struct ClusterState {
     /// written step by step by the working node so every node's api shows the same progress.
     #[serde(default)]
     pub instance_updates: BTreeMap<InstanceId, InstanceUpdate>,
+    /// OpenTofu modules by stack then service. See `crate::terraform`.
+    #[serde(default)]
+    pub terraform_modules: BTreeMap<String, BTreeMap<String, crate::terraform::TerraformModule>>,
+    /// Sealed tofu state by `terraform_key`.
+    #[serde(default)]
+    pub terraform_states: BTreeMap<String, crate::terraform::TerraformState>,
+    /// Latest run per `terraform_key`.
+    #[serde(default)]
+    pub terraform_runs: BTreeMap<String, crate::terraform::TerraformRun>,
+    /// Pending manual Plan/Apply requests by `terraform_key`.
+    #[serde(default)]
+    pub terraform_requests: BTreeMap<String, crate::terraform::TerraformMode>,
+    /// Fingerprint of the last successful Apply by `terraform_key`.
+    #[serde(default)]
+    pub terraform_applied: BTreeMap<String, String>,
     /// Nodes a crash-looping instance was recently moved from, with the move's unix
     /// second. In raft because the owner changes with each move: node-local memory
     /// would start empty each time and let a service that crashes everywhere bounce
@@ -1237,6 +1252,27 @@ pub enum Request {
         drive: String,
         op: crate::served::ServedOp,
     },
+    /// Replaces a stack's OpenTofu modules (service -> source).
+    SetStackTerraform {
+        stack: String,
+        modules: BTreeMap<String, String>,
+    },
+    /// Sealed by the caller; compare-and-set on `expect_serial`.
+    PutTerraformState {
+        key: String,
+        sealed: String,
+        key_fingerprint: String,
+        expect_serial: u64,
+    },
+    /// Starts (Running: the claim) or finishes a run; see `crate::terraform`.
+    RecordTerraformRun {
+        run: crate::terraform::TerraformRun,
+    },
+    /// A manual Plan/Apply, picked up by the leader's runner.
+    RequestTerraformRun {
+        key: String,
+        mode: crate::terraform::TerraformMode,
+    },
     /// Stand-in for a variant this (older) binary does not recognize, produced only
     /// by `Deserialize` for a genuinely unknown tag. `dispatch` treats it as a
     /// no-op without bumping `version`; the real effect lands once this node is
@@ -1324,6 +1360,10 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "ClearEmergency",
     "SetPrioritized",
     "Served",
+    "SetStackTerraform",
+    "PutTerraformState",
+    "RecordTerraformRun",
+    "RequestTerraformRun",
 ];
 
 // Mirrors `Request` field-for-field so `#[derive(Deserialize)]` can generate the
@@ -1601,6 +1641,23 @@ mod request_mirror {
         Served {
             drive: String,
             op: crate::served::ServedOp,
+        },
+        SetStackTerraform {
+            stack: String,
+            modules: BTreeMap<String, String>,
+        },
+        PutTerraformState {
+            key: String,
+            sealed: String,
+            key_fingerprint: String,
+            expect_serial: u64,
+        },
+        RecordTerraformRun {
+            run: crate::terraform::TerraformRun,
+        },
+        RequestTerraformRun {
+            key: String,
+            mode: crate::terraform::TerraformMode,
         },
         // `Unknown` is absent: it is only ever the fallback when nothing matches.
     }
@@ -1963,6 +2020,8 @@ impl ClusterState {
                         previous_spec,
                     },
                 );
+                // A service that left the spec forgets its terraform module and state.
+                self.prune_terraform_for_spec(name, spec);
                 Ok(())
             }
 
@@ -1974,6 +2033,7 @@ impl ClusterState {
                 self.instance_updates.retain(|id, _| &id.stack != name);
                 self.auto_updates.retain(|id, _| &id.stack != name);
                 self.crash_moves.retain(|id, _| &id.stack != name);
+                self.drop_terraform_stack(name);
                 if let Some(stack) = removed {
                     for config in &stack.configs {
                         if self.config_in_use(config).is_none() {
@@ -2747,6 +2807,11 @@ impl ClusterState {
                 Ok(())
             }
 
+            Request::SetStackTerraform { .. }
+            | Request::PutTerraformState { .. }
+            | Request::RecordTerraformRun { .. }
+            | Request::RequestTerraformRun { .. } => self.apply_terraform(req),
+
             Request::Served { drive, op } => {
                 let next = crate::served::ServedAuthority::apply(
                     self.served.get(drive),
@@ -2920,6 +2985,9 @@ impl ClusterState {
         let mut copy = self.clone();
         for secret in copy.secrets.values_mut() {
             secret.sealed = String::new();
+        }
+        for tf in copy.terraform_states.values_mut() {
+            tf.sealed = String::new();
         }
         for cert in copy.certificates.values_mut() {
             cert.key_pem = String::new();
@@ -3600,6 +3668,34 @@ mod tests {
             Request::Served {
                 drive: "fast".into(),
                 op: crate::served::ServedOp::RequestFailback,
+            },
+            Request::SetStackTerraform {
+                stack: "s".into(),
+                modules: BTreeMap::from([("web".to_string(), "x".to_string())]),
+            },
+            Request::PutTerraformState {
+                key: "s/web".into(),
+                sealed: "c2VhbGVk".into(),
+                key_fingerprint: "fp".into(),
+                expect_serial: 3,
+            },
+            Request::RecordTerraformRun {
+                run: crate::terraform::TerraformRun {
+                    id: "r1".into(),
+                    mode: crate::terraform::TerraformMode::Apply,
+                    trigger: "change".into(),
+                    node: "n1".into(),
+                    instance: InstanceId::new("s", "web", 0),
+                    fingerprint: "f".into(),
+                    started_at: 1,
+                    finished_at: Some(2),
+                    outcome: crate::terraform::TerraformOutcome::Failed { error: "e".into() },
+                    log_tail: "l".into(),
+                },
+            },
+            Request::RequestTerraformRun {
+                key: "s/web".into(),
+                mode: crate::terraform::TerraformMode::Plan,
             },
         ];
 

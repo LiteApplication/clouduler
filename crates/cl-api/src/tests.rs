@@ -156,6 +156,7 @@ pub(crate) async fn harness() -> Harness {
         backup: None,
         mcp: Default::default(),
         updates: Default::default(),
+        terraform: None,
     };
 
     let node = Arc::new(node);

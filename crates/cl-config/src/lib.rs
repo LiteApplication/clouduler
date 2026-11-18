@@ -6,7 +6,10 @@ mod cluster;
 mod error;
 mod netalloc;
 mod stack;
+mod terraform;
 mod validate;
+
+pub use terraform::validate_module;
 
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{
@@ -14,8 +17,9 @@ pub use cluster::{
     ContainerOpenPort, ContainerView, DnsPublishMode, Drive, DriveMode, EgressFallback, Failback,
     FailoverConfig, GitBackupConfig, ImageUpdatesConfig, InterfaceAddress, McpConfig, Network,
     NetworkKind, Node, NodeAddress, NodeRole, OidcConfig, OpenPort, PortalPalette, ProxyAuthConfig,
-    ProxyConfig, PublicAddress, SecretsConfig, SelfUpdateConfig, WebConfig, DEFAULT_RPC_PORT,
-    DEFAULT_STOP_GRACE, DEFAULT_WEB_BACKEND_PORT, MAX_STOP_GRACE, MIN_IMAGE_CHECK_INTERVAL,
+    ProxyConfig, PublicAddress, SecretsConfig, SelfUpdateConfig, TerraformConfig, WebConfig,
+    DEFAULT_RPC_PORT, DEFAULT_STOP_GRACE, DEFAULT_TERRAFORM_IMAGE, DEFAULT_WEB_BACKEND_PORT,
+    MAX_STOP_GRACE, MIN_IMAGE_CHECK_INTERVAL,
 };
 pub use error::{ConfigError, Result};
 pub use netalloc::{
@@ -32,6 +36,7 @@ pub use stack::{
     Protocol, ProxyRoute, PublishMode, RedirectRegex, Reservations, ResourceSpec, Resources,
     RestartPolicy, Service, ServiceAction, ServiceExtensions, StackAlerts, StackConfig,
     StackDefaults, StackFile, StackNetwork, StackRequirements, StackSecret, StackVolume,
-    TmpfsOptions, UpdateConfig, VolumeMount, VolumeSyncOverride, DEFAULT_SYNC_INTERVAL,
-    MAX_REPLICAS, MIN_VOLUME_SYNC_INTERVAL, NVIDIA_DRIVER, SECRET_DIR,
+    TerraformService, TfConfigBinding, TfSecretBinding, TmpfsOptions, UpdateConfig, VolumeMount,
+    VolumeSyncOverride, DEFAULT_SYNC_INTERVAL, MAX_REPLICAS, MIN_VOLUME_SYNC_INTERVAL,
+    NVIDIA_DRIVER, SECRET_DIR,
 };

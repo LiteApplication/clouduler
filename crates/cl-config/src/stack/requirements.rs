@@ -105,6 +105,12 @@ impl StackFile {
                 .extend(svc.configs.iter().map(|c| c.source.clone()));
             r.secrets
                 .extend(svc.secrets.iter().map(|s| s.source.clone()));
+            if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
+                r.configs
+                    .extend(tf.configs.iter().map(|c| c.source.clone()));
+                r.secrets
+                    .extend(tf.secrets.iter().map(|s| s.source.clone()));
+            }
         }
 
         for (name, cfg) in &self.configs {
@@ -148,6 +154,12 @@ impl StackFile {
                 .extend(svc.configs.iter().map(|c| c.source.clone()));
             r.secrets
                 .extend(svc.secrets.iter().map(|s| s.source.clone()));
+            if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
+                r.configs
+                    .extend(tf.configs.iter().map(|c| c.source.clone()));
+                r.secrets
+                    .extend(tf.secrets.iter().map(|s| s.source.clone()));
+            }
             r.pinned_node = self.effective_node(name);
             if let Some(constraints) = svc.deploy.as_ref().and_then(|d| d.placement.as_ref()) {
                 r.placement_constraints = constraints.constraints.clone();
@@ -204,6 +216,30 @@ mod tests {
 
     const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
     const GITLAB_YAML: &str = include_str!("../../../../examples/stacks/gitlab.yaml");
+
+    #[test]
+    fn terraform_bindings_count_as_used_configs_and_secrets() {
+        let stack = StackFile::parse(
+            r#"
+services:
+  a:
+    image: x
+    x-clouduler:
+      terraform:
+        secrets: [{source: pw, var: pw}]
+        configs: [{source: mon, var: mon}]
+configs:
+  mon:
+    file: ./mon.yaml
+"#,
+        )
+        .expect("parse");
+        let r = stack.requirements();
+        assert!(r.secrets.contains("pw") && r.configs.contains("mon"));
+        assert!(r.file_configs.contains("mon"));
+        let per = stack.service_requirements();
+        assert!(per["a"].secrets.contains("pw") && per["a"].configs.contains("mon"));
+    }
 
     #[test]
     fn a_services_gpu_needs_are_carried_per_service() {

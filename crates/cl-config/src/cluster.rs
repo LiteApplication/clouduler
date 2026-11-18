@@ -51,6 +51,48 @@ pub struct ClusterConfig {
     /// Registry checks for container image updates.
     #[serde(default)]
     pub updates: ImageUpdatesConfig,
+    /// Per-service OpenTofu modules. Absent means the feature is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terraform: Option<TerraformConfig>,
+}
+
+pub const DEFAULT_TERRAFORM_IMAGE: &str = "ghcr.io/opentofu/opentofu:1.10";
+
+/// How clouduler runs the OpenTofu modules stored with stacks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TerraformConfig {
+    /// The OpenTofu image used for init, plan and apply.
+    #[serde(default = "default_terraform_image")]
+    pub image: String,
+    /// Wall-clock limit for one run.
+    #[serde(with = "humantime_serde", default = "default_terraform_timeout")]
+    pub timeout: Duration,
+    /// Docker network the `tofu init` container (provider downloads) runs on.
+    #[serde(default = "default_terraform_init_network")]
+    pub init_network: String,
+}
+
+fn default_terraform_image() -> String {
+    DEFAULT_TERRAFORM_IMAGE.to_string()
+}
+
+fn default_terraform_timeout() -> Duration {
+    Duration::from_secs(600)
+}
+
+fn default_terraform_init_network() -> String {
+    "bridge".to_string()
+}
+
+impl Default for TerraformConfig {
+    fn default() -> Self {
+        Self {
+            image: default_terraform_image(),
+            timeout: default_terraform_timeout(),
+            init_network: default_terraform_init_network(),
+        }
+    }
 }
 
 /// How often the leader checks registries for newer image digests.
