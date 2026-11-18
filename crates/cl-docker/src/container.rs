@@ -25,6 +25,9 @@ pub const LABEL_STACK: &str = "clouduler.stack";
 pub const LABEL_SERVICE: &str = "clouduler.service";
 pub const LABEL_INSTANCE: &str = "clouduler.instance";
 pub const LABEL_MANAGED: &str = "clouduler.managed";
+/// Marks a one-off OpenTofu helper container with the id of its run. Such containers carry no
+/// `LABEL_MANAGED`, so the reconciler never touches them.
+pub const LABEL_TERRAFORM_RUN: &str = "clouduler.terraform-run";
 /// The value clouduler writes for `LABEL_MANAGED`. Presence and value both matter:
 /// this is how clouduler tells its own containers apart from the user's.
 pub const MANAGED_VALUE: &str = "true";
@@ -177,6 +180,11 @@ pub struct ContainerSpec {
     pub pinned_gateway: Option<Ipv4Addr>,
     /// Attachments to `container`-kind cluster networks, connected after creation.
     pub container_networks: Vec<ContainerAttachment>,
+    /// A one-off helper (not an instance): created with only `labels`, so it carries no
+    /// ownership labels and the reconciler ignores it.
+    pub oneoff: bool,
+    /// Sets `no-new-privileges` so the process cannot gain privileges via setuid binaries.
+    pub no_new_privileges: bool,
 }
 
 /// One attachment to a container-kind cluster network (an L2 segment with a router container).
@@ -210,6 +218,9 @@ impl ContainerSpec {
     /// The full label set: the caller's plus clouduler ownership labels, which win on conflict.
     fn all_labels(&self) -> HashMap<String, String> {
         let mut labels = self.labels.clone();
+        if self.oneoff {
+            return labels;
+        }
         labels.insert(LABEL_STACK.to_string(), self.stack.clone());
         labels.insert(LABEL_SERVICE.to_string(), self.service.clone());
         labels.insert(LABEL_INSTANCE.to_string(), self.instance.clone());
@@ -324,6 +335,9 @@ impl ContainerSpec {
             }),
             cap_add: (!self.cap_add.is_empty()).then(|| self.cap_add.clone()),
             cap_drop: (!self.cap_drop.is_empty()).then(|| self.cap_drop.clone()),
+            security_opt: self
+                .no_new_privileges
+                .then(|| vec!["no-new-privileges".to_string()]),
             sysctls: (!self.sysctls.is_empty()).then(|| {
                 self.sysctls
                     .iter()
@@ -831,11 +845,18 @@ impl Docker {
     }
 
     pub async fn list_managed(&self) -> Result<Vec<ContainerState>> {
+        self.list_with_label(format!("{LABEL_MANAGED}={MANAGED_VALUE}"))
+            .await
+    }
+
+    /// Every container (running or not) that has the label `label` (any value).
+    pub async fn list_labelled(&self, label: &str) -> Result<Vec<ContainerState>> {
+        self.list_with_label(label.to_string()).await
+    }
+
+    async fn list_with_label(&self, filter: String) -> Result<Vec<ContainerState>> {
         let mut filters: HashMap<String, Vec<String>> = HashMap::new();
-        filters.insert(
-            "label".to_string(),
-            vec![format!("{LABEL_MANAGED}={MANAGED_VALUE}")],
-        );
+        filters.insert("label".to_string(), vec![filter]);
         let options = ListContainersOptionsBuilder::new()
             .all(true)
             .filters(&filters)
@@ -862,6 +883,29 @@ mod tests {
             instance: "1".to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_oneoff_container_has_no_ownership_labels_and_can_join_a_netns() {
+        let mut spec = base_spec();
+        spec.oneoff = true;
+        spec.no_new_privileges = true;
+        spec.cap_drop = vec!["ALL".to_string()];
+        spec.network = Some("container:blog_web_0".to_string());
+        spec.labels
+            .insert(LABEL_TERRAFORM_RUN.to_string(), "r1".to_string());
+        let body = spec.to_create_body();
+        let labels = body.labels.expect("labels");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.get(LABEL_TERRAFORM_RUN), Some(&"r1".to_string()));
+        assert!(!labels.contains_key(LABEL_MANAGED));
+        let host = body.host_config.expect("host config");
+        assert_eq!(host.network_mode.as_deref(), Some("container:blog_web_0"));
+        assert_eq!(
+            host.security_opt,
+            Some(vec!["no-new-privileges".to_string()])
+        );
+        assert_eq!(host.cap_drop, Some(vec!["ALL".to_string()]));
     }
 
     /// The address is decided cluster wide, so the create call must carry it;

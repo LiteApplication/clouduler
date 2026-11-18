@@ -273,6 +273,8 @@ pub fn build(
         },
         egress_network: placement.egress_network,
         container_networks: placement.container_networks,
+        oneoff: false,
+        no_new_privileges: false,
     })
 }
 

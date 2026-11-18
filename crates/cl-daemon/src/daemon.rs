@@ -456,6 +456,15 @@ pub async fn run(
         key_rx.clone(),
         data_dir.clone(),
     );
+    let terraform_runner = crate::terraform_runner::start(
+        cluster.clone(),
+        node_name.clone(),
+        docker.clone(),
+        key_rx.clone(),
+        config_rx.clone(),
+        data_dir.clone(),
+        nudges.terraform.clone(),
+    );
     let restore_watcher = crate::backup_restore::start_restore_watcher(
         cfg_for_restore,
         cluster.clone(),
@@ -492,6 +501,7 @@ pub async fn run(
     backup_due_checker.abort();
     log_alerts.abort();
     backup_runner.abort();
+    terraform_runner.abort();
     restore_watcher.abort();
     config_writer.abort();
     detector.abort();

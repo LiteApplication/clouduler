@@ -18,7 +18,7 @@ pub use container::{
     BindMount, ContainerAttachment, ContainerSpec, ContainerState, DeviceMount, GpuRequest,
     HealthState, Healthcheck, PathKind, PathRead, PortMapping, PortProtocol, ResourceLimits,
     RestartPolicy, RunState, TmpfsMount, LABEL_INSTANCE, LABEL_MANAGED, LABEL_SERVICE, LABEL_STACK,
-    MANAGED_VALUE,
+    LABEL_TERRAFORM_RUN, MANAGED_VALUE,
 };
 pub use error::{DockerError, Result};
 pub use events::ContainerEvent;

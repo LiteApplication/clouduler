@@ -10,5 +10,6 @@ pub struct Nudges {
     pub dns: Arc<Notify>,
     pub acme: Arc<Notify>,
     pub git_export: Arc<Notify>,
+    /// Wakes the terraform runner on this node (a manual Plan/Apply was requested).
     pub terraform: Arc<Notify>,
 }

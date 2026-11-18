@@ -397,6 +397,15 @@ pub const EVENTS: &[EventDef] = &[
         true,
     ),
     ev(
+        "terraform.failed",
+        Deployments,
+        "A terraform apply failed",
+        Warning,
+        "Not retried until the module or its inputs change, or someone requests a run",
+        false,
+        true,
+    ),
+    ev(
         "stack.prioritized",
         Deployments,
         "A stack is prioritized",
