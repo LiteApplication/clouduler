@@ -1,6 +1,3 @@
-//! Per-event mutes and severity overrides: the settings' per-event table and
-//! the stacks' own `x-clouduler.alerts`.
-
 use cl_alert::catalog;
 use cl_alert::AlertSettings;
 use cl_config::{AlertSeverity, StackAlerts, StackFile};
@@ -21,7 +18,6 @@ fn stack_block(state: &ClusterState, stack: &str, service: Option<&str>) -> Opti
     })
 }
 
-/// Stacks (with the service, when it is one instance) an alert is about.
 fn scopes(
     state: &ClusterState,
     event: &str,
@@ -50,9 +46,7 @@ fn scopes(
     Vec::new()
 }
 
-/// The severity an alert is raised at, or `None` when it is muted.
-/// `default` is the severity the producer computed. Precedence: the stack or
-/// service block, then the settings' per-event override, then `default`.
+/// `None` when muted. `default` is the producer's severity. Precedence: stack or service block, then the settings' per-event override, then `default`.
 pub fn effective_severity(
     state: &ClusterState,
     settings: &AlertSettings,

@@ -1,9 +1,7 @@
-//! Getting a notification to a destination: unsealing the secrets just in
-//! time, retrying with backoff, and reporting the outcome back to the engine.
+//! Getting a notification to a destination: unsealing secrets just in time, retrying with backoff, reporting the outcome.
 //!
-//! Nothing here captures settings. Every attempt re-reads the destination,
-//! the SMTP server and the sealed secrets from the replicated state, so an
-//! edit (or a deleted destination) is honoured by the very next attempt.
+//! Nothing captures settings: every attempt re-reads the destination, SMTP server and sealed secrets, so an edit or
+//! deleted destination is honoured by the next attempt.
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -29,15 +27,12 @@ pub const BACKOFF: [Duration; 4] = [
     Duration::from_secs(120),
 ];
 pub const MAX_ATTEMPTS: u32 = 5;
-/// Messages one destination is sent per window before the rest is held back,
-/// so a bug or an outage that fires hundreds of alerts cannot flood a channel.
+/// So a bug or outage firing hundreds of alerts cannot flood a channel.
 const RATE_MAX: usize = 30;
 const RATE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
-/// What happened to one delivery, reported to the engine loop.
 #[derive(Debug, Clone)]
 pub struct Outcome {
-    /// Records the message was about (several for a digest).
     pub records: Vec<String>,
     pub destination: String,
     pub phase: &'static str,
@@ -45,9 +40,7 @@ pub struct Outcome {
     pub ok: bool,
     pub error: Option<String>,
     pub attempts: u32,
-    /// Count towards the destination's health.
     pub counts_for_health: bool,
-    /// Provider message ID (e.g. from Discord webhook ?wait=true)
     pub message_id: Option<String>,
 }
 
@@ -62,8 +55,7 @@ pub struct Sender {
 
 impl Sender {
     pub fn new(cluster: Arc<ClusterNode>, key: Arc<RwLock<Option<Arc<ClusterKey>>>>) -> Self {
-        // Not `AppState::http`: that one trusts any certificate, which is
-        // right for peers and wrong for the internet.
+        // Not `AppState::http`: that trusts any certificate, right for peers and wrong for the internet.
         let http = reqwest::Client::builder()
             .timeout(ATTEMPT_TIMEOUT)
             .user_agent(format!("clouduler/{}", env!("CARGO_PKG_VERSION")))
@@ -78,7 +70,6 @@ impl Sender {
         }
     }
 
-    /// One attempt with explicitly given values, for the "send test" button.
     pub async fn send_once(
         &self,
         dest: &Destination,
@@ -118,7 +109,6 @@ impl Sender {
         true
     }
 
-    /// Send in the background; the outcome arrives on `tx`.
     pub fn spawn(
         &self,
         records: Vec<String>,
@@ -259,7 +249,6 @@ pub fn open(state: &ClusterState, key: &ClusterKey, name: &str) -> Result<Option
         .map_err(|_| "a destination secret is not text".to_string())
 }
 
-/// The plaintext secrets `dest` needs, read from `state` right now.
 pub fn unseal_for(
     state: &ClusterState,
     key: &ClusterKey,
@@ -290,9 +279,7 @@ pub fn unseal_for(
     Ok(out)
 }
 
-/// Replace every URL in `text` by its scheme and host, so a webhook path or
-/// token that a transport error quotes never reaches the feed, the health
-/// record or a log line.
+/// So a webhook path or token quoted by a transport error never reaches the feed, health record or logs.
 pub fn scrub_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;

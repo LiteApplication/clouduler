@@ -1,6 +1,3 @@
-//! `/api/static-routes`: CRUD over UI-managed static/external proxy backends.
-//! See `crate::static_routes` for why these live outside `cluster.yaml`.
-
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -179,8 +176,6 @@ async fn submit_store(state: &AppState, store: &StaticRouteStore) -> Result<(), 
     if let Some(msg) = response.error {
         return Err(ApiError::Internal(msg));
     }
-    // Publish the (possibly changed) cloudflare_proxy flag without waiting
-    // out the dns loop's interval.
     state.nudges.dns.notify_one();
     Ok(())
 }

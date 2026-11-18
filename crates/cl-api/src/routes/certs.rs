@@ -23,26 +23,19 @@ pub fn router() -> Router<AppState> {
 #[derive(Serialize)]
 struct CertificateSummary {
     fqdn: String,
-    /// Unix seconds. 0 for a hostname with no certificate yet.
     not_after: i64,
-    /// Unix seconds the certificate was issued at; 0 when unknown.
     issued_at: i64,
-    /// True once the chain is parseable enough to say who issued it; kept
-    /// simple since the full issuer name is not tracked in cluster state.
+    /// True once the chain parses enough to say who issued it; the full issuer is not tracked in cluster state.
     has_chain: bool,
-    /// `ready`: a certificate is held and nothing is wrong. `pending`: no
-    /// certificate yet. `error`: issuance or renewal is failing (`error`
-    /// says why; a held certificate keeps serving meanwhile).
+    /// `ready`: held and fine. `pending`: none yet. `error`: issuance or renewal is failing (`error` says why; a held certificate keeps serving).
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// Unix seconds of the failure above.
     #[serde(skip_serializing_if = "Option::is_none")]
     error_at: Option<i64>,
 }
 
-/// Every certificate held, plus every hostname still waiting on one or whose
-/// issuance failed: the union of `certificates` and `cert_status`.
+/// The union of `certificates` and `cert_status`: held, waiting, or failing.
 async fn list_certificates(
     _identity: Identity,
     State(state): State<AppState>,
@@ -63,8 +56,7 @@ fn certificate_summaries(cluster_state: &cl_raft::ClusterState) -> Vec<Certifica
         .certificates
         .values()
         .map(|c| {
-            // A held certificate is never "pending": that status is only
-            // meaningful while there is nothing to serve.
+            // A held certificate is never "pending"; that is only meaningful while there is nothing to serve.
             let (status, error, error_at) = match status_of(&c.fqdn) {
                 ("pending", ..) => ("ready", None, None),
                 other => other,
@@ -106,10 +98,7 @@ struct TlsFingerprint {
     fingerprint: String,
 }
 
-/// The fingerprint of the certificate this node is actually serving over
-/// TLS, for the "Add a node" flow to hand a joining node its
-/// `--tls-fingerprint` pin without the operator having to compare it by
-/// hand.
+/// For the "Add a node" flow to hand a joining node its `--tls-fingerprint` pin.
 async fn tls_fingerprint(
     _identity: Identity,
     State(state): State<AppState>,
@@ -119,10 +108,8 @@ async fn tls_fingerprint(
     })
 }
 
-/// Renewal itself is `cl-dns`'s job (it holds the ACME account and ownership
-/// records); this crate has no channel to nudge that loop early. Removing the
-/// stored certificate is the best available trigger: the next reconcile pass
-/// sees it missing and issues a fresh one.
+/// Renewal is `cl-dns`'s job (it holds the ACME account) and this crate cannot nudge it; removing the stored
+/// certificate is the best trigger: the next reconcile sees it missing and issues a fresh one.
 async fn renew(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -145,16 +132,12 @@ struct DnsRecordSummary {
     record_type: String,
     content: String,
     zone: String,
-    /// `ready` for a live record, `pending` for a hostname still waiting for
-    /// one, `error` when publishing it failed (`error` says why).
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
-/// Live records, plus a row for each hostname still waiting on its record or
-/// failing to get one (from `dns_status`). Those rows have no type, content
-/// or zone yet.
+/// Live records plus a row per hostname waiting on or failing to get one (`dns_status`); those rows have no type, content or zone.
 async fn list_dns(
     _identity: Identity,
     State(state): State<AppState>,
@@ -189,10 +172,7 @@ async fn list_dns(
     Json(rows)
 }
 
-/// Runs the dns reconcile and certificate passes now instead of at their
-/// next tick. Both loops are leader-only, so a non-leader forwards the nudge
-/// to the leader. The passes run in the background: 202 means "asked", the
-/// outcome shows up as record and certificate status.
+/// Both loops are leader-only, so a non-leader forwards. Runs in the background: 202 means "asked".
 async fn reconcile(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -208,7 +188,6 @@ async fn reconcile(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Node-to-node only: what `reconcile` forwards to the leader.
 async fn internal_reconcile(
     _auth: crate::auth::internal::InternalAuth,
     State(state): State<AppState>,

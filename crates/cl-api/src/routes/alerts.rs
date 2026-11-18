@@ -1,5 +1,4 @@
-//! `/api/alerts`: the feed, the event catalog, the settings and the test
-//! button. The engine that fills the feed is `crate::alerts`.
+//! `/api/alerts`: the feed, event catalog, settings and test button. The engine that fills the feed is `crate::alerts`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -237,8 +236,6 @@ struct SecretFlags {
     auth_set: bool,
 }
 
-/// `https://discord.com/api/webhooks/1/abc` -> `https://discord.com/…`.
-/// Anything unparsable shows as a bare ellipsis.
 pub(crate) fn mask_url(raw: &str) -> String {
     match url::Url::parse(raw) {
         Ok(u) if u.host_str().is_some() => {
@@ -248,8 +245,7 @@ pub(crate) fn mask_url(raw: &str) -> String {
     }
 }
 
-/// True when `candidate` is the masked form a client read from us (so it
-/// must be treated as "keep", never stored).
+/// The masked form a client read from us, which must mean "keep", never be stored.
 fn is_masked_echo(candidate: &str) -> bool {
     candidate.ends_with('…')
 }
@@ -321,8 +317,6 @@ async fn settings_view(state: &AppState) -> SettingsView {
         .await
 }
 
-/// Masked form of the stored URL. A bare ellipsis when it cannot be opened,
-/// so presence is still reported.
 fn stored_url(
     st: &cl_raft::ClusterState,
     key: Option<&cl_secret::ClusterKey>,
@@ -337,7 +331,6 @@ fn stored_url(
     Some(opened.map(|u| mask_url(&u)).unwrap_or_else(|| "…".into()))
 }
 
-/// `absent` keeps, `null` deletes, a string sets.
 fn double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -371,7 +364,6 @@ fn clean(v: &Option<Option<String>>) -> Result<Option<Option<String>>, ApiError>
             if s.is_empty() {
                 Err(ApiError::BadRequest("a secret value is empty".into()))
             } else if is_masked_echo(&s) {
-                // The masked form we returned, echoed back: keep.
                 Ok(None)
             } else {
                 Ok(Some(Some(s)))
@@ -388,7 +380,6 @@ async fn put_settings(
     let st = state.cluster.state().await;
     let new = body.settings;
 
-    // What each destination's secrets will be once this is applied.
     let mut url_in: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut auth_in: BTreeMap<String, Option<String>> = BTreeMap::new();
     for (name, s) in &body.secrets {
@@ -454,7 +445,6 @@ async fn put_settings(
         }
         None => {}
     }
-    // Secrets of destinations that are gone (or no longer need them).
     let old = settings::load(&st);
     for d in &old.destinations {
         let now = new.destinations.iter().find(|x| x.name == d.name);
@@ -530,10 +520,8 @@ async fn put_settings(
 
 #[derive(Deserialize)]
 struct TestBody {
-    /// A saved destination.
     #[serde(default)]
     name: Option<String>,
-    /// An unsaved one, from the add sheet.
     #[serde(default)]
     destination: Option<Destination>,
     #[serde(default)]
@@ -589,7 +577,6 @@ async fn test(
             )
         }
         (None, Some(dest)) => {
-            // Blank fields fall back to what is stored under the same name.
             let stored =
                 crate::alerts::send::unseal_for(&st, &key, dest, &saved).unwrap_or_default();
             (
@@ -607,8 +594,7 @@ async fn test(
     };
     if let Some(s) = &body.secrets {
         if let Some(Some(url)) = clean(&s.url)? {
-            // A stored auth header only ever goes to the stored URL, so a
-            // test cannot send it somewhere else.
+            // A stored auth header only goes to the stored URL, so a test cannot send it elsewhere.
             if secrets.url.as_deref() != Some(url.as_str()) {
                 secrets.auth = None;
             }
@@ -618,7 +604,7 @@ async fn test(
             secrets.auth = Some(auth);
         }
     }
-    // Same for the stored SMTP password: only to the saved server and user.
+    // Likewise the stored SMTP password: only to the saved server and user.
     let same_server = |a: &SmtpSettings, b: &SmtpSettings| {
         a.host == b.host && a.port == b.port && a.username == b.username
     };
@@ -797,7 +783,6 @@ mod tests {
             rec("done-old", AlertSeverity::Warning, Resolved, 2),
             rec("done-new", AlertSeverity::Info, Event, 9),
         ];
-        // When include_pending is false, Pending alerts are hidden completely
         let l = build_list(all.iter(), false);
         let ids: Vec<_> = l.active.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["c", "w-old"]);
@@ -807,7 +792,6 @@ mod tests {
         );
         assert_eq!(l.recent[0].id, "done-new");
 
-        // When include_pending is true, Pending alerts are displayed in active
         let l_pending = build_list(all.iter(), true);
         let ids_pending: Vec<_> = l_pending.active.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids_pending, vec!["c", "w-new", "w-old"]);

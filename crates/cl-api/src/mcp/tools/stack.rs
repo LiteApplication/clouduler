@@ -76,8 +76,6 @@ pub struct RemoveStackArgs {
     pub confirm: String,
 }
 
-// ---- focus ----
-
 pub(super) async fn focus_stack(ctx: &Ctx, args: FocusStackArgs) -> ToolResult {
     stacks::check_stack_name(&ctx.state, &args.name)
         .await
@@ -100,13 +98,10 @@ pub(super) fn clear_focus(ctx: &Ctx) -> ToolResult {
     Ok("focus cleared".to_string())
 }
 
-// ---- reads ----
-
 fn belongs_to(summary: &InstanceSummary, stack: &str) -> bool {
     summary.id.starts_with(&format!("{stack}."))
 }
 
-/// Spec summary (when deployed), instance states and problems for one stack.
 async fn stack_report(ctx: &Ctx, name: &str) -> ToolResult {
     let state = ctx.state.cluster.state().await;
     let mut out = String::new();
@@ -221,10 +216,6 @@ pub(super) async fn validate_stack(ctx: &Ctx, args: ValidateArgs) -> ToolResult 
     serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
 }
 
-// ---- writes ----
-
-/// Names of the secrets whose values appear in `text`, from the redactor's
-/// own markers.
 fn leaked_secret_names(redacted: &str) -> Vec<String> {
     let mut names = Vec::new();
     for part in redacted.split("[REDACTED secret:").skip(1) {
@@ -255,10 +246,8 @@ pub(super) async fn deploy_stack(ctx: &Ctx, args: DeployArgs) -> ToolResult {
         }
     }
 
-    // Only configs the spec bundles with `file:` travel with the deploy. The
-    // rest (`name: {}`) are plain cluster objects, so their content is stored
-    // directly, before the deploy checks that they exist. A name the stack
-    // does not use at all is an error instead of being silently dropped.
+    // Only `file:`-bundled configs travel with the deploy; the rest (`name: {}`) are plain cluster objects stored directly
+    // first. A name the stack does not use is an error, not silently dropped.
     let requirements = StackFile::parse(&args.spec)
         .map_err(|e| e.to_string())?
         .requirements();
@@ -327,7 +316,6 @@ pub(super) async fn deploy_stack(ctx: &Ctx, args: DeployArgs) -> ToolResult {
     Ok(out)
 }
 
-/// Every instance that should run is running and not failing its healthcheck.
 fn is_settled(mine: &[InstanceSummary]) -> bool {
     !mine.is_empty()
         && mine.iter().all(|s| {

@@ -1,21 +1,14 @@
-//! MCP server for AI clients, served at `/mcp` over streamable HTTP.
+//! MCP server for AI clients, served at `/mcp` over streamable HTTP. A client connects with an OAuth
+//! token or api key and gets tools to inspect state, read logs, build stacks and debug containers,
+//! without being able to read a secret value. See docs/mcp.md.
 //!
-//! An AI client (Claude Code, claude.ai, Cursor...) connects with an OAuth
-//! token or api key and gets tools to see cluster state and problems, read
-//! logs, build and fix stacks, and debug inside containers, without ever being
-//! able to read a secret value. See docs/mcp.md.
+//! `rmcp` provides protocol, sessions and transport; this module adds:
 //!
-//! The protocol, sessions and transport come from `rmcp`; this module adds
-//! what it cannot know about:
-//!
-//! * authentication happens on every HTTP request, before rmcp sees it, and
-//!   the verified [`McpCaller`] travels in the request extensions that rmcp
-//!   hands to the handler, so a revoked client stops working mid-session;
-//! * every result passes through [`finish`], the single place that redacts
-//!   secrets, bounds the size and appends warnings, so no tool has to
-//!   remember to;
-//! * a follower relays `/mcp` to the leader (see [`forward_to_leader`]),
-//!   because sessions and focus live in the serving node's memory.
+//! * authentication on every HTTP request before rmcp sees it, with the verified [`McpCaller`] in the
+//!   request extensions, so a revoked client stops working mid-session;
+//! * [`finish`], the single place that redacts secrets, bounds size and appends warnings;
+//! * a follower relaying `/mcp` to the leader ([`forward_to_leader`]), since sessions and focus live
+//!   in the serving node's memory.
 
 pub(crate) mod problems;
 pub mod redact;
@@ -51,13 +44,10 @@ use redact::Redactor;
 use session::Sessions;
 use tools::Ctx;
 
-/// A tool result is cut to this many bytes, after redaction (cutting first
-/// could split a secret in two and defeat the match).
+/// Cut after redaction: cutting first could split a secret and defeat the match.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
-/// Request bodies relayed from a follower to the leader.
 const MAX_RELAYED_BODY: usize = 5 * 1024 * 1024;
-/// rmcp's own idle timeout is minutes; ours for focus is a day, and a session
-/// that dies sooner would orphan the focus the AI set up.
+/// rmcp's own idle timeout is minutes; a session dying sooner would orphan the focus the AI set up.
 const SESSION_IDLE: Duration = Duration::from_secs(24 * 3600);
 
 const INSTRUCTIONS: &str = "\
@@ -83,7 +73,6 @@ Rotating (overwrite) a secret a running service already uses can break it.
 All output is redacted: values of cluster secrets appear as [REDACTED secret:NAME]. If you see that \
 marker, that is expected, not a bug.";
 
-/// Everything `/mcp` keeps in memory: the protocol service and its sessions.
 pub struct McpHub {
     service: StreamableHttpService<McpServer, LocalSessionManager>,
 }
@@ -93,9 +82,8 @@ impl Default for McpHub {
         let sessions = Arc::new(Sessions::default());
         let mut manager = LocalSessionManager::default();
         manager.session_config.keep_alive = Some(SESSION_IDLE);
-        // Host header validation guards a locally running server against DNS
-        // rebinding; this one is public by design and authenticates every
-        // request with a bearer token instead.
+        // Host header validation guards a local server against DNS rebinding; this one is public and
+        // authenticates every request with a bearer token.
         let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
         let service = StreamableHttpService::new(
             move || {
@@ -114,8 +102,6 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/mcp", any(endpoint))
 }
 
-/// Authenticate, then hand the request to rmcp with the caller and the app
-/// state attached for the handler to find.
 async fn endpoint(State(state): State<AppState>, mut request: Request) -> Response {
     let caller = match authenticate_mcp(request.headers(), &state).await {
         Ok(caller) => caller,
@@ -126,12 +112,8 @@ async fn endpoint(State(state): State<AppState>, mut request: Request) -> Respon
     state.mcp.service.handle(request).await.map(Body::new)
 }
 
-/// Relay an `/mcp` request from a follower to the leader.
-///
-/// An MCP client reaches whichever node the dashboard hostname resolves to and
-/// will not follow a 503 + Location. Sessions and focus live in the serving
-/// node's memory, so they must all land on one node, the leader. The
-/// response is streamed back because `/mcp` answers with server-sent events.
+/// A client will not follow a 503 + Location, and sessions/focus live in one node's memory, so they
+/// must all land on the leader. Streamed back because `/mcp` answers with server-sent events.
 pub(crate) async fn forward_to_leader(state: &AppState, request: Request) -> Response {
     let Some(leader) = crate::server::leader_location(state).await else {
         return ApiError::NotLeader { leader: None }.into_response();
@@ -177,14 +159,11 @@ pub(crate) async fn forward_to_leader(state: &AppState, request: Request) -> Res
     out
 }
 
-// ---- the rmcp handler ----
-
 #[derive(Clone)]
 pub struct McpServer {
     sessions: Arc<Sessions>,
 }
 
-/// What the HTTP layer attached to this request.
 struct RequestInfo {
     state: AppState,
     caller: McpCaller,
@@ -207,8 +186,7 @@ fn request_info(ctx: &RequestContext<RoleServer>) -> Result<RequestInfo, McpErro
         caller.identity.subject,
         caller.client.as_deref().unwrap_or("-")
     );
-    // A protocol version without sessions sends no id; focus then belongs to
-    // the caller rather than to a conversation.
+    // A protocol version without sessions sends no id; focus then belongs to the caller.
     let session = parts
         .headers
         .get("mcp-session-id")
@@ -266,9 +244,8 @@ impl ServerHandler for McpServer {
         let args = request.arguments.unwrap_or_default();
         let target = tools::audit_target(&name, &args);
 
-        // Fail closed: without the redactor there is no telling whether output
-        // holds a secret. Only the tools that echo nothing but the focus name
-        // may run without one.
+        // Fail closed: without the redactor there is no telling whether output holds a secret. Only tools
+        // that echo nothing but the focus name may run without one.
         let redactor = match build_redactor(&info.state).await {
             Ok(r) => Arc::new(r),
             Err(_) if tools::is_focus_only(&name) => Arc::new(Redactor::empty()),
@@ -320,9 +297,7 @@ impl ServerHandler for McpServer {
         ))
     }
 
-    /// Docs and examples are compiled into the binary and cannot contain a
-    /// cluster secret, so they skip the redactor on purpose: redacting them
-    /// could only garble the text (a secret that happens to be a common word).
+    /// Compiled in and cannot contain a cluster secret; redacting could only garble them.
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -338,8 +313,7 @@ impl ServerHandler for McpServer {
     }
 }
 
-/// A fresh redactor from the live state and key: rebuilt per call so a secret
-/// rotated a second ago is already covered.
+/// Rebuilt per call so a secret rotated a second ago is already covered.
 async fn build_redactor(state: &AppState) -> Result<Redactor, String> {
     let key = state.key.read().await.clone().ok_or_else(|| {
         "this node holds no cluster key, so output cannot be checked for secret values; refusing \
@@ -351,8 +325,6 @@ async fn build_redactor(state: &AppState) -> Result<Redactor, String> {
         .map_err(|e| format!("could not build the redactor: {e}"))
 }
 
-/// The single choke point every tool result passes through: redact, then
-/// bound the size, then warn about what redaction could not cover.
 fn finish(redactor: &Redactor, text: &str) -> String {
     let mut text = redactor.redact(text);
     if text.len() > MAX_OUTPUT_BYTES {

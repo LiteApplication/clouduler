@@ -1,5 +1,3 @@
-//! Resolves either auth mechanism into an [`Identity`], as an axum extractor.
-
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::CookieJar;
@@ -11,7 +9,6 @@ use super::keys::{self, ApiKeyStore};
 use super::session::COOKIE_NAME;
 use super::{Identity, Role};
 
-/// Any authenticated caller, admin or viewer.
 impl FromRequestParts<AppState> for Identity {
     type Rejection = ApiError;
 
@@ -50,9 +47,7 @@ impl FromRequestParts<AppState> for Identity {
     }
 }
 
-/// Same as [`Identity`], but rejects a viewer with 403 rather than letting
-/// the handler run. Use this on every admin-only route so a viewer never
-/// reaches handler code that might leak a secret value.
+/// Rejects a viewer with 403; use on every admin-only route so a viewer never reaches code that might leak a secret value.
 pub struct RequireAdmin(pub Identity);
 
 impl FromRequestParts<AppState> for RequireAdmin {

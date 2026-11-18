@@ -1,25 +1,14 @@
 //! `/api/updates`: which containers are behind the image they deploy from.
 //!
-//! Three questions per instance, and they are genuinely three:
+//! Three digests per instance: what the cluster has **pinned** (`Assignment::image_digest`),
+//! what the container is **running** (the registry digest behind its local image id), and what
+//! the registry currently **serves** for the reference it deploys from. An update is available
+//! when served differs from running; comparing against the pin would be wrong both ways (an
+//! unpinned instance has nothing to compare; a pinned one not yet rebuilt shows drift, not an update).
 //!
-//! * what the cluster has **pinned** (`Assignment::image_digest`),
-//! * what the container is **running** (the registry digest behind its local
-//!   image id),
-//! * what the registry currently **serves** for the reference it deploys
-//!   from.
-//!
-//! An update is available when the last differs from the second. Comparing
-//! against the pin instead would be wrong in both directions: an unpinned
-//! instance has nothing to compare, and a pinned one that has not been
-//! rebuilt yet is behind its own pin, which is drift rather than an update.
-//!
-//! The registry lookups are the expensive part — one network round trip per
-//! distinct image — so they are not made when a page loads. The leader asks
-//! the registries on a timer (`updates.check_interval`) and when someone
-//! presses Refresh (`check_images`), and stores the answers in
-//! `ClusterState::image_checks`. Everything here that answers a GET reads
-//! that cache. Only the *running* digest is gathered live, by asking each
-//! node about the containers it runs, which is local docker work.
+//! Registry lookups are one round trip per distinct image, so the leader runs them on a timer
+//! (`updates.check_interval`) and on Refresh (`check_images`), caching in
+//! `ClusterState::image_checks`. GETs read that cache; only the running digest is gathered live.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -49,26 +38,16 @@ pub fn router() -> Router<AppState> {
         .route("/api/updates/refresh", post(refresh))
         .route("/api/updates/pin", post(pin))
         .route("/api/updates/apply", post(apply))
-        // Node-to-node only, HMAC authenticated: one node's answer about the
-        // containers it runs. See `internal_peer`.
+        // Node-to-node only: one node's answer about its own containers.
         .route("/api/updates/internal/scan", get(internal_scan))
-        // Internal-auth only: `clouduler update`. See `apply_internal`.
         .route("/api/updates/internal/apply", post(apply_internal))
 }
 
 const INTERNAL_SCAN_PATH: &str = "/api/updates/internal/scan";
 
-/// The reference the stack file declares for an instance, e.g.
-/// `nginx:1.25` — as opposed to `ContainerState::image`, which is what the
-/// container was actually created from and, once an instance is pinned
-/// (`spec::build`'s `pin`), is a `repo@sha256:...` reference with the tag
-/// discarded entirely.
-///
-/// Asking the registry about that pinned reference instead of this one is a
-/// no-op forever: a digest reference is immutable, so "what does the
-/// registry serve for this exact digest" always answers with the same
-/// digest, no matter how many new tags have been pushed since. The declared
-/// reference is the one that can actually move.
+/// The reference the stack file declares (`nginx:1.25`), not `ContainerState::image`, which
+/// once pinned is `repo@sha256:...`. Asking the registry about a digest reference is a no-op
+/// forever (immutable); the declared reference is the one that can move.
 pub(crate) fn declared_image(state: &ClusterState, instance: &InstanceId) -> Option<String> {
     state
         .stacks
@@ -81,37 +60,23 @@ pub(crate) fn declared_image(state: &ClusterState, instance: &InstanceId) -> Opt
         })
 }
 
-/// How many registry lookups run at once. See `check_images`.
-///
-/// Four rather than eight: at eight, ghcr.io and lscr.io started answering
-/// 429 to a routine scan. `registry_digest` retries those, so the cap is
-/// about making the retry rare rather than about correctness — and the
-/// difference between four and eight in wall time is small next to the
-/// difference between four and one.
+/// Four, not eight: at eight ghcr.io and lscr.io answered 429 to a routine scan.
 const REGISTRY_LOOKUP_CONCURRENCY: usize = 4;
 
-/// How long the leader waits for one node's scan, which inspects every
-/// container the node runs; kept under the reverse proxy's 30s response
-/// timeout.
+/// Kept under the reverse proxy's 30s response timeout.
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
-/// What one node can say about one of its containers without consulting raft.
 #[derive(Serialize, Deserialize, Clone)]
 struct ImageStatus {
-    /// Instance id, as a string so this crosses the wire with no parse step.
     id: String,
-    /// The reference the container was created from, e.g. `nginx:1.25`.
     image: Option<String>,
     running_digest: Option<String>,
     latest_digest: Option<String>,
-    /// Why the registry could not be asked, when it could not be. Carried per
-    /// instance rather than failing the scan: one image behind an expired
-    /// login must not blank out the whole cluster's answer.
+    /// Per instance rather than failing the scan: one expired login must not blank the whole answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
-/// One row of the Updates view.
 #[derive(Serialize)]
 struct UpdateRow {
     id: String,
@@ -121,39 +86,26 @@ struct UpdateRow {
     image: Option<String>,
     running_digest: Option<String>,
     latest_digest: Option<String>,
-    /// What the cluster has pinned, if anything.
     pinned_digest: Option<String>,
-    /// The registry served something other than what is running when it was
-    /// last checked.
     update_available: bool,
-    /// Unix seconds the registry was last asked about this image.
     #[serde(skip_serializing_if = "Option::is_none")]
     checked_at: Option<i64>,
-    /// `x-clouduler.auto_update` for this instance, when it is on.
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_update: Option<AutoUpdateRow>,
-    /// A pin exists but the container is not on it. Distinct from
-    /// `update_available`: this one is fixed by rebuilding the container, not
-    /// by pulling anything new.
+    /// A pin exists but the container is not on it; fixed by rebuilding, not pulling.
     pin_drift: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
-/// What auto_update is doing about an instance's newest digest.
 #[derive(Serialize)]
 struct AutoUpdateRow {
-    /// `apply` or `notify`.
     mode: &'static str,
     delay_secs: u64,
-    /// `waiting`, `queued`, `updated`, `failed` or `notified`; absent when
-    /// nothing has been recorded for the newest digest yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<AutoUpdateOutcome>,
-    /// Unix seconds the newest digest was first seen.
     #[serde(skip_serializing_if = "Option::is_none")]
     detected_at: Option<i64>,
-    /// Unix seconds a waiting apply will be queued.
     #[serde(skip_serializing_if = "Option::is_none")]
     apply_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,20 +116,15 @@ async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<Up
     Json(rows(&state).await)
 }
 
-/// Shortest time between two checks however often Refresh is pressed.
 const REFRESH_DEBOUNCE_SECS: i64 = 30;
 
 static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Serialize)]
 struct Refresh {
-    /// False when a check is already running or finished moments ago; the
-    /// cached answer is what is shown.
     started: bool,
 }
 
-/// Starts a registry check in the background. Like every write, a follower
-/// relays this to the leader before it gets here.
 async fn refresh(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -193,10 +140,7 @@ async fn refresh(
     (StatusCode::ACCEPTED, Json(Refresh { started }))
 }
 
-/// Asks the registries about every image the stacks declare, stores the
-/// answers, and lets `auto_update` see what is new. One lookup per distinct
-/// reference, a few at a time, with `registry_digest` backing off on 429.
-/// A second call while one runs does nothing.
+/// One lookup per distinct reference, a few at a time. A second call while one runs does nothing.
 pub(crate) async fn check_images(state: &AppState) {
     use std::sync::atomic::Ordering;
     if CHECKING.swap(true, Ordering::SeqCst) {
@@ -262,9 +206,6 @@ pub(crate) async fn check_images(state: &AppState) {
     crate::auto_update::record_detections(state, seen).await;
 }
 
-/// The whole cluster's answer, shared by the listing route and by `apply`,
-/// which needs the same picture to decide what "everything out of date"
-/// means.
 async fn rows(state: &AppState) -> Vec<UpdateRow> {
     let cluster_state = state.cluster.state().await;
 
@@ -274,8 +215,6 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
         .map(|a| a.node.clone())
         .collect();
 
-    // Every node in parallel: the slowest single node bounds the whole call,
-    // rather than the sum of them.
     let scans = futures::future::join_all(nodes.iter().map(|node| scan_node(state, node))).await;
 
     let by_instance: BTreeMap<String, ImageStatus> = scans
@@ -291,21 +230,15 @@ async fn rows(state: &AppState) -> Vec<UpdateRow> {
             let id = assignment.instance.to_string();
             let status = by_instance.get(&id);
             let running = status.and_then(|s| s.running_digest.clone());
-            // What the registry last said, from the cache. Never fetched here.
             let check = status
                 .and_then(|s| s.image.as_ref())
                 .and_then(|image| cluster_state.image_checks.get(image));
             let latest = check.and_then(|c| c.latest_digest.clone());
             let pinned = assignment.image_digest.clone();
 
-            // Both sides have to be known. An unknown running digest with a
-            // known latest one is not evidence of an update: it is far more
-            // often a locally built image that was never pulled from a
-            // registry, and reporting those as perpetually out of date would
-            // make "update all" a no-op that never stops asking.
-            // A pinned instance with no container (its pinned image is gone,
-            // so it cannot start) compares the pin instead: updating moves
-            // the pin without needing anything to restart.
+            // Both sides must be known: an unknown running digest is usually a locally built image,
+            // and flagging those would make "update all" never stop asking. A pinned instance with no
+            // container compares the pin instead: updating moves the pin without a restart.
             let update_available = match (&running, &latest, &pinned) {
                 (Some(running), Some(latest), _) => running != latest,
                 (None, Some(latest), Some(pinned)) => pinned != latest,
@@ -351,7 +284,6 @@ fn auto_update_row(
         AutoUpdateMode::Apply => "apply",
         AutoUpdateMode::Notify => "notify",
     };
-    // A record for an older digest says nothing about the newest one.
     let record = state
         .auto_updates
         .get(instance)
@@ -366,10 +298,7 @@ fn auto_update_row(
     })
 }
 
-/// Ask one node about everything it runs. A node that cannot be reached
-/// contributes nothing rather than failing the request: the rest of the
-/// cluster's answer is still worth having, and those rows simply show an
-/// unknown running digest.
+/// An unreachable node contributes nothing; its rows show an unknown running digest.
 async fn scan_node(state: &AppState, node: &str) -> Vec<ImageStatus> {
     if node == state.node_name {
         return scan_local(state).await;
@@ -397,8 +326,6 @@ async fn internal_scan(
     Json(scan_local(&state).await)
 }
 
-/// Inspect every container this node is assigned for what it is running.
-/// No registry is asked; see `check_images`.
 async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
     let Some(docker) = state.docker.get().await else {
         return Vec::new();
@@ -426,9 +353,7 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
             }
             None => None,
         };
-        // The declared reference (the stack's tag), not `container.image`:
-        // once pinned that is a digest, which is immutable and so can never
-        // show as behind. See `declared_image`.
+        // The declared reference, not `container.image`: once pinned that is an immutable digest.
         let image = declared_image(&cluster_state, &assignment.instance)
             .or_else(|| container.map(|c| c.image));
         statuses.push(ImageStatus {
@@ -445,14 +370,10 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
 
 #[derive(Deserialize, Default)]
 pub(crate) struct InstanceSelection {
-    /// Instances to act on. Empty or absent means "every instance this action
-    /// applies to", which is what the view's bulk buttons send.
     #[serde(default)]
     pub(crate) instances: Vec<String>,
 }
 
-/// Outcome per instance, so a partial failure is legible rather than the
-/// whole call reading as failed.
 #[derive(Serialize)]
 struct BulkResult {
     id: String,
@@ -461,12 +382,8 @@ struct BulkResult {
     error: Option<String>,
 }
 
-/// Record what each instance is running as its pin.
-///
-/// Only ever pins instances that have no pin yet: an instance already pinned
-/// has had that decision made deliberately, and quietly repointing it at
-/// whatever happens to be running now would undo a rollback. Instances whose
-/// running digest is unknown are skipped, since there is nothing to pin.
+/// Only pins instances with no pin yet: repointing a deliberate pin at whatever is running
+/// would undo a rollback. Unknown running digests are skipped.
 async fn pin(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -477,7 +394,6 @@ async fn pin(
 
     let mut results = Vec::new();
     for row in rows(&state).await {
-        // Already pinned, not asked for, or nothing known to pin.
         if row.pinned_digest.is_some() {
             continue;
         }
@@ -512,32 +428,17 @@ async fn pin(
     Ok(Json(results))
 }
 
-/// What `apply` took on. The work itself outlives the request.
 #[derive(Serialize)]
 pub(crate) struct Accepted {
     accepted: Vec<String>,
 }
 
-/// Start pulling and rebuilding, for the named instances or for every one
-/// with an update available.
+/// Answers `202` once the work is scheduled: a pull can take far longer than the reverse
+/// proxy's 30s, and the resulting gateway timeout on a healthy update made operators click
+/// again, stacking a second pull. Progress arrives via `ClusterState::instance_updates`.
 ///
-/// Answers `202` as soon as the work is scheduled rather than when it is
-/// done, because it cannot be done in time. A pull is a download of hundreds
-/// of megabytes over whatever link the node has; the reverse proxy gives a
-/// backend 30 seconds. Holding the request open across that produced a
-/// gateway timeout every time, on an update that was in fact running fine —
-/// the worst possible reading, since the operator sees a failure and clicks
-/// again, stacking a second pull on the first.
-///
-/// The caller watches progress through `ClusterState::instance_updates`,
-/// which every step of every update is written into as it happens - so it
-/// arrives over the ordinary `/api/events` state stream, and reads the same
-/// from whichever node the browser is talking to.
-///
-/// The updates run inside the spawned task, one download and one restart at a
-/// time per node (see `roll_batch`). Each restart takes its container down and
-/// lets the reconcile loop build a new one, so replicas of one service never
-/// restart together — the one thing a rolling update exists to avoid.
+/// Per node, one download and one restart at a time (`roll_batch`); replicas of one service
+/// never restart together.
 async fn apply(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -547,19 +448,15 @@ async fn apply(
     Ok(apply_selection(&state, selection).await)
 }
 
-/// `clouduler update`: the same trigger as the ui's apply button, over the
-/// internal-auth channel the cli already uses for git-backup's manual
-/// triggers, since scheduling pulls is imperative action against the
-/// running daemon rather than a raft state change - there is nothing for
-/// `client.submit` to write.
+/// `clouduler update`: same trigger as the ui, over internal auth. Scheduling pulls acts on
+/// the daemon, not raft state.
 async fn apply_internal(
     auth: InternalBodyAuth,
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<Accepted>), ApiError> {
-    // The signature covers a hash of the body, not the body itself, so the
-    // bytes read here must be checked against it or a replayer could swap in
-    // a different selection (an empty one means every instance).
+    // The signature covers a hash of the body: check it, or a replayer could swap the selection
+    // (an empty one means every instance).
     auth.check(&body)?;
     let selection = if body.is_empty() {
         InstanceSelection::default()
@@ -574,10 +471,8 @@ pub(crate) async fn apply_selection(
     state: &AppState,
     selection: InstanceSelection,
 ) -> (StatusCode, Json<Accepted>) {
-    // Only scan when the caller did not say what it wanted. The ui always
-    // does — it is looking at the answer already — so the common path costs
-    // nothing. Scanning regardless meant a single-row update paid for a
-    // full cluster-wide registry sweep before it even started pulling.
+    // Scan only when no selection was given; scanning regardless made a single-row update pay
+    // for a cluster-wide registry sweep.
     let instances: Vec<InstanceId> = if selection.instances.is_empty() {
         rows(state)
             .await
@@ -593,10 +488,8 @@ pub(crate) async fn apply_selection(
             .collect()
     };
 
-    // Everything accepted is queued in the replicated record before
-    // answering, so every browser (on any node) sees the whole batch at once
-    // rather than each instance only once its turn comes. One already mid-
-    // update is left alone: stacking a second pull on it helps nobody.
+    // Queue everything in the replicated record before answering so every browser sees the
+    // whole batch at once. An instance already mid-update is left alone.
     let cluster_state = state.cluster.state().await;
     let mut queued = Vec::new();
     for instance in instances {
@@ -634,25 +527,14 @@ pub(crate) async fn apply_selection(
     (StatusCode::ACCEPTED, Json(Accepted { accepted }))
 }
 
-/// What `roll_batch` needs to know about one queued instance: where it runs,
-/// and what it was pinned to before the update touched anything.
 type QueuedUpdate = (InstanceId, String, Option<String>);
 
-/// Rolls the batch: each node works through its own instances in parallel
-/// with the others, and within a node one image downloads while one instance
-/// restarts. The next image is fetched while the previous instance comes up,
-/// but never two downloads or two restarts at once on the same node.
+/// Each node works through its instances in parallel; within a node one image downloads
+/// while one instance restarts. Two instances of a service never restart together.
 ///
-/// Two instances of the same service never restart together, wherever they
-/// run: taking every replica down at once is what a rolling update exists to
-/// avoid.
-///
-/// The first failure stops the batch. A bad image would otherwise take down
-/// every replica in turn. The failed instance is put back on its previous
-/// digest (`rollback_target`) and every instance that has not started
-/// restarting is marked failed as cancelled, so nothing further is touched
-/// and the operator sees exactly where it stopped. Restarts already underway
-/// on other nodes finish (or fail and roll back) on their own.
+/// The first failure stops the batch (a bad image would otherwise take down every replica):
+/// the failed instance returns to its previous digest (`rollback_target`), instances not yet
+/// restarting are failed as cancelled, and restarts underway on other nodes finish on their own.
 async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
     let mut lanes: std::collections::BTreeMap<String, Vec<QueuedUpdate>> = Default::default();
     let mut pending = std::collections::HashMap::new();
@@ -678,21 +560,16 @@ async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
     keepalive.abort();
 }
 
-/// State shared by every node's lane of one `roll_batch`.
 struct Batch {
     worker: AppState,
     inner: parking_lot::Mutex<BatchState>,
-    /// One lock per (stack, service), held from an instance's restart until
-    /// it is up.
     services: parking_lot::Mutex<ServiceLocks>,
 }
 
 type ServiceLocks = std::collections::HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>;
 
 struct BatchState {
-    /// The instance whose failure halted the batch.
     failed_by: Option<InstanceId>,
-    /// Instances that have not started restarting, and their nodes.
     pending: std::collections::HashMap<InstanceId, String>,
 }
 
@@ -701,8 +578,6 @@ impl Batch {
         self.inner.lock().failed_by.is_some()
     }
 
-    /// Takes `instance` off the waiting list; false when the batch already
-    /// cancelled it.
     fn claim(&self, instance: &InstanceId) -> bool {
         self.inner.lock().pending.remove(instance).is_some()
     }
@@ -715,8 +590,6 @@ impl Batch {
             .clone()
     }
 
-    /// Rolls `instance` back as far as the update got, records the failure,
-    /// and cancels everything that has not started restarting.
     async fn fail(
         &self,
         instance: &InstanceId,
@@ -772,9 +645,7 @@ impl Batch {
     }
 }
 
-/// One node's share of the batch: a downloader and a restarter joined by a
-/// one-slot channel, so the next image is fetched while the previous
-/// instance restarts and at most one finished download waits its turn.
+/// A downloader and a restarter joined by a one-slot channel.
 async fn roll_node(batch: Arc<Batch>, items: Vec<QueuedUpdate>) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(QueuedUpdate, String)>(1);
 
@@ -786,9 +657,7 @@ async fn roll_node(batch: Arc<Batch>, items: Vec<QueuedUpdate>) {
             let (instance, node, pin_before) = &item;
             match super::instances::pull_instance(&batch.worker, instance).await {
                 Ok(digest) => {
-                    // Downloaded, waiting for the restart slot: the old
-                    // container is still serving, and the record should say
-                    // it is waiting, not downloading.
+                    // Downloaded, waiting for the restart slot: the record should say waiting, not downloading.
                     cl_sched::progress::submit(
                         &batch.worker.cluster,
                         instance,
@@ -802,8 +671,6 @@ async fn roll_node(batch: Arc<Batch>, items: Vec<QueuedUpdate>) {
                     }
                 }
                 Err(e) => {
-                    // The instance was removed after being queued: nothing
-                    // to roll back and nothing wrong with the image.
                     if let ApiError::NotFound(why) = &e {
                         warn!(%instance, %why, "instance disappeared before its update");
                         batch.claim(instance);
@@ -825,17 +692,14 @@ async fn roll_node(batch: Arc<Batch>, items: Vec<QueuedUpdate>) {
         while let Some(((instance, node, pin_before), digest)) = rx.recv().await {
             let lock = batch.service_lock(&instance);
             let _service = lock.lock().await;
-            // Claimed only now: until here the batch may still cancel it.
             if !batch.claim(&instance) {
                 continue;
             }
             let failure = match super::instances::replace_instance(&batch.worker, &instance, digest)
                 .await
             {
-                // `replace_instance` returns once the old container is gone;
-                // the new one is the reconciler's to bring up (and, with a
-                // healthcheck, to see healthy). Hold the node's restart slot
-                // and the service until that has happened.
+                // `replace_instance` returns once the old container is gone; hold the restart slot and the
+                // service until the reconciler has brought the new one up.
                 Ok(()) => match wait_for_update(&batch.worker, &instance).await {
                     Some((UpdatePhase::Started, _)) => {
                         info!(%instance, "updated");
@@ -861,8 +725,7 @@ async fn roll_node(batch: Arc<Batch>, items: Vec<QueuedUpdate>) {
     tokio::join!(downloader, restarter);
 }
 
-/// Keeps instances still waiting from looking abandoned (`Scheduler` fails a
-/// record queued for too long) while earlier ones take their time.
+/// Keeps waiting records from looking abandoned (`Scheduler` fails ones queued too long).
 async fn keep_queued_alive(batch: Arc<Batch>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -893,13 +756,9 @@ async fn keep_queued_alive(batch: Arc<Batch>) {
     }
 }
 
-/// The digest to put back after a failed update, if the update changed
-/// anything. `pin_before` is the pin when the batch queued the instance and
-/// `pin_now` what it is after the failure: equal means the update never got
-/// as far as pinning (a failed pull), so there is nothing to undo and
-/// `previous`, which could be left over from an older update, must not be
-/// applied. `None` also when no earlier digest was ever recorded (the
-/// running one could not be resolved to a registry digest).
+/// The digest to restore after a failed update. `pin_before == pin_now` means the update never
+/// pinned (failed pull), so `previous`, possibly left from an older update, must not be applied.
+/// `None` also when no earlier digest was ever recorded.
 fn rollback_target(
     pin_before: Option<&str>,
     pin_now: Option<&str>,
@@ -911,13 +770,9 @@ fn rollback_target(
     previous
 }
 
-/// How long one instance's update may take, from its old container going
-/// away to its new one running, before the batch moves on regardless.
 const UPDATE_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-/// Waits for an instance's update record to reach a terminal phase, and
-/// returns it with the failure message, if any. `None` on timeout, or if the
-/// record disappeared (the instance was removed or moved away).
+/// `None` on timeout or if the record disappeared (instance removed or moved).
 pub(crate) async fn wait_for_update(
     state: &AppState,
     instance: &InstanceId,

@@ -1,16 +1,12 @@
 //! Auth for node-to-node internal routes.
 //!
-//! These are not reached by a browser, so they skip the normal session/api
-//! key [`Identity`](super::Identity) path entirely and check only an
-//! HMAC-SHA256 signature computed over the shared cluster key, following
-//! `cl_secret::internal_auth`. A node without the cluster key already cannot
-//! decrypt secrets or run containers that need them, so requiring it here is
-//! a consistent trust boundary, not a new one.
+//! These skip the session/api key [`Identity`](super::Identity) path and check only an HMAC-SHA256
+//! signature over the shared cluster key (`cl_secret::internal_auth`); a node without the key already
+//! cannot decrypt secrets, so this is no new trust boundary.
 //!
-//! The signature binds method, path and query, a timestamp, a per-request
-//! nonce and a body hash, and a given signature is accepted once. The legacy path-only header is
-//! ignored: it never expires, so honouring it would leave every captured
-//! request replayable forever.
+//! The signature binds method, path and query, a timestamp, a nonce and a body hash, and is accepted
+//! once. The legacy path-only header is ignored: it never expires, so honouring it would leave every
+//! captured request replayable forever.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -25,35 +21,29 @@ use cl_update::internal_client::{
 use crate::error::ApiError;
 use crate::server::AppState;
 
-/// Signatures already accepted, so a request captured off the wire cannot be
-/// played back inside the skew window. Entries only exist for signatures that
-/// verified, so an unauthenticated caller cannot grow it, and each is dropped
-/// once its timestamp could no longer pass the skew check anyway.
+/// Stops a captured request being replayed inside the skew window. Only verified signatures are
+/// stored (an unauthenticated caller cannot grow it) and each is dropped once it could no longer pass the skew check.
 #[derive(Default)]
 pub struct ReplayCache {
     seen: Mutex<HashMap<String, u64>>,
 }
 
 impl ReplayCache {
-    /// Record `signature` (made at `ts`). False when it was already seen.
     fn first_use(&self, signature: &str, ts: u64, now: u64) -> bool {
         let mut seen = self.seen.lock();
         seen.retain(|_, expires| *expires >= now);
         seen.insert(signature.to_string(), ts + SKEW_SECS).is_none()
     }
 
-    /// Record `signature` without caring whether it was seen before.
     fn mark(&self, signature: &str, ts: u64, now: u64) {
         self.first_use(signature, ts, now);
     }
 }
 
-/// Proof the caller holds the cluster key, for a route that takes no body.
 pub struct InternalAuth;
 
-/// As [`InternalAuth`], for a route that reads a body. Carries the body hash
-/// the caller signed; the handler must check the bytes it received against it
-/// with [`InternalBodyAuth::check`], since an extractor cannot see the body.
+/// For a route that reads a body. The handler must check the bytes it received against the signed
+/// hash with [`InternalBodyAuth::check`], since an extractor cannot see the body.
 pub struct InternalBodyAuth(String);
 
 impl InternalBodyAuth {
@@ -80,9 +70,7 @@ fn optional_header<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
     parts.headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-/// Log why an internal auth check failed, then build the 401. A signature
-/// that was already used is routine (a retry racing its first attempt), so it
-/// stays at debug; anything else is worth a warning.
+/// An already used signature is routine (a retry racing its first attempt), so it logs at debug.
 fn reject(parts: &Parts, scheme: &str, reason: &str, routine: bool) -> ApiError {
     if routine {
         tracing::debug!(scheme, method = %parts.method, uri = %parts.uri, "internal auth: {reason}");
@@ -92,13 +80,9 @@ fn reject(parts: &Parts, scheme: &str, reason: &str, routine: bool) -> ApiError 
     ApiError::Unauthenticated(reason.into())
 }
 
-/// Verify the signature and burn it, returning the body hash it commits to.
-///
-/// v3 (nonce) is checked whenever its nonce and signature headers are
-/// present; only otherwise does this fall back to v2, which older clients
-/// still send. The v2 fallback can be removed once every node runs a
-/// v3-capable build. Both schemes are replay protected: v3 is keyed on its
-/// signature (which commits to the nonce), v2 on its own.
+/// Verifies the signature and burns it, returning the body hash it commits to. v3 (nonce) is checked
+/// when its headers are present, else v2, which older clients still send (removable once every node
+/// runs v3). Both are replay protected.
 async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiError> {
     let body_sha256 = header(parts, BODY_SHA256_HEADER)?;
     let ts: u64 = header(parts, TIMESTAMP_HEADER)?
@@ -115,10 +99,8 @@ async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiErro
         .as_ref()
         .ok_or_else(|| ApiError::Unauthenticated("this node holds no cluster key".into()))?;
 
-    // Scoped to the exact method and route path (query string included), so a
-    // signature captured for one internal endpoint cannot be replayed
-    // against another. Must match what the caller signs: the query string is
-    // part of it for routes like logs that carry `follow`/`tail`/`since`.
+    // Scoped to method and route path including the query (logs carry `follow`/`tail`/`since`), so a
+    // signature for one endpoint cannot be replayed against another. Must match what the caller signs.
     let path_and_query = parts
         .uri
         .path_and_query()
@@ -166,11 +148,9 @@ async fn authenticate(parts: &Parts, state: &AppState) -> Result<String, ApiErro
             true,
         ));
     }
-    // A v3 client also sends a v2 signature for old servers. Burn it too, or
-    // a captured request could be replayed by stripping the v3 headers. Two
-    // legitimate v3 requests in one second share a v2 signature, so this only
-    // marks and never rejects. Reached only after v3 verified, so an
-    // unauthenticated caller cannot grow the cache.
+    // A v3 client also sends a v2 signature; burn it too, or stripping the v3 headers would allow replay.
+    // Two legitimate v3 requests in a second share a v2 signature, so this only marks. Reached only
+    // after v3 verified, so an unauthenticated caller cannot grow the cache.
     if scheme == "v3" {
         if let Some(v2_sig) = optional_header(parts, SIGNATURE_HEADER) {
             state.internal_replay.mark(&format!("v2:{v2_sig}"), ts, now);
@@ -186,9 +166,7 @@ impl FromRequestParts<AppState> for InternalAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // No internal route but the body-taking ones reads a body, so the
-        // signed hash must be of nothing: a signature minted for a request
-        // with a body is not good for one of these.
+        // Only body-taking routes read a body, so the signed hash must be of nothing.
         let claimed = header(parts, BODY_SHA256_HEADER)?;
         if claimed != internal_auth::body_sha256_hex(b"") {
             return Err(ApiError::Unauthenticated(

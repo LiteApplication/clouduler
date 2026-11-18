@@ -1,5 +1,3 @@
-//! `GET /api/proxy/routes`: what this node's reverse proxy is publishing.
-
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -17,35 +15,27 @@ pub fn router() -> Router<AppState> {
 struct RouteRow {
     host: String,
     path: Option<String>,
-    /// `service`, `redirect`, `static` or `dashboard`.
     kind: &'static str,
     stack: Option<String>,
     service: Option<String>,
-    /// First backend's port; `None` for a redirect or a route with no
-    /// backend resolved yet.
+    /// `None` for a redirect or a route with no backend resolved yet.
     port: Option<u16>,
     network: Option<String>,
     tls: bool,
     websockets: bool,
-    /// The host is the apex of its network's domain (written `@` in config).
     apex: bool,
-    /// Unix seconds the certificate covering this host expires, when one is
-    /// held.
     cert_not_after: Option<i64>,
     health: Option<RouteHealth>,
 }
 
 #[derive(Serialize)]
 struct RouteHealth {
-    /// The node whose proxy ran the check; every node probes on its own.
     node: String,
     checked_at: String,
     healthy: bool,
     error: Option<String>,
 }
 
-/// Where a route came from, and for a service route its stack and service,
-/// decoded from the label the daemon gives it (`Route::instance`).
 fn classify(instance: &str) -> (&'static str, Option<String>, Option<String>) {
     if instance == "clouduler.dashboard" {
         ("dashboard", None, None)
@@ -65,8 +55,7 @@ fn classify(instance: &str) -> (&'static str, Option<String>, Option<String>) {
     }
 }
 
-/// The expiry of the certificate that would serve `host`: its own, else the
-/// wildcard one for its parent domain.
+/// Its own, else the wildcard one for its parent domain.
 fn cert_expiry(state: &cl_raft::ClusterState, host: &str) -> Option<i64> {
     state
         .certificates
@@ -114,7 +103,6 @@ fn row(
     }
 }
 
-/// Empty while the proxy is off on this node.
 async fn list(_identity: Identity, State(state): State<AppState>) -> Json<Vec<RouteRow>> {
     let Some(table) = state.proxy_routes.get() else {
         return Json(Vec::new());

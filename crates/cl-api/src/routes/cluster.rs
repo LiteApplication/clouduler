@@ -1,5 +1,3 @@
-//! `/api/status`, `/api/state`, `/api/events`.
-
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -19,20 +17,16 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Serialize)]
 pub(crate) struct StatusBody {
-    /// The node answering this request, which is not necessarily the leader.
     pub(crate) node: String,
     pub(crate) is_leader: bool,
     pub(crate) has_quorum: bool,
-    /// Leader's node name, not its raft id. The id is an internal hash of the
-    /// name and means nothing to anyone reading the ui or scripting the api.
+    /// A node name, not its raft id, which is an internal hash meaningless to ui or script readers.
     pub(crate) leader: Option<String>,
     pub(crate) voters: usize,
     pub(crate) reachable: usize,
     pub(crate) managers_total: usize,
     pub(crate) managers_reachable: usize,
-    /// Build version of the daemon answering.
     pub(crate) version: String,
-    /// Replicated state version, which moves on every applied command.
     pub(crate) state_version: u64,
 }
 
@@ -40,7 +34,6 @@ async fn status(_identity: Identity, State(state): State<AppState>) -> Json<Stat
     Json(cluster_status(&state).await)
 }
 
-/// The body of `status`, callable in-process.
 pub(crate) async fn cluster_status(state: &AppState) -> StatusBody {
     let quorum = state.cluster.quorum().status();
     let cluster_state = state.cluster.state().await;
@@ -72,9 +65,7 @@ pub(crate) async fn cluster_status(state: &AppState) -> StatusBody {
     }
 }
 
-/// Raft ids are a hash of the node's config-declared uuid, so the only way
-/// back is to hash every known node's id and compare. The roster is a
-/// handful of entries, so that is fine.
+/// Raft ids hash the node's config-declared uuid, so the way back is hashing every known node's id; the roster is tiny.
 fn node_name_for(state: &cl_raft::ClusterState, id: u64) -> Option<String> {
     state
         .nodes

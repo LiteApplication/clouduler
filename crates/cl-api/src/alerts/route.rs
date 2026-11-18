@@ -1,5 +1,3 @@
-//! Which destinations an alert goes to, read from the settings of the moment.
-
 use cl_alert::{AlertSettings, Destination, Route, Severity};
 use cl_raft::alerts::{AlertDelivery, AlertRecord};
 
@@ -7,13 +5,10 @@ use super::sev;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Targets {
-    /// Sent the moment the alert fires.
     pub immediate: Vec<String>,
-    /// Included in the daily digest (info alerts only).
     pub digest: Vec<String>,
 }
 
-/// A muted event is neither recorded nor sent.
 pub fn muted(settings: &AlertSettings, event: &str) -> bool {
     matches!(
         settings.events.get(event).and_then(|o| o.route.as_ref()),
@@ -73,8 +68,6 @@ pub fn targets_for_record(settings: &AlertSettings, r: &AlertRecord) -> Targets 
     )
 }
 
-/// Destinations that received the opening message of `r`, still configured
-/// and enabled: they get the resolved message too.
 pub fn resolved_targets(settings: &AlertSettings, deliveries: &[AlertDelivery]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for d in deliveries {

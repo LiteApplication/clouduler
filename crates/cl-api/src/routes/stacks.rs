@@ -29,7 +29,6 @@ pub fn router() -> Router<AppState> {
             "/api/stacks/{name}/update-webhook/regenerate",
             post(regenerate_update_webhook),
         )
-        // Public, authenticated by the token in the path (see `webhook_token`).
         .route(
             "/api/stacks/{name}/update-webhook/{token}",
             post(update_webhook),
@@ -40,7 +39,6 @@ pub fn router() -> Router<AppState> {
 struct StackSummary {
     name: String,
     revision: u64,
-    /// Unix seconds of the latest deploy; 0 when unknown.
     deployed_at: i64,
 }
 
@@ -69,9 +67,7 @@ pub(crate) struct StackDetail {
     pub(crate) used_configs: Vec<String>,
     pub(crate) used_secrets: Vec<String>,
     pub(crate) requirements: StackRequirements,
-    /// Unix seconds of the latest deploy; 0 when unknown.
     pub(crate) deployed_at: i64,
-    /// The spec before the latest deploy that changed it, for a diff.
     pub(crate) previous_spec: Option<String>,
 }
 
@@ -83,16 +79,14 @@ async fn detail(
     Ok(Json(stack_detail(&state, &name).await?))
 }
 
-/// What `GET /api/stacks/{name}` returns, callable in-process. The spec is
-/// returned verbatim; it holds secret *names* only, never their content.
+/// The spec is verbatim; it holds secret *names* only.
 pub(crate) async fn stack_detail(state: &AppState, name: &str) -> Result<StackDetail, ApiError> {
     let cluster_state = state.cluster.state().await;
     let stack = cluster_state
         .stacks
         .get(name)
         .ok_or_else(|| ApiError::NotFound(format!("no stack {name}")))?;
-    // The spec was already validated at deploy time, so a parse failure here
-    // would mean corrupted state, not a bad request.
+    // Validated at deploy time, so a parse failure means corrupted state.
     let requirements = match StackFile::parse(&stack.spec) {
         Ok(parsed) => {
             let mut r = parsed.requirements();
@@ -119,20 +113,15 @@ pub(crate) async fn stack_detail(state: &AppState, name: &str) -> Result<StackDe
 #[derive(Deserialize)]
 struct DeployRequest {
     spec: String,
-    /// Config name to base64 content, for everything the spec's `configs`
-    /// section references.
     #[serde(default)]
     configs: BTreeMap<String, String>,
-    /// Secret name to base64 plaintext. Sealed here before anything is
-    /// written to the log.
+    /// Secret name to base64 plaintext; sealed here before anything reaches the log.
     #[serde(default)]
     secrets: BTreeMap<String, String>,
 }
 
-/// Refuse a deploy whose overlay would share a docker network, subnet and
-/// bridge with a different stack's (see `cl_sched::run::overlay_collision`).
-/// Checked here rather than in raft apply, which has no cluster config to
-/// work out which network a stack's overlay is on.
+/// Refuse a deploy whose overlay would share a network, subnet and bridge with another stack's
+/// (`cl_sched::run::overlay_collision`). Checked here, not in raft apply, which has no cluster config.
 async fn check_overlay_collision(
     state: &AppState,
     name: &str,
@@ -168,11 +157,9 @@ async fn check_overlay_collision(
     }
 }
 
-/// Refuse a stack name that is unsafe in container names, overlay networks
-/// and the git export (see `validate_stack_name`). A stack already in the
-/// cluster under exactly this name is let through, with a warning: it was
-/// accepted before names were checked, and must stay redeployable. Done here
-/// rather than in raft apply, which must keep replaying existing logs.
+/// Refuse a name unsafe in container names, overlay networks and the git export (`validate_stack_name`).
+/// An existing stack under exactly this name passes with a warning so it stays redeployable; not in
+/// raft apply, which must keep replaying old logs.
 pub(crate) async fn check_stack_name(state: &AppState, name: &str) -> Result<(), ApiError> {
     let Err(reason) = validate_stack_name(name) else {
         return Ok(());
@@ -201,9 +188,7 @@ async fn deploy(
     Ok(StatusCode::OK)
 }
 
-/// The cluster-aware half of validation (networks, drives, node pins, domains
-/// exist): the same check the CLI runs before it sends a deploy. Every
-/// caller of `deploy_stack` (web UI, API, MCP) goes through it.
+/// The cluster-aware half of validation, the same check the CLI runs; every `deploy_stack` caller goes through it.
 async fn validate_against_cluster(
     state: &AppState,
     name: &str,
@@ -223,11 +208,8 @@ fn cluster_check(
         .map_err(|e| ApiError::BadRequest(e.to_string()))
 }
 
-/// The body of `deploy`, callable in-process: validates the spec against what
-/// the cluster already holds, seals and stores the plaintext `secrets` the
-/// spec owns, then hands the rest to `deploy_from_files`. `configs` and
-/// `secrets` are plaintext bytes, already decoded from the wire's base64.
-/// Secrets the spec does not reference are ignored, never written.
+/// Validates, seals and stores the plaintext `secrets` the spec owns (others are ignored), then
+/// hands the rest to `deploy_from_files`. Inputs are already decoded from base64.
 pub(crate) async fn deploy_stack(
     state: &AppState,
     name: &str,
@@ -292,12 +274,9 @@ pub(crate) async fn deploy_stack(
     deploy_from_files(state, name, spec, configs).await
 }
 
-/// The reusable core of `deploy`: parses+validates the spec, submits it, then
-/// writes every provided config it owns and records what it owns. Shared with
-/// `routes::git_backup`'s reverse (git -> cluster) sync, which never has
-/// secret content to supply (git-mirrored secrets are age-encrypted for the
-/// admin, not this cluster's key, so they can't be written back this way) and
-/// so only ever calls this, never the secrets branch above.
+/// Parses, validates, submits, then writes the configs the stack owns. Shared with
+/// `routes::git_backup`'s git -> cluster sync, which has no secret content (git-mirrored secrets are
+/// age-encrypted for the admin, not this cluster's key).
 pub(crate) async fn deploy_from_files(
     state: &AppState,
     name: &str,
@@ -309,10 +288,8 @@ pub(crate) async fn deploy_from_files(
     check_overlay_collision(state, name, &parsed).await?;
     let requirements = parsed.requirements();
 
-    // The names this stack owns come from its own spec, not from whatever the
-    // caller happened to include in this request: a redeploy that doesn't
-    // resend an unchanged config's content must not drop the stack's claim on
-    // it, and a config renamed out of the spec must not linger as owned.
+    // Owned names come from the stack's own spec, not this request: a redeploy that omits an unchanged
+    // config must keep its claim, and a config renamed out of the spec must not linger.
     let cluster_state = state.cluster.state().await;
     for config_name in &requirements.file_configs {
         if !configs.contains_key(config_name) && !cluster_state.configs.contains_key(config_name) {
@@ -380,7 +357,6 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The body of `DELETE /api/stacks/{name}`, callable in-process.
 pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), ApiError> {
     let secret = webhook_secret_name(&name);
     let response = state
@@ -391,8 +367,7 @@ pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), A
     if let Some(msg) = response.error {
         return Err(ApiError::Conflict(msg));
     }
-    // Best effort: a leftover token would otherwise revive the old URL if a
-    // stack of the same name were deployed again.
+    // Best effort: a leftover token would revive the old URL if a same-named stack were deployed.
     let _ = state
         .cluster
         .submit(ClusterRequest::RemoveSecret { name: secret })
@@ -400,7 +375,6 @@ pub(crate) async fn remove_stack(state: &AppState, name: String) -> Result<(), A
     Ok(())
 }
 
-/// `PUT /api/stacks/{name}/prioritize`: see `Request::SetPrioritized`.
 async fn prioritize(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -409,7 +383,6 @@ async fn prioritize(
     set_prioritized(&state, name, true).await
 }
 
-/// `DELETE /api/stacks/{name}/prioritize`: back to the stack's own priority.
 async fn unprioritize(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -450,9 +423,7 @@ pub(crate) struct ValidateResponse {
     pub(crate) valid: bool,
     pub(crate) errors: Vec<ValidationError>,
     pub(crate) requirements: Option<StackRequirements>,
-    /// The same breakdown as `requirements`, one entry per service: what the
-    /// ui shows as a separate placement table per container instead of one
-    /// table that can't say which constraint belongs to which service.
+    /// One entry per service, so the ui can show a placement table per container.
     pub(crate) per_service: BTreeMap<String, StackRequirements>,
 }
 
@@ -465,7 +436,6 @@ async fn validate(
     Json(validate_stack(&state, &name, &body.spec).await)
 }
 
-/// What `POST /api/stacks/{name}/validate` returns, callable in-process.
 /// Never fails: a bad spec or name is reported in the body.
 pub(crate) async fn validate_stack(state: &AppState, name: &str, spec: &str) -> ValidateResponse {
     if let Err(e) = check_stack_name(state, name).await {
@@ -538,7 +508,6 @@ pub(crate) fn is_reserved_webhook_secret(name: &str) -> bool {
     name.starts_with(WEBHOOK_SECRET_PREFIX)
 }
 
-/// The stack's current webhook token, if one has been issued.
 async fn read_webhook_token(state: &AppState, stack: &str) -> Option<String> {
     let secret = webhook_secret_name(stack);
     let entry = state.cluster.state().await.secrets.get(&secret).cloned()?;
@@ -548,8 +517,6 @@ async fn read_webhook_token(state: &AppState, stack: &str) -> Option<String> {
     std::str::from_utf8(&opened).ok().map(str::to_owned)
 }
 
-/// Mints a fresh random token and replaces whatever was stored, which
-/// invalidates the old URL immediately.
 async fn issue_webhook_token(state: &AppState, stack: &str) -> Result<String, ApiError> {
     let mut buf = [0u8; 24];
     rand::fill(&mut buf);
@@ -582,7 +549,6 @@ async fn issue_webhook_token(state: &AppState, stack: &str) -> Result<String, Ap
 
 #[derive(Serialize)]
 struct UpdateWebhook {
-    /// Path to POST to; the caller prepends the cluster's public origin.
     path: String,
 }
 
@@ -592,7 +558,6 @@ fn webhook_path(stack: &str, token: &str) -> UpdateWebhook {
     }
 }
 
-/// The current webhook, issuing the first token on demand.
 async fn update_webhook_url(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -620,8 +585,7 @@ async fn regenerate_update_webhook(
     Ok(Json(webhook_path(&name, &token)))
 }
 
-/// Pulls and restarts every instance of the stack, the same rolling update
-/// the Updates view starts. Answers 202 once the work is queued.
+/// The same rolling update as the Updates view; answers 202 once queued.
 async fn update_webhook(
     State(state): State<AppState>,
     Path((name, token)): Path<(String, String)>,

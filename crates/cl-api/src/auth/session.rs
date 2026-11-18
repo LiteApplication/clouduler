@@ -1,13 +1,10 @@
 //! Server side session storage for cookie based (OIDC and api key) logins.
 //!
-//! Sessions live in raft (`ClusterState::sessions`), so a login survives a
-//! daemon restart and a leader change. Only a SHA-256 of the session id is
-//! stored: the id is the cookie, and the replicated state is readable through
-//! `/api/state` and sits in every node's raft log and snapshots. They are not
-//! part of the git backup export.
+//! Sessions live in raft (`ClusterState::sessions`), so a login survives a restart and a leader change. Only a SHA-256 of the
+//! session id is stored: the id is the cookie, and replicated state is readable through `/api/state` and sits in every raft
+//! log and snapshot. Not part of the git backup export.
 //!
-//! Lookups are local reads, so a session created on one node can be a
-//! replication delay away from being visible on another.
+//! Lookups are local reads, so a session may be a replication delay away from visible on another node.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +27,6 @@ impl SessionStore {
         Self { cluster }
     }
 
-    /// Create a session and return its id, to be set as a cookie value.
     pub async fn create(&self, identity: Identity, ttl: Duration) -> Result<String, ApiError> {
         let id = random_id();
         let now = unix_now();
@@ -57,8 +53,7 @@ impl SessionStore {
         }
     }
 
-    /// Look up a session. An expired one is simply not found; `prune_expired`
-    /// removes it from the replicated state later.
+    /// An expired one is simply not found; `prune_expired` removes it later.
     pub async fn get(&self, id: &str) -> Option<Identity> {
         let key = hash_id(id);
         let now = unix_now();
@@ -78,9 +73,7 @@ impl SessionStore {
             .await
     }
 
-    /// Drop every expired session from the replicated state. `get` ignores an
-    /// expired session but cannot delete it, so one never seen again would
-    /// otherwise stay forever. Writes nothing when there is nothing to drop.
+    /// `get` ignores an expired session but cannot delete it. Writes nothing when there is nothing to drop.
     pub async fn prune_expired(&self) {
         let now = unix_now();
         let any = self

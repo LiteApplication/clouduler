@@ -1,20 +1,12 @@
 //! The leader's image update checker and `x-clouduler.auto_update`.
 //!
-//! Two clocks, both leader only:
+//! Two leader-only clocks: a timer (`updates.check_interval` or Refresh) asks the registries about
+//! every declared image and stores answers in `ClusterState::image_checks` (the only registry
+//! contact); and every tick due auto-updates go to `routes::updates::apply_selection` as if the
+//! button were clicked, with finished ones settled in `ClusterState::auto_updates`.
 //!
-//! * A timer (`updates.check_interval`, or the Updates page's Refresh button)
-//!   asks the registries about every image the stacks declare and stores the
-//!   answers in `ClusterState::image_checks`. Nothing else talks to a
-//!   registry; the GET endpoints only read that cache.
-//! * Every tick, due auto-updates are handed to the ordinary update pipeline
-//!   (`routes::updates::apply_selection`), exactly as if the Updates page's
-//!   button had been clicked, and finished ones are settled in
-//!   `ClusterState::auto_updates`.
-//!
-//! Everything that survives between ticks lives in raft (`AutoUpdateRecord`),
-//! so a new leader continues a delay countdown instead of restarting it and
-//! never retries a digest that already failed. The decisions are the pure
-//! functions below.
+//! State between ticks lives in raft (`AutoUpdateRecord`), so a new leader continues a countdown
+//! and never retries a digest that already failed. The decisions are the pure functions below.
 
 use std::time::Duration;
 
@@ -27,29 +19,19 @@ use tracing::{info, warn};
 
 use crate::server::AppState;
 
-/// How often the leader looks at due auto-updates and the check timer.
 const TICK: Duration = Duration::from_secs(30);
 
-/// After becoming leader (or booting), how long before a check is considered.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(60);
 
-/// How long an auto-update may stay `Queued` with no update record of its own
-/// before it is called failed.
 const NEVER_STARTED_SECS: i64 = 15 * 60;
 
-/// The reason `Batch::fail` gives instances it cancelled, which were not at
-/// fault.
 const CANCELLED_PREFIX: &str = "cancelled:";
 
-/// What a check just learned about one instance.
 pub struct Seen<'a> {
-    /// The registry serves a different digest than the one running.
     pub update_available: bool,
     pub latest: Option<&'a str>,
 }
 
-/// After a registry check: what to record for an instance, if anything.
-/// `None` for mode off, nothing newer, or a digest already recorded.
 pub fn detect(
     auto: AutoUpdate,
     seen: &Seen<'_>,
@@ -65,33 +47,22 @@ pub fn detect(
         AutoUpdateMode::Off => return None,
     };
     match record {
-        // The same digest again: the countdown started when it was first
-        // seen, and a failure is not retried.
-        Some(r) if r.digest == latest => {
-            // Switching from apply to notify while waiting still notifies.
-            (outcome == AutoUpdateOutcome::Notified && r.outcome == AutoUpdateOutcome::Waiting)
-                .then(|| (latest.to_string(), outcome))
-        }
-        // A newer digest replaces whatever came before, restarting the delay.
+        Some(r) if r.digest == latest => (outcome == AutoUpdateOutcome::Notified
+            && r.outcome == AutoUpdateOutcome::Waiting)
+            .then(|| (latest.to_string(), outcome)),
         _ => Some((latest.to_string(), outcome)),
     }
 }
 
-/// Reasons an otherwise due auto-update waits.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Blockers {
-    /// A stack is in emergency mode; the cluster is in a degraded state and
-    /// nothing is restarted for convenience.
+    /// A stack is in emergency mode: nothing is restarted for convenience.
     pub emergency: bool,
-    /// An update or redeploy of this instance is under way.
     pub in_flight: bool,
-    /// The instance is stopped on purpose.
     pub stopped: bool,
 }
 
-/// Whether to queue the update now. `cached_latest` is what the last
-/// registry check says the tag serves: a record for an older digest is
-/// stale, and the check that saw the newer one has replaced it.
+/// `cached_latest` is what the last check says the tag serves; a record for an older digest is stale.
 pub fn due(
     auto: AutoUpdate,
     record: &AutoUpdateRecord,
@@ -102,7 +73,6 @@ pub fn due(
     if auto.mode != AutoUpdateMode::Apply {
         return false;
     }
-    // A notified record turns into a waiting one when the mode becomes apply.
     if !matches!(
         record.outcome,
         AutoUpdateOutcome::Waiting | AutoUpdateOutcome::Notified
@@ -118,7 +88,6 @@ pub fn due(
     now - record.detected_at >= auto.delay.as_secs() as i64
 }
 
-/// Unix seconds an apply-mode record will be applied, for display.
 pub fn apply_at(auto: AutoUpdate, record: &AutoUpdateRecord) -> Option<i64> {
     (auto.mode == AutoUpdateMode::Apply
         && matches!(
@@ -128,8 +97,6 @@ pub fn apply_at(auto: AutoUpdate, record: &AutoUpdateRecord) -> Option<i64> {
     .then(|| record.detected_at + auto.delay.as_secs() as i64)
 }
 
-/// How a `Queued` record ended, from the instance's update entry.
-/// `None` while still in progress.
 pub fn settle(
     record: &AutoUpdateRecord,
     update: Option<&InstanceUpdate>,
@@ -138,7 +105,6 @@ pub fn settle(
     if record.outcome != AutoUpdateOutcome::Queued {
         return None;
     }
-    // An entry older than the record belongs to an earlier update.
     match update.filter(|u| u.at >= record.at) {
         Some(u) => match u.phase {
             UpdatePhase::Started => Some((AutoUpdateOutcome::Updated, None)),
@@ -148,8 +114,6 @@ pub fn settle(
                     .clone()
                     .unwrap_or_else(|| "the update failed".into());
                 if error.starts_with(CANCELLED_PREFIX) {
-                    // Another instance's failure stopped the batch; this one
-                    // did nothing wrong and goes back to waiting.
                     Some((AutoUpdateOutcome::Waiting, None))
                 } else {
                     Some((AutoUpdateOutcome::Failed, Some(error)))
@@ -165,7 +129,6 @@ pub fn settle(
     }
 }
 
-/// What blocks `instance` from being updated right now.
 pub fn blockers(state: &ClusterState, instance: &InstanceId) -> Blockers {
     Blockers {
         emergency: state.in_emergency(),
@@ -180,7 +143,6 @@ pub fn blockers(state: &ClusterState, instance: &InstanceId) -> Blockers {
     }
 }
 
-/// The resolved auto_update setting of `instance`.
 pub fn setting(state: &ClusterState, instance: &InstanceId) -> AutoUpdate {
     state
         .stacks
@@ -201,8 +163,6 @@ async fn submit(state: &AppState, request: Request) {
     }
 }
 
-/// Record what a fresh registry check found, per instance. Called by the
-/// leader right after the check, with the `Seen` facts it just computed.
 pub async fn record_detections(state: &AppState, seen: Vec<(InstanceId, Option<String>, bool)>) {
     let cluster_state = state.cluster.state().await;
     let now = crate::alerts::unix_now();
@@ -230,7 +190,6 @@ pub async fn record_detections(state: &AppState, seen: Vec<(InstanceId, Option<S
     }
 }
 
-/// One pass over the records: settle finished ones, apply due ones.
 pub async fn act(state: &AppState) {
     let cluster_state = state.cluster.state().await;
     let now = crate::alerts::unix_now();
@@ -273,8 +232,6 @@ pub async fn act(state: &AppState) {
         return;
     }
 
-    // Recorded before the update is queued: a leader that dies in between
-    // leaves a Queued record, which `settle` fails rather than retries.
     for instance in &to_apply {
         let digest = cluster_state.auto_updates[instance].digest.clone();
         submit(
@@ -299,7 +256,6 @@ pub async fn act(state: &AppState) {
     let _ = crate::routes::updates::apply_selection(state, selection).await;
 }
 
-/// The leader's loop. Cheap when nothing is due.
 pub fn spawn(state: AppState) {
     let mut shutdown = state.shutdown.subscribe();
     tokio::spawn(async move {
@@ -333,7 +289,6 @@ async fn check_is_due(state: &AppState) -> bool {
     due_check(last, crate::alerts::unix_now(), interval)
 }
 
-/// Whether a registry check is due: never run, or older than `interval`.
 pub fn due_check(last_checked_at: i64, now: i64, interval: Duration) -> bool {
     last_checked_at == 0 || now - last_checked_at >= interval.as_secs() as i64
 }
@@ -388,13 +343,10 @@ mod tests {
         let apply = auto(AutoUpdateMode::Apply, 3600);
         let first = detect(apply, &seen("sha256:a"), None).unwrap();
         assert_eq!(first, ("sha256:a".into(), AutoUpdateOutcome::Waiting));
-        // Seen again by the next check: unchanged, so the countdown stands.
         let rec = record("sha256:a", AutoUpdateOutcome::Waiting, 100);
         assert!(detect(apply, &seen("sha256:a"), Some(&rec)).is_none());
-        // A newer digest restarts it.
         let newer = detect(apply, &seen("sha256:b"), Some(&rec)).unwrap();
         assert_eq!(newer.0, "sha256:b");
-        // A failed digest is not retried by detection either.
         let failed = record("sha256:a", AutoUpdateOutcome::Failed, 100);
         assert!(detect(apply, &seen("sha256:a"), Some(&failed)).is_none());
     }
@@ -407,7 +359,6 @@ mod tests {
         let rec = record("sha256:a", AutoUpdateOutcome::Notified, 1);
         assert!(detect(notify, &seen("sha256:a"), Some(&rec)).is_none());
         assert!(detect(notify, &seen("sha256:b"), Some(&rec)).is_some());
-        // Waiting under apply, then switched to notify: notified.
         let waiting = record("sha256:a", AutoUpdateOutcome::Waiting, 1);
         assert!(detect(notify, &seen("sha256:a"), Some(&waiting)).is_some());
     }
@@ -419,7 +370,6 @@ mod tests {
         let none = Blockers::default();
         assert!(!due(a, &rec, Some("sha256:a"), none, 1000 + 3599));
         assert!(due(a, &rec, Some("sha256:a"), none, 1000 + 3600));
-        // Zero delay applies at once.
         assert!(due(
             auto(AutoUpdateMode::Apply, 0),
             &rec,
@@ -451,10 +401,8 @@ mod tests {
         ] {
             assert!(!due(a, &rec, Some("sha256:a"), b, 10), "{b:?}");
         }
-        // The cache moved on to a newer digest: the record is stale.
         assert!(!due(a, &rec, Some("sha256:b"), ok, 10));
         assert!(!due(a, &rec, None, ok, 10));
-        // Notify and off never apply.
         assert!(!due(
             auto(AutoUpdateMode::Notify, 0),
             &rec,
@@ -469,7 +417,6 @@ mod tests {
             ok,
             10
         ));
-        // Already tried: failed, queued, updated never go again.
         for outcome in [
             AutoUpdateOutcome::Failed,
             AutoUpdateOutcome::Queued,
@@ -478,7 +425,6 @@ mod tests {
             let done = record("sha256:a", outcome, 0);
             assert!(!due(a, &done, Some("sha256:a"), ok, 10), "{outcome:?}");
         }
-        // A notified record is applied once the mode says apply.
         let notified = record("sha256:a", AutoUpdateOutcome::Notified, 0);
         assert!(due(a, &notified, Some("sha256:a"), ok, 10));
     }
@@ -507,17 +453,14 @@ mod tests {
             settle(&rec, Some(&failed), 130),
             Some((AutoUpdateOutcome::Failed, Some("pull failed".into())))
         );
-        // Still going.
         assert_eq!(
             settle(&rec, Some(&entry(UpdatePhase::Pulling, 120, None)), 130),
             None
         );
-        // An older update's entry is not ours.
         assert_eq!(
             settle(&rec, Some(&entry(UpdatePhase::Started, 50, None)), 130),
             None
         );
-        // Collateral of another instance's failure goes back to waiting.
         let cancelled = entry(
             UpdatePhase::Failed,
             120,
@@ -527,12 +470,10 @@ mod tests {
             settle(&rec, Some(&cancelled), 130),
             Some((AutoUpdateOutcome::Waiting, None))
         );
-        // Never started.
         assert_eq!(settle(&rec, None, 100 + NEVER_STARTED_SECS), None);
         let (outcome, error) = settle(&rec, None, 101 + NEVER_STARTED_SECS).unwrap();
         assert_eq!(outcome, AutoUpdateOutcome::Failed);
         assert!(error.unwrap().contains("never started"));
-        // Only queued records settle.
         let waiting = record("sha256:a", AutoUpdateOutcome::Waiting, 0);
         assert_eq!(settle(&waiting, Some(&started), 130), None);
     }

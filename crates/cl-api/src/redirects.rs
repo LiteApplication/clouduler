@@ -1,36 +1,24 @@
-//! UI-managed proxy redirects: rules that answer a host with a `Location`
-//! instead of proxying to a backend. Deliberately not part of `cluster.yaml`
-//! — these are expected to change often enough that hand-editing the config
-//! file for each one would be annoying, so they live in replicated state
-//! under a reserved config name instead, the same way [`crate::auth::keys`]
-//! stores api keys.
+//! UI-managed proxy redirects: rules answering a host with a `Location` instead of proxying. Not in `cluster.yaml`:
+//! they change often, so they live in replicated state under a reserved config name, as [`crate::auth::keys`] does api keys.
 
 use serde::{Deserialize, Serialize};
 
 use cl_raft::ClusterState;
 
-/// Reserved config name holding the redirect list. Never exposed as a
-/// regular config: routes that list or serve user configs must filter it out.
+/// Never exposed as a regular config: routes that list or serve user configs must filter it out.
 pub const REDIRECTS_CONFIG: &str = "_clouduler_redirects";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedirectRule {
     pub id: String,
-    /// Bare label gets the network's domain appended, same as a stack route.
     pub host: String,
-    /// Network the hostname is qualified against and gated by.
     pub network: String,
     #[serde(default)]
     pub path_prefix: Option<String>,
-    /// Destination URL, e.g. `https://new.example.com`.
     pub target: String,
-    /// Append the request's original path and query to `target`.
     #[serde(default)]
     pub preserve_path: bool,
-    /// 301, 302, 307 or 308.
     pub status: u16,
-    /// Publish this hostname's DNS records through Cloudflare's proxy. Public
-    /// networks only; see `cloudflare_proxied_hosts` in the daemon.
     #[serde(default)]
     pub cloudflare_proxy: bool,
 }
@@ -41,8 +29,6 @@ impl RedirectRule {
     }
 }
 
-/// A short random id for a new rule, in the same spirit as api key ids: not a
-/// secret, just unique enough to reference and delete one entry.
 pub fn new_id() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut buf = [0u8; 12];
@@ -58,7 +44,6 @@ pub struct RedirectStore {
 }
 
 impl RedirectStore {
-    /// Read the store out of applied cluster state. Empty if none exist yet.
     pub fn load(state: &ClusterState) -> Self {
         let Some(entry) = state.configs.get(REDIRECTS_CONFIG) else {
             return Self::default();
@@ -69,7 +54,6 @@ impl RedirectStore {
         serde_json::from_slice(&raw).unwrap_or_default()
     }
 
-    /// Base64 content ready to submit via `Request::PutConfig`.
     pub fn encode(&self) -> String {
         crate::encode_json_config(self)
     }

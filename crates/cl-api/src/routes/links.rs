@@ -1,23 +1,16 @@
 //! `/api/nodes/connectivity`: who can reach whom.
 //!
-//! Every node probes its peers itself and reports what *it* sees, so a break
-//! that only goes one way (A reaches B, B does not reach A) shows up as two
-//! different reports instead of being averaged away by the leader's single
-//! replicated `unreachable` list. The aggregate asks every node for its own
-//! report over the signed node-to-node channel (see `internal_peer`); a node
-//! that cannot be asked is itself reported as having no report.
+//! Every node probes its peers and reports what *it* sees, so a one-way break shows as two different
+//! reports instead of being averaged away. The aggregate asks every node over the signed channel
+//! (`internal_peer`); a node that cannot be asked is reported as having no report.
 //!
-//! The raft half of a link is a real authenticated raft `Ping` (cluster-key
-//! handshake, one framed request, one framed reply), the exact exchange
-//! heartbeats use, not a bare TCP connect: a peer whose listener still accepts
-//! sockets while its raft path is wedged must read as down. The api half is a
-//! TCP connect to the peer's web port. Both are on the internal network. The
-//! vxlan overlay and drive-sync links are not probed separately.
+//! The raft half is a real authenticated raft `Ping` (the exchange heartbeats use), not a bare TCP
+//! connect: a peer whose listener accepts sockets while its raft path is wedged must read as down. The
+//! api half is a TCP connect to the web port. The vxlan overlay and drive-sync links are not probed.
 //!
-//! A reply to `Ping` proves the network and the listener, not the disk, yet a
-//! raft follower has to fsync every append before it can answer the leader. So
-//! each node also reports how long a small durable write takes on its own data
-//! dir (`disk_ms`); a node with a stalled disk is reachable but cannot follow.
+//! A `Ping` reply proves the network and listener, not the disk, yet a follower must fsync every
+//! append, so each node also reports a small durable write time (`disk_ms`); a stalled disk is
+//! reachable but cannot follow.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -38,12 +31,9 @@ use crate::error::ApiError;
 use crate::internal_peer;
 use crate::server::AppState;
 
-/// Longer than a healthy lan connect, short enough that a whole probe round
-/// stays well inside the 5s `internal_peer` fetch timeout.
+/// Short enough that a probe round stays inside the 5s `internal_peer` fetch timeout.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Upper bound on the durable write probe. A disk this slow is already
-/// reported as such; waiting longer would only stall the whole report.
 const DISK_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
 const INTERNAL_LINKS_PATH: &str = "/api/nodes/internal/links";
@@ -54,38 +44,27 @@ pub fn router() -> Router<AppState> {
         .route(INTERNAL_LINKS_PATH, get(internal_links))
 }
 
-/// What one node sees of one peer.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PeerLink {
     pub peer: String,
-    /// A tcp connect to the peer's raft rpc address succeeded.
     pub raft: bool,
-    /// A tcp connect to the peer's web/api port succeeded.
     pub api: bool,
-    /// Round trip of the raft connect, when it succeeded.
     pub raft_ms: Option<u64>,
 }
 
-/// One node's own view of every peer.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NodeLinks {
     pub node: String,
     pub links: Vec<PeerLink>,
-    /// Milliseconds a small write plus `fsync` took in this node's data dir;
-    /// None when the probe failed or timed out.
     #[serde(default)]
     pub disk_ms: Option<u64>,
 }
 
-/// One node in the aggregate: `reported` is false when the node could not be
-/// asked, in which case `links` is empty and says nothing about its peers.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct NodeReport {
     pub node: String,
     pub reported: bool,
     pub links: Vec<PeerLink>,
-    /// See [`NodeLinks::disk_ms`]. None when the node did not report or the
-    /// probe failed.
     pub disk_ms: Option<u64>,
 }
 
@@ -94,8 +73,7 @@ pub struct Connectivity {
     pub reports: Vec<NodeReport>,
 }
 
-/// A raft `Ping` over a fresh authenticated connection, timed end to end, so
-/// the figure includes the handshake a reconnecting heartbeat would pay.
+/// Timed end to end, so it includes the handshake a reconnecting heartbeat would pay.
 async fn probe_raft(addr: SocketAddr, keys: &KeyWatch) -> Option<u64> {
     let peer = Peer::connect(&addr.to_string(), keys.clone());
     let start = Instant::now();
@@ -105,7 +83,6 @@ async fn probe_raft(addr: SocketAddr, keys: &KeyWatch) -> Option<u64> {
     }
 }
 
-/// Time one durable write in `dir`, the cost every raft append pays.
 async fn probe_disk(dir: &std::path::Path) -> Option<u64> {
     let path = dir.join(".disk-probe");
     let work = tokio::task::spawn_blocking(move || {
@@ -132,7 +109,6 @@ async fn probe(addr: SocketAddr) -> Option<u64> {
     }
 }
 
-/// Probe every other configured node from here.
 pub(crate) async fn local_links(
     self_name: &str,
     cfg: &ClusterConfig,
@@ -173,7 +149,6 @@ pub(crate) async fn local_links(
                 }
             }
         });
-    // Per node opt-out: a disk that should not be touched reports no figure.
     let disk_enabled = cfg.nodes.get(self_name).is_none_or(|n| n.disk_probe);
     let disk = async {
         if disk_enabled {
@@ -190,7 +165,6 @@ pub(crate) async fn local_links(
     }
 }
 
-/// The body of `connectivity`, callable in-process.
 pub(crate) async fn collect(state: &AppState) -> Connectivity {
     let cfg = state.cluster_config.read().await.clone();
     let unreachable = state.cluster.state().await.unreachable;
@@ -202,7 +176,6 @@ pub(crate) async fn collect(state: &AppState) -> Connectivity {
             let report = if *name == state.node_name {
                 Some(local_links(name, cfg, &state.key_tx.subscribe(), &state.data_dir).await)
             } else if unreachable.contains(name) {
-                // Already known down: do not pay the fetch timeout on every poll.
                 None
             } else {
                 match internal_peer::fetch_json::<NodeLinks>(state, name, INTERNAL_LINKS_PATH).await
@@ -234,7 +207,6 @@ async fn connectivity(
     Ok(Json(collect(&state).await))
 }
 
-/// Node-to-node: always this node's own view.
 async fn internal_links(_auth: InternalAuth, State(state): State<AppState>) -> Json<NodeLinks> {
     let cfg = state.cluster_config.read().await.clone();
     Json(
@@ -277,7 +249,6 @@ mod tests {
         });
         let keys = cl_raft::throwaway_key();
         assert_eq!(probe_raft(addr, &keys).await, None);
-        // The old bare connect would have called this link healthy.
         assert!(probe(addr).await.is_some());
     }
 }

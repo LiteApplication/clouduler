@@ -1,10 +1,8 @@
-//! `/api/self-update/*`: release settings, run control, and the node-to-node
-//! internal route that triggers a restart.
+//! `/api/self-update/*`: release settings, run control, and the node-to-node route that triggers a restart.
 //!
-//! The GitHub token is optional and write-only, like the Cloudflare token
-//! (`routes::cloudflare::set_token` is the template): it's only needed for a
-//! private repo or to avoid GitHub's low unauthenticated rate limit. The
-//! release url is write-once like the Cloudflare token too.
+//! The GitHub token is optional and write-only, and the release url write-once, like the Cloudflare
+//! token (`routes::cloudflare::set_token`). The token is only needed for a private repo or to avoid
+//! GitHub's low unauthenticated rate limit.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -22,8 +20,6 @@ use crate::auth::{Identity, RequireAdmin};
 use crate::error::ApiError;
 use crate::server::AppState;
 
-/// Config names this feature owns and never shows through the generic
-/// config/secret listing routes, mirroring `auth::keys::API_KEYS_CONFIG`.
 pub fn is_reserved_config(name: &str) -> bool {
     name == RUN_CONFIG || name == cl_update::plan::CHECK_CONFIG
 }
@@ -48,8 +44,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Serialize)]
 struct GithubTokenStatus {
-    /// True once a token is stored, which is what the ui keys the "you cannot
-    /// see or change this here" state off.
+    /// True once a token is stored; the ui keys its "cannot see or change this here" state off it.
     configured: bool,
 }
 
@@ -68,7 +63,6 @@ struct SetGithubTokenRequest {
     token: String,
 }
 
-/// Seals and stores the token, replacing whatever was there before.
 async fn set_github_token(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -109,8 +103,7 @@ struct SetRepoRequest {
     release_url: String,
 }
 
-/// Write-once, exactly like `cloudflare::set_token`: further changes go
-/// through the config file by hand, not back through this route.
+/// Write-once, like `cloudflare::set_token`: later changes go through the config file.
 async fn set_repo(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -139,12 +132,10 @@ async fn set_repo(
 #[derive(Deserialize)]
 struct SetCheckRequest {
     enabled: bool,
-    /// A humantime duration such as `24h`; unchanged when absent.
     #[serde(default)]
     interval: Option<String>,
 }
 
-/// Unlike the release url, the periodic check is freely editable.
 async fn set_check(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -235,9 +226,7 @@ async fn cancel_run(
     Ok(StatusCode::OK)
 }
 
-/// Stores `run` if the object is still at `revision`; the orchestrator and
-/// workers write it too, and a stale copy must not clobber theirs. A lost
-/// race is a 409 the caller can simply retry.
+/// Stores `run` if the object is still at `revision`: the orchestrator and workers write it too. A lost race is a retryable 409.
 async fn submit_run(state: &AppState, run: &UpdateRunState, revision: u64) -> Result<(), ApiError> {
     let request = cl_update::orchestrator::put_run_request(run, revision)
         .map_err(|e| ApiError::internal(std::io::Error::other(e)))?;
@@ -259,16 +248,13 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Swap in the artifact this node already downloaded and trigger the same
-/// clean shutdown `SIGINT` drives. The unit's `Restart=always` brings the
-/// process back up running the new binary.
+/// Swaps in the downloaded artifact and triggers the clean shutdown `SIGINT` drives; the unit's `Restart=always` relaunches the new binary.
 async fn internal_restart(
     _auth: InternalAuth,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
     let current_exe = std::env::current_exe().map_err(ApiError::internal)?;
     let artifact = state.self_update_artifact_path.clone();
-    // A binary that cannot run would never reach the code that rolls it back.
     let staged = artifact.clone();
     tokio::task::spawn_blocking(move || {
         use std::os::unix::fs::PermissionsExt;
@@ -280,13 +266,10 @@ async fn internal_restart(
     .map_err(ApiError::internal)?
     .map_err(ApiError::Conflict)?;
     cl_update::install::install_binary(&artifact, &current_exe).map_err(ApiError::internal)?;
-    // The new binary is on probation until it has rejoined the cluster.
     if let Some(dir) = artifact.parent() {
         cl_update::rollback::arm(dir, &current_exe, now()).map_err(ApiError::internal)?;
     }
-    // Shut down only after the response has had time to leave: when the
-    // leader restarts itself, the caller is this same process, and exiting
-    // first would turn a successful restart into a failed request.
+    // Shut down only after the response has left: when the leader restarts itself the caller is this process.
     let shutdown = state.shutdown.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -295,21 +278,15 @@ async fn internal_restart(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// How long a resolved release is reused. GitHub allows 60 unauthenticated
-/// requests an hour, and the settings page polls.
+/// GitHub allows 60 unauthenticated requests an hour and the settings page polls.
 const LATEST_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Clone, Serialize)]
 struct SelfUpdateLatest {
-    /// The release tag the configured source resolves to right now.
     tag: String,
-    /// Architectures the release published a binary for.
     architectures: Vec<String>,
-    /// The configured `release_url`.
     source: String,
-    /// Version of the daemon answering, for comparison with `tag`.
     running_version: String,
-    /// Unix seconds this answer was fetched from GitHub.
     fetched_at: i64,
 }
 
@@ -320,8 +297,6 @@ fn latest_cache() -> &'static LatestCache {
     CACHE.get_or_init(Default::default)
 }
 
-/// What the configured release source points at now, for "running vs
-/// available". Cached for five minutes per source.
 async fn latest(
     _identity: Identity,
     State(state): State<AppState>,
@@ -354,7 +329,6 @@ async fn latest(
     Ok(Json(answer))
 }
 
-/// The stored GitHub token, when there is one this node can open.
 async fn unseal_github_token(state: &AppState) -> Option<String> {
     let cluster_state = state.cluster.state().await;
     let entry = cluster_state.secrets.get(GITHUB_TOKEN_SECRET)?;

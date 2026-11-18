@@ -1,12 +1,8 @@
 //! Turns a failed move into something an operator can act on.
 //!
-//! Raft records only `Failed { reason }`, the `Display` text of the
-//! `DriveError` that stopped the driver. This module parses that text back
-//! into a structured problem (what went wrong, which files differ, who else
-//! uses the volume) and proposes the actions that make sense for it in the
-//! current cluster state. Records already in the log are plain strings, so
-//! the parsing is deliberately tolerant: anything it does not recognise
-//! becomes `Other` with the raw text intact.
+//! Raft records only `Failed { reason }`, the `Display` text of the `DriveError`. This parses it back
+//! into a structured problem and proposes fitting actions for the current cluster state. Records
+//! already in the log are plain strings, so parsing is tolerant: anything unrecognised becomes `Other` with the raw text.
 
 use std::collections::BTreeSet;
 
@@ -14,21 +10,15 @@ use cl_raft::state::{Migration, MigrationPhase};
 use cl_raft::{ClusterState, DesiredState, InstanceId};
 use serde::{Deserialize, Serialize};
 
-/// Most paths returned per list; the total is reported separately.
 const MAX_FILES: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemKind {
-    /// The target's copy differed from the source after the sync.
     VerifyMismatch,
-    /// The sync refused to run because it would have wiped data.
     SyncRefused,
-    /// The copy itself failed (network, protocol, missing volume, io).
     SyncFailed,
-    /// The container on the source would not stop.
     StopFailed,
-    /// The container would not start on the target, after the switch.
     StartFailed,
     Other,
 }
@@ -37,14 +27,12 @@ pub enum ProblemKind {
 pub struct CoWriter {
     pub instance: String,
     pub node: String,
-    /// The cluster wants it running (it is not stopped or mid-move).
     pub running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProblemAction {
-    /// `retry`, `dismiss`, `restart`, `move_elsewhere`, `view_logs` or
-    /// `view_volume`. The last three are navigation the ui performs itself.
+    /// The last three are navigation the ui performs itself.
     pub id: String,
     pub label: String,
     pub description: String,
@@ -67,7 +55,6 @@ pub struct MigrationProblem {
     pub changed: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<String>,
-    /// Differing paths across all three lists before the cap.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub files_total: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -82,7 +69,6 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// What the failure text says, before the cluster state is consulted.
 #[derive(Debug, Clone, PartialEq)]
 enum Parsed {
     Verify {
@@ -118,8 +104,7 @@ fn parse(reason: &str) -> Parsed {
         };
     }
     if let Some(rest) = reason.strip_prefix("transfer failed: ") {
-        // The docker control wraps these as "stopping <id>: ..." /
-        // "starting <id>: ...".
+        // The docker control wraps these as "stopping <id>: ..." / "starting <id>: ...".
         if rest.starts_with("stopping ") {
             return Parsed::Stop;
         }
@@ -160,7 +145,6 @@ fn parse_verify(rest: &str) -> Parsed {
     }
 }
 
-/// Reads the `{:?}` rendering of several `Vec<String>`s in order.
 struct Lists<'a> {
     s: &'a str,
 }
@@ -195,7 +179,6 @@ impl<'a> Lists<'a> {
     }
 }
 
-/// Parses one `{:?}` string literal off the front of `s`.
 fn debug_string(s: &str) -> Option<(String, &str)> {
     let mut chars = s.strip_prefix('"')?.char_indices();
     let body = &s[1..];
@@ -233,7 +216,6 @@ fn debug_string(s: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Instances other than `instance` whose service mounts any of `volumes`.
 fn co_writers(
     state: &ClusterState,
     instance: &InstanceId,
@@ -267,7 +249,6 @@ fn co_writers(
     out
 }
 
-/// Volumes `instance`'s service mounts, as `drive/volume`.
 fn volumes_mounted(state: &ClusterState, instance: &InstanceId) -> BTreeSet<String> {
     state
         .stacks
@@ -311,7 +292,6 @@ fn action(
     }
 }
 
-/// The problem for `instance`'s failed move, or `None` when it has none.
 pub fn classify(state: &ClusterState, instance: &InstanceId) -> Option<MigrationProblem> {
     let assignment = state.assignments.get(instance)?;
     let migration = assignment.migration.as_ref()?;
@@ -335,12 +315,10 @@ fn classify_failed(
     reason: &str,
 ) -> MigrationProblem {
     let (from, to) = (migration.from.as_str(), migration.to.as_str());
-    // `Switching` repoints the assignment, so this is where the container is.
     let switched = assigned_node == to;
     let name = short(&instance.to_string(), &instance.stack);
     let parsed = if switched {
-        // Past the point of no return the only thing left to fail is the
-        // start; whatever the text says, it is about the target.
+        // Past the point of no return only the start can fail, so whatever the text says it is about the target.
         Parsed::Start
     } else {
         parse(reason)
@@ -582,7 +560,6 @@ fn classify_failed(
     p
 }
 
-/// One line for lists, the cli and the MCP report.
 pub fn one_line(p: &MigrationProblem) -> String {
     let running: Vec<&str> = p
         .co_writers
@@ -601,7 +578,6 @@ pub fn one_line(p: &MigrationProblem) -> String {
     }
 }
 
-/// The same line straight from raft state, for callers without a summary.
 pub fn one_line_for(state: &ClusterState, instance: &InstanceId) -> Option<String> {
     classify(state, instance).map(|p| one_line(&p))
 }

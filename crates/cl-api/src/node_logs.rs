@@ -1,9 +1,5 @@
-//! This daemon's own log lines, kept in memory so the ui can show them.
-//!
-//! `LogRingLayer` is a `tracing_subscriber` layer the binary adds next to its
-//! normal output. It keeps the last `CAPACITY` events and broadcasts each new
-//! one to anyone following. Only this process's lines: another node's are
-//! fetched from that node (see `routes::nodes`).
+//! This daemon's own log lines, kept in memory for the ui. `LogRingLayer` (a `tracing_subscriber` layer) keeps the last
+//! `CAPACITY` events and broadcasts new ones; another node's lines are fetched from that node (`routes::nodes`).
 
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -19,24 +15,18 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 pub const CAPACITY: usize = 2000;
-/// How far a slow follower may fall behind before it skips lines.
 const BROADCAST_BACKLOG: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogLine {
-    /// Counts up from 0 for this process, so a client can tell it missed lines.
     pub seq: u64,
-    /// Unix milliseconds.
     pub timestamp: i64,
-    /// `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE`.
     pub level: String,
     pub target: String,
-    /// The message, followed by `key=value` for any other fields.
     pub message: String,
 }
 
 impl LogLine {
-    /// One line of plain text, the way a terminal would show it.
     pub fn render(&self) -> String {
         format!("{} {:>5} {}", self.timestamp, self.level, self.message)
     }
@@ -79,20 +69,16 @@ impl LogRing {
             inner.lines.pop_front();
         }
         inner.lines.push_back(line.clone());
-        // Sent under the lock so a subscriber (which also takes it) sees each
-        // line exactly once, either in its backlog or on the receiver.
+        // Sent under the lock so a subscriber (which also takes it) sees each line exactly once.
         let _ = self.tx.send(line);
     }
 
-    /// The last `n` lines, oldest first.
     pub fn tail(&self, n: usize) -> Vec<LogLine> {
         let inner = self.inner.lock();
         let skip = inner.lines.len().saturating_sub(n);
         inner.lines.iter().skip(skip).cloned().collect()
     }
 
-    /// The last `n` lines plus a receiver for every line after them, with
-    /// nothing missed or repeated between the two.
     pub fn follow(&self, n: usize) -> (Vec<LogLine>, broadcast::Receiver<LogLine>) {
         let inner = self.inner.lock();
         let skip = inner.lines.len().saturating_sub(n);
@@ -103,12 +89,10 @@ impl LogRing {
 
 static RING: OnceLock<LogRing> = OnceLock::new();
 
-/// The process-wide ring `LogRingLayer` feeds.
 pub fn ring() -> &'static LogRing {
     RING.get_or_init(LogRing::default)
 }
 
-/// Feeds every event the subscriber's filter lets through into `ring()`.
 #[derive(Default, Clone, Copy)]
 pub struct LogRingLayer;
 

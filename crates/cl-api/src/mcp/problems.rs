@@ -1,11 +1,8 @@
 //! What is wrong with the cluster right now, as data.
 //!
-//! The same classification `clouduler stack unhealthy` and `clouduler status`
-//! print (see `cl-cli/src/health.rs` and `status.rs`), re-expressed over the
-//! replicated `ClusterState` plus the live instance summaries the api already
-//! builds, so an AI client gets "what is broken" in one call instead of
-//! reading the whole cluster. Printing stays with the callers: this returns
-//! [`Problem`]s and lets the tool decide how much to show for a focused stack.
+//! The classification `clouduler stack unhealthy` and `clouduler status` print (`cl-cli/src/health.rs`, `status.rs`),
+//! over the replicated `ClusterState` plus live instance summaries, so an AI gets "what is broken" in one call.
+//! Callers decide how much to show.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,17 +13,13 @@ use cl_raft::DesiredState;
 
 use crate::routes::instances::InstanceSummary;
 
-/// Updates not finished after this long are reported as stuck.
 const STUCK_UPDATE_SECS: i64 = 15 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Problem {
-    /// The stack the problem belongs to, or `None` for a fault that belongs to
-    /// the cluster as a whole (a node, a volume, a certificate, a backup).
+    /// `None` for a cluster-wide fault (node, volume, certificate, backup).
     pub stack: Option<String>,
-    /// Instance id, node name or object the problem is about.
     pub subject: String,
-    /// Short machine-friendly category, e.g. `crash_loop`.
     pub kind: &'static str,
     pub detail: String,
 }
@@ -44,7 +37,6 @@ pub(crate) fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Every problem the cluster currently has.
 pub(crate) fn classify(
     state: &ClusterState,
     summaries: &[InstanceSummary],
@@ -63,8 +55,7 @@ fn stack_of(id: &str) -> Option<String> {
     id.parse::<cl_raft::InstanceId>().ok().map(|i| i.stack)
 }
 
-/// Explains a state relative to the desired one, so a deliberate stop is told
-/// apart from a crash (both read `exited`).
+/// Tells a deliberate stop apart from a crash (both read `exited`).
 fn describe_state(desired: &str, state: &str) -> Option<(&'static str, String)> {
     let desired = match desired {
         "stopped" => DesiredState::Stopped,
@@ -94,8 +85,6 @@ fn describe_state(desired: &str, state: &str) -> Option<(&'static str, String)> 
     }
 }
 
-/// A container not running the image the cluster pinned for it: a pin was
-/// recorded and the container was never rebuilt onto it.
 fn describe_pin_drift(summary: &InstanceSummary) -> Option<String> {
     let pinned = summary.image_digest.as_deref()?;
     let running = summary.running_digest.as_deref()?;
@@ -203,7 +192,6 @@ fn instance_problems(state: &ClusterState, s: &InstanceSummary) -> Vec<Problem> 
     out
 }
 
-/// Failed updates, and ones that have stopped making progress.
 fn update_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
     let mut out = Vec::new();
     for (instance, update) in &state.instance_updates {
@@ -237,7 +225,6 @@ fn update_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
     out
 }
 
-/// Faults that belong to no single stack.
 fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
     let mut out = Vec::new();
     let mut add = |kind: &'static str, subject: String, detail: String| {
@@ -358,7 +345,6 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
             );
         }
         for (node, generation) in &volume.replicas {
-            // A draining node is on its way out: it is not expected to keep up.
             let draining = state
                 .nodes
                 .get(node)
@@ -437,8 +423,6 @@ fn cluster_problems(state: &ClusterState, now: i64) -> Vec<Problem> {
     out
 }
 
-/// Splits problems into those for `focus` (or all, when nothing is focused),
-/// the cluster-wide ones, and a count for everything else.
 pub(crate) struct Scoped<'a> {
     pub shown: Vec<&'a Problem>,
     pub cluster: Vec<&'a Problem>,
@@ -462,7 +446,6 @@ pub(crate) fn scope<'a>(problems: &'a [Problem], focus: Option<&str>) -> Scoped<
     scoped
 }
 
-/// The text a tool shows for a scoped set of problems.
 pub(crate) fn render(problems: &[Problem], focus: Option<&str>) -> String {
     let scoped = scope(problems, focus);
     let mut out = String::new();

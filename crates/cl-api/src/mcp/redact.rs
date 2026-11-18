@@ -1,17 +1,11 @@
-//! Removes every cluster secret's plaintext from text that will be shown to
-//! an AI client.
+//! Removes every cluster secret's plaintext from text shown to an AI client.
 //!
-//! The AI sees container logs, stack files, config and the like, any of which
-//! can echo a secret: raw, inside an HTTP basic-auth header (base64 of
-//! `user:secret`), in a URL (percent-encoded), in a JSON log line (escaped).
-//! So for each secret we match not just the value but its common encodings,
-//! including encodings of the value embedded at any alignment inside a larger
-//! blob.
+//! Logs, stack files and config can echo a secret raw, in a basic-auth header (base64 of
+//! `user:secret`), percent-encoded in a URL or escaped in JSON, so each secret is matched in its common
+//! encodings, including encodings embedded at any alignment inside a larger blob.
 //!
-//! Nothing here is ever allowed to print a value: `Debug` shows names and
-//! counts only. The automaton itself necessarily contains the needles (which
-//! are secret-equivalent) and cannot be zeroized; it lives only in memory and
-//! is dropped with the `Redactor`.
+//! Nothing here may print a value: `Debug` shows names and counts only. The automaton contains the
+//! needles (secret-equivalent) and cannot be zeroized; it lives only in memory until the `Redactor` drops.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -23,8 +17,7 @@ use cl_raft::ClusterState;
 use cl_secret::{ClusterKey, Sealed};
 use zeroize::Zeroizing;
 
-/// Needles shorter than this would match all over ordinary text and wreck the
-/// output, so a secret that short cannot be redacted (and is reported).
+/// Shorter needles would match ordinary text and wreck the output; such a secret cannot be redacted (and is reported).
 const MIN_NEEDLE_LEN: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,12 +28,9 @@ pub enum RedactError {
 
 pub struct Redactor {
     matcher: Option<AhoCorasick>,
-    /// Pattern index -> secret name, parallel to the matcher's patterns.
     names: Vec<String>,
-    /// Secrets that could not be decrypted (wrong key, corrupt). Their values
-    /// may leak, so callers should warn.
+    /// Their values may leak, so callers should warn.
     pub unredactable: Vec<String>,
-    /// Secrets too short to be matched safely.
     pub too_short: Vec<String>,
 }
 
@@ -55,8 +45,7 @@ impl fmt::Debug for Redactor {
 }
 
 impl Redactor {
-    /// Decrypt every secret, internal ones included: an AI must not see the
-    /// cluster's own credentials any more than a user's.
+    /// Internal secrets included: an AI must not see the cluster's own credentials either.
     pub fn from_state(state: &ClusterState, key: &ClusterKey) -> Result<Redactor, RedactError> {
         let fingerprint = key.fingerprint();
         let mut plaintexts = Vec::new();
@@ -76,7 +65,6 @@ impl Redactor {
         Ok(redactor)
     }
 
-    /// Redacts nothing: for tools that echo no secret-bearing output.
     pub fn empty() -> Redactor {
         Redactor {
             matcher: None,
@@ -105,7 +93,6 @@ impl Redactor {
                 too_short.push(name.clone());
             }
             for needle in needles_for(value) {
-                // Same bytes under two secrets: the first name wins.
                 if !seen.insert(needle.to_vec()) {
                     continue;
                 }
@@ -113,7 +100,6 @@ impl Redactor {
                 patterns.push(needle);
             }
         }
-        // The set holds secret-equivalent copies; scrub them too.
         for mut k in seen {
             zeroize::Zeroize::zeroize(&mut k);
         }
@@ -162,9 +148,7 @@ fn trim_ws(v: &[u8]) -> &[u8] {
     v.trim_ascii()
 }
 
-/// Every form of the value we want to catch. Candidates are the raw value, its
-/// trimmed form and each non-empty trimmed line (a multi-line secret such as a
-/// key file is often logged one line at a time).
+/// Candidates: the raw value, its trimmed form and each non-empty trimmed line (a multi-line key file is often logged line by line).
 fn needles_for(value: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
     let mut candidates: Vec<&[u8]> = vec![value, trim_ws(value)];
     for line in value.split(|b| *b == b'\n') {
@@ -208,14 +192,11 @@ fn needles_for(value: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
     out
 }
 
-/// The part of `base64(prefix + value + suffix)` that depends only on `value`,
-/// when `prefix.len() % 3 == offset`.
+/// The part of `base64(prefix + value + suffix)` that depends only on `value`, when `prefix.len() % 3 == offset`.
 ///
-/// Base64 maps 3 bytes to 4 chars, so where the value starts within a group
-/// decides which chars it produces. Chars whose 6 bits include a byte of the
-/// unknown prefix or suffix are dropped: we keep chars `ceil(8*o/6) ..
-/// floor(8*(o+n)/6)`. Padding is irrelevant: `=` only follows the partial
-/// last char we already excluded, so unpadded needles also match padded text.
+/// Base64 maps 3 bytes to 4 chars, so where the value starts in a group decides its chars. Chars whose
+/// 6 bits include an unknown prefix/suffix byte are dropped, keeping `ceil(8*o/6) .. floor(8*(o+n)/6)`.
+/// Padding is irrelevant: `=` only follows the partial last char already excluded.
 fn base64_middle(value: &[u8], offset: usize, url: bool) -> Option<Vec<u8>> {
     let mut buf = Zeroizing::new(vec![0u8; offset]);
     buf.extend_from_slice(value);
@@ -246,8 +227,7 @@ fn hex(v: &[u8], upper: bool) -> String {
     s
 }
 
-/// RFC 3986 percent-encoding, unreserved characters kept. Uppercase hex, the
-/// form RFC 3986 recommends and most encoders emit.
+/// RFC 3986 percent-encoding with uppercase hex, as most encoders emit.
 fn percent(v: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len());
     for &b in v {

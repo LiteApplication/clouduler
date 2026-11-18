@@ -1,11 +1,8 @@
 //! Telling someone the cluster has lost quorum.
 //!
-//! Without quorum nothing can be written to raft, so the leader's engine
-//! cannot say it. Every manager that stays without quorum for a minute sends
-//! one direct critical message, from the settings and secrets in its own
-//! (still readable) copy of the state, once per outage. When quorum is back
-//! the same node records the outage in the feed as resolved; the leader then
-//! sends the "resolved" message to the destinations that heard about it.
+//! Without quorum nothing can be written to raft, so the leader's engine cannot say it. Every manager that stays without quorum
+//! for a minute sends one direct critical message (once per outage) from its own still-readable state. On recovery the same
+//! node records the outage as resolved; the leader then sends "resolved" to the destinations that heard about it.
 
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -175,15 +172,13 @@ impl QuorumReporter {
             count: 1,
             escalated_from: None,
             sent_severity: Some(AlertSeverity::Critical),
-            // The leader sends the resolved message to whoever got this one.
             resolved_sent: false,
             digested: true,
             links: Vec::new(),
             excerpt: Vec::new(),
             deliveries,
         };
-        // Settings in the record's routing were those of the outage; the
-        // leader re-reads the live ones before sending the resolved message.
+        // The record's routing holds the outage-time settings; the leader re-reads live ones before sending resolved.
         if self
             .state
             .cluster

@@ -1,5 +1,3 @@
-//! Cluster-wide read tools.
-
 use std::fmt::Write;
 
 use cl_raft::ClusterState;
@@ -9,7 +7,6 @@ use crate::mcp::problems::{self, Problem};
 use crate::routes::instances::{self, InstanceSummary};
 use crate::routes::{cluster, nodes};
 
-/// The state, every instance's live summary, and the problems they add up to.
 pub(super) async fn gather(ctx: &Ctx) -> (ClusterState, Vec<InstanceSummary>, Vec<Problem>) {
     let state = ctx.state.cluster.state().await;
     let summaries = instances::list_all(&ctx.state).await;

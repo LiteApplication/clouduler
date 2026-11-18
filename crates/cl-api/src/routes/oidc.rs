@@ -1,14 +1,8 @@
 //! `/api/oidc/client-secret`: setting the OIDC client secret from the web ui.
 //!
-//! The secret is write-only over the api. It is sealed and stored as a
-//! cluster secret (`cl_api::oidc::OIDC_CLIENT_SECRET`), the same pattern the
-//! Cloudflare token route uses (`crate::routes::cloudflare`); only its
-//! presence is ever reported back, there is no route that returns the value,
-//! so a stolen session cannot read out a secret someone else installed.
-//!
-//! Replicated through raft rather than written to a file on one node, so
-//! every node can open it with the cluster key and login keeps working after
-//! a failover to a different leader.
+//! Write-only: sealed and stored as a cluster secret (`cl_api::oidc::OIDC_CLIENT_SECRET`), like the Cloudflare token
+//! route; only its presence is reported back, so a stolen session cannot read out an installed secret. Replicated
+//! through raft so every node can open it and login survives a leader failover.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -37,8 +31,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Serialize)]
 struct SecretStatus {
-    /// True once a secret is stored, which is what the ui keys the "you
-    /// cannot see or change this here" state off.
+    /// The ui keys its "cannot see or change this here" state off it.
     configured: bool,
 }
 
@@ -46,7 +39,6 @@ async fn secret_status(_identity: Identity, State(state): State<AppState>) -> Js
     status_of(&state, OIDC_CLIENT_SECRET).await
 }
 
-/// Same for the reverse proxy login portal's client (`proxy.auth`).
 async fn proxy_secret_status(
     _identity: Identity,
     State(state): State<AppState>,
@@ -64,14 +56,8 @@ struct SetSecretRequest {
     client_secret: String,
 }
 
-/// Seals and stores the secret, replacing whatever was there before:
-/// rotation is safe now that there is exactly one copy of it, replicated to
-/// every node, rather than a file an operator would otherwise have to update
-/// by hand on each manager.
-///
-/// Settable whether or not `oidc` is currently enabled in the config, so a
-/// secret can be staged ahead of flipping OIDC on rather than forcing that
-/// ordering on the operator.
+/// Replacing is safe rotation: there is exactly one copy, replicated to every node. Settable whether or not `oidc` is
+/// enabled, so a secret can be staged before flipping OIDC on.
 async fn set_secret(
     _admin: RequireAdmin,
     State(state): State<AppState>,

@@ -25,14 +25,10 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Serialize)]
 struct NetworkStatus {
-    /// Only for a container network.
     router: Option<crate::container_router::RouterStatus>,
-    /// Each node's address on the container network's shared segment.
     nodes: std::collections::BTreeMap<String, std::net::Ipv4Addr>,
 }
 
-/// The live side of a container network: where its router is and what it is
-/// doing, and each node's segment address. Empty for any other kind.
 async fn network_status(
     _identity: Identity,
     State(state): State<AppState>,
@@ -76,10 +72,7 @@ async fn put_config(
 
     let previous = state.cluster_config.read().await.clone();
 
-    // Adding or renaming a network changes which network each deployed stack's
-    // overlay sits on, which can make two stacks share one. Only a collision
-    // this edit introduces blocks it, so a cluster that already has one can
-    // still be edited to fix it.
+    // Only a collision this edit introduces blocks it, so a cluster that already has one can be edited to fix it.
     let cluster_state = state.cluster.state().await;
     if let Some((overlay, a, b)) = deployed_overlay_collision(&body.config, &cluster_state) {
         if deployed_overlay_collision(&previous, &cluster_state).is_none() {
@@ -94,8 +87,6 @@ async fn put_config(
     Ok(StatusCode::OK)
 }
 
-/// First pair of deployed stacks that share an overlay network under `cfg`,
-/// see `cl_sched::run::overlay_collision`.
 fn deployed_overlay_collision(
     cfg: &ClusterConfig,
     cluster_state: &cl_raft::ClusterState,
@@ -108,13 +99,9 @@ fn deployed_overlay_collision(
     cl_sched::run::overlay_collision(cfg, files.iter().map(|(n, f)| (*n, f)))
 }
 
-/// Put a config into effect: through raft first, so every node's daemon writes
-/// its own copy, then locally so the node answering this request is current
-/// straight away rather than after its next watcher tick.
-///
-/// Raft goes first on purpose. Without a quorum the edit must not land anywhere,
-/// or this node comes back from a restart with a config the cluster never
-/// agreed to.
+/// Raft first, then locally so this node is current immediately. Raft goes first on purpose:
+/// without a quorum the edit must not land anywhere, or a restart would bring back a config the
+/// cluster never agreed to.
 pub(super) async fn apply_config(state: &AppState, config: &ClusterConfig) -> Result<(), ApiError> {
     let yaml = serde_yaml::to_string(config).map_err(ApiError::internal)?;
 
@@ -150,14 +137,9 @@ struct RenameNetworkRequest {
     new_name: String,
 }
 
-/// Rename a network everywhere it is referenced: the cluster config (the
-/// `networks` key, every node's address map, `web.network`), every deployed
-/// stack that names it, and the three out-of-band stores that hold a plain
-/// `network: String` (redirects, static routes, wireguard ingress).
-///
-/// Not one atomic transaction since each piece is its own raft log entry, but
-/// each step is atomic on its own and a failure partway through is surfaced
-/// immediately rather than silently leaving a mismatched reference.
+/// Rename a network everywhere: the config (`networks` key, address maps, `web.network`), every
+/// stack naming it, and the stores holding a plain `network: String` (redirects, static routes,
+/// wireguard ingress). Not atomic (one raft entry per piece), but a partial failure is surfaced.
 async fn rename_network(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -198,8 +180,6 @@ async fn rename_network(
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    // The rename moves every stack's overlay name too (`<stack>_<network>`),
-    // so refuse it up front if that makes two stacks share one.
     let cluster_state = state.cluster.state().await;
     let renamed: Vec<(&str, StackFile)> = cluster_state
         .stacks
@@ -220,9 +200,7 @@ async fn rename_network(
     }
     apply_config(&state, &config).await?;
 
-    // Each node's imported wireguard config is sealed under a secret name
-    // scoped by network name, so it must move along with the rename or the
-    // tunnel silently stops finding its config.
+    // The sealed wireguard config is keyed by network name, so it must move too.
     if is_wireguard {
         rename_wireguard_secrets(&state, &old_name, &new_name, &node_names).await?;
     }
@@ -259,8 +237,6 @@ async fn rename_network(
     Ok(StatusCode::OK)
 }
 
-/// Every network's `access` list names the networks it may reach; a renamed
-/// network must keep matching.
 fn rename_in_access(config: &mut cl_config::ClusterConfig, old: &str, new: &str) {
     for net in config.networks.values_mut() {
         let Some(access) = net.access.as_mut() else {
@@ -274,10 +250,6 @@ fn rename_in_access(config: &mut cl_config::ClusterConfig, old: &str, new: &str)
     }
 }
 
-/// Renames `old` to `new` everywhere a stack file can name a network: the
-/// top-level `networks` block, each service's `networks:` list, and every
-/// `x-clouduler.proxy`/`expose` entry's `network` field. Returns whether
-/// anything changed, so the caller can skip stacks that never mention it.
 fn rename_network_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
     let mut changed = false;
     if let Some(net) = file.networks.remove(old) {
@@ -315,17 +287,11 @@ struct RenameDriveRequest {
     new_name: String,
 }
 
-/// Rename a drive everywhere it is referenced: the cluster config (the
-/// `drives` key, every node's drive-to-path map) and every deployed stack
-/// whose volumes mount from it.
+/// Rename a drive in the config (`drives` key, per-node paths) and every stack mounting it.
 ///
-/// Unlike a network rename this never touches replicated volume state: a
-/// volume's raft-tracked generation and replica set are keyed by
-/// drive/volume id, so the next reconcile pass registers a fresh entry under
-/// the new id the moment a stack's volume mount is renamed here, exactly
-/// as it would if the drive had been renamed by hand across two applies. The
-/// data itself is untouched, since a node's `drives` path mapping moves with
-/// the rename rather than changing.
+/// Replicated volume state is not touched: it is keyed by drive/volume id, so the next reconcile
+/// registers a fresh entry under the new id. The data is untouched since the node's path mapping
+/// moves with the rename.
 async fn rename_drive(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -389,9 +355,6 @@ async fn rename_drive(
     Ok(StatusCode::OK)
 }
 
-/// Renames `old` to `new` in every service's volume mounts that source from
-/// it. Returns whether anything changed, so the caller can skip stacks that
-/// never mention it.
 fn rename_drive_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
     let mut changed = false;
     for svc in file.services.values_mut() {
@@ -405,10 +368,7 @@ fn rename_drive_in_stack(file: &mut StackFile, old: &str, new: &str) -> bool {
     changed
 }
 
-/// Moves every node's sealed wireguard config secret from the old network's
-/// reserved name to the new one, so the tunnel keeps finding it after the
-/// rename. Submitted as-is (still sealed, no key needed here) so that a
-/// put-then-remove per node, since there is no rename request.
+/// Submitted still sealed (no key needed) as put-then-remove per node, since there is no rename request.
 async fn rename_wireguard_secrets(
     state: &AppState,
     old: &str,
@@ -549,8 +509,6 @@ struct ValidateRequest {
 
 #[derive(Serialize)]
 struct ValidationError {
-    /// Dotted config path of the offending key, empty when the failure is not
-    /// tied to one.
     path: String,
     message: String,
 }
@@ -561,13 +519,8 @@ struct ValidationResponse {
     errors: Vec<ValidationError>,
 }
 
-/// Check a config without applying it.
-///
-/// Takes the same `{"config": ...}` envelope as `PUT /api/config` so the two
-/// can be called with one body, and answers 200 with the outcome rather than a
-/// 4xx: a config that fails validation is an expected answer to this question,
-/// not a bad request. Validation short circuits on the first problem, so
-/// `errors` holds at most one entry.
+/// Same `{"config": ...}` envelope as `PUT /api/config`. Answers 200 with the outcome: a failing
+/// config is an expected answer here. Short circuits on the first problem, so `errors` has at most one entry.
 async fn validate_config(
     _identity: Identity,
     Json(body): Json<ValidateRequest>,
@@ -598,10 +551,8 @@ async fn validate_config(
 mod tests {
     use super::*;
 
-    /// The stack-file half of a network rename: the top-level `networks:`
-    /// key, a service's `networks:` list, and the network name buried inside
-    /// `x-clouduler.proxy`/`expose` all have to move together, or the
-    /// renamed network silently stops matching what the service asks for.
+    /// The top-level `networks:` key, a service's `networks:` list and the network inside
+    /// `x-clouduler.proxy`/`expose` must all move together.
     #[test]
     fn rename_network_in_stack_updates_the_x_clouduler_block() {
         let mut file = StackFile::parse(
@@ -637,7 +588,6 @@ networks:
         assert_eq!(ext.proxy[0].network, "public");
         assert_eq!(ext.expose[0].network, "public");
 
-        // Renaming again for a network the stack never mentioned is a no-op.
         assert!(!rename_network_in_stack(&mut file, "unrelated", "other"));
     }
 
@@ -668,9 +618,7 @@ networks:
         );
     }
 
-    /// Re-serializing a stack file after a rename must not pad it with every
-    /// field's default value: only what the stack actually set should
-    /// reappear.
+    /// Re-serializing after a rename must not pad the file with default values.
     #[test]
     fn rewritten_stack_file_stays_minimal() {
         let mut file = StackFile::parse(

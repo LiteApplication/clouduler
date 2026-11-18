@@ -1,6 +1,3 @@
-//! `/api/redirects`: CRUD over UI-managed proxy redirects. See
-//! `crate::redirects` for why these live outside `cluster.yaml`.
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -145,8 +142,6 @@ async fn submit_store(state: &AppState, store: &RedirectStore) -> Result<(), Api
     if let Some(msg) = response.error {
         return Err(ApiError::Internal(msg));
     }
-    // Publish the (possibly changed) cloudflare_proxy flag without waiting
-    // out the dns loop's interval.
     state.nudges.dns.notify_one();
     Ok(())
 }

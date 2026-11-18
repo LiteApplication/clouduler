@@ -1,9 +1,7 @@
-//! The MCP tool catalog: names, argument schemas, who may call what, and the
-//! dispatcher. Each tool is a plain async function returning text; the one
-//! place that redacts, bounds and audits results is `mcp::finish`, not here.
+//! The MCP tool catalog: names, argument schemas, who may call what, and the dispatcher. Tools are plain
+//! async functions returning text; `mcp::finish` is the one place that redacts, bounds and audits results.
 //!
-//! Descriptions and parameter docs are the AI's only manual for these tools,
-//! so they say what a call does, what it refuses, and what to do next.
+//! Descriptions and parameter docs are the AI's only manual, so they say what a call does, refuses, and what to do next.
 
 use std::sync::{Arc, OnceLock};
 
@@ -26,17 +24,13 @@ mod secrets;
 mod stack;
 mod volume;
 
-/// Everything a tool call needs.
 pub struct Ctx {
     pub state: AppState,
     pub caller: McpCaller,
-    /// Key of the session focus lives under.
     pub session: String,
-    /// Who the focus belongs to; see `Sessions`.
     pub owner: String,
     pub sessions: Arc<Sessions>,
-    /// Applied to every result by `mcp::finish`; tools use it to refuse
-    /// input that already contains a secret.
+    /// Applied to every result by `mcp::finish`; tools use it to refuse input that already contains a secret.
     pub redactor: Arc<Redactor>,
 }
 
@@ -63,7 +57,6 @@ impl Ctx {
         })
     }
 
-    /// The focused stack, and an error unless `stack` is that stack.
     pub fn require_in_focus(&self, stack: &str, what: &str) -> Result<String, String> {
         let focus = self.require_focus()?;
         if focus == stack {
@@ -76,8 +69,6 @@ impl Ctx {
         }
     }
 }
-
-// ---- argument parsing ----
 
 pub(super) fn parse<P: DeserializeOwned>(args: JsonObject) -> Result<P, String> {
     serde_json::from_value(serde_json::Value::Object(args))
@@ -92,11 +83,7 @@ pub(super) fn parse_instance(raw: &str) -> Result<InstanceId, String> {
         .map_err(|_| format!("{raw:?} is not an instance id; ids look like stack.service.0"))
 }
 
-// ---- instance helpers shared by several tools ----
-
-/// Resolves `target` to instances. A full id (`stack.service.N`) names one
-/// instance in any stack; a bare service name means every replica of that
-/// service in the focused stack.
+/// A full id (`stack.service.N`) names one instance in any stack; a bare service name means every replica in the focused stack.
 pub(super) async fn resolve_target(ctx: &Ctx, target: &str) -> Result<Vec<InstanceId>, String> {
     let state = ctx.state.cluster.state().await;
     if let Ok(id) = target.parse::<InstanceId>() {
@@ -136,10 +123,8 @@ pub(super) async fn resolve_target(ctx: &Ctx, target: &str) -> Result<Vec<Instan
     Ok(ids)
 }
 
-/// Resolves `target` for a tool that acts inside containers (exec,
-/// read_file), which may only touch the focused stack. The scope check comes
-/// before the existence check so the error teaches the AI to focus rather
-/// than leaking which instances exist elsewhere.
+/// For tools acting inside containers (exec, read_file), limited to the focused stack. The scope check comes
+/// first so the error teaches the AI to focus rather than leaking which instances exist elsewhere.
 pub(super) async fn resolve_in_focus(ctx: &Ctx, target: &str) -> Result<InstanceId, String> {
     ctx.require_focus()?;
     if let Ok(id) = target.parse::<InstanceId>() {
@@ -149,8 +134,6 @@ pub(super) async fn resolve_in_focus(ctx: &Ctx, target: &str) -> Result<Instance
     first_running(ctx, &ids).await
 }
 
-/// The first replica that is actually running, for tools that act on one
-/// container.
 pub(super) async fn first_running(ctx: &Ctx, ids: &[InstanceId]) -> Result<InstanceId, String> {
     if ids.len() == 1 {
         return Ok(ids[0].clone());
@@ -199,11 +182,8 @@ pub(super) fn instance_line(s: &InstanceSummary) -> String {
     line
 }
 
-// ---- the catalog ----
-
 pub struct ToolSpec {
     pub tool: Tool,
-    /// Only callable (and listed) for an admin grant.
     pub admin: bool,
 }
 
@@ -358,7 +338,6 @@ pub fn catalog() -> &'static [ToolSpec] {
     })
 }
 
-/// Whether `name` is a known tool, and if so whether it needs admin.
 pub fn is_admin_tool(name: &str) -> Option<bool> {
     catalog()
         .iter()
@@ -366,13 +345,11 @@ pub fn is_admin_tool(name: &str) -> Option<bool> {
         .map(|s| s.admin)
 }
 
-/// Whether the redaction layer may be skipped for a tool: only those that
-/// return nothing but the focus name.
+/// Only tools that return nothing but the focus name may skip redaction.
 pub fn is_focus_only(name: &str) -> bool {
     matches!(name, "get_focus" | "clear_focus")
 }
 
-/// Runs a tool. `Err` is a tool-level failure the AI should read.
 pub async fn call(ctx: &Ctx, name: &str, args: JsonObject) -> ToolResult {
     let admin = is_admin_tool(name).ok_or_else(|| format!("unknown tool {name:?}"))?;
     if admin && ctx.caller.grant != McpGrant::Admin {
@@ -413,8 +390,6 @@ pub async fn call(ctx: &Ctx, name: &str, args: JsonObject) -> ToolResult {
     }
 }
 
-/// A short, non-sensitive description of what a call targets, for the audit
-/// log. Redacted by the caller before logging.
 pub fn audit_target(name: &str, args: &JsonObject) -> String {
     let text = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let mut target = ["target", "id", "name", "volume", "stack", "confirm"]

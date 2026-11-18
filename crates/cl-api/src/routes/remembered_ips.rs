@@ -1,10 +1,7 @@
-//! `/api/proxy/remembered-ips`: the client addresses visitors saved at the
-//! service login ("remember this IP address"), for an admin to review and
-//! revoke.
+//! `/api/proxy/remembered-ips`: client addresses visitors saved at the service login, for an admin to review and revoke.
 //!
-//! They live in the replicated login-session map, not in configs or secrets,
-//! so the git backup never exports them, and `ClusterState::redacted` hides
-//! them from everyone but this admin-only route.
+//! They live in the replicated login-session map, so the git backup never exports them and `ClusterState::redacted` hides them
+//! from everyone but this admin-only route.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -27,13 +24,11 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Serialize)]
 struct RememberedIp {
-    /// Opaque; pass it back to delete.
     id: String,
     network: String,
     ip: String,
     username: String,
     groups: Vec<String>,
-    /// Unix seconds after which the address no longer skips the login.
     expires_at: i64,
 }
 
@@ -73,8 +68,7 @@ async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    // Only a saved address: this route must not become a way to delete
-    // arbitrary login sessions by key.
+    // Only a saved address: this route must not delete arbitrary login sessions by key.
     let is_remembered = state
         .cluster
         .state()

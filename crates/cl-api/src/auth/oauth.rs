@@ -1,26 +1,16 @@
 //! OAuth 2.1 authorization server state for the MCP endpoint.
 //!
-//! MCP clients (Claude Code, claude.ai, Cursor, VS Code) cannot be handed an
-//! api key by a human in a browser, so they register themselves (RFC 7591),
-//! send the user through an approval page, and trade the resulting code for
-//! tokens. This module holds everything that is not an http handler: the
-//! persistent client records, the in-memory pending requests and codes, the
-//! access token format, and [`authenticate_mcp`], the one call the MCP layer
-//! makes to turn a request into a caller.
+//! MCP clients register themselves (RFC 7591), send the user through an approval page and trade
+//! the code for tokens. This holds everything but the http handlers; [`authenticate_mcp`] is the
+//! one call the MCP layer makes to turn a request into a caller.
 //!
-//! What is replicated and what is not:
-//!
-//! * Client records (including the SHA-256 of each client's current refresh
-//!   token) live in raft under [`MCP_CLIENTS_CONFIG`], the same trick
-//!   [`super::keys`] uses, because cl-raft has no `Request` variant for them.
-//!   Revoking is deleting the record, which every node sees.
-//! * Pending authorization requests and auth codes live in memory on the
-//!   leader only. They last seconds to minutes, and replicating them would
-//!   put a raft write on every login for nothing; the cost is that a leader
-//!   change mid-approval makes the user start the flow again.
-//! * Access tokens are stateless and HMAC signed, so the MCP endpoint can
-//!   authenticate a request on any node with only a (local, already
-//!   replicated) client record check.
+//! * Client records (with the SHA-256 of each refresh token) live in raft under
+//!   [`MCP_CLIENTS_CONFIG`], as [`super::keys`] does, since cl-raft has no `Request` variant for
+//!   them. Revoking deletes the record on every node.
+//! * Pending requests and codes are leader-only memory: they last seconds to minutes and a raft
+//!   write per login is wasteful. A leader change mid-approval restarts the flow.
+//! * Access tokens are stateless and HMAC signed, so any node authenticates with only a local
+//!   client record check.
 
 use parking_lot::Mutex as StdMutex;
 use std::collections::HashMap;
@@ -41,15 +31,11 @@ use super::{Identity, Role};
 use crate::error::ApiError;
 use crate::server::AppState;
 
-/// Reserved config name holding the registered MCP clients. Never exposed as
-/// a regular config through `/api/configs`, exported to git, or backed up as
-/// one: it holds refresh token hashes.
+/// Never exposed through `/api/configs`, git export or backup: it holds refresh token hashes.
 pub const MCP_CLIENTS_CONFIG: &str = "_clouduler_mcp_clients";
 
-/// Domain separator for access token signatures. The signature is an HMAC
-/// over the cluster key, the same primitive node-to-node auth uses, so the
-/// label is what keeps a token signature from ever being valid as an
-/// internal-route signature (those labels all start `v2\n`/`v3\n`).
+/// Domain separator: keeps a token signature from ever verifying as an internal-route
+/// signature (those labels start `v2\n`/`v3\n`).
 const ACCESS_TOKEN_LABEL: &str = "clouduler-mcp-access-token-v1";
 
 pub const ACCESS_TOKEN_PREFIX: &str = "cmt_";
@@ -59,14 +45,11 @@ pub const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(3600);
 const REFRESH_TOKEN_TTL_SECS: i64 = 30 * 24 * 3600;
 pub const PENDING_TTL: Duration = Duration::from_secs(10 * 60);
 pub const CODE_TTL: Duration = Duration::from_secs(60);
-/// A client that registered but was never approved is junk after this long.
 const UNAPPROVED_CLIENT_TTL_SECS: i64 = 24 * 3600;
-/// Registration is unauthenticated, so the number of never-approved records
-/// it can leave in raft is capped.
+/// Registration is unauthenticated, so the never-approved records it can leave in raft are capped.
 pub const MAX_UNAPPROVED_CLIENTS: usize = 100;
 const MAX_IN_MEMORY: usize = 1000;
 
-/// What an MCP caller may do. `Admin` implies `Read`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpGrant {
@@ -91,14 +74,12 @@ impl McpGrant {
     }
 }
 
-/// Whether MCP access is switched on in the live cluster config. Read on
-/// every request so toggling it needs no restart.
+/// Read per request so toggling needs no restart.
 pub fn mcp_enabled(cfg: &ClusterConfig) -> bool {
     cfg.mcp.enabled
 }
 
-/// 404 when MCP access is disabled. A 404 rather than 403 so a disabled
-/// cluster looks like one that never had the feature.
+/// 404 rather than 403 so a disabled cluster looks like one without the feature.
 pub async fn require_enabled(state: &AppState) -> Result<(), ApiError> {
     if mcp_enabled(&*state.cluster_config.read().await) {
         Ok(())
@@ -113,19 +94,14 @@ pub struct McpClient {
     pub client_name: String,
     pub redirect_uris: Vec<String>,
     pub created_at: i64,
-    /// Username of whoever approved it. `None` until the first code is
-    /// exchanged; an unapproved client holds no tokens.
     #[serde(default)]
     pub approved_by: Option<String>,
     #[serde(default)]
     pub approver_subject: Option<String>,
     #[serde(default)]
     pub grant: Option<McpGrant>,
-    /// Bumped on every approval so access tokens minted for an earlier
-    /// approval stop verifying at once.
     #[serde(default)]
     pub generation: u64,
-    /// Hex SHA-256 of the current refresh token.
     #[serde(default)]
     pub refresh_hash: Option<String>,
     #[serde(default)]
@@ -160,7 +136,6 @@ impl McpClientStore {
         self.clients.iter_mut().find(|c| c.client_id == id)
     }
 
-    /// Drop clients that registered but never got approved, if old enough.
     pub fn prune_unapproved(&mut self, now: i64) {
         self.clients
             .retain(|c| c.approved_by.is_some() || now - c.created_at < UNAPPROVED_CLIENT_TTL_SECS);
@@ -174,7 +149,6 @@ impl McpClientStore {
     }
 }
 
-/// An authorization request waiting for a human to approve it.
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
     pub client_id: String,
@@ -187,7 +161,6 @@ pub struct PendingRequest {
     created: Instant,
 }
 
-/// An issued, not yet redeemed authorization code.
 #[derive(Debug, Clone)]
 pub struct AuthCode {
     pub client_id: String,
@@ -199,14 +172,10 @@ pub struct AuthCode {
     created: Instant,
 }
 
-/// In-memory half of the oauth state; see the module docs for why it is not
-/// replicated.
 #[derive(Default)]
 pub struct OAuthMemory {
     pending: StdMutex<HashMap<String, PendingRequest>>,
     codes: StdMutex<HashMap<String, AuthCode>>,
-    /// Serializes read-modify-write of the replicated client store, so two
-    /// concurrent token requests cannot overwrite each other's refresh hash.
     pub write_lock: tokio::sync::Mutex<()>,
 }
 
@@ -248,8 +217,6 @@ impl OAuthMemory {
         Ok(id)
     }
 
-    /// Every pending request still within its lifetime, with the seconds
-    /// each has left, newest first.
     pub fn list_pending(&self) -> Vec<(String, PendingRequest, u64)> {
         let map = lock(&self.pending);
         let mut rows: Vec<_> = map
@@ -301,15 +268,13 @@ impl OAuthMemory {
         code
     }
 
-    /// Single use: a presented code is gone whether or not the rest of the
-    /// exchange succeeds, so a stolen code cannot be retried with guesses.
+    /// Single use: a presented code is consumed even if the exchange fails, so a stolen one cannot be guessed against.
     pub fn take_code(&self, code: &str) -> Option<AuthCode> {
         lock(&self.codes)
             .remove(code)
             .filter(|c| c.created.elapsed() < CODE_TTL)
     }
 
-    /// Drop expired entries; called from the server's periodic prune.
     pub fn prune_expired(&self) {
         lock(&self.pending).retain(|_, p| p.created.elapsed() < PENDING_TTL);
         lock(&self.codes).retain(|_, c| c.created.elapsed() < CODE_TTL);
@@ -330,7 +295,6 @@ pub fn sha256_hex(s: &str) -> String {
         .collect()
 }
 
-/// Constant-time string equality, for hashes and PKCE challenges.
 pub fn ct_eq(a: &str, b: &str) -> bool {
     a.len() == b.len()
         && a.bytes()
@@ -339,7 +303,6 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
             == 0
 }
 
-/// RFC 7636 S256: `base64url(sha256(verifier))`.
 pub fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
@@ -359,8 +322,6 @@ pub fn refresh_expiry(now: i64) -> i64 {
     now + REFRESH_TOKEN_TTL_SECS
 }
 
-// ---- access tokens ----
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenPayload {
     cid: String,
@@ -371,7 +332,6 @@ struct TokenPayload {
     exp: i64,
 }
 
-/// What a verified OAuth access token stands for.
 #[derive(Debug, Clone)]
 pub struct OAuthGrant {
     pub identity: Identity,
@@ -379,9 +339,7 @@ pub struct OAuthGrant {
     pub grant: McpGrant,
 }
 
-/// The identity an OAuth grant acts as. A read grant is a viewer even when
-/// the human who approved it is an admin, so existing role checks keep a
-/// read-only client out of admin paths.
+/// A read grant is a viewer even when the approving human is an admin, keeping read-only clients out of admin paths.
 pub fn identity_for(subject: &str, username: &str, grant: McpGrant) -> Identity {
     Identity {
         subject: subject.to_string(),
@@ -429,9 +387,7 @@ fn decode_access_token(key: &ClusterKey, token: &str, now: i64) -> Result<TokenP
     Ok(payload)
 }
 
-/// Verify signature and expiry, then check the client record still exists,
-/// is approved, and is on the same approval generation. The record check is
-/// what makes revocation immediate despite the token being stateless.
+/// The record check (exists, approved, same generation) is what makes revocation immediate for a stateless token.
 pub async fn verify_access_token(state: &AppState, token: &str) -> Result<OAuthGrant, ApiError> {
     let key = state
         .key
@@ -453,24 +409,15 @@ pub async fn verify_access_token(state: &AppState, token: &str) -> Result<OAuthG
     })
 }
 
-// ---- the MCP layer's entry points ----
-
-/// Who is calling the MCP endpoint.
 #[derive(Debug, Clone)]
 pub struct McpCaller {
     pub identity: Identity,
     pub grant: McpGrant,
-    /// The oauth client id; `None` for an api key.
     pub client: Option<String>,
 }
 
-/// Authenticate an `/mcp` request from its headers.
-///
-/// Accepts an OAuth access token (`cmt_...`) or an api key (`clk_...`, which
-/// is always an admin grant like everywhere else). Returns `NotFound` when
-/// MCP is disabled so the route disappears entirely, and `Unauthenticated`
-/// otherwise; turn that into a response with [`challenge`] so the client
-/// learns where to start the OAuth flow.
+/// Accepts an OAuth token (`cmt_...`) or an api key (`clk_...`, always admin). `NotFound` when MCP
+/// is disabled; otherwise `Unauthenticated`, to be turned into a response with [`challenge`].
 pub async fn authenticate_mcp(
     headers: &HeaderMap,
     state: &AppState,
@@ -514,9 +461,7 @@ pub async fn authenticate_mcp(
     ))
 }
 
-/// The `WWW-Authenticate` value that points a client at the protected
-/// resource metadata (RFC 9728), which is how it finds the authorization
-/// server.
+/// Points a client at the protected resource metadata (RFC 9728).
 pub fn www_authenticate(cfg: &ClusterConfig) -> String {
     format!(
         "Bearer resource_metadata=\"https://{}/.well-known/oauth-protected-resource\"",
@@ -524,8 +469,6 @@ pub fn www_authenticate(cfg: &ClusterConfig) -> String {
     )
 }
 
-/// Render an [`authenticate_mcp`] failure as a response, adding the
-/// `WWW-Authenticate` challenge to a 401.
 pub async fn challenge(state: &AppState, err: ApiError) -> Response {
     let is_401 = matches!(err, ApiError::Unauthenticated(_));
     let mut resp = err.into_response();
@@ -586,7 +529,6 @@ mod tests {
             .unwrap()
             .split_once('.')
             .unwrap();
-        // Swap in an admin payload under the read token's signature.
         let mut p: TokenPayload =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap();
         p.grant = McpGrant::Admin;
