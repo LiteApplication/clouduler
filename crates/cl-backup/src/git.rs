@@ -25,11 +25,10 @@ use crate::tree::TreeFile;
 /// manual reconcile all open the same directory, and libgit2 ref updates and
 /// the remote-tracking ref they fetch into are not safe to interleave. Hold
 /// the guard for the whole blocking git section.
-pub fn lock_repo() -> std::sync::MutexGuard<'static, ()> {
-    static REPO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub fn lock_repo() -> parking_lot::MutexGuard<'static, ()> {
+    static REPO_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
     REPO_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub struct GitBackup {

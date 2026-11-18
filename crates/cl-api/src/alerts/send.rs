@@ -6,7 +6,8 @@
 //! edit (or a deleted destination) is honoured by the very next attempt.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cl_alert::settings::{auth_secret, url_secret, SMTP_PASSWORD_SECRET};
@@ -101,7 +102,7 @@ impl Sender {
     }
 
     fn allow(&self, destination: &str) -> bool {
-        let mut map = self.rate.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.rate.lock();
         let q = map.entry(destination.to_string()).or_default();
         let now = Instant::now();
         while q

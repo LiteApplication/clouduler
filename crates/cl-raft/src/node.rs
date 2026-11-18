@@ -192,7 +192,6 @@ impl ClusterNode {
         )));
 
         let mut metrics = raft.metrics();
-        let gate_contact = contact.clone();
         tasks.push(tokio::spawn(async move {
             // Metrics changes drive this, but a node cut off from the cluster
             // stops getting them entirely, and that is exactly the case the
@@ -201,7 +200,7 @@ impl ClusterNode {
             loop {
                 let status = from_metrics(
                     &metrics.borrow_and_update(),
-                    &gate_contact,
+                    &contact,
                     QUORUM_ACK_TIMEOUT,
                 );
                 // Only wake watchers when something they care about moved.

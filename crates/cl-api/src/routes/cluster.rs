@@ -88,5 +88,5 @@ async fn state(_identity: Identity, State(state): State<AppState>) -> impl IntoR
 }
 
 async fn events(_identity: Identity, State(state): State<AppState>) -> impl IntoResponse {
-    stream::cluster_state_events(state.cluster.clone())
+    stream::cluster_state_events(state.cluster)
 }

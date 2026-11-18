@@ -19,7 +19,8 @@
 //! rest needs the application's own rotation procedure.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -276,18 +277,18 @@ struct RollState {
 
 impl Roll {
     fn halted(&self) -> bool {
-        self.inner.lock().expect("roll lock").failed_by.is_some()
+        self.inner.lock().failed_by.is_some()
     }
 
     fn claim(&self, instance: &InstanceId) -> bool {
-        let mut inner = self.inner.lock().expect("roll lock");
+        let mut inner = self.inner.lock();
         inner.failed_by.is_none() && inner.pending.remove(instance).is_some()
     }
 
     /// Record the failure and cancel every instance that has not started.
     async fn fail(&self, instance: &InstanceId, node: &str, reason: &str) {
         let cancelled = {
-            let mut inner = self.inner.lock().expect("roll lock");
+            let mut inner = self.inner.lock();
             inner.failed_by.get_or_insert_with(|| instance.clone());
             std::mem::take(&mut inner.pending)
         };

@@ -106,7 +106,7 @@ pub struct AppState {
     pub mcp: Arc<crate::mcp::McpHub>,
     /// Wakes the daemon's dns, certificate and git export loops early.
     pub nudges: crate::Nudges,
-    pub git_export_author: Arc<std::sync::Mutex<Option<(String, String)>>>,
+    pub git_export_author: Arc<parking_lot::Mutex<Option<(String, String)>>>,
     /// This node's live routing table, for `/api/proxy/routes`.
     pub proxy_routes: cl_proxy::SharedRoutes,
 }

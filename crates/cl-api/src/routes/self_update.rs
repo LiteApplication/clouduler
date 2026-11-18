@@ -313,7 +313,7 @@ struct SelfUpdateLatest {
     fetched_at: i64,
 }
 
-type LatestCache = std::sync::Mutex<Option<(std::time::Instant, SelfUpdateLatest)>>;
+type LatestCache = parking_lot::Mutex<Option<(std::time::Instant, SelfUpdateLatest)>>;
 
 fn latest_cache() -> &'static LatestCache {
     static CACHE: std::sync::OnceLock<LatestCache> = std::sync::OnceLock::new();
@@ -334,7 +334,7 @@ async fn latest(
         .as_ref()
         .map(|c| c.release_url.clone())
         .ok_or_else(|| ApiError::Conflict("no self-update release is configured".into()))?;
-    if let Some((at, cached)) = latest_cache().lock().ok().and_then(|g| g.clone()) {
+    if let Some((at, cached)) = latest_cache().lock().clone() {
         if at.elapsed() < LATEST_TTL && cached.source == source {
             return Ok(Json(cached));
         }
@@ -350,9 +350,7 @@ async fn latest(
         running_version: env!("CARGO_PKG_VERSION").to_string(),
         fetched_at: now(),
     };
-    if let Ok(mut cache) = latest_cache().lock() {
-        *cache = Some((std::time::Instant::now(), answer.clone()));
-    }
+    *latest_cache().lock() = Some((std::time::Instant::now(), answer.clone()));
     Ok(Json(answer))
 }
 

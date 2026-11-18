@@ -28,7 +28,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cl_docker::{Docker, ImageRef, LocalImage};
@@ -291,7 +292,7 @@ impl ImageGc {
         if busy {
             return false;
         }
-        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.inner.state.lock();
         let fresh = succeeded.iter().any(|s| !state.cleaned.contains(s));
         let periodic = state.last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY);
         if !(fresh || periodic) {

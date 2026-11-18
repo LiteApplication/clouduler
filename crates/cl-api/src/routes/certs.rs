@@ -115,7 +115,7 @@ async fn tls_fingerprint(
     State(state): State<AppState>,
 ) -> Json<TlsFingerprint> {
     Json(TlsFingerprint {
-        fingerprint: state.tls_fingerprint.clone(),
+        fingerprint: state.tls_fingerprint,
     })
 }
 

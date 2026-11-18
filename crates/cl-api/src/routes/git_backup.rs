@@ -103,7 +103,7 @@ async fn export_now_admin(
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
     let email = format!("{}@localhost", admin.0.username);
-    *state.git_export_author.lock().unwrap() = Some((admin.0.username.clone(), email));
+    *state.git_export_author.lock() = Some((admin.0.username.clone(), email));
     if state.cluster.is_leader() {
         state.nudges.git_export.notify_one();
         return Ok(StatusCode::ACCEPTED);
@@ -125,7 +125,7 @@ async fn internal_export_now(
 ) -> StatusCode {
     if let Some(username) = params.get("author") {
         let email = format!("{}@localhost", username);
-        *state.git_export_author.lock().unwrap() = Some((username.clone(), email));
+        *state.git_export_author.lock() = Some((username.clone(), email));
     }
     state.nudges.git_export.notify_one();
     StatusCode::ACCEPTED

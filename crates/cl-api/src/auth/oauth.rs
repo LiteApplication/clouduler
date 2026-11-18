@@ -23,7 +23,7 @@
 //!   replicated) client record check.
 
 use std::collections::HashMap;
-use std::sync::Mutex as StdMutex;
+use parking_lot::Mutex as StdMutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{header, HeaderMap};
@@ -211,8 +211,8 @@ pub struct OAuthMemory {
     pub write_lock: tokio::sync::Mutex<()>,
 }
 
-fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+fn lock<T>(m: &StdMutex<T>) -> parking_lot::MutexGuard<'_, T> {
+    m.lock()
 }
 
 impl OAuthMemory {
