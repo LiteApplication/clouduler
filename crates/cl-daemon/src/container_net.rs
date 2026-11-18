@@ -467,6 +467,7 @@ mod tests {
                 node: "n2".into(),
                 running: true,
                 secret_revisions: Default::default(),
+                config_revisions: Default::default(),
             },
         );
         let listed = desired(&state, &cfg(), &alloc, "n1", "tailnet", 0).unwrap();

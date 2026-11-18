@@ -140,12 +140,82 @@ impl RollPlan {
     }
 }
 
+/// Which kind of object a roll is for. A secret roll takes containers of unknown revision too; a
+/// config roll takes only provably stale ones (containers created before configs were tracked carry no
+/// revision and must not be bounced by an unrelated change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    Secret,
+    Config,
+}
+
+impl ObjectKind {
+    fn word(self) -> &'static str {
+        match self {
+            ObjectKind::Secret => "secret",
+            ObjectKind::Config => "config",
+        }
+    }
+}
+
+/// Instances of services that mount the read-only config `name` (a `write: true` mount is live-edited,
+/// not replaced), with the revision each container started with.
+fn config_users(state: &ClusterState, name: &str) -> Vec<SecretUse> {
+    let Some(entry) = state.configs.get(name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for stack in state.stacks.values() {
+        let Ok(file) = StackFile::parse(&stack.spec) else {
+            continue;
+        };
+        for (service, def) in &file.services {
+            let Some(r) = def.configs.iter().find(|r| r.source == name && !r.write) else {
+                continue;
+            };
+            for assignment in state
+                .assignments
+                .values()
+                .filter(|a| a.instance.stack == stack.name && &a.instance.service == service)
+            {
+                let status = state.container_status.get(&assignment.instance);
+                let running_revision = status.and_then(|s| s.config_revisions.get(name).copied());
+                out.push(SecretUse {
+                    instance: assignment.instance.to_string(),
+                    stack: stack.name.clone(),
+                    service: service.clone(),
+                    node: assignment.node.clone(),
+                    delivery: Delivery::File,
+                    target: r.config_target().display().to_string(),
+                    running: status.is_some_and(|s| s.running),
+                    running_revision,
+                    freshness: freshness(running_revision, entry.revision),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// In: should be running with a container not provably current. Out: already current, stopped on
 /// purpose (takes the new value on next start), moving between nodes, or with an update in flight.
 pub fn plan_roll(state: &ClusterState, secret: &str, current: u64) -> RollPlan {
+    plan_roll_for(state, ObjectKind::Secret, secret, current)
+}
+
+/// The same for the consumers of a read-only config.
+pub fn plan_config_roll(state: &ClusterState, config: &str, current: u64) -> RollPlan {
+    plan_roll_for(state, ObjectKind::Config, config, current)
+}
+
+fn plan_roll_for(state: &ClusterState, kind: ObjectKind, name: &str, current: u64) -> RollPlan {
     let mut plan = RollPlan::default();
     let mut seen = BTreeSet::new();
-    for u in usage(state, secret) {
+    let users = match kind {
+        ObjectKind::Secret => usage(state, name),
+        ObjectKind::Config => config_users(state, name),
+    };
+    for u in users {
         if !seen.insert(u.instance.clone()) {
             continue;
         }
@@ -153,8 +223,11 @@ pub fn plan_roll(state: &ClusterState, secret: &str, current: u64) -> RollPlan {
             continue;
         };
         let assignment = &state.assignments[&instance];
-        let skip = if freshness(u.running_revision, current) == Freshness::Current {
+        let fresh = freshness(u.running_revision, current);
+        let skip = if fresh == Freshness::Current {
             Some("already runs the current revision")
+        } else if kind == ObjectKind::Config && fresh == Freshness::Unknown {
+            Some("started before config revisions were tracked; restart it to be sure")
         } else if assignment.desired != DesiredState::Running {
             Some("stopped; it starts with the new value")
         } else if assignment
@@ -197,24 +270,38 @@ pub struct RollStarted {
     pub skipped: Vec<Skipped>,
 }
 
-/// Answers when queued: a restart waits for health and can outlast a request.
-async fn start_roll(state: &AppState, name: &str, revision: u64) -> RollStarted {
+/// Answers when queued: a restart waits for health and can outlast a request. Also used by the
+/// terraform runner when a module output rewrites a secret.
+pub async fn start_roll(state: &AppState, name: &str, revision: u64) -> RollStarted {
+    start_roll_for(state, ObjectKind::Secret, name, revision).await
+}
+
+/// The same for a rewritten read-only config (the terraform runner's outputs).
+pub async fn start_config_roll(state: &AppState, name: &str, revision: u64) -> RollStarted {
+    start_roll_for(state, ObjectKind::Config, name, revision).await
+}
+
+async fn start_roll_for(
+    state: &AppState,
+    kind: ObjectKind,
+    name: &str,
+    revision: u64,
+) -> RollStarted {
     // A follower may not have applied the new revision yet; planning against the old one finds nothing.
     for _ in 0..50 {
-        let applied = state
-            .cluster
-            .state()
-            .await
-            .secrets
-            .get(name)
-            .is_some_and(|s| s.revision >= revision);
+        let cluster_state = state.cluster.state().await;
+        let applied = match kind {
+            ObjectKind::Secret => cluster_state.secrets.get(name).map(|s| s.revision),
+            ObjectKind::Config => cluster_state.configs.get(name).map(|c| c.revision),
+        }
+        .is_some_and(|r| r >= revision);
         if applied {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let cluster_state = state.cluster.state().await;
-    let plan = plan_roll(&cluster_state, name, revision);
+    let plan = plan_roll_for(&cluster_state, kind, name, revision);
     drop(cluster_state);
 
     for (instance, node) in plan.lanes.values().flatten() {
@@ -228,13 +315,14 @@ async fn start_roll(state: &AppState, name: &str, revision: u64) -> RollStarted 
     if !plan.lanes.is_empty() {
         let worker = state.clone();
         let name = name.to_string();
-        tokio::spawn(async move { roll(worker, name, plan).await });
+        tokio::spawn(async move { roll(worker, kind, name, plan).await });
     }
     started
 }
 
 struct Roll {
     worker: AppState,
+    kind: ObjectKind,
     secret: String,
     inner: Mutex<RollState>,
 }
@@ -260,7 +348,7 @@ impl Roll {
             inner.failed_by.get_or_insert_with(|| instance.clone());
             std::mem::take(&mut inner.pending)
         };
-        warn!(%instance, secret = %self.secret, %reason, "restart after secret rotation failed, halting");
+        warn!(%instance, kind = self.kind.word(), object = %self.secret, %reason, "restart after object rotation failed, halting");
         let cluster = &self.worker.cluster;
         cl_sched::progress::submit(
             cluster,
@@ -268,7 +356,8 @@ impl Roll {
             node,
             UpdatePhase::Failed,
             Some(format!(
-                "restart for the new revision of secret {} failed: {reason}",
+                "restart for the new revision of {} {} failed: {reason}",
+                self.kind.word(),
                 self.secret
             )),
         )
@@ -280,7 +369,8 @@ impl Roll {
                 &other_node,
                 UpdatePhase::Failed,
                 Some(format!(
-                    "cancelled: restarting {instance} for secret {} failed, so the rotation stopped",
+                    "cancelled: restarting {instance} for {} {} failed, so the rotation stopped",
+                    self.kind.word(),
                     self.secret
                 )),
             )
@@ -289,7 +379,7 @@ impl Roll {
     }
 }
 
-async fn roll(worker: AppState, secret: String, plan: RollPlan) {
+async fn roll(worker: AppState, kind: ObjectKind, secret: String, plan: RollPlan) {
     let pending = plan
         .lanes
         .values()
@@ -298,6 +388,7 @@ async fn roll(worker: AppState, secret: String, plan: RollPlan) {
         .collect();
     let roll = Arc::new(Roll {
         worker,
+        kind,
         secret,
         inner: Mutex::new(RollState {
             failed_by: None,
@@ -326,7 +417,7 @@ async fn roll_lane(roll: Arc<Roll>, lane: Vec<(InstanceId, String)>) {
         cl_sched::progress::submit(cluster, &instance, &node, UpdatePhase::Starting, None).await;
         match super::updates::wait_for_update(&roll.worker, &instance).await {
             Some((UpdatePhase::Started, _)) => {
-                info!(%instance, secret = %roll.secret, "restarted")
+                info!(%instance, kind = roll.kind.word(), object = %roll.secret, "restarted")
             }
             Some((_, error)) => {
                 let why = error.unwrap_or_else(|| "the restart failed".into());
@@ -491,6 +582,7 @@ mod tests {
                     secret_revisions: rev
                         .map(|r| BTreeMap::from([("db".to_string(), r)]))
                         .unwrap_or_default(),
+                    config_revisions: BTreeMap::new(),
                 },
             );
         }
@@ -550,6 +642,33 @@ mod tests {
                 reason: "already runs the current revision".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_config_roll_takes_only_provably_stale_read_only_users() {
+        use cl_raft::state::ConfigEntry;
+        let mut s = state();
+        s.stacks.get_mut("app").unwrap().spec = "configs:\n  c:\n    file: ./c\nservices:\n  web:\n    image: nginx\n    configs:\n      - c\n  worker:\n    image: nginx\n    configs:\n      - source: c\n        write: true\n".into();
+        s.configs.insert(
+            "c".into(),
+            ConfigEntry {
+                name: "c".into(),
+                content: String::new(),
+                revision: 3,
+                owner: None,
+            },
+        );
+        // web.0 current, web.1 stale, web.2 carries no label (pre-tracking)
+        for (i, rev) in [(0, Some(3)), (1, Some(2)), (2, None)] {
+            let id = InstanceId::new("app", "web", i);
+            s.container_status.get_mut(&id).unwrap().config_revisions = rev
+                .map(|r| BTreeMap::from([("c".to_string(), r)]))
+                .unwrap_or_default();
+        }
+        let plan = plan_config_roll(&s, "c", 3);
+        assert_eq!(plan.instances(), ["app.web.1"]);
+        let skipped: Vec<&str> = plan.skipped.iter().map(|k| k.instance.as_str()).collect();
+        assert_eq!(skipped, ["app.web.0", "app.web.2"], "write: true worker is not a user");
     }
 
     #[test]

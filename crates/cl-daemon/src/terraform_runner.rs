@@ -40,17 +40,17 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cl_config::{StackFile, TerraformConfig, TerraformService};
+use cl_config::{StackFile, TerraformConfig, TerraformService, TfOutputBinding, TfOutputTarget};
 use cl_docker::{
     BindMount, ContainerSpec, Docker, DockerHandle, HealthState, LogOptions, RestartPolicy,
     LABEL_TERRAFORM_RUN,
 };
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
-use cl_raft::state::{ClusterState, DesiredState, Request, MAX_OBJECT_BYTES};
+use cl_raft::state::{base64_encode, ClusterState, DesiredState, Request, MAX_OBJECT_BYTES};
 use cl_raft::terraform::{
-    terraform_key, TerraformMode, TerraformModule, TerraformOutcome, TerraformRun,
-    MAX_TERRAFORM_LOG_BYTES,
+    terraform_key, OutputKind, OutputObject, TerraformConfigOutput, TerraformMode, TerraformModule,
+    TerraformOutcome, TerraformRun, TerraformSecretOutput, MAX_TERRAFORM_LOG_BYTES,
 };
 use cl_secret::{ClusterKey, Sealed};
 use futures::StreamExt;
@@ -259,6 +259,8 @@ pub struct RunInputs {
     pub vars: BTreeMap<String, String>,
     pub state: Option<Vec<u8>>,
     pub state_serial: u64,
+    /// `x-clouduler.terraform.outputs`: written back after a successful Apply.
+    pub outputs: Vec<TfOutputBinding>,
 }
 
 impl RunInputs {
@@ -302,11 +304,18 @@ pub fn build_inputs(
             .configs
             .get(&b.source)
             .ok_or_else(|| format!("config {} does not exist", b.source))?;
+        let text = entry
+            .decode()
+            .map_err(|e| format!("config {} could not be decoded: {e}", b.source))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| format!("config {} is not valid UTF-8", b.source))
+            })?;
         if let Some(var) = &b.var {
-            config_vars.push((var.clone(), entry.content.clone()));
+            config_vars.push((var.clone(), text.clone()));
         }
         if let Some(path) = &b.path {
-            config_files.push((path.clone(), entry.content.clone()));
+            config_files.push((path.clone(), text));
         }
     }
     let (prior, serial) = match state.terraform_states.get(&tkey) {
@@ -330,6 +339,7 @@ pub fn build_inputs(
         vars: tf.vars.clone(),
         state: prior,
         state_serial: serial,
+        outputs: tf.outputs.clone(),
     })
 }
 
@@ -593,6 +603,176 @@ async fn run_phase(
     result
 }
 
+// ------------------------------------------------------------------ outputs
+
+/// `outputs` of a tfstate file as the text a binding writes: a string value verbatim, any other
+/// value JSON-encoded.
+pub fn state_outputs(state: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    let v: serde_json::Value = serde_json::from_slice(state)
+        .map_err(|e| format!("the tofu state is not valid JSON: {e}"))?;
+    let mut out = BTreeMap::new();
+    if let Some(map) = v.get("outputs").and_then(|o| o.as_object()) {
+        for (name, entry) in map {
+            let Some(value) = entry.get("value") else {
+                continue;
+            };
+            let text = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.insert(name.clone(), text);
+        }
+    }
+    Ok(out)
+}
+
+/// The values bound to secrets that the state holds (a missing one is reported elsewhere).
+pub fn secret_output_values(bindings: &[TfOutputBinding], state: &[u8]) -> Vec<String> {
+    let Ok(outputs) = state_outputs(state) else {
+        return Vec::new();
+    };
+    bindings
+        .iter()
+        .filter(|b| b.secret.is_some())
+        .filter_map(|b| outputs.get(&b.output).cloned())
+        .collect()
+}
+
+/// Each binding's target object with the value to write. A mapped output the state lacks fails.
+pub fn resolve_outputs(
+    bindings: &[TfOutputBinding],
+    state: &[u8],
+) -> Result<Vec<(OutputObject, String)>, String> {
+    let outputs = state_outputs(state)?;
+    let mut out = Vec::new();
+    for b in bindings {
+        let target = match b.target() {
+            Some(TfOutputTarget::Secret(n)) => OutputObject::secret(n),
+            Some(TfOutputTarget::Config(n)) => OutputObject::config(n),
+            None => {
+                return Err(format!(
+                    "output {} has no secret or config target",
+                    b.output
+                ))
+            }
+        };
+        let value = outputs.get(&b.output).ok_or_else(|| {
+            let have: Vec<&str> = outputs.keys().map(String::as_str).collect();
+            format!(
+                "the module has no output {:?} (the state holds: {})",
+                b.output,
+                if have.is_empty() {
+                    "none".to_string()
+                } else {
+                    have.join(", ")
+                }
+            )
+        })?;
+        out.push((target, value.clone()));
+    }
+    Ok(out)
+}
+
+/// What to submit for a run's outputs, decided against the current secrets and configs.
+#[derive(Debug, Default)]
+pub struct OutputPlan {
+    pub secrets: Vec<TerraformSecretOutput>,
+    pub configs: Vec<TerraformConfigOutput>,
+    /// Existing, unchanged objects this module does not yet own.
+    pub claims: Vec<OutputObject>,
+    /// Names only, for the run log.
+    pub unchanged: Vec<String>,
+}
+
+impl OutputPlan {
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty() && self.configs.is_empty() && self.claims.is_empty()
+    }
+
+    pub fn changed_secrets(&self) -> Vec<String> {
+        self.secrets.iter().map(|s| s.name.clone()).collect()
+    }
+
+    pub fn changed_configs(&self) -> Vec<String> {
+        self.configs.iter().map(|c| c.name.clone()).collect()
+    }
+}
+
+/// Compares each value with the stored object (secrets opened, configs by bytes) and keeps only
+/// the ones that differ, so an unchanged output never bumps a revision.
+pub fn plan_outputs(
+    state: &ClusterState,
+    key: &ClusterKey,
+    tkey: &str,
+    resolved: &[(OutputObject, String)],
+) -> Result<OutputPlan, String> {
+    let owned = state.terraform_outputs.get(tkey);
+    let mut plan = OutputPlan::default();
+    for (obj, value) in resolved {
+        if value.len() > MAX_OBJECT_BYTES - 1024 {
+            return Err(format!(
+                "output for {} {} is over the {} byte limit",
+                kind_label(obj.kind),
+                obj.name,
+                MAX_OBJECT_BYTES - 1024
+            ));
+        }
+        let target = match obj.kind {
+            OutputKind::Secret => TfOutputTarget::Secret(&obj.name),
+            OutputKind::Config => TfOutputTarget::Config(&obj.name),
+        };
+        if cl_api::routes::objects::is_reserved_output_target(target) {
+            return Err(format!(
+                "{} {} is a reserved name, a module output cannot write it",
+                kind_label(obj.kind),
+                obj.name
+            ));
+        }
+        let same = match obj.kind {
+            OutputKind::Secret => state.secrets.get(&obj.name).is_some_and(|e| {
+                Sealed::from_blob(e.sealed.clone())
+                    .open(key, &obj.name)
+                    .is_ok_and(|p| p == value.as_bytes())
+            }),
+            OutputKind::Config => state
+                .configs
+                .get(&obj.name)
+                .is_some_and(|e| e.decode().is_ok_and(|b| b == value.as_bytes())),
+        };
+        if same {
+            plan.unchanged
+                .push(format!("{} {}", kind_label(obj.kind), obj.name));
+            if !owned.is_some_and(|set| set.contains(obj)) {
+                plan.claims.push(obj.clone());
+            }
+            continue;
+        }
+        match obj.kind {
+            OutputKind::Secret => {
+                let sealed = Sealed::seal(key, &obj.name, value.as_bytes())
+                    .map_err(|e| format!("could not seal secret {}: {e}", obj.name))?;
+                plan.secrets.push(TerraformSecretOutput {
+                    name: obj.name.clone(),
+                    sealed: sealed.blob,
+                    key_fingerprint: key.fingerprint(),
+                });
+            }
+            OutputKind::Config => plan.configs.push(TerraformConfigOutput {
+                name: obj.name.clone(),
+                content: base64_encode(value.as_bytes()),
+            }),
+        }
+    }
+    Ok(plan)
+}
+
+fn kind_label(kind: OutputKind) -> &'static str {
+    match kind {
+        OutputKind::Secret => "secret",
+        OutputKind::Config => "config",
+    }
+}
+
 /// What the docker side of a run produced.
 pub struct TofuResult {
     /// `Ok(summary)` or `Err(error)`.
@@ -601,6 +781,8 @@ pub struct TofuResult {
     pub log: String,
     /// The state file after an Apply, when it exists and differs from the one given.
     pub new_state: Option<Vec<u8>>,
+    /// The state file after an Apply (changed or not): where the outputs are read from.
+    pub final_state: Option<Vec<u8>>,
 }
 
 fn cap_text(s: String, max: usize) -> String {
@@ -633,19 +815,28 @@ pub async fn run_tofu(
         run_tofu_inner(docker, &work, &cache, cfg, mode, inputs, deadline, &mut log).await;
 
     let mut new_state = None;
+    let mut final_state = None;
     if mode == TerraformMode::Apply {
         let path = work.join("terraform.tfstate");
         let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
         if let Ok(Ok(bytes)) = read {
-            if inputs.state.as_deref() != Some(bytes.as_slice()) && !bytes.is_empty() {
-                new_state = Some(bytes);
+            if !bytes.is_empty() {
+                if inputs.state.as_deref() != Some(bytes.as_slice()) {
+                    new_state = Some(bytes.clone());
+                }
+                final_state = Some(bytes);
             }
         }
+    }
+    // Values bound to secrets are hidden from the log like injected ones.
+    let mut hidden = inputs.secret_values();
+    if let Some(bytes) = &final_state {
+        hidden.extend(secret_output_values(&inputs.outputs, bytes));
     }
     let cleanup = work.clone();
     let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(cleanup)).await;
 
-    let text = redact(&log.into_text(), &inputs.secret_values());
+    let text = redact(&log.into_text(), &hidden);
     let log = cap_text(text, MAX_TERRAFORM_LOG_BYTES);
     let outcome = match outcome {
         Ok(()) => Ok(summarize(&log)),
@@ -654,11 +845,12 @@ pub async fn run_tofu(
             _ => e,
         }),
     };
-    let outcome = outcome.map_err(|e| redact(&e, &inputs.secret_values()));
+    let outcome = outcome.map_err(|e| redact(&e, &hidden));
     TofuResult {
         outcome,
         log,
         new_state,
+        final_state,
     }
 }
 
@@ -687,6 +879,7 @@ async fn run_tofu_inner(
             vars: BTreeMap::new(),
             state: inputs.state.clone(),
             state_serial: inputs.state_serial,
+            outputs: Vec::new(),
         };
         tokio::task::spawn_blocking(move || {
             use std::os::unix::fs::DirBuilderExt;
@@ -830,11 +1023,14 @@ async fn sweep(docker: &Docker, data_dir: &Path) {
 
 struct Ctx {
     cluster: Arc<ClusterNode>,
+    /// Lets a rewritten secret roll its consumers; `None` on a node whose api did not start.
+    api: Option<cl_api::AppState>,
     node: String,
     data_dir: PathBuf,
     in_flight: Mutex<BTreeSet<String>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     cluster: Arc<ClusterNode>,
     node_name: String,
@@ -843,10 +1039,12 @@ pub fn start(
     config_rx: tokio::sync::watch::Receiver<Arc<cl_config::ClusterConfig>>,
     data_dir: PathBuf,
     nudge: Arc<Notify>,
+    api: Option<cl_api::AppState>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let ctx = Arc::new(Ctx {
             cluster,
+            api,
             node: node_name,
             data_dir,
             in_flight: Mutex::new(BTreeSet::new()),
@@ -987,6 +1185,87 @@ async fn claim_and_spawn(
     });
 }
 
+/// Writes the run's mapped outputs to cluster secrets and configs, one raft request, only what
+/// changed. Returns the log note and the secrets whose value changed.
+async fn write_outputs(
+    ctx: &Ctx,
+    key: &ClusterKey,
+    run: &TerraformRun,
+    inputs: &RunInputs,
+    state: Option<&[u8]>,
+) -> Result<(String, Vec<String>, Vec<String>), String> {
+    let tkey = run.key();
+    let state = state.ok_or("the module left no state file to read its outputs from")?;
+    let resolved = resolve_outputs(&inputs.outputs, state)?;
+    let plan = ctx
+        .cluster
+        .read(|s| plan_outputs(s, key, &tkey, &resolved))
+        .await?;
+    let changed = plan.changed_secrets();
+    let changed_configs = plan.changed_configs();
+    let mut note = String::from("--- outputs\n");
+    for name in &changed {
+        note.push_str(&format!("wrote secret {name}\n"));
+    }
+    for c in &plan.configs {
+        note.push_str(&format!("wrote config {}\n", c.name));
+    }
+    for name in &plan.unchanged {
+        note.push_str(&format!("unchanged {name}\n"));
+    }
+    if plan.is_empty() {
+        return Ok((note, changed, changed_configs));
+    }
+    let resp = ctx
+        .cluster
+        .submit(Request::PutTerraformOutputs {
+            key: tkey,
+            run_id: run.id.clone(),
+            secrets: plan.secrets,
+            configs: plan.configs,
+            claims: plan.claims,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    match resp.error {
+        Some(e) => Err(e),
+        None => Ok((note, changed, changed_configs)),
+    }
+}
+
+/// A rewritten secret or config only reaches a container at its next start (a config mount is replaced
+/// by rename, so a running container keeps the old file), so the services using it are rolled one at a
+/// time (the same roll as `POST /api/secrets/{name}/restart`). Containers that already run the new
+/// revision, and ones that predate config tracking, are left alone.
+async fn roll_consumers(ctx: &Ctx, tkey: &str, secrets: Vec<String>, configs: Vec<String>) {
+    let Some(api) = &ctx.api else {
+        warn!(key = %tkey, "objects were rewritten but this node has no api to restart their consumers");
+        return;
+    };
+    for name in secrets {
+        let Some(revision) = ctx
+            .cluster
+            .read(|s| s.secrets.get(&name).map(|e| e.revision))
+            .await
+        else {
+            continue;
+        };
+        let started = cl_api::routes::secret_rotation::start_roll(api, &name, revision).await;
+        info!(key = %tkey, secret = %name, restarting = ?started.restarting, "restarting the users of a rewritten secret");
+    }
+    for name in configs {
+        let Some(revision) = ctx
+            .cluster
+            .read(|s| s.configs.get(&name).map(|e| e.revision))
+            .await
+        else {
+            continue;
+        };
+        let started = cl_api::routes::secret_rotation::start_config_roll(api, &name, revision).await;
+        info!(key = %tkey, config = %name, restarting = ?started.restarting, "restarting the users of a rewritten config");
+    }
+}
+
 async fn execute(
     ctx: &Ctx,
     docker: &Docker,
@@ -1036,8 +1315,25 @@ async fn execute(
         }
     }
 
+    let mut log = result.log;
+    let mut changed_secrets = Vec::new();
+    let mut changed_configs = Vec::new();
+    if outcome.is_ok() && run.mode == TerraformMode::Apply && !inputs.outputs.is_empty() {
+        match write_outputs(ctx, key, &run, &inputs, result.final_state.as_deref()).await {
+            Ok((note, changed, configs)) => {
+                log = cap_text(format!("{log}{note}"), MAX_TERRAFORM_LOG_BYTES);
+                changed_secrets = changed;
+                changed_configs = configs;
+            }
+            Err(e) => {
+                warn!(key = %tkey, error = %e, "terraform outputs could not be written");
+                outcome = Err(format!("the module outputs could not be written: {e}"));
+            }
+        }
+    }
+
     run.finished_at = Some(unix_now());
-    run.log_tail = result.log;
+    run.log_tail = log;
     run.outcome = match &outcome {
         Ok(summary) => TerraformOutcome::Succeeded {
             summary: summary.clone(),
@@ -1062,6 +1358,9 @@ async fn execute(
         .await
     {
         warn!(key = %tkey, error = %e, "could not record the terraform run");
+    }
+    if !changed_secrets.is_empty() || !changed_configs.is_empty() {
+        roll_consumers(ctx, &tkey, changed_secrets, changed_configs).await;
     }
     if let Some(error) = failed_apply {
         let mut s = cl_api::alerts::new_signal(
@@ -1115,7 +1414,7 @@ mod tests {
             "cfg".into(),
             ConfigEntry {
                 name: "cfg".into(),
-                content: "a: 1\n".into(),
+                content: base64_encode(b"a: 1\n"),
                 revision: 1,
                 owner: None,
             },
@@ -1147,6 +1446,7 @@ mod tests {
                 node: node.to_string(),
                 running,
                 secret_revisions: BTreeMap::new(),
+                config_revisions: BTreeMap::new(),
             },
         );
         id
@@ -1206,6 +1506,168 @@ mod tests {
             fingerprint(m, &tf2, &s, "i"),
             "block"
         );
+        let mut tf3 = tf.clone();
+        tf3.outputs.push(TfOutputBinding {
+            output: "o".into(),
+            secret: Some("s".into()),
+            config: None,
+        });
+        assert_ne!(
+            fingerprint(m, &tf, &s, "i"),
+            fingerprint(m, &tf3, &s, "i"),
+            "an outputs mapping change re-applies"
+        );
+    }
+
+    const STATE: &str = r#"{"version":4,"outputs":{
+        "id":{"value":"client-1","type":"string"},
+        "sec":{"value":"p\"w\\d","type":"string","sensitive":true},
+        "n":{"value":3,"type":"number"},
+        "obj":{"value":{"a":[1,2],"b":"x"},"type":["object",{}]}}}"#;
+
+    fn binding(output: &str, secret: Option<&str>, config: Option<&str>) -> TfOutputBinding {
+        TfOutputBinding {
+            output: output.into(),
+            secret: secret.map(Into::into),
+            config: config.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn outputs_are_read_from_the_state_strings_raw_and_the_rest_as_json() {
+        let all = state_outputs(STATE.as_bytes()).unwrap();
+        assert_eq!(all["id"], "client-1");
+        assert_eq!(all["sec"], "p\"w\\d");
+        assert_eq!(all["n"], "3");
+        assert_eq!(all["obj"], r#"{"a":[1,2],"b":"x"}"#);
+        assert!(state_outputs(b"{}").unwrap().is_empty(), "no outputs key");
+        assert!(state_outputs(b"not json").is_err());
+
+        let bindings = [
+            binding("id", None, Some("c")),
+            binding("obj", Some("s"), None),
+        ];
+        let r = resolve_outputs(&bindings, STATE.as_bytes()).unwrap();
+        assert_eq!(r[0], (OutputObject::config("c"), "client-1".to_string()));
+        assert_eq!(r[1].0, OutputObject::secret("s"));
+        let err =
+            resolve_outputs(&[binding("ghost", None, Some("c"))], STATE.as_bytes()).unwrap_err();
+        assert!(
+            err.contains("ghost") && err.contains("id, n, obj, sec"),
+            "{err}"
+        );
+        assert_eq!(
+            secret_output_values(
+                &[
+                    binding("sec", Some("s"), None),
+                    binding("id", None, Some("c"))
+                ],
+                STATE.as_bytes()
+            ),
+            vec!["p\"w\\d".to_string()],
+            "only secret bound values are hidden"
+        );
+    }
+
+    #[test]
+    fn a_secret_bound_output_is_redacted_from_logs() {
+        let hidden = secret_output_values(&[binding("sec", Some("s"), None)], STATE.as_bytes());
+        let log = r#"sec = "p\"w\\d" and raw p"w\d"#;
+        let out = redact(log, &hidden);
+        assert!(!out.contains("w\\\\d") && !out.contains("p\"w"), "{out}");
+    }
+
+    #[test]
+    fn only_changed_outputs_are_planned_and_unowned_ones_are_claimed() {
+        let key = ClusterKey::generate();
+        let mut s = state_with(&key);
+        let tkey = "app/web";
+        let resolved = vec![
+            (OutputObject::secret("sec"), "v1".to_string()),
+            (OutputObject::config("id"), "c1".to_string()),
+        ];
+        let plan = plan_outputs(&s, &key, tkey, &resolved).unwrap();
+        assert_eq!(plan.changed_secrets(), vec!["sec".to_string()]);
+        assert_eq!(plan.configs.len(), 1);
+        assert!(plan.claims.is_empty() && plan.unchanged.is_empty());
+        assert_ne!(
+            plan.secrets[0].sealed,
+            base64_encode(b"v1"),
+            "sealed, not plain"
+        );
+        assert_eq!(
+            Sealed::from_blob(plan.secrets[0].sealed.clone())
+                .open(&key, "sec")
+                .unwrap(),
+            b"v1"
+        );
+
+        // the same values already stored by hand: nothing to write, ownership is claimed
+        s.secrets.insert(
+            "sec".into(),
+            SecretEntry {
+                name: "sec".into(),
+                sealed: Sealed::seal(&key, "sec", b"v1").unwrap().blob,
+                revision: 4,
+                key_fingerprint: key.fingerprint(),
+                owner: None,
+            },
+        );
+        s.configs.insert(
+            "id".into(),
+            ConfigEntry {
+                name: "id".into(),
+                content: base64_encode(b"c1"),
+                revision: 2,
+                owner: None,
+            },
+        );
+        let plan = plan_outputs(&s, &key, tkey, &resolved).unwrap();
+        assert!(plan.secrets.is_empty() && plan.configs.is_empty());
+        assert_eq!(plan.claims.len(), 2);
+        assert_eq!(plan.unchanged.len(), 2);
+
+        // owned and unchanged: nothing at all
+        s.terraform_outputs.insert(
+            tkey.into(),
+            [OutputObject::secret("sec"), OutputObject::config("id")].into(),
+        );
+        assert!(plan_outputs(&s, &key, tkey, &resolved).unwrap().is_empty());
+
+        // one value changes, a secret sealed under another key counts as changed
+        let changed = vec![(OutputObject::secret("sec"), "v2".to_string())];
+        assert_eq!(
+            plan_outputs(&s, &key, tkey, &changed)
+                .unwrap()
+                .secrets
+                .len(),
+            1
+        );
+        let other = ClusterKey::generate();
+        assert_eq!(
+            plan_outputs(&s, &other, tkey, &resolved)
+                .unwrap()
+                .secrets
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn reserved_and_oversize_output_targets_are_refused() {
+        let key = ClusterKey::generate();
+        let s = state_with(&key);
+        let reserved = vec![(
+            OutputObject::config(cl_update::plan::RUN_CONFIG),
+            "x".to_string(),
+        )];
+        assert!(plan_outputs(&s, &key, "app/web", &reserved)
+            .unwrap_err()
+            .contains("reserved"));
+        let big = vec![(OutputObject::config("c"), "x".repeat(MAX_OBJECT_BYTES))];
+        assert!(plan_outputs(&s, &key, "app/web", &big)
+            .unwrap_err()
+            .contains("limit"));
     }
 
     #[test]
@@ -1414,6 +1876,7 @@ mod tests {
             vars: BTreeMap::new(),
             state: Some(b"state".to_vec()),
             state_serial: 1,
+            outputs: Vec::new(),
         }
     }
 
@@ -1527,6 +1990,10 @@ output "echo" {
             vars: BTreeMap::new(),
             state: None,
             state_serial: 0,
+            outputs: vec![
+                binding("theme", None, Some("it-theme")),
+                binding("echo", Some("it-echo"), None),
+            ],
         };
 
         let first = run_tofu(&docker, tmp.path(), &cfg, TerraformMode::Apply, &inputs).await;
@@ -1540,6 +2007,18 @@ output "echo" {
         );
         assert!(text.contains("dark"));
         assert!(!first.log.contains("hunter2-it"));
+        let resolved = resolve_outputs(
+            &inputs.outputs,
+            first.final_state.as_deref().expect("final state"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                (OutputObject::config("it-theme"), "dark".to_string()),
+                (OutputObject::secret("it-echo"), "hunter2-it".to_string()),
+            ]
+        );
 
         inputs.run_id = uuid::Uuid::new_v4().to_string();
         inputs.state = Some(state1.clone());
@@ -1551,6 +2030,16 @@ output "echo" {
                 || summary.starts_with("No changes"),
             "{summary}"
         );
+        // a no-op apply still yields the outputs
+        let again = resolve_outputs(
+            &inputs.outputs,
+            second
+                .final_state
+                .as_deref()
+                .expect("final state of a no-op apply"),
+        )
+        .unwrap();
+        assert_eq!(again[0].1, "dark");
 
         inputs.run_id = uuid::Uuid::new_v4().to_string();
         let plan = run_tofu(&docker, tmp.path(), &cfg, TerraformMode::Plan, &inputs).await;

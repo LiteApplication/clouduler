@@ -45,6 +45,7 @@ function status(over: Partial<TerraformStatus> = {}): TerraformStatus {
           log_tail: 'Error: something broke',
         },
         pending_request: null,
+        outputs: [],
       },
     ],
     ...over,
@@ -78,6 +79,27 @@ describe('TerraformTab', () => {
     expect(screen.getByText('db')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add module' })).toBeInTheDocument();
     expect(screen.getByText('Error: something broke')).toBeInTheDocument();
+  });
+
+  it('lists the objects a module wrote, with revisions', async () => {
+    const base = status();
+    getStackTerraform.mockResolvedValue({
+      ...base,
+      services: [
+        {
+          ...base.services[0],
+          outputs: [
+            { kind: 'secret', name: 'grafana-oidc-secret', revision: 3 },
+            { kind: 'config', name: 'grafana-oidc-id', revision: 1 },
+          ],
+        },
+      ],
+    });
+    renderTab();
+    expect(await screen.findByText('Writes')).toBeInTheDocument();
+    expect(screen.getByText('grafana-oidc-secret')).toBeInTheDocument();
+    expect(screen.getByText('(rev 3)')).toBeInTheDocument();
+    expect(screen.getByText('grafana-oidc-id')).toBeInTheDocument();
   });
 
   it('requests a plan', async () => {

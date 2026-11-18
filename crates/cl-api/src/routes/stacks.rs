@@ -208,7 +208,8 @@ fn cluster_check(
 ) -> Result<(), ApiError> {
     parsed
         .validate_named(name, cfg)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    super::terraform::check_output_targets(parsed)
 }
 
 /// `terraform` (service to module text) is validated and replaces the stack's modules after the deploy; `None` keeps them.

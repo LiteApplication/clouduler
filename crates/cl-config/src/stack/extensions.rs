@@ -621,6 +621,10 @@ pub struct TerraformService {
     /// Plain string variables.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, String>,
+    /// Module outputs written back as cluster secrets or configs after each
+    /// successful apply. Part of this block, so changing a mapping re-applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<TfOutputBinding>,
 }
 
 impl Default for TerraformService {
@@ -630,8 +634,60 @@ impl Default for TerraformService {
             secrets: Vec::new(),
             configs: Vec::new(),
             vars: BTreeMap::new(),
+            outputs: Vec::new(),
         }
     }
+}
+
+/// One module output written to a cluster secret or config. Exactly one of
+/// `secret` / `config` names the target object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TfOutputBinding {
+    /// Name of the module's `output` block.
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+}
+
+/// The object a [`TfOutputBinding`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TfOutputTarget<'a> {
+    Secret(&'a str),
+    Config(&'a str),
+}
+
+impl TfOutputBinding {
+    /// `None` unless exactly one of `secret` / `config` is set.
+    pub fn target(&self) -> Option<TfOutputTarget<'_>> {
+        match (&self.secret, &self.config) {
+            (Some(s), None) => Some(TfOutputTarget::Secret(s)),
+            (None, Some(c)) => Some(TfOutputTarget::Config(c)),
+            _ => None,
+        }
+    }
+}
+
+/// Same rules as raft's object names (they become file names): 1-253 characters of
+/// letters, digits, `.`, `-`, `_`, not starting with a dot.
+pub fn check_object_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 253 {
+        return Err(format!("{name:?} must be between 1 and 253 characters"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(format!(
+            "{name:?} may only contain letters, digits, dot, dash and underscore"
+        ));
+    }
+    if name.starts_with('.') {
+        return Err(format!("{name:?} must not start with a dot"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -700,6 +756,59 @@ impl TerraformService {
         }
         for v in self.vars.keys() {
             take_var(format!("{prefix}.vars.{v}"), v)?;
+        }
+        self.validate_outputs(prefix)
+    }
+
+    fn validate_outputs(&self, prefix: &str) -> Result<(), crate::error::ConfigError> {
+        use crate::error::ConfigError;
+        let mut names = std::collections::BTreeSet::new();
+        let mut targets = std::collections::BTreeSet::new();
+        for (i, o) in self.outputs.iter().enumerate() {
+            let field = format!("{prefix}.outputs[{i}]");
+            if !is_identifier(&o.output) {
+                return Err(ConfigError::invalid(
+                    format!("{field}.output"),
+                    format!("{:?} is not a valid output name (letters, digits, _ and -, not starting with a digit)", o.output),
+                ));
+            }
+            if !names.insert(o.output.as_str()) {
+                return Err(ConfigError::invalid(
+                    format!("{field}.output"),
+                    format!("output {:?} is mapped more than once", o.output),
+                ));
+            }
+            let target = o.target().ok_or_else(|| {
+                ConfigError::invalid(&field, "needs exactly one of `secret` or `config`")
+            })?;
+            let (kind, name, inputs): (&str, &str, Vec<&str>) = match target {
+                TfOutputTarget::Secret(n) => (
+                    "secret",
+                    n,
+                    self.secrets.iter().map(|b| b.source.as_str()).collect(),
+                ),
+                TfOutputTarget::Config(n) => (
+                    "config",
+                    n,
+                    self.configs.iter().map(|b| b.source.as_str()).collect(),
+                ),
+            };
+            check_object_name(name)
+                .map_err(|m| ConfigError::invalid(format!("{field}.{kind}"), m))?;
+            if !targets.insert(target) {
+                return Err(ConfigError::invalid(
+                    format!("{field}.{kind}"),
+                    format!("{kind} {name:?} is written by more than one output"),
+                ));
+            }
+            if inputs.contains(&name) {
+                return Err(ConfigError::invalid(
+                    format!("{field}.{kind}"),
+                    format!(
+                        "{kind} {name:?} is also an input of this module: an output would feed back into its own apply"
+                    ),
+                ));
+            }
         }
         Ok(())
     }

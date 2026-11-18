@@ -1343,6 +1343,7 @@
     },
     "terraform_applied": {},
     "terraform_modules": {},
+    "terraform_outputs": {},
     "terraform_requests": {},
     "terraform_runs": {},
     "terraform_states": {},

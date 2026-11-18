@@ -58,6 +58,8 @@ services:
   {key: 'configs[].var', type: 'variable name', reload: 'n/a', description: 'Passes the config text as TF_VAR_<var>.'},
   {key: 'configs[].path', type: 'relative path', reload: 'n/a', description: 'Writes the config text to this file in the run directory. The module reads it with file().'},
   {key: 'vars', type: 'map of string', default: '{}', reload: 'n/a', description: 'Plain strings passed as TF_VAR_<name>. They are stored in the stack spec in plain text.'},
+  {key: 'outputs[].output', type: 'output name', reload: 'n/a', required: true, description: 'The module output to write to the cluster after a successful apply.'},
+  {key: 'outputs[].secret, config', type: 'secret name, config name', reload: 'n/a', required: true, description: 'The cluster secret or config that receives the output. Exactly one of the two.'},
 ]} />
 
 Checks run when the stack is parsed, so a deploy, a validate and a git pull all refuse a bad block:
@@ -69,6 +71,142 @@ Checks run when the stack is parsed, so a deploy, a validate and a git pull all 
 - `clouduler_stack`, `clouduler_service` and `clouduler_instance` are set by Clouduler last, so they win over a binding with the same name. Declare them as variables to read them: they tell the module which stack, service and instance it belongs to.
 - Secrets and configs named here are part of the stack's requirements, the same as a service's own `secrets:` and `configs:`. To bundle a file with the stack, declare it at the top of the stack with `file:`. A `path` is written into the run directory, so the module reads it as `file("monitors.yaml")`.
 
+## Write outputs to secrets and configs
+
+A module can publish what it creates. Map an output to a cluster secret or config, and other stacks use it like any other object. Typical case: an Authentik module creates an OAuth provider, and Grafana, in another stack, reads the client id and secret.
+
+```yaml title="stack.yaml (excerpt)"
+services:
+  authentik:
+    x-clouduler:
+      terraform:
+        outputs:
+          - { output: grafana_client_id, config: grafana-oidc-id }
+          - { output: grafana_client_secret, secret: grafana-oidc-secret }
+```
+
+Each entry names one `output` block of the module and exactly one target, `secret` or `config`.
+
+- **When.** After a successful **apply**, once the state is stored. A plan writes nothing. A no-op apply still writes: the outputs are read from the state file, not from what the apply changed.
+- **Value.** A string output is written as is. Any other value (number, list, object) is written JSON-encoded. An output named in the mapping but missing from the state fails the run.
+- **Only changes are written.** Each value is compared with the stored object, and an unchanged one is skipped, so a revision does not move on every apply. A changed object gets a new revision, like a `put` from the CLI. All changed objects of a run go into one raft request.
+- **Secrets.** Sealed with the cluster key before they reach raft. Values bound to a secret are replaced with `[REDACTED]` in the run's log and error text, including their JSON-escaped form.
+- **Restart.** After the run is recorded, every running container that uses a changed secret or config is restarted, one container at a time per service, the same roll as `clouduler secret restart`. A secret reaches a container only when it is created, and a config file is replaced by rename, so a running container keeps the old content. Each container records the revision of every secret (`clouduler.secrets`) and read-only config (`clouduler.configs`) it was created with, and only a container that provably runs an older revision is restarted. Left alone: a container that already runs the new revision, a stopped one (it starts with the new value), one that is moving between nodes or already updating, a `write: true` config's users (the file is edited live, not replaced), and, for configs, a container created before config revisions were tracked (no revision is recorded, so it is not known to be stale: restart it once by hand). The first write of a new object restarts nothing, because nothing is running with it. The roll stops at the first container that fails to come back; see [Rotating a secret](/docs/features/configs-and-secrets#rotating-a-secret).
+- **Takeover.** If the object already exists, whether it was written by hand or by another module, the module overwrites it and becomes its owner. The exception is a stack's bundled `file:` object, which the module may not write. An existing object whose value already equals the output is adopted without a new revision.
+- **Failure.** If the write is refused (for example the binding was removed from the spec while the run was going), the run fails.
+
+Checks run when the stack is parsed:
+
+- `output` is a valid identifier (the variable-name rule). Each output is mapped once, and each target is written by one output.
+- The target is a valid object name (letters, digits, `.`, `-`, `_`, not starting with a dot, at most 253 characters).
+- The target is not an input of the same module (`secrets` or `configs` of the block), because the output would change the input and trigger the next apply.
+- The target is not a `file:` secret or config of the same stack.
+- A deploy also refuses a reserved name, one with a dedicated write path such as the API keys config.
+
+Outputs are not part of the stack's requirements: the producer does not need the objects to exist before its first apply. A stack that **uses** them can be deployed at any time, before or after the producer applies: a plain `secrets:` or `configs:` reference to an object that does not exist yet is not refused at deploy. The node just skips the instance ("cannot prepare objects") and keeps its container from starting until the object exists, so the consumer's containers start once the first apply has written the objects. The mapping is part of the block, so changing it triggers an apply. The fingerprint does not cover the written objects' revisions, so editing one by hand is overwritten at the next apply, not at once.
+
+### Example: Authentik to Grafana
+
+An Authentik module creates an OAuth2 provider and application for Grafana. The generated client id and secret are written to the cluster, and the Grafana stack mounts them. The Grafana stack can be deployed first: its container starts once the first apply has written the objects.
+
+<Quirk title="Pin the provider" severity="warn">
+The `goauthentik/authentik` provider tracks Authentik releases closely, and its resource arguments change between them (for example the invalidation flow of a provider). **The version below is a placeholder.** Pin one that matches your Authentik image, and check the resource arguments against its docs.
+</Quirk>
+
+```yaml title="authentik.yaml (excerpt)"
+secrets:
+  authentik_token:        # an Authentik API token, created with clouduler secret set
+
+services:
+  server:
+    # image, database and so on omitted
+    x-clouduler:
+      terraform:
+        secrets:
+          - source: authentik_token
+            var: authentik_token
+        outputs:
+          - { output: client_id, config: grafana-oidc-id }
+          - { output: client_secret, secret: grafana-oidc-secret }
+```
+
+```hcl title="terraform/server.tf"
+terraform {
+  required_providers {
+    authentik = {
+      source  = "goauthentik/authentik"
+      version = "PLACEHOLDER"   # pin to match your Authentik version
+    }
+  }
+}
+
+variable "authentik_token" {
+  type      = string
+  sensitive = true
+}
+
+provider "authentik" {
+  url   = "http://localhost:9000"   # the run shares the service's network namespace
+  token = var.authentik_token
+}
+
+data "authentik_flow" "authorization" {
+  slug = "default-provider-authorization-implicit-consent"
+}
+
+data "authentik_flow" "invalidation" {
+  slug = "default-provider-invalidation-flow"
+}
+
+resource "authentik_provider_oauth2" "grafana" {
+  name               = "grafana"
+  authorization_flow = data.authentik_flow.authorization.id
+  invalidation_flow  = data.authentik_flow.invalidation.id
+  allowed_redirect_uris = [{
+    matching_mode = "strict"
+    url           = "https://grafana.example.com/login/generic_oauth"
+  }]
+}
+
+resource "authentik_application" "grafana" {
+  name              = "Grafana"
+  slug              = "grafana"
+  protocol_provider = authentik_provider_oauth2.grafana.id
+}
+
+output "client_id" {
+  value = authentik_provider_oauth2.grafana.client_id
+}
+
+output "client_secret" {
+  value     = authentik_provider_oauth2.grafana.client_secret
+  sensitive = true
+}
+```
+
+```yaml title="grafana.yaml"
+configs:
+  grafana-oidc-id:        # written by the module above
+secrets:
+  grafana-oidc-secret:    # written by the module above
+
+services:
+  grafana:
+    image: grafana/grafana:11   # pin the version you test against
+    configs:
+      - source: grafana-oidc-id
+        target: /run/oidc/client_id
+    secrets:
+      - source: grafana-oidc-secret
+        env: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+    environment:
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID__FILE: /run/oidc/client_id
+      # auth_url, token_url, api_url and scopes omitted
+```
+
+When the module is applied again and the client id or secret changes, Clouduler restarts Grafana with the new values. An unchanged apply writes and restarts nothing.
+
 ## How a run works
 
 1. **Target.** The run uses the lowest-numbered instance of the service that is running, assigned to a node and not moving. Until that instance is running and healthy (or has no healthcheck), nothing starts.
@@ -77,7 +215,8 @@ Checks run when the stack is parsed, so a deploy, a validate and a git pull all 
 4. **Init.** `tofu init` runs in a helper container on `init_network`, so providers can be downloaded. It gets no secrets and no variables. Providers are cached per node in `<data_dir>/tofu/plugin-cache`, which every run on that node shares.
 5. **Plan or apply.** `tofu plan`, or `tofu apply -auto-approve`, runs in a second helper container. That container shares the target's network namespace (`container:<target>`), so the module reaches the service on `localhost`. The `TF_VAR_*` values are set only here.
 6. **State.** After an apply, the new state is sealed with the cluster key and stored. This also happens after a failed or timed-out apply, so partial state is kept. A plan never writes state.
-7. **Log.** Injected secret values in the output are replaced with `[REDACTED]`. The last 64 KiB of the log are stored with the run.
+7. **Outputs.** After a successful apply, mapped outputs are written to secrets and configs (see above).
+8. **Log.** Injected secret values, and output values bound to a secret, are replaced with `[REDACTED]`. The last 64 KiB of the log are stored with the run.
 
 Helper containers drop every capability, set `no-new-privileges`, never restart, run as the owner of the work directory, and are removed after each phase. They are not managed containers, so the reconciler ignores them.
 
@@ -109,7 +248,9 @@ A manual `plan` or `apply` is refused with 409 while the service has `enabled: f
 
 ## Removing
 
-Dropping a service from its stack, removing the stack, deleting a module, or a git pull or deploy that leaves a service without one forgets everything Clouduler holds for that module: the module, its state, its run history and any pending request. **Nothing is destroyed.** Whatever the module created stays where it is. A module stored again starts from an empty state, so its first apply may try to create what already exists.
+Dropping a service from its stack, removing the stack, deleting a module, or a git pull or deploy that leaves a service without one forgets everything Clouduler holds for that module: the module, its state, its run history and any pending request. **Nothing is destroyed** in the service the module configured: whatever the module created stays where it is. A module stored again starts from an empty state, so its first apply may try to create what already exists.
+
+Secrets and configs written by [outputs](#write-outputs-to-secrets-and-configs) are cluster objects, and they are deleted when their binding goes away: an edited spec without the mapping, a dropped module or service, or a removed stack. If another stack still uses the object (it is in that stack's secrets or configs), the object is kept and only the module's ownership ends. Removing a secret or config by hand also ends its ownership.
 
 ## Failures and alerts
 
@@ -134,7 +275,7 @@ Over the API, all under `/api/stacks/{name}/terraform`:
 
 | Method and path | Auth | Success | What it does |
 |---|---|---|---|
-| `GET` (the collection) | user | 200 | `enabled_cluster` and, per service, `source`, `revision`, `enabled`, `pending_request` and `last_run` (with `outcome`, `message` and `log_tail`). |
+| `GET` (the collection) | user | 200 | `enabled_cluster` and, per service, `source`, `revision`, `enabled`, `pending_request`, `last_run` (with `outcome`, `message` and `log_tail`) and `outputs` (the secrets and configs its outputs wrote: `kind`, `name`, `revision`). |
 | `PUT /{service}` | admin | 204 | Stores a module. Body `{"source": "<.tf text>"}`. Refuses a `backend` or `cloud` block. |
 | `DELETE /{service}` | admin | 204 | Forgets the module, its state and its runs. 404 if the service has no module. |
 | `POST /{service}/plan` | admin | 202 | Requests a plan. 409 while cluster terraform is off, 404 without a module. |

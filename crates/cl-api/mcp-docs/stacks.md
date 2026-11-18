@@ -714,6 +714,7 @@ rule are rejected when the stack is validated.
 - `secrets`: cluster secrets passed as `TF_VAR_<var>`, to plan and apply only.
 - `configs`: cluster configs passed as `TF_VAR_<var>`, written to a file at `path` in the run directory, or both.
 - `vars`: plain strings passed as `TF_VAR_<name>`.
+- `outputs`: list of `{output, secret | config}`. After each successful apply the named module output is written to that cluster secret or config (string as is, anything else JSON-encoded; secrets are sealed). Unchanged values are skipped. A changed object restarts the running containers that use it, one at a time per service. The target may not be an input of the same module or a `file:` object of the stack. Outputs are not requirements: a stack that uses the object can be deployed before the module has applied, and its containers start once the object exists.
 - `enabled: false` pauses the module.
 
 Valid at service level only. Variable names start with a letter or `_` and contain only letters, digits, `_` and `-`, and each name is bound once across the three lists. A config needs `var`, `path`, or both. A `path` is relative, has no `..`, `.` or empty part, and does not end in `.tf` or `.tfstate`. `clouduler_stack`, `clouduler_service` and `clouduler_instance` are set by Clouduler and override a binding of the same name.

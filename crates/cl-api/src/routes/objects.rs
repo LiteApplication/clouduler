@@ -44,6 +44,15 @@ pub(crate) fn is_reserved_secret(name: &str) -> bool {
         || cl_restic::secret_names::is_reserved_restic_secret(name)
 }
 
+/// Whether a terraform module output may not write this object: reserved names have dedicated,
+/// validated write paths.
+pub fn is_reserved_output_target(target: cl_config::TfOutputTarget<'_>) -> bool {
+    match target {
+        cl_config::TfOutputTarget::Secret(name) => is_reserved_secret(name),
+        cl_config::TfOutputTarget::Config(name) => is_reserved(name),
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/configs", get(list_configs))

@@ -68,6 +68,8 @@ pub struct Prepared {
     pub config_edits: Vec<ConfigEdit>,
     /// Revision of every secret opened for this instance, file or env alike.
     pub secret_revisions: BTreeMap<String, u64>,
+    /// Revision of every read-only (not `write: true`) config mounted for this instance.
+    pub config_revisions: BTreeMap<String, u64>,
 }
 
 /// The unix socket the daemon serves the read-only image API on, under the
@@ -140,6 +142,7 @@ impl Materializer {
         let mut env = Vec::new();
         let mut config_edits = Vec::new();
         let mut secret_revisions = BTreeMap::new();
+        let mut config_revisions = BTreeMap::new();
 
         for reference in configs {
             let entry =
@@ -170,6 +173,7 @@ impl Materializer {
                 continue;
             }
 
+            config_revisions.insert(reference.source.clone(), entry.revision);
             out.push(self.write_object(
                 &dir,
                 reference,
@@ -243,6 +247,7 @@ impl Materializer {
             env,
             config_edits,
             secret_revisions,
+            config_revisions,
         })
     }
 

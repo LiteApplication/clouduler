@@ -3207,3 +3207,70 @@ async fn terraform_modules_with_a_backend_or_bad_hcl_are_rejected() {
     }
     assert!(h.state.cluster.state().await.terraform_modules.is_empty());
 }
+
+#[tokio::test]
+async fn terraform_outputs_are_listed_and_reserved_targets_refused() {
+    use cl_raft::terraform::{
+        TerraformConfigOutput, TerraformMode, TerraformOutcome, TerraformRun, TerraformSecretOutput,
+    };
+    let h = harness().await;
+    let spec = "services:\n  web:\n    image: nginx\n    x-clouduler:\n      terraform:\n        outputs:\n          - {output: id, config: oidc-id}\n          - {output: sec, secret: oidc-sec}\n";
+    let body =
+        serde_json::json!({"spec": spec, "terraform": {"web": "variable \"x\" {}\n"}}).to_string();
+    assert_eq!(deploy(&h, "site", &body).await, StatusCode::OK);
+
+    let run = TerraformRun {
+        id: "r1".into(),
+        mode: TerraformMode::Apply,
+        trigger: "manual".into(),
+        node: "n1".into(),
+        instance: cl_raft::ids::InstanceId::new("site", "web", 0),
+        fingerprint: "f".into(),
+        started_at: 1,
+        finished_at: None,
+        outcome: TerraformOutcome::Running,
+        log_tail: String::new(),
+    };
+    h.state
+        .cluster
+        .submit(cl_raft::Request::RecordTerraformRun { run })
+        .await
+        .unwrap();
+    let r = h
+        .state
+        .cluster
+        .submit(cl_raft::Request::PutTerraformOutputs {
+            key: "site/web".into(),
+            run_id: "r1".into(),
+            secrets: vec![TerraformSecretOutput {
+                name: "oidc-sec".into(),
+                sealed: "c2VhbGVk".into(),
+                key_fingerprint: "fp".into(),
+            }],
+            configs: vec![TerraformConfigOutput {
+                name: "oidc-id".into(),
+                content: "aWQ=".into(),
+            }],
+            claims: vec![],
+        })
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.error);
+    let (_, json) = tf_request(&h, "GET", "/api/stacks/site/terraform", "").await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let outputs = v["services"][0]["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs
+        .iter()
+        .any(|o| o["kind"] == "secret" && o["name"] == "oidc-sec" && o["revision"] == 1));
+    assert!(outputs
+        .iter()
+        .any(|o| o["kind"] == "config" && o["name"] == "oidc-id"));
+
+    let reserved = format!(
+        "services:\n  web:\n    image: nginx\n    x-clouduler:\n      terraform:\n        outputs:\n          - {{output: id, config: {}}}\n",
+        cl_update::plan::RUN_CONFIG
+    );
+    let body = serde_json::json!({ "spec": reserved }).to_string();
+    assert_eq!(deploy(&h, "other", &body).await, StatusCode::BAD_REQUEST);
+}

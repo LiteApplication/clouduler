@@ -310,7 +310,7 @@ impl fmt::Debug for WrappedKeyEntry {
 pub const MAX_OBJECT_BYTES: usize = 1024 * 1024;
 
 /// Names become filenames under the mount directory, so they must be safe to join onto a path.
-fn validate_object_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_object_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 253 {
         return Err(format!("{name:?} must be between 1 and 253 characters"));
     }
@@ -745,6 +745,10 @@ pub struct ClusterState {
     /// Fingerprint of the last successful Apply by `terraform_key`.
     #[serde(default)]
     pub terraform_applied: BTreeMap<String, String>,
+    /// Secrets and configs each module's `outputs:` wrote, by `terraform_key`. Owned
+    /// objects are deleted with the binding (unless another stack uses them).
+    #[serde(default)]
+    pub terraform_outputs: BTreeMap<String, BTreeSet<crate::terraform::OutputObject>>,
     /// Nodes a crash-looping instance was recently moved from, with the move's unix
     /// second. In raft because the owner changes with each move: node-local memory
     /// would start empty each time and let a service that crashes everywhere bounce
@@ -850,6 +854,10 @@ pub struct ContainerStatus {
     /// containers, which are indistinguishable here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_revisions: BTreeMap<String, u64>,
+    /// Same for the read-only configs (`clouduler.configs` label). A `write: true` config is live-edited and
+    /// never listed. Empty also for pre-label containers, which are never treated as stale.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_revisions: BTreeMap<String, u64>,
 }
 
 /// Where one instance's image update or redeploy stands; written via
@@ -1139,6 +1147,9 @@ pub enum Request {
         /// Per instance, the secret revisions its container was created with; optional for older nodes' reports.
         #[serde(default)]
         secret_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
+        /// Likewise for read-only configs; optional for older nodes' reports.
+        #[serde(default)]
+        config_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
     },
     /// Record the step an update or redeploy reached; `at` is caller-supplied unix
     /// seconds. Rejected for an instance with no assignment.
@@ -1268,6 +1279,17 @@ pub enum Request {
     RecordTerraformRun {
         run: crate::terraform::TerraformRun,
     },
+    /// The run's module outputs, written to cluster secrets and configs; see
+    /// `ClusterState::apply_terraform_outputs`. `claims` take ownership of unchanged,
+    /// already existing objects without rewriting them.
+    PutTerraformOutputs {
+        key: String,
+        run_id: String,
+        secrets: Vec<crate::terraform::TerraformSecretOutput>,
+        configs: Vec<crate::terraform::TerraformConfigOutput>,
+        #[serde(default)]
+        claims: Vec<crate::terraform::OutputObject>,
+    },
     /// A manual Plan/Apply, picked up by the leader's runner.
     RequestTerraformRun {
         key: String,
@@ -1363,6 +1385,7 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "SetStackTerraform",
     "PutTerraformState",
     "RecordTerraformRun",
+    "PutTerraformOutputs",
     "RequestTerraformRun",
 ];
 
@@ -1553,6 +1576,8 @@ mod request_mirror {
             running: BTreeMap<InstanceId, bool>,
             #[serde(default)]
             secret_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
+            #[serde(default)]
+            config_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
         },
         SetInstanceUpdate {
             instance: InstanceId,
@@ -1654,6 +1679,14 @@ mod request_mirror {
         },
         RecordTerraformRun {
             run: crate::terraform::TerraformRun,
+        },
+        PutTerraformOutputs {
+            key: String,
+            run_id: String,
+            secrets: Vec<crate::terraform::TerraformSecretOutput>,
+            configs: Vec<crate::terraform::TerraformConfigOutput>,
+            #[serde(default)]
+            claims: Vec<crate::terraform::OutputObject>,
         },
         RequestTerraformRun {
             key: String,
@@ -1851,6 +1884,7 @@ impl ClusterState {
                     return Err(format!("config {name} is still used by {user}"));
                 }
                 self.configs.remove(name);
+                self.forget_output_object(&crate::terraform::OutputObject::config(name));
                 Ok(())
             }
 
@@ -1886,6 +1920,7 @@ impl ClusterState {
                     return Err(format!("secret {name} is still used by {user}"));
                 }
                 self.secrets.remove(name);
+                self.forget_output_object(&crate::terraform::OutputObject::secret(name));
                 Ok(())
             }
 
@@ -2020,6 +2055,8 @@ impl ClusterState {
                         previous_spec,
                     },
                 );
+                // Objects whose output binding went away are released before the module itself.
+                self.release_outputs_for_spec(name, spec);
                 // A service that left the spec forgets its terraform module and state.
                 self.prune_terraform_for_spec(name, spec);
                 Ok(())
@@ -2550,6 +2587,7 @@ impl ClusterState {
                 node,
                 running,
                 secret_revisions,
+                config_revisions,
             } => {
                 self.container_status
                     .retain(|_, status| &status.node != node);
@@ -2560,6 +2598,10 @@ impl ClusterState {
                             node: node.clone(),
                             running: *is_running,
                             secret_revisions: secret_revisions
+                                .get(instance)
+                                .cloned()
+                                .unwrap_or_default(),
+                            config_revisions: config_revisions
                                 .get(instance)
                                 .cloned()
                                 .unwrap_or_default(),
@@ -2810,6 +2852,7 @@ impl ClusterState {
             Request::SetStackTerraform { .. }
             | Request::PutTerraformState { .. }
             | Request::RecordTerraformRun { .. }
+            | Request::PutTerraformOutputs { .. }
             | Request::RequestTerraformRun { .. } => self.apply_terraform(req),
 
             Request::Served { drive, op } => {
@@ -3561,6 +3604,7 @@ mod tests {
                 node: "n1".into(),
                 running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
                 secret_revisions: BTreeMap::new(),
+                config_revisions: BTreeMap::new(),
             },
             Request::SetInstanceUpdate {
                 instance: InstanceId::new("gitlab", "web", 0),
@@ -3692,6 +3736,20 @@ mod tests {
                     outcome: crate::terraform::TerraformOutcome::Failed { error: "e".into() },
                     log_tail: "l".into(),
                 },
+            },
+            Request::PutTerraformOutputs {
+                key: "s/web".into(),
+                run_id: "r1".into(),
+                secrets: vec![crate::terraform::TerraformSecretOutput {
+                    name: "sec".into(),
+                    sealed: "c2VhbGVk".into(),
+                    key_fingerprint: "fp".into(),
+                }],
+                configs: vec![crate::terraform::TerraformConfigOutput {
+                    name: "cfg".into(),
+                    content: "Zm9v".into(),
+                }],
+                claims: vec![crate::terraform::OutputObject::config("c2")],
             },
             Request::RequestTerraformRun {
                 key: "s/web".into(),
@@ -5657,6 +5715,7 @@ mod tests {
             node: "n1".into(),
             running: BTreeMap::from([(InstanceId::new("gitlab", "web", 0), true)]),
             secret_revisions: BTreeMap::new(),
+            config_revisions: BTreeMap::new(),
         });
         assert!(!state.container_status.is_empty());
 
@@ -5720,6 +5779,7 @@ mod tests {
                 id.clone(),
                 BTreeMap::from([("db".to_string(), 2)]),
             )]),
+            config_revisions: BTreeMap::new(),
         });
         assert_eq!(state.container_status[&id].secret_revisions["db"], 2);
 

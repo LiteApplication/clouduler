@@ -675,6 +675,7 @@ export function buildHttpRoutes(): HttpRoute[] {
         enabled: true,
         last_run: null,
         pending_request: null,
+        outputs: [],
       })),
     })),
     route('PUT', '/api/stacks/:name/terraform/:service', ({ db, params, body }) => {

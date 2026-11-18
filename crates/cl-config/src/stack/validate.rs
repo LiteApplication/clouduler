@@ -53,7 +53,30 @@ impl StackFile {
     fn validate_terraform(&self) -> Result<()> {
         for (name, svc) in &self.services {
             if let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) {
-                tf.validate(&format!("services.{name}.x-clouduler.terraform"))?;
+                let prefix = format!("services.{name}.x-clouduler.terraform");
+                tf.validate(&prefix)?;
+                // A bundled `file:` object belongs to the stack and is rewritten on every deploy.
+                for (i, o) in tf.outputs.iter().enumerate() {
+                    let bundled = match o.target() {
+                        Some(super::TfOutputTarget::Secret(n)) => self
+                            .secrets
+                            .get(n)
+                            .is_some_and(|s| s.as_ref().and_then(|s| s.file.as_ref()).is_some())
+                            .then_some(("secret", n)),
+                        Some(super::TfOutputTarget::Config(n)) => self
+                            .configs
+                            .get(n)
+                            .is_some_and(|c| c.as_ref().and_then(|c| c.file.as_ref()).is_some())
+                            .then_some(("config", n)),
+                        None => None,
+                    };
+                    if let Some((kind, n)) = bundled {
+                        return Err(ConfigError::invalid(
+                            format!("{prefix}.outputs[{i}].{kind}"),
+                            format!("{kind} {n:?} is a bundled file of this stack, so a module output cannot overwrite it"),
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -1129,6 +1152,59 @@ mod tests {
         ] {
             assert!(tf_stack(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn terraform_outputs_are_validated() {
+        tf_stack("        outputs:\n          - {output: client_id, config: oidc-id}\n          - {output: client_secret, secret: oidc-secret}\n").unwrap();
+        for bad in [
+            // not an identifier
+            "        outputs: [{output: \"1x\", secret: s}]\n",
+            // neither / both targets
+            "        outputs: [{output: o}]\n",
+            "        outputs: [{output: o, secret: s, config: c}]\n",
+            // bad object names
+            "        outputs: [{output: o, secret: \"a/b\"}]\n",
+            "        outputs: [{output: o, config: \".hidden\"}]\n",
+            // duplicate output / duplicate target
+            "        outputs: [{output: o, secret: a}, {output: o, secret: b}]\n",
+            "        outputs: [{output: o, secret: a}, {output: p, secret: a}]\n",
+            // feedback loop with an input binding
+            "        secrets: [{source: s, var: pw}]\n        outputs: [{output: o, secret: s}]\n",
+            "        configs: [{source: c, var: v}]\n        outputs: [{output: o, config: c}]\n",
+            "        outputs: [{output: o, other: x}]\n",
+        ] {
+            assert!(tf_stack(bad).is_err(), "{bad}");
+        }
+        // a secret and a config may share a name: they are different kinds
+        tf_stack("        outputs: [{output: o, secret: a}, {output: p, config: a}]\n").unwrap();
+        // an input of the other kind is not a loop
+        tf_stack(
+            "        secrets: [{source: s, var: pw}]\n        outputs: [{output: o, config: s}]\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn terraform_outputs_may_not_overwrite_bundled_files() {
+        let spec = |extra: &str| {
+            super::StackFile::parse(&format!(
+                "{extra}services:\n  a:\n    image: x\n    x-clouduler:\n      terraform:\n        outputs: [{{output: o, secret: s}}, {{output: p, config: c}}]\n"
+            ))
+        };
+        spec("").unwrap();
+        // declared without a file: an external reference, allowed
+        spec("secrets:\n  s:\nconfigs:\n  c:\n").unwrap();
+        assert!(spec("secrets:\n  s:\n    file: ./s\n").is_err());
+        assert!(spec("configs:\n  c:\n    file: ./c\n").is_err());
+    }
+
+    #[test]
+    fn terraform_outputs_do_not_count_as_requirements() {
+        let s = tf_stack("        outputs: [{output: o, secret: s}, {output: p, config: c}]\n")
+            .unwrap();
+        let r = s.requirements();
+        assert!(r.secrets.is_empty() && r.configs.is_empty());
     }
 
     #[test]

@@ -80,6 +80,7 @@ mod tests {
                     node: node.to_string(),
                     running: *running,
                     secret_revisions: Default::default(),
+                    config_revisions: Default::default(),
                 },
             );
         }

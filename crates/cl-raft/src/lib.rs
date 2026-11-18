@@ -39,6 +39,6 @@ pub use state::{
 };
 pub use store::Store;
 pub use terraform::{
-    terraform_key, TerraformMode, TerraformModule, TerraformOutcome, TerraformRun, TerraformState,
-    MAX_TERRAFORM_LOG_BYTES,
+    terraform_key, OutputKind, OutputObject, TerraformConfigOutput, TerraformMode, TerraformModule,
+    TerraformOutcome, TerraformRun, TerraformSecretOutput, TerraformState, MAX_TERRAFORM_LOG_BYTES,
 };

@@ -24,11 +24,12 @@ pub use deploy::{
     UpdateConfig, MAX_REPLICAS,
 };
 pub use devices::{DeviceCount, DeviceMapping, DeviceRequest, NVIDIA_DRIVER};
+pub use extensions::check_object_name;
 pub use extensions::{
     Authenticated, AutoUpdate, AutoUpdateMode, AutoUpdateSetting, CorsPolicy, DockerSocket,
     DockerSocketMode, ExposePort, Headers, Middleware, ProxyRoute, RedirectRegex, ServiceAction,
-    ServiceExtensions, StackDefaults, TerraformService, TfConfigBinding, TfSecretBinding,
-    VolumeSyncOverride,
+    ServiceExtensions, StackDefaults, TerraformService, TfConfigBinding, TfOutputBinding,
+    TfOutputTarget, TfSecretBinding, VolumeSyncOverride,
 };
 pub use healthcheck::{Healthcheck, HealthcheckTest};
 pub use objects::{ObjectRef, SECRET_DIR};

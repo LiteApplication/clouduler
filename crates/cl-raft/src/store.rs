@@ -245,6 +245,7 @@ impl Store {
         sm.data.terraform_runs.clear();
         sm.data.terraform_requests.clear();
         sm.data.terraform_applied.clear();
+        sm.data.terraform_outputs.clear();
         sm.data.version += 1;
         write_meta(&self.db, KEY_STATE_MACHINE, &*sm)?;
         Ok(())

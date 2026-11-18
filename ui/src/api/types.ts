@@ -407,6 +407,14 @@ export interface TerraformServiceStatus {
   last_run: TerraformRunView | null;
   /** A manual run waiting for the runner. */
   pending_request: TerraformRunMode | null;
+  /** Secrets and configs this module's `outputs:` wrote (values are never shown). */
+  outputs: TerraformOutputView[];
+}
+
+export interface TerraformOutputView {
+  kind: 'secret' | 'config';
+  name: string;
+  revision: number;
 }
 
 /** GET /api/stacks/:name/terraform. */
@@ -524,10 +532,12 @@ export interface ClusterState {
   terraform_runs: Record<string, unknown>;
   terraform_requests: Record<string, 'Plan' | 'Apply'>;
   terraform_applied: Record<string, string>;
+  /** "stack/service" -> the secrets and configs its module outputs wrote. */
+  terraform_outputs?: Record<string, { kind: 'secret' | 'config'; name: string }[]>;
   /** Last docker state each node reported per instance. `secret_revisions`
    *  holds the revision of each cluster secret the container was created
    *  with (absent when it has none or predates the label). */
-  container_status?: Record<InstanceId, { node: string; running: boolean; secret_revisions?: Record<string, number> }>;
+  container_status?: Record<InstanceId, { node: string; running: boolean; secret_revisions?: Record<string, number>; config_revisions?: Record<string, number> }>;
   /** What auto_update did about each instance's newest digest. */
   auto_updates?: Record<
     InstanceId,

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { parse } from 'yaml';
 import { api, ApiError } from '../../api/client';
-import type { TerraformRunMode, TerraformRunView, TerraformServiceStatus, TerraformStatus } from '../../api/types';
+import type { TerraformOutputView, TerraformRunMode, TerraformRunView, TerraformServiceStatus, TerraformStatus } from '../../api/types';
 import { Banner, Button, EmptyState, KV, Panel, StatusBadge, Tag, useConfirm, useToast } from '../../ds';
 import { relativeTime } from '../../lib/format';
 import { terraformRunStatus } from '../../lib/status';
@@ -259,10 +259,27 @@ function ServiceCard({
               {dirty && <span className="sub">Unsaved changes</span>}
             </div>
           )}
+          {status && status.outputs.length > 0 && <WrittenObjects outputs={status.outputs} />}
           {status && <RunSummary run={status.last_run} revision={status.revision} />}
         </>
       )}
     </Panel>
+  );
+}
+
+/** The cluster secrets and configs this module's outputs wrote (names and revisions only). */
+function WrittenObjects({ outputs }: { outputs: TerraformOutputView[] }) {
+  return (
+    <div style={{ marginTop: 12 }}>
+      <span className="sub">Writes</span>
+      <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+        {outputs.map((o) => (
+          <li key={`${o.kind}/${o.name}`}>
+            {o.kind} <span className="mono">{o.name}</span> <span className="sub">{`(rev ${o.revision})`}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

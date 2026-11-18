@@ -159,7 +159,12 @@ pub const LABEL_REVISION: &str = "clouduler.revision";
 /// secret must not restart anything unless the operator asks. Names and numbers only.
 pub const LABEL_SECRETS: &str = "clouduler.secrets";
 
-/// `name=revision` pairs for `LABEL_SECRETS`, sorted by name.
+/// Same as `LABEL_SECRETS` for the read-only configs. A config bind mount is replaced by rename, so a
+/// running container keeps the old content until it restarts. `write: true` configs are not listed (they
+/// are live-edited). Containers created before the label existed carry none and are never called stale.
+pub const LABEL_CONFIGS: &str = "clouduler.configs";
+
+/// `name=revision` pairs for `LABEL_SECRETS` / `LABEL_CONFIGS`, sorted by name.
 pub fn encode_secret_revisions(revisions: &BTreeMap<String, u64>) -> String {
     revisions
         .iter()

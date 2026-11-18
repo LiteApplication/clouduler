@@ -492,16 +492,21 @@ impl Scheduler {
             })
             .collect();
 
-        let revisions: BTreeMap<InstanceId, BTreeMap<String, u64>> = actual
-            .iter()
-            .filter_map(|c| {
-                let id = c.labels.get(cl_docker::LABEL_INSTANCE)?.parse().ok()?;
-                let label = c.labels.get(reconcile::LABEL_SECRETS)?;
-                Some((id, reconcile::decode_secret_revisions(label)))
-            })
-            .collect();
+        let label_revisions = |label: &str| -> BTreeMap<InstanceId, BTreeMap<String, u64>> {
+            actual
+                .iter()
+                .filter_map(|c| {
+                    let id = c.labels.get(cl_docker::LABEL_INSTANCE)?.parse().ok()?;
+                    let value = c.labels.get(label)?;
+                    Some((id, reconcile::decode_secret_revisions(value)))
+                })
+                .collect()
+        };
+        let revisions = label_revisions(reconcile::LABEL_SECRETS);
+        let config_revs = label_revisions(reconcile::LABEL_CONFIGS);
 
-        let report: BTreeMap<InstanceId, (bool, BTreeMap<String, u64>)> = state
+        type Revisions = BTreeMap<String, u64>;
+        let report: BTreeMap<InstanceId, (bool, Revisions, Revisions)> = state
             .assignments_on(&self.node)
             .map(|a| {
                 (
@@ -509,19 +514,24 @@ impl Scheduler {
                     (
                         running.get(&a.instance).copied().unwrap_or(false),
                         revisions.get(&a.instance).cloned().unwrap_or_default(),
+                        config_revs.get(&a.instance).cloned().unwrap_or_default(),
                     ),
                 )
             })
             .collect();
 
-        let current: BTreeMap<InstanceId, (bool, BTreeMap<String, u64>)> = state
+        let current: BTreeMap<InstanceId, (bool, Revisions, Revisions)> = state
             .container_status
             .iter()
             .filter(|(_, status)| status.node == self.node)
             .map(|(id, status)| {
                 (
                     id.clone(),
-                    (status.running, status.secret_revisions.clone()),
+                    (
+                        status.running,
+                        status.secret_revisions.clone(),
+                        status.config_revisions.clone(),
+                    ),
                 )
             })
             .collect();
@@ -533,10 +543,17 @@ impl Scheduler {
             .cluster
             .submit(Request::ReportContainerStatus {
                 node: self.node.clone(),
-                running: report.iter().map(|(id, (r, _))| (id.clone(), *r)).collect(),
+                running: report
+                    .iter()
+                    .map(|(id, (r, _, _))| (id.clone(), *r))
+                    .collect(),
                 secret_revisions: report
+                    .iter()
+                    .map(|(id, (_, revs, _))| (id.clone(), revs.clone()))
+                    .collect(),
+                config_revisions: report
                     .into_iter()
-                    .map(|(id, (_, revs))| (id, revs))
+                    .map(|(id, (_, _, revs))| (id, revs))
                     .collect(),
             })
             .await
@@ -971,6 +988,13 @@ impl Scheduler {
                 spec.labels.insert(
                     reconcile::LABEL_SECRETS.to_string(),
                     reconcile::encode_secret_revisions(&objects.secret_revisions),
+                );
+            }
+
+            if !objects.config_revisions.is_empty() {
+                spec.labels.insert(
+                    reconcile::LABEL_CONFIGS.to_string(),
+                    reconcile::encode_secret_revisions(&objects.config_revisions),
                 );
             }
 

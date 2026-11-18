@@ -369,6 +369,7 @@ export class ScenarioBuilder {
       terraform_runs: {},
       terraform_requests: {},
       terraform_applied: {},
+      terraform_outputs: {},
     };
 
     // The wire omits nulls and defaults from cluster.yaml (serde skips them),

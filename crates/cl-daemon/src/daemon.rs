@@ -464,6 +464,7 @@ pub async fn run(
         config_rx.clone(),
         data_dir.clone(),
         nudges.terraform.clone(),
+        api_state.clone(),
     );
     let restore_watcher = crate::backup_restore::start_restore_watcher(
         cfg_for_restore,

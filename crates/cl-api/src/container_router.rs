@@ -124,6 +124,7 @@ mod tests {
             node: node.into(),
             running,
             secret_revisions: Default::default(),
+            config_revisions: Default::default(),
         };
         state
             .container_status

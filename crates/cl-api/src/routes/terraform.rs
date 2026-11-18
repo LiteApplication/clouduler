@@ -84,6 +84,41 @@ pub(crate) struct ServiceTerraform {
     pub last_run: Option<RunView>,
     /// A manual run waiting for the runner.
     pub pending_request: Option<&'static str>,
+    /// The secrets and configs this module's outputs wrote (values are never shown).
+    pub outputs: Vec<OutputView>,
+}
+
+/// One cluster object written by a module output.
+#[derive(Serialize)]
+pub(crate) struct OutputView {
+    /// `secret` or `config`.
+    pub kind: &'static str,
+    pub name: String,
+    pub revision: u64,
+}
+
+fn output_views(state: &cl_raft::state::ClusterState, key: &str) -> Vec<OutputView> {
+    state
+        .terraform_outputs
+        .get(key)
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            match o.kind {
+                cl_raft::terraform::OutputKind::Secret => {
+                    state.secrets.get(&o.name).map(|e| ("secret", e.revision))
+                }
+                cl_raft::terraform::OutputKind::Config => {
+                    state.configs.get(&o.name).map(|e| ("config", e.revision))
+                }
+            }
+            .map(|(kind, revision)| OutputView {
+                kind,
+                name: o.name.clone(),
+                revision,
+            })
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -128,6 +163,7 @@ pub(crate) async fn terraform_status(
                 .terraform_requests
                 .get(&key)
                 .map(|m| mode_name(*m)),
+            outputs: output_views(&cluster_state, &key),
         });
     }
     Ok(TerraformStatus {
@@ -142,6 +178,30 @@ async fn status(
     Path(name): Path<String>,
 ) -> Result<Json<TerraformStatus>, ApiError> {
     Ok(Json(terraform_status(&state, &name).await?))
+}
+
+/// Refuses a spec whose `x-clouduler.terraform.outputs` would write a reserved secret or config
+/// (the names with dedicated write paths). The rest is `TerraformService::validate`.
+pub(crate) fn check_output_targets(parsed: &cl_config::StackFile) -> Result<(), ApiError> {
+    for (service, svc) in &parsed.services {
+        let Some(tf) = svc.x_clouduler.as_ref().and_then(|x| x.terraform.as_ref()) else {
+            continue;
+        };
+        for o in &tf.outputs {
+            if let Some(target) = o.target() {
+                if super::objects::is_reserved_output_target(target) {
+                    let name = match target {
+                        cl_config::TfOutputTarget::Secret(n)
+                        | cl_config::TfOutputTarget::Config(n) => n,
+                    };
+                    return Err(ApiError::BadRequest(format!(
+                        "services.{service}.x-clouduler.terraform.outputs: {name} is a reserved name"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Rejects a module that does not parse or declares a `backend`/`cloud` block.

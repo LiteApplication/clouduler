@@ -166,6 +166,20 @@ async fn stack_report(ctx: &Ctx, name: &str) -> ToolResult {
             }
             None => out.push_str(", never run\n"),
         }
+        let written: Vec<String> = state
+            .terraform_outputs
+            .get(&terraform_key(name, service))
+            .into_iter()
+            .flatten()
+            .map(|o| format!("{} {}", format!("{:?}", o.kind).to_lowercase(), o.name))
+            .collect();
+        if !written.is_empty() {
+            let _ = writeln!(
+                out,
+                "  terraform {service} outputs written: {}",
+                written.join(", ")
+            );
+        }
     }
     let _ = writeln!(out, "instances: {}", mine.len());
     for s in &mine {
