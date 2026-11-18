@@ -130,6 +130,27 @@ fn extract_digest(info: &bollard::models::ImageInspect) -> Option<String> {
 /// one repository's current digest: it would never match and the image would
 /// read as perpetually out of date. Falls back to the first digest when nothing
 /// matches (the common single-digest case).
+/// Like [`digest_for_repository`], but an image id can carry several digests (the same
+/// bits reached through two manifests, e.g. after a tag was re-pushed with identical layers).
+/// When `prefer` is one of them it wins, so an image that already matches what the registry
+/// serves is not reported as behind because docker listed an older alias first.
+fn digest_preferring(
+    info: &bollard::models::ImageInspect,
+    repository: &str,
+    prefer: Option<&str>,
+) -> Option<String> {
+    let has_preferred = prefer.is_some_and(|wanted| {
+        info.repo_digests.iter().flatten().any(|d| {
+            d.split_once('@')
+                .is_some_and(|(_, digest)| digest == wanted)
+        })
+    });
+    if has_preferred {
+        return prefer.map(str::to_string);
+    }
+    digest_for_repository(info, repository)
+}
+
 fn digest_for_repository(info: &bollard::models::ImageInspect, repository: &str) -> Option<String> {
     let digests = info.repo_digests.as_ref()?;
     digests
@@ -303,6 +324,22 @@ impl Docker {
         }
     }
 
+    /// [`Self::digest_of_image`], preferring `prefer` when the image carries it among several digests.
+    pub async fn digest_of_image_preferring(
+        &self,
+        image_id: &str,
+        repository: &str,
+        prefer: Option<&str>,
+    ) -> Result<Option<String>> {
+        match self.inner.inspect_image(image_id).await {
+            Ok(info) => Ok(digest_preferring(&info, repository, prefer)),
+            Err(e) => match classify(e) {
+                DockerError::NotFound(_) => Ok(None),
+                other => Err(other),
+            },
+        }
+    }
+
     /// What the registry currently serves for `image`, without pulling it.
     ///
     /// `Ok(None)` when the registry published no digest. An unreachable registry
@@ -445,6 +482,29 @@ mod tests {
         assert_eq!(
             digest_for_repository(&info, "nginx"),
             Some("sha256:hub".to_string())
+        );
+    }
+
+    #[test]
+    fn digest_preferring_picks_the_registry_digest_among_aliases() {
+        let info = bollard::models::ImageInspect {
+            repo_digests: Some(vec![
+                "redis@sha256:old".to_string(),
+                "redis@sha256:new".to_string(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            digest_preferring(&info, "redis", Some("sha256:new")),
+            Some("sha256:new".to_string())
+        );
+        assert_eq!(
+            digest_preferring(&info, "redis", Some("sha256:other")),
+            Some("sha256:old".to_string())
+        );
+        assert_eq!(
+            digest_preferring(&info, "redis", None),
+            Some("sha256:old".to_string())
         );
     }
 

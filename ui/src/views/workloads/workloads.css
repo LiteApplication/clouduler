@@ -35,6 +35,11 @@
 
 /* updates page */
 .upd-chips { align-items: center; }
+/* The table is wider than a laptop-sized page (two digests per row): scroll instead of clipping the Action column, and let long cell text wrap. */
+.cl-tablewrap.upd-table { overflow-x: auto; }
+.upd-table .cl-table td { overflow-wrap: anywhere; }
+.upd-table .wl-inline { flex-wrap: wrap; }
+.upd-table .cl-table td:last-child { white-space: nowrap; overflow-wrap: normal; }
 .upd-reg { display: flex; flex-direction: column; gap: var(--space-3); }
 @media (max-width: 559px) {
   .upd-head .acts { width: 100%; }

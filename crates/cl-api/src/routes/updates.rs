@@ -339,12 +339,17 @@ async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
         }
         let name = assignment.instance.container_name();
         let container = docker.inspect(&name).await.ok().flatten();
+        // The registry's current digest, when known: an image id can carry several digests and
+        // the one matching the registry is the honest answer to "is this up to date".
+        let served = declared_image(&cluster_state, &assignment.instance)
+            .and_then(|image| cluster_state.image_checks.get(&image))
+            .and_then(|check| check.latest_digest.clone());
         let running_digest = match &container {
             Some(c) => {
                 let repository = cl_docker::ImageRef::parse(&c.image).repository;
                 match c.image_digest.as_deref() {
                     Some(image_id) => docker
-                        .digest_of_image(image_id, &repository)
+                        .digest_of_image_preferring(image_id, &repository, served.as_deref())
                         .await
                         .ok()
                         .flatten(),
@@ -558,6 +563,9 @@ async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
         .collect();
     futures::future::join_all(lanes).await;
     keepalive.abort();
+    // The cached registry answers predate this batch; without a fresh look the page keeps
+    // listing what was just updated as behind and "update all" would redo it.
+    check_images(&batch.worker).await;
 }
 
 struct Batch {

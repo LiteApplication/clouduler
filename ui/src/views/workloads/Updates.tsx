@@ -724,7 +724,7 @@ export function Updates() {
             {rows.length === 0 ? 'Deploy a stack and its images are checked here.' : 'Try another filter.'}
           </EmptyState>
         ) : (
-          <DataTable caption="Image updates" columns={columns} rows={visibleRows} />
+          <DataTable className="upd-table" caption="Image updates" columns={columns} rows={visibleRows} />
         )}
       </section>
 

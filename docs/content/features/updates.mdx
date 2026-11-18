@@ -129,7 +129,7 @@ A lookup that fails (for example HTTP 429 from a registry) keeps the digest from
 Three different digests (the fingerprint of an exact image build) are involved:
 
 - **Pin.** A digest the cluster has locked the container to. Recreated containers use it.
-- **Running.** The digest behind the image the container actually runs.
+- **Running.** The digest behind the image the container actually runs. When the image carries several digests and one of them is what the registry serves, that one is shown, so a current image never reads as behind.
 - **Latest.** What the registry serves now for the declared tag.
 
 A container is **behind** only when both Running and Latest are known and differ. A locally built image, or a registry that did not answer, is shown as **Unknown**, never as behind. A container whose running digest differs from its pin is **Not on its pin**; fix that by redeploying, not by pulling.
@@ -253,6 +253,8 @@ If an automatic update of an instance fails, it is not retried for that digest, 
 </Quirk>
 
 <Quirk title="auto_update only sees images at a check" severity="info">
+When an update run finishes, the registries are checked again so the page does not keep listing what was just updated as behind.
+
 A new digest is noticed at the next registry check, so with the default 6 hour interval and a delay of 24h an update can be applied up to 30 hours after it was pushed. Press **Refresh** to look sooner.
 </Quirk>
 
