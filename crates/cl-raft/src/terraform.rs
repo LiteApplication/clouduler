@@ -255,6 +255,10 @@ impl ClusterState {
                     if existing.id != run.id && existing.is_running() {
                         return Err(format!("a terraform run is already running for {key}"));
                     }
+                    // A late finish for a run that a newer one has replaced must not overwrite it.
+                    if existing.id != run.id && !run.is_running() {
+                        return Err(format!("terraform run {} was replaced", run.id));
+                    }
                     if existing.id == run.id && !existing.is_running() {
                         return Err(format!("terraform run {} already finished", run.id));
                     }

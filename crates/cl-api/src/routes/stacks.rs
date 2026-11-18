@@ -228,6 +228,15 @@ pub(crate) async fn deploy_stack(
     }
     let secrets_to_write = {
         let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if let Some(modules) = &terraform {
+            for service in modules.keys() {
+                if !parsed.services.contains_key(service) {
+                    return Err(ApiError::BadRequest(format!(
+                        "terraform module for {service}: the spec has no service {service}"
+                    )));
+                }
+            }
+        }
         check_overlay_collision(state, name, &parsed).await?;
         validate_against_cluster(state, name, &parsed).await?;
         let requirements = parsed.requirements();

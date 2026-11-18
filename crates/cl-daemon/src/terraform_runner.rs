@@ -698,9 +698,10 @@ async fn run_tofu_inner(
     match docker.image_exists(&cfg.image).await {
         Ok(true) => {}
         Ok(false) => {
-            docker
-                .pull(&cfg.image)
+            // Bounded by the run deadline so a hung pull cannot outlive the leader's stale check.
+            tokio::time::timeout_at(deadline, docker.pull(&cfg.image))
                 .await
+                .map_err(|_| format!("pulling {} timed out after {:?}", cfg.image, cfg.timeout))?
                 .map_err(|e| format!("could not pull {}: {e}", cfg.image))?;
         }
         Err(e) => return Err(format!("could not look up image {}: {e}", cfg.image)),

@@ -517,6 +517,20 @@
     {
       "category": "deployments",
       "effective_severity": "warning",
+      "key": "terraform.failed",
+      "note": "Not retried until the module or its inputs change, or someone requests a run",
+      "override": null,
+      "routes": [
+        "in-app"
+      ],
+      "severity": "warning",
+      "stack_scoped": true,
+      "stateful": false,
+      "title": "A terraform apply failed"
+    },
+    {
+      "category": "deployments",
+      "effective_severity": "warning",
       "key": "stack.prioritized",
       "note": "Open until `clouduler prioritize --reset` (or the alert's reset button)",
       "override": null,
