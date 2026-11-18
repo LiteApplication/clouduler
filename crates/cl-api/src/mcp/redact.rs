@@ -76,6 +76,16 @@ impl Redactor {
         Ok(redactor)
     }
 
+    /// Redacts nothing: for tools that echo no secret-bearing output.
+    pub fn empty() -> Redactor {
+        Redactor {
+            matcher: None,
+            names: Vec::new(),
+            unredactable: Vec::new(),
+            too_short: Vec::new(),
+        }
+    }
+
     pub fn from_plaintexts(secrets: Vec<(String, Vec<u8>)>) -> Result<Redactor, RedactError> {
         let secrets: Vec<(String, Zeroizing<Vec<u8>>)> = secrets
             .into_iter()
@@ -149,13 +159,7 @@ impl Redactor {
 }
 
 fn trim_ws(v: &[u8]) -> &[u8] {
-    match v.iter().position(|b| !b.is_ascii_whitespace()) {
-        None => &[],
-        Some(s) => {
-            let e = v.iter().rposition(|b| !b.is_ascii_whitespace()).unwrap();
-            &v[s..=e]
-        }
-    }
+    v.trim_ascii()
 }
 
 /// Every form of the value we want to catch. Candidates are the raw value, its
@@ -261,6 +265,19 @@ fn percent(v: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_redactor_passes_text_through() {
+        let r = Redactor::empty();
+        assert_eq!(r.redact("keep s3cr3t as is"), "keep s3cr3t as is");
+        assert!(r.unredactable.is_empty() && r.too_short.is_empty());
+    }
+
+    #[test]
+    fn trim_ws_handles_blank_and_padded_input() {
+        assert_eq!(trim_ws(b" \n "), b"");
+        assert_eq!(trim_ws(b"\n ab c\t"), b"ab c");
+    }
 
     fn r(secrets: &[(&str, &[u8])]) -> Redactor {
         Redactor::from_plaintexts(

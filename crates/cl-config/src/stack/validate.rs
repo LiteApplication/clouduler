@@ -1157,8 +1157,7 @@ mod tests {
     fn a_standalone_action_cannot_be_a_sync_hook() {
         let ok = "services:\n  db:\n    image: x\n    x-clouduler:\n      actions:\n        Flush: { cmd: sync, standalone: true }\n      volume_sync:\n        data: { before: Flush }\n";
         assert!(super::StackFile::parse(ok).is_err());
-        super::StackFile::parse(&ok.replace(", standalone: true", ""))
-            .unwrap();
+        super::StackFile::parse(&ok.replace(", standalone: true", "")).unwrap();
     }
 
     #[test]

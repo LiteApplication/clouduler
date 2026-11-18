@@ -75,7 +75,7 @@ pub fn allocations_of(state: &ClusterState) -> Allocations {
         Allocations::new(
             cl_net::ipam::DEFAULT_OVERLAY_POOL
                 .parse()
-                .expect("the default pool parses"),
+                .expect("DEFAULT_OVERLAY_POOL is a valid CIDR constant"),
             cl_net::ipam::DEFAULT_SUBNET_PREFIX,
         )
     })

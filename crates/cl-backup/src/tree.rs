@@ -162,7 +162,8 @@ pub fn build(
     if !revisions.is_empty() {
         files.push(TreeFile {
             path: SECRET_REVISIONS_PATH.to_string(),
-            contents: serde_json::to_vec_pretty(&revisions).expect("revisions serialize"),
+            contents: serde_json::to_vec_pretty(&revisions)
+                .expect("a string-keyed map of integers always serializes"),
         });
     }
 

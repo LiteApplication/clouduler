@@ -545,7 +545,7 @@ async fn read_webhook_token(state: &AppState, stack: &str) -> Option<String> {
     let key_guard = state.key.read().await;
     let key = key_guard.as_ref()?;
     let opened = Sealed::from_blob(entry.sealed).open(key, &secret).ok()?;
-    String::from_utf8(opened.to_vec()).ok()
+    std::str::from_utf8(&opened).ok().map(str::to_owned)
 }
 
 /// Mints a fresh random token and replaces whatever was stored, which

@@ -246,13 +246,7 @@ pub struct SecretFacts {
 pub fn facts(plaintext: &[u8]) -> SecretFacts {
     let text = std::str::from_utf8(plaintext).ok();
     let ws = |b: &u8| b.is_ascii_whitespace();
-    let trimmed = match plaintext.iter().position(|b| !ws(b)) {
-        None => &plaintext[0..0],
-        Some(s) => {
-            let e = plaintext.iter().rposition(|b| !ws(b)).unwrap();
-            &plaintext[s..=e]
-        }
-    };
+    let trimmed = plaintext.trim_ascii();
     SecretFacts {
         byte_len: plaintext.len(),
         char_len: text.map(|t| t.chars().count()),
@@ -274,6 +268,13 @@ pub fn facts(plaintext: &[u8]) -> SecretFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facts_of_blank_input_have_no_internal_whitespace() {
+        assert!(!facts(b"  \n\t ").contains_internal_whitespace);
+        assert!(!facts(b"").contains_internal_whitespace);
+        assert!(facts(b" a b ").contains_internal_whitespace);
+    }
 
     #[test]
     fn produces_the_requested_length() {

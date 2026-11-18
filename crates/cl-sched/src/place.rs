@@ -237,9 +237,7 @@ fn warn_pinned_without_gpu(desired: &Desired, node: &NodeState, missing: &str) {
     use std::sync::OnceLock;
     static SEEN: OnceLock<Mutex<BTreeSet<(String, String)>>> = OnceLock::new();
     let key = (desired.id.to_string(), node.name.clone());
-    let mut seen = SEEN
-        .get_or_init(Default::default)
-        .lock();
+    let mut seen = SEEN.get_or_init(Default::default).lock();
     if seen.insert(key) {
         warn!(
             instance = %desired.id,
@@ -596,11 +594,12 @@ pub fn place(
             .copied()
             .collect();
         let eligible: Vec<&NodeState> = if !anchors.is_empty() {
-            if anchors.len() == 1 {
-                let anchor = *anchors.iter().next().unwrap();
-                eligible.into_iter().filter(|n| n.name == anchor).collect()
-            } else {
-                Vec::new()
+            let mut it = anchors.iter();
+            match (it.next(), it.next()) {
+                (Some(&anchor), None) => {
+                    eligible.into_iter().filter(|n| n.name == anchor).collect()
+                }
+                _ => Vec::new(),
             }
         } else {
             let mut names: Option<BTreeSet<&str>> = None;

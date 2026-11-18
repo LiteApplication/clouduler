@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use base64::Engine;
 use cl_alert::catalog;
 use cl_alert::settings::SETTINGS_CONFIG;
 use cl_alert::{AlertSettings, DestinationKind, Route};
@@ -22,8 +21,7 @@ pub fn load(state: &ClusterState) -> AlertSettings {
 
 /// Base64 content for `Request::PutConfig*`.
 pub fn encode(settings: &AlertSettings) -> String {
-    let raw = serde_json::to_vec(settings).expect("AlertSettings always serializes");
-    base64::engine::general_purpose::STANDARD.encode(raw)
+    crate::encode_json_config(settings)
 }
 
 /// Problems with the `x-clouduler.alerts` keys of a stack that only the

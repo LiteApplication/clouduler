@@ -3064,7 +3064,9 @@ impl ClusterState {
                 {
                     return Err("signed out".into());
                 }
-                let token = self.proxy_tokens.remove(token_key).expect("checked above");
+                let Some(token) = self.proxy_tokens.remove(token_key) else {
+                    return Err("unknown or already used token".into());
+                };
                 self.sweep_proxy_auth(*now);
                 self.proxy_sessions.insert(
                     session_key.clone(),
@@ -4718,7 +4720,9 @@ mod tests {
         });
         assert!(state.prioritized.is_empty());
         state.apply(&on("site"));
-        state.apply(&Request::RemoveStack { name: "site".into() });
+        state.apply(&Request::RemoveStack {
+            name: "site".into(),
+        });
         assert!(state.prioritized.is_empty());
     }
 

@@ -18,8 +18,8 @@
 //! password stored inside the database or an encryption key protecting data at
 //! rest needs the application's own rotation procedure.
 
-use std::collections::{BTreeMap, BTreeSet};
 use parking_lot::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::body::Bytes;

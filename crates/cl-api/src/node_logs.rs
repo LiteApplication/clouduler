@@ -5,9 +5,9 @@
 //! one to anyone following. Only this process's lines: another node's are
 //! fetched from that node (see `routes::nodes`).
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use parking_lot::Mutex;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 

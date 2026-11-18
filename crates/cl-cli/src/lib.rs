@@ -3,7 +3,6 @@
 pub mod backup_cli;
 pub mod capture;
 pub mod clear_errors;
-pub mod prioritize;
 pub mod cli;
 pub mod completion;
 pub mod completions;
@@ -14,6 +13,7 @@ pub mod git_backup_cli;
 pub mod health;
 pub mod logs;
 pub mod node;
+pub mod prioritize;
 pub mod rebalance;
 pub mod registry;
 pub mod report;

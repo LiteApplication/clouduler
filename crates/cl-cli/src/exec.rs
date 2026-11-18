@@ -86,11 +86,10 @@ pub async fn run(
 
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let qs = serde_urlencoded::to_string(ExecQuery {
-        cmd: serde_json::to_string(&cmd).expect("a Vec<String> always serializes"),
+        cmd: serde_json::to_string(&cmd)?,
         tty,
         user,
-    })
-    .expect("ExecQuery always serializes");
+    })?;
     let path = format!("/api/instances/internal/{}/exec?{qs}", assignment.instance);
 
     let uri: Uri = format!("{ws_base}{path}")

@@ -195,8 +195,7 @@ fn mac(
     server_nonce: &[u8],
     client_nonce: &[u8],
 ) -> Hmac<Sha256> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
-        .expect("any length key is valid for hmac-sha256");
+    let mut mac = crate::internal_auth::hmac_sha256(key);
     mac.update(label.as_bytes());
     mac.update(b":");
     mac.update(role.as_bytes());

@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use cl_config::{ByteSize, Middleware};
-use cl_raft::{base64_encode, ClusterState};
+use cl_raft::ClusterState;
 
 pub use crate::redirects::new_id;
 
@@ -79,8 +79,7 @@ impl StaticRouteStore {
 
     /// Base64 content ready to submit via `Request::PutConfig`.
     pub fn encode(&self) -> String {
-        let raw = serde_json::to_vec(self).expect("StaticRouteStore always serializes");
-        base64_encode(&raw)
+        crate::encode_json_config(self)
     }
 }
 

@@ -132,16 +132,15 @@ impl QuorumReporter {
                 let o: Outcome = sender
                     .deliver_with_retries(Vec::new(), dest, "opened", &n, None)
                     .await;
-                sink.lock()
-                    .push(AlertDelivery {
-                        destination: o.destination,
-                        at: o.at,
-                        ok: o.ok,
-                        error: o.error,
-                        attempts: o.attempts,
-                        phase: o.phase.to_string(),
-                        message_id: o.message_id,
-                    });
+                sink.lock().push(AlertDelivery {
+                    destination: o.destination,
+                    at: o.at,
+                    ok: o.ok,
+                    error: o.error,
+                    attempts: o.attempts,
+                    phase: o.phase.to_string(),
+                    message_id: o.message_id,
+                });
             });
         }
     }
@@ -151,10 +150,7 @@ impl QuorumReporter {
         let now = unix_now();
         let lasted =
             humantime::format_duration(Duration::from_secs((now - outage.started).max(0) as u64));
-        let deliveries = outage
-            .deliveries
-            .lock()
-            .clone();
+        let deliveries = outage.deliveries.lock().clone();
         let record = AlertRecord {
             id: outage.id.clone(),
             event: EVENT.into(),

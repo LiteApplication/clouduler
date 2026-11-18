@@ -191,7 +191,9 @@ async fn publish_objects(
             "publishing object"
         );
         let request = if file.secret {
-            let key = key.as_ref().expect("checked above");
+            let key = key
+                .as_ref()
+                .context("cluster key was not loaded for a secret file")?;
             let sealed = Sealed::seal(key, name, &file.content)
                 .with_context(|| format!("sealing secret {name}"))?;
             secrets.insert(name.clone());
