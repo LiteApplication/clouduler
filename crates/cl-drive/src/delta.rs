@@ -228,7 +228,10 @@ impl DeltaEngine {
         .map_err(transfer_err)?;
 
         let remote = match transport::recv(&mut conn).await.map_err(transfer_err)? {
-            Some(Message::Ready(manifest)) => manifest,
+            Some(Message::Ready(manifest)) => {
+                transport::limit_to_data_frames(&mut conn);
+                manifest
+            }
             Some(other) => {
                 return Err(DriveError::Transfer {
                     message: format!("expected ready, got {other:?}"),

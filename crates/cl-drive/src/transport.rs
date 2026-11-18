@@ -37,6 +37,12 @@ use crate::scan::{self, Manifest};
 /// `MAX_DELTA_FILE`.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 
+/// Limit for the one frame that scales with file count: `Ready(Manifest)`. A
+/// volume with hundreds of thousands of files exceeds `MAX_FRAME`. Connections
+/// start at this limit and drop to `MAX_FRAME` (`limit_to_data_frames`) once
+/// the manifest has been exchanged, so bulk data frames stay small.
+const MAX_MANIFEST_FRAME: usize = 256 * 1024 * 1024;
+
 /// Files at or below this size go as a single `WholeFile` message. Above it,
 /// `send_whole` streams `WholeFileBegin`/`Chunk`/`End` so no single huge
 /// allocation or frame is needed and backpressure applies per chunk. Leaves
@@ -240,8 +246,13 @@ pub type Connection = Framed<TcpStream, LengthDelimitedCodec>;
 pub fn frame(stream: TcpStream) -> Connection {
     let _ = stream.set_nodelay(true);
     LengthDelimitedCodec::builder()
-        .max_frame_length(MAX_FRAME)
+        .max_frame_length(MAX_MANIFEST_FRAME)
         .new_framed(stream)
+}
+
+/// Call once `Ready` has been sent or received: every later frame is bounded by `MAX_FRAME`.
+pub fn limit_to_data_frames(conn: &mut Connection) {
+    conn.codec_mut().set_max_frame_length(MAX_FRAME);
 }
 
 pub async fn send(conn: &mut Connection, msg: &Message) -> io::Result<()> {
@@ -473,6 +484,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
     send(&mut conn, &Message::Ready(manifest))
         .await
         .map_err(io_err)?;
+    limit_to_data_frames(&mut conn);
 
     let mut chunked: Option<ChunkedWrite> = None;
 
