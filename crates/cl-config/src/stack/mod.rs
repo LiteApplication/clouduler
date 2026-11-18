@@ -289,11 +289,7 @@ impl StackFile {
             parking_lot::Mutex::new(None);
         const CAPACITY: usize = 256;
 
-        if let Some(hit) = CACHE
-            .lock()
-            .as_ref()
-            .and_then(|cache| cache.get(raw))
-        {
+        if let Some(hit) = CACHE.lock().as_ref().and_then(|cache| cache.get(raw)) {
             return Ok(hit.clone());
         }
 

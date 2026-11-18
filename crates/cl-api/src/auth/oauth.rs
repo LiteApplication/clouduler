@@ -22,8 +22,8 @@
 //!   authenticate a request on any node with only a (local, already
 //!   replicated) client record check.
 
-use std::collections::HashMap;
 use parking_lot::Mutex as StdMutex;
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{header, HeaderMap};
@@ -31,7 +31,7 @@ use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use cl_config::ClusterConfig;
-use cl_raft::{base64_encode, ClusterState};
+use cl_raft::ClusterState;
 use cl_secret::{internal_auth, ClusterKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -149,8 +149,7 @@ impl McpClientStore {
     }
 
     pub fn encode(&self) -> String {
-        let raw = serde_json::to_vec(self).expect("McpClientStore always serializes");
-        base64_encode(&raw)
+        crate::encode_json_config(self)
     }
 
     pub fn find(&self, id: &str) -> Option<&McpClient> {

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use cl_config::Protocol;
-use cl_raft::{base64_encode, ClusterState};
+use cl_raft::ClusterState;
 
 /// Reserved config name holding the wireguard ingress rule list, same
 /// pattern as `crate::static_routes::STATIC_ROUTES_CONFIG`.
@@ -54,8 +54,7 @@ impl WireguardIngressStore {
     }
 
     pub fn encode(&self) -> String {
-        let raw = serde_json::to_vec(self).expect("WireguardIngressStore always serializes");
-        base64_encode(&raw)
+        crate::encode_json_config(self)
     }
 }
 

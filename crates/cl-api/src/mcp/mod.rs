@@ -271,10 +271,7 @@ impl ServerHandler for McpServer {
         // may run without one.
         let redactor = match build_redactor(&info.state).await {
             Ok(r) => Arc::new(r),
-            Err(msg) if tools::is_focus_only(&name) => {
-                let _ = msg;
-                Arc::new(Redactor::from_plaintexts(Vec::new()).expect("empty redactor"))
-            }
+            Err(_) if tools::is_focus_only(&name) => Arc::new(Redactor::empty()),
             Err(msg) => return Ok(CallToolResponse::from(text_result(msg, true))),
         };
 
@@ -300,7 +297,7 @@ impl ServerHandler for McpServer {
             Err(e) => (e, true),
         };
         Ok(CallToolResponse::from(text_result(
-            finish(&redactor, text),
+            finish(&redactor, &text),
             is_error,
         )))
     }
@@ -356,8 +353,8 @@ async fn build_redactor(state: &AppState) -> Result<Redactor, String> {
 
 /// The single choke point every tool result passes through: redact, then
 /// bound the size, then warn about what redaction could not cover.
-fn finish(redactor: &Redactor, text: String) -> String {
-    let mut text = redactor.redact(&text);
+fn finish(redactor: &Redactor, text: &str) -> String {
+    let mut text = redactor.redact(text);
     if text.len() > MAX_OUTPUT_BYTES {
         let mut end = MAX_OUTPUT_BYTES;
         while !text.is_char_boundary(end) {
@@ -406,14 +403,14 @@ mod tests {
 
     #[test]
     fn finish_redacts_notes_what_it_cannot_cover_and_bounds_output() {
-        let out = finish(&redactor(), "auth: s3cr3t-token-value ok".into());
+        let out = finish(&redactor(), "auth: s3cr3t-token-value ok");
         assert!(!out.contains("s3cr3t-token-value"));
         assert!(out.contains("[REDACTED secret:token]"));
         assert!(out.contains("too short to redact safely"));
         assert!(out.contains("pin"));
 
         let big = "x".repeat(MAX_OUTPUT_BYTES + 100);
-        let out = finish(&redactor(), big);
+        let out = finish(&redactor(), &big);
         assert!(out.contains("[output truncated]"));
         assert!(out.len() < MAX_OUTPUT_BYTES + 400);
     }
@@ -422,7 +419,7 @@ mod tests {
     fn a_secret_cannot_survive_by_being_split_at_the_size_cap() {
         let mut text = "a".repeat(MAX_OUTPUT_BYTES - 5);
         text.push_str("s3cr3t-token-value");
-        let out = finish(&redactor(), text);
+        let out = finish(&redactor(), &text);
         assert!(!out.contains("s3cr3t"));
     }
 }

@@ -5,9 +5,9 @@
 //! every `SAMPLE_INTERVAL`. The last `HISTORY_LEN` samples are kept for the
 //! sparklines.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -87,11 +87,7 @@ pub fn spawn() {
 
 /// Newest CPU reading, 0 before the first sample lands.
 pub fn latest_cpu_percent() -> f32 {
-    sampler()
-        .lock()
-        .ring
-        .back()
-        .map_or(0.0, |x| x.cpu_percent)
+    sampler().lock().ring.back().map_or(0.0, |x| x.cpu_percent)
 }
 
 /// Up to `HISTORY_LEN` samples, oldest first.

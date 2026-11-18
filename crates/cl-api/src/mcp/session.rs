@@ -6,8 +6,8 @@
 //! `/mcp`, which is always the leader (followers relay to it), so a session
 //! never straddles nodes.
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// A session nobody has touched for this long is forgotten.

@@ -25,10 +25,10 @@
 //! use. An image that carries several tags is untagged name by name instead,
 //! because docker refuses to delete such an image by ID without force.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

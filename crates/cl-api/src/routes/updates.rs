@@ -704,11 +704,7 @@ impl Batch {
     /// Takes `instance` off the waiting list; false when the batch already
     /// cancelled it.
     fn claim(&self, instance: &InstanceId) -> bool {
-        self.inner
-            .lock()
-            .pending
-            .remove(instance)
-            .is_some()
+        self.inner.lock().pending.remove(instance).is_some()
     }
 
     fn service_lock(&self, instance: &InstanceId) -> Arc<tokio::sync::Mutex<()>> {

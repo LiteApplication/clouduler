@@ -381,7 +381,9 @@ impl Ledger {
             .map(|r| r.id.clone())
             .collect();
         for id in ids {
-            let r = &mut self.records.get_mut(&id).expect("listed above");
+            let Some(r) = self.records.get_mut(&id) else {
+                continue;
+            };
             r.digested = true;
             if r.state != AlertState::Resolved {
                 let t = route::targets_for_record(settings, r);

@@ -230,9 +230,9 @@ pub fn plan(
         }
 
         let m = movable.remove(idx);
-        *count
-            .get_mut(&from)
-            .expect("from has a load entry, it hosts m") -= 1;
+        if let Some(c) = count.get_mut(&from) {
+            *c = c.saturating_sub(1);
+        }
         *count.entry(to.clone()).or_insert(0) += 1;
         if moved_bytes > 0 {
             let from_used = mem_used.entry(from.clone()).or_insert(0);

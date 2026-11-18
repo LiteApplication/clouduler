@@ -5,8 +5,8 @@
 //! the SMTP server and the sealed secrets from the replicated state, so an
 //! edit (or a deleted destination) is honoured by the very next attempt.
 
-use std::collections::{HashMap, VecDeque};
 use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

@@ -12,8 +12,8 @@
 //! ignored: it never expires, so honouring it would leave every captured
 //! request replayable forever.
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;

@@ -28,5 +28,21 @@ pub use error::ApiError;
 pub use nudges::Nudges;
 pub use server::{ApiServer, ApiServerOptions, AppState};
 
+/// Base64 of the JSON form of a plain data struct, ready for `Request::PutConfig`.
+pub(crate) fn encode_json_config<T: serde::Serialize>(value: &T) -> String {
+    let raw =
+        serde_json::to_vec(value).expect("plain data structs with string keys always serialize");
+    cl_raft::base64_encode(&raw)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod encode_tests {
+    #[test]
+    fn json_config_is_base64_of_the_json() {
+        let encoded = super::encode_json_config(&vec!["a", "b"]);
+        assert_eq!(cl_raft::base64_decode(&encoded).unwrap(), br#"["a","b"]"#);
+    }
+}

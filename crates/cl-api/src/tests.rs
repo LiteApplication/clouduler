@@ -1241,7 +1241,7 @@ async fn renaming_a_drive_updates_config_and_stacks() {
                 mode: cl_config::DriveMode::Replicated,
                 served_by: vec![],
                 failback: Default::default(),
-        max_parallel_syncs: 1,
+                max_parallel_syncs: 1,
             },
         );
         cfg.nodes.insert(
@@ -2242,7 +2242,7 @@ async fn api_shapes_match_the_fixture_the_ui_typechecks_against() {
                 mode: cl_config::DriveMode::Served,
                 served_by: vec!["n0".to_string()],
                 failback: Default::default(),
-        max_parallel_syncs: 1,
+                max_parallel_syncs: 1,
             },
         );
     }

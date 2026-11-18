@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use cl_raft::{base64_encode, ClusterState};
+use cl_raft::ClusterState;
 
 /// Reserved config name holding the redirect list. Never exposed as a
 /// regular config: routes that list or serve user configs must filter it out.
@@ -71,8 +71,7 @@ impl RedirectStore {
 
     /// Base64 content ready to submit via `Request::PutConfig`.
     pub fn encode(&self) -> String {
-        let raw = serde_json::to_vec(self).expect("RedirectStore always serializes");
-        base64_encode(&raw)
+        crate::encode_json_config(self)
     }
 
     pub fn find(&self, id: &str) -> Option<&RedirectRule> {

@@ -195,8 +195,14 @@ mod tests {
         stage_atomically(&path, b"two").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
         assert!(!dir.join("artifact.partial").exists());
-        assert!(staged_matches(&path, blake3::hash(b"two").to_hex().as_str()));
-        assert!(!staged_matches(&path, blake3::hash(b"one").to_hex().as_str()));
+        assert!(staged_matches(
+            &path,
+            blake3::hash(b"two").to_hex().as_str()
+        ));
+        assert!(!staged_matches(
+            &path,
+            blake3::hash(b"one").to_hex().as_str()
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

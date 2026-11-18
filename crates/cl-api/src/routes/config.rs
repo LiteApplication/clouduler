@@ -173,16 +173,15 @@ async fn rename_network(
     }
 
     let mut config = state.cluster_config.read().await.clone();
-    if !config.networks.contains_key(&old_name) {
+    let Some(net) = config.networks.remove(&old_name) else {
         return Err(ApiError::BadRequest(format!("no network named {old_name}")));
-    }
+    };
     if config.networks.contains_key(&new_name) {
         return Err(ApiError::BadRequest(format!(
             "a network named {new_name} already exists"
         )));
     }
 
-    let net = config.networks.remove(&old_name).expect("checked above");
     let is_wireguard = net.kind == cl_config::NetworkKind::Wireguard;
     config.networks.insert(new_name.clone(), net);
     let node_names: Vec<String> = config.nodes.keys().cloned().collect();
@@ -342,16 +341,15 @@ async fn rename_drive(
     }
 
     let mut config = state.cluster_config.read().await.clone();
-    if !config.drives.contains_key(&old_name) {
+    let Some(drive) = config.drives.remove(&old_name) else {
         return Err(ApiError::BadRequest(format!("no drive named {old_name}")));
-    }
+    };
     if config.drives.contains_key(&new_name) {
         return Err(ApiError::BadRequest(format!(
             "a drive named {new_name} already exists"
         )));
     }
 
-    let drive = config.drives.remove(&old_name).expect("checked above");
     config.drives.insert(new_name.clone(), drive);
     for node in config.nodes.values_mut() {
         if let Some(path) = node.drives.remove(&old_name) {

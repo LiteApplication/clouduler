@@ -13,20 +13,24 @@ use sha2::Sha256;
 
 use crate::key::ClusterKey;
 
+/// HMAC accepts keys of any length, so construction cannot fail.
+pub(crate) fn hmac_sha256(key: &ClusterKey) -> Hmac<Sha256> {
+    <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
+        .expect("any length key is valid for hmac-sha256")
+}
+
 /// Compute the signature for one internal call. `label` scopes the signature
 /// to a specific route so a captured header for one internal endpoint cannot
 /// be replayed against another.
 pub fn sign(key: &ClusterKey, label: &str) -> String {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
-        .expect("any length key is valid for hmac-sha256");
+    let mut mac = hmac_sha256(key);
     mac.update(label.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
 
 /// Constant-time check of a signature presented by a caller.
 pub fn verify(key: &ClusterKey, label: &str, presented: &str) -> bool {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes())
-        .expect("any length key is valid for hmac-sha256");
+    let mut mac = hmac_sha256(key);
     mac.update(label.as_bytes());
     let Ok(presented_bytes) = hex::decode(presented) else {
         return false;

@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use cl_raft::{base64_encode, ClusterState};
+use cl_raft::ClusterState;
 
 /// Reserved config name holding the api key list. Never exposed as a regular
 /// config through `/api/configs`.
@@ -54,8 +54,7 @@ impl ApiKeyStore {
 
     /// Base64 content ready to submit via `Request::PutConfig`.
     pub fn encode(&self) -> String {
-        let raw = serde_json::to_vec(self).expect("ApiKeyStore always serializes");
-        base64_encode(&raw)
+        crate::encode_json_config(self)
     }
 
     pub fn find(&self, id: &str) -> Option<&ApiKeyRecord> {
@@ -111,12 +110,7 @@ pub fn hash_secret(secret: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(out, "{b:02x}").expect("write to String never fails");
-    }
-    out
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Split `clk_<id>_<secret>` into its two halves.

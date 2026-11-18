@@ -27,8 +27,7 @@ use crate::tree::TreeFile;
 /// the guard for the whole blocking git section.
 pub fn lock_repo() -> parking_lot::MutexGuard<'static, ()> {
     static REPO_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-    REPO_LOCK
-        .lock()
+    REPO_LOCK.lock()
 }
 
 pub struct GitBackup {
@@ -615,12 +614,13 @@ pub fn build_git_tree_on_parent(
             // Nested path: ensure each parent tree exists.
             let dir_name = parts[0];
             let file_name = parts[1];
-            let subtrees = subtrees
-                .entry(dir_name.to_string())
-                .or_insert_with(|| repo.treebuilder(None).expect("treebuilder"));
+            let subtree = match subtrees.entry(dir_name.to_string()) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(repo.treebuilder(None)?),
+            };
             // Our layout is flat one level deep (stacks/*.yaml, configs/*,
             // secrets/*.age), which the check above enforces.
-            subtrees.insert(file_name, blob_oid, 0o100644)?;
+            subtree.insert(file_name, blob_oid, 0o100644)?;
         }
     }
 

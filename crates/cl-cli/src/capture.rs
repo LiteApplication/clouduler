@@ -69,8 +69,7 @@ pub async fn run(
         network,
         filter: (!filter.is_empty()).then(|| filter.join(" ")),
         pcap,
-    })
-    .expect("CaptureQuery always serializes");
+    })?;
     let path = format!(
         "/api/instances/internal/{}/capture?{qs}",
         assignment.instance

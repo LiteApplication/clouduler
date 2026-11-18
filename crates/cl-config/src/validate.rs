@@ -296,8 +296,7 @@ impl ClusterConfig {
             (NAT_POOL_BASE, "the nat pool"),
         ] {
             inside(
-                ipnet::Ipv4Net::new(std::net::Ipv4Addr::new(10, octet, 0, 0), 16)
-                    .expect("valid prefix"),
+                ipnet::Ipv4Net::new_assert(std::net::Ipv4Addr::new(10, octet, 0, 0), 16),
                 what,
             )?;
         }
@@ -418,7 +417,12 @@ impl ClusterConfig {
                 };
                 match (net.kind, addr) {
                     (NetworkKind::Internal | NetworkKind::Private, NodeAddress::Ip(ip)) => {
-                        let subnet = net.subnet.expect("subnetted network validated above");
+                        let Some(subnet) = net.subnet else {
+                            return Err(ConfigError::invalid(
+                                at,
+                                format!("network {net_name} has no subnet"),
+                            ));
+                        };
                         if !subnet.contains(ip) {
                             return Err(ConfigError::invalid(
                                 at,

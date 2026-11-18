@@ -35,7 +35,7 @@ impl CacheState {
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec(self).expect("CacheState always serializes");
+        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
         std::fs::write(path, bytes)
     }
 }
@@ -43,6 +43,15 @@ impl CacheState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cache.json");
+        let state = CacheState::default();
+        state.save(&path).expect("save");
+        assert!(CacheState::load(&path).last_snapshot.is_none());
+    }
 
     #[test]
     fn missing_file_loads_as_default() {

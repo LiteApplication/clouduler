@@ -198,11 +198,8 @@ impl ClusterNode {
             // gate has to catch. Hence the tick as well.
             let mut ticker = tokio::time::interval(QUORUM_ACK_TIMEOUT / 3);
             loop {
-                let status = from_metrics(
-                    &metrics.borrow_and_update(),
-                    &contact,
-                    QUORUM_ACK_TIMEOUT,
-                );
+                let status =
+                    from_metrics(&metrics.borrow_and_update(), &contact, QUORUM_ACK_TIMEOUT);
                 // Only wake watchers when something they care about moved.
                 quorum_tx.send_if_modified(|current| {
                     let changed = *current != status;

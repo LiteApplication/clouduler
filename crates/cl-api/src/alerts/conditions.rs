@@ -147,7 +147,7 @@ pub(crate) fn derive(
     }
 
     for p in problems::classify(state, summaries, now) {
-        from_problem(&mut b, state, p);
+        from_problem(&mut b, state, &p);
     }
     backups(&mut b, state, now);
     restores(&mut b, state, now);
@@ -203,9 +203,9 @@ pub(crate) fn derive(
     }
 }
 
-fn from_problem(b: &mut Builder, state: &ClusterState, p: Problem) {
+fn from_problem(b: &mut Builder, state: &ClusterState, p: &Problem) {
     let stack = p.stack.clone();
-    let instance_id = p.subject.parse::<InstanceId>().ok().map(|i| i.to_string());
+    let instance_id = p.subject.parse::<InstanceId>().ok();
     let mut o = match p.kind {
         "crash_loop" => base(
             "instance.crash_loop",
@@ -374,12 +374,10 @@ fn from_problem(b: &mut Builder, state: &ClusterState, p: Problem) {
         || o.event == "volume.migration_failed"
     {
         if let Some(id) = instance_id {
-            o.instance = Some(id.clone());
-            o.links = instance_links(&id);
-            o.node = state
-                .assignments
-                .get(&id.parse::<InstanceId>().expect("parsed above"))
-                .map(|a| a.node.clone());
+            let text = id.to_string();
+            o.links = instance_links(&text);
+            o.instance = Some(text);
+            o.node = state.assignments.get(&id).map(|a| a.node.clone());
         }
     }
     b.add(o);
