@@ -32,13 +32,16 @@ use crate::registry::{resolve_no_follow, DriveRegistry};
 use crate::scan::{self, Manifest};
 
 /// Refuse anything absurd so a corrupt length prefix can't cause a huge allocation.
-const MAX_FRAME: usize = 256 * 1024 * 1024;
+/// Every frame a sender builds must fit under this: whole-file messages stay at or
+/// below `WHOLE_FILE_CHUNK`, and delta frames come from files of at most
+/// `MAX_DELTA_FILE`.
+const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 /// Files at or below this size go as a single `WholeFile` message. Above it,
 /// `send_whole` streams `WholeFileBegin`/`Chunk`/`End` so no single huge
 /// allocation or frame is needed and backpressure applies per chunk. Leaves
 /// headroom under `MAX_FRAME` for the envelope.
-pub const WHOLE_FILE_CHUNK: usize = 32 * 1024 * 1024;
+pub const WHOLE_FILE_CHUNK: usize = 4 * 1024 * 1024;
 
 /// How many peers may push to this node at once. See `serve`.
 const MAX_CONCURRENT_RECEIVES: usize = 2;

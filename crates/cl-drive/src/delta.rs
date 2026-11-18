@@ -41,7 +41,10 @@ const WHOLE_FILE_THRESHOLD: u64 = 8 * 1024;
 /// Past this size the `WholeFileBegin`/`Chunk`/`End` path streams in
 /// `WHOLE_FILE_CHUNK` pieces with bounded memory, at the cost of resending big
 /// changed files in full.
-const MAX_DELTA_FILE: u64 = 256 * 1024 * 1024;
+///
+/// Capped at 8 MiB so a delta frame (at most about the file's size) always fits
+/// under `transport::MAX_FRAME`.
+const MAX_DELTA_FILE: u64 = 8 * 1024 * 1024;
 
 /// Against a destination holding at least `DROP_CHECK_MIN_FILES` files, a
 /// source with under 1/`DROP_FRACTION` of that is lost data, not a clean-up.
