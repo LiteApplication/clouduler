@@ -99,19 +99,35 @@ const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
 /// until the next topology change or daemon restart.
 const BIND_RETRY: Duration = Duration::from_secs(10);
 
+/// This node's live drive registry, shared with migration and backups so a
+/// drive added after boot is usable without a restart. Empty while the node
+/// implements no drive.
+#[derive(Clone, Default)]
+pub struct RegistryHandle(Arc<RwLock<Option<Arc<DriveRegistry>>>>);
+
+impl RegistryHandle {
+    pub async fn get(&self) -> Option<Arc<DriveRegistry>> {
+        self.0.read().await.clone()
+    }
+
+    async fn set(&self, registry: Option<Arc<DriveRegistry>>) {
+        *self.0.write().await = registry;
+    }
+}
+
 pub struct Drives {
     supervisor: JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// This node's drive-name-to-directory map, kept live so migration can
     /// resolve a volume to a real path even after a topology rebuild.
     /// `None` while the node implements no drive.
-    registry: Arc<RwLock<Option<Arc<DriveRegistry>>>>,
+    registry: RegistryHandle,
 }
 
 impl Drives {
     /// A live handle to the current registry, shared with `migration::start` so a
     /// drive added after boot is usable as a migration source or target.
-    pub fn registry(&self) -> Arc<RwLock<Option<Arc<DriveRegistry>>>> {
+    pub fn registry(&self) -> RegistryHandle {
         self.registry.clone()
     }
 
@@ -169,7 +185,7 @@ pub fn start(
     let boot_cfg = cfg.clone();
     let node_name = node_name.to_string();
     let cluster = cluster.clone();
-    let registry: Arc<RwLock<Option<Arc<DriveRegistry>>>> = Arc::default();
+    let registry = RegistryHandle::default();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     let supervisor = {
@@ -225,7 +241,7 @@ pub fn start(
                     Ok(running) => running,
                     Err(e) => {
                         warn!(error = %e, "drive subsystem did not restart");
-                        *registry.write().await = None;
+                        registry.set(None).await;
                         Running::default()
                     }
                 };
@@ -273,7 +289,7 @@ async fn build(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    live_registry: &Arc<RwLock<Option<Arc<DriveRegistry>>>>,
+    live_registry: &RegistryHandle,
     config_rx: &tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
     keys: &cl_raft::KeyWatch,
     docker: &cl_docker::DockerHandle,
@@ -281,18 +297,18 @@ async fn build(
     let mut running = Running::default();
 
     let Some(node) = cfg.node(node_name) else {
-        *live_registry.write().await = None;
+        live_registry.set(None).await;
         return Ok(running);
     };
 
     if node.drives.is_empty() {
         debug!("this node backs no drives with a local directory");
-        *live_registry.write().await = None;
+        live_registry.set(None).await;
     } else {
         let registry = Arc::new(
             DriveRegistry::new(cfg, node_name).context("building this node's drive registry")?,
         );
-        *live_registry.write().await = Some(registry.clone());
+        live_registry.set(Some(registry.clone())).await;
         running
             .tasks
             .push(tokio::spawn(keep_staging_destinations_current(

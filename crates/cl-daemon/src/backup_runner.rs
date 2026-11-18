@@ -191,7 +191,7 @@ impl ProgressTracker {
 pub fn start_runner(
     cluster: Arc<ClusterNode>,
     node_name: String,
-    registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
+    registry: crate::drives::RegistryHandle,
     docker: cl_docker::DockerHandle,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     data_dir: PathBuf,
@@ -205,7 +205,7 @@ pub fn start_runner(
 
         loop {
             ticker.tick().await;
-            let Some(registry) = registry.read().await.clone() else {
+            let Some(registry) = registry.get().await else {
                 continue;
             };
             let Some(key) = key_rx.borrow().clone() else {

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use cl_config::{ClusterConfig, StackFile};
 use cl_docker::Docker;
-use cl_drive::{drive_port, DeltaEngine, DriveRegistry, InstanceControl, MigrationJob};
+use cl_drive::{drive_port, DeltaEngine, InstanceControl, MigrationJob};
 use cl_raft::ids::{InstanceId, VolumeId};
 use cl_raft::node::ClusterNode;
 use cl_raft::state::ClusterState;
@@ -40,7 +40,7 @@ pub fn start(
     node_name: &str,
     cluster: &Arc<ClusterNode>,
     docker: cl_docker::DockerHandle,
-    registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
+    registry: crate::drives::RegistryHandle,
     sync_progress: cl_drive::MigrationSyncTracker,
     keys: cl_raft::KeyWatch,
 ) -> JoinHandle<()> {
@@ -92,7 +92,7 @@ pub fn start(
                 // `None` permanently, not just mid-rebuild. Demanding one
                 // regardless stranded exactly those moves: skipped on every
                 // poll, forever, with the migration stuck in `Stopping`.
-                let live_registry = registry.read().await.clone();
+                let live_registry = registry.get().await;
                 if live_registry.is_none() && !job.volumes.is_empty() {
                     warn!(
                         instance = %job.instance,

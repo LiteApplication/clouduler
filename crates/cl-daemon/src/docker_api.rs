@@ -130,7 +130,10 @@ impl ClusterBackend {
 }
 
 fn encode_name(name: &str) -> String {
-    serde_urlencoded::to_string([("name", name)]).expect("a string pair always encodes")
+    format!(
+        "name={}",
+        form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>()
+    )
 }
 
 fn not_found(name: &str) -> BackendError {
