@@ -47,6 +47,7 @@ pub(crate) fn classify(
         out.extend(instance_problems(state, summary));
     }
     out.extend(update_problems(state, now));
+    out.extend(terraform_problems(state));
     out.extend(cluster_problems(state, now));
     out
 }
@@ -190,6 +191,34 @@ fn instance_problems(state: &ClusterState, s: &InstanceSummary) -> Vec<Problem> 
         }
     }
     out
+}
+
+/// A service's latest terraform run failed. Only the latest run per service is kept, so a later success clears it.
+fn terraform_problems(state: &ClusterState) -> Vec<Problem> {
+    state
+        .terraform_runs
+        .iter()
+        .filter_map(|(key, run)| {
+            let cl_raft::terraform::TerraformOutcome::Failed { error } = &run.outcome else {
+                return None;
+            };
+            Some(Problem {
+                stack: key.split_once('/').map(|(s, _)| s.to_string()),
+                subject: key.clone(),
+                kind: "terraform_failed",
+                detail: format!(
+                    "terraform {} on {} failed: {}",
+                    crate::routes::terraform::mode_name(run.mode),
+                    run.node,
+                    error
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("no error recorded")
+                        .trim()
+                ),
+            })
+        })
+        .collect()
 }
 
 fn update_problems(state: &ClusterState, now: i64) -> Vec<Problem> {

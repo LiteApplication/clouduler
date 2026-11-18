@@ -24,6 +24,7 @@ pub mod secret_rotation;
 pub mod self_update;
 pub mod stacks;
 pub mod static_routes;
+pub mod terraform;
 pub mod updates;
 pub mod wireguard;
 
@@ -60,6 +61,7 @@ pub fn router() -> Router<AppState> {
         .merge(links::router())
         .merge(nodes::router())
         .merge(stacks::router())
+        .merge(terraform::router())
         .merge(instances::router())
         .merge(objects::router())
         .merge(secret_rotation::router())

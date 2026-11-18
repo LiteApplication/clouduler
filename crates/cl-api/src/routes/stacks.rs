@@ -118,6 +118,9 @@ struct DeployRequest {
     /// Secret name to base64 plaintext; sealed here before anything reaches the log.
     #[serde(default)]
     secrets: BTreeMap<String, String>,
+    /// Service name to OpenTofu module text. Absent keeps the stack's modules; present replaces them.
+    #[serde(default)]
+    terraform: Option<BTreeMap<String, String>>,
 }
 
 /// Refuse a deploy whose overlay would share a network, subnet and bridge with another stack's
@@ -184,7 +187,7 @@ async fn deploy(
     };
     let configs = decode(body.configs)?;
     let secrets = decode(body.secrets)?;
-    deploy_stack(&state, &name, body.spec, configs, secrets).await?;
+    deploy_stack(&state, &name, body.spec, configs, secrets, body.terraform).await?;
     Ok(StatusCode::OK)
 }
 
@@ -208,6 +211,7 @@ fn cluster_check(
         .map_err(|e| ApiError::BadRequest(e.to_string()))
 }
 
+/// `terraform` (service to module text) is validated and replaces the stack's modules after the deploy; `None` keeps them.
 /// Validates, seals and stores the plaintext `secrets` the spec owns (others are ignored), then
 /// hands the rest to `deploy_from_files`. Inputs are already decoded from base64.
 pub(crate) async fn deploy_stack(
@@ -216,8 +220,12 @@ pub(crate) async fn deploy_stack(
     spec: String,
     configs: BTreeMap<String, Vec<u8>>,
     secrets: BTreeMap<String, Vec<u8>>,
+    terraform: Option<BTreeMap<String, String>>,
 ) -> Result<(), ApiError> {
     check_stack_name(state, name).await?;
+    if let Some(modules) = &terraform {
+        super::terraform::validate_modules(modules)?;
+    }
     let secrets_to_write = {
         let parsed = StackFile::parse(&spec).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         check_overlay_collision(state, name, &parsed).await?;
@@ -271,7 +279,12 @@ pub(crate) async fn deploy_stack(
         }
     }
 
-    deploy_from_files(state, name, spec, configs).await
+    deploy_from_files(state, name, spec, configs).await?;
+    if let Some(modules) = terraform {
+        super::terraform::set_stack_modules(state, name, modules).await?;
+        state.nudges.terraform.notify_one();
+    }
+    Ok(())
 }
 
 /// Parses, validates, submits, then writes the configs the stack owns. Shared with

@@ -378,6 +378,44 @@ export interface StackRequirements {
   host_devices?: string[];
 }
 
+export type TerraformRunMode = 'plan' | 'apply';
+
+export interface TerraformRunView {
+  id: string;
+  mode: TerraformRunMode;
+  /** Why it ran: "change", "manual", ... */
+  trigger: string;
+  node: string;
+  /** Instance whose network namespace the run used, `stack.service.index`. */
+  instance: string;
+  fingerprint: string;
+  started_at: number;
+  finished_at: number | null;
+  outcome: 'running' | 'succeeded' | 'failed';
+  /** Summary on success, error on failure. */
+  message: string | null;
+  /** Secret values are redacted by the runner before this is stored. */
+  log_tail: string;
+}
+
+export interface TerraformServiceStatus {
+  service: string;
+  source: string;
+  revision: number;
+  /** `x-clouduler.terraform.enabled` of the spec (true when absent). */
+  enabled: boolean;
+  last_run: TerraformRunView | null;
+  /** A manual run waiting for the runner. */
+  pending_request: TerraformRunMode | null;
+}
+
+/** GET /api/stacks/:name/terraform. */
+export interface TerraformStatus {
+  /** False when cluster.yaml has no `terraform:` section. */
+  enabled_cluster: boolean;
+  services: TerraformServiceStatus[];
+}
+
 /** GET /api/stacks/:name. */
 export interface StackDetailResponse extends StackState {
   requirements: StackRequirements;
@@ -478,6 +516,14 @@ export interface ClusterState {
    *  step by step by the node doing the work. Finished entries are cleared
    *  by that node about 15 minutes later. */
   instance_updates: Record<InstanceId, InstanceUpdate>;
+  /** stack -> service -> module. */
+  terraform_modules: Record<string, Record<string, { source: string; revision: number }>>;
+  /** "stack/service" -> state metadata (the sealed state is always redacted). */
+  terraform_states: Record<string, { sealed: string; serial: number; key_fingerprint: string }>;
+  /** "stack/service" -> latest run, in the raft serde shape. */
+  terraform_runs: Record<string, unknown>;
+  terraform_requests: Record<string, 'Plan' | 'Apply'>;
+  terraform_applied: Record<string, string>;
   /** Last docker state each node reported per instance. `secret_revisions`
    *  holds the revision of each cluster secret the container was created
    *  with (absent when it has none or predates the label). */

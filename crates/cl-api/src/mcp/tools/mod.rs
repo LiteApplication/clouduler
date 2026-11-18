@@ -281,10 +281,15 @@ pub fn catalog() -> &'static [ToolSpec] {
                 "deploy_stack",
                 true,
                 "Deploy (create or update) the FOCUSED stack from a YAML spec, with optional config \
-                 files. There is deliberately no way to pass secrets: reference a secret that already \
+                 files and OpenTofu modules (`terraform`). There is deliberately no way to pass secrets: reference a secret that already \
                  exists, or create it first with generate_secret. Refuses specs/configs that contain \
                  a secret's plaintext. After deploying, waits up to wait_seconds and reports instance \
                  states; follow up with list_problems and get_logs.",
+            ),
+            spec::<stack::TerraformRunArgs>(
+                "terraform_run",
+                true,
+                "Request a terraform plan or apply of one service's module in the FOCUSED stack. The runner picks it up once the service is healthy; read the outcome and log from get_stack. Needs a `terraform:` section in the cluster config.",
             ),
             spec::<stack::RemoveStackArgs>("remove_stack", true, "Remove the focused stack and stop all its instances. `confirm` must equal the focused stack's name."),
             spec::<stack::InstanceArgs>("restart_instance", true, "Restart an instance of the focused stack (the scheduler re-places it, possibly on another node)."),
@@ -377,6 +382,7 @@ pub async fn call(ctx: &Ctx, name: &str, args: JsonObject) -> ToolResult {
         "inspect_secret" => secrets::inspect_secret(ctx, parse(args)?).await,
         "validate_stack" => stack::validate_stack(ctx, parse(args)?).await,
         "deploy_stack" => stack::deploy_stack(ctx, parse(args)?).await,
+        "terraform_run" => stack::terraform_run(ctx, parse(args)?).await,
         "remove_stack" => stack::remove_stack(ctx, parse(args)?).await,
         "restart_instance" => stack::restart_instance(ctx, parse(args)?).await,
         "update_instance" => stack::update_instance(ctx, parse(args)?).await,

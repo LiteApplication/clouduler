@@ -21,4 +21,5 @@ pub mod restore;
 pub mod secret;
 pub mod stack;
 pub mod status;
+pub mod terraform_cli;
 pub mod update_cli;

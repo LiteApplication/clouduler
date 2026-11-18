@@ -5,6 +5,7 @@ use std::fmt::Write;
 use std::time::{Duration, Instant};
 
 use cl_config::StackFile;
+use cl_raft::terraform::{terraform_key, TerraformMode, TerraformOutcome, TerraformRun};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -65,9 +66,20 @@ pub struct DeployArgs {
     /// Config contents the stack mounts, as `{config name: text}`, whether the spec bundles them with `file:` or only references an existing config. A config that already exists and is not listed keeps its value.
     #[serde(default)]
     pub configs: Option<BTreeMap<String, String>>,
+    /// OpenTofu modules as `{service name: .tf text}`, applied by clouduler once the service is healthy (needs a `terraform:` section in the cluster config). Omit to keep the stack's existing modules; give a map to replace them all (an empty map forgets them). Reference secrets and configs by name through `x-clouduler.terraform` in the spec and declare them as `variable` blocks; never write a secret value in the module. `backend` and `cloud` blocks are refused.
+    #[serde(default)]
+    pub terraform: Option<BTreeMap<String, String>>,
     /// How long to wait for instances to come up and report their states (default 20, max 120). 0 returns immediately.
     #[serde(default)]
     pub wait_seconds: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TerraformRunArgs {
+    /// Service of the focused stack whose module to run.
+    pub service: String,
+    /// `plan` (show what would change) or `apply`.
+    pub mode: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -98,6 +110,28 @@ pub(super) fn clear_focus(ctx: &Ctx) -> ToolResult {
     Ok("focus cleared".to_string())
 }
 
+fn run_line(run: &TerraformRun) -> String {
+    let outcome = match &run.outcome {
+        TerraformOutcome::Running => "running".to_string(),
+        TerraformOutcome::Succeeded { summary } => format!("succeeded ({})", first_line(summary)),
+        TerraformOutcome::Failed { error } => format!("FAILED ({})", first_line(error)),
+    };
+    format!(
+        "{} {} at {} on {}",
+        crate::routes::terraform::mode_name(run.mode),
+        outcome,
+        run.started_at,
+        run.node
+    )
+}
+
+fn first_line(s: &str) -> &str {
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+}
+
 fn belongs_to(summary: &InstanceSummary, stack: &str) -> bool {
     summary.id.starts_with(&format!("{stack}."))
 }
@@ -120,6 +154,19 @@ async fn stack_report(ctx: &Ctx, name: &str) -> ToolResult {
     }
     let all = instances::list_all(&ctx.state).await;
     let mine: Vec<InstanceSummary> = all.into_iter().filter(|s| belongs_to(s, name)).collect();
+    for (service, module) in state.terraform_modules.get(name).into_iter().flatten() {
+        let _ = write!(
+            out,
+            "terraform {service}: module revision {}",
+            module.revision
+        );
+        match state.terraform_runs.get(&terraform_key(name, service)) {
+            Some(run) => {
+                let _ = writeln!(out, ", last run {}", run_line(run));
+            }
+            None => out.push_str(", never run\n"),
+        }
+    }
     let _ = writeln!(out, "instances: {}", mine.len());
     for s in &mine {
         let _ = writeln!(out, "  {}", instance_line(s));
@@ -234,6 +281,9 @@ pub(super) async fn deploy_stack(ctx: &Ctx, args: DeployArgs) -> ToolResult {
     let configs = args.configs.unwrap_or_default();
     let mut inputs: Vec<(&str, &str)> = vec![("the spec", args.spec.as_str())];
     inputs.extend(configs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    if let Some(modules) = &args.terraform {
+        inputs.extend(modules.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
     for (what, text) in inputs {
         let redacted = ctx.redactor.redact(text);
         if redacted != text {
@@ -265,9 +315,16 @@ pub(super) async fn deploy_stack(ctx: &Ctx, args: DeployArgs) -> ToolResult {
         }
     }
     let configs = bundled;
-    stacks::deploy_stack(&ctx.state, &name, args.spec, configs, BTreeMap::new())
-        .await
-        .map_err(api)?;
+    stacks::deploy_stack(
+        &ctx.state,
+        &name,
+        args.spec,
+        configs,
+        BTreeMap::new(),
+        args.terraform,
+    )
+    .await
+    .map_err(api)?;
 
     let wait = Duration::from_secs(
         args.wait_seconds
@@ -322,6 +379,23 @@ fn is_settled(mine: &[InstanceSummary]) -> bool {
             s.desired != "running"
                 || (s.state == "running" && matches!(s.health.as_str(), "healthy" | "none"))
         })
+}
+
+pub(super) async fn terraform_run(ctx: &Ctx, args: TerraformRunArgs) -> ToolResult {
+    let name = ctx.require_focus()?;
+    let mode = match args.mode.as_str() {
+        "plan" => TerraformMode::Plan,
+        "apply" => TerraformMode::Apply,
+        other => return Err(format!("mode must be \"plan\" or \"apply\", got {other:?}")),
+    };
+    crate::routes::terraform::request_run(&ctx.state, &name, &args.service, mode)
+        .await
+        .map_err(api)?;
+    Ok(format!(
+        "requested a terraform {} of {name}/{}; the runner starts it within seconds once the instance is healthy. \
+         Check the last run with get_stack.",
+        args.mode, args.service
+    ))
 }
 
 pub(super) async fn remove_stack(ctx: &Ctx, args: RemoveStackArgs) -> ToolResult {

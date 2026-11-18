@@ -1327,6 +1327,11 @@
         ]
       }
     },
+    "terraform_applied": {},
+    "terraform_modules": {},
+    "terraform_requests": {},
+    "terraform_runs": {},
+    "terraform_states": {},
     "unreachable": [],
     "version": 24,
     "volume_removals": {},

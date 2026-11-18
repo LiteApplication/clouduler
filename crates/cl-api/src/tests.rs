@@ -3110,3 +3110,100 @@ async fn alert_settings_mask_urls_and_a_masked_echo_keeps_the_secret() {
         .secrets
         .contains_key(&cl_alert::settings::auth_secret("main")));
 }
+
+async fn tf_request(h: &Harness, method: &str, uri: &str, body: &str) -> (StatusCode, String) {
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {}", h.admin_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn terraform_modules_deploy_list_run_and_delete() {
+    let h = harness().await;
+    let body = serde_json::json!({
+        "spec": "services:\n  web:\n    image: nginx\n",
+        "terraform": {"web": "variable \"x\" {}\n"},
+    })
+    .to_string();
+    assert_eq!(deploy(&h, "site", &body).await, StatusCode::OK);
+
+    let (status, json) = tf_request(&h, "GET", "/api/stacks/site/terraform", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["enabled_cluster"], false);
+    assert_eq!(v["services"][0]["service"], "web");
+    assert_eq!(v["services"][0]["revision"], 1);
+    assert_eq!(v["services"][0]["enabled"], true);
+    assert!(v["services"][0]["last_run"].is_null());
+
+    // Runs are refused while the cluster has no terraform section.
+    let (status, _) = tf_request(&h, "POST", "/api/stacks/site/terraform/web/plan", "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    h.state.cluster_config.write().await.terraform = Some(Default::default());
+    let (status, _) = tf_request(&h, "POST", "/api/stacks/site/terraform/web/apply", "").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (status, _) = tf_request(&h, "POST", "/api/stacks/site/terraform/nope/apply", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, json) = tf_request(&h, "GET", "/api/stacks/site/terraform", "").await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["enabled_cluster"], true);
+    assert_eq!(v["services"][0]["pending_request"], "apply");
+
+    // A redeploy without `terraform` keeps the module; an edit bumps the revision.
+    assert_eq!(deploy(&h, "site", PLAIN_SPEC).await, StatusCode::OK);
+    let (status, _) = tf_request(
+        &h,
+        "PUT",
+        "/api/stacks/site/terraform/web",
+        r#"{"source":"variable \"y\" {}\n"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let state = h.state.cluster.state().await;
+    assert_eq!(state.terraform_modules["site"]["web"].revision, 2);
+    drop(state);
+
+    let (status, _) = tf_request(&h, "DELETE", "/api/stacks/site/terraform/web", "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(h.state.cluster.state().await.terraform_modules.is_empty());
+    let (status, _) = tf_request(&h, "DELETE", "/api/stacks/site/terraform/web", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn terraform_modules_with_a_backend_or_bad_hcl_are_rejected() {
+    let h = harness().await;
+    assert_eq!(deploy(&h, "site", PLAIN_SPEC).await, StatusCode::OK);
+    for source in [
+        "terraform {\n  backend \"s3\" {}\n}\n",
+        "this is = = not hcl {",
+    ] {
+        let body = serde_json::json!({ "source": source }).to_string();
+        let (status, _) = tf_request(&h, "PUT", "/api/stacks/site/terraform/web", &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{source}");
+        let body = serde_json::json!({
+            "spec": "services:\n  web:\n    image: nginx\n",
+            "terraform": {"web": source},
+        })
+        .to_string();
+        assert_eq!(deploy(&h, "site", &body).await, StatusCode::BAD_REQUEST);
+    }
+    assert!(h.state.cluster.state().await.terraform_modules.is_empty());
+}

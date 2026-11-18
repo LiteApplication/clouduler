@@ -332,6 +332,13 @@ pub enum Command {
         #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
         via: Option<String>,
     },
+    /// Run or inspect the OpenTofu modules of a stack's services. Needs a
+    /// `terraform:` section in the cluster config. Plan and apply queue a
+    /// run that the leader starts shortly after.
+    Terraform {
+        #[command(subcommand)]
+        command: TerraformCommand,
+    },
     /// Forget every recorded failure so it stops showing up as a problem:
     /// failed backup runs, restores, image updates and migrations,
     /// certificate/DNS errors and failed alert deliveries. A failure that is
@@ -511,9 +518,43 @@ pub enum AvailabilityArg {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum TerraformCommand {
+    /// Show what applying would change (no state is written).
+    Plan {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        stack: String,
+        /// Only this service. Defaults to every service with a module.
+        service: Option<String>,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Apply the module now, even if nothing changed.
+    Apply {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        stack: String,
+        /// Only this service. Defaults to every service with a module.
+        service: Option<String>,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+    /// Show each module's revision and its last run.
+    Status {
+        #[arg(add = ArgValueCompleter::new(completion::stack_names))]
+        stack: String,
+        /// Only this service. Defaults to every service with a module.
+        service: Option<String>,
+        #[arg(long, add = ArgValueCompleter::new(completion::node_names))]
+        via: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum StackCommand {
     /// Store a stack in the cluster database and deploy it. The referenced
-    /// config and secret files are bundled in, so every node can run it.
+    /// config and secret files are bundled in, so every node can run it. A
+    /// `terraform/<service>.tf` next to the stack file becomes that service's
+    /// OpenTofu module (the modules of a stack deployed without a
+    /// `terraform/` directory are kept).
     Deploy {
         /// Path to the stack file. The stack is named after the file unless
         /// --name is given.

@@ -56,6 +56,8 @@ import type {
   SelfUpdateRunState,
   SnapshotInfo,
   StackDetailResponse,
+  TerraformRunMode,
+  TerraformStatus,
   StackValidationResult,
   StaticRouteRule,
   TlsFingerprint,
@@ -259,11 +261,31 @@ export const api = {
   getStack: (name: string) => get<StackDetailResponse>(`/api/stacks/${encodeURIComponent(name)}`),
   deployStack: (
     name: string,
-    body: { spec: string; configs?: Record<string, string>; secrets?: Record<string, string> },
+    body: {
+      spec: string;
+      configs?: Record<string, string>;
+      secrets?: Record<string, string>;
+      /** Service to .tf text. Omit to keep the stack's modules; give a map to replace them. */
+      terraform?: Record<string, string>;
+    },
   ) => put<void>(`/api/stacks/${encodeURIComponent(name)}`, body),
   removeStack: (name: string) => del<void>(`/api/stacks/${encodeURIComponent(name)}`),
   validateStack: (name: string, spec: string) =>
     post<StackValidationResult>(`/api/stacks/${encodeURIComponent(name)}/validate`, { spec }),
+  getStackTerraform: (name: string) =>
+    get<TerraformStatus>(`/api/stacks/${encodeURIComponent(name)}/terraform`),
+  putTerraformModule: (name: string, service: string, source: string) =>
+    put<void>(
+      `/api/stacks/${encodeURIComponent(name)}/terraform/${encodeURIComponent(service)}`,
+      { source },
+    ),
+  deleteTerraformModule: (name: string, service: string) =>
+    del<void>(`/api/stacks/${encodeURIComponent(name)}/terraform/${encodeURIComponent(service)}`),
+  runTerraform: (name: string, service: string, mode: TerraformRunMode) =>
+    post<void>(
+      `/api/stacks/${encodeURIComponent(name)}/terraform/${encodeURIComponent(service)}/${mode}`,
+      {},
+    ),
 
   // instances
   listInstances: () => get<InstanceState[]>('/api/instances'),

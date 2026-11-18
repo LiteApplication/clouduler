@@ -203,6 +203,7 @@ async fn an_admin_sees_the_full_tool_list_and_a_reader_only_the_read_tools() {
         "inspect_secret",
         "validate_stack",
         "deploy_stack",
+        "terraform_run",
         "remove_stack",
         "restart_instance",
         "update_instance",
@@ -215,7 +216,7 @@ async fn an_admin_sees_the_full_tool_list_and_a_reader_only_the_read_tools() {
     ] {
         assert!(admin_tools.contains(&t.to_string()), "missing {t}");
     }
-    assert_eq!(admin_tools.len(), 27, "{admin_tools:?}");
+    assert_eq!(admin_tools.len(), 28, "{admin_tools:?}");
 
     let token = read_token(&h).await;
     let mut reader = Mcp::connect(&h, &token).await;
@@ -224,6 +225,7 @@ async fn an_admin_sees_the_full_tool_list_and_a_reader_only_the_read_tools() {
     for t in [
         "exec",
         "deploy_stack",
+        "terraform_run",
         "generate_secret",
         "read_file",
         "put_config",

@@ -22,7 +22,9 @@ pub async fn deploy(
 ) -> Result<()> {
     let bundle = StackBundle::load(file).with_context(|| format!("reading {}", file.display()))?;
     let name = name.unwrap_or_else(|| bundle.name.clone());
-    deploy_bundle(cfg, name, bundle, via).await
+    let base = file.parent().unwrap_or(Path::new("."));
+    let terraform = crate::terraform_cli::load_modules(base, &bundle.parsed)?;
+    deploy_bundle(cfg, name, bundle, terraform, via).await
 }
 
 /// Shared by `stack deploy` and `stack source set`. Creates the stack or bumps
@@ -31,6 +33,7 @@ async fn deploy_bundle(
     cfg: &ClusterConfig,
     name: String,
     bundle: StackBundle,
+    terraform: Option<std::collections::BTreeMap<String, String>>,
     via: Option<&str>,
 ) -> Result<()> {
     debug!(
@@ -78,6 +81,21 @@ async fn deploy_bundle(
         "publishing bundled config and secret objects"
     );
     publish_objects(cfg, &client, &name, &bundle).await?;
+
+    if let Some(modules) = terraform {
+        let count = modules.len();
+        let response = client
+            .submit(Request::SetStackTerraform {
+                stack: name.clone(),
+                modules,
+            })
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        if let Some(error) = response.error {
+            bail!("cluster rejected the terraform modules: {error}");
+        }
+        println!("{count} terraform module(s) stored");
+    }
 
     let stacks = client.state().await.map_err(|e| anyhow!("{e}"))?;
     let revision = stacks.stacks.get(&name).map(|s| s.revision).unwrap_or(0);
@@ -139,7 +157,8 @@ pub async fn source_set(
 
     let bundle =
         cl_config::StackBundle::from_spec(name, &spec, &base).context("parsing stack source")?;
-    deploy_bundle(cfg, name.to_string(), bundle, via).await
+    let terraform = crate::terraform_cli::load_modules(&base, &bundle.parsed)?;
+    deploy_bundle(cfg, name.to_string(), bundle, terraform, via).await
 }
 
 /// Turn the stack's bundled files into cluster config and secret objects.

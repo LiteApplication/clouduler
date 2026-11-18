@@ -10,4 +10,5 @@ pub struct Nudges {
     pub dns: Arc<Notify>,
     pub acme: Arc<Notify>,
     pub git_export: Arc<Notify>,
+    pub terraform: Arc<Notify>,
 }

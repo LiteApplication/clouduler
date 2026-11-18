@@ -1,7 +1,8 @@
 use anyhow::Result;
 use cl_cli::cli::{
     BackupCommand, Cli, Command, CompletionsCommand, ConfigCommand, DriveCommand, GitBackupCommand,
-    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand, VolumeCommand,
+    NodeCommand, RegistryCommand, SecretCommand, SourceCommand, StackCommand, TerraformCommand,
+    VolumeCommand,
 };
 use cl_config::ClusterConfig;
 use cl_init::detect;
@@ -385,6 +386,32 @@ async fn main() -> Result<()> {
         Command::Prioritize { stack, reset, via } => {
             cl_cli::prioritize::run(&cfg, stack.as_deref(), reset, via.as_deref()).await
         }
+        Command::Terraform { command } => match command {
+            TerraformCommand::Plan {
+                stack,
+                service,
+                via,
+            } => {
+                cl_cli::terraform_cli::run(&cfg, false, &stack, service.as_deref(), via.as_deref())
+                    .await
+            }
+            TerraformCommand::Apply {
+                stack,
+                service,
+                via,
+            } => {
+                cl_cli::terraform_cli::run(&cfg, true, &stack, service.as_deref(), via.as_deref())
+                    .await
+            }
+            TerraformCommand::Status {
+                stack,
+                service,
+                via,
+            } => {
+                cl_cli::terraform_cli::status(&cfg, &stack, service.as_deref(), via.as_deref())
+                    .await
+            }
+        },
         Command::ClearErrors { via } => cl_cli::clear_errors::run(&cfg, via.as_deref()).await,
         Command::GitBackup { command } => match command {
             GitBackupCommand::Pull { via } => {
