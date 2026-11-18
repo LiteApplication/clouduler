@@ -83,7 +83,7 @@ fn topology_of(cfg: &ClusterConfig, node_name: &str) -> Topology {
         drives,
         served_by,
         listen,
-        internal_subnet: cfg.internal_network().1.subnet,
+        internal_subnet: cfg.internal_network().and_then(|(_, net)| net.subnet),
         server_ips,
     }
 }
@@ -429,7 +429,7 @@ impl DaemonServedHost {
     fn export_target(&self, drive: &str) -> Option<(PathBuf, String)> {
         let cfg = self.config_rx.borrow().clone();
         let root = cfg.node(&self.node)?.drives.get(drive)?.clone();
-        let subnet = cfg.internal_network().1.subnet?.to_string();
+        let subnet = cfg.internal_network()?.1.subnet?.to_string();
         Some((root, subnet))
     }
 }
@@ -490,8 +490,7 @@ fn ensure_serving(cfg: &ClusterConfig, node: &Node, node_name: &str) -> Vec<(Pat
         return exported;
     }
 
-    let (_, internal) = cfg.internal_network();
-    let Some(subnet) = internal.subnet else {
+    let Some(subnet) = cfg.internal_network().and_then(|(_, net)| net.subnet) else {
         warn!("cluster's internal network has no subnet, cannot restrict NFS exports to it");
         return exported;
     };

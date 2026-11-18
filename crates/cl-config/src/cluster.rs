@@ -1405,17 +1405,16 @@ impl ClusterConfig {
         self.managers().count() / 2 + 1
     }
 
-    /// The single internal network. Validation guarantees exactly one exists.
-    pub fn internal_network(&self) -> (&String, &Network) {
+    /// The single internal network; validation rejects a config without one.
+    pub fn internal_network(&self) -> Option<(&String, &Network)> {
         self.networks
             .iter()
             .find(|(_, n)| n.kind == NetworkKind::Internal)
-            .expect("validated config has exactly one internal network")
     }
 
     /// The node address on the internal network, used for all node to node RPC.
     pub fn internal_ip(&self, node: &Node) -> Option<IpAddr> {
-        node.network.get(self.internal_network().0)?.as_ip()
+        node.network.get(self.internal_network()?.0)?.as_ip()
     }
 
     /// Address other nodes use to reach this one.

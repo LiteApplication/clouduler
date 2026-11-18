@@ -240,7 +240,8 @@ pub fn start(
             let internal_addr = cfg
                 .nodes
                 .get(&node_name)
-                .and_then(|node| node.ip_on(cfg.internal_network().0));
+                .zip(cfg.internal_network())
+                .and_then(|(node, (internal, _))| node.ip_on(internal));
 
             for (network, (kind, addr)) in &interfaces {
                 let iface = &addr.interface;

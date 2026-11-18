@@ -149,7 +149,7 @@ mod tests {
         for n in c.networks.values_mut() {
             n.access = None;
         }
-        let internal = c.internal_network().0.clone();
+        let internal = c.internal_network().expect("internal network").0.clone();
         let other = c
             .networks
             .iter()

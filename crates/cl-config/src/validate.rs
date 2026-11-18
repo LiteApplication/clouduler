@@ -391,7 +391,13 @@ impl ClusterConfig {
             ));
         }
 
-        let internal = self.internal_network().0.clone();
+        let Some((internal, _)) = self.internal_network() else {
+            return Err(ConfigError::invalid(
+                "networks",
+                "exactly one internal network is required",
+            ));
+        };
+        let internal = internal.clone();
         let mut internal_ips = BTreeSet::new();
 
         for (name, node) in &self.nodes {
@@ -997,7 +1003,7 @@ cloudflare:
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.managers().count(), 1);
         assert_eq!(cfg.quorum(), 1);
-        assert_eq!(cfg.internal_network().0, "tailscale");
+        assert_eq!(cfg.internal_network().unwrap().0, "tailscale");
         assert_eq!(
             cfg.drives["fast"].sync_interval,
             std::time::Duration::from_secs(300)

@@ -39,9 +39,7 @@ pub const DEFAULT_ZONE: &str = "cluster.local";
 /// The internal zone domain: the internal network's own domain when it has one, so `web.blog.int.example.com` is the same name inside and outside a container.
 pub fn zone_origin(cfg: &cl_config::ClusterConfig) -> String {
     cfg.internal_network()
-        .1
-        .domain
-        .clone()
+        .and_then(|(_, net)| net.domain.clone())
         .unwrap_or_else(|| DEFAULT_ZONE.to_string())
 }
 

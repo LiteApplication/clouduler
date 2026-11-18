@@ -906,8 +906,10 @@ impl Scheduler {
 
             // Internal-network node addresses where the proxy answers; only member services get them
             // kept off the egress default route.
-            let (internal_name, _) = live.internal_network();
-            if service.networks.iter().any(|n| n == internal_name) {
+            let on_internal = live
+                .internal_network()
+                .is_some_and(|(internal, _)| service.networks.contains(internal));
+            if on_internal {
                 placement.proxy_addresses = live
                     .nodes
                     .values()

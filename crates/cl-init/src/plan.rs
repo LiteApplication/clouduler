@@ -153,7 +153,9 @@ pub fn new_cluster(plan: &ClusterPlan) -> Result<ClusterConfig> {
 /// is how you fix a wrong address or change a role. Without it a name clash is
 /// an error, so init cannot quietly take over another machine's identity.
 pub fn add_node(config: &ClusterConfig, plan: &NodePlan, replace: bool) -> Result<ClusterConfig> {
-    let (internal_name, internal) = config.internal_network();
+    let (internal_name, internal) = config
+        .internal_network()
+        .context("the cluster declares no internal network")?;
     let internal_name = internal_name.clone();
 
     if config.nodes.contains_key(&plan.name) && !replace {
@@ -264,7 +266,7 @@ mod tests {
 
         assert_eq!(config.cluster.name, "home");
         assert_eq!(config.nodes.len(), 1);
-        assert_eq!(config.internal_network().0, INTERNAL_NETWORK);
+        assert_eq!(config.internal_network().unwrap().0, INTERNAL_NETWORK);
         assert_eq!(
             config.internal_ip(config.node("n1").unwrap()),
             Some(ip("10.10.0.1"))

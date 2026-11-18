@@ -343,7 +343,9 @@ async fn join_cluster<R: BufRead, W: Write>(
         }
     }
 
-    let (internal_name, internal) = existing.internal_network();
+    let (internal_name, internal) = existing
+        .internal_network()
+        .context("the cluster declares no internal network")?;
     let subnet = internal
         .subnet
         .context("the cluster's internal network declares no subnet")?;

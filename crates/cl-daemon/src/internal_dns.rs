@@ -159,7 +159,9 @@ fn zone_for(
         .iter()
         .map(|(name, ip)| (name.as_str(), *ip))
         .collect();
-    let (internal_name, _) = cfg.internal_network();
+    let Some((internal_name, _)) = cfg.internal_network() else {
+        return records;
+    };
     for ((host, network), node_names) in crate::proxy::desired_dns_hosts(cfg, state) {
         if network != *internal_name {
             continue;
@@ -218,8 +220,10 @@ fn proxy_overrides(state: &ClusterState, cfg: &ClusterConfig, node_name: &str) -
     else {
         return Vec::new();
     };
-    let (_, internal) = cfg.internal_network();
-    let internal_domain = internal.domain.as_deref().unwrap_or("");
+    let internal_domain = cfg
+        .internal_network()
+        .and_then(|(_, net)| net.domain.as_deref())
+        .unwrap_or("");
 
     let mut names: BTreeSet<String> = BTreeSet::new();
     for (host, network) in crate::proxy::desired_dns_hosts(cfg, state).into_keys() {
