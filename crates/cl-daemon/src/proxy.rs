@@ -339,16 +339,29 @@ fn take_listener(port: u16, v6: bool) -> std::io::Result<tokio::net::TcpListener
     }
 }
 
-pub fn start(
-    cfg: &ClusterConfig,
-    node: &str,
-    cluster: &Arc<ClusterNode>,
-    data_dir: &Path,
-    config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
-    key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
-    dialer: Dialer,
-    nudges: cl_api::Nudges,
-) -> Proxy {
+/// Everything [`start`] wires the proxy to, grouped so the call stays readable.
+pub struct StartProxyArgs<'a> {
+    pub cfg: &'a ClusterConfig,
+    pub node: &'a str,
+    pub cluster: &'a Arc<ClusterNode>,
+    pub data_dir: &'a Path,
+    pub config_rx: tokio::sync::watch::Receiver<Arc<ClusterConfig>>,
+    pub key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
+    pub dialer: Dialer,
+    pub nudges: cl_api::Nudges,
+}
+
+pub fn start(args: StartProxyArgs<'_>) -> Proxy {
+    let StartProxyArgs {
+        cfg,
+        node,
+        cluster,
+        data_dir,
+        config_rx,
+        key_rx,
+        dialer,
+        nudges,
+    } = args;
     ensure_crypto_provider();
 
     let cluster = cluster.clone();

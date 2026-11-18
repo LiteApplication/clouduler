@@ -264,16 +264,16 @@ pub async fn run(
     // reverse proxy's own active backend health checks, from the moment it
     // comes up rather than needing a second wiring pass later.
     let nudges = cl_api::Nudges::default();
-    let proxy = crate::proxy::start(
-        &cfg,
-        &node_name,
-        &cluster,
-        &data_dir,
-        config_rx.clone(),
-        key_rx.clone(),
-        relay.dialer.clone(),
-        nudges.clone(),
-    );
+    let proxy = crate::proxy::start(crate::proxy::StartProxyArgs {
+        cfg: &cfg,
+        node: &node_name,
+        cluster: &cluster,
+        data_dir: &data_dir,
+        config_rx: config_rx.clone(),
+        key_rx: key_rx.clone(),
+        dialer: relay.dialer.clone(),
+        nudges: nudges.clone(),
+    });
 
     let (api, api_state) = start_api(StartApiArgs {
         cfg: &cfg,
