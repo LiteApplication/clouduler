@@ -89,6 +89,17 @@ impl Worker {
             }
         };
 
+        // A lost save race re-enters this step with the same run id: when the
+        // staged file already is the recorded asset, report it instead of
+        // downloading and rewriting a binary the restart route may be running.
+        if let Some(recorded) = run.arch_hashes.get(&arch) {
+            if staged_matches(&self.artifact_path, recorded) {
+                run.per_node
+                    .insert(self.node_name.clone(), NodePhase::Ready);
+                return self.save(run.clone(), revision).await;
+            }
+        }
+
         let token = self.unseal_github_token().await;
         let http = release::download_client()?;
         match release::download_asset(&http, &owner, &repo, &asset, token.as_deref()).await {
@@ -102,7 +113,7 @@ impl Worker {
                         .insert(self.node_name.clone(), NodePhase::FetchFailed { reason });
                     return self.save(run.clone(), revision).await;
                 }
-                std::fs::write(&self.artifact_path, &binary)
+                stage_atomically(&self.artifact_path, &binary)
                     .map_err(|e| format!("staging downloaded binary: {e}"))?;
                 run.arch_hashes.entry(arch).or_insert(hash);
                 run.per_node
@@ -142,6 +153,24 @@ impl Worker {
     }
 }
 
+/// Whether the file at `path` already holds the asset with blake3 `hash`.
+fn staged_matches(path: &std::path::Path, hash: &str) -> bool {
+    std::fs::read(path)
+        .map(|bytes| blake3::hash(&bytes).to_hex().as_str() == hash)
+        .unwrap_or(false)
+}
+
+/// Writes next to `path` and renames into place, so a reader (the restart
+/// route executing the artifact for `--version`) sees the old file or the
+/// whole new one, never a truncated or still-open one.
+fn stage_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = path.with_extension("partial");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Fails if an earlier node of the same architecture recorded a different
 /// hash for what should be the same asset.
 fn check_agrees(recorded: Option<&String>, hash: &str) -> Result<(), String> {
@@ -156,6 +185,20 @@ fn check_agrees(recorded: Option<&String>, hash: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_replaces_the_file_whole_and_is_recognised() {
+        let dir = std::env::temp_dir().join(format!("cl-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("artifact");
+        stage_atomically(&path, b"one").unwrap();
+        stage_atomically(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert!(!dir.join("artifact.partial").exists());
+        assert!(staged_matches(&path, blake3::hash(b"two").to_hex().as_str()));
+        assert!(!staged_matches(&path, blake3::hash(b"one").to_hex().as_str()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_download_that_disagrees_with_the_recorded_hash_is_rejected() {
