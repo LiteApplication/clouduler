@@ -1721,7 +1721,7 @@ async fn report_self(
         let arch = std::env::consts::ARCH.to_string();
         let binary_hash = current_binary_hash();
         let memory_total_bytes = cl_api::routes::nodes::total_memory_bytes();
-        let version = env!("CARGO_PKG_VERSION").to_string();
+        let version = cl_config::version().to_string();
         // Until the first detection finishes, keep what is already stored
         // rather than report a restarting node as having no GPUs.
         let gpus = gpus_rx

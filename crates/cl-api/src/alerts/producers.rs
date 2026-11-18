@@ -254,7 +254,7 @@ pub fn spawn_self_update_report(
             while cl_update::rollback::is_pending(&update_dir) {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
-            let version = env!("CARGO_PKG_VERSION");
+            let version = cl_config::version();
             let mut s = new_signal(
                 "self_update.completed",
                 format!("self_update.completed:{}", state.node_name),

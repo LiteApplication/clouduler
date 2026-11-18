@@ -60,7 +60,7 @@ pub(crate) async fn cluster_status(state: &AppState) -> StatusBody {
         reachable: quorum.reachable.len(),
         managers_total: managers.len(),
         managers_reachable,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: cl_config::version().to_string(),
         state_version: cluster_state.version,
     }
 }

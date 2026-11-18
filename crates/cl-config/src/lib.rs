@@ -8,8 +8,10 @@ mod netalloc;
 mod stack;
 mod terraform;
 mod validate;
+mod version;
 
 pub use terraform::validate_module;
+pub use version::{set_version, version};
 
 pub use bundle::{BundledFile, StackBundle};
 pub use cluster::{

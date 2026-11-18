@@ -322,7 +322,7 @@ async fn latest(
         tag: resolved.tag,
         architectures: resolved.assets.into_keys().collect(),
         source,
-        running_version: env!("CARGO_PKG_VERSION").to_string(),
+        running_version: cl_config::version().to_string(),
         fetched_at: now(),
     };
     *latest_cache().lock() = Some((std::time::Instant::now(), answer.clone()));

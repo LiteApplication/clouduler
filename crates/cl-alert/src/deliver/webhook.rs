@@ -121,7 +121,7 @@ pub async fn send(
         .timeout(TIMEOUT)
         .header(
             USER_AGENT,
-            format!("clouduler/{}", env!("CARGO_PKG_VERSION")),
+            format!("clouduler/{}", cl_config::version()),
         )
         .header("X-Clouduler-Event", event)
         .header("X-Clouduler-Severity", severity)

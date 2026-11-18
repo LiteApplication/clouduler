@@ -6,7 +6,7 @@ use cl_cli::cli::{
 };
 use cl_config::ClusterConfig;
 use cl_init::detect;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use clap_complete::CompleteEnv;
 use tracing_subscriber::EnvFilter;
 
@@ -17,10 +17,14 @@ fn install_crypto_provider() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // First, so every reported version is this binary's.
+    cl_config::set_version(env!("CARGO_PKG_VERSION"));
+
     // Must run first: answers a shell completion request (`COMPLETE` set) and exits.
     CompleteEnv::with_factory(Cli::command).complete();
 
-    let cli = Cli::parse();
+    let cli = Cli::from_arg_matches(&Cli::command().version(cl_config::version()).get_matches())
+        .unwrap_or_else(|e| e.exit());
     init_tracing(&cli.log, cli.verbose)?;
     install_crypto_provider();
 

@@ -356,7 +356,7 @@ fn local_resource_usage(
         memory_used_bytes: sys.used_memory(),
         uptime_seconds: System::uptime(),
         cpu_percent: node_metrics::latest_cpu_percent(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: cl_config::version().to_string(),
         drives: node_metrics::drive_space(drives),
         local: true,
     }

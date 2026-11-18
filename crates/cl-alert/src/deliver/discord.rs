@@ -541,7 +541,7 @@ pub async fn send(
             let patch_url = format!("{base}/messages/{msg_id}");
             let mut req = http.patch(&patch_url).timeout(TIMEOUT).header(
                 USER_AGENT,
-                format!("clouduler/{}", env!("CARGO_PKG_VERSION")),
+                format!("clouduler/{}", cl_config::version()),
             );
             if message.has_components() {
                 req = req.query(&[("with_components", "true")]);
@@ -584,7 +584,7 @@ pub async fn send(
 
         let mut req = http.post(url).timeout(TIMEOUT).header(
             USER_AGENT,
-            format!("clouduler/{}", env!("CARGO_PKG_VERSION")),
+            format!("clouduler/{}", cl_config::version()),
         );
         let mut query: Vec<(&str, &str)> = vec![("wait", "true")];
         // Link buttons are only accepted on a webhook when asked for.

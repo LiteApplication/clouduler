@@ -768,6 +768,7 @@ dependencies = [
 name = "cl-alert"
 version = "0.13.0"
 dependencies = [
+ "cl-config",
  "humantime-serde",
  "lettre",
  "reqwest 0.12.28",

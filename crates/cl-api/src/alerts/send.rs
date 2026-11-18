@@ -58,7 +58,7 @@ impl Sender {
         // Not `AppState::http`: that trusts any certificate, right for peers and wrong for the internet.
         let http = reqwest::Client::builder()
             .timeout(ATTEMPT_TIMEOUT)
-            .user_agent(format!("clouduler/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("clouduler/{}", cl_config::version()))
             .build()
             .unwrap_or_default();
         Self {

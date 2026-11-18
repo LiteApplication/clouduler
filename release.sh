@@ -17,13 +17,9 @@ fi
 
 VERSION="${ARGS[0]}"
 
-# Crates that identify the release and are ALWAYS bumped, even when unchanged:
-#  - clouduler: the binary users install
-#  - cl-api: reports env!("CARGO_PKG_VERSION") in cluster/node info and the
-#    self-update running_version comparison, and the alert User-Agent
-#  - cl-daemon: reports its CARGO_PKG_VERSION to the cluster (node version checks)
-#  - cl-alert: sends "clouduler/<CARGO_PKG_VERSION>" as User-Agent
-ALWAYS_BUMPED_CRATES=(clouduler cl-api cl-daemon cl-alert)
+# Crates ALWAYS bumped, even when unchanged: the binary's version is the
+# reported release version (see crates/cl-config/src/version.rs).
+ALWAYS_BUMPED_CRATES=(clouduler)
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
     echo "error: version must look like x.y.z (e.g. 0.2.0)" >&2
