@@ -1,6 +1,4 @@
-//! The documentation and example stacks an AI client can read before writing
-//! a stack, compiled into the binary so they always match the running
-//! version and need no file access on the node.
+//! Docs and example stacks an AI client can read, compiled in so they match the running version.
 
 pub struct Doc {
     pub uri: &'static str,

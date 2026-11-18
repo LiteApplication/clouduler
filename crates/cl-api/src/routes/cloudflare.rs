@@ -1,15 +1,8 @@
 //! `/api/cloudflare/token`: setting the Cloudflare API token from the web ui.
 //!
-//! The token is write-only over the api. It is sealed and stored as a
-//! cluster secret (`cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET`), the same
-//! pattern the wireguard config import route uses
-//! (`crate::routes::wireguard::put_config`); only its presence is ever
-//! reported back, there is no route that returns the value, so a stolen
-//! session cannot read out a token someone else installed.
-//!
-//! Replicated through raft rather than written to a file on one node, so
-//! every node can open it with the cluster key and certificate issuance or
-//! DNS publishing keeps working after a failover to a different leader.
+//! Write-only: sealed and stored as a cluster secret (`cl_api::cloudflare::CLOUDFLARE_TOKEN_SECRET`), like the wireguard
+//! config import (`crate::routes::wireguard::put_config`); only its presence is reported back. Replicated through raft so
+//! certificate issuance and DNS publishing survive a leader failover.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -30,8 +23,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Serialize)]
 struct TokenStatus {
-    /// True once a token is stored, which is what the ui keys the "you cannot
-    /// see or change this here" state off.
+    /// The ui keys its "cannot see or change this here" state off it.
     configured: bool,
 }
 
@@ -47,14 +39,8 @@ struct SetTokenRequest {
     token: String,
 }
 
-/// Seals and stores the token, replacing whatever was there before: rotation
-/// is safe now that there is exactly one copy of it, replicated to every
-/// node, rather than a file an operator would otherwise have to update by
-/// hand on each manager.
-///
-/// Settable whether or not `cloudflare` is currently enabled in the config,
-/// so a token can be staged ahead of flipping DNS management on rather than
-/// forcing that ordering on the operator.
+/// Replacing is safe rotation: there is exactly one copy, replicated to every node. Settable whether or not `cloudflare`
+/// is enabled, so a token can be staged before flipping DNS management on.
 async fn set_token(
     _admin: RequireAdmin,
     State(state): State<AppState>,

@@ -1,10 +1,8 @@
-//! Alerts: the leader's engine, the node-side producers and the settings
-//! plumbing. What a message looks like and how it is delivered is `cl-alert`;
+//! Alerts: the leader's engine, node-side producers and settings plumbing. Message format and delivery are `cl-alert`;
 //! what is replicated is `cl_raft::alerts`.
 //!
-//! Everything here reads the settings (`_clouduler_alerts` and the sealed
-//! destination secrets) out of the replicated state on every pass, so an edit
-//! takes effect on the next tick on every node, with no restart.
+//! Settings (`_clouduler_alerts` and the sealed destination secrets) are re-read from replicated state every pass, so an edit
+//! takes effect on the next tick everywhere without a restart.
 
 pub mod conditions;
 pub mod engine;
@@ -47,7 +45,6 @@ pub(crate) fn unix_now() -> i64 {
     crate::mcp::problems::unix_now()
 }
 
-/// A signal skeleton for `event`; callers fill in the rest.
 pub fn new_signal(event: &str, dedupe: String, action: SignalAction) -> AlertSignal {
     AlertSignal {
         id: uuid::Uuid::new_v4().to_string(),
@@ -69,16 +66,13 @@ pub fn new_signal(event: &str, dedupe: String, action: SignalAction) -> AlertSig
     }
 }
 
-/// Queue a signal for the leader's engine. Works from any node; failures
-/// (no leader yet) are logged and dropped, since a signal that cannot be
-/// delivered now is stale by the time it could be.
+/// Works from any node; failures (no leader yet) are logged and dropped, since an undeliverable signal is stale by the time it could be.
 pub async fn push_signal(cluster: &ClusterNode, signal: AlertSignal) {
     if let Err(e) = cluster.submit(Request::PushAlertSignal(signal)).await {
         tracing::debug!(error = %e, "could not queue an alert signal");
     }
 }
 
-/// Base URL the UI is reachable at, for links in messages.
 pub async fn ui_url(state: &AppState, settings: &cl_alert::AlertSettings) -> Option<String> {
     if let Some(url) = settings.public_url.as_deref() {
         let url = url.trim().trim_end_matches('/');

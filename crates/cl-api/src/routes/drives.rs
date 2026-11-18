@@ -35,38 +35,24 @@ pub fn router() -> Router<AppState> {
 struct DriveSummary {
     name: String,
     mode: cl_config::DriveMode,
-    /// Candidate serving nodes for a served drive, in priority order.
     served_by: Vec<String>,
-    /// The candidate currently answering requests: the first of `served_by`
-    /// that's reachable. `None` for a replicated drive, or when every
-    /// candidate is unreachable.
+    /// The first reachable of `served_by`; `None` for a replicated drive or when none is reachable.
     active_server: Option<String>,
     sync_interval: String,
-    /// Whether a served drive goes back to a preferred node that returns
-    /// after a failover.
     failback: cl_config::Failback,
-    /// Who holds a served drive's authoritative copy, and any handover or
-    /// conflict. `None` for a replicated drive, and for a served drive that
-    /// has never failed over.
+    /// `None` for a replicated drive and a served drive that never failed over.
     served: Option<ServedSummary>,
-    /// Nodes that implement this drive, with whether each one is currently
-    /// reachable.
     nodes: Vec<DriveNodeStatus>,
 }
 
 #[derive(Serialize)]
 struct ServedSummary {
-    /// The node whose copy is authoritative.
     holder: String,
-    /// Counts every change of holder.
     epoch: u64,
-    /// The node the drive is being handed to right now; nobody serves it
-    /// until the handover ends.
+    /// Nobody serves the drive until the handover ends.
     handover_to: Option<String>,
-    /// Both copies were written while apart. Replication between them is
-    /// stopped until an operator resolves it.
+    /// Both copies were written while apart; replication is stopped until an operator resolves it.
     conflict: Option<ServedConflictSummary>,
-    /// Why the last automatic hand back did not finish.
     failback_blocked: Option<String>,
 }
 
@@ -139,13 +125,8 @@ struct VolumeSummary {
     generation: u64,
     primary: String,
     replicas: Vec<ReplicaStatus>,
-    /// The source found no files in it on two scans in a row.
     looks_empty: bool,
-    /// Replication is paused so one node's copy can be edited; `None` when
-    /// the volume replicates normally.
     frozen: Option<FrozenSummary>,
-    /// The latest push a node refused because it would have overwritten
-    /// newer data. `None` when nothing is refused.
     sync_refused: Option<cl_raft::state::SyncRefusal>,
 }
 
@@ -211,10 +192,7 @@ async fn submit_served(
     Ok(StatusCode::OK)
 }
 
-/// Asks the node holding a served drive to hand it back to its preferred
-/// server now, whatever the drive's `failback` is. The holder still checks
-/// that the preferred server's copy can safely take over, and copies over
-/// anything it is missing first.
+/// The holder still checks that the preferred server's copy can safely take over, and copies anything missing first.
 async fn request_failback(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -235,12 +213,9 @@ async fn request_failback(
 
 #[derive(Deserialize)]
 struct ResolveBody {
-    /// The node whose copy to keep. The other copy is overwritten by it.
     keep: String,
 }
 
-/// Settles a served drive's diverged copies by keeping one. Copy anything
-/// worth saving off the other node first: its copy is replaced.
 async fn resolve_conflict(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -255,10 +230,7 @@ async fn resolve_conflict(
     .await
 }
 
-/// Triggering a sync outside the drive's own schedule is not a raft command:
-/// `cl-drive` owns the actual sync loop and this crate has no channel to
-/// nudge it directly. `TouchVolume` bumps the generation so the drive's next
-/// pass (which watches for exactly that) picks the volume up right away.
+/// Not a raft command: `cl-drive` owns the sync loop. `TouchVolume` bumps the generation, which its next pass watches for.
 async fn sync_volume(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -287,25 +259,18 @@ async fn sync_volume(
 
 #[derive(Serialize)]
 struct VolumeInspection {
-    /// The node whose copy was looked at.
     node: String,
     files: usize,
     bytes: u64,
-    /// Modification time of the newest file, unix seconds. `None` when there
-    /// is no file at all.
     newest_file_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct InspectQuery {
-    /// Look at this node's copy instead of the source node's. It must hold
-    /// a replica of the volume.
     node: Option<String>,
 }
 
-/// What a volume holds right now, read from its source node on demand: the
-/// cluster only records whether it looks empty, not how much is in it.
-/// `?node=` asks a specific replica instead, to compare copies.
+/// Read from the source node on demand (the cluster only records "looks empty"); `?node=` asks a replica to compare copies.
 async fn inspect_volume(
     _identity: Identity,
     State(state): State<AppState>,
@@ -366,8 +331,6 @@ async fn inspect_volume(
     }))
 }
 
-/// Deletes a volume that holds no files, on every node. The cluster refuses
-/// unless the volume is flagged empty, is not frozen and is not mounted.
 async fn delete_volume(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -387,22 +350,17 @@ async fn delete_volume(
 
 #[derive(Deserialize, Default)]
 struct FreezeRequest {
-    /// Node whose copy will be edited. Defaults to the volume's primary.
     node: Option<String>,
-    /// Stop containers using the volume on other nodes.
     #[serde(default)]
     force: bool,
 }
 
 #[derive(Deserialize, Default)]
 struct UnfreezeRequest {
-    /// Start the containers the freeze stopped. Default true.
     start_containers: Option<bool>,
 }
 
-/// Pauses replication so one node's copy can be edited. Stopping containers
-/// on other nodes is requested but not waited for: the volume reads as frozen
-/// straight away and the caller watches the instances stop.
+/// Stopping containers on other nodes is requested but not waited for; the volume reads as frozen straight away.
 async fn freeze_volume(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -417,9 +375,7 @@ async fn freeze_volume(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Lifts the freeze and returns at once; waiting for every node to receive
-/// the edited copy, then starting the stopped containers, carries on in the
-/// background. The volume's replica generations show the progress.
+/// Returns at once; waiting for every node to receive the edited copy and restarting containers continues in the background.
 async fn unfreeze_volume(
     _admin: RequireAdmin,
     State(state): State<AppState>,

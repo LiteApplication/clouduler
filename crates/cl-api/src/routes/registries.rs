@@ -1,17 +1,11 @@
 //! `/api/registries`: the container registry accounts the Updates view uses.
 //!
-//! A login is stored the same way the Cloudflare token is — sealed under a
-//! reserved cluster secret name, replicated through raft, never readable back
-//! over the api (`list` returns the username and nothing else). See
-//! `cl_sched::registries` for the storage format and how a pull picks the
-//! right one. Verification and server-name normalization also live there,
-//! shared with the `clouduler registry` cli so a login typed at either one is
-//! checked and named the same way.
+//! A login is sealed under a reserved cluster secret name, replicated through raft and never readable back
+//! (`list` returns the username only). See `cl_sched::registries` for the format and pull selection; verification
+//! and server-name normalization live there too, shared with the `clouduler registry` cli.
 //!
-//! Every login is checked against the registry before it is stored. A wrong
-//! password that is accepted silently does not fail here; it fails later, on
-//! some other node, in the middle of a pull, as an image that will not come
-//! down — which is a much worse place to discover a typo.
+//! Every login is checked before it is stored: a wrong password accepted silently would fail later, on another
+//! node, mid-pull.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -35,11 +29,8 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// Every registry login this node can currently open.
-///
-/// A node with no cluster key yet gets an empty set and falls back to
-/// anonymous access, which is what it did before logins existed — better than
-/// refusing to pull anything at all while the key is still being delivered.
+/// A node with no cluster key yet gets an empty set and pulls anonymously, as before logins existed, rather than
+/// refusing to pull while the key is delivered.
 pub(crate) async fn load(state: &AppState) -> Registries {
     let Some(key) = state.key.read().await.clone() else {
         return Registries::default();
@@ -66,8 +57,6 @@ async fn list(
         .ok_or_else(|| ApiError::Conflict("this node holds no cluster key".into()))?;
 
     let registries = Registries::load(&cluster_state, &key);
-    // `Registries` deliberately exposes no password accessor, so the listing
-    // cannot leak one even by mistake.
     let mut accounts: Vec<RegistryAccount> = registries
         .accounts()
         .map(|(server, username)| RegistryAccount {
@@ -86,7 +75,6 @@ struct LoginRequest {
     password: String,
 }
 
-/// Check a login without storing it, for the ui's "test" button.
 async fn verify_only(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -99,9 +87,7 @@ async fn verify_only(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Check the login, then seal and store it, replacing any login for the same
-/// server. Rotation is a plain overwrite: there is exactly one copy, and
-/// every node reads it out of raft.
+/// Rotation is a plain overwrite: one copy, read by every node out of raft.
 async fn put_registry(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -169,9 +155,7 @@ fn validated(body: LoginRequest) -> Result<(String, String, String), ApiError> {
     if username.is_empty() {
         return Err(ApiError::BadRequest("the username is empty".into()));
     }
-    // Not trimmed: leading or trailing whitespace can be part of a password,
-    // and silently changing one produces a login that verifies here and fails
-    // everywhere else.
+    // Not trimmed: whitespace can be part of a password, and changing it yields a login that verifies here and fails elsewhere.
     if body.password.is_empty() {
         return Err(ApiError::BadRequest("the password is empty".into()));
     }

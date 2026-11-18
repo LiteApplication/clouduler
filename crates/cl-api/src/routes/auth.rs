@@ -28,8 +28,6 @@ pub fn router() -> Router<AppState> {
 struct MeResponse {
     #[serde(flatten)]
     identity: Identity,
-    /// Every logged-in user can read this, unlike `/api/config`, which the ui
-    /// would otherwise need to know whether to show the "AI access" page.
     mcp_enabled: bool,
 }
 
@@ -59,12 +57,8 @@ struct LoginParams {
     key: String,
 }
 
-/// Trade an api key for a session cookie.
-///
-/// The ui needs this because `EventSource` cannot carry an Authorization
-/// header, so every SSE endpoint is invisible to bearer auth. Exchanging the
-/// key once for the same cookie OIDC issues gets the streams authenticated
-/// like everything else, and keeps the key itself out of browser storage.
+/// `EventSource` cannot carry an Authorization header, so SSE endpoints are invisible to bearer auth. Exchanging the
+/// key once for the OIDC session cookie authenticates the streams and keeps the key out of browser storage.
 async fn login_with_key(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -90,9 +84,7 @@ async fn login_with_key(
     ))
 }
 
-/// The one place the session cookie's flags are decided, so the api key and
-/// OIDC paths cannot drift apart. The server only ever speaks TLS, so `Secure`
-/// is unconditional.
+/// The one place the cookie's flags are decided, so the api key and OIDC paths cannot drift. Always `Secure`: the server only speaks TLS.
 fn session_cookie(session_id: String, ttl: std::time::Duration) -> Cookie<'static> {
     Cookie::build((COOKIE_NAME, session_id))
         .path("/")
@@ -103,10 +95,7 @@ fn session_cookie(session_id: String, ttl: std::time::Duration) -> Cookie<'stati
         .build()
 }
 
-/// The cookie that binds a login's `state` to the browser that started it.
-/// `Lax` is enough: the provider's redirect back is a top-level GET, which
-/// carries it. The state is random and only meaningful server side, so the
-/// cookie holds it as is.
+/// `Lax` suffices: the provider's redirect back is a top-level GET. The state is random and only meaningful server side.
 fn state_cookie(state: String) -> Cookie<'static> {
     Cookie::build((STATE_COOKIE_NAME, state))
         .path(STATE_COOKIE_PATH)
@@ -119,11 +108,8 @@ fn state_cookie(state: String) -> Cookie<'static> {
         .build()
 }
 
-/// Where the browser was headed before login sent it away, so the oauth
-/// consent page survives the identity provider round trip.
 const RETURN_COOKIE_NAME: &str = "cl_oidc_return";
 
-/// Only same-origin paths: anything else would make login an open redirect.
 fn safe_return_path(path: &str) -> bool {
     path.starts_with('/')
         && !path.starts_with("//")
@@ -179,7 +165,6 @@ async fn callback(
     Query(params): Query<CallbackParams>,
     jar: CookieJar,
 ) -> Response {
-    // One shot either way: a state cookie is never reused.
     let cookie_state = jar.get(STATE_COOKIE_NAME).map(|c| c.value().to_string());
     let return_to = jar
         .get(RETURN_COOKIE_NAME)

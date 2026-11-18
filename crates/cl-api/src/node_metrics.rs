@@ -1,9 +1,7 @@
 //! This node's CPU and memory over time, plus free space on its drives.
 //!
-//! `sysinfo` computes CPU usage as the change between two refreshes, so one
-//! `System` lives for the whole process and a background task refreshes it
-//! every `SAMPLE_INTERVAL`. The last `HISTORY_LEN` samples are kept for the
-//! sparklines.
+//! `sysinfo` computes CPU as the change between two refreshes, so one `System` lives for the process and a background task
+//! refreshes it every `SAMPLE_INTERVAL`. The last `HISTORY_LEN` samples feed the sparklines.
 
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
@@ -19,13 +17,11 @@ pub const HISTORY_LEN: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
-    /// Unix seconds.
     pub at: i64,
     pub cpu_percent: f32,
     pub memory_used_bytes: u64,
 }
 
-/// Free space on the filesystem backing one of this node's drives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DriveSpace {
     pub drive: String,
@@ -63,7 +59,6 @@ static SAMPLER: OnceLock<Mutex<Sampler>> = OnceLock::new();
 fn sampler() -> &'static Mutex<Sampler> {
     SAMPLER.get_or_init(|| {
         let mut system = System::new();
-        // Baseline for the first delta.
         system.refresh_cpu_usage();
         Mutex::new(Sampler {
             system,
@@ -72,8 +67,7 @@ fn sampler() -> &'static Mutex<Sampler> {
     })
 }
 
-/// Start the 5 second sampling task. Idempotent enough for tests: a second
-/// call just runs a second sampler into the same ring, so call it once.
+/// Call once: a second call runs a second sampler into the same ring.
 pub fn spawn() {
     sampler();
     tokio::spawn(async {
@@ -85,18 +79,15 @@ pub fn spawn() {
     });
 }
 
-/// Newest CPU reading, 0 before the first sample lands.
 pub fn latest_cpu_percent() -> f32 {
     sampler().lock().ring.back().map_or(0.0, |x| x.cpu_percent)
 }
 
-/// Up to `HISTORY_LEN` samples, oldest first.
 pub fn history() -> Vec<Sample> {
     sampler().lock().ring.iter().copied().collect()
 }
 
-/// Space on each drive's backing directory: the mount point with the longest
-/// prefix of the path is the filesystem it lives on.
+/// The mount point with the longest prefix of the path is the filesystem it lives on.
 pub fn drive_space(drives: &BTreeMap<String, PathBuf>) -> Vec<DriveSpace> {
     let disks = Disks::new_with_refreshed_list();
     let mounts: Vec<(PathBuf, u64, u64)> = disks
@@ -123,7 +114,6 @@ pub fn drive_space(drives: &BTreeMap<String, PathBuf>) -> Vec<DriveSpace> {
         .collect()
 }
 
-/// `(total, free)` of the mount whose path is the longest prefix of `path`.
 fn match_mount(path: &Path, mounts: &[(PathBuf, u64, u64)]) -> Option<(u64, u64)> {
     mounts
         .iter()

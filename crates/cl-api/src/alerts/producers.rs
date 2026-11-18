@@ -1,6 +1,5 @@
-//! Node-side producers: what only the node itself can see. They push signals
-//! into raft; the leader's engine decides what to do with them. Thresholds
-//! are read from the replicated settings on every pass.
+//! Node-side producers: what only the node can see. They push signals into raft; the leader's engine decides what to do.
+//! Thresholds are read from replicated settings every pass.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,12 +16,10 @@ use crate::server::AppState;
 
 const DISK_EVERY: Duration = Duration::from_secs(60);
 const MEMORY_EVERY: Duration = Duration::from_secs(15);
-/// A reading this far under the threshold closes the alert, so a value
-/// hovering around the line does not open and close it all day.
+/// A value hovering around the line must not open and close the alert all day.
 const DISK_HYSTERESIS: u8 = 2;
 const MEMORY_HYSTERESIS: u8 = 3;
 
-/// Start the disk, memory and out-of-memory producers of this node.
 pub fn spawn(state: AppState) {
     tokio::spawn(disk_loop(state.clone()));
     tokio::spawn(memory_loop(state.clone()));
@@ -33,7 +30,6 @@ async fn thresholds(state: &AppState) -> cl_alert::Thresholds {
     state.cluster.read(|st| settings::load(st).thresholds).await
 }
 
-/// Which band a reading falls in, given where it was before.
 pub fn disk_band(
     used_percent: f64,
     previous: Option<AlertSeverity>,
@@ -93,7 +89,6 @@ async fn disk_loop(state: AppState) {
                     s.node = Some(state.node_name.clone());
                     push_signal(&state.cluster, s).await;
                 }
-                // Right after start, clear anything a previous run left open.
                 None if first || known => {
                     let s = new_signal("node.disk_low", dedupe, SignalAction::Resolve);
                     push_signal(&state.cluster, s).await;
@@ -106,8 +101,6 @@ async fn disk_loop(state: AppState) {
     }
 }
 
-/// Drives this node holds real data for (not the mountpoint of a served drive
-/// that lives on another node).
 async fn local_drives(state: &AppState) -> BTreeMap<String, PathBuf> {
     let drives = state
         .cluster
@@ -200,7 +193,6 @@ async fn oom_loop(state: AppState) {
             if !c.oom_killed {
                 continue;
             }
-            // `die` can be reported more than once for the same death.
             let marker = (c.id.clone(), c.finished_at.clone());
             if last_seen.as_ref() == Some(&marker) {
                 continue;
@@ -235,11 +227,8 @@ async fn oom_loop(state: AppState) {
     }
 }
 
-/// Report how this node's last self-update went, once, when it is known.
-///
-/// `rolled_back` is the reason `cl_update::rollback::take_note` returned at
-/// boot. While `probation` holds, the new binary has not yet proven itself;
-/// the moment the marker is cleared the update is reported as completed.
+/// `rolled_back` is what `cl_update::rollback::take_note` returned at boot. While `probation` holds the new binary has
+/// not proven itself; once the marker clears the update is reported completed.
 pub fn spawn_self_update_report(
     state: AppState,
     update_dir: PathBuf,
@@ -280,7 +269,6 @@ pub fn spawn_self_update_report(
     });
 }
 
-/// A node that just restarted may not have a leader to talk to yet.
 async fn retry_push(state: &AppState, signal: cl_raft::alerts::AlertSignal) {
     for _ in 0..60 {
         if state
@@ -309,7 +297,6 @@ mod tests {
             disk_band(96.0, Some(AlertSeverity::Warning), &t),
             Some(AlertSeverity::Critical)
         );
-        // Just under critical: stays critical until clearly below.
         assert_eq!(
             disk_band(94.0, Some(AlertSeverity::Critical), &t),
             Some(AlertSeverity::Critical)
@@ -318,13 +305,11 @@ mod tests {
             disk_band(92.0, Some(AlertSeverity::Critical), &t),
             Some(AlertSeverity::Warning)
         );
-        // Just under warning: stays open; well under: closes.
         assert_eq!(
             disk_band(89.0, Some(AlertSeverity::Warning), &t),
             Some(AlertSeverity::Warning)
         );
         assert_eq!(disk_band(80.0, Some(AlertSeverity::Warning), &t), None);
-        // Lower thresholds, read on the next pass, change the verdict.
         t.disk_warning_percent = 60;
         assert_eq!(disk_band(80.0, None, &t), Some(AlertSeverity::Warning));
     }

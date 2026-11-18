@@ -1,24 +1,16 @@
 //! Delivery of the cluster secret key to a newly joined node.
 //!
-//! A joining node never receives the plaintext key over the network. Every
-//! node has its own X25519 keypair (`cl_secret::NodeKeypair`) and the key
-//! travels wrapped for the recipient's public half, so only that node can open
-//! it.
+//! The plaintext key never crosses the network: each node has an X25519 keypair
+//! (`cl_secret::NodeKeypair`) and the key travels wrapped for the recipient's public half.
 //!
-//! There are two routes, because the node-to-node channel (raft included) is
-//! itself authenticated with the cluster key, which a keyless node cannot
-//! satisfy:
+//! Two routes, because the node-to-node channel (raft included) is itself authenticated with the
+//! cluster key, which a keyless node cannot satisfy:
 //!
-//! - `POST /api/secrets/key/wrap` ([`wrap_for_node`]): the route a brand new
-//!   node uses. `clouduler init` calls it over the admin-authenticated https
-//!   api before the daemon ever starts, so the key is on disk when raft first
-//!   needs it.
-//! - The raft route (`spawn_wrap_for_new_nodes` / `spawn_unwrap_own_key`): a
-//!   node publishes its public half into its `NodeState`, any key holder
-//!   stores a wrapped copy in raft, and the recipient unwraps it locally. It
-//!   only works for a node that can already speak raft, so it is a fallback
-//!   for a node that lost or has not yet loaded its key file while its peers
-//!   still trust it, not a way to bootstrap a new one.
+//! - `POST /api/secrets/key/wrap` ([`wrap_for_node`]): for a brand new node. `clouduler init` calls it
+//!   over the admin-authenticated https api before the daemon starts.
+//! - The raft route (`spawn_wrap_for_new_nodes` / `spawn_unwrap_own_key`): a node publishes its public
+//!   half in its `NodeState`, any key holder stores a wrapped copy in raft, the recipient unwraps it.
+//!   It needs raft access already, so it is a fallback for a node that lost its key file, not a bootstrap.
 
 use std::time::Duration;
 
@@ -40,11 +32,9 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Deserialize)]
 struct WrapRequest {
-    /// Name of the node the key is for. Folded into the wrap, so the result
-    /// only opens for a node claiming the same name.
+    /// Folded into the wrap, so the result only opens for a node claiming the same name.
     node: String,
-    /// The recipient's `NodeKeypair` public half, base64 (the same encoding
-    /// `NodeState::node_pubkey` carries).
+    /// Base64, as `NodeState::node_pubkey`.
     public_key: String,
 }
 
@@ -55,14 +45,9 @@ pub struct WrapResponse {
     pub key_fingerprint: String,
 }
 
-/// Hand the cluster key to a joining node, wrapped for its public key.
-///
-/// Admin only, and served by whichever node the caller reached as long as it
-/// holds the key (no leader needed: nothing is written to raft). The plaintext
-/// key never appears in the response, only a copy only the holder of the
-/// matching private key can open. Whoever holds an admin key can already
-/// replace the whole config and deploy arbitrary containers, so this does not
-/// widen what an admin can do.
+/// Admin only, served by any node holding the key (nothing is written to raft). The response holds
+/// only a copy that the matching private key can open. An admin can already replace the config and
+/// deploy arbitrary containers, so this widens nothing.
 async fn wrap_for_node(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -95,15 +80,11 @@ async fn wrap_for_node(
 const WRAP_RETRY: Duration = Duration::from_secs(5);
 const UNWRAP_RETRY: Duration = Duration::from_secs(5);
 
-/// Wrap this node's held cluster key for every node that has published a
-/// public key but has no current wrapped copy yet, including one whose
-/// existing copy targets a stale public key, after a keypair rotation.
+/// Wraps the held key for every node that published a public key but has no current wrapped copy
+/// (including a stale one after keypair rotation).
 ///
-/// Any node currently holding the plaintext key runs this, not just the
-/// leader: raft forwards a non-leader's `submit` to the current leader like
-/// any other write, and wrapping the same key twice for the same node is
-/// harmless (last write wins, both are valid), so there is no duplicate-mint
-/// race to gate against the way `spawn_bootstrap_first_key` has to.
+/// Any key holder runs this, not just the leader: raft forwards `submit` to the leader, and wrapping
+/// twice is harmless (last write wins), so there is no duplicate-mint race as in `spawn_bootstrap_first_key`.
 pub fn spawn_wrap_for_new_nodes(state: AppState) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(WRAP_RETRY);
@@ -168,16 +149,11 @@ pub fn spawn_wrap_for_new_nodes(state: AppState) {
     });
 }
 
-/// Watch for this node's own wrapped key showing up in raft, unwrap it with
-/// the local private key, and install it live (the same effect as an operator
-/// pasting it through `POST /api/secrets/key`, just automatic.
+/// Watches for this node's wrapped key in raft, unwraps it with the local private key and installs it
+/// live (as `POST /api/secrets/key`, automatically).
 ///
-/// Returns immediately, with nothing to watch for, on a node that already
-/// holds a key (from disk at startup, or a manual install that lands while
-/// this loop is waiting) or that has no keypair to unwrap with. No
-/// timeout: a node with no key and no reachable key holder is the same
-/// steady state the cluster has always supported, and this loop just keeps
-/// it self-healing whenever that changes.
+/// Returns at once on a node that already holds a key or has no keypair. No timeout: a keyless node
+/// with no reachable holder is a supported steady state, and this loop self-heals when that changes.
 pub fn spawn_unwrap_own_key(state: AppState, node_name: String, keypair: Option<NodeKeypair>) {
     let Some(keypair) = keypair else {
         return;

@@ -1,22 +1,14 @@
 //! Secret usage and rotation.
 //!
-//! Overwriting a secret only changes the stored value. A running container
-//! keeps what it was created with (a file bind-mounted by inode, or an
-//! environment variable), so the cluster records which revision of each
-//! secret every container started with (`clouduler.secrets` label, reported
-//! into `ClusterState::container_status`) and this module compares that with
-//! the secret's current revision.
+//! Overwriting a secret only changes the stored value: a running container keeps what it was created
+//! with. The cluster records which revision of each secret every container started with
+//! (`clouduler.secrets` label, via `ClusterState::container_status`) and compares it with the current one.
 //!
-//! Restarting is the only way a container picks up a new value, for files and
-//! `env:` alike: the file is a single-file bind mount, which keeps pointing at
-//! the old inode when the host copy is replaced. The roll removes one
-//! container at a time per service and lets the reconcile loop recreate it,
-//! the same way an image update does, with progress in
-//! `ClusterState::instance_updates`.
+//! Only a restart picks up a new value (a single-file bind mount keeps the old inode). The roll removes
+//! one container at a time per service and lets reconcile recreate it, as an image update does, with
+//! progress in `ClusterState::instance_updates`.
 //!
-//! Clouduler does not migrate anything derived from the old value: a database
-//! password stored inside the database or an encryption key protecting data at
-//! rest needs the application's own rotation procedure.
+//! Anything derived from the old value (a database password, an at-rest key) needs the application's own rotation.
 
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,11 +35,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/secrets/{name}/rotate", post(rotate))
         .route("/api/secrets/{name}/restart", post(restart))
-        // Internal-auth only: `clouduler secret rotate --restart`.
         .route("/api/secrets/internal/restart", post(restart_internal))
 }
 
-/// How a service receives a secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Delivery {
@@ -55,20 +45,14 @@ pub enum Delivery {
     Env,
 }
 
-/// Whether a container runs the secret's current revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Freshness {
-    /// Created with the current revision.
     Current,
-    /// Created with an older revision.
     Stale,
-    /// Nothing recorded: the container predates revision tracking, or its
-    /// node has not reported yet.
     Unknown,
 }
 
-/// One instance that references a secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecretUse {
     pub instance: String,
@@ -76,14 +60,12 @@ pub struct SecretUse {
     pub service: String,
     pub node: String,
     pub delivery: Delivery,
-    /// The environment variable name, or the path inside the container.
     pub target: String,
     pub running: bool,
     pub running_revision: Option<u64>,
     pub freshness: Freshness,
 }
 
-/// Freshness of a container given what it was created with.
 pub fn freshness(running_revision: Option<u64>, current: u64) -> Freshness {
     match running_revision {
         Some(r) if r >= current => Freshness::Current,
@@ -92,8 +74,6 @@ pub fn freshness(running_revision: Option<u64>, current: u64) -> Freshness {
     }
 }
 
-/// Every instance whose service references `secret`, with the revision its
-/// container started with.
 pub fn usage(state: &ClusterState, secret: &str) -> Vec<SecretUse> {
     let Some(entry) = state.secrets.get(secret) else {
         return Vec::new();
@@ -138,15 +118,12 @@ pub fn usage(state: &ClusterState, secret: &str) -> Vec<SecretUse> {
     out
 }
 
-/// Why an instance is not in a roll.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Skipped {
     pub instance: String,
     pub reason: String,
 }
 
-/// What a roll would touch: instances grouped by (stack, service), each group
-/// in index order and restarted one at a time.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RollPlan {
     pub lanes: BTreeMap<(String, String), Vec<(InstanceId, String)>>,
@@ -163,13 +140,8 @@ impl RollPlan {
     }
 }
 
-/// Which instances need restarting to pick up `secret` at revision `current`.
-///
-/// In: an instance that should be running whose container is not provably
-/// current (an older revision, or none recorded). Out: one that already runs
-/// the current revision, one stopped on purpose (it takes the new value
-/// whenever it next starts), one moving between nodes, and one with an update
-/// already in flight.
+/// In: should be running with a container not provably current. Out: already current, stopped on
+/// purpose (takes the new value on next start), moving between nodes, or with an update in flight.
 pub fn plan_roll(state: &ClusterState, secret: &str, current: u64) -> RollPlan {
     let mut plan = RollPlan::default();
     let mut seen = BTreeSet::new();
@@ -225,11 +197,9 @@ pub struct RollStarted {
     pub skipped: Vec<Skipped>,
 }
 
-/// Queue the roll and run it in the background. Answers when queued: a
-/// restart waits for health and can take minutes, longer than a request may.
+/// Answers when queued: a restart waits for health and can outlast a request.
 async fn start_roll(state: &AppState, name: &str, revision: u64) -> RollStarted {
-    // The rotating request may land on a follower whose copy has not applied
-    // the new revision yet; planning against the old one would find nothing.
+    // A follower may not have applied the new revision yet; planning against the old one finds nothing.
     for _ in 0..50 {
         let applied = state
             .cluster
@@ -271,7 +241,6 @@ struct Roll {
 
 struct RollState {
     failed_by: Option<InstanceId>,
-    /// Not yet claimed for a restart, with their nodes.
     pending: BTreeMap<InstanceId, String>,
 }
 
@@ -285,7 +254,6 @@ impl Roll {
         inner.failed_by.is_none() && inner.pending.remove(instance).is_some()
     }
 
-    /// Record the failure and cancel every instance that has not started.
     async fn fail(&self, instance: &InstanceId, node: &str, reason: &str) {
         let cancelled = {
             let mut inner = self.inner.lock();
@@ -343,8 +311,6 @@ async fn roll(worker: AppState, secret: String, plan: RollPlan) {
     futures::future::join_all(lanes).await;
 }
 
-/// One service's instances, strictly one after another, each waiting for its
-/// replacement to be up (and healthy, when it has a healthcheck).
 async fn roll_lane(roll: Arc<Roll>, lane: Vec<(InstanceId, String)>) {
     for (instance, node) in lane {
         if roll.halted() || !roll.claim(&instance) {
@@ -384,8 +350,6 @@ async fn roll_lane(roll: Arc<Roll>, lane: Vec<(InstanceId, String)>) {
 struct RotateRequest {
     #[serde(flatten)]
     value: PutSecretRequest,
-    /// Restart the instances that run an older revision, one at a time per
-    /// service. Without it the value is only stored.
     #[serde(default)]
     restart: bool,
 }
@@ -420,7 +384,6 @@ async fn rotate(
     }
 }
 
-/// Restart whatever still runs an older revision of an already stored secret.
 async fn restart(
     _admin: RequireAdmin,
     State(state): State<AppState>,

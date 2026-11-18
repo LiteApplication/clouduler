@@ -20,10 +20,7 @@ use crate::server::AppState;
 use crate::static_routes::STATIC_ROUTES_CONFIG;
 use crate::wireguard::{is_reserved_wireguard_secret, WIREGUARD_INGRESS_CONFIG};
 
-/// Config names clouduler itself owns and never shows through the generic
-/// config routes. `pub(crate)` so `routes::git_backup`'s reverse sync can
-/// skip these too - they have their own dedicated, validated write paths and
-/// must never be overwritten by a plain `PutConfig` of raw git content.
+/// `pub(crate)` so `routes::git_backup`'s reverse sync skips these too: they have dedicated validated write paths a raw `PutConfig` must not overwrite.
 pub(crate) fn is_reserved(name: &str) -> bool {
     name == API_KEYS_CONFIG
         || name == crate::auth::oauth::MCP_CLIENTS_CONFIG
@@ -35,8 +32,6 @@ pub(crate) fn is_reserved(name: &str) -> bool {
         || super::git_backup::is_reserved_config(name)
 }
 
-/// Secret names clouduler itself owns and never shows through the generic
-/// secret listing route.
 pub(crate) fn is_reserved_secret(name: &str) -> bool {
     name.starts_with("_clouduler_alert_")
         || super::self_update::is_reserved_secret(name)
@@ -78,8 +73,6 @@ async fn list_configs(
         cluster_state
             .configs
             .values()
-            // The api key store rides along as a config object internally,
-            // but it is not a user config and must never appear here.
             .filter(|c| !is_reserved(&c.name))
             .map(|c| ConfigSummary {
                 name: c.name.clone(),
@@ -174,16 +167,11 @@ struct SecretSummary {
     revision: u64,
     owner: Option<String>,
     key_fingerprint: String,
-    /// Every instance that references the secret, and which revision its
-    /// container started with.
     used_by: Vec<super::secret_rotation::SecretUse>,
-    /// How many of `used_by` run an older revision.
     stale: usize,
 }
 
-/// Never includes a value, at any role: the contract is explicit that a
-/// secret value leaves the sealing node exactly once, at write time, and
-/// never comes back out through the api.
+/// Never includes a value, at any role: a secret value leaves the sealing node once, at write time.
 async fn list_secrets(
     _identity: Identity,
     State(state): State<AppState>,
@@ -240,8 +228,7 @@ async fn put_secret(
     Ok(StatusCode::OK)
 }
 
-/// Produce the plaintext, seal it under this node's cluster key and store it,
-/// returning the new revision. The caller has already refused reserved names.
+/// The caller has already refused reserved names.
 pub(crate) async fn store_secret(
     state: &AppState,
     name: &str,
@@ -357,9 +344,6 @@ async fn post_key(
 mod tests {
     use super::*;
 
-    /// The self-update run object rides `state.configs` like the api key
-    /// store does, so it needs the same filtering out of the generic config
-    /// listing, mirroring the existing `API_KEYS_CONFIG` exclusion.
     #[test]
     fn the_self_update_run_config_is_excluded_from_the_generic_listing() {
         assert!(is_reserved(cl_update::plan::RUN_CONFIG));

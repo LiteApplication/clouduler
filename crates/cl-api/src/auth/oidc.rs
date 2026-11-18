@@ -1,14 +1,9 @@
 //! Authorization code flow with PKCE.
 //!
-//! `CoreClient` bakes in `EmptyAdditionalClaims`, so the standard claims are
-//! all openidconnect will hand us after verification. The admin role check
-//! needs an arbitrary claim (`admin_claim`, often `groups`), which is not one
-//! of the standard ones. Rather than redefine the whole generic `Client` type
-//! alias to plumb a custom claims type through, we verify the id token with
-//! openidconnect as usual and then re-read its already-verified payload as
-//! loose json to pull out that one extra claim. The signature and nonce check
-//! already happened by that point, so this is just a second look at the same
-//! trusted bytes, not a second source of trust.
+//! `CoreClient` fixes `EmptyAdditionalClaims`, but the admin role check needs an arbitrary claim
+//! (`admin_claim`, often `groups`). Rather than plumb a custom claims type through the generic
+//! `Client` alias, the id token is verified by openidconnect as usual and its already-verified
+//! payload re-read as loose json for that one claim; no second source of trust.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,16 +24,12 @@ use crate::oidc::OIDC_CLIENT_SECRET;
 
 use super::{Identity, Role};
 
-/// How long an in-flight login may sit between redirect and callback.
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Most logins that may be in flight at once. `/auth/oidc/login` is
-/// unauthenticated, so without a cap a flood grows `pending` without bound.
+/// `/auth/oidc/login` is unauthenticated, so without a cap a flood grows `pending` without bound.
 const MAX_PENDING_LOGINS: usize = 1024;
-/// Name of the cookie that ties a login's `state` to the browser that started
-/// it. Without it the callback url alone completes a login, so an attacker
-/// could start one with their own account and hand the url to a victim.
+/// Ties a login's `state` to the browser that started it; without it an attacker could start a
+/// login with their own account and hand the callback url to a victim.
 pub const STATE_COOKIE_NAME: &str = "cl_oidc_state";
-/// Path scope of the state cookie: only the callback needs it.
 pub const STATE_COOKIE_PATH: &str = "/auth/oidc/callback";
 
 pub struct OidcSettings {
@@ -57,19 +48,15 @@ struct PendingLogin {
     started_at: Instant,
 }
 
-/// The in-flight logins, keyed by `state`, bounded by `MAX_PENDING_LOGINS`.
 #[derive(Default)]
 struct PendingLogins {
     logins: Mutex<HashMap<String, PendingLogin>>,
 }
 
 impl PendingLogins {
-    /// Record a login, or reject it with 429 when the map is full of
-    /// unexpired entries. Rejecting rather than evicting the oldest is
-    /// deliberate: eviction would let a flood of throwaway logins push real
-    /// users' in-flight ones out, while rejecting only costs the flooder's own
-    /// new attempts until old entries expire. Expired entries are only swept
-    /// when the cap is hit, so the common path stays O(1).
+    /// Rejects with 429 when full of unexpired entries rather than evicting the oldest: eviction
+    /// would let a flood push real users' logins out. Expired entries are only swept at the cap,
+    /// keeping the common path O(1).
     async fn insert(&self, state: String, login: PendingLogin) -> Result<(), ApiError> {
         let mut logins = self.logins.lock().await;
         if logins.len() >= MAX_PENDING_LOGINS {
@@ -88,7 +75,6 @@ impl PendingLogins {
         self.logins.lock().await.remove(state)
     }
 
-    /// Drop every login that outlived `LOGIN_TIMEOUT`.
     async fn prune_expired(&self) {
         self.logins
             .lock()
@@ -100,18 +86,12 @@ impl PendingLogins {
 pub struct OidcAuthenticator {
     settings: OidcSettings,
     http: openidconnect::reqwest::Client,
-    /// Discovery is cached; the client itself is rebuilt from it on every
-    /// call. `CoreClient::from_provider_metadata` returns a type whose
-    /// generics encode exactly which endpoints discovery filled in, which is
-    /// not nameable as the bare `CoreClient` alias, so it cannot live in a
-    /// struct field without redeclaring that whole generic signature. Cheap
-    /// to rebuild since it does no IO, unlike discovery itself.
+    /// Discovery is cached; the client is rebuilt per call because `from_provider_metadata` returns a
+    /// type that is not nameable as the bare `CoreClient` alias. Rebuilding does no IO.
     metadata: OnceCell<CoreProviderMetadata>,
     pending: PendingLogins,
-    /// Where the client secret actually lives: a sealed cluster secret,
-    /// opened fresh on every login rather than resolved once at startup, so
-    /// it can be set or rotated from the web ui while the api is already
-    /// running. See `crate::routes::oidc`.
+    /// The client secret is a sealed cluster secret opened on every login, so it can be set or
+    /// rotated from the web ui without a restart. See `crate::routes::oidc`.
     cluster: Arc<ClusterNode>,
     key: Arc<RwLock<Option<Arc<ClusterKey>>>>,
 }
@@ -123,9 +103,7 @@ impl OidcAuthenticator {
         key: Arc<RwLock<Option<Arc<ClusterKey>>>>,
     ) -> Result<Self, ApiError> {
         let http = openidconnect::reqwest::ClientBuilder::new()
-            // Discovery and token requests go to a fixed, configured issuer;
-            // there is no reason for either hop to follow a redirect, and
-            // allowing one opens an SSRF path.
+            // Discovery and token requests go to a fixed issuer; following a redirect would open an SSRF path.
             .redirect(openidconnect::reqwest::redirect::Policy::none())
             .build()
             .map_err(ApiError::internal)?;
@@ -139,11 +117,8 @@ impl OidcAuthenticator {
         })
     }
 
-    /// Opens the client secret out of replicated secrets, decrypting with
-    /// this node's cluster key. `None` when there is no key, no secret
-    /// stored yet, or the stored bytes cannot be opened -- a provider that
-    /// requires a client secret then fails authentication rather than
-    /// silently trying with none.
+    /// `None` when there is no key, no secret or it cannot be opened; a provider requiring a secret
+    /// then fails authentication rather than trying with none.
     async fn client_secret(&self) -> Option<String> {
         let key_guard = self.key.read().await;
         let key = key_guard.as_ref()?;
@@ -164,14 +139,8 @@ impl OidcAuthenticator {
         }
     }
 
-    /// Discover the provider once and cache it. Building a `CoreClient` from
-    /// the metadata is left to each caller: what `from_provider_metadata(...)
-    /// .set_redirect_uri(...)` returns is a `Client` instantiated with
-    /// whichever endpoint typestate markers discovery happened to fill in,
-    /// which is not nameable as the bare `CoreClient` alias, so it cannot be
-    /// the return type of a shared helper without redeclaring that whole
-    /// generic signature by hand. Leaving it to type inference at each call
-    /// site sidesteps that.
+    /// Discover once and cache. Building the `CoreClient` is left to each caller: the type returned by
+    /// `from_provider_metadata(..).set_redirect_uri(..)` is not nameable as the bare alias.
     async fn metadata(&self) -> Result<&CoreProviderMetadata, ApiError> {
         self.metadata
             .get_or_try_init(|| async {
@@ -184,8 +153,7 @@ impl OidcAuthenticator {
             .await
     }
 
-    /// Start a login: returns the url to redirect the browser to and the
-    /// `state`, which the caller must also bind to the browser in a cookie.
+    /// Returns the redirect url and the `state`, which the caller must also bind to the browser in a cookie.
     pub async fn start_login(&self) -> Result<(String, String), ApiError> {
         let metadata = self.metadata().await?;
         let redirect = RedirectUrl::new(self.settings.redirect_url.clone())
@@ -223,7 +191,6 @@ impl OidcAuthenticator {
         Ok((auth_url.to_string(), state))
     }
 
-    /// Finish a login from the callback's `code` and `state`.
     pub async fn finish_login(&self, code: String, state: String) -> Result<Identity, ApiError> {
         let pending =
             self.pending.take(&state).await.ok_or_else(|| {
@@ -271,9 +238,7 @@ impl OidcAuthenticator {
         })
     }
 
-    /// Re-parse the id token's payload as loose json to read `admin_claim`.
-    /// See the module doc for why this is safe to do after `claims()` has
-    /// already verified the token.
+    /// Safe after `claims()` has verified the token; see the module doc.
     fn role_from_raw_claims(&self, id_token: &openidconnect::core::CoreIdToken) -> Role {
         let Some(admin_value) = &self.settings.admin_value else {
             return Role::Viewer;
@@ -298,9 +263,7 @@ impl OidcAuthenticator {
         }
     }
 
-    /// Re-parse the id token's payload as loose json to read
-    /// `username_claim`. `None` when that claim is absent or not a string,
-    /// so the caller falls back to the subject.
+    /// `None` when absent or not a string, so the caller falls back to the subject.
     fn username_from_raw_claims(
         &self,
         id_token: &openidconnect::core::CoreIdToken,
@@ -312,15 +275,12 @@ impl OidcAuthenticator {
             .map(str::to_string)
     }
 
-    /// Drop in-flight logins nobody came back for.
     pub async fn prune_expired(&self) {
         self.pending.prune_expired().await;
     }
 }
 
-/// Check the callback's `state` against the cookie set when the login began.
-/// Runs before any token exchange: a missing or different cookie means this
-/// browser did not start the login.
+/// Runs before any token exchange: a missing or different cookie means this browser did not start the login.
 pub fn check_state_cookie(cookie: Option<&str>, state: &str) -> Result<(), ApiError> {
     match cookie {
         Some(cookie) if constant_time_eq(cookie.as_bytes(), state.as_bytes()) => Ok(()),
@@ -330,7 +290,6 @@ pub fn check_state_cookie(cookie: Option<&str>, state: &str) -> Result<(), ApiEr
     }
 }
 
-/// Length-aware constant-time byte comparison, for the csrf state.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -388,7 +347,6 @@ mod tests {
             err.into_response().status(),
             axum::http::StatusCode::TOO_MANY_REQUESTS
         );
-        // The real entries were not evicted to make room.
         assert!(pending.take("s0").await.is_some());
     }
 

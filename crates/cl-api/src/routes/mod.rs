@@ -1,6 +1,3 @@
-//! One module per section of docs/api.md. Handlers stay thin: parse,
-//! authorize, call into the cluster or docker, serialize.
-
 pub mod alerts;
 pub mod auth;
 pub mod auth_keys;
@@ -35,8 +32,6 @@ use axum::Router;
 use crate::error::ApiError;
 use crate::server::AppState;
 
-/// Rejects `cloudflare_proxy` on a network that is not public: Cloudflare can
-/// only front an address the open internet reaches.
 pub(crate) fn check_cloudflare_proxy(
     cfg: &cl_config::ClusterConfig,
     network: &str,

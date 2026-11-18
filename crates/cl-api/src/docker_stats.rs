@@ -1,12 +1,7 @@
 //! Container resource stats, for `GET /api/instances/:id/stats`.
 //!
-//! cl-docker wraps container lifecycle, logs and inspect, but has no stats
-//! method, and this crate cannot add one without editing cl-docker. Bollard
-//! itself has a `stats` call, so this module opens its own connection to the
-//! docker socket and talks to it directly, translating the raw response into
-//! [`crate::stream::StatSample`]. It is a second connection to the same
-//! daemon cl-docker already talks to, which is a bit wasteful but keeps the
-//! crate boundary clean.
+//! cl-docker has no stats method and this crate cannot edit it, so this opens its own bollard connection to the docker socket
+//! and translates the response into [`crate::stream::StatSample`].
 
 use bollard::query_parameters::StatsOptionsBuilder;
 use futures::{Stream, StreamExt};

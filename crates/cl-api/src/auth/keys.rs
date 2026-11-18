@@ -1,36 +1,26 @@
 //! API key authentication.
 //!
-//! cl-raft has no `Request` variant for api keys and this crate cannot add
-//! one without editing cl-raft, which is out of bounds. So keys are stored as
-//! an ordinary cluster config object, under the reserved name
-//! [`API_KEYS_CONFIG`]. The prefix marks it as clouduler-internal: routes
-//! that list or serve user configs must filter it out, and it never appears
-//! in `GET /api/configs`.
+//! cl-raft has no `Request` variant for api keys, so they are stored as an ordinary config object under the
+//! reserved name [`API_KEYS_CONFIG`]; routes that list or serve user configs must filter it out.
 //!
-//! A key looks like `clk_<id>_<secret>`. Only a SHA-256 hash of the secret is
-//! stored; the plaintext is shown to the caller exactly once, at creation
-//! time, and never again. Every key grants the admin role: the api key path
-//! exists specifically so a freshly formed cluster with no OIDC configured
-//! still has a way in, and that way in has to be able to do everything.
+//! A key looks like `clk_<id>_<secret>`. Only a SHA-256 hash of the secret is stored; the plaintext is shown once,
+//! at creation. Every key is admin: the api key path is the way into a fresh cluster with no OIDC, so it must do everything.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use cl_raft::ClusterState;
 
-/// Reserved config name holding the api key list. Never exposed as a regular
-/// config through `/api/configs`.
+/// Never exposed through `/api/configs`.
 pub const API_KEYS_CONFIG: &str = "_clouduler_api_keys";
 
-/// Prefix every api key starts with, so a stray token is recognizable at a
-/// glance in a log line.
+/// Makes a stray token recognizable in a log line.
 const KEY_PREFIX: &str = "clk";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
     pub id: String,
     pub name: Option<String>,
-    /// Hex-encoded SHA-256 of the secret half.
     pub hash: String,
     pub created_at: i64,
 }
@@ -41,7 +31,6 @@ pub struct ApiKeyStore {
 }
 
 impl ApiKeyStore {
-    /// Read the store out of applied cluster state. Empty if none exist yet.
     pub fn load(state: &ClusterState) -> Self {
         let Some(entry) = state.configs.get(API_KEYS_CONFIG) else {
             return Self::default();
@@ -52,7 +41,6 @@ impl ApiKeyStore {
         serde_json::from_slice(&raw).unwrap_or_default()
     }
 
-    /// Base64 content ready to submit via `Request::PutConfig`.
     pub fn encode(&self) -> String {
         crate::encode_json_config(self)
     }
@@ -62,14 +50,11 @@ impl ApiKeyStore {
     }
 }
 
-/// A freshly generated key: the record to store and the full secret string
-/// to hand back to the caller once.
 pub struct NewKey {
     pub record: ApiKeyRecord,
     pub secret: String,
 }
 
-/// Generate one key. `name` is an optional operator-facing label.
 pub fn generate(name: Option<String>, created_at: i64) -> NewKey {
     let id = random_token(12);
     let secret = random_token(32);
@@ -95,7 +80,6 @@ pub(crate) fn random_token(len: usize) -> String {
             if out.len() == len {
                 break;
             }
-            // Reject-sample so every character stays equally likely.
             if (byte as usize) < (256 / ALPHABET.len()) * ALPHABET.len() {
                 out.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
             }
@@ -113,15 +97,12 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Split `clk_<id>_<secret>` into its two halves.
 pub fn parse(token: &str) -> Option<(&str, &str)> {
     let rest = token.strip_prefix(KEY_PREFIX)?.strip_prefix('_')?;
     rest.split_once('_')
 }
 
-/// Check a presented `(id, secret)` pair against the store. Constant time in
-/// the hash comparison, so a timing attack cannot narrow down a valid hash
-/// one byte at a time.
+/// The hash comparison is constant time, so timing cannot narrow down a valid hash byte by byte.
 pub fn verify<'a>(store: &'a ApiKeyStore, id: &str, secret: &str) -> Option<&'a ApiKeyRecord> {
     let record = store.find(id)?;
     let expected = record.hash.as_bytes();
@@ -137,7 +118,6 @@ pub fn verify<'a>(store: &'a ApiKeyStore, id: &str, secret: &str) -> Option<&'a 
     (diff == 0).then_some(record)
 }
 
-/// Bearer header value into `(id, secret)`, tolerant of the `Bearer ` prefix.
 pub fn parse_authorization_header(value: &str) -> Option<(&str, &str)> {
     let token = value.strip_prefix("Bearer ").unwrap_or(value);
     parse(token)

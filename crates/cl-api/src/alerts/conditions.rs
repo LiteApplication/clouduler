@@ -1,9 +1,7 @@
 //! The standing conditions of the cluster, as [`Observed`] problems.
 //!
-//! Instance and update conditions come from the same classifier the MCP
-//! `list_problems` tool uses. Backups, restores, certificates and DNS are read
-//! from the state here, so their text is stable between passes (a detail that
-//! counted seconds would rewrite the alert on every pass).
+//! Instance and update conditions come from the classifier the MCP `list_problems` tool uses. Backups, restores, certificates
+//! and DNS are read from state here, with stable text between passes (a detail counting seconds would rewrite the alert every pass).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -18,8 +16,7 @@ use super::lifecycle::Observed;
 use crate::mcp::problems::{self, Problem};
 use crate::routes::instances::InstanceSummary;
 
-/// Events the engine derives from state every pass and resolves by itself
-/// when they stop holding. The rest are opened and closed by signals.
+/// Derived from state every pass and resolved by the engine itself; the rest are opened and closed by signals.
 const DERIVED: &[&str] = &[
     "cluster.emergency_mode",
     "node.unreachable",
@@ -52,8 +49,7 @@ pub fn is_derived(event: &str) -> bool {
     DERIVED.contains(&event)
 }
 
-/// A replica must lag this long before it is worth an alert: replicas are
-/// behind for a whole sync interval after every write, by design.
+/// Replicas are behind for a whole sync interval after every write, by design.
 const REPLICA_LAG_SECS: i64 = 30 * 60;
 const FAILED_RESTORE_KEEP_SECS: i64 = 3 * 24 * 3600;
 const BACKUP_CRITICAL_SECS: i64 = 24 * 3600;
@@ -61,9 +57,7 @@ const BACKUP_CRITICAL_SECS: i64 = 24 * 3600;
 #[derive(Default)]
 pub struct Derived {
     pub observed: Vec<Observed>,
-    /// Instances whose live state could not be read this pass.
     pub held_instances: HashSet<String>,
-    /// Dedupes that only count once they have held this many seconds.
     pub min_age: HashMap<String, i64>,
 }
 
@@ -261,7 +255,6 @@ fn from_problem(b: &mut Builder, state: &ClusterState, p: &Problem) {
             format!("Update of {} is stuck", p.subject),
             "The update has made no progress for over 15 minutes".to_string(),
         ),
-        // The instance-level duplicate of a node outage is covered by the node.
         "node_unreachable" if p.stack.is_none() => {
             let critical = state
                 .nodes
@@ -402,7 +395,6 @@ fn backups(b: &mut Builder, state: &ClusterState, now: i64) {
         };
         let links = vec![link("Open backups", "/storage/backups".into())];
         if let BackupRunOutcome::Failed { error } = &latest.outcome {
-            // Failing since the oldest failure of the unbroken streak.
             let since = finished
                 .iter()
                 .take_while(|r| matches!(r.outcome, BackupRunOutcome::Failed { .. }))

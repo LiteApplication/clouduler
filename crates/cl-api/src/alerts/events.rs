@@ -1,6 +1,5 @@
-//! One-shot events, found by comparing the replicated state with the
-//! previous pass. The first snapshot after becoming leader is taken silently:
-//! whatever happened before is not news.
+//! One-shot events, found by comparing replicated state with the previous pass. The first snapshot after becoming leader is
+//! silent: whatever happened before is not news.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -112,7 +111,6 @@ fn link(label: &str, path: String) -> Vec<AlertLink> {
     }]
 }
 
-/// Events between `prev` and now.
 pub fn diff(prev: &Snapshot, state: &ClusterState) -> Vec<Observed> {
     let now = Snapshot::take(state);
     let mut out = Vec::new();
@@ -265,20 +263,16 @@ pub fn diff(prev: &Snapshot, state: &ClusterState) -> Vec<Observed> {
     out
 }
 
-/// Leader changes seen by this node, to tell a flapping cluster from a
-/// single failover.
 #[derive(Default)]
 pub struct LeaderChanges {
     seen: VecDeque<i64>,
 }
 
 impl LeaderChanges {
-    /// Changes seen in the last 10 minutes.
     pub fn recent(&self, now: i64) -> usize {
         self.seen.iter().filter(|t| now - **t <= 600).count()
     }
 
-    /// Record a change at `now`; returns the changes in the last 10 minutes.
     pub fn record(&mut self, now: i64) -> usize {
         self.seen.push_back(now);
         while self.seen.front().is_some_and(|t| now - t > 600) {

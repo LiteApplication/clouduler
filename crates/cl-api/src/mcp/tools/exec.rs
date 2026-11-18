@@ -155,8 +155,6 @@ pub(super) async fn exec(ctx: &Ctx, args: ExecArgs) -> ToolResult {
     Ok(out)
 }
 
-/// Resolves `.` and `..` and repeated slashes without touching a filesystem,
-/// so a path cannot dodge the secret-path check by spelling.
 pub(super) fn normalize_path(path: &str) -> Option<String> {
     if !path.starts_with('/') || path.contains('\0') {
         return None;
@@ -181,7 +179,6 @@ fn is_under(path: &str, dir: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Why `path` may not be read from this service, if it may not.
 fn refused_path(path: &str, secret_targets: &[String]) -> Option<String> {
     if is_under(path, SECRET_DIR) || is_under(path, "/var/run/secrets") {
         return Some(format!(
@@ -202,9 +199,7 @@ fn refusal(path: &str, why: &str) -> String {
 }
 
 pub(super) async fn read_file(ctx: &Ctx, args: ReadFileArgs) -> ToolResult {
-    // The mount point of every secret is known without looking at the
-    // service, so refuse it before anything else: the answer must not depend
-    // on which instances exist.
+    // Secret mount points are known without the service, so refuse first: the answer must not depend on which instances exist.
     let path = normalize_path(&args.path)
         .ok_or_else(|| format!("path must be absolute, got {:?}", args.path))?;
     if let Some(why) = refused_path(&path, &[]) {

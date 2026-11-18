@@ -1,12 +1,8 @@
-//! Forwarding a read to the node that actually holds the answer.
+//! Forwarding a read to the node that holds the answer.
 //!
-//! Container inspection, logs and stats only exist on the node running the
-//! container; resource usage only on the node itself. cl-raft carries no rpc
-//! path for one node to ask another for any of these, so this goes over the
-//! same channel `cl-update`'s internal self-update calls use: the node's
-//! normal https api, authenticated by an HMAC signature over the shared
-//! cluster key rather than session or api key auth, since this is node to
-//! node and no browser is involved.
+//! Container inspection, logs and stats exist only on the node running the container, and
+//! cl-raft has no rpc for one node to ask another, so this uses the node's https api, authenticated
+//! by an HMAC signature over the cluster key rather than session or api key auth.
 
 use std::time::Duration;
 
@@ -20,28 +16,19 @@ use serde::Serialize;
 use crate::error::ApiError;
 use crate::server::AppState;
 
-/// Generous but bounded: a peer that cannot answer a plain read in this long
-/// is treated the same as one that is down, so a caller waiting on the
-/// cluster-wide instance list is never stuck on one unreachable node.
+/// A peer that cannot answer a plain read in this long is treated as down, so the cluster-wide
+/// instance list is never stuck on one node.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Forwarded write commands can run a docker restart or an image pull on the
-/// target node before answering, either of which can legitimately take a
-/// while (a large image pull especially), so this is far more generous than
-/// `FETCH_TIMEOUT`.
+/// Far more generous than `FETCH_TIMEOUT`: a forwarded write can run a docker restart or a large image pull.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// A peer answering 503 means "not there right now, and may be later" (see
-/// `ApiError::Unavailable`) — the exact shape of a node whose docker client
-/// is mid-reconnect, or that is still fencing right after a raft rejoin.
-/// Both of those clear up within a few seconds in the common case, so it is
-/// worth a few retries before giving up and surfacing it to the caller.
+/// A 503 means "not there right now" (`ApiError::Unavailable`), e.g. docker mid-reconnect or fencing
+/// after a raft rejoin; usually clears within seconds.
 const RETRY_ATTEMPTS: u32 = 5;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 
-/// Retry `attempt` (0-based) after a short exponential backoff, but only when
-/// the peer's answer was specifically 503 — any other non-success status is a
-/// real failure (auth, not found, ...) that retrying will not fix.
+/// Retries only on 503; any other non-success status is a real failure.
 async fn retry_on_unavailable(attempt: u32, status: reqwest::StatusCode) -> bool {
     if attempt + 1 >= RETRY_ATTEMPTS || status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
         return false;
@@ -50,19 +37,11 @@ async fn retry_on_unavailable(attempt: u32, status: reqwest::StatusCode) -> bool
     true
 }
 
-/// Same backoff, for when the request never got a response at all (dropped
-/// connection, handshake hiccup) rather than an explicit 503. On a mesh like
-/// tailscale these are just as transient as a 503 and just as worth a
-/// couple of quiet retries instead of failing a whole scan over one dropped
-/// packet — see the "could not scan a node" symptom this replaced.
+/// For requests that got no response at all (dropped connection), as transient as a 503 on a mesh
+/// like tailscale.
 ///
-/// Deliberately excludes timeouts (`reqwest::Error::is_timeout`): those
-/// already burned a full `FETCH_TIMEOUT`, so retrying stacks that wait up to
-/// `RETRY_ATTEMPTS` times instead of amortizing it away, and `scan_node`'s
-/// callers fan out to every node in parallel — one slow node then bounds the
-/// whole request and can trip an upstream proxy's own timeout (a 504)
-/// instead of the fast, contributes-nothing-and-moves-on failure the caller
-/// expects.
+/// Excludes timeouts: those already burned a full `FETCH_TIMEOUT`, and `scan_node`'s callers fan out
+/// to every node in parallel, so retrying would let one slow node trip an upstream proxy 504.
 async fn retry_on_send_error(attempt: u32, err: &reqwest::Error) -> bool {
     if err.is_timeout() || attempt + 1 >= RETRY_ATTEMPTS {
         return false;
@@ -77,9 +56,7 @@ async fn peer_base_url(state: &AppState, node: &str) -> Result<String, ApiError>
         .ok_or_else(|| ApiError::Unavailable(format!("no address on record for node {node}")))
 }
 
-/// Sign `request` for `path`. Made per attempt rather than once up front: the
-/// peer accepts each signature a single time, so a retry reusing one would be
-/// refused as a replay.
+/// Signed per attempt: the peer accepts each signature once, so a retry would be refused as a replay.
 async fn signed(
     state: &AppState,
     request: reqwest::RequestBuilder,
@@ -96,7 +73,6 @@ async fn signed(
     ))
 }
 
-/// `GET path` (query string included, if any) on `node`'s api, decoded as `T`.
 pub async fn fetch_json<T: DeserializeOwned>(
     state: &AppState,
     node: &str,
@@ -105,9 +81,7 @@ pub async fn fetch_json<T: DeserializeOwned>(
     fetch_json_within(state, node, path, FETCH_TIMEOUT).await
 }
 
-/// `fetch_json` with a caller-chosen timeout, for reads that do real work on
-/// the peer (the image-update scan makes a registry round trip per image and
-/// takes several seconds on a node running a couple of dozen containers).
+/// For reads that do real work on the peer (the image-update scan takes several seconds).
 pub async fn fetch_json_within<T: DeserializeOwned>(
     state: &AppState,
     node: &str,
@@ -151,16 +125,11 @@ pub async fn fetch_json_within<T: DeserializeOwned>(
     unreachable!("retry_on_unavailable eventually returns false")
 }
 
-/// `POST path` (no body) on `node`'s api, for write commands — restart,
-/// update — whose target instance lives on another node. Any manager can
-/// issue these; the receiving node trusts the caller's earlier
-/// `RequireAdmin` check the same way it trusts it for the read-only
-/// forwards above.
+/// For write commands (restart, update) on another node; the receiver trusts the caller's earlier `RequireAdmin` check.
 pub async fn post_empty(state: &AppState, node: &str, path: &str) -> Result<(), ApiError> {
     post_response(state, node, path).await.map(|_| ())
 }
 
-/// `post_empty`, decoding the answer as `T`.
 pub async fn post_json<T: DeserializeOwned>(
     state: &AppState,
     node: &str,
@@ -204,13 +173,10 @@ async fn post_response(
     unreachable!("retry_on_unavailable eventually returns false")
 }
 
-/// Longest a forwarded plain-text read (buffered logs) may take. Between a
-/// quick status read and a docker write: the peer streams its answer, but a
-/// large `tail` off a slow disk is not instant.
+/// Between a status read and a docker write: a large `tail` off a slow disk is not instant.
 const TEXT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `GET path` on `node`'s api, returned as the raw body text. For the SSE log
-/// route with `follow=false`, which ends on its own and so can be read whole.
+/// Raw body text, for the SSE log route with `follow=false`, which ends on its own.
 pub async fn fetch_text(state: &AppState, node: &str, path: &str) -> Result<String, ApiError> {
     let base = peer_base_url(state, node).await?;
     for attempt in 0.. {
@@ -241,11 +207,8 @@ pub async fn fetch_text(state: &AppState, node: &str, path: &str) -> Result<Stri
     unreachable!("retry_on_unavailable eventually returns false")
 }
 
-/// `POST path` on `node`'s api with `body` as JSON, decoding the answer as
-/// `T`. The signature commits to a hash of the body, so the receiving route
-/// must take `InternalBodyAuth` and check the bytes it read against it. Uses
-/// the long write timeout: a forwarded command may legitimately run for
-/// minutes (`exec-run` caps itself at 300s).
+/// The signature commits to a hash of the body, so the receiving route must take `InternalBodyAuth`
+/// and check the bytes it read. Uses the long write timeout (`exec-run` caps itself at 300s).
 pub async fn post_json_body<B: Serialize, T: DeserializeOwned>(
     state: &AppState,
     node: &str,
@@ -282,10 +245,7 @@ pub async fn post_json_body<B: Serialize, T: DeserializeOwned>(
     unreachable!("retry_on_unavailable eventually returns false")
 }
 
-/// `GET path` on `node`'s api, proxied straight through as the response body.
-/// Used for the SSE log and stats streams: neither side needs to parse the
-/// events to relay them, and a fixed timeout would cut a `follow=true` stream
-/// short, so none is set here.
+/// Proxied straight through for the SSE log and stats streams; no timeout, which would cut a `follow=true` stream.
 pub async fn proxy_stream(state: &AppState, node: &str, path: &str) -> Result<Response, ApiError> {
     let base = peer_base_url(state, node).await?;
     let resp = signed(

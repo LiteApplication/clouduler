@@ -1,20 +1,14 @@
-//! WireGuard-kind networks: the reserved-name conventions shared between the
-//! config import route and the ingress-rule CRUD route, plus the ingress
-//! store itself. See `crate::routes::wireguard` for the handlers and
-//! `cl_net::wireguard` for interface lifecycle and iptables enforcement.
+//! WireGuard-kind networks: reserved-name conventions shared by the config import route and the ingress-rule CRUD route, plus the
+//! ingress store. See `crate::routes::wireguard` and `cl_net::wireguard`.
 
 use serde::{Deserialize, Serialize};
 
 use cl_config::Protocol;
 use cl_raft::ClusterState;
 
-/// Reserved config name holding the wireguard ingress rule list, same
-/// pattern as `crate::static_routes::STATIC_ROUTES_CONFIG`.
 pub const WIREGUARD_INGRESS_CONFIG: &str = "_clouduler_wireguard_ingress";
 
-/// Reserved secret name prefix for an imported wireguard config: one secret
-/// per (network, node), since each node in a wireguard network runs its own
-/// tunnel with its own key material.
+/// One secret per (network, node): each node in a wireguard network runs its own tunnel with its own key material.
 const WIREGUARD_SECRET_PREFIX: &str = "_clouduler_wireguard_config_";
 
 pub fn wireguard_secret_name(network: &str, node: &str) -> String {
@@ -28,12 +22,10 @@ pub fn is_reserved_wireguard_secret(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireguardIngressRule {
     pub id: String,
-    /// Must name a `Wireguard`-kind network.
     pub network: String,
     pub port: u16,
     pub protocol: Protocol,
-    /// Port on this node's own docker port bind the rule forwards to. Equal
-    /// to `port` when no renumbering is needed.
+    /// Port on this node's own docker port bind the rule forwards to.
     pub target_port: u16,
 }
 

@@ -1,8 +1,6 @@
-//! `/api/wireguard/*`: import a node's WireGuard config for a wireguard-kind
-//! network, and `/api/wireguard-ingress`: CRUD over the ports let in through
-//! it. See `crate::wireguard` for the reserved-name conventions and
-//! `cl_net::wireguard` for interface lifecycle and iptables enforcement,
-//! which the daemon applies from what these routes write.
+//! `/api/wireguard/*`: import a node's WireGuard config for a wireguard-kind network, and `/api/wireguard-ingress`: CRUD over
+//! the ports let in through it. See `crate::wireguard` for the reserved-name conventions and `cl_net::wireguard` for the
+//! interface lifecycle and iptables enforcement the daemon applies from what these routes write.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -45,25 +43,16 @@ async fn wireguard_network(state: &AppState, network: &str) -> Result<(), ApiErr
 
 #[derive(Deserialize)]
 struct PutWireguardConfigRequest {
-    /// Base64 of the wg-quick `.conf` text, same shape as
-    /// `PutSecretRequest::File` on the generic secrets route.
     content: String,
 }
 
 #[derive(Serialize)]
 struct PutWireguardConfigResponse {
-    /// The interface name the daemon will bring this tunnel up as. The
-    /// caller writes this into `node.network.<network>` via `PUT
-    /// /api/config` to complete the import, which is computed here rather than
-    /// duplicated client side, so the two can never drift apart.
+    /// The tunnel interface name; computed here so the caller writing `node.network.<network>` via `PUT /api/config` cannot drift.
     interface: String,
 }
 
-/// Seals and stores a node's WireGuard config, same as the generic
-/// `PUT /api/secrets/{name}` route but under a name reserved for this
-/// feature and with the config validated as parseable first, so a malformed
-/// paste fails at import time instead of silently never bringing up a
-/// tunnel.
+/// As `PUT /api/secrets/{name}` but under a reserved name, with the config validated first so a malformed paste fails at import.
 async fn put_config(
     _admin: RequireAdmin,
     State(state): State<AppState>,

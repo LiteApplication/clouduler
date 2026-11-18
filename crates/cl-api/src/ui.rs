@@ -1,9 +1,6 @@
-//! Serves the React build from `ui/dist`, with an SPA fallback so
-//! client-side routing works on a hard refresh of any `/x/y` path.
+//! Serves the React build from `ui/dist` with an SPA fallback so client-side routes survive a hard refresh.
 //!
-//! `CL_API_UI_DIR` is set by `build.rs`: it points at the real `ui/dist` when
-//! that build exists, or a placeholder page under `OUT_DIR` otherwise, so
-//! this crate always compiles.
+//! `CL_API_UI_DIR` is set by `build.rs`: the real `ui/dist` when built, else a placeholder under `OUT_DIR`, so this crate always compiles.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -15,9 +12,7 @@ use rust_embed::RustEmbed;
 #[folder = "$CL_API_UI_DIR"]
 struct Assets;
 
-/// Fallback handler: serves the requested path out of the embedded assets,
-/// falling back to `index.html` for anything not found so client-side routes
-/// like `/stacks/gitlab` resolve to the app shell.
+/// Falls back to `index.html` for anything not found so client-side routes resolve to the app shell.
 pub async fn serve(request: Request) -> Response {
     let path = request.uri().path().trim_start_matches('/');
     serve_path(path).unwrap_or_else(|| serve_path("index.html").unwrap_or_else(not_found))
@@ -25,8 +20,6 @@ pub async fn serve(request: Request) -> Response {
 
 fn serve_path(path: &str) -> Option<Response> {
     let file = Assets::get(path)?;
-    // rust-embed's default `mime-guess` feature fills this in from the
-    // extension, so no separate mime lookup is needed here.
     let mime = file.metadata.mimetype().to_string();
     Some(
         (
@@ -48,7 +41,6 @@ mod tests {
 
     #[test]
     fn index_is_always_embedded() {
-        // Either the real ui build or build.rs's placeholder must provide this.
         assert!(Assets::get("index.html").is_some());
     }
 }

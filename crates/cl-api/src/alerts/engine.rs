@@ -1,10 +1,6 @@
-//! The leader's alert engine.
-//!
-//! Runs on every node, acts only while the node leads. Each tick it reads the
-//! settings and the feed out of raft, folds in what it observes (standing
-//! conditions, signals pushed by nodes, state changes), persists the records
-//! that changed and only then sends. See `lifecycle` for why a change of
-//! leader does not repeat messages.
+//! The leader's alert engine. Runs on every node, acts only while leading. Each tick it reads settings and the feed
+//! from raft, folds in observations (standing conditions, node signals, state changes), persists changed records and
+//! only then sends. See `lifecycle` for why a leader change does not repeat messages.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -30,7 +26,6 @@ const TICK: Duration = Duration::from_secs(5);
 const CONDITIONS_EVERY: Duration = Duration::from_secs(15);
 const CONDITIONS_TIMEOUT: Duration = Duration::from_secs(20);
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
-/// Records kept in the feed no matter how recent.
 const FEED_SOFT_CAP: usize = 2000;
 const OOM_WINDOW_SECS: i64 = 3600;
 
@@ -182,7 +177,6 @@ impl Engine {
         let mut ledger = Ledger::new(&st.alerts);
         let mut new_id = || uuid::Uuid::new_v4().to_string();
 
-        // Becoming leader: take the baseline silently, announce the change.
         let mut pre_events = Vec::new();
         if !self.leading {
             self.leading = true;
@@ -191,7 +185,6 @@ impl Engine {
             pre_events.push(events::leader_changed(&node_name, recent));
         }
 
-        // Signals from nodes.
         let mut signals: Vec<&AlertSignal> = st.alert_inbox.values().collect();
         signals.sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         let taken: Vec<String> = signals.iter().map(|s| s.id.clone()).collect();
@@ -199,7 +192,6 @@ impl Engine {
             apply_signal(&mut ledger, &st, &settings, sig, now, &mut new_id);
         }
 
-        // Standing conditions.
         let due = self
             .last_conditions
             .is_none_or(|t| t.elapsed() >= CONDITIONS_EVERY);
@@ -218,7 +210,6 @@ impl Engine {
             }
         }
 
-        // One-shot events from state changes.
         if let Some(prev) = &self.snapshot {
             pre_events.extend(events::diff(prev, &st));
         }
@@ -239,15 +230,13 @@ impl Engine {
             ledger.once(new_id(), &obs, 1, now);
         }
 
-        // Owed messages, per the settings of this moment.
         let mut jobs = ledger.collect_sends(&settings);
         let digests = match digest_cutoff(&settings, now) {
             Some(cutoff) => ledger.collect_digest(&settings, cutoff),
             None => Vec::new(),
         };
 
-        // Persist first, send after: a record written as announced is never
-        // announced twice, whoever leads next.
+        // Persist first, send after: a record written as announced is never announced twice, whoever leads next.
         let mut dirty: Vec<String> = ledger.dirty.iter().cloned().collect();
         dirty.sort();
         let mut persisted: HashSet<String> = HashSet::new();
@@ -324,7 +313,6 @@ impl Engine {
             if let Some(min) = derived.min_age.get(&obs.dedupe) {
                 let first = *self.first_seen.entry(obs.dedupe.clone()).or_insert(now);
                 if now - first < *min {
-                    // Not worth an alert yet, but not gone either.
                     present.insert(obs.dedupe.clone());
                     continue;
                 }
@@ -428,7 +416,6 @@ impl Engine {
         }
     }
 
-    /// Health of destinations that no longer exist goes away with them.
     async fn prune_health(&self, st: &ClusterState, settings: &AlertSettings) {
         for name in st.alert_destinations.keys() {
             if !settings.destinations.iter().any(|d| &d.name == name) {
@@ -471,7 +458,6 @@ fn missing(_id: &str) -> AlertRecord {
     }
 }
 
-/// Links a signal's record offers, by what it is about.
 fn links_for(sig: &AlertSignal) -> Vec<cl_raft::alerts::AlertLink> {
     use cl_raft::alerts::AlertLink as L;
     let mut out = Vec::new();
@@ -496,7 +482,6 @@ fn links_for(sig: &AlertSignal) -> Vec<cl_raft::alerts::AlertLink> {
     out
 }
 
-/// Fold one signal into the ledger.
 pub fn apply_signal(
     ledger: &mut Ledger,
     st: &ClusterState,
@@ -571,13 +556,11 @@ pub fn apply_signal(
                 return;
             };
             obs.severity = s;
-            // Deterministic id: replaying the same signal overwrites.
             ledger.once(format!("sig-{}", sig.id), &obs, sig.count, sig.at);
         }
     }
 }
 
-/// The wire form of a record for one transition.
 pub fn message(
     r: &AlertRecord,
     kind: Kind,
@@ -623,8 +606,6 @@ pub fn message(
     }
 }
 
-/// The most recent time `digest_at` struck in the settings' zone, as unix
-/// seconds, or `None` if it cannot be worked out.
 pub fn digest_cutoff(settings: &AlertSettings, now: i64) -> Option<i64> {
     use jiff::tz::TimeZone;
     let tz = match &settings.timezone {
@@ -723,8 +704,6 @@ mod tests {
 
     #[test]
     fn settings_changes_in_state_change_routing_without_a_restart() {
-        // The engine reads `settings::load(state)` on every pass; model two
-        // passes over one record with an edit in between.
         let mut st = ClusterState::default();
         let mut ledger = Ledger::default();
         let mut n = 0;
@@ -735,7 +714,6 @@ mod tests {
         let sig = signal("node.disk_low", "d", SignalAction::Open, 0);
         let s0 = settings::load(&st);
         apply_signal(&mut ledger, &st, &s0, &sig, 0, &mut id);
-        // No destination yet: swallowed.
         assert!(ledger.collect_sends(&settings::load(&st)).is_empty());
 
         let mut edited = settings_with_dest(&[Severity::Warning, Severity::Critical]);
@@ -754,7 +732,6 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].destination, "main");
 
-        // Muting the event in the settings drops the next occurrence.
         edited.events.insert(
             "node.disk_low".into(),
             cl_alert::EventOverride {
@@ -830,7 +807,6 @@ mod tests {
         rec.id = "rec1".into();
         st.alerts.insert("rec1".into(), rec);
 
-        // Verify the outcome drained into delivery retains message_id
         let o = rx.recv().await.unwrap();
         let r = st.alerts.get_mut("rec1").unwrap();
         r.deliveries.push(AlertDelivery {

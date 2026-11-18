@@ -1,5 +1,3 @@
-//! Loading, validating and storing [`AlertSettings`].
-
 use std::collections::BTreeSet;
 
 use cl_alert::catalog;
@@ -7,8 +5,6 @@ use cl_alert::settings::SETTINGS_CONFIG;
 use cl_alert::{AlertSettings, DestinationKind, Route};
 use cl_raft::ClusterState;
 
-/// The stored settings, defaults when none were ever saved or the stored copy
-/// cannot be read.
 pub fn load(state: &ClusterState) -> AlertSettings {
     let Some(entry) = state.configs.get(SETTINGS_CONFIG) else {
         return AlertSettings::default();
@@ -19,13 +15,11 @@ pub fn load(state: &ClusterState) -> AlertSettings {
     serde_json::from_slice(&raw).unwrap_or_default()
 }
 
-/// Base64 content for `Request::PutConfig*`.
 pub fn encode(settings: &AlertSettings) -> String {
     crate::encode_json_config(settings)
 }
 
-/// Problems with the `x-clouduler.alerts` keys of a stack that only the
-/// catalog can tell: a `mute` or `severity` key that names no event.
+/// What only the catalog can tell: a `mute` or `severity` key that names no event.
 pub fn stack_key_errors(stack: &cl_config::StackFile) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -61,7 +55,6 @@ fn name_ok(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// `https://discord.com/api/webhooks/<id>/<token>` and its aliases.
 pub fn discord_url_ok(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
@@ -104,7 +97,6 @@ pub fn http_url_ok(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `@here`, `@everyone`, `<@id>`, `<@!id>` or `<@&id>`.
 pub fn mention_ok(m: &str) -> bool {
     if m == "@here" || m == "@everyone" {
         return true;
@@ -119,7 +111,6 @@ pub fn mention_ok(m: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// A bare address, or `Name <address>` when `allow_name`.
 pub fn email_ok(value: &str, allow_name: bool) -> bool {
     let value = value.trim();
     let addr = if allow_name {
@@ -152,8 +143,7 @@ fn hhmm_ok(s: &str) -> bool {
         && m.parse::<u8>().is_ok_and(|m| m < 60)
 }
 
-/// Check `settings` as it will be after an update. `has_url(name)` says
-/// whether a destination will have a URL secret.
+/// `has_url(name)` says whether a destination will have a URL secret.
 pub fn validate(
     settings: &AlertSettings,
     has_url: &dyn Fn(&str) -> bool,

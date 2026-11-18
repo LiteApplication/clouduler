@@ -1,22 +1,15 @@
-//! Per-session focus: which stack an AI client is currently working on.
-//!
-//! Focus limits what the MCP's report and write tools touch, so it has to
-//! outlive a single call, but it is not worth persisting: a client that loses
-//! its session simply focuses again. It lives in memory on the node serving
-//! `/mcp`, which is always the leader (followers relay to it), so a session
-//! never straddles nodes.
+//! Per-session focus: which stack an AI client is working on. It limits what the MCP report and write tools touch, so it
+//! outlives a call, but is not persisted: a client that loses its session focuses again. Held in memory on the node
+//! serving `/mcp`, always the leader (followers relay), so a session never straddles nodes.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// A session nobody has touched for this long is forgotten.
 const IDLE_EXPIRY: Duration = Duration::from_secs(24 * 3600);
 
 struct Entry {
-    /// Who set the focus. An `Mcp-Session-Id` is a bearer-ish handle, so a
-    /// focus is only honoured for the identity that created it: a different
-    /// caller presenting the same id starts with no focus.
+    /// An `Mcp-Session-Id` is a bearer-ish handle, so focus is honoured only for the identity that created it.
     owner: String,
     stack: Option<String>,
     last_used: Instant,

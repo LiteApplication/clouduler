@@ -1,6 +1,5 @@
-//! Freezing and unfreezing replicated volumes, shared by the REST routes and
-//! the MCP tools. Freezing pauses replication so one node's copy can be
-//! edited in place; unfreezing makes that copy the primary and pushes it.
+//! Freezing and unfreezing replicated volumes, shared by the REST routes and the MCP tools. Freezing pauses replication so
+//! one node's copy can be edited in place; unfreezing makes it the primary and pushes it.
 
 use std::time::Duration;
 
@@ -18,7 +17,6 @@ pub fn parse_volume(raw: &str) -> Result<VolumeId, String> {
         .map_err(|_| format!("{raw:?} is not a volume id; ids look like drive/volume"))
 }
 
-/// A wait given in seconds, clamped to `MAX_WAIT_SECS`.
 pub fn wait_of(seconds: Option<u64>) -> Duration {
     Duration::from_secs(seconds.unwrap_or(DEFAULT_WAIT_SECS).min(MAX_WAIT_SECS))
 }
@@ -51,10 +49,8 @@ async fn set_desired(
     Ok(())
 }
 
-/// Freeze `volume` for editing on `node` (default: its primary). Containers
-/// using it on other nodes make this fail unless `force` stops them.
-/// With `wait` of `None` the stop is requested but not waited for, so the
-/// caller returns at once and watches `container_status` itself.
+/// Containers using the volume on other nodes make this fail unless `force` stops them. With `wait` of `None` the stop is
+/// requested but not waited for; the caller watches `container_status`.
 pub async fn freeze(
     state: &AppState,
     volume: &VolumeId,
@@ -93,7 +89,6 @@ pub async fn freeze(
         ));
     }
 
-    // Freeze first so no sync starts while the other containers wind down.
     submit(
         state,
         Request::FreezeVolume {
@@ -160,9 +155,7 @@ async fn wait_stopped(
     }
 }
 
-/// First half of an unfreeze: check the volume is frozen and lift the freeze.
-/// The source node then pushes at its next sync tick. Returns what the freeze
-/// had stopped, for `finish_unfreeze`.
+/// Checks the volume is frozen and lifts the freeze; the source pushes at its next sync tick. Returns what the freeze stopped.
 pub async fn begin_unfreeze(state: &AppState, volume: &VolumeId) -> Result<FrozenVolume, String> {
     let cluster_state = state.cluster.state().await;
     let frozen = cluster_state
@@ -178,9 +171,7 @@ pub async fn begin_unfreeze(state: &AppState, volume: &VolumeId) -> Result<Froze
     Ok(frozen)
 }
 
-/// Second half: wait for every node to hold the edited copy, then start the
-/// containers the freeze stopped. They only start once every node has it, or
-/// they would run on stale data that the push then overwrites under them.
+/// Containers start only once every node holds the edited copy, or they would run on stale data that the push overwrites.
 pub async fn finish_unfreeze(
     state: &AppState,
     volume: &VolumeId,
@@ -217,7 +208,6 @@ pub async fn finish_unfreeze(
     Ok(format!("{volume} is unfrozen and on every node"))
 }
 
-/// Unfreeze and wait for the push to land.
 pub async fn unfreeze(
     state: &AppState,
     volume: &VolumeId,

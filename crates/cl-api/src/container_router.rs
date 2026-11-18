@@ -1,6 +1,5 @@
-//! The state of a container network's router container, derived from the
-//! replicated state. One definition for the daemon's warnings, the problem
-//! list and the network detail endpoint.
+//! The state of a container network's router container, derived from replicated state; shared by the daemon's warnings,
+//! the problem list and the network detail endpoint.
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -15,10 +14,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterState {
-    /// No instance of the router service is assigned (stack or service not
-    /// deployed, or not placed yet).
     Missing,
-    /// Assigned, but not running on its node.
     Down,
     Up,
 }
@@ -34,7 +30,6 @@ pub struct RouterStatus {
     pub state: RouterState,
 }
 
-/// The router of `network`, or `None` when it is not a container network.
 pub fn router_status(
     state: &ClusterState,
     cfg: &ClusterConfig,
@@ -69,7 +64,6 @@ pub fn router_status(
     })
 }
 
-/// Decode the allocation book out of the replicated state.
 pub fn allocations_of(state: &ClusterState) -> Allocations {
     Allocations::decode(state.overlay.as_deref()).unwrap_or_else(|| {
         Allocations::new(
@@ -81,7 +75,6 @@ pub fn allocations_of(state: &ClusterState) -> Allocations {
     })
 }
 
-/// The status of every container network.
 pub fn all_statuses(state: &ClusterState, cfg: &ClusterConfig) -> BTreeMap<String, RouterStatus> {
     let allocations = allocations_of(state);
     cfg.container_networks()
@@ -91,7 +84,6 @@ pub fn all_statuses(state: &ClusterState, cfg: &ClusterConfig) -> BTreeMap<Strin
         .collect()
 }
 
-/// The config carried in the replicated state, if any.
 pub fn config_of(state: &ClusterState) -> Option<ClusterConfig> {
     ClusterConfig::parse(&state.cluster_config.as_ref()?.yaml).ok()
 }
@@ -143,7 +135,6 @@ mod tests {
         state
             .container_status
             .insert(id.clone(), status(true, "n2"));
-        // Reported by a node that is not the assigned one: not running there.
         assert_eq!(
             router_status(&state, &cfg, &alloc, "tailnet")
                 .unwrap()

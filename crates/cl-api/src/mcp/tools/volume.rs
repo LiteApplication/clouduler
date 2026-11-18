@@ -1,5 +1,4 @@
-//! Volume freeze tools: pause a volume's replication so it can be edited in
-//! place, then resume and push it.
+//! Volume freeze tools: pause replication so a volume can be edited in place, then resume and push it.
 
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;

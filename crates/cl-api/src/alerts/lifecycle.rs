@@ -1,11 +1,8 @@
 //! The alert lifecycle as pure functions over a working copy of the feed.
 //!
-//! The engine loads the records from raft, feeds the [`Ledger`] what it
-//! observed (conditions, signals), asks it which messages are owed, writes
-//! the changed records back and only then sends. Every "was this already
-//! announced" decision rests on fields stored in the record
-//! (`sent_severity`, `resolved_sent`, `digested`), never on engine memory, so
-//! a new leader picks up exactly where the old one stopped.
+//! The engine loads records from raft, feeds the [`Ledger`] what it observed, asks which messages are owed, writes
+//! changed records back and only then sends. Every "already announced" decision rests on stored record fields
+//! (`sent_severity`, `resolved_sent`, `digested`), never engine memory, so a new leader picks up where the old stopped.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -17,11 +14,9 @@ use cl_raft::alerts::{AlertLink, AlertRecord, AlertState};
 use super::route;
 use super::sev;
 
-/// Passes a condition must be missing before its alert resolves, so one
-/// missed reading does not flap an alert.
+/// So one missed reading does not flap an alert.
 pub const ABSENT_PASSES: u32 = 2;
 
-/// What the world looks like for one problem right now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observed {
     pub event: String,
@@ -37,7 +32,6 @@ pub struct Observed {
     pub excerpt: Vec<String>,
 }
 
-/// Why a message goes out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Opened,
@@ -79,7 +73,6 @@ pub struct DigestJob {
     pub records: Vec<String>,
 }
 
-/// Working copy of the feed with change tracking.
 #[derive(Debug, Default)]
 pub struct Ledger {
     pub records: BTreeMap<String, AlertRecord>,
@@ -109,7 +102,6 @@ impl Ledger {
         self.dirty.insert(id.to_string());
     }
 
-    /// A problem that holds right now: open it, refresh it, escalate it.
     pub fn observe(
         &mut self,
         obs: &Observed,
@@ -192,9 +184,8 @@ impl Ledger {
         }
     }
 
-    /// The problem is gone. A warning nobody was told about is dropped
-    /// without a trace; anything else becomes `Resolved`. `silent` marks it
-    /// as not needing a resolved message (muted since, or never announced).
+    /// A warning nobody was told about is dropped without a trace; anything else becomes `Resolved`.
+    /// `silent` means no resolved message is needed (muted since, or never announced).
     pub fn resolve(&mut self, dedupe: &str, now: i64, silent: bool) {
         let Some(id) = self.open.remove(dedupe) else {
             return;
@@ -217,10 +208,8 @@ impl Ledger {
         self.touch(&id);
     }
 
-    /// Resolve open records of `derived` events that are no longer observed.
-    /// `present` are the dedupes observed this pass, `silent` the ones that
-    /// stopped because they are muted now, `held_instances` instances whose
-    /// state could not be read (their alerts are kept as they are).
+    /// `present`: dedupes observed this pass; `silent`: ones that stopped because they are now muted;
+    /// `held_instances`: instances whose state could not be read (their alerts are kept).
     pub fn close_absent(
         &mut self,
         derived: &dyn Fn(&str) -> bool,
@@ -260,7 +249,6 @@ impl Ledger {
         absent.retain(|d, _| self.open.contains_key(d));
     }
 
-    /// Record a one-shot event under a fixed `id` (so a replay overwrites).
     pub fn once(&mut self, id: String, obs: &Observed, count: u32, at: i64) {
         let Some(def) = catalog::find(&obs.event) else {
             return;
@@ -294,8 +282,7 @@ impl Ledger {
         self.touch(&id);
     }
 
-    /// Messages owed now, per the settings of the moment. Marks the records
-    /// as announced (the caller must persist them before sending).
+    /// The caller must persist the records (marked announced) before sending.
     pub fn collect_sends(&mut self, settings: &AlertSettings) -> Vec<SendJob> {
         let mut jobs = Vec::new();
         let ids: Vec<String> = self.records.keys().cloned().collect();
@@ -313,7 +300,6 @@ impl Ledger {
                     };
                     if owed {
                         let t = route::targets_for_record(settings, r);
-                        // Info waits for the digest unless routed explicitly.
                         let wait_for_digest = current == Severity::Info && t.immediate.is_empty();
                         if !wait_for_digest {
                             let mut n = r.clone();
@@ -365,8 +351,6 @@ impl Ledger {
         jobs
     }
 
-    /// Info records opened at or before `cutoff` that no digest has covered.
-    /// Marks them covered. One job per destination that wants them.
     pub fn collect_digest(&mut self, settings: &AlertSettings, cutoff: i64) -> Vec<DigestJob> {
         let mut per_dest: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let ids: Vec<String> = self
@@ -467,7 +451,6 @@ mod tests {
         let jobs = l.collect_sends(&settings());
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].kind, Kind::Opened);
-        // Announced: a second collect (or a new leader reading the record) sends nothing.
         assert!(l.collect_sends(&settings()).is_empty());
         let mut next = Ledger::new(&l.records);
         assert!(next.collect_sends(&settings()).is_empty());
@@ -510,7 +493,6 @@ mod tests {
         assert_eq!(l.records["r1"].escalated_from, Some(AlertSeverity::Warning));
         let jobs = l.collect_sends(&settings());
         assert_eq!(jobs[0].kind, Kind::Escalated(Severity::Warning));
-        // Pretend the open delivery succeeded.
         l.records
             .get_mut("r1")
             .unwrap()

@@ -1,12 +1,9 @@
-//! The three ways to produce a secret's plaintext, matching the shapes
-//! `PUT /api/secrets/:name` accepts. Sealing happens one layer up, in
-//! `routes::objects`, so this module never touches the cluster key.
+//! The three ways to produce a secret's plaintext, matching what `PUT /api/secrets/:name` accepts.
+//! Sealing happens in `routes::objects`, so this module never touches the cluster key.
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Longest value the generator will produce. A generated secret is meant to
-/// be a password or token, not a blob; anything bigger should come in as a
-/// file upload instead.
+/// A generated secret is a password or token; anything bigger should be a file upload.
 pub const MAX_GENERATED_LEN: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -25,13 +22,11 @@ impl Charset {
                 b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
             }
             Charset::Hex => b"0123456789abcdef",
-            // Standard base64 alphabet. The result is not padded and is not
-            // meant to be decoded back to bytes, just used as a dense charset.
+            // Not padded and not meant to be decoded, just a dense charset.
             Charset::Base64 => {
                 b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
             }
-            // Printable ASCII minus space and backslash/quote characters that
-            // tend to cause trouble in shells and env files.
+            // Printable ASCII minus space and the backslash/quote characters that trouble shells and env files.
             Charset::Printable => {
                 br##"!#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_abcdefghijklmnopqrstuvwxyz{|}~"##
             }
@@ -55,7 +50,6 @@ pub enum GenerateError {
     ClassesNotSatisfied,
 }
 
-/// Generate a random secret value from a cryptographically secure RNG.
 pub fn generate(length: usize, charset: Charset) -> Result<Vec<u8>, GenerateError> {
     if length == 0 {
         return Err(GenerateError::TooShort);
@@ -67,12 +61,9 @@ pub fn generate(length: usize, charset: Charset) -> Result<Vec<u8>, GenerateErro
     Ok(sample(charset.alphabet(), length))
 }
 
-/// Draw `length` characters uniformly from `alphabet`.
 fn sample(alphabet: &[u8], length: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(length);
-    // Reject-sampling one byte at a time keeps every character in the
-    // alphabet equally likely, unlike `byte % len` which biases toward the
-    // low end of the alphabet whenever len does not divide 256.
+    // Reject sampling keeps every character equally likely; `byte % len` biases toward the low end when len does not divide 256.
     let bound = (256 / alphabet.len()) * alphabet.len();
     while out.len() < length {
         let mut buf = [0u8; 32];
@@ -89,19 +80,15 @@ fn sample(alphabet: &[u8], length: usize) -> Vec<u8> {
     out
 }
 
-/// Which symbols a generated value may contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Symbols {
     None,
-    /// The same safe set as `Charset::Printable`.
     Default,
-    /// Exactly these characters.
     Custom(String),
 }
 
 impl<'de> Deserialize<'de> for Symbols {
-    /// `false` -> none, `true` -> default set, a string -> that set. One field
-    /// that reads naturally in a tool call, without a separate enum tag.
+    /// `false` -> none, `true` -> default set, a string -> that set.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -127,8 +114,6 @@ impl Serialize for Symbols {
     }
 }
 
-/// Fine-grained generator options, for callers (the MCP server) that need more
-/// control than a single `Charset`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateOptions {
     pub length: usize,
@@ -136,9 +121,7 @@ pub struct GenerateOptions {
     pub uppercase: bool,
     pub digits: bool,
     pub symbols: Symbols,
-    /// Drop `0O1lI|`, which are easy to misread when copied by hand.
     pub exclude_ambiguous: bool,
-    /// Retry until every selected class appears.
     pub require_each_class: bool,
 }
 
@@ -146,7 +129,6 @@ const AMBIGUOUS: &[u8] = b"0O1lI|";
 const DEFAULT_SYMBOLS: &[u8] = br##"!#$%&()*+,-./:;<=>?@[]^_{|}~"##;
 const MAX_CLASS_ATTEMPTS: usize = 1000;
 
-/// Generate a secret from per-class options.
 pub fn generate_with(opts: &GenerateOptions) -> Result<Vec<u8>, GenerateError> {
     if opts.length == 0 {
         return Err(GenerateError::TooShort);
@@ -177,8 +159,7 @@ pub fn generate_with(opts: &GenerateOptions) -> Result<Vec<u8>, GenerateError> {
         (opts.digits, b"0123456789"),
         (!symbols.is_empty(), &symbols),
     ];
-    // Each class filtered on its own so `require_each_class` cannot demand a
-    // class whose every member was excluded as ambiguous.
+    // Filtered per class so `require_each_class` cannot demand a class whose members were all excluded as ambiguous.
     let selected: Vec<Vec<u8>> = classes
         .iter()
         .filter(|(on, _)| *on)
@@ -206,8 +187,7 @@ pub fn generate_with(opts: &GenerateOptions) -> Result<Vec<u8>, GenerateError> {
     if !opts.require_each_class {
         return Ok(sample(&alphabet, opts.length));
     }
-    // Regenerate whole values rather than forcing characters into positions,
-    // which would skew the distribution and make the layout predictable.
+    // Regenerate whole values: forcing characters into positions would skew the distribution and make the layout predictable.
     for _ in 0..MAX_CLASS_ATTEMPTS {
         let value = sample(&alphabet, opts.length);
         if selected
@@ -220,14 +200,11 @@ pub fn generate_with(opts: &GenerateOptions) -> Result<Vec<u8>, GenerateError> {
     Err(GenerateError::ClassesNotSatisfied)
 }
 
-/// Non-secret properties of a stored value, so an AI can diagnose "wrong
-/// password" style problems (stray newline, trailing space) without ever
-/// seeing the value. Deliberately no hash, prefix or suffix: those would leak
-/// information about the value.
+/// Lets an AI diagnose "wrong password" problems (stray newline, trailing space) without seeing the value.
+/// Deliberately no hash, prefix or suffix: those would leak information.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SecretFacts {
     pub byte_len: usize,
-    /// `None` when the value is not UTF-8.
     pub char_len: Option<usize>,
     pub utf8: bool,
     pub leading_whitespace: bool,
@@ -419,7 +396,6 @@ mod tests {
 
     #[test]
     fn every_char_of_a_non_power_of_two_alphabet_appears() {
-        // 26 chars does not divide 256; with reject sampling all still show up.
         let v = generate_with(&GenerateOptions {
             length: 4096,
             ..opts()

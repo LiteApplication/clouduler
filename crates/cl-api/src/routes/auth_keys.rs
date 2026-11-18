@@ -53,7 +53,6 @@ struct CreateKeyRequest {
 #[derive(Serialize)]
 struct CreateKeyResponse {
     id: String,
-    /// The full secret, shown exactly once.
     key: String,
 }
 
@@ -114,15 +113,10 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Mint a key on first launch, when the cluster holds none yet.
+/// A task, not a startup step: on a brand new cluster the api is up before any leader, and a write with no leader fails, which
+/// meant the only way in was never created.
 ///
-/// This runs as a task rather than once at startup because of the ordering on a
-/// brand new cluster: the api comes up before any leader has been elected, and
-/// a write with no leader to forward to just fails. Doing it once meant the
-/// only way into a fresh cluster was never created at all.
-///
-/// Only the leader mints, and it rechecks the store on every attempt, so
-/// several managers starting together produce one key rather than one each.
+/// Only the leader mints, rechecking the store each attempt, so managers starting together produce one key.
 pub fn spawn_bootstrap_first_key(state: AppState) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(BOOTSTRAP_RETRY);
@@ -144,8 +138,7 @@ pub fn spawn_bootstrap_first_key(state: AppState) {
 
             match submit_store(&state, &store).await {
                 Ok(()) => {
-                    // The one time this is ever shown, so it has to be
-                    // impossible to miss in a wall of startup logs.
+                    // Shown only this once, so it must be impossible to miss in a wall of startup logs.
                     info!(
                         "\n\n=====================================================\n\
                          no api keys exist yet: generated one for initial access\n\
@@ -156,8 +149,7 @@ pub fn spawn_bootstrap_first_key(state: AppState) {
                     );
                     return;
                 }
-                // Leadership can be lost between the check and the write.
-                // Another manager will pick it up, or we will on the next tick.
+                // Leadership can be lost between the check and the write; another manager or the next tick picks it up.
                 Err(e) => tracing::debug!(error = %e, "bootstrap api key not stored yet, retrying"),
             }
         }

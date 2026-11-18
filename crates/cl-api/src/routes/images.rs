@@ -1,7 +1,5 @@
-//! Node-to-node image reads, for the cluster-wide docker socket
-//! (`cl-dockerapi`): a node asked for an image it does not hold asks its
-//! peers. HMAC authenticated like the other `/internal/` routes, never
-//! reachable with a session or api key, and read-only.
+//! Node-to-node image reads for the cluster-wide docker socket (`cl-dockerapi`): a node asked for an image it lacks asks its
+//! peers. HMAC authenticated like other `/internal/` routes, read-only.
 
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -70,8 +68,7 @@ async fn list(_auth: InternalAuth, State(state): State<AppState>) -> Result<Json
     Ok(Json(docker.list_images_json().await.map_err(docker_error)?))
 }
 
-/// The image as a `docker save` tar, streamed. Checked first so a missing
-/// image is a 404 rather than a body that dies after the headers went out.
+/// Checked first so a missing image is a 404 rather than a body that dies after the headers went out.
 async fn save(
     _auth: InternalAuth,
     State(state): State<AppState>,

@@ -1,25 +1,14 @@
 //! `GET /api/git-backup/status`: read-only view of the git backup feature.
 //!
-//! Also `POST /api/git-backup/webhook/{token}`: the reverse direction. A git
-//! host notifies this endpoint after a push; the leader fetches the tracked
-//! branch, and if the new tip parses and validates cleanly, applies it to the
-//! cluster (cluster config, stacks, and the plain configs they reference -
-//! never secrets, see `validate_parsed` below). A commit that fails
-//! validation is never applied: it is preserved on its own `rejected/...`
-//! branch and the tracked branch is force-pushed back to the current cluster
-//! state, so the remote is never left pointing at something this cluster
-//! refuses to run.
+//! Also `POST /api/git-backup/webhook/{token}`: a git host notifies it after a push; the leader
+//! fetches the tracked branch and, if the tip parses and validates, applies it (cluster config,
+//! stacks, plain configs, never secrets; see `validate_parsed`). A failing commit is preserved on
+//! its own `rejected/...` branch and the tracked branch is force-pushed back to the cluster state.
 //!
-//! The token lives in the URL path rather than a header: some git hosts (and
-//! most generic "webhook" integrations) offer no way to attach a custom
-//! header, but every one of them lets you paste an arbitrary url, so an
-//! unguessable path segment is the auth mechanism that actually works
-//! everywhere.
+//! The token is in the URL path because some git hosts cannot attach a custom header.
 //!
-//! `clouduler git-backup pull` reaches `POST /api/git-backup/pull`: an
-//! internal-auth route (the same HMAC-over-cluster-key scheme as every other
-//! node-to-node call) rather than the token-in-url one, since the cli
-//! already holds the cluster key on disk.
+//! `clouduler git-backup pull` uses `POST /api/git-backup/pull`, internal-auth (HMAC over the
+//! cluster key) since the cli holds the key on disk.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -50,13 +39,10 @@ use crate::error::ApiError;
 use crate::internal_peer;
 use crate::server::AppState;
 
-/// Reserved secret this feature's webhook is authenticated with - a shared
-/// token the admin pastes into both this cluster and the git host's webhook
-/// config. Sealed like any other secret; there is no getter for its value.
+/// Shared token pasted into both this cluster and the git host. Sealed; no getter.
 pub const WEBHOOK_SECRET: &str = "_clouduler_git_backup_webhook_secret";
 
-/// Config/secret names this feature owns and never shows through the
-/// generic config/secret listing routes, mirroring `self_update`'s.
+/// Names this feature owns and hides from the generic config/secret listings.
 pub fn is_reserved_config(name: &str) -> bool {
     name == DEPLOY_KEY_PUBLIC_CONFIG || name == LAST_EXPORT_CONFIG || name == LAST_PULL_CONFIG
 }
@@ -83,8 +69,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/git-backup/pull", post(pull_now))
         .route("/api/git-backup/reconcile", post(reconcile_now))
-        // Admin-authenticated counterparts for the web ui: the three above
-        // are cli-only (internal auth).
+        // Admin-authenticated counterparts for the web ui (the three above are cli-only).
         .route("/api/git-backup/export-now", post(export_now_admin))
         .route("/api/git-backup/pull-now", post(pull_now_admin))
         .route("/api/git-backup/reconcile-now", post(reconcile_now_admin))
@@ -94,10 +79,7 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// Run the export loop's next pass now instead of at its next 2 second tick.
-/// The loop only exports when something tracked changed, so this is a
-/// "check immediately" more than a forced push. The loop is leader-only, so
-/// a non-leader forwards to the leader.
+/// Runs the export loop's next pass now; it only exports when something tracked changed. Leader-only, so forwarded.
 async fn export_now_admin(
     admin: RequireAdmin,
     State(state): State<AppState>,
@@ -117,7 +99,6 @@ async fn export_now_admin(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Node-to-node only: what `export_now_admin` forwards to the leader.
 async fn internal_export_now(
     _auth: InternalAuth,
     State(state): State<AppState>,
@@ -131,7 +112,6 @@ async fn internal_export_now(
     StatusCode::ACCEPTED
 }
 
-/// `pull_now` for a signed-in admin rather than the cli.
 async fn pull_now_admin(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -140,7 +120,6 @@ async fn pull_now_admin(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `reconcile_now` for a signed-in admin rather than the cli.
 async fn reconcile_now_admin(
     admin: RequireAdmin,
     State(state): State<AppState>,
@@ -152,10 +131,8 @@ async fn reconcile_now_admin(
 
 #[derive(Serialize)]
 struct GitBackupStatus {
-    /// True once `backup:` is set in the cluster config.
     configured: bool,
-    /// The public half of the deploy key, once the leader has generated
-    /// one - hand this to the git host as a write-capable deploy key.
+    /// Hand to the git host as a write-capable deploy key.
     deploy_public_key: Option<String>,
     last_export: Option<LastExport>,
     last_pull: Option<LastPull>,
@@ -192,8 +169,7 @@ struct SetWebhookSecretRequest {
     token: String,
 }
 
-/// Seals and stores the token, replacing whatever was there before. There is
-/// no getter for its value, same reasoning as `self_update`'s github token.
+/// Replaces the stored token. No getter, as for `self_update`'s github token.
 async fn set_webhook_secret(
     _admin: RequireAdmin,
     State(state): State<AppState>,
@@ -251,8 +227,7 @@ async fn verify_webhook_token(state: &AppState, presented: &str) -> bool {
     }
 }
 
-/// The node currently holding raft leadership, by name - `internal_peer`
-/// addresses peers by name, but raft only knows leadership by `NodeId`.
+/// By name: `internal_peer` addresses peers by name, raft knows leadership by `NodeId`.
 pub(crate) async fn leader_node_name(state: &AppState) -> Option<String> {
     let leader_id = state.cluster.quorum().leader()?;
     let cfg = state.cluster_config.read().await;
@@ -262,10 +237,7 @@ pub(crate) async fn leader_node_name(state: &AppState) -> Option<String> {
         .map(|(name, _)| name.clone())
 }
 
-/// Public, token-authenticated endpoint a git host's webhook config points
-/// at. Any node can receive it; a non-leader forwards the trigger to
-/// whichever node currently leads, the same HMAC-authenticated channel
-/// `internal_peer` uses for every other node-to-node call.
+/// Public, token-authenticated. Any node can receive it; a non-leader forwards to the leader.
 async fn webhook(
     State(state): State<AppState>,
     UrlPath(token): UrlPath<String>,
@@ -277,9 +249,7 @@ async fn webhook(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Any node can run a pull once asked - the actual git work happens on the
-/// leader, so a non-leader forwards the trigger over the same
-/// HMAC-authenticated node-to-node channel.
+/// The git work happens on the leader, so a non-leader forwards the trigger.
 async fn trigger_pull(state: &AppState) -> Result<(), ApiError> {
     if !state.cluster.is_leader() {
         let leader = leader_node_name(state)
@@ -295,8 +265,6 @@ async fn trigger_pull(state: &AppState) -> Result<(), ApiError> {
     run_pull(state).await
 }
 
-/// Node-to-node only: what `trigger_pull` forwards to when this node is not
-/// the leader.
 async fn internal_trigger(
     _auth: InternalAuth,
     State(state): State<AppState>,
@@ -305,9 +273,7 @@ async fn internal_trigger(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `clouduler git-backup pull`: manually run the same pull the webhook would
-/// have triggered, without waiting for (or even configuring) one. Internal
-/// auth rather than the webhook token.
+/// `clouduler git-backup pull`: the pull a webhook would trigger, without one configured. Internal auth.
 async fn pull_now(
     _auth: InternalAuth,
     State(state): State<AppState>,
@@ -316,8 +282,6 @@ async fn pull_now(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Trigger a reconcile on the leader. If called on a non-leader, forwards
-/// to the leader over the internal authenticated channel.
 async fn trigger_reconcile(
     state: &AppState,
     author: Option<(String, String)>,
@@ -338,7 +302,6 @@ async fn trigger_reconcile(
     run_reconcile(state, author).await
 }
 
-/// Node-to-node only: what `trigger_reconcile` forwards to when this node is not the leader.
 async fn internal_reconcile(
     _auth: InternalAuth,
     State(state): State<AppState>,
@@ -351,9 +314,8 @@ async fn internal_reconcile(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `clouduler git-backup reconcile`: manually force the cluster to reconcile
-/// with the git repo: builds cluster.yaml, stacks, configs, and secrets from Raft
-/// data, commits and pushes to git, and updates the last known good commit.
+/// `clouduler git-backup reconcile`: rebuilds cluster.yaml, stacks, configs and secrets from
+/// raft, commits and pushes, and updates the last known good commit.
 async fn reconcile_now(
     _auth: InternalAuth,
     State(state): State<AppState>,
@@ -471,10 +433,7 @@ async fn publish_last_export(state: &AppState, export: &LastExport) -> Result<()
     Ok(())
 }
 
-/// What the blocking git2 half of a pull decided, handed back to async code
-/// to either apply (raft submissions) or just report.
 enum PullDecision {
-    /// Fetched tip is the same as the remote's tip - nothing to do.
     NoChange,
     Rejected {
         reason: String,
@@ -487,10 +446,8 @@ enum PullDecision {
     },
 }
 
-/// Public so `cl-daemon`'s `watch_git_backup` can pull through this exact
-/// path right before an export would otherwise rebuild the tracked tree
-/// straight from raft state - see that function's doc comment for the race
-/// this closes.
+/// Public so `cl-daemon`'s `watch_git_backup` can pull before an export rebuilds the tracked tree
+/// from raft (see its doc comment for the race).
 pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
     let backup_cfg = state
         .cluster_config
@@ -564,9 +521,6 @@ pub async fn run_pull(state: &AppState) -> Result<(), ApiError> {
             parsed,
         } => {
             apply_pulled_tree(state, &cluster_config, &parsed).await?;
-            // No need to advance any local ref — the export path is
-            // stateless (always fetches fresh). The next export's
-            // fetch will see the same remote tip the pull just accepted.
 
             publish_last_pull(
                 state,
@@ -606,10 +560,8 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// The blocking git2 half of a pull: fetch the remote, compare the secrets
-/// subtree against the cluster's last known good commit (or reject if secrets
-/// changed, since git cannot authoritatively supply new secret content), parse
-/// the candidate tree directly from the odb, and validate.
+/// Blocking git2 half: fetch, reject if the secrets subtree changed against the last known good
+/// commit (git cannot supply new secrets), parse the candidate from the odb, validate.
 fn pull_and_decide(
     dir: &Path,
     cfg: &cl_config::GitBackupConfig,
@@ -618,7 +570,6 @@ fn pull_and_decide(
     existing_stacks: &BTreeSet<String>,
     last_good_oid: Option<git2::Oid>,
 ) -> cl_backup::Result<PullDecision> {
-    // One on-disk repo, shared with the export loop and manual reconcile.
     let _repo_guard = cl_backup::git::lock_repo();
     let backup = cl_backup::git::GitBackup::open_or_init(dir, &cfg.repo_url, &cfg.branch)?;
 
@@ -640,9 +591,8 @@ fn pull_and_decide(
         }
     }
 
-    // Check whether the secrets/ subtree changed — if so, reject. With no
-    // known good commit the candidate's parent is the baseline, so a lost
-    // status entry cannot make every commit look like a secret rotation.
+    // With no known good commit the candidate's parent is the baseline, so a lost status entry
+    // cannot make every commit look like a secret rotation.
     if backup.secrets_changed_against_baseline(last_good_oid, candidate)? {
         let reason = "the pulled commit changes something under secrets/, which this cluster cannot decrypt back \
                        into a live secret - secret rotation must go through the api, not git"
@@ -655,8 +605,6 @@ fn pull_and_decide(
         });
     }
 
-    // Parse the candidate tree directly from the odb — no working
-    // directory checkout needed.
     let candidate_tree = candidate_commit.tree()?.id();
     let parsed = parse_tree(backup.repo(), candidate_tree)?;
 
@@ -682,11 +630,8 @@ fn pull_and_decide(
     }
 }
 
-/// Parse + validate only, no cluster state beyond `existing_secrets` (a
-/// stack's `file_secrets` requirement can only ever be satisfied by a secret
-/// this cluster already holds - git can never supply new secret content, see
-/// the git-backup design notes). A raft-submission failure after this passes
-/// is not treated as malformed; see the git-backup design notes.
+/// Parse + validate only. A stack's `file_secrets` can only be satisfied by a secret the cluster
+/// already holds. A raft-submission failure after this passes is not "malformed".
 fn validate_parsed(
     parsed: &ParsedTree,
     existing_secrets: &BTreeSet<String>,
@@ -697,11 +642,8 @@ fn validate_parsed(
     };
     let cluster_config = ClusterConfig::parse(yaml).map_err(|e| format!("cluster.yaml: {e}"))?;
 
-    // `apply_pulled_tree` removes every cluster stack the tree does not
-    // name, so a tree with no stacks at all (an accidental `git rm -r
-    // stacks/`, a bad merge, a force-push of an unrelated repo that happens
-    // to hold a cluster.yaml) would tear down the whole cluster's workloads.
-    // Deliberately emptying a cluster goes through the api, not git.
+    // `apply_pulled_tree` removes every stack the tree omits, so an empty tree (bad merge, `git rm -r
+    // stacks/`, unrelated repo) would tear down all workloads. Emptying a cluster goes through the api.
     if parsed.stacks.is_empty() && !existing_stacks.is_empty() {
         return Err(format!(
             "the pulled tree has no stacks/ at all, which would remove all {} stack(s) \
@@ -711,8 +653,7 @@ fn validate_parsed(
     }
 
     for (name, spec) in &parsed.stacks {
-        // A stack the cluster already runs under this exact name stays
-        // pullable, same grandfathering as `deploy_from_files`.
+        // A stack already running under this name stays pullable (as `deploy_from_files`).
         if !existing_stacks.contains(name) {
             validate_stack_name(name).map_err(|e| format!("stacks/{name}.yaml: {e}"))?;
         }
@@ -741,9 +682,6 @@ fn validate_parsed(
     Ok(cluster_config)
 }
 
-/// Reconciles the cluster to match a validated pulled tree: the cluster
-/// config, every stack (deployed or removed), and the plain configs they
-/// reference (deployed, orphaned to no owner, or removed).
 async fn apply_pulled_tree(
     state: &AppState,
     cluster_config: &ClusterConfig,
@@ -767,13 +705,9 @@ async fn apply_pulled_tree(
                 configs.insert(config_name.clone(), bytes.clone());
             }
         }
-        // `DeployStack` always bumps the stack's revision, unconditionally -
-        // that revision feeds straight into every one of its instances'
-        // `clouduler.revision` label (`cl_sched::spec::build`), so an
-        // unconditional call here would recreate every container of every
-        // stack in the repo on every pull, not just the one(s) whose spec
-        // actually changed. Skip a stack whose pulled spec is byte-for-byte
-        // what the cluster already has.
+        // `DeployStack` always bumps the revision, which feeds every instance's `clouduler.revision`
+        // label (`cl_sched::spec::build`); calling it unconditionally would recreate every container on
+        // every pull. Skip a stack whose spec is unchanged.
         if current.stacks.get(name).is_some_and(|s| &s.spec == spec) {
             continue;
         }
@@ -795,11 +729,8 @@ async fn apply_pulled_tree(
     }
 
     for (name, bytes) in &parsed.configs {
-        // Reserved configs (api keys, redirects, wireguard ingress, the
-        // self-update run state, ...) get mirrored into the export for
-        // backup purposes, but each has its own dedicated, validated write
-        // path - a plain `PutConfig` of raw git content would bypass that
-        // entirely and must never happen here.
+        // Reserved configs are mirrored into the export but each has its own validated write path;
+        // a raw `PutConfig` of git content would bypass it.
         if claimed_configs.contains(name) || super::objects::is_reserved(name) {
             continue;
         }
@@ -857,12 +788,8 @@ mod tests {
         }
     }
 
-    /// The bug a manual git push used to trigger: every stack named in a
-    /// pulled tree got redeployed (bumping its revision, and with it every
-    /// instance's `clouduler.revision` label - see `cl_sched::spec::build`),
-    /// which recreates the container, even when that stack's spec was
-    /// byte-for-byte unchanged. Only a stack whose pulled spec actually
-    /// differs from what the cluster already has may be redeployed.
+    /// Regression: every stack in a pulled tree was redeployed (bumping `clouduler.revision` and
+    /// recreating containers) even when its spec was unchanged.
     #[tokio::test]
     async fn a_pull_does_not_redeploy_an_unchanged_stack() {
         let h = harness().await;
@@ -892,8 +819,6 @@ mod tests {
 
     const CLUSTER_YAML: &str = include_str!("../../../../examples/cluster.yaml");
 
-    /// A pulled tree with no stacks would make `apply_pulled_tree` remove
-    /// every stack the cluster runs.
     #[test]
     fn a_tree_with_no_stacks_is_rejected_when_the_cluster_has_some() {
         let mut parsed = tree(&[]);
@@ -907,12 +832,9 @@ mod tests {
         .expect_err("an empty-stacks tree must be rejected");
         assert!(reason.contains("no stacks"), "unexpected reason: {reason}");
 
-        // A cluster with nothing deployed yet may legitimately pull an empty tree.
         assert!(validate_parsed(&parsed, &BTreeSet::new(), &BTreeSet::new()).is_ok());
     }
 
-    /// The other half: a stack whose spec really did change must still be
-    /// redeployed.
     #[tokio::test]
     async fn a_pull_redeploys_a_changed_stack() {
         let h = harness().await;

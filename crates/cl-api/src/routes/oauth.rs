@@ -1,18 +1,11 @@
-//! OAuth 2.1 authorization server for MCP clients, plus the ui's consent
-//! and client-management endpoints.
+//! OAuth 2.1 authorization server for MCP clients, plus the ui's consent and client-management endpoints.
 //!
-//! Layout of the flow: a client discovers us through the `.well-known`
-//! documents, registers (`/oauth/register`), sends the user's browser to
-//! `/oauth/authorize`, which parks the request in memory and bounces to the
-//! ui's consent page. The ui, logged in as the human, approves through
-//! `/api/oauth/requests/{id}/approve`, which mints a one-shot code and hands
-//! back the redirect for the browser to follow. The client then redeems the
-//! code at `/oauth/token`. All state beyond the client records lives on the
-//! leader, see `auth::oauth`.
+//! Flow: a client discovers us via `.well-known`, registers (`/oauth/register`), and sends the browser
+//! to `/oauth/authorize`, which parks the request in memory and bounces to the ui's consent page. The
+//! ui approves via `/api/oauth/requests/{id}/approve`, minting a one-shot code the client redeems at
+//! `/oauth/token`. State beyond client records lives on the leader (`auth::oauth`).
 //!
-//! Every endpoint but `/api/mcp/clients*` answers 404 when `mcp.enabled` is
-//! false; the client list stays reachable so an admin can still see and
-//! revoke what was granted before the switch was flipped.
+//! All endpoints but `/api/mcp/clients*` 404 when `mcp.enabled` is false, so an admin can still revoke grants.
 
 use axum::body::Bytes;
 use axum::extract::{Form, Path, Query, Request, State};
@@ -64,9 +57,7 @@ pub fn router() -> Router<AppState> {
 
 // ---- errors ----
 
-/// Either an RFC 6749 section 5.2 error body or a plain [`ApiError`] (used
-/// for the 404 when disabled and for infrastructure failures, which have no
-/// oauth code).
+/// An RFC 6749 section 5.2 error body, or a plain [`ApiError`] (404 when disabled, infrastructure failures).
 enum OAuthError {
     Oauth {
         status: StatusCode,
@@ -179,19 +170,13 @@ async fn load_store(state: &AppState) -> McpClientStore {
 
 // ---- redirect uri handling ----
 
-/// Hosts a plain-http redirect may point at: loopback only, which is what
-/// native apps (Claude Code, MCP inspector) listen on.
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
-/// `(scheme, authority)` of a redirect uri, or `None` if it is not
-/// acceptable for a public client to register.
-///
-/// https is accepted anywhere, http only on loopback, and other schemes are
-/// private-use app schemes (`cursor://`, `vscode://`) per RFC 8252. Schemes
-/// that can run script or exfiltrate in a browser are refused outright, and
-/// fragments and userinfo are never allowed.
+/// `(scheme, authority)`, or `None` if unacceptable for a public client. https anywhere, http only on
+/// loopback, other schemes are private-use app schemes (RFC 8252); script-capable schemes, fragments
+/// and userinfo are refused.
 fn parse_redirect_uri(uri: &str) -> Option<(String, String)> {
     if uri.len() > 2048 || uri.contains('#') || uri.chars().any(|c| c.is_control() || c == ' ') {
         return None;
@@ -224,7 +209,6 @@ fn parse_redirect_uri(uri: &str) -> Option<(String, String)> {
     }
 }
 
-/// What the consent page shows as "where this will send you".
 fn display_target(uri: &str) -> String {
     match parse_redirect_uri(uri) {
         Some((scheme, authority)) if scheme == "https" || scheme == "http" => authority,
@@ -375,8 +359,7 @@ async fn authorize(
 ) -> Result<Response, ApiError> {
     require_enabled(&state).await?;
 
-    // Until the client and redirect uri check out, an error must NOT be sent
-    // to the redirect uri, or this endpoint becomes an open redirector.
+    // Until client and redirect uri check out, an error must NOT go to the redirect uri (open redirector).
     let client_id = p
         .client_id
         .as_deref()
@@ -438,7 +421,6 @@ struct RequestInfo {
     client_name: String,
     redirect_host: String,
     scope: String,
-    /// What the requested scope suggests; the user still chooses.
     requested_grant: McpGrant,
     allowed_grants: Vec<McpGrant>,
 }
@@ -450,16 +432,11 @@ struct PendingRow {
     redirect_host: String,
     scope: String,
     requested_grant: McpGrant,
-    /// Seconds until the request expires.
     expires_in: u64,
-    /// The node holding the request. Pending requests live in the memory of
-    /// the node that received the authorize call, so this list only covers
-    /// the node answering.
+    /// Pending requests live in the memory of the node that got the authorize call.
     node: String,
 }
 
-/// Authorization requests waiting for someone to approve them, so the ui can
-/// show them without the user having the consent link.
 async fn list_requests(
     admin: crate::auth::RequireAdmin,
     State(state): State<AppState>,
@@ -538,8 +515,7 @@ async fn approve(
     let grant = McpGrant::parse(&body.grant)
         .ok_or_else(|| ApiError::BadRequest("grant must be read or admin".into()))?;
     if !allowed_grants(&identity).contains(&grant) {
-        // Checked before the request is consumed, so the user can retry with
-        // a grant they are allowed to give.
+        // Checked before the request is consumed so the user can retry with an allowed grant.
         return Err(ApiError::Forbidden(
             "only an admin can grant admin access".into(),
         ));
@@ -654,7 +630,6 @@ async fn token(
                 .as_deref()
                 .ok_or_else(|| OAuthError::new("invalid_request", "code_verifier is required"))?;
 
-            // Burns the code even if a check below fails.
             let auth = state
                 .oauth
                 .take_code(code)
@@ -685,7 +660,6 @@ async fn token(
             client.approved_by = Some(auth.identity.username.clone());
             client.approver_subject = Some(auth.identity.subject.clone());
             client.grant = Some(auth.grant);
-            // New approval: access tokens from any earlier one stop working.
             client.generation += 1;
             let refresh = oauth::new_refresh_token(client_id);
             client.refresh_hash = Some(sha256_hex(&refresh));
@@ -800,12 +774,8 @@ async fn revoke_client(
 
 // ---- follower support ----
 
-/// Relay a `/oauth/register` or `/oauth/token` POST to the leader.
-///
-/// An MCP client reaches whichever node the dashboard hostname resolves to
-/// and will not follow a 503 + Location the way the ui does. The authorization
-/// codes those calls depend on only exist in the leader's memory, so the
-/// follower proxies the request instead of refusing it.
+/// An MCP client will not follow a 503 + Location, and the codes these calls need exist only in the
+/// leader's memory, so a follower proxies the request.
 pub(crate) async fn forward_to_leader(state: &AppState, request: Request) -> Response {
     let Some(leader) = crate::server::leader_location(state).await else {
         return ApiError::NotLeader { leader: None }.into_response();

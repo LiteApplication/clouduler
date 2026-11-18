@@ -1,5 +1,4 @@
-//! Config and secret tools. None of these can return a secret's value:
-//! `inspect_secret` and `generate_secret` report facts about it, nothing more.
+//! Config and secret tools. None can return a secret's value: `inspect_secret` and `generate_secret` report facts only.
 
 use std::fmt::Write;
 
@@ -148,7 +147,6 @@ pub(super) async fn list_secrets(ctx: &Ctx) -> ToolResult {
     Ok(out)
 }
 
-/// Where each stack mounts `secret`, so the AI can tell what depends on it.
 fn used_by(state: &cl_raft::ClusterState, secret: &str) -> Vec<String> {
     let mut out = Vec::new();
     for stack in state.stacks.values() {
@@ -201,9 +199,7 @@ pub(super) async fn inspect_secret(ctx: &Ctx, args: NameArgs) -> ToolResult {
         "revision": entry.revision,
         "owner": entry.owner,
         "used_by": used_by(&state, &args.name),
-        // Containers keep the value they started with, so after an overwrite
-        // these still run the old one until restarted (by the operator, from
-        // the secrets view or `clouduler secret rotate --restart`).
+        // Containers keep the value they started with until restarted (secrets view or `clouduler secret rotate --restart`).
         "instances_running_an_older_revision": crate::routes::secret_rotation::usage(&state, &args.name)
             .into_iter()
             .filter(|u| u.freshness == crate::routes::secret_rotation::Freshness::Stale)
@@ -224,8 +220,7 @@ pub(super) async fn put_config(ctx: &Ctx, args: PutConfigArgs) -> ToolResult {
     ))
 }
 
-/// Stores one config on behalf of the focused stack, under the same rules as
-/// `put_config`: it keeps an existing owner and refuses another stack's.
+/// Same rules as `put_config`: keeps an existing owner and refuses another stack's.
 pub(super) async fn store_config(ctx: &Ctx, name: &str, content: &str) -> Result<(), String> {
     let focus = ctx.require_focus()?;
     valid_object_name(name)?;

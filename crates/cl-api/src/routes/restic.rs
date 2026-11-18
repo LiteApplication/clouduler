@@ -1,17 +1,9 @@
-//! `/api/restic/*`: restic-based drive backups - destinations, per-drive
-//! schedules, run history, snapshots, and restore.
+//! `/api/restic/*`: restic drive backups: destinations, per-drive schedules, run history, snapshots, restore.
 //!
-//! Manual runs are a plain `RecordBackupRun` submit (`clouduler`'s
-//! `backup_runner::start_runner` polls for `Running` runs on its own, so
-//! there is no nudge endpoint the way `drives::sync_volume` needs one).
-//! Restore is different: it needs a real local drive/docker to act on, which
-//! this crate deliberately never has direct access to (see `drives.rs`'s doc
-//! comment on the same constraint). So restore submits a `RestoreRequest`
-//! through raft instead of doing any IO itself; `clouduler`'s
-//! `backup_restore::start_restore_watcher` on the node that actually holds
-//! the drive claims and executes it. `/api/events` already streams
-//! `restore_requests`/`restic_runs` on every state version bump, so the ui
-//! polls status from there rather than a bespoke SSE stream here.
+//! Manual runs are a plain `RecordBackupRun` submit; `clouduler`'s `backup_runner::start_runner` polls for
+//! `Running` runs. Restore needs a real local drive/docker, which this crate never touches (see
+//! `drives.rs`), so it submits a `RestoreRequest` through raft and `backup_restore::start_restore_watcher`
+//! on the node holding the drive executes it. `/api/events` streams `restore_requests`/`restic_runs`, so the ui polls from there.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -91,14 +83,11 @@ struct PutDestinationRequest {
     id: String,
     name: String,
     kind: BackupDestinationKind,
-    /// Repo password. Omitted (on an existing destination) keeps the current
-    /// one; required the first time a destination is created.
+    /// Omitted on an existing destination keeps the current one; required on creation.
     #[serde(default)]
     password: Option<String>,
-    /// `Ssh`: PEM-encoded private key. `S3`: ignored.
     #[serde(default)]
     ssh_private_key: Option<String>,
-    /// `S3`: access key id, paired with `s3_secret_access_key`.
     #[serde(default)]
     s3_access_key_id: Option<String>,
     #[serde(default)]
@@ -110,8 +99,7 @@ async fn put_destination(
     State(state): State<AppState>,
     Json(body): Json<PutDestinationRequest>,
 ) -> Result<StatusCode, ApiError> {
-    // Before anything is sealed: a rejected destination must not leave
-    // orphaned secrets behind. The state machine checks the same rules.
+    // Before anything is sealed: a rejected destination must not leave orphaned secrets. The state machine checks the same rules.
     let probe = BackupDestination {
         id: body.id.clone(),
         name: body.name.clone(),
@@ -265,7 +253,6 @@ async fn put_target(
         ));
     }
     let cluster_state = state.cluster.state().await;
-    // Preserve last_run across an edit - it isn't part of the request body.
     let last_run = cluster_state
         .restic_targets
         .get(&body.id)
@@ -313,9 +300,7 @@ async fn remove_target(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Trigger a run immediately, outside its schedule. `clouduler`'s
-/// `backup_runner::start_runner` polls for `Running` runs on its own, so
-/// this is a plain submit with no daemon-side nudge needed.
+/// Outside its schedule; a plain submit, since the runner polls for `Running` runs.
 async fn run_target(
     admin: RequireAdmin,
     State(state): State<AppState>,
@@ -327,9 +312,7 @@ async fn run_target(
         .get(&id)
         .ok_or_else(|| ApiError::NotFound(format!("no backup target {id}")))?;
 
-    // The state machine rejects a second `Running` run for the same target
-    // too (the authoritative check - this one's just a friendlier error
-    // before paying for a raft round trip in the common case).
+    // The state machine rejects a second `Running` run too (authoritative); this just gives a friendlier error early.
     if cluster_state
         .restic_runs
         .values()
@@ -404,16 +387,14 @@ async fn list_snapshots(
             .clone()
     };
 
-    // The same repository builder the runner and restore use, so S3 keys and
-    // ssh identities are wired up too - and credentials are staged under the
-    // data directory (0700, unique per call), never a predictable /tmp path.
+    // The runner/restore repository builder, so S3 keys and ssh identities are wired up; credentials are
+    // staged under the data directory (0700, unique per call), never a predictable /tmp path.
     let cred_dir = state.data_dir.join("restic").join("creds").join(&id);
     let (repo, guards) =
         cl_restic::credentials::build_repo(&cluster_state, &key, &cred_dir, &destination)
             .map_err(|e| ApiError::Conflict(e.to_string()))?;
     let list = tokio::task::spawn_blocking(move || {
         let result = repo.snapshots();
-        // Staged credentials go away as soon as restic is done with them.
         drop(guards);
         result
     })
