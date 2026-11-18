@@ -170,7 +170,7 @@ const SCHEMA: Record<string, string[]> = {
   'services.*.deploy.update_config': ['parallelism', 'delay', 'order', 'failure_action'],
   'services.*.x-clouduler': [
     'proxy', 'expose', 'volume_sync', 'auto_update', 'node', 'docker_socket', 'colocate', 'backup',
-    'actions', 'alerts',
+    'actions', 'alerts', 'terraform',
   ],
   'services.*.x-clouduler.proxy': [
     'host', 'network', 'port', 'path_prefix', 'tls', 'middlewares', 'sticky', 'max_body_size',
@@ -186,6 +186,7 @@ const SCHEMA: Record<string, string[]> = {
   'x-clouduler.auto_update': ['mode', 'delay'],
   'services.*.x-clouduler.docker_socket': ['target', 'read_only', 'mode'],
   'services.*.x-clouduler.backup': ['stop_before'],
+  'services.*.x-clouduler.terraform': ['enabled', 'secrets', 'configs', 'vars'],
   'services.*.x-clouduler.actions.*': ['cmd', 'user', 'timeout', 'confirm', 'show_in_ui', 'standalone'],
   'services.*.configs': ['source', 'target', 'mode', 'uid', 'gid', 'env'],
   'services.*.secrets': ['source', 'target', 'mode', 'uid', 'gid', 'env'],

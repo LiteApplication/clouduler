@@ -32,6 +32,7 @@ import { StackSpecEditor } from '../../components/StackSpecEditor';
 import { DnsCertPanel, PlacementPanel } from './PlacementPanel';
 import { logStreamOptions, toLogViewLine, type StreamLine } from './logLines';
 import { copyText, useKnownNames } from './specTools';
+import { TerraformTab } from './TerraformTab';
 import { MigrationProblem } from './MigrationProblem';
 import './workloads.css';
 
@@ -42,7 +43,7 @@ export function StackDetail() {
   const navigate = useNavigate();
   const toast = useToast();
   const [params, setParams] = useSearchParams();
-  const tab = (['containers', 'placement', 'spec', 'settings'] as const).find((t) => t === params.get('tab')) ?? 'containers';
+  const tab = (['containers', 'placement', 'spec', 'terraform', 'settings'] as const).find((t) => t === params.get('tab')) ?? 'containers';
   const stack = cluster?.stacks[name];
   const known = useKnownNames();
   const polled = useInstances();
@@ -160,6 +161,7 @@ export function StackDetail() {
           { id: 'containers', label: 'Containers', count: assignments.length },
           { id: 'placement', label: 'Placement' },
           { id: 'spec', label: 'Spec' },
+          { id: 'terraform', label: 'Terraform' },
           { id: 'settings', label: 'Settings' },
         ]}
       />
@@ -167,6 +169,7 @@ export function StackDetail() {
       {tab === 'containers' && <ContainersTab name={name} assignments={assignments} live={live} isAdmin={isAdmin} />}
       {tab === 'placement' && <PlacementTab name={name} spec={stack.spec} />}
       {tab === 'spec' && <SpecTab spec={stack.spec} previous={stack.previous_spec ?? null} known={known} />}
+      {tab === 'terraform' && <TerraformTab name={name} spec={stack.spec} isAdmin={isAdmin} />}
       {tab === 'settings' && (
         <SettingsTab
           name={name}

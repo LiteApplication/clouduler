@@ -364,6 +364,11 @@ export class ScenarioBuilder {
       crash_moves: {},
       previous_image_digests: {},
       volume_removals: {},
+      terraform_modules: {},
+      terraform_states: {},
+      terraform_runs: {},
+      terraform_requests: {},
+      terraform_applied: {},
     };
 
     // The wire omits nulls and defaults from cluster.yaml (serde skips them),

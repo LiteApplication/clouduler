@@ -100,7 +100,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
   clusterConfig: {
     maps: ['.networks', '.drives', '.nodes', '.nodes.*.network', '.nodes.*.drives'],
     optional: [
-      '.cloudflare', '.self_update', '.backup', '.proxy.acme.contact_email', '.proxy.acme.directory_url',
+      '.cloudflare', '.self_update', '.backup', '.terraform', '.proxy.acme.contact_email', '.proxy.acme.directory_url',
       '.proxy.auth', '.auth.oidc', '.networks.*.subnet', '.networks.*.domain', '.networks.*.publish_dns', '.networks.*.access', '.networks.*.container', '.networks.*.container.proxy',
       '.drives.*.served_by', '.drives.*.failback', '.nodes.*.data_dir', '.nodes.*.docker_data_dir', '.nodes.*.last_resort',
       '.nodes.*.generate_secret_key',
@@ -133,7 +133,7 @@ const OPTIONS: Record<string, ShapeOptions> = {
       '.stacks', '.assignments', '.volumes', '.volumes.*.replicas', '.configs', '.secrets',
       '.certificates', '.dns_records', '.cert_status', '.dns_status', '.wrapped_keys',
       '.alert_destinations', '.alerts', '.alert_inbox', '.container_status', '.crash_moves',
-      '.previous_image_digests', '.volume_removals', '.instance_updates', '.auto_updates', '.image_checks',
+      '.previous_image_digests', '.volume_removals', '.terraform_modules', '.terraform_states', '.terraform_runs', '.terraform_requests', '.terraform_applied', '.instance_updates', '.auto_updates', '.image_checks',
       '.restic_destinations', '.restic_targets', '.restic_runs', '.restore_requests',
       '.sessions', '.served', '.proxy_sessions', '.proxy_tokens', '.stacks.*.requirements.allowed',
     ],

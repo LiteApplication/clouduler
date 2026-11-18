@@ -65,6 +65,18 @@ export function runStatus(state: 'running' | 'ok' | 'failed' | 'pending'): Statu
   }
 }
 
+/** A terraform run's outcome. */
+export function terraformRunStatus(outcome: 'running' | 'succeeded' | 'failed'): StatusView {
+  switch (outcome) {
+    case 'running':
+      return { status: 'updating', label: 'Running' };
+    case 'succeeded':
+      return { status: 'healthy', label: 'Succeeded' };
+    default:
+      return { status: 'failed', label: 'Failed' };
+  }
+}
+
 /** Rolls a stack's instance states up to one badge: any failure wins, then
  *  anything not yet settled, then all running. */
 export function rollupStatus(states: Status[]): Status {

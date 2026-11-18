@@ -77,6 +77,7 @@ export function normalizeConfig(cfg: ClusterConfig): ClusterConfig {
         : null,
     },
     cloudflare: cfg.cloudflare ? { ...cfg.cloudflare } : null,
+    terraform: cfg.terraform ? { ...cfg.terraform } : null,
     proxy: {
       ...cfg.proxy,
       acme: {

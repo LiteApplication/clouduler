@@ -12,6 +12,7 @@ import {
   FailoverSection,
   GitBackupSection,
   McpSection,
+  TerraformSection,
   NetworksSection,
   ProxySection,
   SecretsSection,
@@ -143,6 +144,15 @@ export const CONFIG_PAGES: ConfigPage[] = [
     group: 'Security',
     keys: ['backup'],
     Component: GitBackupSection,
+  },
+  {
+    slug: 'terraform',
+    label: 'Terraform',
+    icon: 'terminal',
+    blurb: 'Run OpenTofu modules stored with stacks.',
+    group: 'General',
+    keys: ['terraform'],
+    Component: TerraformSection,
   },
 ];
 

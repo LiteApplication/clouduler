@@ -1173,6 +1173,8 @@ export interface ClusterConfig {
   proxy: ProxyConfig;
   self_update: SelfUpdateConfig | null;
   backup: GitBackupConfig | null;
+  /** Absent or null = terraform off. */
+  terraform?: TerraformConfig | null;
   mcp: McpConfig;
   updates?: ImageUpdatesConfig;
 }
@@ -1180,6 +1182,13 @@ export interface ClusterConfig {
 export interface ImageUpdatesConfig {
   /** How often the leader asks the registries about declared images, e.g. `6h`. */
   check_interval: string;
+}
+
+/** `terraform:` in cluster.yaml; all fields default when omitted. */
+export interface TerraformConfig {
+  image: string;
+  timeout: string;
+  init_network: string;
 }
 
 export interface McpConfig {

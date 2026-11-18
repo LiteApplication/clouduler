@@ -30,6 +30,11 @@ const cluster: ClusterState = {
   restic_runs: {},
   restore_requests: {},
   instance_updates: {},
+  terraform_modules: {},
+  terraform_states: {},
+  terraform_runs: {},
+  terraform_requests: {},
+  terraform_applied: {},
   overlay: null,
   version: 1,
 };

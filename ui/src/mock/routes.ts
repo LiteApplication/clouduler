@@ -34,6 +34,7 @@ import type {
   StackValidationResult,
   VolumeInspection,
 } from '../api/types';
+import type { TerraformStatus } from '../api/types';
 import { commit, HttpError, listInstances, newId, type MockDb } from './db';
 import { fakeDigest } from './builders';
 import { requirementsFor } from './spec';
@@ -663,6 +664,32 @@ export function buildHttpRoutes(): HttpRoute[] {
     route('POST', '/api/stacks/:name/update-webhook/regenerate', ({ params }) => ({
       path: `/api/hooks/update/${fakeDigest(`${params.name}-${Date.now()}`).slice(7, 39)}`,
     })),
+
+    // ---- terraform (modules only; the mock never runs tofu)
+    route('GET', '/api/stacks/:name/terraform', ({ db, params }): TerraformStatus => ({
+      enabled_cluster: false,
+      services: Object.entries(db.state.terraform_modules[params.name] ?? {}).map(([service, m]) => ({
+        service,
+        source: m.source,
+        revision: m.revision,
+        enabled: true,
+        last_run: null,
+        pending_request: null,
+      })),
+    })),
+    route('PUT', '/api/stacks/:name/terraform/:service', ({ db, params, body }) => {
+      need(db.state.stacks[params.name], `stack ${params.name}`);
+      const mods = (db.state.terraform_modules[params.name] ??= {});
+      mods[params.service] = { source: String(body?.source ?? ''), revision: (mods[params.service]?.revision ?? 0) + 1 };
+      commit(db);
+    }),
+    route('DELETE', '/api/stacks/:name/terraform/:service', ({ db, params }) => {
+      delete db.state.terraform_modules[params.name]?.[params.service];
+      commit(db);
+    }),
+    route('POST', '/api/stacks/:name/terraform/:service/:mode', () => {
+      throw new HttpError(409, 'terraform is disabled in the mock cluster');
+    }),
 
     // ---- instances
     route('GET', '/api/instances', ({ db }) => listInstances(db)),

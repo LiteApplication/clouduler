@@ -44,6 +44,11 @@ export interface ServerOnlyStateFields {
   crash_moves: Record<string, number>;
   previous_image_digests: Record<string, string>;
   volume_removals: Record<string, unknown>;
+  terraform_modules: Record<string, Record<string, { source: string; revision: number }>>;
+  terraform_states: Record<string, unknown>;
+  terraform_runs: Record<string, unknown>;
+  terraform_requests: Record<string, string>;
+  terraform_applied: Record<string, string>;
 }
 
 /** `NodeState` as the server sends it: with the raft node id the ui ignores. */

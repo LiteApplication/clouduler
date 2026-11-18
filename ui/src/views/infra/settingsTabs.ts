@@ -78,6 +78,7 @@ export const SETTINGS_TABS: SettingsTab[] = [
 export const CONFIG_SLUG_TAB: Record<string, string> = {
   cluster: 'general',
   failover: 'general',
+  terraform: 'general',
   review: 'general',
   networks: 'network',
   web: 'network',
