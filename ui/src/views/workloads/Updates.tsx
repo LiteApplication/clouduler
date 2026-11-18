@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ApiError, api } from '../../api/client';
 import type { BulkResult, InstanceState, InstanceUpdate, RegistryAccount, UpdateRow } from '../../api/types';
 import { Banner, Button, Chip, DataTable, EmptyState, Icon, PageHeader, Panel, StatusBadge, Tag, TextField, type Column } from '../../ds';
-import { relativeTime, shortDigest } from '../../lib/format';
+import { relativeTime, shortDigest, shortImage } from '../../lib/format';
 import { UPDATE_STEPS, isUpdateActive } from '../../lib/updates';
 import { useClusterState } from '../../state/store';
 import { RegistryAccounts } from './RegistryAccounts';
@@ -536,7 +536,7 @@ export function Updates() {
             {row.id}
           </Link>
           <span className="code-sm muted" title={row.image ?? undefined}>
-            {row.image ?? '-'}
+            {row.image ? shortImage(row.image) : '-'}
           </span>
         </span>
       ),

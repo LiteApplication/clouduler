@@ -24,7 +24,7 @@ import {
 } from '../../ds';
 import { useEventSource } from '../../hooks/useEventSource';
 import { useStatsHistory } from '../../hooks/useStatsHistory';
-import { formatBytes, formatDuration, relativeTime, shortDigest } from '../../lib/format';
+import { formatBytes, formatDuration, relativeTime, shortDigest, shortImage } from '../../lib/format';
 import { buildPlacementRows, nodeEligibility } from '../../lib/placement';
 import { instanceStatus, volumeStatus } from '../../lib/status';
 import { useInstanceProgress } from '../../state/progressStore';
@@ -312,7 +312,7 @@ function ImagePanel({
     >
       <KV
         items={[
-          ['Image', instance.image ?? '-'],
+          ['Image', instance.image ? shortImage(instance.image) : '-'],
           ['Running', shortDigest(running) || '-'],
           ['Registry', registry ? shortDigest(registry) : '-'],
           ['Pinned', shortDigest(instance.image_digest) || '-'],

@@ -4,6 +4,7 @@ import { Icon, type IconName } from './Icon';
 import { Meter } from './Meter';
 import { StatusBadge, type Status } from './StatusBadge';
 import { cx } from './cx';
+import { shortImage } from '../lib/format';
 
 const ROLE = { leader: 'Leader', follower: 'Follower', candidate: 'Candidate' } as const;
 export type RaftRole = keyof typeof ROLE;
@@ -172,7 +173,7 @@ export function ContainerRow({
         ) : (
           <span className="cl-crow__name">{name}</span>
         )}
-        {image && <span className="cl-code-sm cl-muted cl-crow__image">{image}</span>}
+        {image && <span className="cl-code-sm cl-muted cl-crow__image">{shortImage(image)}</span>}
         <span className="cl-sm cl-muted">{[node, ports].filter(Boolean).join(' · ')}</span>
         {extra}
       </div>

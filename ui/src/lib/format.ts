@@ -84,6 +84,11 @@ export function formatDuration(ms: number | null | undefined): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
 }
 
+/** `repo@sha256:<64 hex>` -> `repo@sha256:3f9a8c1d`; references without a digest pass through. */
+export function shortImage(image: string): string {
+  return image.replace(/@([a-z0-9]+):([0-9a-f]+)/i, (_, algo: string, hex: string) => `@${algo}:${hex.slice(0, 8)}`);
+}
+
 /** `sha256:3f9a8c1d2e4b...` -> `3f9a8c1d2e4b`. Short enough to compare by eye. */
 export function shortDigest(digest: string | null | undefined, len = 12): string {
   if (!digest) return '-';
