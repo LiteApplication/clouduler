@@ -65,14 +65,7 @@ pub fn router_status(
 }
 
 pub fn allocations_of(state: &ClusterState) -> Allocations {
-    Allocations::decode(state.overlay.as_deref()).unwrap_or_else(|| {
-        Allocations::new(
-            cl_net::ipam::DEFAULT_OVERLAY_POOL
-                .parse()
-                .expect("DEFAULT_OVERLAY_POOL is a valid CIDR constant"),
-            cl_net::ipam::DEFAULT_SUBNET_PREFIX,
-        )
-    })
+    Allocations::decode(state.overlay.as_deref()).unwrap_or_default()
 }
 
 pub fn all_statuses(state: &ClusterState, cfg: &ClusterConfig) -> BTreeMap<String, RouterStatus> {
