@@ -1013,7 +1013,7 @@ dependencies = [
  "fast_rsync",
  "filetime",
  "futures",
- "libc",
+ "nix",
  "openraft",
  "rand 0.8.8",
  "serde",
