@@ -1047,7 +1047,7 @@ async fn watch_git_backup(
 
         let author = api_state
             .as_ref()
-            .and_then(|a| a.git_export_author.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+            .and_then(|a| a.git_export_author.lock().take());
         let (result, updated_cache) = run_git_export_blocking(
             state.clone(),
             key,
