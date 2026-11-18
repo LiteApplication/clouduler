@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "cl-alert"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "humantime-serde",
  "lettre",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "cl-api"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "aho-corasick",
  "async-stream",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "cl-backup"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "age",
  "base64 0.23.1",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "cl-cli"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "age",
  "anyhow",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "cl-config"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "humantime-serde",
  "ipnet",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "cl-daemon"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "age",
  "anyhow",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "cl-dns"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "cl-config",
  "hickory-resolver",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "cl-docker"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "bollard",
  "bytes",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "cl-dockerapi"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "bytes",
  "cl-docker",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "cl-drive"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "bincode",
  "blake3",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "cl-init"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "cl-api",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "cl-net"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "async-trait",
  "cl-config",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "cl-proxy"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "cl-raft"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "cl-restic"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "cl-raft",
  "cl-secret",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "cl-sched"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "cl-config",
  "cl-docker",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "cl-secret"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "cl-update"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "blake3",
  "cl-config",
@@ -1278,7 +1278,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clouduler"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "cl-api",
