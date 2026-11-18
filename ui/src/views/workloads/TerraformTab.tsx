@@ -72,7 +72,7 @@ export function TerraformTab({ name, spec, isAdmin }: { name: string; spec: stri
   }
 
   return (
-    <div className="wl-terraform">
+    <div className="wl-terraform col">
       {!status.enabled_cluster && (
         <Banner
           tone="warn"
@@ -220,8 +220,8 @@ function ServiceCard({
       }
     >
       {!hasModule && !adding ? (
-        <div>
-          <p className="sub">No terraform module for this service.</p>
+        <div className="wl-stack" style={{ gap: 'var(--space-3)' }}>
+          <p className="sub" style={{ margin: 0 }}>No terraform module for this service.</p>
           {isAdmin && (
             <Button size="sm" icon="plus" onClick={() => setAdding(true)}>
               Add module
