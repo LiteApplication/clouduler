@@ -7,7 +7,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -79,9 +80,7 @@ pub fn spawn() {
         let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
         loop {
             interval.tick().await;
-            if let Ok(mut s) = sampler().lock() {
-                s.sample();
-            }
+            sampler().lock().sample();
         }
     });
 }
@@ -90,17 +89,14 @@ pub fn spawn() {
 pub fn latest_cpu_percent() -> f32 {
     sampler()
         .lock()
-        .ok()
-        .and_then(|s| s.ring.back().map(|x| x.cpu_percent))
-        .unwrap_or(0.0)
+        .ring
+        .back()
+        .map_or(0.0, |x| x.cpu_percent)
 }
 
 /// Up to `HISTORY_LEN` samples, oldest first.
 pub fn history() -> Vec<Sample> {
-    sampler()
-        .lock()
-        .map(|s| s.ring.iter().copied().collect())
-        .unwrap_or_default()
+    sampler().lock().ring.iter().copied().collect()
 }
 
 /// Space on each drive's backing directory: the mount point with the longest

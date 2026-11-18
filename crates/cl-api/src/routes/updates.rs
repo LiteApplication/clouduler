@@ -662,7 +662,7 @@ async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
     }
     let batch = Arc::new(Batch {
         worker,
-        inner: std::sync::Mutex::new(BatchState {
+        inner: parking_lot::Mutex::new(BatchState {
             failed_by: None,
             pending,
         }),
@@ -681,10 +681,10 @@ async fn roll_batch(worker: AppState, queued: Vec<QueuedUpdate>) {
 /// State shared by every node's lane of one `roll_batch`.
 struct Batch {
     worker: AppState,
-    inner: std::sync::Mutex<BatchState>,
+    inner: parking_lot::Mutex<BatchState>,
     /// One lock per (stack, service), held from an instance's restart until
     /// it is up.
-    services: std::sync::Mutex<ServiceLocks>,
+    services: parking_lot::Mutex<ServiceLocks>,
 }
 
 type ServiceLocks = std::collections::HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>;
@@ -698,7 +698,7 @@ struct BatchState {
 
 impl Batch {
     fn halted(&self) -> bool {
-        self.inner.lock().expect("batch lock").failed_by.is_some()
+        self.inner.lock().failed_by.is_some()
     }
 
     /// Takes `instance` off the waiting list; false when the batch already
@@ -706,7 +706,6 @@ impl Batch {
     fn claim(&self, instance: &InstanceId) -> bool {
         self.inner
             .lock()
-            .expect("batch lock")
             .pending
             .remove(instance)
             .is_some()
@@ -715,7 +714,6 @@ impl Batch {
     fn service_lock(&self, instance: &InstanceId) -> Arc<tokio::sync::Mutex<()>> {
         self.services
             .lock()
-            .expect("batch lock")
             .entry((instance.stack.clone(), instance.service.clone()))
             .or_default()
             .clone()
@@ -731,7 +729,7 @@ impl Batch {
         reason: &str,
     ) {
         let cancelled: Vec<(InstanceId, String)> = {
-            let mut inner = self.inner.lock().expect("batch lock");
+            let mut inner = self.inner.lock();
             inner.failed_by.get_or_insert_with(|| instance.clone());
             inner.pending.drain().collect()
         };
@@ -875,7 +873,6 @@ async fn keep_queued_alive(batch: Arc<Batch>) {
         let waiting: Vec<(InstanceId, String)> = batch
             .inner
             .lock()
-            .expect("batch lock")
             .pending
             .iter()
             .map(|(i, n)| (i.clone(), n.clone()))

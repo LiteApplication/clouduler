@@ -392,7 +392,7 @@ fn classify_failed(
             p.removed = removed.into_iter().take(MAX_FILES).collect();
             let vols: BTreeSet<String> = match &volume {
                 Some(v) => BTreeSet::from([v.clone()]),
-                None => mounted.clone(),
+                None => mounted,
             };
             p.co_writers = co_writers(state, instance, &vols);
             p.volume = volume;

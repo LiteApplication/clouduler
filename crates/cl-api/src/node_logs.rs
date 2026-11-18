@@ -7,7 +7,8 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::sync::{Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -65,9 +66,7 @@ impl Default for LogRing {
 
 impl LogRing {
     pub fn push(&self, level: &str, target: &str, message: String) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
+        let mut inner = self.inner.lock();
         let line = LogLine {
             seq: inner.next_seq,
             timestamp: unix_millis(),
@@ -87,9 +86,7 @@ impl LogRing {
 
     /// The last `n` lines, oldest first.
     pub fn tail(&self, n: usize) -> Vec<LogLine> {
-        let Ok(inner) = self.inner.lock() else {
-            return Vec::new();
-        };
+        let inner = self.inner.lock();
         let skip = inner.lines.len().saturating_sub(n);
         inner.lines.iter().skip(skip).cloned().collect()
     }
@@ -97,9 +94,7 @@ impl LogRing {
     /// The last `n` lines plus a receiver for every line after them, with
     /// nothing missed or repeated between the two.
     pub fn follow(&self, n: usize) -> (Vec<LogLine>, broadcast::Receiver<LogLine>) {
-        let Ok(inner) = self.inner.lock() else {
-            return (Vec::new(), self.tx.subscribe());
-        };
+        let inner = self.inner.lock();
         let skip = inner.lines.len().saturating_sub(n);
         let backlog = inner.lines.iter().skip(skip).cloned().collect();
         (backlog, self.tx.subscribe())

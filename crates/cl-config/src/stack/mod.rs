@@ -285,13 +285,12 @@ impl StackFile {
     /// on a small board costs far more than cloning the result (and delayed
     /// the proxy's first routes after a restart). Failures are not cached.
     pub fn parse(raw: &str) -> Result<Self> {
-        static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, StackFile>>> =
-            std::sync::Mutex::new(None);
+        static CACHE: parking_lot::Mutex<Option<std::collections::HashMap<String, StackFile>>> =
+            parking_lot::Mutex::new(None);
         const CAPACITY: usize = 256;
 
         if let Some(hit) = CACHE
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .and_then(|cache| cache.get(raw))
         {
@@ -304,7 +303,7 @@ impl StackFile {
         })?;
         stack.validate_syntax()?;
 
-        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = CACHE.lock();
         let cache = guard.get_or_insert_with(Default::default);
         if cache.len() >= CAPACITY {
             // Stale specs are never revisited, so wholesale clearing is

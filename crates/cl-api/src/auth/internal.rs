@@ -13,7 +13,7 @@
 //! request replayable forever.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -37,7 +37,7 @@ pub struct ReplayCache {
 impl ReplayCache {
     /// Record `signature` (made at `ts`). False when it was already seen.
     fn first_use(&self, signature: &str, ts: u64, now: u64) -> bool {
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen = self.seen.lock();
         seen.retain(|_, expires| *expires >= now);
         seen.insert(signature.to_string(), ts + SKEW_SECS).is_none()
     }

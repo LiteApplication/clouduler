@@ -324,7 +324,7 @@ async fn wait_until_up(cfg: &ClusterConfig, name: &str, stacks: &BTreeSet<String
             Err(e) => Err(e.to_string()),
         };
         let state = match client_for(cfg, Some(name)) {
-            Ok(client) => client.state().await.map_err(|e| e.to_string()),
+            Ok(client) => client.state().await,
             Err(e) => Err(e.to_string()),
         };
         let state = match state {

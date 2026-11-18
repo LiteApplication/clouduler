@@ -602,7 +602,7 @@ fn invalid_client() -> OAuthError {
     }
 }
 
-fn token_response(access: String, refresh: String, grant: McpGrant) -> Response {
+fn token_response(access: &str, refresh: &str, grant: McpGrant) -> Response {
     let mut resp = Json(json!({
         "access_token": access,
         "token_type": "Bearer",
@@ -699,7 +699,7 @@ async fn token(
                 now,
             );
             submit_store(&state, &store).await?;
-            Ok(token_response(access, refresh, auth.grant))
+            Ok(token_response(&access, &refresh, auth.grant))
         }
         Some("refresh_token") => {
             let presented = f
@@ -739,7 +739,7 @@ async fn token(
             client.refresh_expires_at = Some(oauth::refresh_expiry(now));
             let access = oauth::sign_access_token(&key, client, &subject, &username, grant, now);
             submit_store(&state, &store).await?;
-            Ok(token_response(access, refresh, grant))
+            Ok(token_response(&access, &refresh, grant))
         }
         Some(_) => Err(OAuthError::new(
             "unsupported_grant_type",

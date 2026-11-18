@@ -233,13 +233,13 @@ fn gpu_shortfall(node: &NodeState, needs: &GpuNeeds) -> Option<String> {
 /// Warn once per instance and node that a pin overrides a GPU shortfall: the
 /// scheduler passes every few seconds and the same line each time is noise.
 fn warn_pinned_without_gpu(desired: &Desired, node: &NodeState, missing: &str) {
-    use std::sync::{Mutex, OnceLock};
+    use parking_lot::Mutex;
+    use std::sync::OnceLock;
     static SEEN: OnceLock<Mutex<BTreeSet<(String, String)>>> = OnceLock::new();
     let key = (desired.id.to_string(), node.name.clone());
     let mut seen = SEEN
         .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .lock();
     if seen.insert(key) {
         warn!(
             instance = %desired.id,

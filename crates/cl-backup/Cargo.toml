@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+parking_lot.workspace = true
 age = "0.11"
 base64.workspace = true
 cl-config.workspace = true

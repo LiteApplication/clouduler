@@ -7,7 +7,7 @@
 //! never straddles nodes.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 /// A session nobody has touched for this long is forgotten.
@@ -29,7 +29,7 @@ pub struct Sessions {
 
 impl Sessions {
     pub fn focus(&self, session: &str, owner: &str) -> Option<String> {
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.map.lock();
         prune(&mut map);
         let entry = map.get_mut(session)?;
         if entry.owner != owner {
@@ -40,7 +40,7 @@ impl Sessions {
     }
 
     pub fn set_focus(&self, session: &str, owner: &str, stack: Option<String>) {
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.map.lock();
         prune(&mut map);
         map.insert(
             session.to_string(),

@@ -7,7 +7,8 @@
 //! the same node records the outage in the feed as resolved; the leader then
 //! sends the "resolved" message to the destinations that heard about it.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cl_alert::{Body, Notification, Phase, Severity};
@@ -132,7 +133,6 @@ impl QuorumReporter {
                     .deliver_with_retries(Vec::new(), dest, "opened", &n, None)
                     .await;
                 sink.lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .push(AlertDelivery {
                         destination: o.destination,
                         at: o.at,
@@ -154,7 +154,6 @@ impl QuorumReporter {
         let deliveries = outage
             .deliveries
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .clone();
         let record = AlertRecord {
             id: outage.id.clone(),
