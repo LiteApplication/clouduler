@@ -44,7 +44,7 @@ const WHOLE_FILE_THRESHOLD: u64 = 8 * 1024;
 ///
 /// Capped at 8 MiB so a delta frame (at most about the file's size) always fits
 /// under `transport::MAX_FRAME`.
-const MAX_DELTA_FILE: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_DELTA_FILE: u64 = 8 * 1024 * 1024;
 
 /// Against a destination holding at least `DROP_CHECK_MIN_FILES` files, a
 /// source with under 1/`DROP_FRACTION` of that is lost data, not a clean-up.
@@ -482,8 +482,10 @@ impl DeltaEngine {
                 if !is_regular_file(&full) {
                     return Ok(None);
                 }
-                match std::fs::read(&full) {
-                    Ok(data) => Ok(Some(data)),
+                match crate::transport::read_capped(&full, transport::WHOLE_FILE_CHUNK as u64) {
+                    Ok(Some(data)) => Ok(Some(data)),
+                    // Grew past one frame since the scan: next pass streams it.
+                    Ok(None) => Ok(None),
                     Err(e) if scan::vanished(Some(&e)) || !is_regular_file(&full) => Ok(None),
                     Err(source) => Err(DriveError::Io { path: full, source }),
                 }
@@ -546,14 +548,17 @@ impl DeltaEngine {
         .map_err(transfer_err)?;
         // Handle and buffer go to the blocking pool and back per chunk, keeping IO
         // and allocation off runtime threads; the buffer is reused.
-        let mut buf = vec![0u8; transport::WHOLE_FILE_CHUNK];
+        // One frame buffer for the whole file: header, then the chunk read straight in.
+        let mut buf = bytes::BytesMut::new();
         loop {
             let at = full_path.clone();
             let (returned_file, returned_buf, n) =
                 off_runtime("reading a chunk to send", move || {
                     let mut file = file;
                     let mut buf = buf;
-                    match std::io::Read::read(&mut file, &mut buf) {
+                    buf.clear();
+                    buf.resize(transport::CHUNK_HEADER_LEN + transport::WHOLE_FILE_CHUNK, 0);
+                    match std::io::Read::read(&mut file, &mut buf[transport::CHUNK_HEADER_LEN..]) {
                         Ok(n) => Ok((file, buf, n)),
                         Err(source) => Err(DriveError::Io { path: at, source }),
                     }
@@ -564,14 +569,13 @@ impl DeltaEngine {
             if n == 0 {
                 break;
             }
-            transport::send(
-                conn,
-                &Message::WholeFileChunk {
-                    data: buf[..n].to_vec(),
-                },
-            )
-            .await
-            .map_err(transfer_err)?;
+            buf.truncate(transport::CHUNK_HEADER_LEN + n);
+            buf[..transport::CHUNK_HEADER_LEN].copy_from_slice(&transport::chunk_header(n));
+            // The codec copies the frame, so the allocation is reclaimed by the next
+            // `resize` once this `Bytes` is dropped.
+            transport::send_frame(conn, buf.split().freeze())
+                .await
+                .map_err(transfer_err)?;
         }
         transport::send(conn, &Message::WholeFileEnd)
             .await
@@ -614,8 +618,10 @@ impl DeltaEngine {
             })?;
             let indexed = signature.index();
 
-            let local_data = match std::fs::read(&full) {
-                Ok(data) => data,
+            let local_data = match transport::read_capped(&full, MAX_DELTA_FILE) {
+                Ok(Some(data)) => data,
+                // Grew past the delta limit since the scan: the next pass sends it whole.
+                Ok(None) => return Ok(None),
                 // Replaced since the check above: skip, the next pass resends it.
                 Err(e) if scan::vanished(Some(&e)) || !is_regular_file(&full) => return Ok(None),
                 Err(source) => return Err(DriveError::Io { path: full, source }),

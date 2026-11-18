@@ -256,8 +256,48 @@ pub fn limit_to_data_frames(conn: &mut Connection) {
 }
 
 pub async fn send(conn: &mut Connection, msg: &Message) -> io::Result<()> {
-    let raw = bincode::serialize(msg).map_err(io::Error::other)?;
-    conn.send(bytes::Bytes::from(raw)).await
+    // Sized first and serialized straight into the frame: no intermediate Vec.
+    let size = bincode::serialized_size(msg).map_err(io::Error::other)? as usize;
+    let mut buf = bytes::BytesMut::with_capacity(size);
+    bincode::serialize_into(bytes::BufMut::writer(&mut buf), msg).map_err(io::Error::other)?;
+    conn.send(buf.freeze()).await
+}
+
+/// Send an already-encoded frame (see [`chunk_header`]).
+pub async fn send_frame(conn: &mut Connection, frame: bytes::Bytes) -> io::Result<()> {
+    conn.send(frame).await
+}
+
+/// Bytes before the data in an encoded `WholeFileChunk`: the u32 variant index
+/// and the u64 length of `data`.
+pub const CHUNK_HEADER_LEN: usize = 12;
+
+/// The bincode prefix of `Message::WholeFileChunk { data }` for `len` bytes of data,
+/// so a chunk can be read into a frame buffer and sent without a copy into a `Vec`.
+pub fn chunk_header(len: usize) -> [u8; CHUNK_HEADER_LEN] {
+    let mut head = [0u8; CHUNK_HEADER_LEN];
+    let empty = bincode::serialize(&Message::WholeFileChunk { data: Vec::new() })
+        .expect("serializing an empty chunk cannot fail");
+    head[..4].copy_from_slice(&empty[..4]);
+    head[4..].copy_from_slice(&(len as u64).to_le_bytes());
+    head
+}
+
+/// Read a regular-file-or-whatever `path` opens to, refusing (`Ok(None)`) anything
+/// longer than `cap` bytes rather than holding it in memory.
+pub fn read_capped(path: &Path, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    let file = std::fs::File::open(path)?;
+    read_capped_file(file, cap)
+}
+
+fn read_capped_file(file: std::fs::File, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    let hint = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if hint > cap {
+        return Ok(None);
+    }
+    let mut data = Vec::with_capacity(hint as usize);
+    file.take(cap + 1).read_to_end(&mut data)?;
+    Ok((data.len() as u64 <= cap).then_some(data))
 }
 
 /// `Ok(None)` means the peer closed cleanly.
@@ -571,7 +611,7 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             Some(Message::SignatureRequest(path)) => {
                 let target = resolve_no_follow(&root, &path)?;
                 let data = off_runtime("building a signature", move || {
-                    let data = read_no_follow(&target).unwrap_or_default();
+                    let data = read_base(&target);
                     Ok(Signature::calculate(&data, signature_options()).into_serialized())
                 })
                 .await?;
@@ -635,12 +675,14 @@ pub async fn receive(stream: TcpStream, registry: &DriveRegistry) -> Result<()> 
             }) => {
                 let target = resolve_no_follow(&root, &path)?;
                 off_runtime("applying a delta", move || {
-                    let base = read_no_follow(&target).unwrap_or_default();
-                    let mut out = Vec::new();
-                    apply(&base, &data, &mut out).map_err(|e| DriveError::Transfer {
-                        message: format!("apply delta for {path}: {e}"),
-                    })?;
-                    write_temp_then_rename(&target, &out, mode, uid, gid, mtime_nanos)
+                    let base = read_base(&target);
+                    write_temp_then_rename_with(&target, mode, uid, gid, mtime_nanos, |file| {
+                        let mut out = io::BufWriter::new(file);
+                        apply(&base, &data, &mut out).map_err(|e| {
+                            io::Error::other(format!("apply delta for {path}: {e}"))
+                        })?;
+                        out.flush()
+                    })
                 })
                 .await?;
             }
@@ -864,14 +906,23 @@ fn create_temp(tmp: &Path) -> Result<std::fs::File> {
 
 /// Read a file without following a symlink in its final component (which
 /// `std::fs::read` would); intermediates are `resolve_no_follow`'s concern.
-fn read_no_follow(path: &Path) -> io::Result<Vec<u8>> {
-    let mut file = std::fs::OpenOptions::new()
+fn read_no_follow(path: &Path, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
         .open(path)?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-    Ok(data)
+    read_capped_file(file, cap)
+}
+
+/// The receiver's copy of a file as the base for a signature and its delta. Both
+/// sides of the exchange use this, so they agree: a missing, unreadable or
+/// over-`MAX_DELTA_FILE` file is an empty base (the sender then ships the whole
+/// content in the delta) instead of being read into memory.
+fn read_base(path: &Path) -> Vec<u8> {
+    read_no_follow(path, crate::delta::MAX_DELTA_FILE)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Refuse `target` if it is itself a symlink, for syscalls that would follow it.
@@ -966,6 +1017,21 @@ fn write_temp_then_rename(
     gid: u32,
     mtime_nanos: i64,
 ) -> Result<()> {
+    write_temp_then_rename_with(target, mode, uid, gid, mtime_nanos, |file| {
+        file.write_all(data)
+    })
+}
+
+/// As [`write_temp_then_rename`], with the content produced by `fill` straight
+/// into the temp file.
+fn write_temp_then_rename_with(
+    target: &Path,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    mtime_nanos: i64,
+    fill: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DriveError::Io {
             path: parent.to_path_buf(),
@@ -974,8 +1040,7 @@ fn write_temp_then_rename(
     }
     let tmp = temp_path(target);
     let mut file = create_temp(&tmp)?;
-    let result = file
-        .write_all(data)
+    let result = fill(&mut file)
         .map_err(|source| DriveError::Io {
             path: tmp.clone(),
             source,
@@ -1049,6 +1114,12 @@ mod tests {
     use super::*;
 
     fn msg_round_trip(msg: Message) {
+        let chunk = Message::WholeFileChunk {
+            data: b"abc".to_vec(),
+        };
+        let mut framed = chunk_header(3).to_vec();
+        framed.extend_from_slice(b"abc");
+        assert_eq!(framed, bincode::serialize(&chunk).unwrap());
         let raw = bincode::serialize(&msg).unwrap();
         let decoded: Message = bincode::deserialize(&raw).unwrap();
         assert_eq!(decoded, msg);
