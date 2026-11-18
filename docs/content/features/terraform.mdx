@@ -25,6 +25,7 @@ terraform:
 ## Where the module lives
 
 - A module is one `.tf` file per service. Clouduler writes it to the run directory as `main.tf`.
+- In the web UI, the stack's Terraform tab edits it in a code editor with HCL syntax highlighting, line numbers, bracket matching, search (`Ctrl+F`) and 2-space indentation. `Ctrl+S` saves.
 - Put it at `terraform/<service>.tf` next to the stack file. `clouduler stack deploy` picks up every service that has one. If the `terraform/` directory exists, it **replaces** the stack's modules: a service with no `.tf` file in it loses its module and its state. Without the directory, the stored modules stay.
 - The module may not contain a `backend` or `cloud` block inside `terraform {}`. State lives in the cluster, so such a block is refused.
 - Keep secret values out of the module. Secrets reach it as variables at run time.

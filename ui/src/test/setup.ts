@@ -12,3 +12,9 @@ if (!('EventSource' in globalThis)) {
     removeEventListener() {}
   };
 }
+
+// jsdom has no layout; CodeMirror measures text through Range rects.
+if (typeof Range !== 'undefined' && !Range.prototype.getClientRects) {
+  Range.prototype.getClientRects = () => ({ length: 0, item: () => null, [Symbol.iterator]: [][Symbol.iterator] }) as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+}

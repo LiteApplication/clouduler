@@ -6,6 +6,7 @@ import type { TerraformOutputView, TerraformRunMode, TerraformRunView, Terraform
 import { Banner, Button, EmptyState, KV, Panel, StatusBadge, Tag, useConfirm, useToast } from '../../ds';
 import { relativeTime } from '../../lib/format';
 import { terraformRunStatus } from '../../lib/status';
+import { HclEditor } from '../../components/HclEditor';
 
 const POLL_MS = 3000;
 
@@ -230,17 +231,18 @@ function ServiceCard({
         </div>
       ) : (
         <>
-          <label className="cl-label" htmlFor={`tf-${service}`}>
+          <label className="cl-label" id={`tf-${service}-label`}>
             {`Module for ${service} (main.tf)`}
           </label>
-          <textarea
+          <HclEditor
             id={`tf-${service}`}
-            className="mono"
-            style={{ width: '100%', minHeight: 220, fontFamily: 'var(--mono, monospace)' }}
-            spellCheck={false}
+            ariaLabel={`Module for ${service} (main.tf)`}
             value={text}
-            readOnly={!isAdmin}
-            onChange={(e) => setText(e.target.value)}
+            editable={isAdmin}
+            onChange={setText}
+            onSave={() => {
+              if (isAdmin && dirty && !working) void save();
+            }}
           />
           {isAdmin && (
             <div className="btn-row" style={{ marginTop: 8 }}>
