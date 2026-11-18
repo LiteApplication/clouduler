@@ -187,10 +187,7 @@ pub enum RuleSelector {
     All,
     From(Ipv4Net),
     Iif(String),
-    Fwmark {
-        mark: u32,
-        mask: u32,
-    },
+    Fwmark { mark: u32, mask: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -4,9 +4,9 @@
 //! (reject `..`, empty and absolute components) rather than canonicalizing,
 //! since the target path may not exist yet.
 
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use parking_lot::RwLock;
 
 use cl_config::ClusterConfig;
 use cl_raft::VolumeId;
@@ -133,9 +133,7 @@ impl DriveRegistry {
 
     /// Replace the allowed backup staging destinations.
     pub fn set_staging_destinations(&self, paths: Vec<PathBuf>) {
-        *self
-            .staging_destinations
-            .write() = paths;
+        *self.staging_destinations.write() = paths;
     }
 
     /// Accept a peer-supplied staging path only if it is exactly a configured

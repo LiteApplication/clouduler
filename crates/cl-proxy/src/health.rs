@@ -59,24 +59,17 @@ pub struct HealthTable(Arc<Mutex<HashMap<String, BackendHealth>>>);
 
 impl HealthTable {
     pub fn get(&self, instance: &str) -> Option<BackendHealth> {
-        self.0
-            .lock()
-            .get(instance)
-            .cloned()
+        self.0.lock().get(instance).cloned()
     }
 
     fn record(&self, instance: String, health: BackendHealth) {
-        self.0
-            .lock()
-            .insert(instance, health);
+        self.0.lock().insert(instance, health);
     }
 
     /// Drops entries for routes no longer in the table, so a removed stack
     /// doesn't linger as a stale unhealthy row forever.
     fn retain_known(&self, known: &std::collections::HashSet<String>) {
-        self.0
-            .lock()
-            .retain(|k, _| known.contains(k));
+        self.0.lock().retain(|k, _| known.contains(k));
     }
 }
 

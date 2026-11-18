@@ -50,7 +50,7 @@ struct NetworkAllocation {
 }
 
 impl Allocations {
-/// A fresh allocator over `pool`, sliced into `subnet_prefix`-bit subnets (>= the pool prefix, <= 32).
+    /// A fresh allocator over `pool`, sliced into `subnet_prefix`-bit subnets (>= the pool prefix, <= 32).
     pub fn new(pool: Ipv4Net, subnet_prefix: u8) -> Self {
         Self {
             pool,
@@ -90,18 +90,18 @@ impl Allocations {
         self.networks.keys().map(|s| s.as_str())
     }
 
-/// Subnets of the given overlays, by exact name (an overlay is named
-/// `<stack>_<cluster network>`, see `cl_sched::run::overlay_name`). Names
-/// with no allocation are skipped.
-///
-/// The caller derives the overlays from cluster state rather than parsing
-/// names: both halves may contain `_`, so a suffix match cannot tell stack `x`
-/// on network `a_b` from stack `x_a` on network `b`.
-///
-/// A client and a same-node backend on one cluster network can be delivered
-/// locally by the kernel, so the proxy sees the client's raw overlay address
-/// instead of one in the cluster network's subnet. Containers on these subnets
-/// were placed by clouduler and are trusted.
+    /// Subnets of the given overlays, by exact name (an overlay is named
+    /// `<stack>_<cluster network>`, see `cl_sched::run::overlay_name`). Names
+    /// with no allocation are skipped.
+    ///
+    /// The caller derives the overlays from cluster state rather than parsing
+    /// names: both halves may contain `_`, so a suffix match cannot tell stack `x`
+    /// on network `a_b` from stack `x_a` on network `b`.
+    ///
+    /// A client and a same-node backend on one cluster network can be delivered
+    /// locally by the kernel, so the proxy sees the client's raw overlay address
+    /// instead of one in the cluster network's subnet. Containers on these subnets
+    /// were placed by clouduler and are trusted.
     pub fn subnets_of_overlays<'a>(
         &'a self,
         overlays: impl IntoIterator<Item = &'a str> + 'a,
@@ -117,7 +117,7 @@ impl Allocations {
         self.networks.get(network)?.instances.get(instance).copied()
     }
 
-/// Claim a subnet out of the pool, skipping candidates that overlap another stack network or a declared cluster network (so the overlay never shadows the internal or a private one). Idempotent.
+    /// Claim a subnet out of the pool, skipping candidates that overlap another stack network or a declared cluster network (so the overlay never shadows the internal or a private one). Idempotent.
     pub fn allocate_network(
         &mut self,
         network: &str,
@@ -126,7 +126,7 @@ impl Allocations {
         self.allocate_network_in(network, None, cluster_subnets)
     }
 
-/// Like [`allocate_network`](Self::allocate_network) but claims exactly `requested`, failing on overlap instead of picking another.
+    /// Like [`allocate_network`](Self::allocate_network) but claims exactly `requested`, failing on overlap instead of picking another.
     pub fn allocate_network_in(
         &mut self,
         network: &str,
@@ -208,12 +208,12 @@ impl Allocations {
         })
     }
 
-/// Drop a network's allocation, freeing its subnet and every instance address.
+    /// Drop a network's allocation, freeing its subnet and every instance address.
     pub fn release_network(&mut self, network: &str) {
         self.networks.remove(network);
     }
 
-/// Allocate an instance address in the network's subnet. Idempotent; `.1` is the gateway.
+    /// Allocate an instance address in the network's subnet. Idempotent; `.1` is the gateway.
     pub fn allocate_ip(&mut self, network: &str, instance: &InstanceId) -> Result<Ipv4Addr> {
         let net = self
             .networks
@@ -240,7 +240,7 @@ impl Allocations {
             .flat_map(|n| n.nodes.iter().map(|(node, ip)| (node.as_str(), *ip)))
     }
 
-/// Allocate a node's address on a network; same rules as `allocate_ip`.
+    /// Allocate a node's address on a network; same rules as `allocate_ip`.
     pub fn allocate_node_ip(&mut self, network: &str, node: &str) -> Result<Ipv4Addr> {
         let net = self
             .networks
@@ -254,7 +254,7 @@ impl Allocations {
         Ok(chosen)
     }
 
-/// Release a node's address to the back of the cooldown queue; no-op if none.
+    /// Release a node's address to the back of the cooldown queue; no-op if none.
     pub fn release_node_ip(&mut self, network: &str, node: &str) {
         let Some(net) = self.networks.get_mut(network) else {
             return;
@@ -266,7 +266,7 @@ impl Allocations {
         net.cooldown.push_back(ip);
     }
 
-/// Release an instance's address to the back of the cooldown queue; no-op if none.
+    /// Release an instance's address to the back of the cooldown queue; no-op if none.
     pub fn release_ip(&mut self, network: &str, instance: &InstanceId) {
         let Some(net) = self.networks.get_mut(network) else {
             return;
@@ -280,7 +280,7 @@ impl Allocations {
 }
 
 impl NetworkAllocation {
-/// Reserve a never-used address if any is left, else the oldest released one. Never the gateway.
+    /// Reserve a never-used address if any is left, else the oldest released one. Never the gateway.
     fn pick_address(&mut self, network: &str) -> Result<Ipv4Addr> {
         let subnet = self.subnet;
         let gateway = gateway_of(subnet);
@@ -308,10 +308,7 @@ impl NetworkAllocation {
 
 impl Default for Allocations {
     fn default() -> Self {
-        Self::new(
-            DEFAULT_OVERLAY_NET,
-            DEFAULT_SUBNET_PREFIX,
-        )
+        Self::new(DEFAULT_OVERLAY_NET, DEFAULT_SUBNET_PREFIX)
     }
 }
 
@@ -331,7 +328,9 @@ mod tests {
     #[test]
     fn default_overlay_net_matches_its_string_form() {
         assert_eq!(
-            super::DEFAULT_OVERLAY_POOL.parse::<ipnet::Ipv4Net>().unwrap(),
+            super::DEFAULT_OVERLAY_POOL
+                .parse::<ipnet::Ipv4Net>()
+                .unwrap(),
             super::DEFAULT_OVERLAY_NET
         );
     }

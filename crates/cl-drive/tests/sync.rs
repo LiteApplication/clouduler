@@ -24,7 +24,10 @@ fn volume_id() -> VolumeId {
 /// a made-up number, the same way a real sender only ever carries the
 /// ownership a file already has.
 fn current_owner() -> (u32, u32) {
-    (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw())
+    (
+        nix::unistd::getuid().as_raw(),
+        nix::unistd::getgid().as_raw(),
+    )
 }
 
 /// One cluster key shared by every test in this file: listener and senders

@@ -15,9 +15,9 @@
 //! connection is open closes that connection immediately instead of hanging
 //! against a backend that's no longer there.
 
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use parking_lot::Mutex;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -59,7 +59,7 @@ impl Routes {
         Self::default()
     }
 
-/// Watch channel for a port, created (routeless) on first reference.
+    /// Watch channel for a port, created (routeless) on first reference.
     fn channel(&self, published: u16) -> watch::Sender<Option<SocketAddr>> {
         let mut inner = self.inner.lock();
         inner
@@ -68,12 +68,12 @@ impl Routes {
             .clone()
     }
 
-/// The receiver starts with the current value.
+    /// The receiver starts with the current value.
     pub fn subscribe(&self, published: u16) -> watch::Receiver<Option<SocketAddr>> {
         self.channel(published).subscribe()
     }
 
-/// Point a port at a backend, or clear it with `None` when the instance runs nowhere.
+    /// Point a port at a backend, or clear it with `None` when the instance runs nowhere.
     pub fn set(&self, published: u16, backend: Option<SocketAddr>) {
         // send_if_modified avoids waking every watcher on a reconcile pass
         // that didn't actually change anything.

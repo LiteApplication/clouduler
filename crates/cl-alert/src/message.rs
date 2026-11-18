@@ -11,7 +11,9 @@ use crate::settings::Severity;
 pub enum Phase {
     Opened,
     /// Already open, got worse. `previous` is what was sent before.
-    Escalated { previous: Severity },
+    Escalated {
+        previous: Severity,
+    },
     Resolved,
     /// A one-shot event with no recovery (`stack.deployed`, `log.match`).
     Event,

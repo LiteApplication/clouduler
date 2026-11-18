@@ -114,7 +114,7 @@ struct DialerInner {
 }
 
 impl Dialer {
-/// A dialer that always connects directly.
+    /// A dialer that always connects directly.
     pub fn direct() -> Self {
         Self::default()
     }
@@ -128,7 +128,7 @@ impl Dialer {
         }
     }
 
-/// Replace the relay table (container address -> its node's relay endpoint).
+    /// Replace the relay table (container address -> its node's relay endpoint).
     pub fn set_relays(&self, relays: HashMap<IpAddr, SocketAddr>) {
         let mut table = self.inner.relays.write();
         if **table != relays {
@@ -137,14 +137,10 @@ impl Dialer {
     }
 
     pub fn relay_for(&self, ip: IpAddr) -> Option<SocketAddr> {
-        self.inner
-            .relays
-            .read()
-            .get(&ip)
-            .copied()
+        self.inner.relays.read().get(&ip).copied()
     }
 
-/// A TCP connection to `target`, via its node's relay when another node runs it. `timeout` bounds the whole dial.
+    /// A TCP connection to `target`, via its node's relay when another node runs it. `timeout` bounds the whole dial.
     pub async fn connect_tcp(
         &self,
         target: SocketAddr,
@@ -163,7 +159,7 @@ impl Dialer {
         }
     }
 
-/// A stream of `len || payload` datagram frames to the UDP `target` through `relay`, for a forwarder whose backend runs on another node.
+    /// A stream of `len || payload` datagram frames to the UDP `target` through `relay`, for a forwarder whose backend runs on another node.
     pub async fn connect_udp(
         &self,
         relay: SocketAddr,

@@ -1,7 +1,7 @@
 //! Minimal Cloudflare API v4 client: auth, zone lookup, and DNS record CRUD.
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -137,11 +137,7 @@ impl Cloudflare {
     /// Resolves a zone name to its id, caching the result. Cloudflare has no
     /// "get zone by name" endpoint, so this lists zones filtered by name.
     pub async fn zone_id(&self, name: &str) -> Result<String> {
-        if let Some(id) = self
-            .zone_cache
-            .lock()
-            .get(name)
-        {
+        if let Some(id) = self.zone_cache.lock().get(name) {
             return Ok(id.clone());
         }
 

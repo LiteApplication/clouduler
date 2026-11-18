@@ -533,7 +533,8 @@ pub async fn send(
     let mut returned_id: Option<String> = None;
 
     for (idx, message) in msgs.iter().enumerate() {
-        let patch_target = edit_message_id.filter(|_| opts.edit_resolved && is_resolved && idx == 0);
+        let patch_target =
+            edit_message_id.filter(|_| opts.edit_resolved && is_resolved && idx == 0);
 
         if let Some(msg_id) = patch_target {
             let base = url.trim_end_matches('/');
@@ -646,7 +647,10 @@ mod tests {
     #[test]
     fn finish_leaves_a_non_object_payload_untouched() {
         let o = DiscordOptions::default();
-        let env = Envelope { mention: None, flags: 0 };
+        let env = Envelope {
+            mention: None,
+            flags: 0,
+        };
         let m = env.finish(&o, None, json!([1, 2]));
         assert_eq!(m.payload, json!([1, 2]));
     }

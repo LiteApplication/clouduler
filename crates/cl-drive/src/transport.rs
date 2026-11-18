@@ -1164,7 +1164,10 @@ mod receive_tests {
     }
 
     fn me() -> (u32, u32) {
-        (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw())
+        (
+            nix::unistd::getuid().as_raw(),
+            nix::unistd::getgid().as_raw(),
+        )
     }
 
     #[tokio::test]

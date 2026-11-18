@@ -35,7 +35,11 @@ impl Docker {
         cmd: Vec<String>,
         user: Option<String>,
     ) -> Result<String> {
-        let resp = self.inner.inspect_container(main, None).await.map_err(classify)?;
+        let resp = self
+            .inner
+            .inspect_container(main, None)
+            .await
+            .map_err(classify)?;
         let config = resp.config.unwrap_or_default();
         let mut host = resp.host_config.unwrap_or_default();
         let instance = config
@@ -56,7 +60,12 @@ impl Docker {
         // Docker takes one network at create time. Keep the address and
         // aliases the service had so it is reachable the same way.
         let networking_config = host.network_mode.as_deref().and_then(|network| {
-            let old = resp.network_settings.as_ref()?.networks.as_ref()?.get(network)?;
+            let old = resp
+                .network_settings
+                .as_ref()?
+                .networks
+                .as_ref()?
+                .get(network)?;
             let endpoint = EndpointSettings {
                 aliases: old.aliases.clone(),
                 ipam_config: old

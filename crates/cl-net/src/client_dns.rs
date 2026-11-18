@@ -75,10 +75,7 @@ fn build_view(view: &View) -> Result<BuiltView> {
     let root = Name::root();
     let mut handler = InMemoryZoneHandler::empty(root.clone(), ZoneType::Primary, AxfrPolicy::Deny);
     let soa = SOA::new(root.clone(), root.clone(), 1, 3600, 600, 86400, RECORD_TTL);
-    handler.upsert_mut(
-        Record::from_rdata(root, RECORD_TTL, RData::SOA(soa)),
-        1,
-    );
+    handler.upsert_mut(Record::from_rdata(root, RECORD_TTL, RData::SOA(soa)), 1);
 
     let mut names = BTreeSet::new();
     for record in &view.records {
@@ -191,7 +188,7 @@ impl ClientDns {
         })
     }
 
-/// Replace views and classifier together so no query sees a mix.
+    /// Replace views and classifier together so no query sees a mix.
     pub async fn reload(&self, views: &BTreeMap<String, View>, classify: Classifier) -> Result<()> {
         let views = views
             .iter()

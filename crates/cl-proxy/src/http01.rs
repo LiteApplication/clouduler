@@ -5,8 +5,8 @@
 //! the issuance code in `acme`, which populates it for the lifetime of one
 //! authorization and removes the entry once the order moves past it.
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Http01Store {
@@ -21,16 +21,11 @@ impl Http01Store {
     }
 
     pub fn get(&self, token: &str) -> Option<String> {
-        self.tokens
-            .lock()
-            .get(token)
-            .cloned()
+        self.tokens.lock().get(token).cloned()
     }
 
     pub fn remove(&self, token: &str) {
-        self.tokens
-            .lock()
-            .remove(token);
+        self.tokens.lock().remove(token);
     }
 }
 

@@ -406,10 +406,7 @@ mod tests {
         sink.report(1, 4);
         sink.report(4, 4);
 
-        assert_eq!(
-            tracker.read().get(&instance).unwrap().files_done,
-            4
-        );
+        assert_eq!(tracker.read().get(&instance).unwrap().files_done, 4);
     }
 
     struct UnusedEngine;

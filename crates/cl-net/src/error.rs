@@ -51,7 +51,7 @@ pub enum NetError {
 }
 
 impl NetError {
-/// Map a raw netlink error, recognising EPERM/EACCES as the CAP_NET_ADMIN message.
+    /// Map a raw netlink error, recognising EPERM/EACCES as the CAP_NET_ADMIN message.
     pub fn from_netlink(interface: impl Into<String>, source: rtnetlink::Error) -> Self {
         let interface = interface.into();
         if is_permission_error(&source) {

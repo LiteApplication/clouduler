@@ -623,7 +623,10 @@ mod tests {
             (1, id("fast", "b")),
             (2, id("fast", "c")),
         ];
-        assert_eq!(take_batch(&mut due, 2), vec![id("fast", "a"), id("fast", "b")]);
+        assert_eq!(
+            take_batch(&mut due, 2),
+            vec![id("fast", "a"), id("fast", "b")]
+        );
         assert_eq!(due, vec![(0, id("bulk", "x")), (2, id("fast", "c"))]);
         assert_eq!(take_batch(&mut due, 1), vec![id("bulk", "x")]);
         assert_eq!(take_batch(&mut due, 4), vec![id("fast", "c")]);

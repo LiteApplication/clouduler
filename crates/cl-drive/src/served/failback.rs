@@ -361,16 +361,12 @@ impl<E: SyncEngine + 'static> ServedSupervisor<E> {
         if failed_recently {
             return false;
         }
-        self.busy
-            .lock()
-            .insert(drive.to_string())
+        self.busy.lock().insert(drive.to_string())
     }
 
     /// Ends an attempt; one that got nowhere is not repeated for a while.
     fn release(&self, drive: &str, progressed: bool) {
-        self.busy
-            .lock()
-            .remove(drive);
+        self.busy.lock().remove(drive);
         let mut failures = self.last_failure.lock();
         if progressed {
             failures.remove(drive);

@@ -3,11 +3,11 @@
 //! Mounts real NFSv4 directly via `mount(2)`, no `mount.nfs` helper: NFSv4 has
 //! no separate MOUNT round trip, so a text options string suffices.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 use std::time::Duration;
 
 use tracing::warn;
@@ -220,9 +220,7 @@ impl MountManager {
         }
         do_mount(&spec)?;
         let key = spec.key();
-        self.mounts
-            .lock()
-            .insert(key, ActiveMount { spec });
+        self.mounts.lock().insert(key, ActiveMount { spec });
         Ok(())
     }
 
@@ -237,12 +235,7 @@ impl MountManager {
 
     /// Unmount everything for shutdown, continuing past failures; returns the first error.
     pub fn unmount_all(&self) -> Result<()> {
-        let keys: Vec<String> = self
-            .mounts
-            .lock()
-            .keys()
-            .cloned()
-            .collect();
+        let keys: Vec<String> = self.mounts.lock().keys().cloned().collect();
         let mut first_err = None;
         for key in keys {
             if let Err(e) = self.unmount(&key) {
@@ -255,17 +248,11 @@ impl MountManager {
 
     /// Every key currently mounted, for converging against what is needed.
     pub fn mounted_keys(&self) -> BTreeSet<String> {
-        self.mounts
-            .lock()
-            .keys()
-            .cloned()
-            .collect()
+        self.mounts.lock().keys().cloned().collect()
     }
 
     pub fn is_mounted(&self, key: &str) -> bool {
-        self.mounts
-            .lock()
-            .contains_key(key)
+        self.mounts.lock().contains_key(key)
     }
 
     /// Fail a mount over to a new active server. A kernel NFS mount bakes in its

@@ -364,9 +364,7 @@ pub enum MigrationPhase {
     Switching,
     Starting,
     Done,
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 impl MigrationPhase {
@@ -463,10 +461,7 @@ pub struct DnsRecordState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReconcileStatus {
     Pending,
-    Error {
-        message: String,
-        at: i64,
-    },
+    Error { message: String, at: i64 },
 }
 
 /// A place restic can keep a drive's backup history; see `DriveBackupTarget`.
@@ -2975,7 +2970,6 @@ pub fn base64_decode(encoded: &str) -> Result<Vec<u8>, String> {
 pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
     format!("{fqdn}|{record_type}|{content}")
 }
-
 
 /// Stacks whose spec mounts the volume (or the whole drive), whether or not an instance is assigned.
 pub fn stacks_declaring_volume(state: &ClusterState, id: &crate::ids::VolumeId) -> Vec<String> {

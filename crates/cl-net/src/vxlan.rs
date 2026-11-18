@@ -210,9 +210,9 @@ impl Overlay {
         Self { handle }
     }
 
-/// The interface carrying `address`, as (index, name, mtu). Keyed off the
-/// node's own internal address, the one thing the config already pins down,
-/// so nobody writes an interface name into config.
+    /// The interface carrying `address`, as (index, name, mtu). Keyed off the
+    /// node's own internal address, the one thing the config already pins down,
+    /// so nobody writes an interface name into config.
     pub async fn underlay_for(&self, address: Ipv4Addr) -> Result<Option<Underlay>> {
         let mut addrs = self.handle.address().get().execute();
         let mut index = None;
@@ -278,7 +278,7 @@ impl Overlay {
         }
     }
 
-/// Ensure the bridge exists with gateway address, MTU, up. Returns its index.
+    /// Ensure the bridge exists with gateway address, MTU, up. Returns its index.
     pub async fn ensure_bridge(
         &self,
         name: &str,
@@ -312,7 +312,7 @@ impl Overlay {
         Ok(index)
     }
 
-/// VNI, local address and underlay link a VXLAN device was created with.
+    /// VNI, local address and underlay link a VXLAN device was created with.
     async fn vxlan_params(&self, index: u32) -> Result<Option<VxlanParams>> {
         use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo};
         let mut links = self.handle.link().get().match_index(index).execute();
@@ -347,7 +347,7 @@ impl Overlay {
         Ok(found)
     }
 
-/// Ensure the VXLAN device exists, enslaved to `bridge_index`. Returns its index.
+    /// Ensure the VXLAN device exists, enslaved to `bridge_index`. Returns its index.
     #[allow(clippy::too_many_arguments)]
     pub async fn ensure_vxlan(
         &self,
@@ -420,12 +420,12 @@ impl Overlay {
         Ok(index)
     }
 
-/// Pin an existing bridge's MAC to the shared anycast value; no-op if absent.
-///
-/// Covers bridges this node merely still has (left behind after the last
-/// instance moved away, swept only once the stack is gone): they still answer
-/// ARP for the anycast gateway, and with the wrong MAC hijack containers on
-/// other nodes. See `gateway_mac`.
+    /// Pin an existing bridge's MAC to the shared anycast value; no-op if absent.
+    ///
+    /// Covers bridges this node merely still has (left behind after the last
+    /// instance moved away, swept only once the stack is gone): they still answer
+    /// ARP for the anycast gateway, and with the wrong MAC hijack containers on
+    /// other nodes. See `gateway_mac`.
     pub async fn ensure_existing_bridge_mac(&self, name: &str) -> Result<()> {
         let Some(index) = self.find_link(name).await? else {
             return Ok(());
@@ -433,15 +433,15 @@ impl Overlay {
         self.ensure_mac(name, index, gateway_mac(name)).await
     }
 
-/// Drop every frame this node's own bridge sends out through the VXLAN
-/// device. No-op if the device does not exist.
-///
-/// The host's own ARP traffic on the shared-MAC bridge reaches other nodes
-/// with that bridge's own MAC as source; the kernel logs each one ("received
-/// packet ... with own address as source address"), thousands an hour. None
-/// is useful there: containers only need the gateway on their own node, and
-/// the host reaches remote containers through the relay (`crate::relay`).
-/// Container-to-container frames carry their own MACs and are untouched.
+    /// Drop every frame this node's own bridge sends out through the VXLAN
+    /// device. No-op if the device does not exist.
+    ///
+    /// The host's own ARP traffic on the shared-MAC bridge reaches other nodes
+    /// with that bridge's own MAC as source; the kernel logs each one ("received
+    /// packet ... with own address as source address"), thousands an hour. None
+    /// is useful there: containers only need the gateway on their own node, and
+    /// the host reaches remote containers through the relay (`crate::relay`).
+    /// Container-to-container frames carry their own MACs and are untouched.
     pub async fn keep_gateway_frames_local(&self, bridge: &str, vxlan: &str) -> Result<()> {
         if self.find_link(vxlan).await?.is_none() {
             return Ok(());
@@ -494,7 +494,7 @@ impl Overlay {
             .map_err(|e| NetError::from_netlink(name, e))
     }
 
-/// Checks first so a permission-denied dry run does not misreport.
+    /// Checks first so a permission-denied dry run does not misreport.
     async fn ensure_address(
         &self,
         name: &str,
@@ -587,13 +587,13 @@ impl Overlay {
         Ok(())
     }
 
-/// Give this node a host port on a segment bridge: a veth pair whose peer is
-/// enslaved to `bridge`, with `mac` on the host end and `addr`/32 on it.
-///
-/// The unique MAC is what lets a router reach this node over VXLAN (the
-/// anycast gateway MAC never leaves its node). `arp_ignore=1` on veth and
-/// bridge stops either answering ARP for the other's address; `rp_filter=2`
-/// is loose reverse-path filtering, as for egress bridges. Idempotent.
+    /// Give this node a host port on a segment bridge: a veth pair whose peer is
+    /// enslaved to `bridge`, with `mac` on the host end and `addr`/32 on it.
+    ///
+    /// The unique MAC is what lets a router reach this node over VXLAN (the
+    /// anycast gateway MAC never leaves its node). `arp_ignore=1` on veth and
+    /// bridge stops either answering ARP for the other's address; `rp_filter=2`
+    /// is loose reverse-path filtering, as for egress bridges. Idempotent.
     pub async fn ensure_host_port(
         &self,
         bridge: &str,
@@ -656,7 +656,7 @@ impl Overlay {
         Ok(())
     }
 
-/// Remove a network's bridge and VXLAN device; missing links are fine.
+    /// Remove a network's bridge and VXLAN device; missing links are fine.
     pub async fn teardown(&self, bridge: &str, vxlan: &str) -> Result<()> {
         for name in [vxlan, bridge] {
             if let Some(index) = self.find_link(name).await? {
@@ -824,7 +824,7 @@ mod tests {
         assert_eq!(vxlan_name("monitoring"), vxlan_name("monitoring"));
     }
 
-/// Every node must derive the same MAC from the name alone, or a container can cache a remote bridge and get reset.
+    /// Every node must derive the same MAC from the name alone, or a container can cache a remote bridge and get reset.
     #[test]
     fn the_gateway_mac_is_the_same_on_every_node() {
         assert_eq!(gateway_mac("clbr-gitlab"), gateway_mac("clbr-gitlab"));
@@ -951,7 +951,7 @@ mod tests {
     #[test]
     #[ignore = "needs CAP_NET_ADMIN and a real netlink socket"]
     fn ensure_bridge_is_idempotent_against_a_real_kernel() {
-// Exercised manually / in the qemu harness.
+        // Exercised manually / in the qemu harness.
     }
 
     #[test]

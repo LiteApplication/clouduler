@@ -318,9 +318,7 @@ pub fn prebind(cfg: &ClusterConfig, node: &str) {
 }
 
 fn take_listener(port: u16, v6: bool) -> std::io::Result<tokio::net::TcpListener> {
-    let prebound = PREBOUND
-        .lock()
-        .remove(&(port, v6));
+    let prebound = PREBOUND.lock().remove(&(port, v6));
     match prebound {
         Some(listener) => tokio::net::TcpListener::from_std(listener),
         None => {
@@ -491,13 +489,14 @@ fn build_listen(
     shared_routes.set(routes.clone());
     let peers = Arc::new(cl_proxy::PeerPolicies::new());
     let certs = Arc::new(CertStore::new());
-    let auth_gate = match cl_proxy::AuthGate::new(config_rx.clone(), key_rx.clone(), cluster.clone()) {
-        Ok(gate) => Arc::new(gate),
-        Err(e) => {
-            warn!(error = %e, "cannot build the auth gate http client; proxy not started");
-            return None;
-        }
-    };
+    let auth_gate =
+        match cl_proxy::AuthGate::new(config_rx.clone(), key_rx.clone(), cluster.clone()) {
+            Ok(gate) => Arc::new(gate),
+            Err(e) => {
+                warn!(error = %e, "cannot build the auth gate http client; proxy not started");
+                return None;
+            }
+        };
     let server = Arc::new(
         cl_proxy::ProxyServer::full(
             routes.clone(),

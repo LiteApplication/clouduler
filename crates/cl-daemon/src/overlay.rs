@@ -544,14 +544,7 @@ impl Context_ {
                 .ensure_bridge(&bridge, gateway, subnet.prefix_len(), mtu)
                 .await?;
             let vxlan_index = netlink
-                .ensure_vxlan(
-                    &vxlan,
-                    vni,
-                    underlay.index,
-                    internal_ip,
-                    bridge_index,
-                    mtu,
-                )
+                .ensure_vxlan(&vxlan, vni, underlay.index, internal_ip, bridge_index, mtu)
                 .await?;
             netlink.reconcile_fdb(&vxlan, vxlan_index, peers).await?;
             // Not fatal: containers work without it, it only stops this

@@ -48,7 +48,7 @@ pub fn zone_origin(cfg: &cl_config::ClusterConfig) -> String {
 /// One resolvable name in the internal zone, independent of any DNS wire format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneRecord {
-/// Label relative to the zone origin, e.g. `web.gitlab`, `tasks.web.gitlab` or a bare node name.
+    /// Label relative to the zone origin, e.g. `web.gitlab`, `tasks.web.gitlab` or a bare node name.
     pub name: String,
     /// Every address this name should answer with. More than one means the
     /// resolver round robins, same as Swarm's `tasks.<service>` names.
@@ -206,7 +206,7 @@ struct OverrideZone {
 struct Overrides {
     handler: InMemoryZoneHandler,
     names: BTreeSet<LowerName>,
-/// Clients that get no override and go upstream like any outside name.
+    /// Clients that get no override and go upstream like any outside name.
     skip_clients: BTreeSet<IpAddr>,
 }
 
@@ -300,7 +300,7 @@ impl ZoneHandler for OverrideZone {
 /// the grant in place by the time the container learns the address.
 #[async_trait::async_trait]
 pub trait AnswerObserver: Send + Sync {
-/// `name` is lowercase without trailing dot; `answers` are IPv4 addresses with TTL seconds.
+    /// `name` is lowercase without trailing dot; `answers` are IPv4 addresses with TTL seconds.
     async fn observe(&self, client: IpAddr, name: &str, answers: &[(Ipv4Addr, u32)]);
 }
 
@@ -470,7 +470,7 @@ pub struct InternalDns {
 }
 
 impl InternalDns {
-/// `origin` is the internal zone domain (or a default such as `cluster.local.`).
+    /// `origin` is the internal zone domain (or a default such as `cluster.local.`).
     pub fn new(origin: Name, records: &[ZoneRecord]) -> Result<Self> {
         let handler = build_authority(&origin, records)?;
         Ok(Self {
@@ -481,12 +481,12 @@ impl InternalDns {
         })
     }
 
-/// Have `observer` told of every upstream answer from now on, running servers included.
+    /// Have `observer` told of every upstream answer from now on, running servers included.
     pub fn set_observer(&self, observer: Arc<dyn AnswerObserver>) {
         *self.observer.write() = Some(observer);
     }
 
-/// Replace the zone content in place when placement changes, without dropping queries.
+    /// Replace the zone content in place when placement changes, without dropping queries.
     pub async fn reload(&self, records: &[ZoneRecord]) -> Result<()> {
         let handler = build_authority(&self.origin, records)?;
         self.zone.swap(handler).await;
@@ -510,7 +510,7 @@ impl InternalDns {
         Ok(())
     }
 
-/// Serve on `bind_addr`; names outside the zone go to the host resolvers (`/etc/resolv.conf`).
+    /// Serve on `bind_addr`; names outside the zone go to the host resolvers (`/etc/resolv.conf`).
     pub async fn serve(&self, bind_addr: SocketAddr) -> Result<()> {
         let forwarder: Arc<dyn ZoneHandler> = Arc::new(ObservedForwarder {
             inner: build_forwarder()?,
@@ -751,6 +751,6 @@ mod tests {
 
         let ip2: Ipv4Addr = "10.244.0.9".parse().unwrap();
         dns.reload(&build_records([(&a, ip2)], [])).await.unwrap();
-// No getter on the live zone by design; no error here means the swap worked (see `answer` above).
+        // No getter on the live zone by design; no error here means the swap worked (see `answer` above).
     }
 }

@@ -501,10 +501,7 @@ pub struct HostObjects {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SweepAction {
-    RemoveChain {
-        table: &'static str,
-        chain: String,
-    },
+    RemoveChain { table: &'static str, chain: String },
     DelRule(PolicyRule),
     DelIpRule(crate::container_net::IpRule),
     FlushTable(u32),
