@@ -1,5 +1,4 @@
-//! The `clouduler secret` commands. These talk to a running daemon over the
-//! node RPC channel, the same way the `stack` commands do.
+//! The `clouduler secret` commands.
 
 use std::io::Read;
 use std::path::Path;
@@ -79,12 +78,8 @@ fn charset_of(name: &str) -> Result<cl_api::secrets::Charset> {
     }
 }
 
-/// Seal `value` (or `file`, or stdin if neither is given) and store it as a
-/// cluster-wide secret, not owned by any stack.
-///
-/// Sealing happens here rather than on the cluster, for the same reason it
-/// does for a stack's bundled secrets: plaintext must never travel through
-/// the raft log, so this needs the cluster key.
+/// Seal `value` (or `file`, or stdin) and store it as a cluster-wide secret.
+/// Sealed here because plaintext must never travel through the raft log.
 pub async fn set(
     cfg: &ClusterConfig,
     name: &str,
@@ -136,9 +131,8 @@ async fn store(
     Ok(())
 }
 
-/// Replace an existing secret's value and, with `restart`, roll the instances
-/// that run an older revision. The restart is scheduled in the daemon and runs
-/// after this returns.
+/// Replace a secret's value; with `restart`, roll instances running an older
+/// revision (scheduled in the daemon, runs after this returns).
 pub async fn rotate(
     cfg: &ClusterConfig,
     name: &str,

@@ -1,9 +1,6 @@
-//! The leader-gated background loop that drives one self-update run: resolves
-//! the target release, waits for every node to fetch its architecture's
-//! asset, then rolls the restart out one node at a time. Modeled on
-//! `cl_sched::run::Scheduler`: only the leader decides, every node's own
-//! worker loop carries out the parts that touch its own filesystem and its
-//! own binary.
+//! Leader-gated loop that drives one self-update run: resolves the target
+//! release, waits for every node to fetch its asset, then rolls the restart
+//! out one node at a time. Workers handle the parts touching their own node.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,20 +18,14 @@ use crate::plan::{
 };
 use crate::release;
 
-/// How often the leader checks the run's progress. Same order of magnitude
-/// as `cl_sched::run::Scheduler`'s sweep: fast enough that a stalled step
-/// shows up in the ui promptly, slow enough not to spam raft with reads.
+/// How often the leader checks the run's progress.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How long a triggered restart may take before the run is failed. Generous:
-/// covers the binary swap, a services restart, and this process rejoining
-/// raft and reporting a fresh `binary_hash`.
+/// How long a triggered restart may take before the run is failed.
 const RESTART_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Restart order: workers first, then non-leader managers, then the leader
-/// last, each group sorted by name for determinism. Keeping the leader
-/// stable until the very end means the raft leadership does not move mid
-/// rollout, and every node's restart is driven by the same orchestrator loop.
+/// Restart order: workers, then non-leader managers, then the leader last (by
+/// name within each group), so raft leadership does not move mid-rollout.
 pub fn restart_order(nodes: &BTreeMap<String, NodeState>, leader: &str) -> Vec<String> {
     let mut workers: Vec<&String> = nodes
         .iter()
@@ -72,20 +63,15 @@ pub struct Orchestrator {
     pub cluster: Arc<ClusterNode>,
     pub http: reqwest::Client,
     pub cluster_config: cl_config::ClusterConfig,
-    /// Live rather than a snapshot: a node started with no key still gets
-    /// self-update working once one is delivered to it automatically. `Arc`
-    /// because `ClusterKey` is deliberately not `Clone`, and this needs to be
-    /// held across an `.await` (the restart request), which a `watch::Ref`
-    /// guard cannot safely do.
+    /// Live so a key delivered later enables self-update. `Arc` because
+    /// `ClusterKey` is not `Clone` and is held across an `.await`.
     pub cluster_key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
-    /// Live config, so toggling the periodic check or its interval takes
-    /// effect without a restart (`cluster_config` above is a boot snapshot).
+    /// Live config, so the periodic check and interval change without a restart.
     pub config_rx: tokio::sync::watch::Receiver<Arc<cl_config::ClusterConfig>>,
 }
 
 impl Orchestrator {
-    /// Run forever. Only does anything while this node is the raft leader and
-    /// a run is in progress; a follower or an idle cluster just polls.
+    /// Run forever; only acts while this node is leader and a run is active.
     pub async fn run(self) {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         loop {
@@ -102,10 +88,9 @@ impl Orchestrator {
         }
     }
 
-    /// Look up the latest release when the configured interval has passed
-    /// since the last stored check, and record the answer in raft. Driven by
-    /// the stored timestamp rather than a local timer so a leader change or a
-    /// restart does not trigger an extra GitHub request.
+    /// Look up the latest release once the interval has passed since the stored
+    /// check. Keyed on the stored timestamp so leader changes do not cause extra
+    /// GitHub requests.
     async fn check_for_update(&self) -> Result<(), String> {
         let cfg = self.config_rx.borrow().clone();
         let Some(self_update) = cfg.self_update.as_ref() else {
@@ -218,9 +203,8 @@ impl Orchestrator {
         }
     }
 
-    /// Resolve the configured release (once) into a tag and a per-arch asset
-    /// map, then hand every node its assignment. Every node moves straight to
-    /// `Fetching`: there is no build step left to gate on.
+    /// Resolve the release once into a tag and per-arch assets, then assign
+    /// every node (straight to `Fetching`).
     async fn resolve_release(&self, mut run: UpdateRunState, revision: u64) -> Result<(), String> {
         let Some(self_update) = self.cluster_config.self_update.as_ref() else {
             run.fail("no self-update release is configured", now());
@@ -351,10 +335,9 @@ impl Orchestrator {
             .map(|node| node.name.clone())
     }
 
-    /// Writes the run back only if nobody else has since: a worker's
-    /// `Ready` report landing between this tick's read and write would
-    /// otherwise be overwritten with the stale copy (and the reverse). A lost
-    /// race is an error; the next tick re-reads and redoes it.
+    /// Writes only if nobody else has since, so a concurrent worker report is
+    /// not overwritten with a stale copy. A lost race is an error; the next tick
+    /// redoes it.
     async fn save(&self, run: UpdateRunState, revision: u64) -> Result<(), String> {
         let response = self
             .cluster
@@ -396,12 +379,10 @@ fn restarting_node(run: &UpdateRunState) -> Option<String> {
         .map(|(name, _)| name.clone())
 }
 
-/// Read the current run state out of applied cluster state, if any.
 pub fn load_run(state: &cl_raft::ClusterState) -> Option<UpdateRunState> {
     load_run_revision(state).map(|(run, _)| run)
 }
 
-/// `load_run`, plus the revision it was read at, for `put_run_request`.
 pub fn load_run_revision(state: &cl_raft::ClusterState) -> Option<(UpdateRunState, u64)> {
     let entry = state.configs.get(RUN_CONFIG)?;
     let raw = entry.decode().ok()?;

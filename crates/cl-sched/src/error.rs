@@ -9,9 +9,7 @@ pub enum SchedError {
         source: cl_config::ConfigError,
     },
 
-    /// No node satisfies the instance's requirements. The reason lists what
-    /// ruled each candidate out, because "unschedulable" on its own is useless
-    /// when you are trying to work out which drive you forgot to implement.
+    /// No node satisfies the instance's requirements; the reason lists what ruled each candidate out.
     #[error("cannot place {instance}: {reason}")]
     Unplaceable { instance: String, reason: String },
 
@@ -25,9 +23,8 @@ pub enum SchedError {
         instance: String,
     },
 
-    /// A volume mount the spec builder refuses. Deterministic: retrying, or
-    /// moving to another node, cannot change the answer, so the reconciler
-    /// reports it instead of starting the container without the volume.
+    /// A volume mount the spec builder refuses. Deterministic, so the reconciler reports it
+    /// instead of starting the container without the volume.
     #[error("{instance}: refusing volume {drive}/{volume}: {reason}")]
     BadVolume {
         instance: String,
@@ -39,8 +36,7 @@ pub enum SchedError {
     #[error("{name} is unusable: {reason}")]
     BadObject { name: String, reason: String },
 
-    /// This node holds no cluster key, so it cannot open the secret. Starting
-    /// the container anyway would give it an empty or encrypted file.
+    /// This node holds no cluster key and cannot open the secret.
     #[error("no cluster key on this node, cannot mount secret {name} for {instance}")]
     NoSecretKey { name: String, instance: String },
 
@@ -61,8 +57,7 @@ pub enum SchedError {
     #[error("docker: {0}")]
     Docker(#[from] cl_docker::DockerError),
 
-    /// Boxed because openraft's storage error is 224 bytes and would otherwise
-    /// bloat every Result in this crate.
+    /// Boxed because openraft's storage error is 224 bytes.
     #[error("cluster: {0}")]
     Cluster(#[from] Box<cl_raft::ClusterError>),
 }

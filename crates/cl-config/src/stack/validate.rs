@@ -13,11 +13,9 @@ use super::extensions::DockerSocketMode;
 use super::port::Protocol;
 use super::StackFile;
 
-/// `volume_sync.VOL.enabled` was accepted for a long time and never did
-/// anything. Replication cannot be switched off for one volume: a failover
-/// only starts an instance on a node holding a current replica of every
-/// volume it mounts, so a volume that is never copied would pin the service
-/// to its node forever.
+/// `volume_sync.VOL.enabled` was accepted but never did anything. Replication
+/// cannot be off per volume: failover needs a current replica of every mounted
+/// volume, so a never-copied volume would pin the service to its node forever.
 fn enabled_rejected(path: String) -> ConfigError {
     ConfigError::invalid(
         path,
@@ -74,9 +72,8 @@ impl StackFile {
         Ok(())
     }
 
-    /// The clouduler socket only ever serves read-only image endpoints, so a
-    /// stack asking for it read-write has misunderstood what it is getting.
-    /// Refused rather than silently downgraded.
+    /// The clouduler socket only serves read-only image endpoints; a read-write
+    /// request is refused rather than silently downgraded.
     fn validate_docker_sockets(&self) -> Result<()> {
         for (name, svc) in &self.services {
             let Some(socket) = svc
@@ -96,9 +93,8 @@ impl StackFile {
         Ok(())
     }
 
-    /// Replica counts are capped at `MAX_REPLICAS`: the scheduler materializes
-    /// one record per replica every pass, so a typo like `replicas: 4000000000`
-    /// would otherwise take down whichever node is leader.
+    /// Replica counts are capped at `MAX_REPLICAS`: the scheduler builds a record
+    /// per replica every pass, so `replicas: 4000000000` would take down the leader.
     fn validate_replicas(&self) -> Result<()> {
         for (name, svc) in &self.services {
             let replicas = svc.deploy.as_ref().and_then(|d| d.replicas);
@@ -112,9 +108,8 @@ impl StackFile {
         Ok(())
     }
 
-    /// A memory size whose digits parse but overflow a u64 once the unit is
-    /// applied is rejected. (Other unparseable sizes are still ignored, as
-    /// they always were.)
+    /// A memory size that overflows a u64 once the unit is applied is rejected
+    /// (other unparseable sizes are still ignored).
     fn validate_memory_sizes(&self) -> Result<()> {
         for (name, svc) in &self.services {
             let Some(resources) = svc.deploy.as_ref().and_then(|d| d.resources.as_ref()) else {
@@ -171,10 +166,8 @@ impl StackFile {
         Ok(())
     }
 
-    /// `write: true` feeds a container's edits back into the cluster's copy
-    /// of the object — fine for a config, never for a secret: nothing should
-    /// be able to overwrite a secret's plaintext by editing its own mounted
-    /// copy of it.
+    /// `write: true` feeds container edits back into the cluster object: fine for
+    /// a config, never for a secret (its plaintext must not be overwritable).
     fn validate_writable_secrets(&self) -> Result<()> {
         for (name, svc) in &self.services {
             for (idx, secret) in svc.secrets.iter().enumerate() {
@@ -189,11 +182,9 @@ impl StackFile {
         Ok(())
     }
 
-    /// A `write: true` config is copied per instance, and every copy's edits
-    /// are fed back into the one cluster object. Two writers (two services, or
-    /// several replicas of one) edit from copies that drift apart and replace
-    /// each other's changes, so only a single instance may hold it writable;
-    /// everything else mounts it read-only.
+    /// A `write: true` config is copied per instance and every copy feeds back
+    /// into one object; multiple writers overwrite each other, so only a single
+    /// instance may hold it writable.
     fn validate_single_config_writer(&self) -> Result<()> {
         let mut writers: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, svc) in &self.services {
@@ -457,9 +448,9 @@ impl StackFile {
         Ok(())
     }
 
-    /// `env_file` is parsed but its variables are never injected into the
-    /// container, so a service relying on it would start without them. The web
-    /// UI rewrites it into `environment` and secrets before the spec is sent.
+    /// `env_file` is parsed but never injected, so a service relying on it would
+    /// start without its variables. The web UI rewrites it into `environment`
+    /// and secrets before the spec is sent.
     fn validate_env_file(&self) -> Result<()> {
         for (name, svc) in &self.services {
             if !svc.env_file.is_empty() {
@@ -521,9 +512,8 @@ impl StackFile {
                             ),
                         ));
                     }
-                    // Rejected rather than ignored: silently dropping it
-                    // would leave someone believing their backend is seeing
-                    // real client addresses when it never will.
+                    // Rejected rather than ignored: silently dropping it would leave someone
+                    // believing the backend sees real client addresses.
                     if expose.proxy_protocol && expose.protocol == Protocol::Udp {
                         return Err(ConfigError::invalid(
                             at,
@@ -550,19 +540,14 @@ impl StackFile {
     }
 
     /// A network no node implements can never host a placement, so a service
-    /// naming one could never schedule. Same idiom as `validate_drives` in
-    /// the cluster config, but per stack since that's where a service's
-    /// `networks:` list lives.
+    /// naming one could never schedule.
     fn validate_networks_implemented(&self, cluster: &ClusterConfig) -> Result<()> {
         use crate::cluster::NetworkKind;
 
         for (name, svc) in &self.services {
             for net in &svc.networks {
-                // A nat network declares no per-node address at all: every
-                // node implements it identically, so there is nothing to
-                // check here the way there is for an egress or wireguard
-                // interface.
-                // A container network is likewise implemented by every node.
+                // Nat and container networks are implemented by every node; no per-node
+                // address to check.
                 if matches!(
                     cluster.networks.get(net).map(|n| n.kind),
                     Some(NetworkKind::Nat | NetworkKind::Container)
@@ -597,16 +582,11 @@ impl StackFile {
         Ok(())
     }
 
-    /// A volume mount whose subpath is exactly `.` binds a drive's real root
-    /// directory straight into the container (`cl_drive::registry::resolve_relative`
-    /// resolves it to the drive root itself), bypassing the scoped,
-    /// per-volume path every other mount goes through. That is only safe when
-    /// there is exactly one node holding the real directory and this service
-    /// is pinned there: unpinned, or with more than one node able to hold the
-    /// data, the scheduler could place the container against a different
-    /// node's copy (or, for a served drive, an NFS mountpoint of somebody
-    /// else's copy) than the last time it ran, silently diverging from
-    /// whatever else touches that drive.
+    /// A volume subpath of exactly `.` binds a drive's real root into the
+    /// container (see `cl_drive::registry::resolve_relative`), bypassing the
+    /// scoped per-volume path. Only safe with exactly one node holding the real
+    /// directory and the service pinned there; otherwise the scheduler could
+    /// place it against a different copy and silently diverge.
     fn validate_whole_drive_mounts(&self, cluster: &ClusterConfig) -> Result<()> {
         for (name, svc) in &self.services {
             for (idx, vol) in svc.volumes.iter().enumerate() {
@@ -763,11 +743,8 @@ impl StackFile {
                         ),
                     ));
                 };
-                // Only a public network's router, or a wireguard tunnel's far
-                // end forwarding a port back in (e.g. a VPN provider's port
-                // forwarding feature), can make a raw port reachable from
-                // outside. At least one node must have it marked open, or
-                // this could never actually be reached.
+                // Only a public network's router or a wireguard tunnel's far end can make a
+                // raw port reachable from outside; at least one node must have it open.
                 use crate::cluster::NetworkKind;
                 if matches!(net.kind, NetworkKind::Public | NetworkKind::Wireguard) {
                     let wanted = crate::cluster::OpenPort {
@@ -802,10 +779,8 @@ impl StackFile {
         Ok(())
     }
 
-    /// A service may attach to at most one egress network: two would mean
-    /// two conflicting default routes for its outbound traffic, which is not
-    /// a thing. This is layered on top of whatever the stack already allows
-    /// for its other (overlay) networks.
+    /// A service may attach to at most one egress network: two would give it
+    /// conflicting default routes. Layered on top of the other (overlay) networks.
     fn validate_service_network_kinds(&self, cluster: &ClusterConfig) -> Result<()> {
         use crate::cluster::NetworkKind;
 
@@ -840,11 +815,9 @@ impl StackFile {
         Ok(())
     }
 
-    /// The one declared network this stack's containers get an overlay on,
-    /// if any. An internal or private network wins when the stack declares
-    /// one, since that is the network whose domain its containers should
-    /// resolve on; failing that, a public one. A stack whose networks are all
-    /// egress, wireguard or nat needs no overlay.
+    /// The one declared network this stack's containers get an overlay on, if
+    /// any: internal or private wins (its domain is what containers resolve on),
+    /// else public. All egress, wireguard or nat needs no overlay.
     pub fn overlay_network<'a>(&'a self, cluster: &ClusterConfig) -> Option<&'a str> {
         use crate::cluster::NetworkKind;
 
@@ -860,10 +833,9 @@ impl StackFile {
             .map(String::as_str)
     }
 
-    /// A pinned `x-clouduler.subnet` needs a stack with an overlay network,
-    /// must be a real network address no smaller than a /29, and must not
-    /// overlap any subnet declared in the cluster config. Collisions with
-    /// other stacks are checked at deploy time, where those stacks are known.
+    /// A pinned `x-clouduler.subnet` needs an overlay network, must be a real
+    /// network address no smaller than a /29, and must not overlap any cluster
+    /// subnet. Collisions with other stacks are checked at deploy time.
     fn validate_network_subnets(&self, cluster: &ClusterConfig) -> Result<()> {
         use crate::cluster::NetworkKind;
 
@@ -1000,9 +972,7 @@ impl StackFile {
                 ));
             }
             if let Some(net) = self.egress_network(name, cluster) {
-                // A nat network needs no interface address anywhere: every
-                // node implements it the same way, so a pin to any node is
-                // always fine.
+                // A nat network needs no interface address; a pin to any node is fine.
                 let is_nat = matches!(
                     cluster.networks.get(&net).map(|n| n.kind),
                     Some(crate::cluster::NetworkKind::Nat | crate::cluster::NetworkKind::Container)
@@ -1053,10 +1023,9 @@ impl StackFile {
     }
 }
 
-/// Nodes holding a real, non-mountpoint local directory for `drive_name`: for
-/// a replicated drive, every node that implements it; for a served drive,
-/// only its `served_by` candidates (every other implementing node gets an NFS
-/// mountpoint of whichever candidate is currently active, not real data).
+/// Nodes holding a real local directory for `drive_name`: every implementing
+/// node for a replicated drive, only the `served_by` candidates for a served
+/// one (others get an NFS mountpoint).
 fn drive_root_holders(cluster: &ClusterConfig, drive_name: &str) -> BTreeSet<String> {
     let Some(drive) = cluster.drives.get(drive_name) else {
         return BTreeSet::new();
@@ -1083,8 +1052,8 @@ fn drive_root_holders(cluster: &ClusterConfig, drive_name: &str) -> BTreeSet<Str
     }
 }
 
-/// Whether `raw` is all digits (plus an optional unit letter) but too big for
-/// a u64 - the one way `parse_memory_bytes` fails that is worth an error.
+/// Whether `raw` is all digits (plus an optional unit letter) but overflows a
+/// u64, the one `parse_memory_bytes` failure worth an error.
 fn memory_overflows(raw: &str) -> bool {
     let raw = raw.trim();
     let digits = raw.trim_end_matches(|c: char| c.is_ascii_alphabetic());
@@ -1094,12 +1063,11 @@ fn memory_overflows(raw: &str) -> bool {
         && digits.trim().chars().all(|c| c.is_ascii_digit())
 }
 
-/// A stack name ends up in container names (`<stack>_<service>_<index>`), in
-/// overlay network names and in the git backup's `stacks/<name>.yaml`, so it
-/// has to be safe in all of them: lowercase letters, digits, `-` and `_`,
-/// starting and ending with a letter or digit, at most 63 bytes. `_` is
-/// allowed because existing stacks use it; the ambiguity it creates in
-/// `<stack>_<network>` is handled by `cl_sched::run::overlay_collision`.
+/// A stack name ends up in container names, overlay network names and the git
+/// backup's `stacks/<name>.yaml`: lowercase letters, digits, `-` and `_`,
+/// starting and ending alphanumeric, at most 63 bytes. `_` is allowed for
+/// existing stacks; the `<stack>_<network>` ambiguity is handled by
+/// `cl_sched::run::overlay_collision`.
 pub fn validate_stack_name(name: &str) -> std::result::Result<(), String> {
     let invalid = |why: &str| Err(format!("invalid stack name {name:?}: {why}"));
     if name.is_empty() || name.len() > 63 {
@@ -1391,8 +1359,7 @@ services:
         assert!(err.to_string().contains("already published by"));
     }
 
-    /// Silently ignoring it would leave someone believing their backend is
-    /// seeing real client addresses when it never can.
+    /// Silently ignoring it would mislead about real client addresses.
     #[test]
     fn proxy_protocol_on_a_udp_port_is_rejected() {
         let raw = r#"
@@ -1459,8 +1426,7 @@ services:
         assert!(expose.proxy_protocol);
     }
 
-    /// The default has to stay off: a backend that does not speak PROXY
-    /// protocol sees a malformed request the moment one appears.
+    /// Must default off: a backend not speaking PROXY protocol sees a malformed request.
     #[test]
     fn proxy_protocol_defaults_to_off() {
         let raw = r#"

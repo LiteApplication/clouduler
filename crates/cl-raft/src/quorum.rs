@@ -1,8 +1,6 @@
-//! The quorum gate.
-//!
-//! A node that cannot see a majority of managers must not start containers.
-//! Containers already running are left alone: killing them on a network blip
-//! would turn a partition into an outage.
+//! The quorum gate: a node that cannot see a majority of managers must not start
+//! containers; running ones are left alone, since killing them on a blip would
+//! turn a partition into an outage.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -13,23 +11,18 @@ use crate::contact::Contact;
 use crate::ids::NodeId;
 use crate::types::Node;
 
-/// Raft's own view of this node, the input to the gate.
 pub type Metrics = openraft::RaftMetrics<NodeId, Node>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuorumStatus {
-    /// True when a majority of voters is reachable.
     pub has_quorum: bool,
-    /// Current leader, if one is known.
     pub leader: Option<NodeId>,
-    /// Voters this node can currently reach, including itself.
     pub reachable: BTreeSet<NodeId>,
-    /// Total voters in the cluster.
     pub voters: usize,
 }
 
 impl QuorumStatus {
-    /// Nothing is known yet, so assume the worst and hold work back.
+    /// Nothing known yet: assume the worst.
     pub fn unknown() -> Self {
         Self {
             has_quorum: false,
@@ -39,7 +32,6 @@ impl QuorumStatus {
         }
     }
 
-    /// How many voters must be reachable.
     pub fn needed(&self) -> usize {
         self.voters / 2 + 1
     }
@@ -49,7 +41,6 @@ impl QuorumStatus {
     }
 }
 
-/// Compute the gate from what raft reports.
 pub fn evaluate(
     voters: &BTreeSet<NodeId>,
     reachable: BTreeSet<NodeId>,
@@ -66,13 +57,12 @@ pub fn evaluate(
     }
 }
 
-/// Derive the gate from what raft reports plus when the leader last got in touch.
+/// Derive the gate from raft's report plus when the leader last got in touch.
 ///
-/// A leader knows it holds quorum because a majority acknowledged it recently.
-/// A follower cannot use `current_leader` alone: it keeps reporting the last
-/// leader it saw long after that node has gone, and a learner never runs an
-/// election to find out otherwise. So a follower needs both a known leader and
-/// recent traffic from it. `reachable` is best effort and only there for the ui.
+/// A leader holds quorum if a majority acknowledged it recently. A follower
+/// cannot trust `current_leader` alone (it keeps naming a vanished leader, and
+/// a learner never elects), so it needs a known leader and recent traffic.
+/// `reachable` is best effort, for the ui.
 pub fn from_metrics(
     metrics: &Metrics,
     leader_contact: &Contact,
@@ -108,7 +98,6 @@ pub fn from_metrics(
     }
 }
 
-/// Read side of the gate, cloned into every subsystem that needs to check it.
 #[derive(Clone)]
 pub struct QuorumWatch {
     rx: watch::Receiver<QuorumStatus>,
@@ -131,10 +120,9 @@ impl QuorumWatch {
         self.rx.borrow().leader
     }
 
-    /// Wait until the gate opens. Used by subsystems that should idle rather
-    /// than fail while the cluster is degraded.
+    /// Wait until the gate opens.
     pub async fn wait_for_quorum(&mut self) {
-        // The borrow must be dropped before awaiting, hence the explicit check.
+        // The borrow must be dropped before awaiting.
         if self.rx.borrow_and_update().has_quorum {
             return;
         }
@@ -145,7 +133,6 @@ impl QuorumWatch {
         }
     }
 
-    /// Wait until this node is or is not the leader, whichever it is not now.
     pub async fn changed(&mut self) -> bool {
         self.rx.changed().await.is_ok()
     }

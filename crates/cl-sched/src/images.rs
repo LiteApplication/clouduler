@@ -1,29 +1,16 @@
 //! Disk cleanup for docker images this node pulled for stack services.
 //!
-//! Nothing else ever removes an image, so every update would otherwise leave
-//! the old one behind on every node. The rule, per repository a stack service
-//! uses on this node:
+//! Nothing else removes images, so each update would leave the old one behind. Per
+//! repository a stack service uses here, keep:
+//! - any image a container uses (running or stopped);
+//! - any image a service here is configured with (tag or pinned digest);
+//! - the newest remaining image, as the rollback target. The rest are removed.
 //!
-//! - an image any container uses (running or stopped, clouduler's or not) is
-//!   kept;
-//! - an image a service on this node is configured with right now (by tag or
-//!   by pinned digest) is kept: it is the one running or the one about to run;
-//! - of the remaining images of that repository, the newest is kept as the
-//!   rollback target and the rest are removed.
-//!
-//! So after a successful update the new image and the one just before it stay.
-//! A failed update keeps both, because cleanup does not run while an update on
-//! this node is still in flight and the rule above never touches the pair.
-//!
-//! A repository this node has stopped wanting (its stack was removed or moved
-//! away) is dropped entirely, but only after `RETIRE_AFTER_SECS`. Which
-//! repositories clouduler pulled is remembered in a small file in the node's
-//! data directory: an image of a repository that was never a stack service
-//! here is never touched.
-//!
-//! Images are removed by ID, without force, so docker refuses one that is in
-//! use. An image that carries several tags is untagged name by name instead,
-//! because docker refuses to delete such an image by ID without force.
+//! Cleanup does not run while an update on this node is in flight, so a failed update
+//! keeps both images. A repository no longer wanted here is dropped entirely after
+//! `RETIRE_AFTER_SECS`; repositories clouduler never pulled are never touched (the pulled
+//! set is persisted in the data dir). Images are removed by ID without force; one with
+//! several tags is untagged name by name, since docker refuses to delete it by ID.
 
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
@@ -147,17 +134,14 @@ fn repos_of_image(image: &LocalImage) -> BTreeSet<String> {
         .collect()
 }
 
-/// Which images to delete. Pure: everything it needs is passed in.
-///
-/// - `used`: image IDs of every container on the node, any state, any owner.
+/// Which images to delete. Pure.
+/// - `used`: image IDs of every container on the node.
 /// - `wanted`: what this node's services are configured to run.
-/// - `retired`: repositories to clear out completely (past the grace period).
+/// - `retired`: repositories to clear out completely.
 ///
-/// A repository is only touched when it is wanted or retired, and an image is
-/// only touched when every repository it is known under is. Images with no
-/// name at all (neither tag nor digest) are never touched. An image that
-/// lost its tag to a newer one but keeps its `repo@sha256` digest still counts
-/// as a version of that repository.
+/// An image is touched only when every repository it is known under is wanted or retired.
+/// Nameless images are never touched; an image that lost its tag but keeps its
+/// `repo@sha256` digest still counts as a version.
 pub fn images_to_remove(
     images: &[LocalImage],
     used: &BTreeSet<String>,
@@ -284,10 +268,8 @@ impl ImageGc {
         }
     }
 
-    /// Whether a sweep is due, and if so claim it. `succeeded` lists this
-    /// node's updates that just finished successfully (instance, record
-    /// time); `busy` means an update or pull is still in flight, which defers
-    /// everything so a failed or running update keeps both images.
+    /// Whether a sweep is due, claiming it. `succeeded` lists this node's just-finished
+    /// successful updates; `busy` (update or pull in flight) defers everything.
     pub fn due(&self, succeeded: &[(String, i64)], busy: bool) -> bool {
         if busy {
             return false;

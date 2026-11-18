@@ -1,10 +1,6 @@
-//! The scheduler loop.
-//!
-//! Two jobs on one timer. The leader decides where everything should run and
-//! writes those decisions through raft. Every node, leader or not, then makes
-//! its own docker match the decisions that name it. Splitting it this way means
-//! a node never waits on the leader to start a container it has already been
-//! given, and the leader never has to reach into anyone else's docker.
+//! The scheduler loop: two jobs on one timer. The leader decides placement and writes it
+//! through raft; every node then makes its own docker match the decisions naming it, so a
+//! node never waits on the leader to start what it was given.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -32,17 +28,11 @@ use crate::progress::{unix_now, UpdateReporter};
 use crate::reconcile::{self, Action, PullTracker, Reconciler, Target};
 use crate::spec;
 
-/// How often to sweep, on top of reacting to state changes. A periodic pass
-/// catches drift docker never told us about, like a container someone stopped
-/// by hand.
+/// Sweep interval on top of reacting to state changes; catches drift like a hand-stopped container.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
-/// How many times a container needs restarting within `CRASH_LOOP_WINDOW`
-/// before this node gives up on running it in place and asks the leader to
-/// move it elsewhere. Three catches a genuine loop (an OOM kill, a crash on
-/// startup) within a minute or so while still giving a single transient
-/// failure - a dockerd blip, a slow pull racing the sweep - room to recover
-/// on its own.
+/// Restarts within `CRASH_LOOP_WINDOW` before this node asks the leader to move the instance.
+/// Three catches a genuine loop but lets one transient failure recover.
 const CRASH_LOOP_THRESHOLD: usize = 3;
 
 /// How long a write-back waits for its own commit to show up in this node's
@@ -52,75 +42,52 @@ const CONFIG_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The window `CRASH_LOOP_THRESHOLD` is counted over.
 const CRASH_LOOP_WINDOW: Duration = Duration::from_secs(120);
 
-/// First delay between in-place restarts once an instance has crash-looped
-/// everywhere it can run (see `try_reschedule_away`), doubled for each further
-/// loop up to `CRASH_BACKOFF_MAX`. Without it such an instance is restarted
-/// every sweep forever, which for a container that dies on start is a busy
-/// loop of docker calls, pulls and log noise.
+/// First in-place restart delay once an instance has crash-looped everywhere (see
+/// `try_reschedule_away`), doubled per loop up to `CRASH_BACKOFF_MAX`; otherwise a container
+/// that dies on start busy-loops docker calls, pulls and logs.
 const CRASH_BACKOFF_BASE: Duration = Duration::from_secs(30);
 
 /// Cap on the in-place restart delay.
 const CRASH_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
 
-/// An in-place restart backoff is forgotten once this long has passed after
-/// it expired without the instance needing another restart, i.e. it has
-/// stayed up long enough to be considered healthy again.
+/// A backoff is forgotten once the instance stays up this long after it expired.
 const CRASH_BACKOFF_FORGET_AFTER: Duration = Duration::from_secs(10 * 60);
 
-/// How long a finished (started or failed) update stays in the replicated
-/// record, so whoever started it can still see how it ended.
+/// How long a finished update stays in the replicated record.
 const FINISHED_UPDATE_TTL_SECS: i64 = 15 * 60;
 
-/// How long an update may sit in one unfinished phase before it is presumed
-/// abandoned: queued by a node that went away before getting to it, or
-/// waiting on a container the reconciler never got to create.
+/// How long an update may sit in one unfinished phase before it is presumed abandoned.
 const STALLED_UPDATE_TTL_SECS: i64 = 60 * 60;
 
-/// How long an update may sit `Queued`. A rolling batch queues everything
-/// before starting, so a long batch legitimately waits, but 15 minutes is
-/// beyond what one instance's turn takes (`UPDATE_FINISH_TIMEOUT` in the api
-/// bounds each earlier one).
+/// How long an update may sit `Queued`: a rolling batch queues everything first, but 15
+/// minutes exceeds one instance's turn (`UPDATE_FINISH_TIMEOUT` in the api bounds earlier ones).
 const QUEUED_UPDATE_TTL_SECS: i64 = 15 * 60;
 
 pub struct Scheduler {
     node: String,
     cluster: Arc<ClusterNode>,
-    /// A live view of the docker connection rather than a snapshot: a node
-    /// started before dockerd was up, or whose dockerd is later restarted on
-    /// its own, keeps working once `docker` is reconnected, without a daemon
-    /// restart. `None` is a normal, temporary state, not an error.
+    /// A live view of the docker connection, so a late or restarted dockerd works without a
+    /// daemon restart. `None` is a normal temporary state.
     docker: cl_docker::DockerHandle,
     materializer: Materializer,
     /// Internal DNS zone, written into every container's search list.
     zone: Option<String>,
-    /// The config this node booted with, used only as a fallback until the
-    /// replicated copy is available (`live_config`). Which networks are
-    /// egress- or public-kind is re-derived from the *live* config on every
-    /// pass rather than frozen from this at construction, so a rename or
-    /// kind change takes effect on the next sweep instead of needing a
-    /// restart.
+    /// Boot config, a fallback until the replicated copy is available (`live_config`). Egress and
+    /// public network sets are re-derived from the live config each pass.
     boot_config: ClusterConfig,
     /// Instances this node's reconciler is currently pulling the image for,
     /// shared with the api so it can report a "pulling" instance state.
     pulling: PullTracker,
-    /// Recent `Action::Start` timestamps per instance this node has had to
-    /// restart. Node-local and in-memory only, never persisted or shared:
-    /// enough to notice a container this node keeps failing to keep running
-    /// (an OOM kill, a crash on start) without needing a raft round trip just
-    /// to count it. See `note_restart_and_check_crash_loop`.
+    /// Recent `Action::Start` timestamps per instance; node-local, in memory, to notice a
+    /// container this node keeps failing to keep running. See `note_restart_and_check_crash_loop`.
     restarts: Arc<RwLock<BTreeMap<InstanceId, VecDeque<Instant>>>>,
-    /// In-place restart delays for instances that crash-looped on every node
-    /// they could be moved to. Node-local like `restarts`; losing it on a
-    /// daemon restart merely restarts the backoff from its first step.
+    /// In-place restart delays for instances that crash-looped on every node; node-local, losing
+    /// it just restarts the backoff.
     backoffs: Arc<RwLock<BTreeMap<InstanceId, RestartBackoff>>>,
-    /// Unix seconds this scheduler was built, i.e. roughly when this daemon
-    /// started. An in-flight update on this node older than that was being
-    /// driven by a process that no longer exists.
+    /// Unix seconds this scheduler was built; an older in-flight update was driven by a dead process.
     booted_at: i64,
-    /// Rung when the fence releases, so a node that just regained quorum
-    /// starts its containers now instead of waiting out the sweep interval.
+    /// Rung when the fence releases so a node regaining quorum starts containers now.
     wake: Arc<tokio::sync::Notify>,
-    /// Old-image cleanup, see `crate::images`.
     image_gc: crate::images::ImageGc,
 }
 
@@ -150,23 +117,19 @@ impl Scheduler {
         }
     }
 
-    /// Share the handle that cuts the wait for the next sweep short.
     pub fn with_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
         self.wake = wake;
         self
     }
 
-    /// Set the internal DNS zone containers search, so `web.blog` resolves
-    /// without the cluster's domain being spelled out in every stack file.
+    /// Set the internal DNS zone containers search, so `web.blog` resolves without the domain.
     pub fn with_zone(mut self, zone: impl Into<String>) -> Self {
         self.zone = Some(zone.into());
         self
     }
 
-    /// The cluster config as replicated state currently has it, falling back
-    /// to the config this node booted with only for the brief window before
-    /// any leader has published one, or if the replicated copy fails to
-    /// parse.
+    /// The replicated cluster config, falling back to the boot config before a leader has
+    /// published one or if it fails to parse.
     fn live_config(&self, state: &ClusterState) -> ClusterConfig {
         match &state.cluster_config {
             Some(entry) => ClusterConfig::parse(&entry.yaml).unwrap_or_else(|e| {
@@ -177,14 +140,9 @@ impl Scheduler {
         }
     }
 
-    /// Run until cancelled. `fence` reports whether this node has lost quorum
-    /// long enough to give up its containers — `None` when that has not been
-    /// determined yet (e.g. the first sweep after this node's own restart,
-    /// which can easily land before the fence's own first tick). A pass that
-    /// lands during `None` does nothing at all: guessing "fenced" would stop
-    /// every container this node already correctly owns, only for the next
-    /// sweep to start them all back up once the fence catches up. A pass
-    /// during `Hold` does nothing either, for the leader side as well.
+    /// Run until cancelled. `fence` says whether this node lost quorum long enough to give up
+    /// its containers; `None` (undetermined, e.g. first sweep after restart) or `Hold` makes a
+    /// pass do nothing, since guessing "fenced" would stop every container only to restart them.
     pub async fn run(self, fence: impl Fn() -> Option<FenceState> + Send + Sync + 'static) {
         let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
         loop {
@@ -215,7 +173,6 @@ impl Scheduler {
         }
     }
 
-    /// Leader side: work out where everything belongs and record it.
     async fn schedule(&self, state: &ClusterState) -> crate::Result<()> {
         let live = self.live_config(state);
         let colocate_proxy_hosts = live.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
@@ -238,9 +195,8 @@ impl Scheduler {
         }
 
         for decision in outcome.decisions {
-            // `submit` forwards to whichever node is leader, so a pass that
-            // outlives this node's leadership would otherwise keep writing
-            // decisions computed from its own, now stale, view of the state.
+            // `submit` forwards to the leader, so a pass outliving this node's leadership would keep
+            // writing decisions from a stale view.
             if !self.cluster.is_leader() {
                 warn!("lost leadership mid-pass, abandoning the scheduling pass");
                 return Ok(());
@@ -262,13 +218,9 @@ impl Scheduler {
             }
         }
 
-        // Re-read: `state` is from before the placements above were submitted,
-        // and `volume_requests` decides where a volume's primary belongs from
-        // the assignments. Working off the stale copy makes it chase the node
-        // each instance was on a moment ago, which is one step behind for
-        // exactly one sweep - long enough to hand the primary back and forth
-        // with placement forever, stopping and starting the containers each
-        // time round.
+        // Re-read: `state` predates the placements above, and `volume_requests` decides a volume's
+        // primary from assignments. A stale copy lags one sweep behind and hands the primary back
+        // and forth with placement forever, restarting containers each time.
         let state = &self.cluster.state().await;
         for request in volume_requests(state, &live) {
             if !self.cluster.is_leader() {
@@ -297,7 +249,6 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Node side: make docker match the assignments naming this node.
     async fn reconcile(
         &self,
         state: &ClusterState,
@@ -305,15 +256,11 @@ impl Scheduler {
         still_fenced: &(dyn Fn() -> bool + Sync),
     ) -> crate::Result<()> {
         let fenced = gate == FenceState::Closed;
-        // No docker to reconcile against yet (or right now) is not an error:
-        // this pass is simply skipped, and the next one tries again once
-        // `docker` is reconnected.
+        // No docker yet is not an error: skip, the next pass retries once `docker` reconnects.
         let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
-        // Opened fresh each pass: see `Reconciler::registries`. A node with
-        // no cluster key yet gets none, and pulls anonymously — the same
-        // thing it did before logins existed, rather than failing outright.
+        // Opened fresh each pass (see `Reconciler::registries`); with no cluster key, pulls anonymously.
         let registries = match self.materializer.key() {
             Some(key) => crate::registries::Registries::load(state, &key),
             None => crate::registries::Registries::default(),
@@ -336,21 +283,18 @@ impl Scheduler {
         self.report_refused(state, &refused).await;
         let actual = docker.list_managed().await?;
         let mut actions = reconcile::diff(&targets, &actual, gate);
-        // A standalone action has stopped an instance and put its own
-        // container in its place: leave that instance alone until it is done.
+        // A standalone action is replacing this instance's container: leave it alone until done.
         let holds = docker.action_holds().await?;
         if !holds.is_empty() {
             actions.retain(|a| !holds.contains(&a.instance().to_string()));
         }
         reconcile::restrict_to_emergency_stacks(&mut actions, &state.emergency_stacks);
 
-        // Most important stacks first, so they are also the first to come back.
         let priorities = stack_priorities(state);
         reconcile::sort_by_priority(&mut actions, &priorities);
 
-        // `depends_on`: hold back the first creation of an instance until the
-        // services it depends on are up. Only `Create` is gated, so an existing
-        // container is never stopped or blocked by a dependency going down.
+        // `depends_on`: hold back only the first `Create` until dependencies are up, so an existing
+        // container is never stopped by a dependency going down.
         actions.retain(|action| {
             let Action::Create(id) = action else {
                 return true;
@@ -364,10 +308,8 @@ impl Scheduler {
             }
         });
 
-        // An instance that crash-looped everywhere it can run is restarted in
-        // place on a growing delay instead of every sweep. Dropped before the
-        // crash-loop bookkeeping below so a deferred start is not counted as a
-        // restart that never happened.
+        // A crash-looped-everywhere instance restarts in place on a growing delay. Dropped before
+        // the crash-loop bookkeeping so a deferred start is not counted.
         {
             let now = Instant::now();
             let keep: BTreeSet<&InstanceId> =
@@ -386,11 +328,8 @@ impl Scheduler {
             info!(actions = actions.len(), fenced, "reconciling");
         }
 
-        // An instance this node keeps having to restart is never fixed by
-        // restarting it again: ask the leader to move it somewhere else.
-        // Checked before `apply` runs the actual restart, but the restart
-        // still happens either way - a rejected or unsubmittable move must
-        // not leave the instance down for no reason.
+        // A repeatedly restarted instance is not fixed by restarting: ask the leader to move it.
+        // The restart still happens either way, so a refused move does not leave it down.
         {
             let keep: BTreeSet<&InstanceId> =
                 targets.iter().map(|t| &t.assignment.instance).collect();
@@ -404,8 +343,7 @@ impl Scheduler {
             if self.note_restart_and_check_crash_loop(id).await
                 && !self.try_reschedule_away(state, id).await
             {
-                // Nowhere better to go: restart in place, but less eagerly
-                // each time round.
+                // Nowhere better to go: restart in place, with backoff.
                 let mut backoffs = self.backoffs.write().await;
                 backoffs
                     .entry(id.clone())
@@ -425,7 +363,6 @@ impl Scheduler {
             self.clean_images(state, &docker, &targets, &actual).await;
         }
 
-        // Objects for instances that have moved on must not linger on disk.
         let keep: BTreeMap<String, ()> = targets
             .iter()
             .map(|t| (t.assignment.instance.container_name(), ()))
@@ -434,15 +371,10 @@ impl Scheduler {
             warn!(error = %e, "could not clean orphaned objects");
         }
 
-        // A writable config a container changed since we last mounted it:
-        // feed it back through raft, same path anyone else's edit takes.
-        // `submit` forwards to the leader on its own, so this runs the same
-        // way whether or not this node happens to be it.
+        // A writable config a container changed: feed it back through raft (`submit` forwards to the leader).
         let mut committed: Vec<(String, u64)> = Vec::new();
         for edit in config_edits {
-            // Compare-and-set against the revision the container edited from:
-            // a second writer on the same config must not replace the first
-            // one's newer change with a copy it never saw.
+            // Compare-and-set on the revision edited from, so a second writer does not overwrite a newer change.
             let request = Request::PutConfigCas {
                 name: edit.name.clone(),
                 content: base64_encode(&edit.content),
@@ -469,13 +401,9 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Finish a write-back: the edit is committed once `submit` returns, but
-    /// this node's applied state (a follower's, especially) can still be a
-    /// beat behind, and every other instance mounting the config holds its own
-    /// copy on disk. Wait until the new revision is applied here, then
-    /// re-materialize every local instance that mounts the config so none of
-    /// them is left on the old content. Other nodes read the same committed
-    /// state on their own next sweep.
+    /// Finish a write-back: the edit is committed once `submit` returns, but this node's applied
+    /// state may lag. Wait for the new revision, then re-materialize every local instance
+    /// mounting the config. Other nodes do so on their own next sweep.
     async fn settle_config_edits(&self, committed: &[(String, u64)]) {
         if committed.is_empty() {
             return;
@@ -526,10 +454,8 @@ impl Scheduler {
         }
     }
 
-    /// Show the operator why an instance was not started: a failed update
-    /// record carrying the reason, the one per-instance error channel the UI
-    /// already renders. Skipped when the same failure is already recorded, so
-    /// a steady refusal costs one raft write rather than one per sweep.
+    /// Show the operator why an instance was not started via a failed update record (the UI's
+    /// one per-instance error channel); skipped if already recorded, so a steady refusal costs one write.
     async fn report_refused(&self, state: &ClusterState, refused: &[(InstanceId, String)]) {
         let reporter = UpdateReporter::new(self.cluster.clone(), self.node.clone());
         for (instance, error) in refused {
@@ -546,12 +472,8 @@ impl Scheduler {
         }
     }
 
-    /// Self-report this node's running/stopped state for every instance
-    /// assigned to it, so anyone elsewhere waiting for one of them to stop
-    /// (a backup, a restore, a folder import) can poll `container_status`
-    /// instead of blindly sleeping out a worst-case deadline. Skipped when
-    /// nothing changed since the last report, so a quiet node doesn't spam
-    /// raft with an identical write every sweep.
+    /// Self-report this node's running/stopped state per instance so waiters (backup, restore,
+    /// folder import) can poll `container_status` instead of sleeping. Skipped when unchanged.
     async fn report_container_status(
         &self,
         state: &ClusterState,
@@ -570,7 +492,6 @@ impl Scheduler {
             })
             .collect();
 
-        // What each container was created with, from its secrets label.
         let revisions: BTreeMap<InstanceId, BTreeMap<String, u64>> = actual
             .iter()
             .filter_map(|c| {
@@ -624,10 +545,8 @@ impl Scheduler {
         }
     }
 
-    /// Remove old images (see `crate::images` for the rule): once after an
-    /// update on this node succeeded, and as a sweep at daemon start and
-    /// daily. Runs in the background so a slow docker never holds a pass, and
-    /// never fails the pass.
+    /// Remove old images (see `crate::images`) after a successful update here, at daemon start
+    /// and daily. Backgrounded; never fails the pass.
     async fn clean_images(
         &self,
         state: &ClusterState,
@@ -635,8 +554,7 @@ impl Scheduler {
         targets: &[Target],
         actual: &[cl_docker::ContainerState],
     ) {
-        // With the wanted set not fully known, cleanup could mistake a
-        // service's image for an unwanted one.
+        // With the wanted set not fully known, cleanup could mistake a service's image for unwanted.
         if state.in_emergency() {
             return;
         }
@@ -688,15 +606,9 @@ impl Scheduler {
         });
     }
 
-    /// Tidy this node's entries in `instance_updates`: drop finished ones once
-    /// they have been visible long enough, and fail the ones nothing is
-    /// driving any more, so a daemon restart mid-update cannot leave a
-    /// progress bar spinning forever.
-    ///
-    /// Also the safety net for an update whose new container came up without
-    /// the reconciler recording it (a sweep that raced the update's own
-    /// writes): at `Starting` the old container is already gone, so any
-    /// running one is the new one.
+    /// Tidy this node's `instance_updates`: drop finished ones after a while and fail ones nothing
+    /// drives any more (a restart mid-update). Also the safety net for a new container that came
+    /// up unrecorded: at `Starting` the old one is gone, so any running one is the new one.
     async fn expire_updates(&self, state: &ClusterState, actual: &[cl_docker::ContainerState]) {
         let now = unix_now();
         let running: BTreeMap<InstanceId, Option<cl_docker::HealthState>> = actual
@@ -751,12 +663,9 @@ impl Scheduler {
         }
     }
 
-    /// Leader only: settle update records no live process is driving. The
-    /// owning node's own sweep handles its records, but that cannot help when
-    /// the owner is gone, unreachable, or no longer the instance's node (the
-    /// instance moved), nor a `Queued` record whose driving api node
-    /// restarted. Left alone they stay non-terminal for an hour and
-    /// `apply_selection` refuses to start another update on the instance.
+    /// Leader only: settle update records no live process drives (owner gone, moved, or a
+    /// `Queued` record whose api node restarted); otherwise they stay non-terminal for an hour
+    /// and `apply_selection` refuses another update on the instance.
     async fn expire_orphaned_updates(&self, state: &ClusterState) {
         let now = unix_now();
         for (instance, update) in &state.instance_updates {
@@ -791,25 +700,13 @@ impl Scheduler {
         record_restart(deque, now)
     }
 
-    /// Ask the leader to move a crash-looping instance to a different
-    /// eligible node, the same `BeginMigration` request a manual move or
-    /// `clouduler rebalance` submits - so a redeploy or a config edit racing
-    /// this is rejected exactly where a manual move would be.
+    /// Ask the leader to move a crash-looping instance via `BeginMigration` (as a manual move
+    /// or `clouduler rebalance` does, so racing redeploys are rejected there).
     ///
-    /// Skipped (restarting in place is all that is left) for an instance
-    /// that is pinned, global, or anchored to another instance by a shared
-    /// proxy host or `x-clouduler.colocate` group, the same exclusions
-    /// `rebalance::plan` applies: none of those can safely move to just any
-    /// other eligible node on their own. Also skipped if a migration is
-    /// already under way, so a slow move in progress is not raced by a
-    /// second one.
-    ///
-    /// Nodes this instance was already moved away from within
-    /// `CRASH_MOVE_RETENTION_SECS` (`ClusterState::crash_moves`) are not
-    /// candidates, so a service that crashes everywhere tries each node once
-    /// and then stays put instead of hopping between them forever. Returns
-    /// whether a move was submitted; `false` means the caller restarts in
-    /// place.
+    /// Skipped (restart in place) for pinned, global or anchored instances (same exclusions as
+    /// `rebalance::plan`) and when a migration is under way. Nodes it was moved away from within
+    /// `CRASH_MOVE_RETENTION_SECS` (`ClusterState::crash_moves`) are excluded so a service that
+    /// crashes everywhere stops hopping. Returns whether a move was submitted.
     async fn try_reschedule_away(&self, state: &ClusterState, id: &InstanceId) -> bool {
         let Some(assignment) = state.assignments.get(id) else {
             return false;
@@ -878,10 +775,8 @@ impl Scheduler {
                     warn!(instance = %id, %error, "could not move a crash-looping instance away");
                 } else {
                     self.restarts.write().await.remove(id);
-                    // Remember where it crashed so the next owner does not
-                    // send it straight back. Submitted after the move so a
-                    // rejected move leaves no history; losing this write only
-                    // loses the memory, never the move.
+                    // Remember where it crashed so the next owner does not send it back. Submitted after the
+                    // move so a rejected move leaves no history.
                     let record = Request::RecordCrashMove {
                         instance: id.clone(),
                         from: self.node.clone(),
@@ -900,16 +795,13 @@ impl Scheduler {
         false
     }
 
-    /// Build what this node should be running, materializing each instance's
-    /// configs and secrets on the way. Also returns any edit a container
-    /// made to one of its writable config mounts, for the caller to feed
-    /// back into the cluster.
+    /// Build what this node should run, materializing configs and secrets, and return any edit
+    /// a container made to a writable config mount.
     fn targets(&self, state: &ClusterState) -> crate::Result<Targets> {
         let live = self.live_config(state);
         let (drive_roots, dynamic_mounts) = self.drive_roots(state, &live);
 
-        // Decoded once per pass rather than per instance: every container on
-        // this node reads out of the same address book.
+        // Decoded once per pass; every container reads the same address book.
         let allocations = Allocations::decode(state.overlay.as_deref());
         let egress_networks = live.egress_networks();
 
@@ -919,11 +811,8 @@ impl Scheduler {
 
         for assignment in state.assignments_on(&self.node) {
             let instance = &assignment.instance;
-            // During emergency mode (see `clouduler emergency`), another
-            // stack's instance is not a target (it is not recreated or
-            // updated). Its existing container is left alone rather than
-            // removed: `reconcile::restrict_to_emergency_stack` drops the
-            // actions that would otherwise treat it as no longer assigned.
+            // In emergency mode (`clouduler emergency`) another stack's instance is not a target; its
+            // container is left alone because `reconcile::restrict_to_emergency_stack` drops the removal.
             if !state.emergency_allows(&instance.stack) {
                 continue;
             }
@@ -941,19 +830,14 @@ impl Scheduler {
                 continue;
             };
 
-            // A served-drive volume this node isn't the active server for is
-            // backed by a FUSE mount the drive subsystem sets up on demand,
-            // not necessarily up yet the first time an instance lands here.
-            // Starting the container against an empty, not-yet-mounted
-            // directory would bind it to the wrong data, so wait rather than
-            // start early; the next sweep tries again.
+            // A served-drive volume this node does not serve is a FUSE mount set up on demand and maybe
+            // not up yet; starting against the empty directory would bind the wrong data, so wait.
             if !volumes_ready(service, &drive_roots, &dynamic_mounts) {
                 debug!(instance = %instance, "waiting for a served drive volume to be mounted");
                 continue;
             }
 
-            // A missing secret or a node without the key is a reason not to
-            // start this one container, not to abandon the whole pass.
+            // A missing secret or key blocks this container, not the whole pass.
             let objects =
                 match self
                     .materializer
@@ -970,11 +854,8 @@ impl Scheduler {
             let network =
                 overlay_network_name(&file, &live).map(|n| overlay_name(&instance.stack, n));
 
-            // A container on a stack network gets the address the leader
-            // allocated for it, not one docker picks: the other nodes read
-            // that address out of replicated state to build DNS answers and
-            // proxy backends, and can only do that if it was decided cluster
-            // wide. Nothing to run yet if it has not been allocated.
+            // Containers on a stack network use the leader-allocated address (other nodes build DNS and
+            // proxy backends from it). Nothing to run until allocated.
             let mut placement = spec::Placement {
                 network: network.clone(),
                 ..Default::default()
@@ -1004,10 +885,8 @@ impl Scheduler {
                     },
                 );
 
-            // Container-kind networks: this instance's own address on each
-            // segment (pinned, so part of the revision) and the routes into
-            // its namespace (not: they follow the router and are re-applied
-            // every tick). Nothing to run until the leader has allocated.
+            // Container-kind networks: the instance's own segment address (pinned, part of the revision)
+            // and routes (not: they follow the router and are re-applied every tick).
             match crate::container_net::plan(
                 instance,
                 &file.container_networks(&instance.service, &live),
@@ -1025,9 +904,8 @@ impl Scheduler {
                 }
             }
 
-            // Node addresses on the internal network, where the proxy answers
-            // for routes published on it. Only a service that is a member of
-            // that network gets them kept off the egress default route.
+            // Internal-network node addresses where the proxy answers; only member services get them
+            // kept off the egress default route.
             let (internal_name, _) = live.internal_network();
             if service.networks.iter().any(|n| n == internal_name) {
                 placement.proxy_addresses = live
@@ -1040,16 +918,10 @@ impl Scheduler {
                     .collect();
             }
 
-            // An instance on its way somewhere else must not be started here
-            // again between the migration stopping it and the handover
-            // finishing: the two loops would fight, and every restart would
-            // dirty the volume the final sync is trying to freeze. Recorded as
-            // a stopped target rather than dropped from the list, so the
-            // container stays in place and a failed migration is one start
-            // away from being back where it was.
-            //
-            // Past `Switching` the assignment names the target, so this same
-            // test lets the target start it: `to` is the node reading it.
+            // An instance migrating away must not be restarted here between the migration stopping it
+            // and the handover finishing (the loops would fight and dirty the frozen volume). Recorded
+            // as a stopped target so a failed migration is one start from restored. Past `Switching`
+            // the assignment names the target, so this test lets the target start it.
             let mut assignment = assignment.clone();
             if assignment
                 .migration
@@ -1084,11 +956,9 @@ impl Scheduler {
             ) {
                 Ok(spec) => spec,
                 Err(e) => {
-                    // Deterministic, so left out of `targets` entirely: no
-                    // `Start` is planned, which keeps it out of the
-                    // crash-loop counter and away from `try_reschedule_away`
-                    // (another node would refuse the same mount). The
-                    // operator sees it through `refused`.
+                    // Deterministic, so left out of `targets`: no `Start` is planned, which keeps it out of the
+                    // crash-loop counter and `try_reschedule_away` (another node would refuse too). The operator
+                    // sees it through `refused`.
                     error!(instance = %instance, error = %e, "refusing to start an instance whose spec is invalid");
                     refused.push((instance.clone(), e.to_string()));
                     continue;
@@ -1113,18 +983,10 @@ impl Scheduler {
         Ok((targets, config_edits, refused))
     }
 
-    /// Where this node resolves each drive's root for mounting purposes, and
-    /// which of those roots are FUSE mountpoints the drive subsystem owns
-    /// (`crate::run::volumes_ready` waits on those before starting a
-    /// container).
-    ///
-    /// A replicated drive always resolves to this node's own declared local
-    /// copy (`NodeState::drives`), exactly as before. A served drive resolves
-    /// the same way only for the node currently serving it; every other node
-    /// — whether or not it declared the drive at all — resolves to a
-    /// per-volume directory under its data dir, which the drive subsystem
-    /// (`clouduler::drives`) is responsible for FUSE-mounting from the active
-    /// server before a container needing it can start.
+    /// Where this node resolves each drive's root, and which roots are FUSE mountpoints owned by
+    /// the drive subsystem (`volumes_ready` waits on those). A replicated drive resolves to the
+    /// node's declared local copy; a served drive only on the node serving it, elsewhere to a
+    /// per-volume directory the drive subsystem (`clouduler::drives`) FUSE-mounts on demand.
     fn drive_roots(
         &self,
         state: &ClusterState,
@@ -1156,38 +1018,16 @@ impl Scheduler {
     }
 }
 
-/// Folds which of a service's drives are currently FUSE-mounted (rather than
-/// backed by this node's own local copy), and the instance's own overlay
-/// address, into the revision used to detect drift, so a container gets
-/// recreated on top of `stack.revision` changing.
+/// Folds the FUSE-mounted state of a service's drives and the instance's overlay address into
+/// the drift revision, on top of `stack.revision`. Hashed since it is only compared for equality.
 ///
-/// A served drive's active server can change after a container already
-/// exists (the previously-active candidate failed, or came back and this
-/// node handed the role back) without `stack.revision` moving at all — the
-/// stack file didn't change, only which host path answers for the drive did.
-/// `diff` only compares `LABEL_REVISION`, so without this, a container
-/// created while its drive was FUSE-mounted keeps that bind source baked in
-/// forever: `Action::Start` never recreates it, and the mountpoint it points
-/// at is only maintained by `clouduler::drives::watch_volume_mounts` while
-/// this node still needs it as a FUSE mount, which stops being true the
-/// moment this node becomes the active server. The result is a container
-/// stuck failing to start against a bind path nothing owns any more.
+/// Drives: a served drive's active server can change with no stack change, and `diff` only
+/// compares `LABEL_REVISION`, so a container keeps a stale FUSE bind source baked in and
+/// `Action::Start` never recreates it.
 ///
-/// The overlay address has the same shape of problem: `cl_net::ipam` frees
-/// an instance's address and hands out a fresh one whenever the instance
-/// briefly drops out of the assignment table (a redeploy's replanning pass,
-/// say), even when the container backing it was never touched — `diff` only
-/// compares `LABEL_REVISION`, so a container built with the old address keeps
-/// running under it forever while every other node's proxy and internal DNS
-/// have already moved on to the new one. Confirmed live: a stack redeploy
-/// left an already-running, perfectly healthy container answering on an
-/// address the reverse proxy no longer knew about, so every request that
-/// landed on it got a permanent `bad gateway`, indistinguishable from the
-/// backend actually being down.
-///
-/// Not reversible bit-packing (an IPv4 address alone needs all 32 bits a
-/// per-drive flag set was previously borrowing) — hashed together instead,
-/// since nothing reads this value apart from testing it for equality.
+/// Address: `cl_net::ipam` frees and reissues an instance's address when it briefly drops out
+/// of the assignment table (a redeploy's replanning), while the untouched container keeps the
+/// old one; other nodes' proxy and DNS move on and every request gets a permanent `bad gateway`.
 fn revision_with_mounts(
     revision: u64,
     service: &cl_config::Service,
@@ -1215,21 +1055,17 @@ fn revision_with_mounts(
     revision.hash(&mut hasher);
     bits.hash(&mut hasher);
     ip.hash(&mut hasher);
-    // Only the instance's own addresses on container networks: the router's
-    // address and the routes are deliberately left out, so a router appearing
-    // or moving never recreates its clients. Skipped when empty to keep every
-    // other revision as it was.
+    // Only the instance's own container-network addresses: the router's address and routes are
+    // left out so a router appearing or moving never recreates clients. Skipped when empty.
     if !container_ips.is_empty() {
         container_ips.hash(&mut hasher);
     }
     hasher.finish()
 }
 
-/// The node currently serving a `Served` drive: the holder recorded in raft
-/// while it is reachable, otherwise the first reachable `served_by` candidate.
-/// The same rule as `cl_drive::registry::DriveRegistry::active_server`,
-/// computed here since placement/mount resolution only need the answer, not
-/// the rest of that crate.
+/// The node serving a `Served` drive: the raft holder while reachable, else the first
+/// reachable `served_by` candidate. Same rule as `DriveRegistry::active_server`, duplicated
+/// to avoid depending on `cl-drive`.
 fn active_server<'a>(
     name: &str,
     drive: &'a cl_config::Drive,
@@ -1242,9 +1078,8 @@ fn active_server<'a>(
     )
 }
 
-/// Whether `path` is itself a mount point (its device differs from its
-/// parent's), the cheap way to tell a live FUSE mount from an ordinary, not
-/// yet mounted local directory without depending on `cl-drive`.
+/// Whether `path` is a mount point (device differs from its parent's), telling a live FUSE
+/// mount from an unmounted directory without `cl-drive`.
 fn is_mounted(path: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Ok(meta) = std::fs::metadata(path) else {
@@ -1259,10 +1094,8 @@ fn is_mounted(path: &std::path::Path) -> bool {
     meta.dev() != parent_meta.dev()
 }
 
-/// Whether every served-drive volume this service mounts is actually mounted
-/// on this node yet. A replicated-drive volume, or a served drive this node
-/// is the active server for, is always ready — only a `dynamic` (FUSE, drive
-/// subsystem owned) mount can be not-yet-up.
+/// Whether every served-drive volume this service mounts is mounted here yet. Replicated
+/// volumes and served drives this node serves are always ready; only `dynamic` mounts lag.
 fn volumes_ready(
     service: &cl_config::Service,
     drive_roots: &BTreeMap<String, PathBuf>,
@@ -1282,52 +1115,32 @@ fn volumes_ready(
     })
 }
 
-/// `UpsertVolume` for every volume a placed instance mounts that the cluster
-/// does not know about yet.
+/// `UpsertVolume` for every volume a placed instance mounts that the cluster does not know.
+/// Without a record nothing replicates, `/api/volumes` reports nothing and a migration has
+/// nothing to hand over.
 ///
-/// Nothing else creates a volume record, and without one there is nothing for
-/// the sync scheduler to replicate, nothing for `/api/volumes` to report and
-/// nothing for a migration to hand over: the mount would work on the node that
-/// happens to hold the directory and the data would exist nowhere else.
-///
-/// The primary registered is the node that actually holds the data: for a
-/// replicated drive that's wherever the instance landed (the only place with
-/// a local copy), but for a served drive it's the drive's own active server
-/// — an instance using a served drive can land on any node, most of which
-/// hold no local copy at all, and the raft state machine's own
-/// `check_placement` only waives the "must implement this drive" rule for a
-/// served drive's real primary, not for an arbitrary assignment node.
+/// The primary registered is the node holding the data: where the instance landed for a
+/// replicated drive, the drive's active server for a served one (`check_placement` only waives
+/// the drive requirement for a served drive's real primary).
 ///
 /// # Following the instance
 ///
-/// A replicated volume already on record also gets a `TouchVolume` whenever
-/// its primary is no longer the node running the instance that mounts it.
+/// A replicated volume already on record gets a `TouchVolume` when its primary is no longer
+/// the node running the instance. This fires after a real failover (placement prefers the
+/// primary, `place::sole_primary`): until the primary follows, the sync scheduler treats the
+/// departed node as source and, when it returns, syncs its stale copy over the live one,
+/// every interval, forever (every rolling restart makes nodes briefly unreachable).
 ///
-/// Placement prefers the primary (`place::sole_primary`), so this only fires
-/// after a real failover: the primary went unreachable, the instance moved to
-/// a node holding a replica, and the volume has to follow it. Until it does,
-/// the sync scheduler still treats the node that just went away as the source
-/// and, the moment it comes back, syncs its stale copy over the live one —
-/// deleting files the running container is using, reverting its writes, and
-/// doing it again every interval, forever. That is not a corner case: every
-/// rolling restart of the fleet makes each node briefly unreachable.
+/// Not done for a served drive (its primary is the active server) or an instance mid-migration
+/// (`cl_drive::migration` hands the primary over itself at `Switching`).
+/// Hostnames this stack's `allowed` lists reach on a port another service publishes with
+/// `x-clouduler.expose` (`host:port` where a service has `hostname: host` and that published
+/// port/protocol). Lower case.
 ///
-/// Deliberately not done for a served drive (its primary is the active
-/// server, which has nothing to do with where instances run) or for an
-/// instance mid-migration (`cl_drive::migration` hands the primary over
-/// itself, at `Switching`, and must not be raced).
-/// Hostnames this stack's `allowed` lists reach on a port that another
-/// service publishes with `x-clouduler.expose`: an entry `host:port` where some
-/// service has `hostname: host` and an `expose` entry with that published port
-/// and protocol. Lower case.
-///
-/// Such a name must lead to the expose forwarder on the caller's own node, not
-/// to the backend container's address (docker's resolver answers a service's
-/// `hostname` with its address on a shared bridge, where the port is neither
-/// reachable through the firewall nor behind the PROXY header the backend
-/// expects). The container resolves it to its node's gateway
-/// (`Placement::published_hosts`) and the firewall opens that port for it
-/// (`cl_daemon::restrict`).
+/// Such a name must lead to the expose forwarder on the caller's own node, not the backend's
+/// shared-bridge address (port unreachable through the firewall and not behind the PROXY
+/// header). The container resolves it to its node's gateway (`Placement::published_hosts`) and
+/// the firewall opens the port (`cl_daemon::restrict`).
 pub fn exposed_allowed_hosts(state: &ClusterState, file: &StackFile) -> BTreeSet<String> {
     use cl_config::AllowedHost;
     let wanted: Vec<(String, cl_config::AllowedPorts)> = file
@@ -1373,8 +1186,7 @@ pub fn exposed_allowed_hosts(state: &ClusterState, file: &StackFile) -> BTreeSet
 
 pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Request> {
     let mut requests = Vec::new();
-    // Every replica of a service mounts the same volume, so the same id comes
-    // up once per instance.
+    // Every replica mounts the same volume, so the same id comes up once per instance.
     let mut seen = BTreeSet::new();
     for assignment in state.assignments.values() {
         let instance = &assignment.instance;
@@ -1412,8 +1224,7 @@ pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Reques
                 _ => Some(assignment.node.clone()),
             };
             let Some(primary) = primary else {
-                // Every candidate is unreachable right now; try again next
-                // sweep once one comes back.
+                // Every candidate is unreachable; retry next sweep.
                 continue;
             };
             requests.push(Request::UpsertVolume { id, primary });
@@ -1422,12 +1233,8 @@ pub fn volume_requests(state: &ClusterState, live: &ClusterConfig) -> Vec<Reques
     requests
 }
 
-/// Pushes `now` and reports whether `CRASH_LOOP_THRESHOLD` restarts now sit
-/// within `CRASH_LOOP_WINDOW` of it, pruning anything older than the window
-/// on the way so a deque tracking a long-lived instance never grows past
-/// what the window can hold. Pulled out of `Scheduler::note_restart_and_check_crash_loop`
-/// as a pure function so the counting logic is testable without a running
-/// cluster.
+/// Pushes `now` and reports whether `CRASH_LOOP_THRESHOLD` restarts sit within
+/// `CRASH_LOOP_WINDOW`, pruning older ones. Pure, so it is testable without a cluster.
 fn record_restart(deque: &mut VecDeque<Instant>, now: Instant) -> bool {
     deque.push_back(now);
     while deque
@@ -1439,9 +1246,8 @@ fn record_restart(deque: &mut VecDeque<Instant>, now: Instant) -> bool {
     deque.len() >= CRASH_LOOP_THRESHOLD
 }
 
-/// Picks the least-loaded node to move a crash-looping instance to: not the
-/// node it is on, and not one it was moved away from within the retention
-/// window. `None` once every eligible node has been tried.
+/// The least-loaded node to move a crash-looping instance to, excluding its own node and
+/// ones it was moved away from within the retention window. `None` once all were tried.
 fn pick_crash_move_target<'a>(
     eligible: impl Iterator<Item = &'a NodeState>,
     current: &str,
@@ -1474,8 +1280,7 @@ impl RestartBackoff {
         }
     }
 
-    /// Another crash loop was detected: double the delay (capped) before the
-    /// next in-place restart.
+    /// Another crash loop: double the delay (capped).
     fn record_loop(&mut self, now: Instant) {
         let delay = CRASH_BACKOFF_BASE
             .saturating_mul(1u32.checked_shl(self.loops).unwrap_or(u32::MAX))
@@ -1484,8 +1289,7 @@ impl RestartBackoff {
         self.next_start = now + delay;
     }
 
-    /// Whether the instance has stayed up long enough since the backoff
-    /// expired that it should start from the first step again.
+    /// Whether the instance stayed up long enough since the backoff expired to reset it.
     fn is_forgettable(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.next_start) > CRASH_BACKOFF_FORGET_AFTER
     }
@@ -1504,30 +1308,18 @@ pub fn overlay_name(stack: &str, network: &str) -> String {
     format!("{stack}_{network}")
 }
 
-/// The one declared network a stack should get a VXLAN overlay built for, if
-/// any. An internal or private network wins when the stack declares one,
-/// since that is the network whose domain its containers should actually
-/// resolve on. Failing that, a public network still needs its containers
-/// reachable cross-node for the proxy to forward to them, so it falls back to
-/// getting its own per-stack overlay too - isolated to this stack alone, the
-/// same as any other overlay, so this grants no access to whatever internal
-/// or private network other stacks happen to share.
-///
-/// A stack whose networks are all egress or wireguard needs no overlay at
-/// all, and must not be made to wait forever for an address on one of those
-/// instead.
+/// The one declared network a stack gets a VXLAN overlay for: an internal or private network
+/// if declared (its domain is what containers resolve on), else a public network (needed
+/// cross-node for the proxy; isolated per stack). A stack with only egress or wireguard
+/// networks needs none and must not wait for an address on one.
 pub fn overlay_network_name<'a>(file: &'a StackFile, cfg: &ClusterConfig) -> Option<&'a str> {
     file.overlay_network(cfg)
 }
 
-/// The first pair of distinct stacks whose overlays share a docker network
-/// name, as `(overlay, stack, other stack)`.
-///
-/// `overlay_name` joins with `_` and neither stack nor network names forbid
-/// it, so stack `a_b` on network `c` and stack `a` on network `b_c` both map
-/// to `a_b_c`: one IPAM allocation, one bridge, no isolation between them.
-/// The names can't change (live clusters already have them), so a deploy or
-/// a network rename that would create the collision is refused instead.
+/// The first pair of distinct stacks whose overlays share a docker network name, as
+/// `(overlay, stack, other stack)`. `overlay_name` joins with `_`, so stack `a_b` on `c` and
+/// `a` on `b_c` both map to `a_b_c` (one IPAM allocation, no isolation). Names cannot change
+/// (live clusters), so a deploy or rename that would collide is refused.
 pub fn overlay_collision<'a>(
     cfg: &ClusterConfig,
     stacks: impl IntoIterator<Item = (&'a str, &'a StackFile)>,
@@ -1606,19 +1398,12 @@ pub fn stack_priorities(state: &ClusterState) -> reconcile::Priorities {
         .collect()
 }
 
-/// Every instance every deployed stack wants, expanded from its spec against
-/// the cluster's egress/public network sets (see `ClusterConfig::egress_networks`
-/// / `port_gated_networks`). Shared by the scheduler and by anything else (the
-/// api's "why is this instance unplaced" reporting) that needs the same
-/// expansion without duplicating it.
+/// Every instance every deployed stack wants, expanded against the cluster's egress/public
+/// network sets (`ClusterConfig::egress_networks` / `port_gated_networks`). Shared with the
+/// api's unplaced reporting.
 ///
-/// While `state.emergency_stacks` holds names (see `clouduler emergency`),
-/// every other stack is left out entirely, rather than reported unplaceable:
-/// its instances are not a placement problem, they are simply not wanted
-/// until an operator ends emergency mode. Nothing here mutates any
-/// assignment's own `desired` state, so once `emergency_stack` clears (see
-/// `Request::ClearEmergency`) every stack picks back up exactly where its own
-/// `desired` field already said it should be.
+/// While `state.emergency_stacks` is non-empty, other stacks are left out entirely (not
+/// unplaceable); no assignment's `desired` is mutated, so they resume after `ClearEmergency`.
 pub fn desired_instances(
     state: &ClusterState,
     egress_networks: &BTreeSet<String>,
@@ -1638,18 +1423,15 @@ pub fn desired_instances(
                 port_gated_networks,
                 colocate_proxy_hosts,
             )),
-            // A stored stack that no longer parses is the operator's
-            // problem, but it must not stop every other stack scheduling.
+            // A stored stack that no longer parses must not stop other stacks scheduling.
             Err(e) => warn!(stack = %name, error = %e, "stored stack does not parse"),
         }
     }
     desired
 }
 
-/// Fill `near` on every container network's router: the services listing
-/// that network, so the router prefers the node most of its users run on.
-/// Routers are moved after the instances they prefer to sit with, so the
-/// placement pass has already counted those when it reaches them. The order
+/// Fill `near` on every container network's router with the services listing that network.
+/// Routers are moved after the instances they prefer, so placement has counted those; order
 /// is otherwise untouched.
 pub fn with_container_routers(
     mut desired: Vec<Desired>,
@@ -1689,9 +1471,7 @@ pub fn with_container_routers(
     desired
 }
 
-/// Drives whose mode is `Served`, read from the replicated cluster config.
-/// Empty (falling back to strict replicated-drive eligibility) if no config
-/// has been published yet or it fails to parse.
+/// Drives whose mode is `Served`; empty (strict replicated eligibility) if no config yet or unparseable.
 fn served_drives(state: &ClusterState) -> BTreeSet<String> {
     state
         .cluster_config
@@ -1709,9 +1489,8 @@ fn effective_stop_grace(
     service.stop_grace_period.unwrap_or(default)
 }
 
-/// `failover.stop_grace` from the replicated cluster config: how long a
-/// container without its own `stop_grace_period` gets to stop. The built-in
-/// default if no config has been published yet or it fails to parse.
+/// `failover.stop_grace` for a container without its own `stop_grace_period`; built-in
+/// default if no config yet or unparseable.
 pub fn configured_stop_grace(state: &ClusterState) -> std::time::Duration {
     state
         .cluster_config
@@ -1721,9 +1500,7 @@ pub fn configured_stop_grace(state: &ClusterState) -> std::time::Duration {
         .unwrap_or(cl_config::DEFAULT_STOP_GRACE)
 }
 
-/// Nat-kind network names, read from the replicated cluster config the same
-/// way `served_drives` is. Empty (falling back to strict per-node network
-/// eligibility) if no config has been published yet or it fails to parse.
+/// Nat-kind network names, like `served_drives`; empty if no config yet or unparseable.
 fn everywhere_networks(state: &ClusterState) -> BTreeSet<String> {
     state
         .cluster_config
@@ -1733,8 +1510,7 @@ fn everywhere_networks(state: &ClusterState) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// Every request the leader would submit for a state, without submitting them.
-/// Exists so the scheduling decision can be tested without a cluster.
+/// Every request the leader would submit for a state, without submitting (for tests).
 pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
     let desired = desired_instances(state, &BTreeSet::new(), &BTreeSet::new(), false);
 
@@ -1758,11 +1534,9 @@ pub fn plan_requests(state: &ClusterState) -> crate::Result<Vec<Request>> {
         .collect())
 }
 
-/// What the leader does with an update record owned by another node: same
-/// shape as `expire_verdict`. A record is orphaned when its node left the
-/// cluster, is unreachable, or is no longer where the instance is assigned,
-/// and a `Queued` one is also given up on after `QUEUED_UPDATE_TTL_SECS`
-/// whatever the owner is doing.
+/// What the leader does with another node's update record (same shape as `expire_verdict`):
+/// orphaned when its node left, is unreachable or no longer hosts the instance; a `Queued`
+/// one is also given up on after `QUEUED_UPDATE_TTL_SECS`.
 fn orphan_verdict(
     state: &ClusterState,
     instance: &InstanceId,
@@ -1812,9 +1586,8 @@ fn expire_verdict(
         _ if now - update.at >= STALLED_UPDATE_TTL_SECS => {
             Some(Some("stalled: no progress for an hour"))
         }
-        // Queued is written by whichever node took the request, so its
-        // timestamp says nothing about this process - only its age does. The
-        // driver that would start it may be gone (the api node restarted).
+        // Queued is written by whichever node took the request, so only its age matters; the
+        // driver that would start it may be gone.
         UpdatePhase::Queued => (now - update.at >= QUEUED_UPDATE_TTL_SECS)
             .then_some(Some("stalled: queued but never started")),
         // Pulling, stopping, starting: only ever written on this node, so
@@ -2104,11 +1877,8 @@ web: { address: cloud, network: tailscale }
         assert_eq!(overlay_network_name(&no_overlay, &cfg), None);
     }
 
-    /// A stack reachable only from the internet, with no internal/private
-    /// network of its own, still needs its container reachable cross-node for
-    /// the proxy to forward to it - so a public network falls back to
-    /// getting its own overlay rather than leaving the stack with no address
-    /// at all.
+    /// A stack reachable only from the internet still needs a cross-node address for the proxy,
+    /// so a public network falls back to its own overlay.
     #[test]
     fn a_public_only_stack_still_gets_its_own_overlay() {
         let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
@@ -2117,10 +1887,8 @@ web: { address: cloud, network: tailscale }
         assert_eq!(overlay_network_name(&public_only, &cfg), Some("public"));
     }
 
-    /// A stack declaring both keeps the internal/private one: that is the
-    /// network whose domain the containers should resolve on, and the one
-    /// other stacks on it are reachable through - a public network is only
-    /// ever a fallback, not a preference.
+    /// A stack declaring both keeps the internal/private network (its domain is what containers
+    /// resolve on); a public network is only a fallback.
     #[test]
     fn an_internal_network_is_preferred_over_a_public_one() {
         let cfg = ClusterConfig::parse(CLUSTER).expect("valid cluster config");
@@ -2275,10 +2043,8 @@ services:
         assert!(volume_requests(&state, &cfg).is_empty());
     }
 
-    /// After a failover the instance is on a node that is not the volume's
-    /// primary, and the primary has to follow it — otherwise the node it left
-    /// stays the sync source and, once it is back, overwrites the live copy
-    /// with its stale one every interval.
+    /// After a failover the volume's primary has to follow the instance; otherwise the node it
+    /// left stays the sync source and overwrites the live copy when it returns.
     #[test]
     fn a_volumes_primary_follows_an_instance_that_failed_over() {
         let mut state = stateful_state();
@@ -2324,11 +2090,8 @@ services:
         assert!(volume_requests(&state, &cfg).is_empty());
     }
 
-    /// A served drive's volume is registered against the drive's own active
-    /// server, not the placed instance's node — the instance can land
-    /// anywhere, most of which hold no local copy, and the raft state
-    /// machine's `check_placement` only waives "must implement this drive"
-    /// for a served drive's real primary.
+    /// A served drive's volume is registered against the drive's active server, not the
+    /// instance's node (`check_placement` only waives the drive requirement for the real primary).
     #[test]
     fn a_served_volumes_primary_is_the_active_server_not_the_assignment() {
         const SERVED_CLUSTER: &str = r#"
@@ -2407,10 +2170,8 @@ web: { address: cloud, network: tailscale }
         stack.services["web"].clone()
     }
 
-    /// A container created while its drive was FUSE-mounted, then never
-    /// recreated, keeps that stale bind path forever if a failover (or fail
-    /// back) that changes nothing about the stack file also changes nothing
-    /// about the revision `diff` compares.
+    /// A container created while its drive was FUSE-mounted keeps a stale bind path unless a
+    /// failover that leaves the stack file unchanged also moves the revision `diff` compares.
     #[test]
     fn a_drive_switching_between_local_and_fuse_mounted_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
@@ -2441,9 +2202,7 @@ web: { address: cloud, network: tailscale }
         assert_eq!(a, b);
     }
 
-    /// The stack's own revision still has to move the combined value, the
-    /// same as before this was folded in, or an ordinary redeploy would stop
-    /// being noticed.
+    /// The stack's own revision must still move the combined value, or redeploys go unnoticed.
     #[test]
     fn the_stack_revision_still_changes_the_combined_value() {
         let service = service_with_volumes("      - fast/data:/data\n");
@@ -2454,14 +2213,8 @@ web: { address: cloud, network: tailscale }
         );
     }
 
-    /// The whole reason this was folded in: an instance handed a new overlay
-    /// address (a redeploy's replanning pass released and reallocated it,
-    /// say, without the container itself ever being touched) has to be
-    /// recreated so it actually binds to the address the rest of the cluster
-    /// now believes it holds — otherwise it keeps answering on the old one
-    /// forever while the reverse proxy and internal DNS point everyone else
-    /// at the new one, a permanent "bad gateway" indistinguishable from the
-    /// backend actually being down.
+    /// A new overlay address (a redeploy's replanning released and reallocated it) must recreate
+    /// the container, else it keeps the old address and the proxy gets a permanent `bad gateway`.
     #[test]
     fn an_instance_getting_a_new_overlay_address_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");
@@ -2485,9 +2238,8 @@ web: { address: cloud, network: tailscale }
         assert_ne!(a, b);
     }
 
-    /// A client's own address on a container network is part of what it was
-    /// built with; the router's address and the routes are not an input at
-    /// all, so a router appearing or moving never recreates a client.
+    /// A client's own container-network address is part of its revision; the router's address and
+    /// routes are not, so a router appearing or moving never recreates a client.
     #[test]
     fn only_the_clients_own_container_address_changes_the_revision() {
         let service = service_with_volumes("      - fast/data:/data\n");

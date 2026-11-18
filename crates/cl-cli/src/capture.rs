@@ -1,13 +1,7 @@
-//! `clouduler capture` — run `tcpdump` on the bridge of a stack's overlay
-//! network, on whichever node the target instance actually runs on.
-//!
-//! Same node-resolution and node-to-node auth as `clouduler exec`: the
-//! instance's node is read out of the replicated state, then this connects
-//! directly to that node's api over a websocket
-//! (`cl-api::routes::instances::internal_capture`), which spawns `tcpdump`
-//! as the daemon's own root process (it already needs `CAP_NET_ADMIN` for the
-//! overlay bridges) and relays its output back frame by frame, so there is no
-//! need to SSH into a cluster node and work out the bridge interface name.
+//! `clouduler capture`: run `tcpdump` on the bridge of a stack's overlay network,
+//! on the node the target instance runs on. Same node resolution and auth as
+//! `clouduler exec`; output is relayed over a websocket to
+//! `cl-api::routes::instances::internal_capture`.
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;

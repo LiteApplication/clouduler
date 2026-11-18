@@ -28,10 +28,8 @@ pub struct ObjectRef {
     /// mounting it as a file. Mutually exclusive with `target`/`mode`/`uid`/
     /// `gid`, which only make sense for a file.
     pub env: Option<String>,
-    /// Mount read-write instead of read-only, and feed any change the
-    /// container makes back into the cluster's copy. Valid only for a
-    /// `configs:` reference — never for a secret, so there's no way for a
-    /// container to leak one back out by "editing" it.
+    /// Mount read-write and feed container changes back into the cluster copy.
+    /// Valid only for `configs:`, never secrets, so a container cannot leak one back.
     pub write: bool,
 }
 
@@ -61,8 +59,7 @@ impl ObjectRef {
             .unwrap_or_else(|| PathBuf::from(SECRET_DIR).join(&self.source))
     }
 
-    /// Path inside the container for a config. Compose defaults to the root,
-    /// which is rarely what anyone wants, but matching it avoids surprises.
+    /// Path inside the container for a config. Defaults to the root, matching compose.
     pub fn config_target(&self) -> PathBuf {
         self.target
             .clone()
@@ -105,9 +102,8 @@ fn is_false(b: &bool) -> bool {
     !b
 }
 
-/// Compose writes modes as `0444`, which yaml reads as the decimal 444 unless
-/// it is quoted. Accept both and treat a bare number as octal, since nobody
-/// means decimal 444 when they write a file mode.
+/// Compose writes modes as `0444`, which yaml reads as decimal 444 unless
+/// quoted. Accept both and treat a bare number as octal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Mode {

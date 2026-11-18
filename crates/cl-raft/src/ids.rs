@@ -3,11 +3,9 @@ use std::str::FromStr;
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-/// Raft node id. Derived from the node's config-declared uuid (`cl_config::Node::id`)
-/// so it stays stable across restarts and config edits, unlike an index into
-/// the node list, but changes on every re-provisioning of that node - which is
-/// the point: it's what lets a removed node's name be reused without the
-/// new instance colliding with the old one's removed-tombstone.
+/// Raft node id, derived from the node's config uuid (`cl_config::Node::id`):
+/// stable across restarts and config edits, but new on re-provisioning, so a
+/// removed node's name can be reused without colliding with its tombstone.
 pub type NodeId = u64;
 
 /// FNV-1a over the uuid's bytes.

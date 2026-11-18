@@ -1,28 +1,14 @@
-//! Swapping the running binary for a freshly built one.
-//!
-//! Shared between `clouduler init` (which installs the binary a human
-//! downloaded) and the self-update worker (which installs one the cluster
-//! built for itself), and reachable from `cl-api`'s internal restart route
-//! without that crate depending on the `clouduler` binary crate.
+//! Swapping the running binary for a new one. Shared by `clouduler init`, the
+//! self-update worker and `cl-api`'s restart route.
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 /// Copy `source` to `destination`, replacing whatever is there.
 ///
-/// A running daemon cannot have its own executable overwritten in place
-/// (`ETXTBSY`), so this writes to a temp file in the destination directory
-/// and renames it into place, which swaps the directory entry instead.
-///
-/// The binary being replaced is kept next to it as `<name>.old` (hard-linked,
-/// so it costs no space until the new one diverges and survives the rename
-/// because the old inode is still linked). Only one generation is kept: each
-/// install replaces the previous `.old`.
-///
-/// `rollback` swaps the previous binary back in automatically when the new
-/// one keeps crashing or does not rejoin the cluster. By hand, on that node:
-/// `mv /usr/local/bin/clouduler.old /usr/local/bin/clouduler && systemctl
-/// restart clouduler`.
+/// A running executable cannot be overwritten (`ETXTBSY`), so this writes a
+/// temp file and renames it over. The replaced binary is hard-linked as
+/// `<name>.old` (one generation); `rollback` swaps it back on failure.
 pub fn install_binary(source: &Path, destination: &Path) -> std::io::Result<()> {
     if same_file(source, destination) {
         return Ok(());
@@ -49,7 +35,6 @@ pub fn install_binary(source: &Path, destination: &Path) -> std::io::Result<()> 
     Ok(())
 }
 
-/// `<destination>.old`, in the same directory.
 pub fn previous_path(destination: &Path) -> std::path::PathBuf {
     let mut name = destination
         .file_name()

@@ -1,18 +1,14 @@
-//! Syntax checks for restic backup destinations. Lives here (not in
-//! `cl-restic`, which depends on this crate) so the state machine can reject
-//! a bad destination at write time while `cl-restic` re-checks the same
-//! rules right before it builds a command line from one.
+//! Syntax checks for restic backup destinations. Lives here (not in `cl-restic`,
+//! which depends on this crate) so the state machine rejects bad destinations at
+//! write time and `cl-restic` re-checks before building a command line.
 //!
-//! Why this matters: an `Ssh` destination's `user` and `host` are
-//! interpolated into restic's `sftp.command=ssh {user}@{host} ...`, which
-//! restic splits on whitespace and runs. A host of `-oProxyCommand=...` (or a
-//! user containing a space) would be a remote-command-execution primitive for
-//! anyone who can create a destination.
+//! An `Ssh` user/host is interpolated into restic's whitespace-split
+//! `sftp.command=ssh {user}@{host} ...`, so a host like `-oProxyCommand=...`
+//! would be a remote-command-execution primitive.
 
 use crate::state::{BackupDestination, BackupDestinationKind};
 
-/// Why `value` is unacceptable as the `what` field of a destination, or
-/// `Ok(())`.
+/// Why `value` is unacceptable as the `what` field, or `Ok(())`.
 fn check_token(what: &str, value: &str, extra_ok: &[char]) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("{what} must not be empty"));
@@ -61,9 +57,7 @@ pub fn validate_ssh_host(host: &str) -> Result<(), String> {
     check_token("ssh host", host, &['.', '_', '-', ':'])
 }
 
-/// Every free-text field of `destination`. Called by the state machine on
-/// `PutBackupDestination` and again by `cl-restic` before it builds a
-/// command from a stored one.
+/// Every free-text field of `destination`; also re-run by `cl-restic`.
 pub fn validate_destination(destination: &BackupDestination) -> Result<(), String> {
     match &destination.kind {
         BackupDestinationKind::NodeLocal { path, .. } => check_plain("path", path, true),

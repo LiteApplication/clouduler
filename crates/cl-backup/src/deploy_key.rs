@@ -1,14 +1,9 @@
 //! The ssh keypair clouduler pushes the git backup with.
 //!
-//! Cluster-wide rather than per-node: leadership fails over between managers
-//! and the export task always runs from whoever currently leads, so a
-//! per-node key would need every manager's key registered on the git host.
-//! Instead one keypair is generated on demand and stored like any other
-//! cluster-owned singleton (the reserved-name convention already used for
-//! e.g. the self-update github token): the public half in `configs` (plain,
-//! anyone can read it to hand to the git host), the private half in
-//! `secrets` (sealed with the internal `ClusterKey`, same as any other
-//! secret).
+//! Cluster-wide, not per-node: the export runs on whoever leads, so per-node
+//! keys would all need registering on the git host. One keypair is generated
+//! on demand; the public half lives in `configs` (plain), the private half in
+//! `secrets` (sealed with `ClusterKey`).
 
 use base64::Engine;
 use cl_raft::state::{ClusterState, ConfigEntry, SecretEntry};

@@ -183,11 +183,9 @@ impl ClusterKey {
     }
 }
 
-/// A key other users can read is a key you have to assume is gone — except
-/// group read, which is deliberately allowed: the `clouduler` system group
-/// is how a non-root operator's cli reads this file to seal/unseal secrets,
-/// the same way it reads `cluster.yaml` to find the daemon. Anything else
-/// outside owner (group write/execute, or any "other" bit) is still refused.
+/// A key other users can read is a key you have to assume is gone, except group
+/// read, which is allowed so the `clouduler` group can run the cli. Group
+/// write/execute and any "other" bit are refused.
 fn check_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

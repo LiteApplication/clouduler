@@ -1,10 +1,6 @@
-//! Runs on every node, leader or not. Watches the run's progress object for
-//! its own assignment and downloads its architecture's release asset
-//! straight from GitHub, staging it for the restart route to install.
-//!
-//! Idempotent per run id: the phase already recorded is what a restarted
-//! worker loop reads back before doing anything, so it never repeats a step
-//! that already landed.
+//! Runs on every node. Watches the run for its own assignment and downloads
+//! its architecture's asset, staging it for the restart route. Idempotent per
+//! run id: the recorded phase is read back before any step.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,16 +14,14 @@ use tracing::{info, warn};
 use crate::plan::{NodePhase, UpdateRunState, GITHUB_TOKEN_SECRET};
 use crate::{orchestrator, release};
 
-/// Same order of magnitude as the orchestrator's own poll: a worker has to
-/// notice an assignment about as promptly as the leader notices progress.
+/// Same cadence as the orchestrator's poll.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Worker {
     pub node_name: String,
     pub cluster: Arc<ClusterNode>,
-    /// Live rather than a snapshot: a node started with no key still gets
-    /// self-update working once one is delivered to it automatically. `Arc`
-    /// because `ClusterKey` is deliberately not `Clone`.
+    /// Live so a key delivered later enables self-update. `Arc` because
+    /// `ClusterKey` is not `Clone`.
     pub cluster_key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     pub http: reqwest::Client,
     pub cluster_config: ClusterConfig,

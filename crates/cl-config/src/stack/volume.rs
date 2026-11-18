@@ -113,10 +113,8 @@ impl TryFrom<RawVolume> for VolumeMount {
 }
 
 impl From<VolumeMount> for RawVolume {
-    /// Prefers the short `drive/volume:target[:ro]` form, since that's what
-    /// everyone writes by hand; the long map form is only reached for an
-    /// anonymous, read-only mount, which the short syntax can't express
-    /// (its target-only case is always read-write).
+    /// Prefers the short form; the long map form is only for an anonymous,
+    /// read-only mount, which the short syntax cannot express.
     fn from(v: VolumeMount) -> Self {
         let target = v.target.to_string_lossy();
         if let Some(tmpfs) = v.tmpfs {
@@ -316,8 +314,7 @@ mod tests {
 
     #[test]
     fn an_anonymous_read_only_mount_falls_back_to_the_long_form() {
-        // The short syntax's target-only case is always read-write, so this
-        // is the one shape that can't round trip through it.
+        // The short syntax's target-only case is always read-write.
         let v: VolumeMount = serde_yaml::from_str("{ target: /data, read_only: true }").unwrap();
         let encoded = serde_yaml::to_string(&v).unwrap();
         let reparsed: VolumeMount = serde_yaml::from_str(&encoded).unwrap();

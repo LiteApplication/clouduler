@@ -33,8 +33,7 @@ pub struct BundledFile {
 
 impl StackBundle {
     /// Read a stack file and everything it points at. Relative paths resolve
-    /// against the stack file's own directory, which is what compose does and
-    /// what people expect.
+    /// against the stack file's directory, like compose.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let spec = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {

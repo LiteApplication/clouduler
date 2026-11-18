@@ -38,13 +38,11 @@ pub struct ClusterConfig {
     pub cloudflare: Option<CloudflareConfig>,
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Git-based cluster self-update. Write-once through the web ui: once
-    /// set, further changes go through this file by hand.
+    /// Git-based cluster self-update. Write-once through the web ui.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_update: Option<SelfUpdateConfig>,
-    /// Mirrors cluster.yaml, stack specs, configs and secrets into an
-    /// admin-owned git repo on every change. Absent means the feature is
-    /// off. Freely editable through the web ui, unlike `self_update`.
+    /// Mirrors cluster.yaml, stacks, configs and secrets into an admin-owned git repo.
+    /// Absent means off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<GitBackupConfig>,
     /// The MCP endpoint and the OAuth server that fronts it.
@@ -55,14 +53,11 @@ pub struct ClusterConfig {
     pub updates: ImageUpdatesConfig,
 }
 
-/// How often the leader asks the registries whether the images the stacks
-/// declare have a newer digest. The results are stored in the cluster state
-/// and are what the Updates page shows and `x-clouduler.auto_update` acts on.
+/// How often the leader checks registries for newer image digests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ImageUpdatesConfig {
-    /// Time between checks. Values below `MIN_IMAGE_CHECK_INTERVAL` are
-    /// treated as that minimum.
+    /// Time between checks, raised to `MIN_IMAGE_CHECK_INTERVAL` if lower.
     #[serde(with = "humantime_serde", default = "default_image_check_interval")]
     pub check_interval: Duration,
 }
@@ -90,10 +85,9 @@ fn default_image_check_interval() -> Duration {
 }
 
 /// Whether AI clients may connect over MCP.
+/// Whether AI clients may connect over MCP.
 ///
-/// On by default: every grant still needs an admin or viewer to click
-/// through an approval, and this switch exists for operators who want the
-/// whole surface (discovery, oauth, `/mcp`) gone rather than merely unused.
+/// On by default; every grant still needs an admin or viewer approval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
@@ -115,29 +109,24 @@ fn default_data_dir() -> PathBuf {
 
 /// Where the key that decrypts stored secrets lives.
 ///
-/// Secrets are encrypted before they enter the database, so the replicated
-/// state and its snapshots are safe to copy around. The key itself is not in
-/// the database: it sits in a file on at least one node. A node without the key
-/// replicates secrets fine but cannot start a container that uses one.
+/// Secrets are encrypted before entering the replicated database; the key
+/// itself sits in a file on at least one node. A node without it replicates
+/// secrets but cannot start a container that uses one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
-    /// Path to the key file. Nodes that have it can decrypt; nodes that do not
-    /// simply cannot run containers needing secrets.
+    /// Path to the key file.
     #[serde(default = "default_key_file")]
     pub key_file: PathBuf,
 
-    /// Generate a key on first launch when the file is missing. Turn this off
-    /// on nodes that should only ever receive an existing key, so a typo in the
-    /// path cannot quietly create a second, useless key.
+    /// Generate a key on first launch when the file is missing. Turn off on
+    /// nodes that should only receive an existing key.
     #[serde(default = "default_true_bool")]
     pub generate_if_missing: bool,
 
-    /// Path to this node's own asymmetric keypair. Every node has one of
-    /// these, generated on first launch if missing — unlike `key_file`,
-    /// there is no "receiving node" concept for it. Its public half is
-    /// published into the cluster roster so another node holding `key_file`
-    /// can wrap a copy of the cluster key for this one.
+    /// Path to this node's own asymmetric keypair, generated on first launch.
+    /// Its public half goes in the cluster roster so a `key_file` holder can wrap
+    /// the cluster key for this node.
     #[serde(default = "default_node_key_file")]
     pub node_key_file: PathBuf,
 }
@@ -172,8 +161,7 @@ pub struct AuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcConfig>,
 
-    /// Api keys always work as a fallback, so a broken identity provider cannot
-    /// lock you out of your own cluster. One is generated and printed on first
+    /// Api keys always work as a fallback; one is generated and printed on first
     /// launch. Set to false only once OIDC is known to work.
     #[serde(default = "default_true_bool")]
     pub api_keys: bool,
@@ -205,10 +193,8 @@ pub struct OidcConfig {
     /// Issuer URL. Discovery happens at `<issuer>/.well-known/openid-configuration`.
     pub issuer: String,
     pub client_id: String,
-    /// The client secret itself is not here: it is sealed and stored as a
-    /// replicated cluster secret (set from the web ui), so every node has it
-    /// instead of only the one an operator happened to log into, and the
-    /// config stays safe to commit.
+    /// The client secret is a sealed replicated cluster secret (set from the web
+    /// ui), not stored here.
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
     /// Claim listing the user's groups or roles.
@@ -218,9 +204,7 @@ pub struct OidcConfig {
     /// gets read only access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_value: Option<String>,
-    /// Claim shown in the web ui as the signed-in user's name. Falls back to
-    /// the `sub` claim (an opaque id, unreadable at a glance) when this claim
-    /// is absent from the id token.
+    /// Claim shown as the signed-in user's name. Falls back to `sub`.
     #[serde(default = "default_username_claim")]
     pub username_claim: String,
 }
@@ -239,12 +223,9 @@ fn default_username_claim() -> String {
 
 /// Timings for handling a node that drops out of the cluster.
 ///
-/// The two timeouts work against each other and must not be set carelessly.
-/// `fence_timeout` is how long a node keeps running containers after losing
-/// quorum; `node_timeout` is how long the rest of the cluster waits before
-/// giving that node's containers to someone else. Fencing has to happen first,
-/// or the same container runs in two places at once, which for anything with a
-/// volume means corruption.
+/// `fence_timeout` (node stops its containers after losing quorum) must be
+/// shorter than `node_timeout` (cluster reschedules them), or the same
+/// container runs in two places and volumes corrupt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FailoverConfig {
@@ -262,9 +243,9 @@ pub struct FailoverConfig {
     #[serde(with = "humantime_serde", default = "default_probe_interval")]
     pub probe_interval: Duration,
 
-    /// How long a container gets to stop cleanly before it is killed, for
-    /// services that do not set their own `stop_grace_period`. Counts against
-    /// the margin between `fence_timeout` and `node_timeout`.
+    /// Time a container gets to stop cleanly before being killed, for services
+    /// without their own `stop_grace_period`. Counts against the margin between
+    /// `fence_timeout` and `node_timeout`.
     #[serde(with = "humantime_serde", default = "default_stop_grace")]
     pub stop_grace: Duration,
 }
@@ -306,12 +287,10 @@ impl Default for FailoverConfig {
 }
 
 impl FailoverConfig {
-    /// A warning, not an error, when a fence may not finish before the leader
-    /// reschedules: stopping a container takes up to its stop grace after
-    /// `fence_timeout` has already run out, and that has to land inside
-    /// `node_timeout`. Checked against the configured `stop_grace`; pass the
-    /// longest per-service `stop_grace_period` to `fence_margin_warning_for`
-    /// to check that too.
+    /// A warning when a fence may not finish before the leader reschedules: stop
+    /// takes up to the stop grace after `fence_timeout`, and must land inside
+    /// `node_timeout`. Pass the longest per-service grace to
+    /// `fence_margin_warning_for` to check that too.
     pub fn fence_margin_warning(&self) -> Option<String> {
         self.fence_margin_warning_for(self.stop_grace, "default stop grace")
     }
@@ -352,24 +331,15 @@ pub enum NetworkKind {
     /// interface (a VPN tunnel, usually) that a service attached to it
     /// egresses through, instead of the node's normal route out.
     Egress,
-    /// Like `Egress`, but the tunnel is a WireGuard interface clouduler
-    /// itself brings up from an imported config, instead of one the admin
-    /// set up out of band. A node's address is still the interface name
-    /// clouduler derives for it, not admin-chosen.
+    /// Like `Egress`, but the tunnel is a WireGuard interface clouduler brings up
+    /// from an imported config. The node address is the derived interface name.
     Wireguard,
-    /// Like `Egress`, but outbound traffic leaves through the node's normal
-    /// route instead of a named interface: ordinary NAT, masqueraded out
-    /// whatever the host's own routing table picks. No node address is
-    /// declared or needed — every node implements it the same way, with
-    /// nothing host-specific to configure. Useful for a service that needs
-    /// to reach addresses only the host's routing table knows how to reach
-    /// (a Tailscale/VPN peer, say) rather than the internet at large, which
-    /// an `egress` network's single fixed interface cannot do.
+    /// Like `Egress`, but outbound traffic leaves through the node's normal route
+    /// (masqueraded). No node address is declared. For services that must reach
+    /// addresses only the host routing table knows (a VPN peer, say).
     Nat,
-    /// Traffic to the network's `subnet` is routed through a router container
-    /// (a Tailscale/VPN client, say) instead of a host interface. Like `Nat`,
-    /// no node address is declared: every node implements it. The subnet is
-    /// the routed range, not a range the nodes have addresses in.
+    /// Traffic to the network's `subnet` is routed through a router container.
+    /// No node address is declared; the subnet is the routed range.
     Container,
 }
 
@@ -404,12 +374,10 @@ pub struct Network {
     /// Required for, and only allowed on, a `container` network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerNetwork>,
-    /// Networks this one may reach, allowed on internal, private and
-    /// container networks. Absent means no host firewall for this source
-    /// network (legacy, unrestricted at L3) and only its own network plus
-    /// public networks at L7; `[]` or a list turns enforcement on. A network
-    /// always reaches itself, and public networks are implicitly reachable by
-    /// everyone. See [`ClusterConfig::reaches`].
+    /// Networks this one may reach (internal, private and container networks).
+    /// Absent means no host firewall (unrestricted at L3) and only own network plus
+    /// public networks at L7; `[]` or a list turns enforcement on. See
+    /// [`ClusterConfig::reaches`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Vec<String>>,
 }
@@ -467,14 +435,12 @@ impl std::ops::Deref for ContainerView<'_> {
     }
 }
 
-/// Deserializes `networks` and folds the legacy `container.allowed_networks`
-/// into network-level `access`: each entry X of container network C is added
-/// to `C.access` (created when absent, deduplicated), then the legacy list is
-/// cleared. Going through the field's deserializer means every construction
-/// path (YAML, JSON, raft state, API bodies) is normalized.
+/// Deserializes `networks`, folding the legacy `container.allowed_networks`
+/// into network-level `access` (entry X of container network C is added to
+/// `C.access`, deduplicated) and clearing the legacy list, so every
+/// construction path is normalized.
 ///
-/// Reverse direction, deliberately not folded: `X.access` is NOT touched.
-/// stack_sources keeps routing X's stacks into C when C.access contains X.
+/// Deliberately not folded in reverse: `X.access` is untouched.
 fn deserialize_networks<'de, D>(d: D) -> std::result::Result<BTreeMap<String, Network>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -555,35 +521,28 @@ impl Failback {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Drive {
-    /// How often this drive syncs. For a replicated drive, how often each
-    /// node's copy syncs to the others. For a served drive, how often the
-    /// active server pushes its data out to the other nodes named in
-    /// `served_by`, so one of them can take over with reasonably current
-    /// data if the active server goes down.
+    /// How often this drive syncs: each node's copy for a replicated drive, the
+    /// active server's push to the `served_by` standbys for a served drive.
     #[serde(with = "humantime_serde", default = "default_sync_interval")]
     pub sync_interval: Duration,
 
     #[serde(default)]
     pub mode: DriveMode,
 
-    /// Nodes that can hold the data for a served drive, in priority order.
-    /// The active server is the first of these that is currently reachable;
-    /// the rest keep a synced-to-`sync_interval` backup copy and stand ready
-    /// to take over. Every node named here maps the drive to the real
-    /// directory holding its copy; every other implementing node gets a
-    /// mountpoint instead, always pointed at whichever server is active.
+    /// Nodes that can hold the data for a served drive, in priority order. The
+    /// first reachable one is active; the rest keep a synced backup. Each maps
+    /// the drive to the real directory; other nodes get a mountpoint pointed at
+    /// the active server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_by: Vec<String>,
 
-    /// Whether a served drive goes back to a preferred node (earlier in
-    /// `served_by`) that returns after a failover. Either way the node only
-    /// takes the drive back after copying over what was written meanwhile.
+    /// Whether a served drive returns to a preferred node (earlier in `served_by`)
+    /// after a failover, once it has copied what was written meanwhile.
     #[serde(default, skip_serializing_if = "Failback::is_default")]
     pub failback: Failback,
 
-    /// How many of this drive's volumes one node replicates at the same time
-    /// when several are due together. Volumes beyond that wait their turn,
-    /// the most important stack's first.
+    /// How many of this drive's volumes one node replicates at once; the rest
+    /// wait, most important stack first.
     #[serde(
         default = "default_max_parallel_syncs",
         skip_serializing_if = "is_default_max_parallel_syncs"
@@ -621,12 +580,9 @@ pub enum NodeRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
-    /// Identity used for raft membership and the removed-node tombstone.
-    /// Minted fresh by `clouduler init` every time a machine is provisioned
-    /// (including a `--force` rejoin under a name the cluster already had),
-    /// so a name freed up by removing a node is never permanently radioactive:
-    /// only the old id stays tombstoned, and the new provisioning event
-    /// never collides with it.
+    /// Identity for raft membership and the removed-node tombstone. Minted fresh
+    /// by `clouduler init` on every provisioning (including a `--force` rejoin),
+    /// so only the old id stays tombstoned and a reused name never collides.
     pub id: uuid::Uuid,
     pub role: NodeRole,
     /// Networks this node is attached to, keyed by network name. Subnetted
@@ -639,13 +595,9 @@ pub struct Node {
     #[serde(default)]
     pub drives: BTreeMap<String, PathBuf>,
 
-    /// Free-form labels this node carries, matched by
-    /// `deploy.placement.constraints` as `node.labels.<key>`.
-    ///
-    /// A label says what a node *is* — it has fast storage, it can send mail,
-    /// its disk is external and replicated — so a stack can ask for a class of
-    /// node instead of naming one. Pinning to `node.hostname` is the blunt
-    /// alternative and it makes every stack file a record of today's topology.
+    /// Free-form labels, matched by `deploy.placement.constraints` as
+    /// `node.labels.<key>`, so a stack can ask for a class of node instead of
+    /// pinning to `node.hostname`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 
@@ -656,39 +608,29 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
 
-    /// Where this node's docker daemon stores images, container layers and
-    /// volumes (dockerd's `data-root`). `None` leaves dockerd's own default
-    /// (`/var/lib/docker`) alone. Purely local to this machine, unlike
-    /// `data_dir`: it has no cluster-wide default because there is no sane
-    /// shared value for a path that has to sit on this node's own disk.
-    /// `clouduler init` writes it into `/etc/docker/daemon.json`; changing it
-    /// here later only takes effect after dockerd is restarted, and moving
-    /// any data already under the old root is left to the operator.
+    /// Where this node's docker daemon stores data (dockerd `data-root`); `None`
+    /// leaves dockerd's default. Local only, so no cluster default. `clouduler
+    /// init` writes it to `/etc/docker/daemon.json`; changing it later needs a
+    /// dockerd restart and does not move existing data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_data_dir: Option<PathBuf>,
 
     /// Overrides `secrets.generate_if_missing` for this node.
     ///
-    /// A node joining an existing cluster must not invent its own key: the
-    /// cluster's secrets are sealed with the one that already exists, and a
-    /// second key only produces a node that thinks it can open them. `clouduler
-    /// init --join` sets this to false unless you say the node should hold the
-    /// key, and then you copy the real one in.
+    /// A joining node must not invent its own key (cluster secrets are sealed
+    /// with the existing one). `clouduler init --join` sets this to false unless
+    /// told otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_secret_key: Option<bool>,
 
-    /// This node should only host an instance when no other eligible node
-    /// can take it. For a node whose one virtue is a large drive but whose
-    /// cpu/ram are weak, it keeps the scheduler from piling general workload
-    /// onto it just because it happens to sort first.
+    /// Host an instance only when no other eligible node can take it, so a
+    /// large-drive but weak node is not piled with general workload.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last_resort: bool,
 
-    /// Whether this node times a small durable write (write + fsync) in its
-    /// data dir when the connectivity table asks it for a report. On by
-    /// default. Turn it off for a node whose disk is known to be slow or
-    /// should not be touched, such as an SD card you want to spare: the node
-    /// then reports no disk figure and is never shown as "Slow disk".
+    /// Whether this node times a small durable write in its data dir when the
+    /// connectivity table asks. Turn off for disks that should not be touched
+    /// (an SD card); the node then reports no disk figure.
     #[serde(default = "default_true_bool", skip_serializing_if = "is_true")]
     pub disk_probe: bool,
 }
@@ -740,25 +682,20 @@ impl NodeAddress {
 }
 
 /// A node's address on an egress or wireguard network: the local host
-/// interface (a VPN tunnel, usually) a service on this network egresses
-/// through. `open_ports` names ports the tunnel's far end forwards back to
-/// this node (e.g. a VPN provider's port forwarding feature like AirVPN), so
-/// the scheduler only places a service exposing one on a node where it will
-/// actually arrive, the same way `PublicAddress::open_ports` works for a
-/// public network's router.
+/// interface (a VPN tunnel, usually) a service egresses through.
+/// `open_ports` names ports the tunnel's far end forwards back to this node,
+/// so the scheduler only places a service exposing one where it will arrive.
 ///
 /// Serializes as a bare string when `open_ports` is empty and `fallback` is
-/// unset, so a plain egress interface (`vpn: wg0`) round trips unchanged; a
-/// map form is used once either is declared.
+/// unset, so `vpn: wg0` round trips unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceAddress {
     pub interface: String,
     pub open_ports: BTreeSet<OpenPort>,
-    /// Only meaningful on an `egress`-kind network: a second interface to
-    /// route out of instead, while `health_check_ip` stops answering pings
-    /// sent out `interface`. Re-checked every reconcile tick, so it also
-    /// switches back once the primary interface recovers. See
-    /// `[[clouduler-egress-fallback]]` / `docs/networking.md`.
+    /// Egress networks only: a second interface to route out of while
+    /// `health_check_ip` stops answering pings sent out `interface`. Re-checked
+    /// every reconcile tick, so it switches back when the primary recovers. See
+    /// `docs/networking.md`.
     pub fallback: Option<EgressFallback>,
 }
 
@@ -853,10 +790,8 @@ pub struct PublicAddress {
     pub ipv6: Option<Ipv6Addr>,
     #[serde(default)]
     pub domain: Option<String>,
-    /// Ports this node's router forwards to it on this network. A raw
-    /// `x-clouduler.expose` port on this network is only ever placed on a
-    /// node that lists it here, since nothing else guarantees the traffic
-    /// can actually reach the node from outside.
+    /// Ports this node's router forwards to it. A raw `x-clouduler.expose` port
+    /// on this network is only placed on a node that lists it here.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub open_ports: BTreeSet<OpenPort>,
 }
@@ -888,30 +823,24 @@ pub struct WebConfig {
     #[serde(default = "default_web_port")]
     pub port: u16,
 
-    /// Publish the dashboard as a route on the reverse proxy, so it is reached
-    /// on the standard HTTPS port with the same Let's Encrypt certificate and
-    /// Cloudflare record as any other service.
+    /// Publish the dashboard as a route on the reverse proxy (standard HTTPS
+    /// port, same certificate and DNS record as other services).
     ///
-    /// The direct listener on `port` stays up either way. That is deliberate:
-    /// it is the way back in when the proxy cannot bind its ports or a config
-    /// edit breaks routing, and locking the operator out of the ui that fixes
-    /// the proxy would be the worst possible failure mode.
+    /// The direct listener on `port` stays up either way, as the way back in when
+    /// the proxy cannot bind or a config edit breaks routing.
     #[serde(default = "default_true_bool")]
     pub through_proxy: bool,
 
     /// Loopback port the proxy forwards dashboard traffic to.
     ///
-    /// The proxy speaks plain HTTP to its backends, so the api opens a second
-    /// listener for it. Bound to 127.0.0.1 only, never the overlay: the
-    /// dashboard carries session cookies and the overlay is not encrypted.
-    /// Each node's proxy therefore reaches its own api, which is what we want
-    /// anyway since a non-leader already redirects to the leader.
+    /// The proxy speaks plain HTTP to backends, so the api opens a second
+    /// listener, bound to 127.0.0.1 only: the overlay is unencrypted and the
+    /// dashboard carries session cookies. Each node's proxy reaches its own api.
     #[serde(default = "default_web_backend_port")]
     pub backend_port: u16,
 }
 
-/// Not 443: the reverse proxy owns the standard ports, since those are where
-/// the cluster's own services are published. The admin ui takes the odd one.
+/// Not 443: the reverse proxy owns the standard ports.
 fn default_web_port() -> u16 {
     8443
 }
@@ -925,11 +854,9 @@ fn default_web_backend_port() -> u16 {
 
 /// The reverse proxy in front of every `x-clouduler.proxy` route.
 ///
-/// Both listeners are bound on every node, on all addresses: a request can
-/// land on any node and gets forwarded internally to wherever the container
-/// actually runs, the same way Swarm's routing mesh works. `dns_publish`
-/// only decides what the *public* DNS answer says, not where the proxy
-/// itself listens.
+/// Both listeners bind on every node; a request landing anywhere is forwarded
+/// to wherever the container runs. `dns_publish` only decides what the public
+/// DNS answer says.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
@@ -950,9 +877,8 @@ pub struct ProxyConfig {
     /// The client-facing DNS server, answering per the network the client is on.
     #[serde(default)]
     pub dns_server: DnsServerConfig,
-    /// Login for routes carrying the `authenticated` middleware. A separate
-    /// identity provider client (and group namespace) from `auth.oidc`, which
-    /// is for people operating the cluster.
+    /// Login for routes carrying the `authenticated` middleware. A separate OIDC
+    /// client (and group namespace) from `auth.oidc`, which is for operators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProxyAuthConfig>,
 }
@@ -960,26 +886,18 @@ pub struct ProxyConfig {
 /// The login portal behind the `authenticated` route middleware.
 ///
 /// The portal is a hostname the proxy answers itself, one per network in
-/// `networks` (the same label under each network's domain). A login is per
-/// network: signing in on one network's portal does not sign anyone in on
-/// another's, and a route may only ask for a login on a network listed here.
-/// A protected app that
-/// sees no valid cookie redirects the browser there; the portal runs the OIDC
-/// login (or, when the browser already has a portal session, skips straight
-/// on), then sends the browser back to the app through a one-time-token URL
-/// that sets the app's own cookie. Sessions are replicated in raft, so any
-/// node accepts any login.
+/// `networks`. Logins are per network, and a route may only ask for a login
+/// on a listed network. An app without a valid cookie redirects to the
+/// portal, which runs the OIDC login and sends the browser back through a
+/// one-time-token URL that sets the app's cookie. Sessions are replicated in
+/// raft, so any node accepts any login.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyAuthConfig {
-    /// Portal hostname. A bare label gets each network's domain appended, so
-    /// `login` on networks `public` and `private` serves `login.<public
-    /// domain>` and `login.<private domain>`. Needs DNS and a certificate like
-    /// any proxied host, which the proxy arranges.
+    /// Portal hostname. A bare label gets each network's domain appended.
     pub host: String,
     /// Networks that offer the login. A route with the `authenticated`
-    /// middleware must be published on one of these, and its users log in on
-    /// that network's portal, once per network.
+    /// middleware must be published on one of these.
     pub networks: Vec<String>,
     pub issuer: String,
     pub client_id: String,
@@ -994,9 +912,8 @@ pub struct ProxyAuthConfig {
     /// Claim shown as the user's name. Falls back to `sub`.
     #[serde(default = "default_username_claim")]
     pub username_claim: String,
-    /// How long a login lasts, for the portal and for every app cookie it
-    /// hands out. Fixed at login: an app cookie never outlives the portal
-    /// session it came from.
+    /// How long a login lasts, for the portal and every app cookie it hands out.
+    /// An app cookie never outlives the portal session.
     #[serde(with = "humantime_serde", default = "default_session_ttl")]
     pub session_ttl: Duration,
     /// Heading of the login page.
@@ -1009,14 +926,12 @@ pub struct ProxyAuthConfig {
     /// as a CSS hex colour like `#e5603c`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
-    /// Networks (a subset of `networks`) whose login page offers "remember
-    /// this IP address": a visitor whose address sits inside that network
-    /// may tick it, after which that address skips the login until
-    /// `remember_ip_ttl` passes. Empty means no network offers it.
+    /// Networks (subset of `networks`) whose login page offers "remember this IP
+    /// address": a visitor inside that network may skip login until
+    /// `remember_ip_ttl` passes. Empty means none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remember_ip: Vec<String>,
-    /// How long a remembered address stays trusted, counted from the login
-    /// that saved it and independent of `session_ttl`.
+    /// How long a remembered address stays trusted, from the login that saved it.
     #[serde(with = "humantime_serde", default = "default_remember_ip_ttl")]
     pub remember_ip_ttl: Duration,
     /// Publish the portal hostname's DNS records through Cloudflare's proxy
@@ -1034,8 +949,7 @@ fn default_remember_ip_ttl() -> Duration {
     Duration::from_secs(30 * 24 * 3600)
 }
 
-/// Colour sets for the login page. Each is a dark background with a few loud
-/// shapes in it, like the dashboard's own sign-in screen.
+/// Colour sets for the login page: a dark background with a few loud shapes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PortalPalette {
@@ -1200,29 +1114,25 @@ impl Default for ProxyConfig {
     }
 }
 
-/// A DNS server on the nodes' own addresses that answers cluster hostnames
-/// by the network the asking client is on: a client inside a network gets the
-/// node address on that network, and a hostname on a network the client cannot
-/// reach is refused. Names the cluster does not own are forwarded upstream for
-/// clients inside a subnetted network and refused for everyone else.
+/// A DNS server on the nodes' own addresses that answers cluster hostnames by
+/// the network the client is on. Hostnames on a network the client cannot
+/// reach are refused; other names are forwarded upstream for clients inside a
+/// subnetted network and refused otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DnsServerConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Networks to listen on, at this node's address on each. Empty means
-    /// every subnetted network the node has an address on, and every
-    /// container network with `proxy: true` (on the node's segment address);
-    /// a public network is only served when listed.
+    /// Networks to listen on, at this node's address on each. Empty means every
+    /// subnetted network the node has an address on plus every container network
+    /// with `proxy: true`; a public network is only served when listed.
     #[serde(default)]
     pub networks: Vec<String>,
     #[serde(default = "default_dns_port")]
     pub port: u16,
-    /// Resolvers that names the cluster does not own are forwarded to, tried
-    /// in order on port 53. Empty means the host's own resolvers
-    /// (`/etc/resolv.conf`) minus Tailscale MagicDNS, which split DNS can
-    /// route straight back to this server, or `1.1.1.1` and `1.0.0.1` when
-    /// MagicDNS is all the host has.
+    /// Upstream resolvers, tried in order on port 53. Empty means the host's
+    /// (`/etc/resolv.conf`) minus Tailscale MagicDNS (split DNS can loop back to
+    /// this server), or `1.1.1.1`/`1.0.0.1` when MagicDNS is all there is.
     #[serde(default)]
     pub upstream: Vec<std::net::IpAddr>,
 }
@@ -1247,19 +1157,12 @@ impl Default for DnsServerConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum DnsPublishMode {
     /// Every node's address is published for every proxied hostname (like
-    /// Docker Swarm's routing mesh: reaching any node reaches the service,
-    /// since every node forwards internally to wherever the container
-    /// actually runs). Safe default - works regardless of where containers
-    /// land, and needs no placement co-location.
+    /// Swarm's routing mesh). Safe default; needs no placement co-location.
     #[default]
     AllNodes,
-    /// Only the node(s) actually running the containers behind a hostname
-    /// are published, and stale records on any other node are deleted from
-    /// the DNS provider. Routing happens at the DNS level instead of inside
-    /// the proxy. Requires every container that publishes the same hostname
-    /// to be scheduled onto the same node - the scheduler enforces this as
-    /// an implicit placement constraint - since a hostname can only point at
-    /// one place.
+    /// Only the node(s) running the containers behind a hostname are published;
+    /// stale records elsewhere are deleted. Requires every container publishing
+    /// the same hostname to land on one node (an implicit scheduler constraint).
     OwningNode,
 }
 
@@ -1276,24 +1179,21 @@ fn default_https_port() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AcmeConfig {
-    /// Off by default: issuing against the real Let's Encrypt from a cluster
-    /// that is not reachable yet burns rate limit for nothing.
+    /// Off by default: issuing against production Let's Encrypt from an
+    /// unreachable cluster burns rate limit.
     #[serde(default)]
     pub enabled: bool,
-    /// ACME directory. Left out for Let's Encrypt production; set it to a
-    /// staging or Pebble directory for testing.
+    /// ACME directory. Left out for Let's Encrypt production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_url: Option<String>,
-    /// Contact address registered with the CA, which uses it for expiry
-    /// warnings.
+    /// Contact address registered with the CA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_email: Option<String>,
 }
 
-/// Where the cluster downloads its own prebuilt binary from to roll out a
-/// new version. A GitHub api token, needed only for a private repo or to
-/// avoid GitHub's low unauthenticated rate limit, lives sealed in the
-/// cluster secrets rather than here.
+/// Where the cluster downloads its own prebuilt binary to roll out updates.
+/// A GitHub api token (private repo / rate limits) lives sealed in the cluster
+/// secrets, not here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
@@ -1301,8 +1201,7 @@ pub struct SelfUpdateConfig {
     /// that repo's latest release, or a specific release's url
     /// (`https://github.com/OWNER/REPO/releases/tag/TAG`), which pins it.
     pub release_url: String,
-    /// Whether the leader periodically looks up the latest release, so the
-    /// ui can say an update is available without anyone opening settings.
+    /// Whether the leader periodically looks up the latest release.
     #[serde(default = "default_true_bool")]
     pub check_updates: bool,
     /// How often that lookup runs.
@@ -1314,13 +1213,11 @@ fn default_update_check_interval() -> Duration {
     Duration::from_secs(24 * 60 * 60)
 }
 
-/// Where and how the cluster mirrors its own state into git.
+/// Where and how the cluster mirrors its state into git.
 ///
-/// clouduler generates its own ssh keypair to push with; the admin adds its
-/// public half as a deploy key on the repo (shown in the web ui, under
-/// `GET /api/git-backup/status`). Secrets are re-encrypted for `age_recipient`
-/// rather than reusing the cluster's own key, so the matching private key can
-/// live entirely outside the cluster.
+/// clouduler generates its own ssh keypair; the admin adds its public half as
+/// a deploy key (`GET /api/git-backup/status`). Secrets are re-encrypted for
+/// `age_recipient`, so the private key can live outside the cluster.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GitBackupConfig {
     /// SSH url, e.g. `git@github.com:org/repo.git`. Only ssh push (deploy
@@ -1336,12 +1233,9 @@ fn default_backup_branch() -> String {
     "main".to_string()
 }
 
-// Hand-rolled rather than `#[serde(deny_unknown_fields)]` like its siblings:
-// `interval` used to debounce exports onto a fixed period (removed once
-// exports started pushing immediately on every change) and a cluster.yaml
-// written before that change still has it on disk. Accept and discard it so
-// that file keeps loading instead of refusing to parse; a fresh save from the
-// web ui drops it for good.
+// Hand-rolled rather than `deny_unknown_fields`: `interval` (removed once
+// exports started pushing on every change) may still be on disk in older
+// cluster.yaml files. Accept and discard it so they keep loading.
 impl<'de> Deserialize<'de> for GitBackupConfig {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -1369,10 +1263,8 @@ impl<'de> Deserialize<'de> for GitBackupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CloudflareConfig {
-    /// Zones clouduler is allowed to write records into. The api token itself
-    /// is not here: it is sealed and stored as a cluster secret (set from the
-    /// web ui), so every node replicates it instead of only the one an
-    /// operator happened to log into.
+    /// Zones clouduler may write records into. The api token is a sealed cluster
+    /// secret (set from the web ui), not stored here.
     pub zones: Vec<String>,
 }
 
@@ -1437,12 +1329,8 @@ impl ClusterConfig {
             || self.access_of(from).iter().any(|n| n == to)
     }
 
-    /// Names of every network of kind `Egress`, `Wireguard` or `Nat`, the
-    /// three kinds a service's `networks:` entry can join for outbound NAT
-    /// (a wireguard network attaches exactly like an egress one, its
-    /// interface just being clouduler-managed instead of admin-managed; a
-    /// nat network needs no interface at all, since every node implements it
-    /// the same way).
+    /// Names of every `Egress`, `Wireguard` or `Nat` network, the kinds a
+    /// service's `networks:` entry can join for outbound NAT.
     pub fn egress_networks(&self) -> std::collections::BTreeSet<String> {
         self.networks
             .iter()
@@ -1473,12 +1361,10 @@ impl ClusterConfig {
             .map(|(name, _)| name.as_str())
     }
 
-    /// Names of every network that every node implements without any
-    /// per-node setup: kinds `Nat` and `Container`. Unlike `Egress` or
-    /// `Wireguard`, these take no entry under `nodes.<name>.network`.
-    /// Placement treats membership in this set as an automatic pass in
-    /// `cl_sched::place::rejection`, the same way `served_drives` bypasses
-    /// `NodeState::implements` for a served drive.
+    /// Names of every network all nodes implement without per-node setup (`Nat`
+    /// and `Container`); they take no entry under `nodes.<name>.network`.
+    /// Placement treats membership as an automatic pass in
+    /// `cl_sched::place::rejection`, like `served_drives`.
     pub fn everywhere_networks(&self) -> std::collections::BTreeSet<String> {
         self.networks
             .iter()
@@ -1487,10 +1373,9 @@ impl ClusterConfig {
             .collect()
     }
 
-    /// Names of every network whose reachability from outside depends on a
-    /// specific node, whether public (its own router) or wireguard (its own
-    /// tunnel's far end forwarding a port back), so a raw `x-clouduler.expose`
-    /// port on one only ever schedules onto a node that actually has it open.
+    /// Names of every public or wireguard network, whose outside reachability
+    /// depends on a specific node, so a raw `x-clouduler.expose` port only
+    /// schedules onto a node that has it open.
     pub fn port_gated_networks(&self) -> std::collections::BTreeSet<String> {
         self.networks
             .iter()
@@ -1500,10 +1385,7 @@ impl ClusterConfig {
     }
 
     /// Names of every drive whose mode is `Served`, so placement and mount
-    /// resolution can tell a served drive (one authoritative copy, mounted
-    /// over the internal network by every other node) from a replicated one
-    /// (every implementing node keeps its own full copy) without needing the
-    /// whole `Drive` record.
+    /// resolution need not load the whole `Drive` record.
     pub fn served_drives(&self) -> std::collections::BTreeSet<String> {
         self.drives
             .iter()
@@ -1589,17 +1471,13 @@ impl Node {
     }
 }
 
-/// Append `domain` to a bare label. Anything already containing a dot is taken
-/// as a full name. `@` (the DNS zone-file convention for "the zone itself")
-/// names the apex: the domain with no label in front of it.
+/// Append `domain` to a bare label. A name containing a dot is taken as full.
+/// `@` names the apex (the domain alone).
 ///
-/// A trailing dot (the DNS zone-file convention for "this is already
-/// absolute") is stripped and the rest of the name used verbatim, regardless
-/// of `domain` - the explicit way to name a domain that isn't a subdomain of
-/// any network here, e.g. one bought elsewhere with no matching Cloudflare
-/// zone. Callers that need to tell such a name apart (to allow an ACME
-/// HTTP-01 fallback, say) check `name.ends_with('.')` on the raw input
-/// themselves; this function only normalizes the name.
+/// A trailing dot is stripped and the name used verbatim regardless of
+/// `domain`, to name a domain outside any network here. Callers needing to
+/// detect that (ACME HTTP-01 fallback) check `name.ends_with('.')` on the raw
+/// input; this only normalizes.
 pub fn qualify(name: &str, domain: Option<&str>) -> String {
     // DNS names are case-insensitive and resolvers/Cloudflare hand them back
     // lowercased, so normalize here to keep every comparison downstream exact.

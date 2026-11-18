@@ -12,15 +12,13 @@ use cl_raft::state::{Availability, NodeState, Request, Role};
 use openraft::BasicNode;
 use tempfile::TempDir;
 
-/// Grab a free port by binding and immediately dropping the listener. Racy in
-/// principle, fine in practice and much simpler than plumbing port 0 through.
+/// Grab a free port by binding and dropping the listener (racy in principle, fine in practice).
 fn free_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr")
 }
 
-/// Deterministic per-name id, purely so these tests can derive the same id
-/// from a name twice without threading a `Uuid` through everything.
+/// Deterministic per-name id, so a name maps to the same id twice without threading a `Uuid`.
 fn test_id(name: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes())
 }
@@ -33,7 +31,6 @@ struct Harness {
 }
 
 impl Harness {
-    /// Start `count` nodes and form a cluster with all of them voting.
     async fn start(count: usize) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let keys = cl_raft::throwaway_key();
@@ -75,7 +72,6 @@ impl Harness {
         }
     }
 
-    /// Index of the current leader, waiting for one to appear.
     async fn leader(&self) -> usize {
         for _ in 0..100 {
             // Every node must have learned who leads, not just the leader
@@ -91,7 +87,6 @@ impl Harness {
         panic!("no leader elected");
     }
 
-    /// Wait until every node has applied at least `version` commands.
     async fn await_version(&self, version: u64) {
         for _ in 0..100 {
             let mut all = true;
@@ -300,8 +295,7 @@ async fn a_node_without_a_cluster_holds_no_quorum() {
     assert!(node.submit(Request::NoOp).await.is_err());
 }
 
-/// A config edit made on any node reaches every node, which is what lets each
-/// daemon write its own copy of the file.
+/// A config edit on any node reaches every node, so each daemon can write its own copy.
 #[tokio::test]
 async fn a_config_edit_replicates_to_every_node() {
     let cluster = Harness::start(3).await;
@@ -382,8 +376,6 @@ fn id_of(i: usize) -> cl_raft::ids::NodeId {
     node_id(test_id(&format!("n{i}")))
 }
 
-/// Move `index` to a fresh address through the leader, waiting for the node to
-/// have bound it.
 async fn move_node(cluster: &Harness, index: usize) -> SocketAddr {
     let new = free_addr();
     cluster.nodes[index].set_rpc_addr(new);

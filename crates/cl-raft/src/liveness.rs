@@ -1,22 +1,18 @@
-//! Node failure handling.
+//! Node failure handling. Two halves tuned against each other:
 //!
-//! Two halves that have to be tuned against each other:
-//!
-//! - The leader probes every node and, once one has been silent for longer than
+//! - The leader probes every node and, once one is silent longer than
 //!   `node_timeout`, marks it unreachable so the scheduler moves its work.
-//! - Every node watches its own quorum and, once it has been without one for
-//!   longer than `fence_timeout`, stops the containers it is running.
+//! - Every node watches its own quorum and, once without one longer than
+//!   `fence_timeout`, stops its containers.
 //!
-//! Fencing has to happen before rescheduling, or the same container runs in two
-//! places and a shared volume gets two writers. The config validator enforces
-//! `fence_timeout < node_timeout`, and both are timed from the same kind of
-//! event, so the gap between them is the safety margin.
+//! Fencing must happen before rescheduling, or a container runs in two places
+//! with two writers on a shared volume. The config validator enforces
+//! `fence_timeout < node_timeout`; the gap is the safety margin.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-/// Tracks when each node last answered a probe. Timekeeping is injected so the
-/// decision logic can be tested without sleeping.
+/// Tracks when each node last answered a probe; time is injected for testing.
 #[derive(Debug, Default)]
 pub struct LivenessTracker {
     last_seen: BTreeMap<String, Instant>,
@@ -27,13 +23,11 @@ impl LivenessTracker {
         Self::default()
     }
 
-    /// Record a successful probe.
     pub fn seen(&mut self, node: &str, at: Instant) {
         self.last_seen.insert(node.to_string(), at);
     }
 
-    /// Start the clock for a node we have not probed yet. Without this, a node
-    /// that was never reachable would look fine forever.
+    /// Start the clock for a never-probed node, so it cannot look fine forever.
     pub fn track(&mut self, node: &str, at: Instant) {
         self.last_seen.entry(node.to_string()).or_insert(at);
     }
@@ -42,12 +36,10 @@ impl LivenessTracker {
         self.last_seen.remove(node);
     }
 
-    /// Drop nodes that are no longer in the roster.
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.last_seen.retain(|node, _| keep(node));
     }
 
-    /// Nodes silent for longer than `timeout` as of `now`.
     pub fn expired(&self, now: Instant, timeout: Duration) -> Vec<String> {
         self.last_seen
             .iter()
@@ -63,23 +55,19 @@ impl LivenessTracker {
     }
 }
 
-/// What this node may do with containers right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FenceState {
-    /// Quorum is held: reconcile normally.
     Open,
-    /// The daemon restarted shortly after last having a quorum, so the leader
-    /// cannot have moved this node's work yet. Whatever runs keeps running,
-    /// but nothing is created, started, stopped or removed until quorum is
-    /// confirmed, or `fence_timeout` runs out and this becomes `Closed`.
+    /// Daemon restarted shortly after last having quorum: the leader cannot have
+    /// moved this node's work yet. Running containers keep running but nothing is
+    /// created, started, stopped or removed until quorum is confirmed or
+    /// `fence_timeout` runs out (then `Closed`).
     Hold,
-    /// No quorum, or none confirmed yet: running containers are stopped and
-    /// nothing is started.
+    /// No quorum, or none confirmed yet: containers are stopped, none started.
     Closed,
 }
 
 impl FenceState {
-    /// For sharing the state through an `AtomicU8`.
     pub fn as_u8(self) -> u8 {
         match self {
             Self::Open => 0,
@@ -88,7 +76,6 @@ impl FenceState {
         }
     }
 
-    /// Anything unrecognised reads as `Closed`, the safe answer.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Open,
@@ -98,27 +85,21 @@ impl FenceState {
     }
 }
 
-/// Tracks how long this node has been without a quorum.
 #[derive(Debug)]
 pub struct Fence {
-    /// When quorum was lost, or None while it is held.
     lost_at: Option<Instant>,
     state: FenceState,
-    /// Whether `observe` has run at least once. A caller needs this to tell
-    /// "genuinely fenced" apart from "still closed because nobody has asked
-    /// yet" — see `is_observed`.
+    /// Whether `observe` has run, to tell "fenced" from "closed by default"
+    /// (see `is_observed`).
     observed: bool,
 }
 
-/// What the fence wants the node to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FenceAction {
-    /// Nothing to do.
     None,
-    /// Quorum has been gone too long: stop the containers running here.
+    /// Quorum gone too long: stop the containers running here.
     Fence,
-    /// Quorum is back (from `Closed` or `Hold`): the reconcile loop may act
-    /// again.
+    /// Quorum is back: the reconcile loop may act again.
     Release,
 }
 
@@ -129,15 +110,10 @@ impl Default for Fence {
 }
 
 impl Fence {
-    /// A new fence is closed.
-    ///
-    /// This is what a node coming back from a reboot has to start from. Its
-    /// stored state still says it owns the containers it owned when it died,
-    /// and the reconcile loop would act on that within a second of boot, well
-    /// before raft has told it that the leader handed those containers to
-    /// somebody else. Starting open means a rejoining node starts a second
-    /// copy of everything it used to run; starting closed costs one probe
-    /// interval on a node that really is still in the cluster.
+    /// A new fence is closed. A rebooted node's stored state still claims the
+    /// containers it owned, and reconcile would act on that before raft says the
+    /// leader handed them elsewhere; starting open would run a second copy of
+    /// everything. Starting closed costs one probe interval.
     pub fn new() -> Self {
         Self {
             lost_at: None,
@@ -146,15 +122,10 @@ impl Fence {
         }
     }
 
-    /// A fence for a daemon restarting `since_quorum` after this node last
-    /// had a quorum, which the caller has already checked is shorter than
-    /// `node_timeout`: the leader cannot have rescheduled this node's work
-    /// yet, so stopping it all would only cause an outage.
-    ///
-    /// The loss clock starts at that last quorum rather than at the restart.
-    /// The leader's `node_timeout` runs from the same moment, so a fence
-    /// counted from the restart could land after the leader has already moved
-    /// the work.
+    /// A fence for a daemon restarting `since_quorum` after last having quorum
+    /// (already checked to be below `node_timeout`): stopping everything would only
+    /// cause an outage. The loss clock starts at that last quorum, not the restart,
+    /// since the leader's `node_timeout` runs from the same moment.
     pub fn resume(now: Instant, since_quorum: Duration) -> Self {
         Self {
             lost_at: Some(now.checked_sub(since_quorum).unwrap_or(now)),
@@ -163,11 +134,8 @@ impl Fence {
         }
     }
 
-    /// Feed the current quorum state and get back what to do.
-    ///
-    /// Containers keep running while quorum is merely flapping, because killing
-    /// them on a brief blip turns a network hiccup into an outage. Only a
-    /// sustained loss fences.
+    /// Feed the current quorum state and get back what to do. A flapping quorum
+    /// does not stop containers; only a sustained loss fences.
     pub fn observe(&mut self, has_quorum: bool, now: Instant, timeout: Duration) -> FenceAction {
         self.observed = true;
         if has_quorum {
@@ -195,12 +163,8 @@ impl Fence {
         self.state == FenceState::Closed
     }
 
-    /// Whether `observe` has been called yet. A fresh fence is closed
-    /// (`is_fenced() == true`) before its first observation purely as a
-    /// starting default, not because quorum was actually checked and found
-    /// missing — a caller that needs to distinguish those two cases (e.g. to
-    /// avoid acting on a fence result that was never really decided) should
-    /// check this first.
+    /// Whether `observe` has been called. Before that, a fence is closed only as a
+    /// default, not because quorum was checked and found missing.
     pub fn is_observed(&self) -> bool {
         self.observed
     }
@@ -262,9 +226,7 @@ mod tests {
         assert!(!tracker.is_live("n1", at(base, 61), Duration::from_secs(30)));
     }
 
-    /// A fence on a node that has been up and in the cluster for a while.
-    /// Every test but the boot one starts here, since a fresh `Fence` is
-    /// closed and the interesting transitions are the ones after that.
+    /// A fence on a node that has been in the cluster for a while.
     fn settled(base: Instant, timeout: Duration) -> Fence {
         let mut fence = Fence::new();
         assert_eq!(fence.observe(true, base, timeout), FenceAction::Release);
@@ -277,8 +239,7 @@ mod tests {
         let mut fence = Fence::new();
         let timeout = Duration::from_secs(15);
 
-        // A node that has just booted has not heard from anyone yet. It must
-        // not run anything in that window, however long it lasts.
+        // Just booted: must not run anything, however long that lasts.
         assert!(fence.is_fenced());
         assert_eq!(fence.observe(false, base, timeout), FenceAction::None);
         assert_eq!(
@@ -303,9 +264,7 @@ mod tests {
         let mut fence = Fence::new();
         assert!(!fence.is_observed());
 
-        // True regardless of what that first call finds: a caller telling
-        // "fenced because unchecked" apart from "fenced because confirmed"
-        // needs this to flip on the call itself, not on a particular result.
+        // Must flip on the call itself, not on a particular result.
         fence.observe(false, base, timeout);
         assert!(fence.is_observed());
     }

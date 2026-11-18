@@ -1,7 +1,5 @@
-//! The `clouduler node` commands that change live cluster state. These talk
-//! to a running daemon over the node RPC channel, the same way the `stack`
-//! commands do, and mirror what the web ui's `/api/nodes` routes do to the
-//! replicated roster and the config file.
+//! The `clouduler node` commands that change live cluster state, mirroring the
+//! web ui's `/api/nodes` routes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -148,16 +146,10 @@ pub async fn remove(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Resul
     Ok(())
 }
 
-/// Disaster recovery for a cluster that has lost quorum for good: force
-/// `name`'s own local raft state to make it the cluster's sole voter, and let
-/// only `stacks` (or, with none named, every stack with `x-clouduler.priority:
-/// -1`) come back up, trusting this node's own local data for them.
-///
-/// The rewrite goes straight at this node's own data directory, so a running
-/// daemon is stopped through systemd first and started again afterwards; `via`
-/// does not apply. Then this waits until the stacks' containers run, saying
-/// what holds them back otherwise. See `cl_raft::node::emergency` for what
-/// actually changes.
+/// Disaster recovery after permanent quorum loss: force `name`'s local raft state
+/// to be the sole voter and bring up only `stacks` (or, with none named, stacks
+/// with `x-clouduler.priority: -1`) from local data. Stops and restarts a running
+/// daemon through systemd; `via` does not apply. See `cl_raft::node::emergency`.
 pub async fn emergency(
     cfg: &ClusterConfig,
     name: &str,

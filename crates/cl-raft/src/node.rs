@@ -1,5 +1,4 @@
-//! Assembles storage, network, the RPC server and the quorum gate into one
-//! handle the daemon holds for the life of the process.
+//! Assembles storage, network, the RPC server and the quorum gate into the handle the daemon holds.
 
 #![allow(clippy::result_large_err)]
 
@@ -28,36 +27,30 @@ use crate::state::{
 use crate::store::{StateMachine, Store};
 use crate::types::Raft;
 
-/// How stale a quorum acknowledgement may be before the leader stops counting
-/// itself as holding quorum. Three heartbeats gives one lost tick of slack.
+/// Max staleness of a quorum ack before the leader stops counting itself as
+/// holding quorum (three heartbeats).
 const QUORUM_ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// How long `add_manager` waits for a ping before deciding a prospective
-/// voter is not up yet. Short and one-shot: a miss is not fatal, since
-/// `seed_roster` retries on its own timer.
+/// How long `add_manager` waits for a ping before deciding the prospective
+/// voter is not up yet (`seed_roster` retries).
 const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long a write forwarded to the leader may take. A leader that just died
-/// without closing its sockets would otherwise hold the caller for the OS TCP
-/// timeout, and the caller can be the scheduler loop that has to fence this
-/// node.
+/// Max time for a write forwarded to the leader, so a silently dead leader does
+/// not hold the caller (possibly the scheduler loop that must fence this node)
+/// for the OS TCP timeout.
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Options {
     pub name: String,
-    /// Config-declared identity this node was provisioned with. See
-    /// `cl_config::Node::id`.
+    /// Config-declared identity (`cl_config::Node::id`).
     pub id: uuid::Uuid,
     pub rpc_addr: SocketAddr,
-    /// Directory holding the raft database.
     pub data_dir: PathBuf,
     pub cluster_name: String,
-    /// The cluster key, live. Gates every rpc connection in both directions;
-    /// a node with no key at all can talk to no one until one arrives.
+    /// The cluster key, live; gates every rpc connection in both directions.
     pub keys: crate::network::KeyWatch,
 }
 
-/// A running cluster member.
 pub struct ClusterNode {
     pub id: NodeId,
     pub name: String,
@@ -66,21 +59,14 @@ pub struct ClusterNode {
     keys: crate::network::KeyWatch,
     shared: Arc<RwLock<StateMachine>>,
     quorum: QuorumWatch,
-    /// The address the config currently gives this node, which the rpc server
-    /// listens on in addition to the one raft membership holds for it.
+    /// The address the config gives this node; the rpc server listens here too.
     listen: watch::Sender<SocketAddr>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
-/// Force `data_dir` (a stopped node's own raft storage) to hold a cluster
-/// where this node is the sole voter, so it can restore quorum on its own
-/// the next time it starts.
-///
-/// This is offline disaster recovery, not a `ClusterNode` operation: it
-/// writes straight to `data_dir/raft.redb`, so the daemon owning that
-/// directory must not be running, and it must be called before `start` opens
-/// the store for real. See `Store::force_quorum` for what it actually
-/// changes and why.
+/// Force `data_dir` (a stopped node's raft storage) to hold a cluster where this
+/// node is the sole voter. Offline disaster recovery: the daemon must not be
+/// running and this must run before `start`. See `Store::force_quorum`.
 pub async fn force_quorum(
     data_dir: &std::path::Path,
     id: uuid::Uuid,
@@ -91,11 +77,8 @@ pub async fn force_quorum(
     Ok(())
 }
 
-/// Disaster recovery like `force_quorum`, for `clouduler emergency`: makes
-/// `id` the cluster's sole voter, and additionally lets only `stack` start
-/// once this node comes back up, with its `stack_volumes` trusted as
-/// authoritative on this node. See `Store::emergency` for exactly what
-/// changes and why. Same offline precondition as `force_quorum`.
+/// Offline recovery for `clouduler emergency`: like `force_quorum`, plus only
+/// `stack` may start with its `stack_volumes` trusted. See `Store::emergency`.
 pub async fn emergency(
     data_dir: &std::path::Path,
     id: uuid::Uuid,
@@ -111,9 +94,8 @@ pub async fn emergency(
     Ok(())
 }
 
-/// Refills `data_dir`'s `cluster_config`/`stacks`/`configs`/`secrets` from a
-/// git backup, for `clouduler restore`. Does not touch raft membership - see
-/// `Store::restore_state`. Same offline precondition as `force_quorum`.
+/// Offline: refills `data_dir` content from a git backup, for `clouduler restore`.
+/// See `Store::restore_state`.
 pub async fn restore(
     data_dir: &std::path::Path,
     cluster_config: Option<ClusterConfigEntry>,
@@ -143,13 +125,10 @@ impl ClusterNode {
             heartbeat_interval: 500,
             election_timeout_min: 1500,
             election_timeout_max: 3000,
-            // Small state, so snapshot often and keep the log short.
             snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1000),
             max_in_snapshot_log_to_keep: 100,
-            // openraft's default (200ms) is a deadline for shipping the
-            // *whole* snapshot in one RPC. That's fine on localhost but
-            // spuriously times out over a wireguard/VPN link to a remote
-            // node, which then retries forever and spams the log.
+            // openraft's default (200ms) deadline for shipping a whole snapshot in one RPC
+            // spuriously times out over a VPN link and retries forever.
             install_snapshot_timeout: 30_000,
             ..Default::default()
         };
@@ -193,14 +172,12 @@ impl ClusterNode {
 
         let mut metrics = raft.metrics();
         tasks.push(tokio::spawn(async move {
-            // Metrics changes drive this, but a node cut off from the cluster
-            // stops getting them entirely, and that is exactly the case the
-            // gate has to catch. Hence the tick as well.
+            // A node cut off from the cluster stops getting metrics changes, which is
+            // exactly the case the gate must catch, hence the tick.
             let mut ticker = tokio::time::interval(QUORUM_ACK_TIMEOUT / 3);
             loop {
                 let status =
                     from_metrics(&metrics.borrow_and_update(), &contact, QUORUM_ACK_TIMEOUT);
-                // Only wake watchers when something they care about moved.
                 quorum_tx.send_if_modified(|current| {
                     let changed = *current != status;
                     if changed {
@@ -235,8 +212,7 @@ impl ClusterNode {
         })
     }
 
-    /// Form a new cluster from `members`. Only ever called once, on the first
-    /// manager to come up; every other node joins through membership change.
+    /// Form a new cluster from `members`; only called once, on the first manager.
     pub async fn initialize(&self, members: BTreeMap<NodeId, BasicNode>) -> Result<()> {
         self.raft
             .initialize(members)
@@ -245,14 +221,10 @@ impl ClusterNode {
         Ok(())
     }
 
-    /// Probe every other node and mark the silent ones unreachable, so the
-    /// scheduler gives their containers to someone else.
-    ///
-    /// Runs only while this node leads. Every node keeps its own tracker, and a
-    /// new leader starts with a fresh one, so a leader change buys the cluster
-    /// another `node_timeout` before it declares anyone dead. That is
-    /// deliberate: right after an election is exactly when probes are least
-    /// trustworthy.
+    /// Probe every other node and mark silent ones unreachable so the scheduler
+    /// reassigns their containers. Runs only while this node leads. A new leader
+    /// starts with a fresh tracker, buying another `node_timeout` before declaring
+    /// anyone dead: probes are least trustworthy right after an election.
     pub async fn run_failure_detector(
         self: Arc<Self>,
         probe_interval: Duration,
@@ -264,8 +236,7 @@ impl ClusterNode {
         loop {
             ticker.tick().await;
             if !self.is_leader() {
-                // Not our job right now. Drop what we know so the next term
-                // starts from a clean slate.
+                // Not leading: drop state so the next term starts clean.
                 tracker = LivenessTracker::new();
                 continue;
             }
@@ -277,21 +248,15 @@ impl ClusterNode {
             for (name, node) in &state.nodes {
                 if name == &self.name {
                     tracker.seen(name, now);
-                    // Answering this loop proves the leader is up. Without
-                    // this a previous leader's verdict on it (it was down
-                    // when that leader last probed) is never revoked once it
-                    // wins the election itself, so it stays flagged
-                    // unreachable and takes no work.
+                    // Answering this loop proves the leader is up; without this a previous
+                    // leader's unreachable verdict on it would never be revoked.
                     alive.push(name.clone());
                     continue;
                 }
                 tracker.track(name, now);
-                // Bounded, because the failure this detector exists for is a
-                // node vanishing without closing its sockets: power loss, a
-                // pulled cable, a killed VM. Nothing answers and nothing
-                // refuses, so an unbounded connect sits there for the OS TCP
-                // timeout, minutes long, and stalls this whole loop. A probe
-                // that has not answered within the probe interval is a miss.
+                // Bounded: the target failure is a node vanishing without closing sockets,
+                // where an unbounded connect waits minutes for the OS TCP timeout and stalls
+                // the loop. No answer within the probe interval is a miss.
                 let peer = Peer::connect(&node.rpc_addr.to_string(), self.keys.clone());
                 if matches!(
                     timeout(probe_interval, network::ping(&peer)).await,
@@ -331,7 +296,6 @@ impl ClusterNode {
         }
     }
 
-    /// Whether this node already belongs to a formed cluster.
     pub async fn is_initialized(&self) -> Result<bool> {
         self.raft
             .is_initialized()
@@ -339,21 +303,12 @@ impl ClusterNode {
             .map_err(ClusterError::Fatal)
     }
 
-    /// Add a voting manager to the cluster, but only once it is actually
-    /// reachable.
-    ///
-    /// Promoting to voter the moment the learner is added is unsafe:
-    /// openraft's own blocking wait for the learner to catch up
-    /// (`add_learner(.., true)`) compares replication lag against
-    /// `replication_lag_threshold`, which a freshly formed or lightly used
-    /// cluster's whole log can sit under - so a learner that never actually
-    /// connected can still look "caught up" and get promoted anyway. That
-    /// turns a 1-voter cluster into a 2-voter one with no fault tolerance:
-    /// if the new node in fact never came up, quorum (now requiring both) is
-    /// lost immediately and the cluster locks. So this pings the node
-    /// itself before calling `change_membership`, and if it does not
-    /// answer, leaves it a learner and returns an error - `seed_roster`
-    /// retries on its own timer, same as any other add failure.
+    /// Add a voting manager, but only once it is reachable. Promoting right after
+    /// adding the learner is unsafe: openraft's catch-up wait compares lag against
+    /// `replication_lag_threshold`, which a small log can sit under, so a learner
+    /// that never connected can look caught up. A 1-voter cluster would become a
+    /// 2-voter one and lock when the node never comes up. So this pings first and,
+    /// on no answer, leaves it a learner and errors (`seed_roster` retries).
     pub async fn add_manager(&self, id: NodeId, addr: SocketAddr) -> Result<()> {
         self.raft
             .add_learner(id, BasicNode::new(addr.to_string()), false)
@@ -379,11 +334,9 @@ impl ClusterNode {
         Ok(())
     }
 
-    /// Tell the rpc server which address the config now gives this node. It
-    /// starts listening there at once, and keeps answering on the address raft
-    /// membership holds until the leader has moved membership over (see
-    /// [`crate::listeners`]). Safe to call with an address that is not up yet:
-    /// the bind is retried.
+    /// Tell the rpc server the address the config now gives this node. It listens
+    /// there at once and keeps the membership address until the leader moves it
+    /// (see [`crate::listeners`]); the bind is retried if the address is not up yet.
     pub fn set_rpc_addr(&self, addr: SocketAddr) {
         self.listen.send_if_modified(|current| {
             let changed = *current != addr;
@@ -392,8 +345,7 @@ impl ClusterNode {
         });
     }
 
-    /// The address raft membership currently holds for `id`, which is the one
-    /// every peer dials.
+    /// The address raft membership holds for `id`, which peers dial.
     pub fn member_addr(&self, id: NodeId) -> Option<String> {
         self.raft
             .metrics()
@@ -404,18 +356,12 @@ impl ClusterNode {
             .map(|node| node.addr.clone())
     }
 
-    /// Move a member (voter or learner) to a new rpc address without changing
-    /// who votes. Leader only. A no-op when membership already holds `addr`.
-    ///
-    /// The node is first asked for its identity at `addr`, and the change is
-    /// refused unless it answers as `id`. Both halves are the point: raft
-    /// would otherwise dial an address nobody listens on (a network that is
-    /// not up yet) and lose the node, or worse an address that belongs to a
-    /// different node, which openraft documents as a split-brain risk for
-    /// `SetNodes`. Because the leader only commits an address it has itself
-    /// reached, the commit never depends on the node being reachable any other
-    /// way, and an unreachable new address leaves membership untouched: the
-    /// error is returned and the caller retries, or the config is edited back.
+    /// Move a member to a new rpc address without changing who votes. Leader only;
+    /// no-op if membership already holds `addr`. The node is first asked for its
+    /// identity at `addr` and refused unless it answers as `id`: otherwise raft
+    /// could dial an address nobody listens on, or one belonging to another node
+    /// (a documented `SetNodes` split-brain risk). An unreachable address leaves
+    /// membership untouched; the caller retries or the config is edited back.
     pub async fn readdress(&self, id: NodeId, addr: SocketAddr) -> Result<()> {
         let Some(current) = self.member_addr(id) else {
             return Err(ClusterError::Membership(format!(
@@ -456,8 +402,7 @@ impl ClusterNode {
         Ok(())
     }
 
-    /// Add a worker. Workers replicate state so they can reconcile locally, but
-    /// they do not vote.
+    /// Add a worker: replicates state but does not vote.
     pub async fn add_worker(&self, id: NodeId, addr: SocketAddr) -> Result<()> {
         self.raft
             .add_learner(id, BasicNode::new(addr.to_string()), true)
@@ -466,8 +411,7 @@ impl ClusterNode {
         Ok(())
     }
 
-    /// Drop a node from the voter set, then from membership entirely. A no-op
-    /// if the node is not currently a member, so callers can retry freely.
+    /// Drop a node from the voter set, then from membership. No-op if not a member.
     pub async fn remove_node(&self, id: NodeId) -> Result<()> {
         let is_member = self
             .raft
@@ -505,19 +449,13 @@ impl ClusterNode {
             .collect()
     }
 
-    /// Whether `id` currently holds a vote, as opposed to being absent from
-    /// membership entirely or present only as a learner.
-    ///
-    /// `seed_roster` polls this for every configured manager so a node
-    /// demoted by `force_quorum` - or never promoted because it was
-    /// unreachable when `add_manager` last tried - gets promoted again the
-    /// moment it is reachable, with no operator action needed.
+    /// Whether `id` holds a vote. `seed_roster` polls this so a node demoted by
+    /// `force_quorum` or never promoted gets promoted once reachable.
     pub async fn is_voter(&self, id: NodeId) -> bool {
         self.voters().await.contains(&id)
     }
 
-    /// Submit a write. Applied here when this node leads, otherwise forwarded
-    /// to the leader over the same channel raft uses.
+    /// Submit a write: applied here if leading, else forwarded to the leader.
     pub async fn submit(&self, request: Request) -> Result<Response> {
         if self.is_leader() {
             return Ok(self
@@ -541,13 +479,9 @@ impl ClusterNode {
             .map_err(|msg| ClusterError::Forward { leader, msg })
     }
 
-    /// The current leader's raft rpc address (`ip:port`), read straight from
-    /// raft's own live membership rather than this node's replicated
-    /// application state, so it stays correct even when the latter is
-    /// lagging or holds a stale id for the leader (e.g. right after the
-    /// leader was re-provisioned under a new id via `force_quorum`/`init
-    /// --join`). `None` if there is no leader right now, or raft's
-    /// membership does not (yet) carry its address.
+    /// The leader's raft rpc address (`ip:port`), read from raft's live membership
+    /// rather than replicated app state, which can lag or hold a stale id (e.g.
+    /// after the leader was re-provisioned). `None` if no leader or no address.
     pub async fn leader_rpc_addr(&self) -> Option<String> {
         let leader = self.quorum.leader()?;
         self.leader_addr(leader).await
@@ -563,15 +497,12 @@ impl ClusterNode {
             .map(|node| node.addr.clone())
     }
 
-    /// Read the applied state. Reads are local, so they can lag the leader by
-    /// the replication delay; anything needing linearizability must go through
-    /// `submit`.
+    /// Read the applied state; local, so it may lag the leader (use `submit` for linearizability).
     pub async fn state(&self) -> ClusterState {
         self.shared.read().await.data.clone()
     }
 
-    /// Run `f` over the applied state without cloning it, for hot paths that
-    /// only need a lookup.
+    /// Run `f` over the applied state without cloning it.
     pub async fn read<R>(&self, f: impl FnOnce(&ClusterState) -> R) -> R {
         f(&self.shared.read().await.data)
     }
@@ -604,13 +535,11 @@ impl ClusterNode {
     }
 }
 
-/// How often the listener set is reconciled when nothing wakes it: a bind that
-/// failed (the address is not on an interface yet) is retried at this pace.
+/// Retry pace for reconciling the listener set when nothing wakes it (failed binds).
 const LISTEN_RETRY: Duration = Duration::from_secs(5);
 
-/// Serve rpc on the address the config gives this node and on the one raft
-/// membership holds for it, binding each as it becomes possible. See
-/// [`crate::listeners`] for why both are needed while a node is re-addressed.
+/// Serve rpc on the config's address and the one raft membership holds, binding
+/// each as possible. See [`crate::listeners`].
 async fn supervise_listeners(
     id: NodeId,
     raft: Arc<Raft>,
@@ -620,8 +549,7 @@ async fn supervise_listeners(
     let mut wanted = crate::listeners::Wanted::default();
     let mut tasks = crate::listeners::Tasks::default();
     let mut metrics = raft.metrics();
-    // Metrics change far more often than the retry pace, and a failed bind
-    // must not be retried (and logged) on every one of them.
+    // Metrics change far more often than the retry pace; do not retry (and log) failed binds on each.
     let mut tried: BTreeMap<SocketAddr, Instant> = BTreeMap::new();
 
     loop {

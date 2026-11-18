@@ -1,5 +1,4 @@
-//! The RPC listener. Serves raft messages and forwarded writes on the internal
-//! network address.
+//! The RPC listener: raft messages and forwarded writes on the internal address.
 
 use std::sync::Arc;
 
@@ -21,8 +20,7 @@ use crate::state::{Request as StateRequest, Response as StateResponse};
 use crate::store::StateMachine;
 use crate::types::Raft;
 
-/// Everything the RPC handlers need. Built before the node itself exists, since
-/// the listener starts as part of bringing the node up.
+/// Everything the RPC handlers need; built before the node exists.
 #[derive(Clone)]
 pub struct Context {
     pub name: String,
@@ -31,14 +29,11 @@ pub struct Context {
     pub shared: Arc<RwLock<StateMachine>>,
     pub quorum: QuorumWatch,
     pub contact: Contact,
-    /// This node's cluster key, read per connection. Every connection must
-    /// prove it holds the same key before a single frame is read.
+    /// This node's cluster key, read per connection.
     pub keys: KeyWatch,
 }
 
-/// Accept connections on an already bound listener until the task is dropped.
-/// Each connection handles requests sequentially, matching how the client side
-/// uses one socket per peer.
+/// Accept connections until the task is dropped; each handles requests sequentially.
 pub async fn serve_listener(listener: TcpListener, ctx: Context) -> std::io::Result<()> {
     if let Ok(addr) = listener.local_addr() {
         debug!(%addr, "rpc listening");
@@ -49,7 +44,6 @@ pub async fn serve_listener(listener: TcpListener, ctx: Context) -> std::io::Res
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(stream, ctx).await {
-                // A peer going away mid request is routine, so keep it quiet.
                 debug!(%peer, error = %e, "rpc connection closed");
             }
         });
@@ -57,10 +51,9 @@ pub async fn serve_listener(listener: TcpListener, ctx: Context) -> std::io::Res
 }
 
 async fn handle(mut stream: TcpStream, ctx: Context) -> std::io::Result<()> {
-    // The listener is reachable by anything that can route to the internal
-    // address, and the requests below can rewrite cluster state or hijack
-    // leadership, so nothing is decoded until the peer has proven it holds the
-    // cluster key. A node with no key cannot verify anyone and refuses all.
+    // Reachable by anything that can route to the internal address and able to
+    // rewrite state or hijack leadership, so nothing is decoded until the peer
+    // proves the cluster key. No key means refuse all.
     let key = ctx.keys.borrow().clone();
     let Some(key) = key else {
         debug!("refusing rpc connection, this node holds no cluster key");
@@ -97,7 +90,7 @@ async fn dispatch(ctx: &Context, request: RpcRequest) -> RpcResponse {
     let contact = &ctx.contact;
 
     match request {
-        // Leader traffic, so the quorum gate knows we are still being reached.
+        // Leader traffic: tells the quorum gate we are still being reached.
         RpcRequest::AppendEntries(rpc) => {
             contact.touch();
             match raft.append_entries(rpc).await {
@@ -122,12 +115,8 @@ async fn dispatch(ctx: &Context, request: RpcRequest) -> RpcResponse {
     }
 }
 
-/// Apply a write, relaying it to the leader when this node is not it.
-///
-/// The caller should not have to know who leads, so a follower passes the
-/// request on rather than bouncing it back. One hop is always enough: the next
-/// stop is the leader itself, and if it has since lost the term the error comes
-/// back to the client to retry.
+/// Apply a write, relaying to the leader if this node is not it. One hop
+/// suffices; if the leader lost the term meanwhile the error goes back to retry.
 async fn write(ctx: &Context, request: StateRequest) -> Result<StateResponse, String> {
     let status = ctx.quorum.status();
 
@@ -162,7 +151,6 @@ async fn write(ctx: &Context, request: StateRequest) -> Result<StateResponse, St
     }
 }
 
-/// Reads come from this node's own applied state, no consensus round trip.
 async fn answer(ctx: &Context, query: Query) -> QueryResult {
     match query {
         Query::Status => {

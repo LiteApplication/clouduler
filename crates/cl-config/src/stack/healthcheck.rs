@@ -14,7 +14,6 @@ pub enum HealthcheckTest {
     Exec(Vec<String>),
 }
 
-/// Compose `healthcheck:` block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Healthcheck {

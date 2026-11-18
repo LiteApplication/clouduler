@@ -1,14 +1,6 @@
-//! `clouduler exec` — run a command inside a running container, wherever it
-//! runs.
-//!
-//! Same node-resolution and node-to-node auth as `clouduler logs` (see that
-//! module's docs): the instance's node is read out of the replicated state,
-//! then this connects directly to that node's api, authenticated by an HMAC
-//! signature over the shared cluster key. The difference is that a container
-//! shell needs two-way traffic, so this goes over a websocket
-//! (`cl-api::routes::instances::internal_exec`) instead of `logs`'s
-//! one-way SSE stream: raw bytes in, raw bytes out, tty allocated so it reads
-//! and echoes exactly like `docker exec -it`.
+//! `clouduler exec`: run a command inside a running container on whichever node
+//! runs it. Same node resolution and auth as `clouduler logs`, but over a websocket
+//! (`cl-api::routes::instances::internal_exec`) with a tty, like `docker exec -it`.
 
 use std::io::IsTerminal;
 
@@ -26,12 +18,8 @@ use tokio_tungstenite::Connector;
 use crate::logs::resolve_target;
 use cl_raft::client::client_for;
 
-/// With no command given, try `bash` and fall back to `sh` inside the
-/// container itself rather than picking one client-side: many images (most
-/// `alpine`-based ones) have no `bash` at all, and the server rejects an
-/// empty `cmd` outright (see `cl-api`'s `ExecQuery`), so a bare `clouduler
-/// exec target` would always 400. `sh` is assumed to exist - `docker exec`
-/// itself has nothing more minimal to fall back to.
+/// With no command, try `bash` and fall back to `sh` inside the container: many
+/// images (e.g. `alpine`) lack `bash`, and the server rejects an empty `cmd`.
 fn default_shell_command(cmd: Vec<String>) -> Vec<String> {
     if !cmd.is_empty() {
         return cmd;
@@ -120,13 +108,9 @@ pub async fn run(
     let result = bridge(ws_stream).await;
     drop(raw_terminal);
 
-    // The stdin-forwarding task in `bridge` reads via `tokio::io::stdin()`,
-    // which is backed by a real blocking read on a threadpool thread that
-    // `.abort()` cannot interrupt. Returning normally would leave `main`'s
-    // `#[tokio::main]` runtime waiting for that thread to finish before the
-    // process can exit - which only happens once the user presses another
-    // key. Exit directly instead, once this exec session is over, so the
-    // stuck thread can't hold the process open.
+    // The stdin task in `bridge` is a blocking read on a threadpool thread that
+    // `.abort()` cannot interrupt; returning would make the tokio runtime wait for
+    // it until another keypress. Exit directly instead.
     match result {
         Ok(code) => std::process::exit(code.unwrap_or(0)),
         Err(e) => {
@@ -167,12 +151,9 @@ where
                 }
             }
         }
-        // Not `Message::Close`: a websocket close starts the close handshake,
-        // after which the server can no longer send, so a command run without
-        // a terminal (`ssh host clouduler exec ...`, stdin at EOF at once)
-        // would lose all of its output. An empty frame - which a real read
-        // never produces - means "stdin is done" instead, and the server ends
-        // the session once the command does.
+        // Not `Message::Close`: that starts the close handshake, after which the
+        // server can no longer send, losing output of commands run without a
+        // terminal (stdin at EOF at once). An empty frame means "stdin is done".
         let _ = write.send(Message::Binary(Vec::new().into())).await;
     });
 
@@ -209,10 +190,8 @@ where
     }
 }
 
-/// A `rustls::ClientConfig` that accepts any certificate, matching the
-/// `danger_accept_invalid_certs(true)` reqwest client `clouduler logs` uses:
-/// every node's certificate is self signed until ACME issues a real one, and
-/// the caller is authenticated by the HMAC header, not TLS trust.
+/// Accepts any certificate, like `clouduler logs`: node certs are self signed until
+/// ACME issues one, and the caller is authenticated by the HMAC header.
 pub fn insecure_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
     let config = rustls::ClientConfig::builder()
         .dangerous()
@@ -261,10 +240,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     }
 }
 
-/// Puts the controlling terminal into raw mode for the life of the exec
-/// session, so keystrokes go straight to the container's tty instead of
-/// being line-buffered and echoed twice. Restores the original mode on drop,
-/// including on an early return via `?`.
+/// Puts the terminal into raw mode for the exec session; restores it on drop.
 struct RawTerminal {
     original: nix::sys::termios::Termios,
 }

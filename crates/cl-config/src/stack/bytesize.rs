@@ -1,8 +1,5 @@
-//! A byte count that can be written as a number or as a human size.
-//!
-//! `max_body_size: 10MB` in a stack file is the point of this: an operator
-//! reasons in megabytes and should not have to count zeroes, but the proxy
-//! needs an exact `u64` and a round trip through yaml must not change it.
+//! A byte count written as a number or a human size (`max_body_size: 10MB`),
+//! stored as an exact `u64` that round trips through yaml unchanged.
 
 use std::fmt;
 
@@ -18,9 +15,8 @@ impl ByteSize {
     }
 }
 
-/// Decimal and binary suffixes both accepted, longest first so `mib` is not
-/// matched as `m`. Ordering matters: `b` has to come last or it swallows the
-/// `b` in `kb`.
+/// Decimal and binary suffixes, longest first so `mib` is not matched as `m`;
+/// `b` must come last or it swallows the `b` in `kb`.
 const UNITS: &[(&str, u64)] = &[
     ("kib", 1024),
     ("mib", 1024 * 1024),
@@ -72,9 +68,7 @@ impl std::str::FromStr for ByteSize {
 }
 
 impl fmt::Display for ByteSize {
-    /// Renders back to the largest binary unit that divides exactly, so a
-    /// config that was written as `10MiB` comes back out that way rather than
-    /// as a wall of digits.
+    /// Renders back to the largest binary unit that divides exactly.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (suffix, factor) in [
             ("GiB", 1024u64 * 1024 * 1024),

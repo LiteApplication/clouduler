@@ -1,9 +1,6 @@
-//! The progress object for one self-update run.
-//!
-//! This is exactly what gets stored, as json, in the reserved config object
-//! `_clouduler_self_update_run`: it rides the existing config CAS plumbing and
-//! the existing `/api/events` SSE stream for free, so no new raft entry type
-//! is needed for it.
+//! The progress object for one self-update run, stored as json in the reserved
+//! config object `_clouduler_self_update_run` (rides the config CAS and SSE
+//! stream, so no new raft entry type).
 
 use std::collections::BTreeMap;
 
@@ -20,7 +17,6 @@ pub const RUN_CONFIG: &str = "_clouduler_self_update_run";
 /// last check ran.
 pub const CHECK_CONFIG: &str = "_clouduler_self_update_check";
 
-/// What the leader's periodic release check found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateCheck {
     /// Unix seconds the check ran, whether or not it succeeded.
@@ -33,16 +29,12 @@ pub struct UpdateCheck {
     pub error: Option<String>,
 }
 
-/// Reserved secret name the sealed GitHub API token is stored under. Never
-/// exposed through the generic `/api/secrets` routes. Optional: only needed
-/// for a private repo, or to avoid GitHub's low unauthenticated rate limit.
+/// Reserved secret name for the sealed GitHub API token (private repos or the
+/// rate limit). Never exposed through `/api/secrets`.
 pub const GITHUB_TOKEN_SECRET: &str = "_clouduler_self_update_github_token";
 
-/// One node's progress through a run, in the order it must be crossed.
-///
-/// Forward-only, like `cl_raft::state::MigrationPhase`: a stale message must
-/// never rewind a node's phase, since two workers racing to report the same
-/// step would otherwise be able to bounce it back and forth.
+/// One node's progress through a run. Forward-only, like
+/// `cl_raft::state::MigrationPhase`, so a stale report never rewinds a phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePhase {
@@ -84,7 +76,6 @@ impl NodePhase {
     }
 }
 
-/// Everything the orchestrator and every worker agree on for one run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateRunState {
     /// Unique per run, so a worker that missed the start of a run (restarted

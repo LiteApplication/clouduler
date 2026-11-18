@@ -1,5 +1,4 @@
-//! Raft type wiring. Kept in one place so the long openraft generics never
-//! leak into the rest of the codebase.
+//! Raft type wiring, kept here so openraft generics do not leak.
 
 // The macro's default snapshot type expands to a bare `Cursor`.
 use std::io::Cursor;
@@ -12,7 +11,6 @@ openraft::declare_raft_types!(
         R = Response,
 );
 
-/// A peer as raft sees it. `addr` is the node RPC endpoint on the internal network.
 pub type Node = openraft::BasicNode;
 pub type Entry = openraft::Entry<TypeConfig>;
 pub type LogId = openraft::LogId<crate::ids::NodeId>;
@@ -24,5 +22,4 @@ pub type StorageError = openraft::StorageError<crate::ids::NodeId>;
 pub type StorageIOError = openraft::StorageIOError<crate::ids::NodeId>;
 pub type Raft = openraft::Raft<TypeConfig>;
 
-/// Snapshots are a json dump of the state machine, small enough to hold in memory.
 pub type SnapshotData = Cursor<Vec<u8>>;

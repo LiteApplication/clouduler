@@ -42,9 +42,7 @@ pub enum ClusterError {
     Shutdown(String),
 }
 
-// openraft's errors are generic over the operation, so there is no single type
-// to convert from. Flattening them to a message at the boundary keeps the
-// signatures of this crate readable.
+// openraft's errors are generic over the operation; flatten to a message.
 impl ClusterError {
     pub fn initialize(e: impl std::fmt::Display) -> Self {
         ClusterError::Initialize(e.to_string())

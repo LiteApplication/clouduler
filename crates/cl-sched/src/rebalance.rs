@@ -1,15 +1,9 @@
-//! Rebalancing: actively relocating already-placed instances to smooth load
-//! across nodes, run only on operator request (`clouduler rebalance` / the ui
-//! button), never on the regular scheduling sweep.
+//! Rebalancing: relocating already-placed instances to smooth load, only on operator
+//! request (`clouduler rebalance` / ui button), never on the regular sweep.
 //!
-//! `place::place` deliberately never moves a validly-placed instance -
-//! reshuffling a running cluster on every pass would mean needless downtime
-//! and volume transfers for no operator-visible reason (see its own doc
-//! comment). Rebalancing is the opposite: explicitly asked for, so it is
-//! allowed to disturb a stable cluster to spread load more evenly. It never
-//! decides placement itself; it only picks, among nodes an instance could
-//! already legally run on (the same `candidates` `place` uses), a less busy
-//! one to move it to.
+//! `place::place` never moves a validly-placed instance (to avoid needless downtime and
+//! volume transfers); rebalance is the explicit exception. It never decides placement:
+//! it only picks a less busy node among the legal `candidates` `place` uses.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,11 +13,8 @@ use cl_raft::state::ClusterState;
 use crate::place::candidates;
 use crate::plan::Desired;
 
-/// One instance rebalance decided to relocate. Carrying out the move is the
-/// caller's job (`Request::BeginMigration`, the same request the ui's manual
-/// "move" button already submits), so a redeploy or a config edit racing this
-/// plan is rejected exactly where a manual move would be, not silently
-/// overwritten.
+/// One instance rebalance decided to relocate. The caller carries out the move via
+/// `Request::BeginMigration` (as the ui's manual move does), so racing edits are rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Move {
     pub instance: InstanceId,
@@ -38,16 +29,10 @@ struct Movable<'a> {
     candidate_nodes: BTreeSet<String>,
 }
 
-/// A node's current burden, used to pick which node gives up an instance and
-/// which one receives it. Compared lexicographically: memory pressure first
-/// (the fraction, in permille, of the node's own self-reported total used by
-/// instances that declare a `deploy.resources` memory limit), then raw
-/// instance count as the fallback and tie-break for everything memory can't
-/// see - pinned/global instances, instances with no declared memory limit,
-/// and any node that hasn't self-reported its own memory total yet (0, so it
-/// never outranks a node whose pressure is actually known). When no instance
-/// anywhere declares a memory limit, every node's `mem_permille` is 0 and
-/// this collapses to the original count-only comparison.
+/// A node's burden, compared lexicographically: memory pressure first (permille of the
+/// node's reported total used by instances declaring a memory limit), then instance count
+/// as fallback and tie-break (0 pressure for nodes without a reported total). With no
+/// declared limits anywhere this collapses to count-only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct NodeLoad {
     mem_permille: u64,
@@ -75,15 +60,9 @@ fn load_of(
     }
 }
 
-/// Whether moving one instance from `from` to `to` is actually worth doing:
-/// a meaningful (>=1 percentage point) easing in memory pressure when the two
-/// nodes' pressure differs, else more than one instance apart by count - so
-/// two nodes already within one of each other are left alone rather than
-/// trading a container back and forth forever. Also guards against
-/// overshoot: a single large instance moving onto a much smaller node could
-/// leave `to` worse off than `from` started, which neither metric alone
-/// would catch, so the move must not leave `to` more loaded than `from` was
-/// before it.
+/// Whether moving one instance `from` -> `to` is worth it: at least a 1 point easing in
+/// memory pressure when pressures differ, else more than one instance apart by count (no
+/// ping-pong). The move must also not leave `to` more loaded than `from` was.
 fn worth_moving(from: NodeLoad, to: NodeLoad, to_after: NodeLoad) -> bool {
     let meaningful_gap = if from.mem_permille != to.mem_permille {
         from.mem_permille.saturating_sub(to.mem_permille) >= 10
@@ -93,26 +72,13 @@ fn worth_moving(from: NodeLoad, to: NodeLoad, to_after: NodeLoad) -> bool {
     meaningful_gap && to_after <= from
 }
 
-/// Decide which already-placed instances to move to smooth load across
-/// nodes - memory pressure where it's known, instance count everywhere else.
+/// Decide which placed instances to move. Considers only instances that are not pinned
+/// or global, publish no proxy hostname (those must move as a group, not attempted), are
+/// not mid-migration, and have more than one candidate node (otherwise `place` handles it).
 ///
-/// Only ever considers an instance that:
-/// - is not pinned to a specific node (`x-clouduler.node`) or a global
-///   service (one copy per eligible node already, nothing to balance);
-/// - publishes no proxy hostname - a hostname shared by more than one
-///   instance has to move as one group (see `place`'s `host_node`
-///   anchoring), which this does not attempt, so such an instance is simply
-///   left alone rather than half-moved;
-/// - is not already mid-migration;
-/// - has more than one node in its own candidate set, the current one
-///   included (otherwise there is nowhere else for it to go, or its current
-///   placement is not even valid any more, which is `place`'s job to fix).
-///
-/// Greedy and bounded: each pass moves one instance off the currently busiest
-/// node (that still has a movable instance on it) onto the least busy node
-/// that can run it, stopping once no candidate move would narrow the gap
-/// meaningfully (see `worth_moving`). Capped at one pass over every instance,
-/// the most a single call could ever usefully need.
+/// Greedy: each pass moves one instance off the busiest node onto the least busy node that
+/// can run it, stopping when no move narrows the gap (`worth_moving`), capped at one pass
+/// per instance.
 pub fn plan(
     state: &ClusterState,
     desired: &[Desired],

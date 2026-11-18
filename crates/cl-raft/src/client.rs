@@ -1,8 +1,5 @@
-//! Talking to a running daemon from outside the cluster, for the cli.
-//!
-//! Uses the same RPC channel the nodes use between themselves. Writes are
-//! submitted to whichever node is asked and forwarded from there to the leader,
-//! so the caller does not have to know who leads.
+//! Talking to a running daemon from outside the cluster, for the cli. Uses the
+//! node RPC channel; writes go to any node and are forwarded to the leader.
 
 use std::sync::Arc;
 
@@ -38,8 +35,7 @@ pub fn client_for(cfg: &ClusterConfig, via: Option<&str>) -> AnyResult<Client> {
         .ok_or_else(|| anyhow!("node {name} has no address on the internal network"))?;
     debug!(node = name, %addr, "submitting through");
 
-    // The rpc channel is gated on the cluster key, so the cli needs it just
-    // as it already does to seal and unseal secrets locally.
+    // The rpc channel is gated on the cluster key.
     let key = ClusterKey::load(&cfg.secrets.key_file).map_err(|e| {
         anyhow!(
             "the node channel needs the cluster key, and {} cannot be read: {e}. Run this from a node that holds the key",
@@ -87,9 +83,8 @@ impl Client {
         self.fetch_state(false).await
     }
 
-    /// The applied state with sealed secrets intact, for the cli paths that
-    /// open them locally with the cluster key (listing and restoring from a
-    /// backup destination). The rpc channel is already gated on that key.
+    /// The applied state with sealed secrets intact, for cli paths that open them
+    /// locally with the cluster key.
     pub async fn state_with_secrets(&self) -> Result<ClusterState, String> {
         self.fetch_state(true).await
     }

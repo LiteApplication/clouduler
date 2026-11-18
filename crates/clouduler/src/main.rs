@@ -16,20 +16,14 @@ fn install_crypto_provider() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Must run before anything else touches stdout: if `COMPLETE` is set in
-    // the environment this answers a shell completion request (or, with no
-    // further args, prints the registration snippet `completions print`
-    // also prints) and exits, instead of falling through to the real CLI.
-    // See `crate::completion` and `crate::completions`.
+    // Must run first: answers a shell completion request (`COMPLETE` set) and exits.
     CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
     init_tracing(&cli.log, cli.verbose)?;
     install_crypto_provider();
 
-    // Setting the node up is the one thing that runs without a config, since
-    // writing that config is most of what it does. Printing or installing
-    // completions needs no cluster at all.
+    // Init and completions run without a config or cluster.
     match cli.command {
         Command::Init(args) => return cl_init::run(*args, cli.config).await,
         Command::Completions {

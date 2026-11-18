@@ -25,26 +25,19 @@ use crate::rpc::{decode, encode, frame, Connection, RpcRequest, RpcResponse};
 use crate::state::{Request as StateRequest, Response as StateResponse};
 use crate::types::TypeConfig;
 
-/// The label both ends of the raft channel authenticate under, so a handshake
-/// captured here cannot be used to open any other node-to-node channel.
+/// Label both ends authenticate under, so a captured handshake cannot open any other channel.
 pub const AUTH_LABEL: &str = "raft";
 
-/// A live view of this process's cluster key. The key can arrive after the node
-/// starts (another node delivers it), so connections read it when they are made
-/// rather than capturing it at boot.
+/// Live view of this process's cluster key, which may arrive after boot; read per connection.
 pub type KeyWatch = watch::Receiver<Option<Arc<ClusterKey>>>;
 
-/// A `KeyWatch` that always holds `key`, for callers with a key in hand and no
-/// need for it to change, like the cli.
+/// A `KeyWatch` that always holds `key` (e.g. the cli).
 pub fn fixed_key(key: Arc<ClusterKey>) -> KeyWatch {
-    // The sender is dropped straight away; a receiver keeps serving the last
-    // value it saw, which is all a fixed key needs.
+    // The sender is dropped; a receiver keeps serving its last value.
     watch::channel(Some(key)).1
 }
 
-/// A `KeyWatch` holding a fresh random key, for tests that stand up nodes and
-/// have no key file to load. Nodes only talk to each other when they share one,
-/// so a test cluster clones the receiver it gets from here into every node.
+/// A `KeyWatch` with a fresh random key, for tests; clone the receiver into every node.
 pub fn throwaway_key() -> KeyWatch {
     fixed_key(Arc::new(ClusterKey::generate()))
 }
@@ -55,8 +48,7 @@ const DETACHED_CALL_LIMIT: Duration = Duration::from_secs(10);
 
 type NetError<E = RaftError<NodeId>> = RPCError<NodeId, BasicNode, E>;
 
-/// Hands raft a client per peer. Connections are cached and reopened lazily,
-/// since heartbeats would otherwise pay a TCP handshake every tick.
+/// Hands raft a client per peer; connections are cached and reopened lazily.
 #[derive(Clone)]
 pub struct Network {
     peers: Arc<Mutex<BTreeMap<NodeId, Arc<Peer>>>>,
@@ -98,8 +90,7 @@ impl RaftNetworkFactory<TypeConfig> for Network {
     }
 }
 
-/// One peer's cached connection. The mutex serializes requests, which is what
-/// the single socket needs anyway since responses are not tagged.
+/// One peer's cached connection. The mutex serializes requests: replies are not tagged.
 pub struct Peer {
     addr: String,
     keys: KeyWatch,
@@ -115,14 +106,11 @@ impl Peer {
         }
     }
 
-    /// A one off peer, for callers outside raft's own replication paths.
     pub fn connect(addr: &str, keys: KeyWatch) -> Self {
         Self::new(addr.to_string(), keys)
     }
 
-    /// `call` with an upper bound, for callers that run it detached and so
-    /// cannot rely on a caller's deadline to stop a dead peer holding the
-    /// connection lock.
+    /// `call` with an upper bound, so a dead peer cannot hold the connection lock.
     async fn call_bounded(&self, request: &RpcRequest) -> Result<RpcResponse, std::io::Error> {
         tokio::time::timeout(DETACHED_CALL_LIMIT, self.call(request))
             .await
@@ -134,32 +122,24 @@ impl Peer {
             })
     }
 
-    /// Send one request, reconnecting once if the cached socket is stale.
     pub async fn call(&self, request: &RpcRequest) -> Result<RpcResponse, std::io::Error> {
         let mut guard = self.conn.lock().await;
 
-        // Take the socket out while it is in use and only put it back once the
-        // exchange completed. If this future is cancelled mid exchange (the
-        // detached call limit, or a caller's timeout) the socket is dropped
-        // with it; leaving it cached would keep an unread reply on it, and
-        // since replies are not tagged every later call would read the answer
-        // to the one before.
+        // The socket is only put back after a completed exchange: if this future is
+        // cancelled mid-exchange it is dropped, since a cached socket with an unread
+        // reply would shift every later answer by one (replies are untagged).
         if let Some(mut conn) = guard.take() {
-            // A reply of the wrong kind means the socket is out of step with
-            // us (a stale answer is queued ahead of the real one), so it is
-            // dropped like a dead one rather than trusted for another call.
+            // Wrong-kind reply: socket is out of step, drop it.
             if let Ok(response) = Self::exchange(&mut conn, request).await {
                 if reply_fits(request, &response) {
                     *guard = Some(conn);
                     return Ok(response);
                 }
             }
-            // Otherwise a peer that restarted left us a dead socket. Drop it
-            // and try once more on a fresh one.
+            // Peer restarted and left a dead socket: retry once on a fresh one.
         }
 
-        // No key means we cannot prove membership, and the listener would
-        // refuse us anyway; failing here says why instead of a bare reset.
+        // No key: the listener would refuse us; fail here with a clear reason.
         let key = self.keys.borrow().clone().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -167,9 +147,7 @@ impl Peer {
             )
         })?;
         let mut stream = TcpStream::connect(&self.addr).await?;
-        // Mutual proof of the cluster key before any frame is exchanged, so
-        // we never ship a write or a snapshot to something that is not a
-        // member.
+        // Mutual proof of the cluster key before any frame, so we never ship writes or snapshots to a non-member.
         stream_auth::connect(&mut stream, &key, AUTH_LABEL)
             .await
             .map_err(|e| {
@@ -200,21 +178,16 @@ impl Peer {
     }
 }
 
-/// A raft client bound to one peer.
 pub struct Channel {
     target: NodeId,
     peer: Arc<Peer>,
 }
 
 impl Channel {
-    /// Send `request`, giving up after `deadline` rather than letting a dead
-    /// peer's TCP connect hang until raft's own hard_ttl fires. A connect
-    /// that never gets a RST (peer down, firewalled) can take far longer
-    /// than the ~500ms heartbeat timeout, and if we let raft's own timer
-    /// expire instead of ours we surface as `RPCError::Timeout`, which raft
-    /// never backs off on — that's what floods the log every heartbeat for
-    /// as long as the peer stays down. Timing out here first means we report
-    /// `Unreachable`, which raft *does* back off on.
+    /// Send `request`, giving up after `deadline`. A connect to a dead peer can
+    /// outlast raft's heartbeat timeout, which surfaces as `RPCError::Timeout` and
+    /// is never backed off (log flood); timing out here yields `Unreachable`,
+    /// which raft does back off on.
     async fn call<E>(
         &self,
         request: RpcRequest,
@@ -223,14 +196,11 @@ impl Channel {
     where
         E: std::error::Error,
     {
-        // The exchange runs detached so a deadline only stops us waiting for
-        // it. Cancelling it mid connect would restart the TCP and auth
-        // handshake from scratch on the next attempt, so one lost SYN (a
-        // one second retransmit) would make every attempt miss its deadline
-        // and keep the peer in raft's growing backoff. Left to finish, the
-        // slow connection is cached and the next heartbeat finds it ready,
-        // and since the task consumes its own response a late answer can
-        // never be read by an unrelated call.
+        // Runs detached so the deadline only stops us waiting: cancelling mid-connect
+        // would restart the handshake next time, and one lost SYN would make every
+        // attempt miss its deadline. Left to finish, the connection is cached for the
+        // next heartbeat, and the task consumes its own response so a late answer
+        // is never read by an unrelated call.
         let peer = self.peer.clone();
         let task = tokio::spawn(async move { peer.call_bounded(&request).await });
         match tokio::time::timeout(deadline, task).await {
@@ -299,19 +269,14 @@ impl RaftNetwork<TypeConfig> for Channel {
         }
     }
 
-    /// A dead peer otherwise gets retried at raft's default flat 500ms
-    /// backoff, which is indistinguishable in the logs from no backoff at
-    /// all. Grow it so a long-downed node quiets down instead of logging a
-    /// warn+error pair on every heartbeat forever.
+    /// Grow the backoff so a long-downed node does not log a warn+error pair per heartbeat at raft's flat 500ms default.
     fn backoff(&self) -> Backoff {
         let schedule = [1, 1, 2, 5].into_iter().map(Duration::from_secs);
         Backoff::new(schedule.chain(std::iter::repeat(Duration::from_secs(5))))
     }
 }
 
-/// Whether `response` is a possible answer to `request`. Replies are not
-/// tagged, so this is the only way to notice a socket that has fallen out of
-/// step. `Error` answers anything.
+/// Whether `response` is a possible answer to `request` (replies are untagged, so this detects an out-of-step socket). `Error` answers anything.
 fn reply_fits(request: &RpcRequest, response: &RpcResponse) -> bool {
     matches!(
         (request, response),
@@ -328,12 +293,10 @@ fn reply_fits(request: &RpcRequest, response: &RpcResponse) -> bool {
     )
 }
 
-/// Probe a peer's liveness. Used by the leader's failure detector.
 pub async fn ping(peer: &Peer) -> bool {
     matches!(peer.call(&RpcRequest::Ping).await, Ok(RpcResponse::Pong))
 }
 
-/// Forward a write to the leader over the same channel raft uses.
 pub async fn forward(peer: &Peer, request: StateRequest) -> Result<StateResponse, String> {
     match peer.call(&RpcRequest::Forward(request)).await {
         Ok(RpcResponse::Forward(result)) => result,

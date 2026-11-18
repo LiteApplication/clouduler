@@ -1,12 +1,6 @@
-//! `clouduler git-backup` commands: manual controls for the git <-> cluster
-//! mirror (see `docs/git-backup.md`) that fall outside the schedule-driven
-//! export loop and the webhook-driven pull - triggering a pull immediately.
-//!
-//! Goes over the same node-to-node https channel `clouduler logs`/`exec` use:
-//! the normal api, authenticated by an HMAC signature over the shared cluster
-//! key rather than a session or api key, since the cli already needs that key
-//! on disk for other commands and there is no reason to also ask for the
-//! separate webhook token.
+//! `clouduler git-backup` commands: manual controls for the git mirror (see
+//! `docs/git-backup.md`), e.g. triggering a pull immediately. Uses the same HMAC
+//! node-to-node channel as `clouduler logs`/`exec`.
 
 use anyhow::{anyhow, Context, Result};
 use cl_config::ClusterConfig;

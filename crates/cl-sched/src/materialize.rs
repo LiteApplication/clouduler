@@ -1,17 +1,11 @@
 //! Getting configs and secrets from the database onto disk and into containers.
 //!
-//! Docker's own configs and secrets are a swarm feature we cannot use, so the
-//! node writes each object to a file under its data directory and bind mounts
-//! that file at the target path, read only by default. From inside the
-//! container it looks exactly like a docker secret at `/run/secrets/<name>`,
-//! which is what matters: images that already read docker secrets work
-//! unchanged.
-//!
-//! Secrets are decrypted only at this point, as late as possible, and written
-//! with owner-only permissions to a directory that is also owner-only. A
-//! secret is never mounted read-write — see `validate_writable_secrets` in
-//! cl-config — but a config opting into `write: true` is, and this module is
-//! also what notices a container has changed one: see `writable_config`.
+//! Docker secrets are a swarm feature we cannot use, so each object is written under
+//! the node's data dir and bind mounted at the target path (read only by default),
+//! so images reading `/run/secrets/<name>` work unchanged. Secrets are decrypted as
+//! late as possible and written owner-only; they are never mounted read-write (see
+//! `validate_writable_secrets` in cl-config), but `write: true` configs are, and
+//! `writable_config` detects a container's edit.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,10 +20,8 @@ use cl_secret::{ClusterKey, Sealed};
 
 use crate::error::{Result, SchedError};
 
-/// Directory under the node's data dir holding materialized objects.
 const OBJECT_DIR: &str = "objects";
 
-/// One object written to disk, ready to mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Materialized {
     pub host_path: PathBuf,
@@ -78,7 +70,6 @@ pub struct Prepared {
     pub secret_revisions: BTreeMap<String, u64>,
 }
 
-/// Writes objects out for one instance.
 /// The unix socket the daemon serves the read-only image API on, under the
 /// node's data directory. One definition so the listener and the container
 /// mount cannot drift apart.
@@ -86,19 +77,16 @@ pub fn docker_api_socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("docker-api").join("docker.sock")
 }
 
+/// Writes objects out for one instance.
 pub struct Materializer {
     root: PathBuf,
     docker_api_socket: PathBuf,
-    /// A live view of the cluster key rather than a snapshot: a node started
-    /// with none still gets secrets materialized once one is delivered to it
-    /// automatically, without a restart. `borrow()` is synchronous and cheap,
-    /// so this stays a plain field read from `prepare`/`has_key`.
+    /// A live view of the cluster key, so a node started without one materializes secrets
+    /// once one is delivered, without a restart.
     key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
 }
 
 impl Materializer {
-    /// `data_dir` is this node's data directory. `key` tracks the cluster
-    /// key live; without one, secrets cannot be materialized.
     pub fn new(
         data_dir: &Path,
         key: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
@@ -110,13 +98,11 @@ impl Materializer {
         }
     }
 
-    /// Where this node serves clouduler's own docker API socket, the one a
-    /// `docker_socket` with `mode: clouduler` mounts.
+    /// Where this node serves clouduler's own docker API socket (`docker_socket` mode `clouduler`).
     pub fn docker_api_socket(&self) -> &Path {
         &self.docker_api_socket
     }
 
-    /// This node's data directory.
     pub fn data_dir(&self) -> &Path {
         self.root.parent().unwrap_or(&self.root)
     }
@@ -125,13 +111,9 @@ impl Materializer {
         self.key.borrow().is_some()
     }
 
-    /// The cluster key as this node currently holds it.
-    ///
-    /// Exposed because secrets are not only ever written into containers: a
-    /// registry login is a sealed secret the reconcile loop has to open for
-    /// itself, before any container exists to mount it into. Cloned out of
-    /// the watch rather than handing back a borrow, so a caller cannot hold
-    /// the watch's lock across an await.
+    /// The cluster key as this node currently holds it. Also needed outside container
+    /// mounts (registry logins are sealed secrets). Cloned out of the watch so no borrow
+    /// is held across an await.
     pub fn key(&self) -> Option<Arc<ClusterKey>> {
         self.key.borrow().clone()
     }
@@ -264,25 +246,15 @@ impl Materializer {
         })
     }
 
-    /// Materializes a `write: true` config, watching for a container's edit
-    /// to it on the way.
+    /// Materializes a `write: true` config, detecting a container's edit.
     ///
-    /// Each write records the revision it wrote alongside the file itself
-    /// (`<name>.rev`), so a stale-vs-edited disk file can be told apart
-    /// without keeping anything in memory (nothing survives this process
-    /// restarting otherwise). Three cases:
-    ///
-    /// - No `.rev` yet, or it names a revision other than `entry.revision`:
-    ///   this node's copy is not caught up with the cluster (first mount, or
-    ///   someone else's edit landed since); overwrite from `content` and
-    ///   record the new revision, exactly like a read-only config.
-    /// - `.rev` matches `entry.revision` and the file on disk still reads
-    ///   back as `content`: nothing to do.
-    /// - `.rev` matches `entry.revision` but the file reads back as
-    ///   something else: the container changed it. Leave the file alone and
-    ///   report the edit, so the caller can feed it back into the cluster;
-    ///   the next `write: true` config to land here — most likely this same
-    ///   edit, once it round-trips through raft — is what advances `.rev`.
+    /// The written revision is stored in `<name>.rev` so stale-vs-edited files can be told
+    /// apart across restarts. Cases:
+    /// - no `.rev`, or one differing from `entry.revision`: not caught up with the cluster;
+    ///   overwrite and record the revision.
+    /// - `.rev` matches and the file reads back as `content`: nothing to do.
+    /// - `.rev` matches but the file differs: the container edited it. Leave it and report
+    ///   the edit so the caller feeds it back through raft.
     fn writable_config(
         &self,
         dir: &Path,
@@ -350,13 +322,11 @@ impl Materializer {
         Ok(None)
     }
 
-    /// Like `write_object`, but keeps the file's inode when it already exists.
+    /// Like `write_object`, but keeps the inode of an existing file.
     ///
-    /// A container bind mounts a single file by inode, so replacing it by
-    /// rename leaves the container holding the old, now unlinked, file: its
-    /// later writes vanish and it never sees the cluster's updates. A writable
-    /// config is rewritten in place instead; the first write still goes
-    /// through the rename so a starting container never sees half a file.
+    /// A container bind mounts a single file by inode, so a rename would leave it holding the
+    /// unlinked old file. The first write still renames so a starting container never sees
+    /// half a file.
     fn write_in_place(
         &self,
         dir: &Path,
@@ -415,7 +385,6 @@ impl Materializer {
         })
     }
 
-    /// Remove an instance's objects, called when its container goes away.
     pub fn clean(&self, instance: &InstanceId) -> Result<()> {
         let dir = self.instance_dir(instance);
         if !dir.exists() {
@@ -482,9 +451,8 @@ fn write_private(path: &Path, content: &[u8], secret: bool) -> Result<()> {
     })
 }
 
-/// Apply the reference's `uid`/`gid` to the host file, which a bind mount
-/// shows to the container unchanged. Only numeric ids can be honoured: the
-/// host has no idea what the image's `/etc/passwd` calls anyone.
+/// Apply the reference's `uid`/`gid` to the host file (numeric ids only; the host cannot
+/// resolve the image's `/etc/passwd` names).
 fn set_owner(path: &Path, reference: &ObjectRef) -> Result<()> {
     let id = |field: &str, value: &Option<String>| -> Result<Option<u32>> {
         value

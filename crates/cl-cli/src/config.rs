@@ -1,5 +1,4 @@
-//! The `clouduler config` commands. These talk to a running daemon over the
-//! node RPC channel, the same way the `stack` commands do.
+//! The `clouduler config` commands.
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
@@ -8,10 +7,8 @@ use tracing::debug;
 
 use cl_raft::client::client_for;
 
-/// Push the on-disk config into raft. `cfg` is already read and validated by
-/// the time this runs (`ClusterConfig::load` in `main`, before any command
-/// dispatches), so a permission or parse problem with the file has already
-/// failed loudly and no network call has happened yet.
+/// Push the on-disk config into raft. `cfg` is already read and validated by the
+/// caller (`ClusterConfig::load` in `main`).
 pub async fn reload(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
     let yaml = serde_yaml::to_string(cfg).context("re-encoding the config")?;
     let client = client_for(cfg, via)?;

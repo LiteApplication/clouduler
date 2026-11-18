@@ -21,9 +21,7 @@ pub fn summary(cfg: &ClusterConfig) {
     }
 }
 
-/// Non-fatal problems with the config itself (stack-level checks such as a
-/// service's own `stop_grace_period` need the deployed stacks, so the daemon
-/// log covers those).
+/// Non-fatal problems with the config itself.
 pub fn warnings(cfg: &ClusterConfig) -> Vec<String> {
     cfg.failover.fence_margin_warning().into_iter().collect()
 }

@@ -84,12 +84,9 @@ pub struct PortMapping {
     pub mode: PublishMode,
 }
 
-/// Compose/Swarm's port publishing mode. Clouduler has no ingress mesh: a
-/// published port is always bound directly on the single node running the
-/// container, which is what swarm calls `host` mode. `Ingress` is accepted
-/// syntax (so a stack file copied from swarm doesn't fail to parse on the
-/// field alone) but rejected at the value level, since there is no mesh to
-/// back it.
+/// Compose/Swarm's port publishing mode. There is no ingress mesh: a published
+/// port always binds on the node running the container (swarm `host` mode).
+/// `Ingress` parses so swarm stack files load, but is rejected at the value level.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PublishMode {

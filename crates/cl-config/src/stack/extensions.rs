@@ -73,8 +73,7 @@ impl Default for Authenticated {
 }
 
 /// Wire form. serde_yaml renders an externally tagged enum as a yaml tag
-/// (`!Headers`), which nobody wants to write in a compose file, so the two
-/// shapes are spelled out and mapped by hand.
+/// (`!Headers`), so the shapes are spelled out and mapped by hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum RawMiddleware {
@@ -196,19 +195,15 @@ impl Middleware {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CorsPolicy {
-    /// Origins allowed to read the response. `["*"]` allows any origin, but
-    /// is rejected together with `allow_credentials`: a browser refuses to
-    /// pair a wildcard origin with credentials, so the combination could
-    /// only ever surface as a confusing runtime failure.
+    /// Origins allowed to read the response. `["*"]` is rejected together with
+    /// `allow_credentials`: browsers refuse that pairing.
     pub origins: Vec<String>,
     #[serde(
         default = "default_cors_methods",
         skip_serializing_if = "is_default_cors_methods"
     )]
     pub methods: Vec<String>,
-    /// Headers a request may set. Empty means whatever the browser asked for
-    /// in `Access-Control-Request-Headers` is echoed back, which is the
-    /// common case and avoids listing every header a client might send.
+    /// Headers a request may set. Empty echoes `Access-Control-Request-Headers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -292,22 +287,17 @@ pub struct ProxyRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticky: Option<bool>,
 
-    /// Largest request body to forward, e.g. `10MB`. Anything bigger is
-    /// answered with 413 and never reaches the container. Unset means no
-    /// limit, which is the right default for an upload-heavy service and the
-    /// wrong one for anything exposed to the internet.
+    /// Largest request body to forward, e.g. `10MB`; bigger gets 413. Unset means
+    /// no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body_size: Option<ByteSize>,
 
-    /// Let `Upgrade` requests through, which is what a websocket needs. On by
-    /// default: a route that does not use websockets is unaffected, and one
-    /// that does would otherwise fail in a way that is tedious to diagnose.
+    /// Let `Upgrade` requests through (websockets). On by default.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub websockets: bool,
 
-    /// Forward the client's `Host` header instead of rewriting it to the
-    /// backend's address. Off by default because most containers do not care,
-    /// but anything that builds absolute URLs or does virtual hosting needs it.
+    /// Forward the client's `Host` header instead of the backend's address. Off by
+    /// default; needed for absolute URLs or virtual hosting.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_host: bool,
 
@@ -321,28 +311,23 @@ pub struct ProxyRoute {
     )]
     pub response_timeout: Option<Duration>,
 
-    /// Talk to the container in cleartext HTTP/2 with prior knowledge (h2c)
-    /// instead of HTTP/1.1. This is what a gRPC service needs. Decided per
-    /// route, so several `path_prefix` routes on one host and port can mix
-    /// h2c and HTTP/1.1. Upgrade requests (websockets) on such a route still
-    /// go to the container over HTTP/1.1.
+    /// Talk to the container in cleartext HTTP/2 (h2c), as gRPC needs. Per route,
+    /// so routes on one host and port can mix h2c and HTTP/1.1. Upgrade requests
+    /// on such a route still use HTTP/1.1.
     #[serde(default, skip_serializing_if = "is_false")]
     pub http2: bool,
 
-    /// Publish this hostname's DNS records through Cloudflare's proxy (the
-    /// orange cloud). Public networks only. A hostname is only proxied when
-    /// every route behind it (every path, every service) sets this; any
-    /// route, static route or redirect that does not keeps it DNS-only.
+    /// Publish this hostname's DNS through Cloudflare's proxy (orange cloud).
+    /// Public networks only. A hostname is only proxied when every route behind it
+    /// sets this.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cloudflare_proxy: bool,
 
-    /// Let clients on another network that reaches this route's network answer
-    /// through the node's address on their own network. On by default: the
-    /// client DNS server (`proxy.dns_server`) answers a client inside a
-    /// subnetted network with the node's address there when it has one, so it
-    /// skips the router. Set false to answer every client with the address on
-    /// the route's own network instead. Valid on any route network. Names are compared fully qualified; the shortcut is off
-    /// for a hostname as soon as any route behind it sets this false.
+    /// Let clients on another network that reaches this route's network be
+    /// answered with the node's address on their own network (`proxy.dns_server`),
+    /// skipping the router. On by default; false answers with the route's own
+    /// network address. Names are compared fully qualified; the shortcut is off
+    /// for a hostname once any route behind it sets this false.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub private_shortcut: bool,
 }
@@ -360,24 +345,15 @@ pub struct ExposePort {
     #[serde(default, skip_serializing_if = "is_default_protocol")]
     pub protocol: Protocol,
     pub network: String,
-    /// Announce the real client to the backend with a PROXY protocol header
-    /// before relaying anything else.
+    /// Announce the real client to the backend with a PROXY protocol header.
     ///
-    /// A published port is forwarded in userspace (`cl_net::expose`), which
-    /// means the backend sees a connection from *this node's* address on the
-    /// container's bridge, never the client's. For most services that is
-    /// merely a worse access log. For anything that makes decisions per
-    /// client address — rate limits, fail2ban, allowlists — it is actively
-    /// dangerous: every client looks like the same address, so one abusive
-    /// client gets the relay itself banned and takes every other client down
-    /// with it. That is not hypothetical; it is why this option exists.
+    /// A published port is relayed in userspace (`cl_net::expose`), so the backend
+    /// otherwise sees this node's bridge address for every client, which breaks
+    /// per-client rate limits, fail2ban and allowlists (one abusive client gets
+    /// the relay banned for everyone).
     ///
-    /// Off by default, and necessarily opt in: the header is extra bytes at
-    /// the head of the stream, so a backend that is not expecting one sees a
-    /// malformed request. **Enable it on the backend first.**
-    ///
-    /// TCP only. The relay rejects `proxy_protocol` on a UDP port rather
-    /// than silently ignoring it.
+    /// Off by default: a backend not expecting the header sees a malformed
+    /// request, so enable it on the backend first. TCP only; rejected on UDP.
     #[serde(default, skip_serializing_if = "is_false")]
     pub proxy_protocol: bool,
 }
@@ -386,26 +362,18 @@ fn is_default_protocol(p: &Protocol) -> bool {
     *p == Protocol::default()
 }
 
-/// Bind-mounts the host's docker socket into the container. Every other
-/// mount in clouduler has to live on a drive so it can be replicated and
-/// migrated (see `VolumeMount`), but the docker socket is neither data nor
-/// something a drive could back — it's the one deliberate escape hatch, for
-/// containers that need to control docker itself (CI runners, docker-in-docker
-/// builds).
+/// Bind-mounts the host's docker socket into the container: the one escape
+/// hatch from drive-backed mounts, for containers that control docker itself
+/// (CI runners, docker-in-docker builds).
 ///
-/// Granting this is equivalent to root on the host: anything with write
-/// access to the socket can launch a privileged container and mount the host
-/// filesystem into it, so only give it to services you already trust with
-/// root.
+/// Equivalent to root on the host; only grant it to services trusted with root.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DockerSocket {
     /// Path the socket is mounted at inside the container.
     pub target: PathBuf,
-    /// Read-write by default: most docker clients need to create and start
-    /// containers, not just inspect what's running, so that's the useful
-    /// default despite being the more dangerous one. `mode: clouduler`
-    /// refuses a read-write socket, so it has to say `read_only: true`.
+    /// Read-write by default, as most docker clients must create containers.
+    /// `mode: clouduler` refuses read-write, so it needs `read_only: true`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
     /// Which socket gets mounted.
@@ -420,9 +388,8 @@ pub enum DockerSocketMode {
     /// The node's real docker socket: the full engine API, root on the host.
     #[default]
     Local,
-    /// Clouduler's own socket: only the read-only image endpoints scanners
-    /// like grype and syft use, answered for every image in the cluster
-    /// rather than just this node's cache.
+    /// Clouduler's own socket: only the read-only image endpoints scanners (grype,
+    /// syft) use, answered for every image in the cluster.
     Clouduler,
 }
 
@@ -591,10 +558,9 @@ pub struct VolumeSyncOverride {
     pub after: Option<String>,
 }
 
-/// Per service/stack override of whether a restic backup run stops this
-/// service's containers first. `None` defers to the drive backup target's
-/// own setting, then a hardcoded default of stopping - see
-/// `StackFile::effective_backup_stop_before`.
+/// Per service/stack override of whether a restic backup stops this service's
+/// containers first. `None` defers to the drive backup target, then to
+/// stopping; see `StackFile::effective_backup_stop_before`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct BackupOverride {
@@ -618,10 +584,8 @@ pub struct ServiceExtensions {
     pub node: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_socket: Option<DockerSocket>,
-    /// Other services in this stack that must always land on the same node
-    /// as this one. Transitively closed: naming `b` here and `c` on `b`
-    /// still puts `a`, `b` and `c` in one group even though `a` never named
-    /// `c` directly. See `StackFile::colocate_group`.
+    /// Other services that must land on the same node. Transitively closed; see
+    /// `StackFile::colocate_group`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub colocate: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -659,12 +623,10 @@ pub struct ServiceAction {
     /// exists to be a `volume_sync` `before`/`after` hook. On by default.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_in_ui: bool,
-    /// Run in a separate one-off container instead of inside the service's
-    /// own. The service's container is stopped for the duration and the
-    /// one-off container takes its place (same image, mounts, environment,
-    /// network and address), so the command can touch files the service has
-    /// open, like `pg_resetwal` on a data directory. The service is started
-    /// again afterwards. Off by default.
+    /// Run in a separate one-off container (same image, mounts, environment,
+    /// network and address) while the service's container is stopped, so the
+    /// command can touch open files (`pg_resetwal`). The service restarts
+    /// afterwards. Off by default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub standalone: bool,
 }
@@ -694,10 +656,8 @@ pub struct StackDefaults {
     /// `alerts: false` or a map. See [`super::StackAlerts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<super::StackAlerts>,
-    /// Pins the subnet of the stack's overlay network (the one its containers
-    /// reach each other on) instead of taking the next free one from the
-    /// pool. Only applied when the overlay is first created: docker cannot
-    /// re-address a live network.
+    /// Pins the subnet of the stack's overlay network instead of taking the next
+    /// free one. Only applied at creation: docker cannot re-address a live network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<ipnet::Ipv4Net>,
     /// Lower is more important (default 0). Stacks start and restart in
@@ -761,9 +721,7 @@ proxy:
         assert!(route.http2);
     }
 
-    /// Every new knob is optional, and the defaults have to be the behaviour
-    /// that existed before they were added: no cap, no timeout, host rewritten,
-    /// and websockets working without anyone asking for them.
+    /// Every new knob is optional and defaults to the pre-existing behaviour.
     #[test]
     fn the_proxy_settings_default_to_the_previous_behaviour() {
         let ext: ServiceExtensions =
@@ -777,8 +735,7 @@ proxy:
         assert!(!route.http2, "routes stay HTTP/1.1 unless asked");
     }
 
-    /// The settings are stack-file settings: this asserts they survive a real
-    /// stack file end to end, not just a hand written fragment.
+    /// Asserts the settings survive a real stack file end to end.
     #[test]
     fn the_example_stack_carries_its_proxy_settings() {
         let raw = include_str!("../../../../examples/stacks/gitlab.yaml");

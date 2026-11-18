@@ -1,9 +1,4 @@
 //! Resolving a GitHub release and downloading its per-architecture asset.
-//!
-//! Replaces the old git-clone-and-build pipeline: an operator points
-//! `SelfUpdateConfig` at either a repo (track its latest release) or one
-//! specific release's page, and every node downloads the prebuilt binary for
-//! its own architecture straight from GitHub instead of compiling it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -60,17 +55,14 @@ fn parse_source(source: &str) -> Result<RepoRef, String> {
     }
 }
 
-/// One resolved download target for one architecture.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
     pub id: u64,
     pub name: String,
 }
 
-/// Everything a run needs to know about the release it is rolling out,
-/// resolved once by the leader and then carried in `UpdateRunState` so every
-/// worker downloads a specific, agreed-upon asset rather than each re-asking
-/// "what's latest" and risking a release landing mid-rollout.
+/// The release being rolled out, resolved once by the leader so every worker
+/// downloads the same agreed asset even if a newer release lands mid-rollout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedRelease {
     pub owner: String,
@@ -81,11 +73,8 @@ pub struct ResolvedRelease {
     pub assets: BTreeMap<String, ReleaseAsset>,
 }
 
-/// `octocrab::Error::GitHub` has no `#[snafu(display(..))]` override, so its
-/// `Display` falls back to snafu's default of printing just the variant name
-/// ("GitHub") — the actual reason GitHub gave (rate limited, not found, bad
-/// credentials, ...) lives in the wrapped `GitHubError` and would otherwise
-/// be silently dropped from every error message this module produces.
+/// `octocrab::Error::GitHub` displays as just "GitHub"; this surfaces the
+/// wrapped reason (rate limited, not found, ...).
 fn describe(e: &octocrab::Error) -> String {
     match e {
         octocrab::Error::GitHub { source, .. } => source.message.clone(),
@@ -93,9 +82,7 @@ fn describe(e: &octocrab::Error) -> String {
     }
 }
 
-/// Build an authenticated (if `token` is set) octocrab client. Anonymous
-/// access works fine against public repos, just at GitHub's much lower
-/// unauthenticated rate limit.
+/// Authenticated if `token` is set; anonymous access has a much lower rate limit.
 fn client(token: Option<&str>) -> Result<octocrab::Octocrab, String> {
     let mut builder = octocrab::Octocrab::builder();
     if let Some(token) = token {
@@ -106,12 +93,9 @@ fn client(token: Option<&str>) -> Result<octocrab::Octocrab, String> {
         .map_err(|e| format!("building github client: {e}"))
 }
 
-/// How long GitHub may take to answer a release lookup. octocrab sets no
-/// timeout of its own, so without this a stalled connection would hang the
-/// caller forever.
+/// Lookup timeout; octocrab sets none, so a stalled connection would hang.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a connection to GitHub may take to open.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long a download may go without receiving a single byte before it is
@@ -129,9 +113,7 @@ pub fn download_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("building the download client: {e}"))
 }
 
-/// Resolve `source` (a repo url or a release tag url) to the release it
-/// names and the assets it published for the architectures clouduler builds
-/// for.
+/// Resolve `source` to its release and the assets published per architecture.
 pub async fn resolve(source: &str, token: Option<&str>) -> Result<ResolvedRelease, String> {
     tokio::time::timeout(RESOLVE_TIMEOUT, resolve_inner(source, token))
         .await

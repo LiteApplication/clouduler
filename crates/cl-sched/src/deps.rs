@@ -1,20 +1,13 @@
-//! `depends_on` gating (compose `service_started`).
-//!
-//! The source of truth is the replicated `container_status`, which every node
-//! reports for its own instances, so a dependency on another node is visible.
+//! `depends_on` gating (compose `service_started`), from the replicated `container_status`
+//! so cross-node dependencies are visible.
 
 use cl_config::StackFile;
 use cl_raft::ids::InstanceId;
 use cl_raft::state::ClusterState;
 
-/// The first service `instance` depends on that has no running instance, or
-/// `None` when it may be created.
-///
-/// A service counts as up when at least one of its instances is reported
-/// running by the node it is currently assigned to. A dependency that is
-/// stopped on purpose or has no instances therefore still blocks. An instance
-/// with an update in flight is never held, and a stack that does not parse or
-/// a dependency naming no service never blocks, so this fails open.
+/// The first service `instance` depends on that has no running instance, or `None` when it
+/// may be created. A service is up when an instance is running on its assigned node. Fails
+/// open: an update in flight, an unparseable stack or an unknown dependency never block.
 pub fn unmet_dependency(state: &ClusterState, instance: &InstanceId) -> Option<String> {
     if state.instance_updates.contains_key(instance) {
         return None;

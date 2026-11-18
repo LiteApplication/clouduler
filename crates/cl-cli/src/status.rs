@@ -1,11 +1,7 @@
-//! `clouduler status` — one command that answers "what is wrong with the
-//! cluster right now?": raft health, every node, then everything that is off
-//! (unhealthy instances with their node, uptime, reason and log tail, stuck or
-//! failed updates, failed backups and restores, certificate and DNS errors,
-//! lagging volumes), ending in a count of what is running fine.
-//!
-//! Built so an operator - or an LLM - needs no second command to find out
-//! what went wrong; `stack unhealthy` is the instance part of this on its own.
+//! `clouduler status`: raft health, every node, then everything that is off
+//! (unhealthy instances, stuck or failed updates, failed backups and restores,
+//! certificate and DNS errors, lagging volumes). `stack unhealthy` is the
+//! instance part alone.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -114,8 +110,7 @@ fn ago(now: i64, then: i64) -> String {
 }
 
 /// Updates and redeploys that failed or have been going for too long.
-/// Finished-ok ones are noise and are skipped; in-flight ones are shown, as
-/// whoever is debugging a slow rollout wants to see them.
+/// Finished-ok ones are skipped.
 fn print_updates(state: &ClusterState, now: i64) -> bool {
     let mut lines = Vec::new();
     for (instance, update) in &state.instance_updates {

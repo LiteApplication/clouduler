@@ -1,15 +1,7 @@
-//! Persists `watch_git_backup`'s in-memory change-detection state across
-//! restarts and leader handoffs.
-//!
-//! Both `snapshot::Snapshot` (what the last successful export actually
-//! contained) and `tree::SecretCache` (each secret's last-encrypted
-//! ciphertext) are kept on disk. A restart or a leadership change starts the
-//! loop fresh with `None`/empty, which would make the next export's commit
-//! message describe every tracked object as newly added (diffed against
-//! `Snapshot::default()`) and re-encrypt every secret from scratch - `age` is
-//! non-deterministic, so the fresh ciphertext differs from what's already
-//! committed even though the plaintext never changed, producing a spurious
-//! commit that touches every secret file.
+//! Persists `watch_git_backup`'s change-detection state (`Snapshot` and
+//! `SecretCache`) across restarts and leader handoffs. Starting empty would
+//! describe every object as newly added and re-encrypt every secret; `age` is
+//! non-deterministic, so that yields a spurious commit touching every secret.
 
 use std::path::Path;
 

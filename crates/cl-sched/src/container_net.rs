@@ -1,11 +1,7 @@
-//! What a container needs to sit on a `container`-kind network: the pinned
-//! address on the cluster-wide segment and the routes pushed into its network
-//! namespace. Pure, so it is unit-tested without docker.
-//!
-//! The router's own address is never part of a client's identity (see
-//! `run::revision_with_mounts`): only the client's address on the segment is.
-//! Routes are re-applied every tick instead, so a router appearing or moving
-//! never recreates its clients.
+//! What a container needs on a `container`-kind network: the pinned segment address and the
+//! routes pushed into its namespace. Pure, so unit-tested without docker. The router's address
+//! is not part of a client's identity (see `run::revision_with_mounts`); routes are re-applied
+//! every tick so a router appearing or moving never recreates clients.
 
 use std::net::{IpAddr, Ipv4Addr};
 

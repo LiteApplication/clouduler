@@ -339,9 +339,7 @@ async fn remove_target(cfg: &ClusterConfig, id: &str, via: Option<&str>) -> Resu
     Ok(())
 }
 
-/// Trigger a run immediately, bypassing the schedule - the daemon's
-/// per-node runner picks up `Running` runs on its own poll, the same as a
-/// scheduled one; this just skips `schedule::is_due`.
+/// Trigger a run immediately, skipping `schedule::is_due`; the per-node runner picks it up.
 pub async fn run(cfg: &ClusterConfig, id: &str, via: Option<&str>) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;

@@ -16,11 +16,6 @@ const HOST_ALIASES: [&str; 2] = ["host.docker.internal", "host-gateway"];
 use crate::materialize::Materialized;
 use crate::reconcile::LABEL_REVISION;
 
-/// Build the spec for one instance.
-///
-/// `objects` are the configs and secrets already written to disk, `network` is
-/// the overlay network to attach to, and `digest` pins the image when one has
-/// been resolved, so every replica of a `:latest` service runs the same bits.
 /// Where a container sits on the overlay: its own address, the resolver that
 /// answers `service.stack` for it, and the zone that resolver is authoritative
 /// for. Empty for a container on no stack network, which keeps docker's own
@@ -43,11 +38,9 @@ pub struct Placement {
     /// This service is a container network's router: turn on IPv4 forwarding
     /// (unless the service sets the sysctl itself).
     pub ip_forward: bool,
-    /// Hostnames of another service's `x-clouduler.expose`d ports that this
-    /// service's `allowed` list names with that port. They resolve to the
-    /// node's own gateway address so the connection lands on this node's
-    /// expose forwarder (PROXY header included) instead of whatever address
-    /// docker's resolver has for the name. See `run::exposed_allowed_hosts`.
+    /// Hostnames of another service's `x-clouduler.expose`d ports named in this service's
+    /// `allowed` list. They resolve to the node's gateway so the connection hits the local
+    /// expose forwarder (PROXY header included). See `run::exposed_allowed_hosts`.
     pub published_hosts: Vec<String>,
 }
 
@@ -62,12 +55,10 @@ pub struct Materialization<'a> {
     pub docker_api_socket: &'a Path,
 }
 
-/// The host directory a `drive/volume` mount binds. Defense in depth behind
-/// stack validation (the same rules as `cl_drive::registry::resolve_relative`,
-/// which this crate can't depend on): the volume must be a single plain path
-/// component, or `.` for the whole drive, and an existing volume directory
-/// must not itself be a symlink - a container with write access to a
-/// whole-drive mount can plant one, and docker would resolve it on the host.
+/// The host directory a `drive/volume` mount binds. Defense in depth behind stack
+/// validation (same rules as `cl_drive::registry::resolve_relative`, which this crate
+/// cannot depend on): a single plain path component or `.`, and an existing volume dir
+/// must not be a symlink (a whole-drive mount could plant one for docker to resolve on the host).
 fn volume_host_path(root: &Path, volume: &str) -> Result<PathBuf, String> {
     if volume == "." {
         return Ok(root.to_path_buf());
@@ -84,6 +75,8 @@ fn volume_host_path(root: &Path, volume: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Build the spec for one instance. `digest`, when resolved, pins the image so every
+/// replica of a `:latest` service runs the same bits.
 pub fn build(
     instance: &InstanceId,
     service: &Service,
@@ -161,9 +154,7 @@ pub fn build(
         })
         .collect();
 
-    // Secrets given an `env:` target take priority over a same-named plain
-    // `environment:` entry, since naming one explicitly is the more specific
-    // choice.
+    // An explicit `env:` target on a secret beats a same-named `environment:` entry.
     let mut env: BTreeMap<String, String> = service.environment.clone();
     env.extend(object_env.iter().cloned());
 
@@ -171,12 +162,10 @@ pub fn build(
     // through the router of a `0.0.0.0/0` container network.
     let default_routed = placement.egress_network.is_some()
         || placement.container_networks.iter().any(|a| a.default_route);
-    // A client whose only network is a container one has no overlay to be
-    // primary on, and without a primary docker would put it on its default
-    // bridge, with internet access around the router. Create it on the
-    // segment instead, at its pinned address. A router keeps the legacy
-    // layout (it may have no other way to the internet), and so does a
-    // service that also has an egress network.
+    // A client whose only network is a container one has no overlay to be primary on, and
+    // docker would put it on its default bridge, bypassing the router. Create it on the
+    // segment at its pinned address instead. Routers and services with an egress network
+    // keep the legacy layout.
     let (network, ip) = match placement.container_networks.first() {
         Some(att)
             if placement.network.is_none()
@@ -226,22 +215,16 @@ pub fn build(
             .into_iter()
             .map(std::net::IpAddr::V4)
             .collect(),
-        // The container's own stack goes first, so a bare service name (e.g.
-        // `headscale` from a config file written before it knew it'd run
-        // under clouduler) resolves to the sibling in the same stack without
-        // having to be rewritten to `service.stack`; the bare zone stays
-        // after it so `service.stack` from another stack still resolves.
+        // The container's own stack goes first so a bare service name resolves to the sibling
+        // in the same stack; the bare zone stays after it for `service.stack` from other stacks.
         dns_search: placement
             .zone
             .iter()
             .flat_map(|zone| [format!("{}.{zone}", instance.stack), zone.clone()])
             .collect(),
-        // `service.stack` has one dot, and docker's own resolver defaults the
-        // container to ndots:0, which makes a name with any dot in it absolute
-        // and skips the search list entirely: the short name then comes back
-        // NXDOMAIN from upstream while the fully qualified one resolves. Two
-        // is the smallest value that sends `service.stack` through the search
-        // list, and leaves ordinary two dot internet names resolving directly.
+        // `service.stack` has one dot and docker defaults to ndots:0, which skips the search list
+        // and returns NXDOMAIN for the short name. Two is the smallest value that sends it through
+        // the search list while ordinary two-dot internet names still resolve directly.
         dns_options: placement
             .zone
             .map(|_| vec!["ndots:2".to_string()])

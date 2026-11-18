@@ -1,29 +1,10 @@
-//! Dynamic shell completion.
+//! Dynamic shell completion via clap_complete's `unstable-dynamic` engine (see
+//! `ArgValueCompleter` fields in `cli.rs`). Node and drive names come from the
+//! config file; stacks, instances, volumes and backups are asked of a live manager.
 //!
-//! Static clap completion only ever knows about subcommand and flag names -
-//! it cannot tell a user which stacks, nodes, drives or running instances
-//! actually exist. This module plugs into clap_complete's `unstable-dynamic`
-//! engine (see `clap_complete::engine::ArgValueCompleter` on the relevant
-//! fields in `cli.rs`) to answer those with live data instead: node and
-//! drive names come straight from the config file (cheap, local, and the
-//! same source every other command already trusts for those), while
-//! anything that only exists in the replicated raft state - stacks,
-//! instances, volumes, backup destinations/targets - is asked of a live
-//! manager.
-//!
-//! Every completer here is best-effort: on any failure (no config, no
-//! reachable manager, a slow network) it silently returns no candidates
-//! rather than erroring or hanging the shell. A completer also runs
-//! synchronously from clap_complete's callback, so a state lookup spins up
-//! its own throwaway single-threaded runtime on a dedicated thread rather
-//! than reusing `main`'s, and bounds it with a short timeout.
-//!
-//! No API key or special endpoint is needed for any of this: `cluster.yaml`
-//! is already group-readable by the `clouduler` group members (see
-//! `init::permissions`), and the raft rpc channel a completer's throwaway
-//! runtime talks to is the same unauthenticated node-to-node channel any
-//! cli invocation already uses - a shell able to read the config and reach
-//! the internal network can already do everything `stack list` can.
+//! Every completer is best-effort: any failure returns no candidates rather than
+//! erroring or hanging. Completers run synchronously, so a state lookup uses its
+//! own throwaway runtime on a dedicated thread with a short timeout.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -35,8 +16,7 @@ use clap_complete::engine::CompletionCandidate;
 
 use crate::stack;
 
-/// A short timeout so a hung or unreachable manager doesn't leave the shell
-/// waiting on tab completion; better to complete nothing than to hang.
+/// Bounds the manager lookup so tab completion never hangs the shell.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(400);
 
 fn config_path() -> PathBuf {
@@ -49,9 +29,7 @@ fn load_config() -> Option<ClusterConfig> {
     ClusterConfig::load(config_path()).ok()
 }
 
-/// Fetch the live cluster state from any manager in the config, bounded by
-/// `QUERY_TIMEOUT` and run on its own throwaway runtime since a completer
-/// runs synchronously from clap_complete's callback.
+/// Fetch live cluster state from any configured manager, bounded by `QUERY_TIMEOUT`.
 fn live_state() -> Option<ClusterState> {
     let cfg = load_config()?;
     std::thread::spawn(move || {
@@ -91,9 +69,7 @@ fn drive_mode_label(mode: &cl_config::DriveMode) -> &'static str {
     }
 }
 
-/// Complete a stack name by asking a live manager for the current stack
-/// list, the same call `clouduler stack list` makes. Each candidate is
-/// annotated with how many instances it currently has.
+/// Complete a stack name from live state, annotated with its instance count.
 pub fn stack_names(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();
@@ -114,9 +90,7 @@ pub fn stack_names(current: &OsStr) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-/// Complete either a stack name (streams/targets every instance) or a live
-/// instance id (`stack.service.index`), for arguments that accept both -
-/// `logs`, `exec`, `capture`.
+/// Complete a stack name or an instance id (`stack.service.index`).
 pub fn targets(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();
@@ -158,9 +132,7 @@ pub fn targets(current: &OsStr) -> Vec<CompletionCandidate> {
     out
 }
 
-/// Complete a node name from the config file. Nodes are declared there
-/// before they can be reached at all, so this needs no network round trip.
-/// Annotated with role and internal address.
+/// Complete a node name from the config file, annotated with role and address.
 pub fn node_names(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();
@@ -222,10 +194,8 @@ pub fn volume_ids(current: &OsStr) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-/// Complete a service name seen anywhere in the live assignments. Not
-/// scoped to a particular stack - clap_complete's dynamic completers only
-/// see the value being typed, not sibling arguments already parsed - so
-/// this is best-effort across the whole cluster rather than per-stack.
+/// Complete a service name across all live assignments (dynamic completers cannot see
+/// sibling arguments, so it is not scoped to a stack).
 pub fn service_names(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();
@@ -280,11 +250,8 @@ pub fn backup_target_ids(current: &OsStr) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-/// Complete `clouduler folder-import`'s packed `<drive>/<volume>[/path]`
-/// target: drive names with no slash typed yet, then known volumes under
-/// the drive once one is chosen. A path segment past the volume is left
-/// uncompleted, since that is a path inside the volume rather than
-/// anything this process can list.
+/// Complete `folder-import`'s `<drive>/<volume>[/path]` target: drives, then volumes
+/// of the chosen drive. Paths inside a volume are left uncompleted.
 pub fn folder_import_target(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();

@@ -10,9 +10,7 @@
 //! secrets/<name>.age
 //! ```
 //!
-//! `build` is a full rebuild every tick, not an incremental patch — this
-//! crate's four tracked fields are small, and a full rebuild means `git.rs`
-//! never has to reason about stale files left over from a rename or delete.
+//! `build` is a full rebuild every tick, so there are no stale files after a rename or delete.
 //!
 //! Secrets are the one exception: `age` encryption is non-deterministic (a
 //! fresh random ephemeral key per call), so re-encrypting an unchanged
@@ -171,12 +169,9 @@ pub fn build(
     files
 }
 
-/// The reverse of `build`, read back off disk (an already-checked-out git
-/// working tree). Used only by `clouduler restore`, which clones a real
-/// repo — the hot-path pull reads directly from the odb via
-/// `git::parse_tree` instead. Secrets are returned still age-encrypted —
-/// decrypting them needs the admin's identity, which only the `restore`
-/// CLI command holds.
+/// The reverse of `build`, read from a checked-out working tree. Used only by
+/// `clouduler restore`; the hot-path pull uses `git::parse_tree`. Secrets stay
+/// age-encrypted since only the admin holds the identity.
 pub struct ParsedTree {
     pub cluster_yaml: Option<String>,
     /// Stack name -> raw spec yaml.
@@ -223,7 +218,6 @@ pub fn parse_dir(root: &Path) -> Result<ParsedTree> {
     })
 }
 
-/// The base64 a `ConfigEntry`/state-machine json expects.
 pub fn encode_config_content(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }

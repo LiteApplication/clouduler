@@ -1,10 +1,6 @@
-//! The git2 IO layer: a bare repository where commits and trees are built
-//! entirely via the object database (no working directory on disk). Each
-//! export fetches the remote's current tip, builds a candidate tree from
-//! the cluster's state, and pushes a new commit if the tree changed. Pulls
-//! read fetched commits directly from the odb too — nothing is ever
-//! checked out to disk except by `clouduler restore`, which clones a real
-//! repo for a one-shot offline operation.
+//! The git2 IO layer: a bare repository with commits and trees built entirely
+//! in the object database. Nothing is checked out to disk except by
+//! `clouduler restore`, which clones a real repo.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -20,11 +16,9 @@ use git2::{
 use crate::error::{BackupError, Result};
 use crate::tree::TreeFile;
 
-/// Serializes every operation on the on-disk `git-backup` repository inside
-/// this process: the export loop, the webhook/CLI/pre-export pulls and a
-/// manual reconcile all open the same directory, and libgit2 ref updates and
-/// the remote-tracking ref they fetch into are not safe to interleave. Hold
-/// the guard for the whole blocking git section.
+/// Serializes every operation on the on-disk `git-backup` repository in this
+/// process (export loop, pulls, reconcile): libgit2 ref updates and the
+/// remote-tracking ref they fetch into are not safe to interleave.
 pub fn lock_repo() -> parking_lot::MutexGuard<'static, ()> {
     static REPO_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
     REPO_LOCK.lock()
@@ -37,9 +31,7 @@ pub struct GitBackup {
 }
 
 impl GitBackup {
-    /// Opens a bare repository at `dir`, initializing it (and wiring up
-    /// `origin`) on first use. Bare repos have no working directory — all
-    /// commits and trees live purely in the object database.
+    /// Opens a bare repository at `dir`, initializing it (and `origin`) on first use.
     pub fn open_or_init(dir: &Path, repo_url: &str, branch: &str) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|source| BackupError::Io {
             path: dir.to_path_buf(),
@@ -83,24 +75,14 @@ impl GitBackup {
         &self.repo_url
     }
 
-    /// Public access to the underlying bare git2 repository — used by
-    /// `pull_and_decide` to call `parse_tree` directly against the odb.
+    /// The underlying bare repository, for `parse_tree` against the odb.
     pub fn repo(&self) -> &Repository {
         &self.repo
     }
 
-    /// Replaces the whole tracked tree with `files`, and if that produced
-    /// any change, commits and pushes it. Returns `None` when nothing
-    /// changed, so an unrelated raft-version bump doesn't produce an empty
-    /// commit.
-    ///
-    /// Each call fetches the remote's current tip fresh (no reliance on
-    /// a local branch ref surviving across ticks), builds the candidate
-    /// tree entirely in the odb, and compares it against the remote tip's
-    /// tree. If different, a new commit is created with the remote tip as
-    /// parent and pushed. On a push rejection (remote moved concurrently),
-    /// the remote tip is re-fetched and the commit is rebuilt once against
-    /// the new parent.
+    /// Replaces the tracked tree with `files`; if that changed anything, commits
+    /// and pushes. Returns `None` when nothing changed. On a push rejection the
+    /// remote tip is re-fetched and the commit rebuilt once.
     pub fn sync(
         &self,
         files: &[TreeFile],
@@ -108,7 +90,6 @@ impl GitBackup {
         private_key_pem: &str,
         author: Option<(&str, &str)>,
     ) -> Result<Option<git2::Oid>> {
-        // Fetch the remote's current tip.
         let remote_tip = self.fetch_remote_tip(private_key_pem)?;
         let remote_tip_commit = match remote_tip {
             Some(oid) => Some(self.repo.find_commit(oid)?),
@@ -120,7 +101,6 @@ impl GitBackup {
         let tree_oid = build_git_tree_on_parent(&self.repo, parent_tree.as_ref(), files)?;
         let tree = self.repo.find_tree(tree_oid)?;
 
-        // If the remote tip's tree matches our candidate, nothing changed.
         if let Some(tip_commit) = &remote_tip_commit {
             if tip_commit.tree()?.id() == tree_oid {
                 return Ok(None);
@@ -132,7 +112,6 @@ impl GitBackup {
             None => Signature::now("clouduler", "clouduler@localhost")?,
         };
 
-        // One commit-and-push attempt against a given parent.
         let attempt = |parent: Option<git2::Oid>| -> Result<git2::Oid> {
             let parents = match parent {
                 Some(oid) => vec![self.repo.find_commit(oid)?],
@@ -203,10 +182,8 @@ impl GitBackup {
         }
     }
 
-    /// Reconciles the git repository with the given files by building a new tree
-    /// replacing cluster.yaml, stacks, configs, and secrets on top of the remote tip
-    /// (preserving unmanaged repo files), committing, and pushing.
-    /// Returns the pushed commit OID (or the existing tip commit OID if already matching).
+    /// Reconciles the repo with `files` on top of the remote tip, preserving
+    /// unmanaged files. Returns the pushed commit OID (or the existing tip if already matching).
     pub fn reconcile(
         &self,
         files: &[TreeFile],
@@ -303,10 +280,7 @@ impl GitBackup {
         self.push_refspecs(&[refspec], private_key_pem)
     }
 
-    /// Pushes `refspecs` to `origin`. A rejected ref update (e.g. a
-    /// non-force push against a remote branch that has moved) is surfaced
-    /// through the `push_update_reference` callback as
-    /// `BackupError::PushRejected`.
+    /// Pushes `refspecs` to `origin`; a rejected ref update becomes `BackupError::PushRejected`.
     fn push_refspecs(&self, refspecs: &[String], private_key_pem: &str) -> Result<()> {
         let mut remote = self.repo.find_remote("origin")?;
         let known_hosts_path = self.known_hosts_path();
@@ -347,9 +321,8 @@ impl GitBackup {
         Ok(())
     }
 
-    /// Fetches `origin`'s tracked branch and returns its tip commit oid,
-    /// or `None` if the branch does not exist on the remote yet. Does not
-    /// touch any local refs beyond the remote-tracking ref.
+    /// Fetches `origin`'s tracked branch and returns its tip oid, or `None` if the
+    /// remote has no such branch yet.
     pub fn fetch_remote_tip(&self, private_key_pem: &str) -> Result<Option<git2::Oid>> {
         let mut remote = self.repo.find_remote("origin")?;
         let known_hosts_path = self.known_hosts_path();
@@ -425,7 +398,7 @@ impl GitBackup {
         Ok(())
     }
 
-    /// Same as `advance_local_ref`, taking the oid as the hex string form.
+    /// Same as `advance_local_ref`, taking the oid as hex.
     pub fn advance_local_ref_str(&self, oid: &str) -> Result<()> {
         let oid = git2::Oid::from_str(oid)?;
         self.advance_local_ref(oid)
@@ -568,11 +541,8 @@ impl GitBackup {
     }
 }
 
-/// Builds a nested git tree object from a list of `TreeFile`s.
-/// If `parent_tree` is provided, all unmanaged files in `parent_tree` (e.g.
-/// README.md, AGENTS.md, docs/, etc.) are preserved, while the cluster-managed
-/// paths (`cluster.yaml`, `cluster.yml`, `stacks`, `configs`, `secrets`) are
-/// replaced with the entries in `files`.
+/// Builds a nested git tree from `TreeFile`s. Unmanaged files in `parent_tree`
+/// (README.md, docs/, ...) are preserved; the cluster-managed paths are replaced.
 pub fn build_git_tree_on_parent(
     repo: &Repository,
     parent_tree: Option<&git2::Tree>,
@@ -637,20 +607,14 @@ pub fn build_git_tree_on_parent(
     Ok(tree_oid)
 }
 
-/// Builds a nested git tree object from a list of `TreeFile`s, entirely via
-/// the repository's object database (no working directory, no index). Returns
-/// the root tree's oid. Paths use forward slashes; each segment becomes a
-/// nested tree, with blobs at the leaves.
+/// Builds a tree with no parent; see [`build_git_tree_on_parent`].
 pub fn build_git_tree(repo: &Repository, files: &[TreeFile]) -> Result<git2::Oid> {
     build_git_tree_on_parent(repo, None, files)
 }
 
-/// Walks a git tree object (by oid) and extracts the four tracked kinds
-/// into a `ParsedTree`, reading blob contents directly from the object
-/// database — no working directory involved. Any files outside the four
-/// tracked top-level paths (`cluster.yaml`, `stacks/`, `configs/`,
-/// `secrets/`) are silently ignored (see the "raft should ignore
-/// modifications to things that are not part of the raft" design rule).
+/// Extracts the four tracked kinds from a git tree into a `ParsedTree`, reading
+/// blobs from the odb. Files outside the tracked paths are ignored (raft must
+/// ignore things that are not part of the raft).
 pub fn parse_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<crate::tree::ParsedTree> {
     use crate::tree::ParsedTree;
     use std::collections::BTreeMap;

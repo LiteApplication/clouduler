@@ -1,12 +1,6 @@
-//! The `clouduler registry` commands: add, list, test and remove logins used
-//! to pull private images, the cli equivalent of `docker login`.
-//!
-//! A login is stored as an ordinary cluster secret under a reserved name
-//! (see `cl_sched::registries`), so `add` needs this node's cluster key the
-//! same way `secret set` does, and `list`/`rm` just talk to a running daemon.
-//! Verification reuses exactly what the api's "test" button and pre-save
-//! check run, so a login accepted here behaves the same as one saved through
-//! the web ui.
+//! The `clouduler registry` commands: logins used to pull private images.
+//! A login is stored as a cluster secret under a reserved name (see
+//! `cl_sched::registries`), so `add` needs this node's cluster key.
 
 use anyhow::{anyhow, bail, Context, Result};
 use cl_config::ClusterConfig;
@@ -22,10 +16,7 @@ fn http_client() -> Result<reqwest::Client> {
         .context("building the http client")
 }
 
-/// Read a password from the terminal without echoing it, or from `--password`
-/// / `--password-stdin` when given. Mirrors `docker login`'s flags: a bare
-/// prompt for interactive use, `--password-stdin` for scripts and CI, where a
-/// prompt would just hang.
+/// Read a password from the terminal without echo, or from `--password` / `--password-stdin`.
 fn read_password(password: Option<String>, password_stdin: bool) -> Result<String> {
     if let Some(p) = password {
         return Ok(p);
@@ -44,13 +35,9 @@ fn read_password(password: Option<String>, password_stdin: bool) -> Result<Strin
     rpassword::prompt_password("Password: ").context("reading the password from the terminal")
 }
 
-/// Check a login against the registry, then seal and store it, replacing any
-/// existing login for the same server.
-///
-/// Verification happens here, on the operator's own machine, before anything
-/// is sealed or sent — the same order `secret set` follows for the plaintext
-/// itself, and the same check the web ui runs before it will let a save
-/// through. A login this rejects never reaches the cluster at all.
+/// Verify a login against the registry, then seal and store it, replacing any
+/// existing login for the same server. Verification runs before anything is
+/// sealed or sent, so a rejected login never reaches the cluster.
 pub async fn login(
     cfg: &ClusterConfig,
     server: &str,
@@ -113,8 +100,7 @@ pub async fn login(
     Ok(())
 }
 
-/// List every registry login the cluster holds. Usernames only: a password
-/// never travels back out of `Registries`, on the cli any more than the api.
+/// List registry logins. Usernames only; passwords never travel back out.
 pub async fn list(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
     let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
         format!(
@@ -140,9 +126,7 @@ pub async fn list(cfg: &ClusterConfig, via: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Check a stored login against its registry again, without touching what is
-/// stored. Catches a password that was rotated on the registry's side, or a
-/// login that verified once but no longer does.
+/// Re-verify a stored login against its registry without changing it.
 pub async fn test(cfg: &ClusterConfig, server: &str, via: Option<&str>) -> Result<()> {
     let server = normalize_server(server);
     let key = ClusterKey::load(&cfg.secrets.key_file).with_context(|| {
@@ -168,9 +152,7 @@ pub async fn test(cfg: &ClusterConfig, server: &str, via: Option<&str>) -> Resul
     Ok(())
 }
 
-/// Remove a stored registry login. Idempotent the way `secret` removal is
-/// not asked to be: a server with nothing stored is not an error, since the
-/// end state either way is "no login for this server".
+/// Remove a stored login. Idempotent: no login for the server is not an error.
 pub async fn remove(cfg: &ClusterConfig, server: &str, via: Option<&str>) -> Result<()> {
     let server = normalize_server(server);
     let client = client_for(cfg, via)?;

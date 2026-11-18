@@ -1,10 +1,9 @@
 //! Re-encrypting secret plaintext for the admin's age recipient.
 //!
-//! The cluster's own `ClusterKey` never leaves the cluster, so a secret bound
-//! for the git backup is decrypted with it and re-sealed under an age
-//! recipient the admin supplies instead. Only the admin holds the matching
-//! identity (private key); clouduler never sees it, except transiently in
-//! the offline `restore` command, and never persists it.
+//! The `ClusterKey` never leaves the cluster, so secrets bound for the git
+//! backup are decrypted and re-sealed to an age recipient the admin supplies.
+//! The matching identity is only seen transiently by the offline `restore`
+//! command and never persisted.
 
 use std::io::{Read, Write};
 use std::str::FromStr;

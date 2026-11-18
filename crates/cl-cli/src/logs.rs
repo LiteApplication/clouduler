@@ -1,15 +1,6 @@
-//! `clouduler logs` — stream a container's output, or every container in a
-//! stack.
-//!
-//! Container logs only exist on the node that runs the container, so this
-//! looks the instance up in the replicated state to find its node and then
-//! goes straight to that node's api over the same node-to-node channel
-//! `cl-update`'s internal restart call and `cl-api`'s cross-node forwarding
-//! use: the normal https api, authenticated by an HMAC signature over the
-//! shared cluster key rather than a session or api key, since this is one
-//! cluster member reading another's local docker state and no browser is
-//! involved. That means it needs this node's cluster key, same as `stack
-//! deploy` does for sealing secrets.
+//! `clouduler logs`: stream a container's output, or every container in a stack.
+//! Logs live on the node running the container, so this connects to that node's
+//! api with an HMAC signature over the cluster key (needs this node's key).
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -80,16 +71,9 @@ pub async fn run(
     Ok(())
 }
 
-/// `clouduler stack logs`: every instance's output merged into one stream,
-/// ordered by the timestamp docker attached to each line rather than by
-/// whichever node's connection happens to answer first.
-///
-/// Without `--follow` this is exact: every source closes once its tail is
-/// sent, so the whole set is collected and sorted before anything prints.
-/// With `--follow` the sources never close, so exactness would mean waiting
-/// forever; instead, lines are held in a small buffer and flushed in
-/// timestamp order every [`FOLLOW_BUFFER`], trading a bounded delay for
-/// still-live output that reads in order across nodes.
+/// `clouduler stack logs`: every instance's output merged by docker timestamp.
+/// Without `--follow` everything is collected and sorted first; with it, lines are
+/// buffered and flushed in timestamp order every [`FOLLOW_BUFFER`].
 const FOLLOW_BUFFER: Duration = Duration::from_millis(400);
 
 pub async fn merged(
@@ -175,9 +159,7 @@ pub async fn merged(
     Ok(())
 }
 
-/// One line pulled off an instance's log stream, kept structured (rather than
-/// printed immediately like [`stream_one`] does) so [`merged`] can sort a
-/// batch of them across instances before anything reaches the terminal.
+/// One log line, kept structured so [`merged`] can sort across instances.
 struct MergedEvent {
     instance: String,
     timestamp: Option<String>,
@@ -185,11 +167,9 @@ struct MergedEvent {
     text: String,
 }
 
-/// Sortable by (timestamp, arrival order): docker's timestamps are fixed-width
-/// RFC3339 in UTC, so lexicographic order on the string is chronological
-/// order. The arrival-order tiebreaker only matters for lines with no
-/// timestamp (the synthetic "error" event), keeping those in the order they
-/// were received instead of comparing `MergedEvent`'s unrelated fields.
+/// Sorted by (timestamp, arrival order): docker timestamps are fixed-width UTC
+/// RFC3339, so string order is chronological. Arrival order breaks ties for
+/// lines without a timestamp.
 struct HeapItem(Option<String>, u64, MergedEvent);
 
 impl PartialEq for HeapItem {
@@ -363,11 +343,8 @@ struct LogPayload {
     text: String,
 }
 
-/// Parses the `text/event-stream` body a step at a time: an event is
-/// `event: <name>\ndata: <payload>\n\n`, and every event this endpoint sends
-/// fits in one `data:` line (the server always encodes it through
-/// `Event::json_data`/`Event::data`, neither of which folds a `\n` into the
-/// wire format), so a line-based scan is enough without a full sse parser.
+/// Parses the `text/event-stream` body: every event fits one `data:` line (the
+/// server never folds a `\n` into it), so a line-based scan suffices.
 async fn print_events(resp: reqwest::Response, prefix: Option<&str>) -> Result<()> {
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();

@@ -1,10 +1,6 @@
-//! When we last heard from the leader.
-//!
-//! Raft's own metrics only tell a leader whether it still holds quorum. A
-//! follower, and a learner especially, keeps reporting the last leader it knew
-//! about long after that leader has gone, because it has nothing to replace it
-//! with. Timing the arrival of leader traffic ourselves is what lets a
-//! partitioned node work out that it is on its own.
+//! When we last heard from the leader. Raft metrics only tell a leader whether it
+//! holds quorum; a follower keeps reporting a vanished leader forever, so we time
+//! leader traffic ourselves to let a partitioned node notice it is alone.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

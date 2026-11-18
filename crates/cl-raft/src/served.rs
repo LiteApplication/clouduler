@@ -1,22 +1,16 @@
 //! Which node holds a served drive's authoritative copy, and the handover
-//! between nodes.
-//!
-//! `served_by` order says who is *preferred*; it does not say whose data is
-//! current. A standby that took over has been written to, so when the
-//! preferred node comes back, handing the drive straight back to it would
-//! serve (and then sync out) the stale copy. This record is what stops that:
-//! the holder stays active until a handover completes.
+//! between nodes. `served_by` order is only a preference: a standby that took
+//! over has newer data, so handing the drive straight back to the preferred
+//! node would serve and sync out the stale copy. The holder stays active until
+//! a handover completes.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-/// The authoritative holder of one served drive.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ServedAuthority {
-    /// The node serving the drive.
     pub holder: String,
-    /// Bumped whenever the holder changes.
     pub epoch: u64,
     /// A handover in progress: nobody serves the drive until it ends.
     #[serde(default)]
@@ -97,13 +91,10 @@ pub enum ServedOp {
     ClearOverwrite,
 }
 
-/// The node serving a drive, given its candidates in priority order, the
-/// nodes known unreachable and the drive's recorded authority.
-///
-/// Without a record, or when the recorded holder is gone, this is the first
-/// reachable candidate. With one, the holder keeps serving however many
-/// higher-priority candidates are back, until a handover moves it; during a
-/// handover nobody serves.
+/// The node serving a drive given candidates in priority order, unreachable
+/// nodes and the recorded authority. Without a (live) record: the first
+/// reachable candidate. With one: the holder keeps serving until a handover
+/// moves it; during a handover nobody serves.
 pub fn choose_active_server<'a>(
     served_by: &'a [String],
     unreachable: &BTreeSet<String>,
@@ -130,8 +121,7 @@ pub fn choose_active_server<'a>(
 }
 
 impl ServedAuthority {
-    /// Applies `op` to the record for a drive. `current` is the existing
-    /// record, if any; `unreachable` is the cluster's unreachable set.
+    /// Applies `op` to the drive's current record (if any).
     pub fn apply(
         current: Option<&ServedAuthority>,
         op: &ServedOp,

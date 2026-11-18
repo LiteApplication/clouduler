@@ -8,8 +8,7 @@ use crate::netalloc::{
 };
 
 impl ClusterConfig {
-    /// Structural checks the rest of the daemon then relies on. Anything that
-    /// would otherwise surface as a confusing runtime failure belongs here.
+    /// Structural checks the rest of the daemon relies on.
     pub fn validate(&self) -> Result<()> {
         self.validate_meta()?;
         self.validate_networks()?;
@@ -303,13 +302,11 @@ impl ClusterConfig {
         Ok(())
     }
 
-    /// Egress, wireguard and nat networks get their bridge subnet and (for the
-    /// first two) policy routing table from a hash of their name, so every node
-    /// agrees without coordinating. Two names that hash alike would silently
-    /// share a subnet or a routing table, each network rewriting the other's
-    /// default route every reconcile tick, so refuse the config instead. The
-    /// allocation itself cannot be changed to dodge this: it would renumber the
-    /// networks that already exist on live nodes.
+    /// Egress, wireguard and nat networks derive their bridge subnet and (for the
+    /// first two) routing table from a hash of their name. Names that hash alike
+    /// would share them and rewrite each other's default route every tick, so
+    /// refuse the config; the allocation cannot change without renumbering live
+    /// networks.
     fn validate_derived_allocations(&self) -> Result<()> {
         let mut egress_octets: BTreeMap<u8, &str> = BTreeMap::new();
         let mut nat_octets: BTreeMap<u8, &str> = BTreeMap::new();
@@ -532,14 +529,8 @@ impl ClusterConfig {
                     "must be at least 1",
                 ));
             }
-            // A drive nobody implements yet just can't host a volume until a
-            // node is given a local path for it, because scheduling already rejects
-            // placement onto a node that doesn't implement a drive, so this is
-            // left for the operator to fill in rather than blocked here.
-            // A served drive with no server named yet just can't be mounted
-            // anywhere until the operator picks one, since the daemon already
-            // skips it in that state, so this is left for the operator to
-            // fill in rather than blocked here.
+            // A drive nobody implements, or a served drive with no server named, is left
+            // for the operator to fill in: scheduling and the daemon already skip them.
             match (drive.is_served(), drive.served_by.is_empty()) {
                 (true, true) => {}
                 (false, false) => {
@@ -1154,9 +1145,7 @@ cloudflare:
 
     #[test]
     fn unimplemented_drive_is_allowed() {
-        // A drive can be declared before any node is given a local path for
-        // it; scheduling rejects placement onto a node lacking it, and that
-        // is enough; config validation doesn't need to block staging it.
+        // Scheduling already rejects a node lacking the drive; no need to block staging.
         parse(&[(
             "  fast: { sync_interval: 5m }",
             "  fast: { sync_interval: 5m }\n  bulk: { sync_interval: 5m }",
@@ -1684,9 +1673,7 @@ cloudflare:
 
     #[test]
     fn a_served_drive_without_a_serving_node_is_allowed() {
-        // Nobody has picked a server for it yet, but the daemon already
-        // treats that as "nothing to do", so config validation doesn't need
-        // to block staging it.
+        // The daemon already treats a served drive with no server as "nothing to do".
         let cfg =
             parse(&[("fast: { sync_interval: 5m }", "fast: { mode: served }")]).expect("valid");
         assert!(cfg.drives["fast"].served_by.is_empty());
@@ -1846,9 +1833,8 @@ cloudflare:
         assert!(matches!(err, ConfigError::Invalid { at, .. } if at == "backup.age_recipient"));
     }
 
-    /// `interval` used to debounce exports and no longer exists, but a
-    /// cluster.yaml written before that change still has it on disk - it
-    /// must keep loading rather than refuse to parse.
+    /// `interval` no longer exists but older cluster.yaml files still have it;
+    /// they must keep loading.
     #[test]
     fn backup_tolerates_a_leftover_interval_field() {
         let cfg = with_backup(

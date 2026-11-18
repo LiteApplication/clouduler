@@ -1,15 +1,8 @@
-//! Registry logins: where they live, and how a node gets at them.
+//! Registry logins: where they live and how a node gets at them.
 //!
-//! A login is an ordinary cluster secret under a reserved name, so it is
-//! sealed with the cluster key, replicated through raft, and hidden from the
-//! generic secret routes exactly like the Cloudflare token or the self-update
-//! deploy key. Nothing here ever writes a password to disk or a log line: a
-//! login is opened in memory at the moment a pull needs it and dropped again.
-//!
-//! Both the scheduler and the api read them through this module. The
-//! scheduler needs them to pull a private image at all; the api needs them to
-//! ask a registry what the current digest of a tag is, which for a private
-//! repository is just as gated as the pull.
+//! A login is an ordinary sealed cluster secret under a reserved name (hidden from the
+//! generic secret routes). It is opened in memory when a pull or a digest check needs it
+//! and never written to disk or logged. Both the scheduler and the api read through here.
 
 use std::collections::BTreeMap;
 
@@ -19,12 +12,8 @@ use cl_secret::{ClusterKey, Sealed};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-/// Prefix marking a secret as a registry login rather than a user's own.
-///
-/// Leading underscore for the same reason the other reserved objects use one:
-/// `validate_object_name` forbids a leading dot, so an underscore is the
-/// available way to keep clouduler's own names out of the namespace an
-/// operator is likely to reach for.
+/// Prefix marking a secret as a registry login. Underscore because
+/// `validate_object_name` forbids a leading dot.
 pub const SECRET_PREFIX: &str = "_clouduler_registry_";
 
 /// True for a secret this module owns, which the generic secret routes hide.
@@ -32,14 +21,9 @@ pub fn is_registry_secret(name: &str) -> bool {
     name.starts_with(SECRET_PREFIX)
 }
 
-/// The secret name a login for `server` is stored under.
-///
-/// A registry host can contain a colon (a port), which object names may not,
-/// so it is folded to an underscore. That makes `registry.local:5000` and
-/// `registry.local_5000` share a name, which would matter if both were ever
-/// real hosts at once. It is not a correctness problem for lookups: the true
-/// server is carried inside the sealed payload and `load` keys on that, never
-/// on the name. Only storing both at once would have one overwrite the other.
+/// The secret name a login for `server` is stored under. A port colon is folded to an
+/// underscore, so `host:5000` and `host_5000` would collide; lookups are unaffected since
+/// `load` keys on the server stored in the sealed payload.
 pub fn secret_name(server: &str) -> String {
     let safe: String = server
         .chars()
@@ -54,11 +38,7 @@ pub fn secret_name(server: &str) -> String {
     format!("{SECRET_PREFIX}{safe}")
 }
 
-/// What is actually sealed: the server this login is for, and the login.
-///
-/// The server is stored rather than derived from the secret name so a name
-/// that had to be sanitised still round-trips to the exact host docker has to
-/// be told about.
+/// What is sealed: the real server (the name may have been sanitised) and the login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredLogin {
     pub server: String,
@@ -78,13 +58,8 @@ impl StoredLogin {
     }
 }
 
-/// Reduce whatever the operator typed to the host docker itself keys
-/// credentials on.
-///
-/// Docker Hub has four spellings in common use and only one of them is what a
-/// credential store holds, so they are all folded to `docker.io` — otherwise
-/// a login saved as `hub.docker.com` would simply never be found when pulling
-/// `nginx`, with nothing to indicate why.
+/// Reduce what the operator typed to the host docker keys credentials on. Docker Hub's
+/// spellings all fold to `docker.io`, otherwise a login would silently never match.
 pub fn normalize_server(server: &str) -> String {
     let trimmed = server
         .trim()
@@ -110,18 +85,9 @@ fn api_base(server: &str) -> String {
     }
 }
 
-/// Ask the registry whether it accepts this login.
-///
-/// Follows the ordinary registry v2 handshake: `GET /v2/` either succeeds
-/// outright, or answers 401 naming the scheme to use. For `Bearer` — Docker
-/// Hub, Forgejo, Gitea, GHCR, GitLab — that means fetching a token from the
-/// realm it names, with the login as basic auth; a wrong password is a 401
-/// there. For `Basic`, the same request is simply retried with the header.
-///
-/// Shared by the api's `/api/registries` routes and the `clouduler registry`
-/// cli, so a login typed at either one is checked the same way. Returns a
-/// plain message on failure rather than an api-specific error type, since
-/// the cli has no `ApiError` to build.
+/// Ask the registry whether it accepts this login (v2 handshake: `GET /v2/`, then for a
+/// `Bearer` challenge fetch a token from the realm with basic auth; for `Basic` retry with
+/// the header). Shared by the api and the cli; fails with a plain message.
 pub async fn verify(
     http: &reqwest::Client,
     server: &str,
@@ -136,10 +102,8 @@ pub async fn verify(
         .map_err(|e| format!("cannot reach {server}: {e}"))?;
 
     if probe.status().is_success() {
-        // An open registry answers this anonymously, so there is nothing here
-        // to check the password against. Storing it is still the right move:
-        // the host is real and reachable, and a registry that is public for
-        // reads commonly still wants a login for private repositories.
+        // An open registry cannot check the password; storing it is still right since
+        // public-read registries often want a login for private repositories.
         return Ok(());
     }
     if probe.status() != reqwest::StatusCode::UNAUTHORIZED {
@@ -198,11 +162,8 @@ fn bearer_realm(challenge: &str) -> Option<String> {
     challenge_param(challenge, "realm")
 }
 
-/// Pull one quoted parameter out of a `WWW-Authenticate` challenge.
-///
-/// Deliberately simple rather than a full RFC 7235 parser: every registry in
-/// practice emits `Bearer realm="...",service="..."` with quoted values, and
-/// a challenge this cannot read falls back to basic auth rather than failing.
+/// Pull one quoted parameter out of a `WWW-Authenticate` challenge. Not a full RFC 7235
+/// parser; an unreadable challenge falls back to basic auth.
 fn challenge_param(challenge: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=\"");
     let start = challenge.find(&needle)? + needle.len();
@@ -216,11 +177,8 @@ fn challenge_param(challenge: &str, name: &str) -> Option<String> {
 pub struct Registries(BTreeMap<String, RegistryCredentials>);
 
 impl Registries {
-    /// Open every stored login with the cluster key.
-    ///
-    /// A login that will not open is skipped with a warning rather than
-    /// failing the lot: one bad entry — sealed under a key this node no
-    /// longer has, say — must not stop every other registry from working.
+    /// Open every stored login with the cluster key. A login that will not open is skipped
+    /// with a warning so one bad entry does not break the other registries.
     pub fn load(state: &ClusterState, key: &ClusterKey) -> Self {
         let mut logins = BTreeMap::new();
         for (name, entry) in &state.secrets {
@@ -244,28 +202,22 @@ impl Registries {
                         },
                     );
                 }
-                // `name` is safe to log; it is derived from the host, and the
-                // value it guards never reached this branch.
+                // `name` is derived from the host, so it is safe to log.
                 Err(reason) => warn!(secret = %name, %reason, "could not open a registry login"),
             }
         }
         Self(logins)
     }
 
-    /// The login to use when pulling or inspecting `image`, if there is one.
-    ///
-    /// Matched on the registry the reference names, so credentials for one
-    /// registry are never handed to another: docker sends whatever it is
-    /// given to the host in the reference, so a mismatched login is a
-    /// password disclosed to a third party, not a failed pull.
+    /// The login to use when pulling or inspecting `image`. Matched on the reference's
+    /// registry: docker sends credentials to whatever host the reference names, so a
+    /// mismatch would disclose a password to a third party.
     pub fn for_image(&self, image: &str) -> Option<&RegistryCredentials> {
         self.0.get(&cl_docker::ImageRef::parse(image).registry())
     }
 
-    /// The login stored for `server`, if any, keyed the same way `login`
-    /// stores it. Used by the cli's `registry test` and `registry rm`, which
-    /// take whatever spelling the operator typed rather than an image
-    /// reference.
+    /// The login stored for `server`, keyed as `login` stores it (for the cli's
+    /// `registry test`/`rm`).
     pub fn get(&self, server: &str) -> Option<&RegistryCredentials> {
         self.0.get(&normalize_server(server))
     }
@@ -275,13 +227,8 @@ impl Registries {
         self.0.keys().map(String::as_str)
     }
 
-    /// `(server, username)` for each stored login.
-    ///
-    /// There is deliberately no accessor that hands back a password: the only
-    /// way one leaves this type is into docker, through `for_image`. That
-    /// keeps "which registries are configured" — a question the ui asks — and
-    /// "what is the password" strictly separate, so no listing endpoint can
-    /// disclose one by mistake.
+    /// `(server, username)` for each stored login. No accessor returns a password: it only
+    /// leaves this type into docker via `for_image`, so no listing can leak one.
     pub fn accounts(&self) -> impl Iterator<Item = (&str, &str)> {
         self.0
             .iter()
@@ -331,8 +278,7 @@ mod tests {
         assert_eq!(creds.server, "docker.io");
     }
 
-    /// Handing one registry's password to another is a disclosure, not a
-    /// missing feature, so a reference to a host with no login gets none.
+    /// A host with no login gets none: handing another registry's password out is a disclosure.
     #[test]
     fn a_login_is_never_offered_to_a_different_registry() {
         let key = ClusterKey::generate();

@@ -1,19 +1,13 @@
 //! What changed between two exports, for a descriptive commit message.
 //!
-//! Deliberately narrow: only the four fields the git backup mirrors
-//! (`cluster_config`, `stacks`, `configs`, `secrets`). `ClusterState` also
-//! churns on scheduling/DNS/certificate activity that has nothing to do with
-//! this feature, so diffing the whole state would produce noisy commits and
-//! misleading messages.
+//! Only the four mirrored fields (`cluster_config`, `stacks`, `configs`,
+//! `secrets`) are diffed: the rest of `ClusterState` churns on unrelated
+//! activity and would make noisy commits.
 //!
-//! `configs` also excludes this feature's own reserved bookkeeping entries
-//! (`LAST_EXPORT_CONFIG`, `DEPLOY_KEY_PUBLIC_CONFIG`). Publishing an export's
-//! status bumps `LAST_EXPORT_CONFIG`'s revision in raft state right after
-//! that export runs — including it here would mean the snapshot taken on the
-//! *next* poll never equals `last_snapshot` (which predates that bump),
-//! forcing a fresh export forever, each one re-encrypting every secret with
-//! a new (age is non-deterministic) ciphertext and producing a real commit
-//! on every poll even when nothing a human changed.
+//! `configs` excludes this feature's reserved bookkeeping entries. Publishing
+//! an export's status bumps `LAST_EXPORT_CONFIG` right after the export, so
+//! including it would make the next snapshot never equal `last_snapshot` and
+//! force a new commit on every poll.
 
 use std::collections::BTreeMap;
 
@@ -25,11 +19,9 @@ use crate::status::{LAST_EXPORT_CONFIG, LAST_PULL_CONFIG};
 
 const RUN_CONFIG: &str = "_clouduler_self_update_run";
 
-/// Reserved config entries this feature writes for its own bookkeeping, not
-/// user content - excluded both from change detection (this module) and
-/// from the exported tree itself (`tree::build`), and from the reverse
-/// (git -> cluster) sync in `cl-api::routes::git_backup` since they are never
-/// mirrored into the repo in the first place.
+/// Reserved config entries this feature writes for bookkeeping, not user
+/// content: excluded from change detection, from `tree::build`, and from the
+/// reverse sync in `cl-api::routes::git_backup`.
 pub fn is_bookkeeping_config(name: &str) -> bool {
     name == LAST_EXPORT_CONFIG
         || name == DEPLOY_KEY_PUBLIC_CONFIG

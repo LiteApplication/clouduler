@@ -1,10 +1,5 @@
-//! `clouduler rebalance` — actively relocate instances to smooth load across
-//! nodes, on request. The cli counterpart to the ui's rebalance button
-//! (`POST /api/rebalance` in cl-api); this one talks over the raft rpc
-//! channel directly, the same as every other `clouduler` command, computing
-//! the plan against this node's own copy of the cluster config rather than
-//! the replicated one - the same trade `stack deploy` and `stack unhealthy`
-//! already make (see `health::pending_rows`).
+//! `clouduler rebalance`: relocate instances to smooth load across nodes.
+//! Plans against this node's own copy of the cluster config, like `stack deploy`.
 
 use std::collections::BTreeSet;
 
@@ -65,11 +60,8 @@ pub async fn run(cfg: &ClusterConfig, via: Option<&str>, yes: bool) -> Result<()
     Ok(())
 }
 
-/// Drives the instance's service mounts volumes from. Mirrors `cl-api`'s
-/// `required_drives`: an unknown stack or service yields an empty set, which
-/// reads as "no drive requirements" - the right answer for a stack with no
-/// volumes, and harmless for one removed since this plan was computed, where
-/// the move fails on the missing assignment instead.
+/// Mirrors `cl-api`'s `required_drives`: an unknown stack or service yields an
+/// empty set (no drive requirements); a stale plan fails on the missing assignment.
 fn required_drives(state: &ClusterState, instance: &InstanceId) -> BTreeSet<String> {
     state
         .stacks

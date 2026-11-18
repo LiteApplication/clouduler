@@ -1,6 +1,5 @@
-//! Resolving a node name to the https origin its api answers on, the same way
-//! other node-to-node lookups in this codebase read it out of the config
-//! rather than the replicated state, which has no notion of an api port.
+//! Resolving a node name to its api https origin from the config (the
+//! replicated state has no api port).
 
 use cl_config::ClusterConfig;
 

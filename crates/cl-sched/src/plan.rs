@@ -14,8 +14,7 @@ fn to_port_protocol(protocol: Protocol) -> PortProtocol {
     }
 }
 
-/// The GPUs and host devices a service asks for, which placement matches
-/// against what each node reported (`NodeState::gpus`).
+/// GPUs and host devices a service asks for, matched against `NodeState::gpus`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GpuNeeds {
     /// `deploy.resources.reservations.devices`, one entry per request:
@@ -55,8 +54,7 @@ pub struct NvidiaNeed {
     pub device_ids: Vec<String>,
 }
 
-/// One instance the cluster should be running, with everything placement needs
-/// to decide where it can go.
+/// One instance the cluster should run, with everything placement needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Desired {
     pub id: InstanceId,
@@ -64,11 +62,9 @@ pub struct Desired {
     /// Drives whose volumes this instance mounts. A node must implement all of
     /// them to be a candidate.
     pub drives: BTreeSet<String>,
-    /// The individual volumes this instance mounts. Implementing the drive is
-    /// only half the requirement: for a replicated drive every node holds its
-    /// own copy of each volume, and only one of them is the authoritative one
-    /// (`VolumeState::primary`), so placement has to know which volumes are at
-    /// stake and not just which drives. See `place::rejection`.
+    /// Individual volumes mounted. For a replicated drive each node holds its own copy and only
+    /// one is authoritative (`VolumeState::primary`), so placement needs volumes, not just drives.
+    /// See `place::rejection`.
     pub volumes: BTreeSet<VolumeId>,
     /// Raw `deploy.placement.constraints` entries.
     pub constraints: Vec<String>,
@@ -76,48 +72,31 @@ pub struct Desired {
     pub pinned_node: Option<String>,
     /// Global services run one copy on every eligible node.
     pub global: bool,
-    /// The egress-kind network this instance's service attaches to, if any.
-    /// A node must implement it (`NodeState::implements_egress_network`) to
-    /// be a candidate, the same way `drives` works.
+    /// Egress-kind network the service attaches to; a candidate must implement it
+    /// (`NodeState::implements_egress_network`).
     pub egress_network: Option<String>,
-    /// Every network this instance's service attaches to. A node must
-    /// implement each of them (`NodeState::implements_network`) to be a
-    /// candidate, the same way `drives` works.
+    /// Every network attached; a candidate must implement each (`NodeState::implements_network`).
     pub networks: BTreeSet<String>,
-    /// `(network, protocol, published port)` for every `x-clouduler.expose`
-    /// entry on a public-kind network. A node must have the port marked open
-    /// on that network (`NodeState::opens_port`) to be a candidate.
+    /// `(network, protocol, published port)` per `x-clouduler.expose` on a public network; a
+    /// candidate must have the port open (`NodeState::opens_port`).
     pub bound_ports: BTreeSet<(String, PortProtocol, u16)>,
-    /// Hostnames this instance's `x-clouduler.proxy` routes publish, when the
-    /// cluster's DNS routes at the DNS level instead of through the proxy's
-    /// routing mesh. Populated only in that mode: another instance sharing
-    /// one of these hostnames must land on the same node, since a hostname
-    /// can only point at one place once DNS is the one deciding where a
-    /// request goes. Empty (no constraint) under the swarm-style default.
+    /// Hostnames this instance's `x-clouduler.proxy` routes publish, only under DNS-level
+    /// routing: instances sharing one must land on the same node. Empty otherwise.
     pub proxy_hosts: BTreeSet<String>,
-    /// `x-clouduler.colocate` group this instance's service belongs to, if
-    /// any. Another instance sharing the same key must land on the same
-    /// node, same idiom as `proxy_hosts` above.
+    /// `x-clouduler.colocate` group: instances sharing the key must share a node.
     pub colocate_key: Option<String>,
-    /// `deploy.resources.limits.memory`, parsed into bytes. `None` when the
-    /// service declares no memory limit - `rebalance::plan` then falls back
-    /// to balancing this instance by raw instance count instead of weight.
+    /// `deploy.resources.limits.memory` in bytes. `None` makes `rebalance::plan` weigh this
+    /// instance by count.
     pub memory_bytes: Option<u64>,
-    /// GPUs and host devices this instance needs on its node.
     pub gpu_needs: GpuNeeds,
-    /// `(stack, service)` pairs this instance prefers to share a node with
-    /// (a container network's router, with the services using the network).
-    /// A soft preference only: placement orders otherwise-eligible nodes by
-    /// how many of these already sit on them, it never overrides eligibility,
-    /// pins or an existing valid placement.
+    /// `(stack, service)` pairs this instance prefers to share a node with (a container
+    /// network's router and its users). Soft: only orders eligible nodes.
     pub near: BTreeSet<(String, String)>,
 }
 
 impl Desired {
-    /// Keys this instance's placement is anchored by: another instance
-    /// sharing one of these must land on the same node. Combines the
-    /// DNS-mode proxy hostnames with any explicit `x-clouduler.colocate`
-    /// group, so placement only has to reason about one kind of anchor.
+    /// Anchor keys (DNS-mode proxy hostnames plus `x-clouduler.colocate`): instances sharing
+    /// one must land on the same node.
     pub fn anchor_keys(&self) -> impl Iterator<Item = &str> {
         self.proxy_hosts
             .iter()
@@ -126,14 +105,9 @@ impl Desired {
     }
 }
 
-/// Expand a stack into its instances. Replica counts come from
-/// `deploy.replicas`, defaulting to one; global services are expanded later,
-/// once the eligible node set is known.
-///
-/// `egress_networks` names every cluster network of kind `Egress`, so a
-/// service's plain `networks: Vec<String>` list can be told apart without
-/// this crate needing the full `ClusterConfig` (it only ever sees replicated
-/// state and stack files otherwise).
+/// Expand a stack into its instances (`deploy.replicas`, default one; global services
+/// are expanded later once the node set is known). `egress_networks` names every
+/// `Egress` cluster network so it can be told apart from plain `networks:` entries.
 pub fn expand(
     stack: &str,
     file: &StackFile,
@@ -159,9 +133,7 @@ pub fn expand(
                 .as_ref()
                 .and_then(|d| d.replicas)
                 .unwrap_or(1);
-            // Validation rejects this on the way in, but a stack stored before
-            // that check existed would otherwise be expanded in full on every
-            // leader pass, and crash every leader that tries.
+            // Validation rejects this, but a stack stored before that check would crash every leader pass.
             if asked > MAX_REPLICAS {
                 warn!(%stack, service = %service_name, asked, max = MAX_REPLICAS, "replica count is above the maximum, clamping");
             }

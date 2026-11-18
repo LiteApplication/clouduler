@@ -170,8 +170,7 @@ fn is_default_stream(s: &LogStream) -> bool {
     *s == LogStream::Both
 }
 
-/// Longest a log pattern may be. A line is checked against every pattern of a
-/// container, so an absurd one would only slow the node down.
+/// Longest a log pattern may be; every line is checked against every pattern.
 pub const MAX_LOG_PATTERN_LEN: usize = 512;
 /// Most log rules one container may carry (stack and service rules together).
 pub const MAX_LOG_RULES: usize = 32;

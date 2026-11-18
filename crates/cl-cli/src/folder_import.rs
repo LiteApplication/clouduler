@@ -1,17 +1,8 @@
 //! `clouduler folder-import`: get a local file or folder into a drive volume.
-//!
-//! This is a filesystem operation on whichever node runs it, so it only
-//! makes sense on a node that actually implements the target drive (for a
-//! served drive, that includes a node that mounts it over FUSE: a write there
-//! forwards to the real server transparently). The one role it refuses is a
-//! served drive's standby: its directory is a sync *target*, and the next
-//! push from the active server would delete whatever was written there
-//! directly.
-//!
-//! Once the data is in place this pushes it straight to every other node
-//! holding a copy, using the same delta engine and wire protocol the
-//! background sync scheduler uses, rather than waiting for the volume's own
-//! sync interval.
+//! A filesystem operation on this node, so it must implement the target drive
+//! (a FUSE mount forwards writes). A served drive's standby is refused: its
+//! directory is a sync target and the next push would delete the data. Afterwards
+//! the data is pushed to other holders with the background sync delta engine.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
@@ -32,20 +23,14 @@ use tracing::debug;
 use crate::cli::FolderImportArgs;
 use cl_raft::client::client_for;
 
-/// Upper bound on how long to give instances to stop cleanly before
-/// touching the volume they mount, on top of each service's own
-/// `stop_grace_period`. `wait_for_stopped` polls local docker for instances
-/// on this node and the cluster's self-reported `container_status` for
-/// everything else, returning as soon as all of them are confirmed stopped
-/// rather than always sleeping the full margin.
+/// Upper bound on waiting for instances to stop before touching their volume, on
+/// top of each service's `stop_grace_period`; returns early once all are confirmed.
 const STOP_POLL_MARGIN: Duration = Duration::from_secs(15);
 
 /// How often to poll local docker while waiting for instances to stop.
 const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Live one-line progress for a long-running step, redrawn in place with a
-/// carriage return. Only active on a real terminal: piped/logged output gets
-/// no progress line at all, since overwriting a line makes no sense there.
+/// One-line progress redrawn in place; only active on a real terminal.
 struct Progress {
     live: bool,
 }
@@ -128,14 +113,10 @@ enum Verdict {
     Waiting(Vec<InstanceId>),
 }
 
-/// Decide whether every instance is confirmed stopped, given what this poll
-/// observed at `now` (time since the stop was requested).
-///
-/// A remote `running:false` is only trusted once it has held, unbroken, for a
-/// full scheduler sweep: the owning node only notices the desired change and
-/// reports `container_status` once per `SWEEP_INTERVAL`, so a shorter
-/// observation could be a report from before the stop was requested.
-/// `remote_stopped_since` carries that first-seen time between polls.
+/// Decide whether every instance is confirmed stopped at `now` (time since the stop
+/// request). A remote `running:false` is trusted only once held for a full
+/// `SWEEP_INTERVAL`, since the owning node reports once per sweep and an earlier
+/// report could predate the stop. `remote_stopped_since` carries the first-seen time.
 fn judge(
     observations: &[(InstanceId, Observed)],
     remote_stopped_since: &mut BTreeMap<InstanceId, Duration>,
@@ -165,18 +146,10 @@ fn judge(
     }
 }
 
-/// Wait for `instances` to stop. Returns `Ok` only once every one is
-/// positively confirmed stopped; a deadline, an unreachable docker or cluster,
-/// or an inconclusive status is an error, so the caller never touches a
-/// volume something might still be writing to.
-///
-/// Instances assigned to `node_name` are checked against the local docker
-/// daemon directly; instances on other nodes are checked against the
-/// cluster's self-reported `container_status` (see
-/// `cl_sched::run::Scheduler::report_container_status`), so this returns as
-/// soon as the remote node actually confirms its container is down instead
-/// of always sleeping the full margin. An instance with no report yet counts
-/// as running.
+/// Wait for `instances` to stop; `Ok` only once all are confirmed stopped, so the
+/// caller never touches a volume something may still write to. Local instances are
+/// checked against docker, others against the cluster's `container_status` (see
+/// `cl_sched::run::Scheduler::report_container_status`); no report counts as running.
 async fn wait_for_stopped(
     client: &Client,
     node_name: &str,
@@ -663,14 +636,9 @@ fn move_into(
 ) -> Result<()> {
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
-        // EXDEV: rename(2) refuses to cross a mount-point boundary even when
-        // both sides are actually the same underlying device — this is
-        // exactly what a bind mount looks like (e.g. the destination is a
-        // FUSE-mounted served drive, or the source is bind-mounted into a
-        // container/chroot from the same disk the volume lives on). link(2)
-        // has no such restriction, only requiring the same device, so when
-        // `same_device` confirms that's the case here, relink the tree
-        // instead of paying for a full byte copy.
+        // EXDEV: rename(2) cannot cross a mount point even on the same device (e.g. a
+        // bind mount or FUSE-mounted drive). link(2) only needs the same device, so
+        // relink the tree when `same_device` confirms it instead of copying bytes.
         Err(e) if e.raw_os_error() == Some(18) => {
             if same_device(src, dest)? {
                 hardlink_into(src, dest, copied, progress)?;
@@ -683,11 +651,8 @@ fn move_into(
     }
 }
 
-/// Whether `src` and `dest` live on the same underlying device, even though
-/// `rename` refused to cross between them (they're on different mount
-/// points, e.g. one or both sides is a bind mount). `dest` doesn't exist
-/// yet, so its parent directory is compared instead — a directory always
-/// exists on the same device as everything created inside it.
+/// Whether `src` and `dest` share a device though `rename` refused (different mount
+/// points). `dest` does not exist yet, so its parent directory is compared.
 fn same_device(src: &Path, dest: &Path) -> Result<bool> {
     use std::os::unix::fs::MetadataExt;
     let src_dev = std::fs::symlink_metadata(src)
@@ -702,13 +667,9 @@ fn same_device(src: &Path, dest: &Path) -> Result<bool> {
     Ok(src_dev == dest_dev)
 }
 
-/// Recreate `src`'s tree at `dest` by hardlinking every regular file rather
-/// than copying its bytes. The caller checks `same_device` first as a cheap
-/// filter, but that check is only a hint: on btrfs, separate subvolumes of
-/// the same filesystem report identical `st_dev` yet still refuse to
-/// hardlink across the subvolume boundary. So every hardlink here still
-/// falls back to a byte copy on `EXDEV`, the same way `move_into` falls back
-/// on `rename`, rather than trusting `same_device` to have been right.
+/// Recreate `src`'s tree at `dest` by hardlinking. `same_device` is only a hint (btrfs
+/// subvolumes share `st_dev` but refuse cross-subvolume links), so each link still
+/// falls back to a byte copy on `EXDEV`.
 fn hardlink_into(
     src: &Path,
     dest: &Path,
@@ -758,10 +719,8 @@ fn remove_source(src: &Path) -> Result<()> {
     result.with_context(|| format!("removing {} after copying it", src.display()))
 }
 
-/// A single symlink at `dest` pointing at the source's absolute path. Not
-/// dereferenced or duplicated: the volume just references it in place. Note
-/// this is what the sync engine replicates too (same path string, sent as
-/// is), so it only resolves on another node if that path exists there.
+/// A single symlink at `dest` to the source's absolute path, not dereferenced. Sync
+/// replicates it as-is, so it only resolves on another node if the path exists there.
 fn symlink_into(src: &Path, dest: &Path) -> Result<()> {
     let target = src
         .canonicalize()

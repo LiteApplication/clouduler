@@ -2,11 +2,10 @@
 //! daemon: the pool octet an egress/nat bridge subnet lands on, and the policy
 //! routing table an egress network uses.
 //!
-//! These are hashes of the network name so every node computes the same answer
-//! without coordinating. The price is that two names can collide, silently
-//! sharing a subnet or a routing table. Validation (`ClusterConfig::validate`)
-//! uses these same functions to refuse such a config up front, which is why
-//! they live here and not in `cl-net`, which depends on this crate.
+//! These are hashes of the network name so every node agrees without
+//! coordinating; two names can collide, so `ClusterConfig::validate` uses the
+//! same functions to refuse such a config. They live here, not in `cl-net`,
+//! which depends on this crate.
 
 use std::hash::{Hash, Hasher};
 
@@ -41,12 +40,10 @@ pub fn subnet_octet(network: &str) -> u8 {
     (fnv1a(network.as_bytes()) % 256) as u8
 }
 
-/// The hasher behind every derived identifier that gets persisted: policy
-/// routing tables in the kernel, the revision label on containers and NFS
-/// fsids held by clients. SipHash-1-3 with zero keys is what
-/// `DefaultHasher::new()` happened to be when those values were first handed
-/// out, but std documents its algorithm as unspecified, so this pins it. The
-/// output must never change, or live networks, containers and mounts drift.
+/// The hasher behind every persisted derived identifier (policy routing
+/// tables, container revision labels, NFS fsids). SipHash-1-3 with zero keys
+/// matches what `DefaultHasher::new()` was when values were first handed out;
+/// std leaves that unspecified, so this pins it. The output must never change.
 pub fn stable_hasher() -> siphasher::sip::SipHasher13 {
     siphasher::sip::SipHasher13::new_with_keys(0, 0)
 }
@@ -87,10 +84,9 @@ pub fn container_mark(network: &str) -> u32 {
 }
 
 /// Checks a host interface name the way the kernel will: non-empty, at most 15
-/// bytes, none of `/`, whitespace or `:` (which `ip` and `iptables` also
-/// reject or misparse), and only `[A-Za-z0-9_.-]`. Interface names reach
-/// `ip`, `iptables` and `/proc/sys/net/ipv4/conf/<name>/`, so a name like
-/// `../../x` must never get that far.
+/// bytes, only `[A-Za-z0-9_.-]`. Names reach `ip`, `iptables` and
+/// `/proc/sys/net/ipv4/conf/<name>/`, so something like `../../x` must be
+/// rejected.
 pub fn check_interface_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("must not be empty".to_string());

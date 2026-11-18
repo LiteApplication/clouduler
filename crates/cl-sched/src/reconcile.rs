@@ -18,15 +18,10 @@ use crate::error::Result;
 use crate::progress::UpdateReporter;
 use crate::registries::Registries;
 
-/// Instances whose image this node's reconciler is currently pulling. Shared
-/// with the api so `GET /api/instances` can report "pulling" instead of
-/// guessing from the absence of a container — nothing in a docker inspect
-/// distinguishes "about to be created" from "still fetching the image".
-///
-/// A count per instance, not a set: the api's update path and this reconciler
-/// can both be pulling for one instance at once, and with a plain set the
-/// first to finish would clear the mark while the other is still downloading.
-/// Go through `pull_started` / `pull_finished`.
+/// Instances whose image this node's reconciler is pulling, shared with the api so
+/// `GET /api/instances` can report "pulling". A count per instance, not a set: the api's
+/// update path and this reconciler can pull concurrently and the first to finish must not
+/// clear the mark. Use `pull_started` / `pull_finished`.
 pub type PullTracker = Arc<RwLock<BTreeMap<InstanceId, usize>>>;
 
 /// Marks one more pull in flight for `id`.
@@ -73,10 +68,8 @@ impl Action {
     }
 }
 
-/// While emergency mode is on, drop every action that would touch a container
-/// outside the emergency stack. Other stacks are not scheduled, but whatever
-/// of theirs is already running on this node is left exactly as it is: not
-/// stopped, not removed, not recreated.
+/// While emergency mode is on, drop every action touching a container outside the emergency
+/// stack; other stacks' running containers are left exactly as they are.
 pub fn restrict_to_emergency_stacks(
     actions: &mut Vec<Action>,
     emergency_stacks: &BTreeSet<String>,
@@ -126,11 +119,8 @@ pub struct Target {
     pub stop_grace: Duration,
 }
 
-/// Run a fence's stops all at once, skipping any not yet begun once
-/// `still_fenced` says the fence is gone. Other actions in `actions` are left
-/// alone: a fence batch is only ever stops.
-///
-/// `stop` is the real thing in `Reconciler::apply`, and a stand-in in tests.
+/// Run a fence's stops concurrently, skipping any not yet begun once `still_fenced` says
+/// the fence is gone. `stop` is real in `Reconciler::apply`, a stand-in in tests.
 async fn stop_while_fenced<'a, F, Fut>(
     actions: &'a [Action],
     still_fenced: &(dyn Fn() -> bool + Sync),
@@ -161,16 +151,12 @@ const FENCE_STOP_SLACK: Duration = Duration::from_secs(10);
 /// The built-in stop grace; the configured one is `failover.stop_grace`.
 pub const DEFAULT_STOP_GRACE: Duration = cl_config::DEFAULT_STOP_GRACE;
 
-/// Label carrying the spec revision, so drift is detectable without inspecting
-/// every field docker may have normalised.
+/// Label carrying the spec revision, so drift is detectable without inspecting every field.
 pub const LABEL_REVISION: &str = "clouduler.revision";
 
-/// Label carrying the revision of every cluster secret the container was
-/// created with, as `name=revision` pairs joined by commas (secret names
-/// cannot contain `=` or `,`). Deliberately not part of `LABEL_REVISION`:
-/// `diff` recreates a container whenever that changes, and overwriting a
-/// secret must not restart anything unless the operator asks for it. Holds
-/// names and numbers only, never a value.
+/// Label with the revision of every cluster secret the container was created with, as
+/// `name=revision` pairs joined by commas. Not part of `LABEL_REVISION`: overwriting a
+/// secret must not restart anything unless the operator asks. Names and numbers only.
 pub const LABEL_SECRETS: &str = "clouduler.secrets";
 
 /// `name=revision` pairs for `LABEL_SECRETS`, sorted by name.
@@ -193,12 +179,8 @@ pub fn decode_secret_revisions(label: &str) -> BTreeMap<String, u64> {
         .collect()
 }
 
-/// Work out what to do, given what the cluster wants and what docker has.
-///
-/// `Closed` short circuits everything: a node that has lost quorum stops what
-/// it runs and starts nothing, because the rest of the cluster is about to hand
-/// its work to somebody else. `Hold` changes nothing at all, since this node
-/// cannot yet tell whether its view of what it owns is still current.
+/// Work out what to do. `Closed` stops everything and starts nothing (the cluster is about
+/// to reassign the work); `Hold` changes nothing (this node cannot tell if its view is current).
 pub fn diff(targets: &[Target], actual: &[ContainerState], gate: FenceState) -> Vec<Action> {
     let running: BTreeMap<InstanceId, &ContainerState> = actual
         .iter()
@@ -235,12 +217,9 @@ pub fn diff(targets: &[Target], actual: &[ContainerState], gate: FenceState) -> 
             continue;
         };
 
-        // A changed spec cannot be patched onto a live container, so replace it.
-        //
-        // Only for one that should be running: recreating ends in `start`, and
-        // an instance is stopped either because someone asked for that or
-        // because it is migrating away, and neither wants it back up. It keeps
-        // its stale container until it is wanted again, and is recreated then.
+        // A changed spec cannot be patched onto a live container, so replace it, but only one
+        // that should be running: a stopped or migrating-away instance keeps its stale container
+        // until wanted again, since recreating ends in `start`.
         let current_revision = current
             .labels
             .get(LABEL_REVISION)
@@ -279,10 +258,8 @@ pub struct Reconciler {
     /// phase, so that a `Create`/`Start` finishing one reports how it went.
     /// Any other `Create` is a plain deploy and stays out of the record.
     updates: BTreeMap<InstanceId, UpdatePhase>,
-    /// Registry logins this pass may pull with. Rebuilt per pass rather than
-    /// held for the reconciler's life so a login added, rotated or removed
-    /// through the api takes effect on the next sweep instead of at the next
-    /// daemon restart — and so no password outlives the pass that needed it.
+    /// Registry logins for this pass, rebuilt per pass so changes apply on the next sweep and
+    /// no password outlives the pass.
     registries: Registries,
     /// Stop grace for a container with no target to read one from.
     stop_grace: Duration,
@@ -325,22 +302,15 @@ impl Reconciler {
         }
     }
 
-    /// Pull private images with these logins. Without them a private image is
-    /// simply unpullable: docker answers an anonymous manifest request for
-    /// one with the same 401 it gives for a repository that does not exist.
+    /// Pull private images with these logins (otherwise docker answers 401, same as for a missing repo).
     pub fn with_registries(mut self, registries: Registries) -> Self {
         self.registries = registries;
         self
     }
 
-    /// Apply the actions. One failure does not abort the rest: a single broken
-    /// container must not stop the node reconciling everything else.
-    ///
-    /// `fencing` is set when `actions` is a fence's batch of stops, with a
-    /// check for whether the fence still stands. Those run concurrently, each
-    /// with its own grace period, so the fence takes as long as the slowest
-    /// container rather than all of them added up, and a release part way
-    /// through drops the stops not yet begun.
+    /// Apply the actions; one failure does not abort the rest. With `fencing` (a fence's batch
+    /// of stops plus a still-fenced check) stops run concurrently, each with its own grace, and
+    /// a release drops the stops not yet begun.
     pub async fn apply(
         &self,
         actions: &[Action],
@@ -355,8 +325,7 @@ impl Reconciler {
             .collect();
 
         if let Some(still_fenced) = fencing {
-            // One stage per priority, so a stack that matters more outlives
-            // the ones it depends on being gone.
+            // One stage per priority, so a more important stack outlives the ones it depends on.
             for stage in fence_stages(actions, priorities) {
                 stop_while_fenced(&stage, still_fenced, |action| async {
                     let id = action.instance();
@@ -407,21 +376,10 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Catches a container that should be attached to an egress network but
-    /// isn't yet — almost always one that was already running before the
-    /// network existed to attach it to (`crates/cl-daemon/src/egress.rs` can
-    /// bring a new `egress`/`wireguard` network up without a restart, but
-    /// that alone does nothing for a container already running without it).
-    /// `Action::Create`/`Action::Recreate` above are the only other place
-    /// this attachment happens, and neither fires again once a container's
-    /// revision is up to date, so nothing else would ever retry it.
-    ///
-    /// Runs unconditionally every tick, for every running target with an
-    /// egress network, rather than trying to track "did this one already get
-    /// fixed": both `connect_network` and `set_default_route` are already
-    /// idempotent (a repeat call is a cheap no-op), and that's simpler than
-    /// keeping that answer correct across reconnects, migrations and
-    /// restarts.
+    /// Attach a running container that should be on an egress network but is not (typically it
+    /// started before the network existed; `Create`/`Recreate` are the only other attach
+    /// points and do not fire again). Runs every tick: `connect_network` and
+    /// `set_default_route` are idempotent, which is simpler than tracking what was fixed.
     async fn reconcile_egress_attachments(&self, targets: &[Target], actual: &[ContainerState]) {
         let running: BTreeMap<InstanceId, &ContainerState> = actual
             .iter()
@@ -469,9 +427,7 @@ impl Reconciler {
         }
     }
 
-    /// Pull the image unless it is already here. Creating a container against
-    /// an image the node has never seen fails, and on a fresh node that is
-    /// every image.
+    /// Pull the image unless it is already here (creating against an unseen image fails).
     async fn ensure_image(&self, id: &InstanceId, image: &str) -> Result<()> {
         // Presence, not a repo digest: a local image without one is still
         // usable, and pulling it would fail whenever its registry is down.
@@ -555,16 +511,9 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Stops (if running), force-removes, then creates and starts a fresh
-    /// container from `target`'s current spec. Shared by `Action::Recreate`
-    /// (the spec itself changed) and `Action::Start`'s stale-network
-    /// recovery: both need the old container gone before docker will let a
-    /// new one attach cleanly, and `create` picks up whatever the network
-    /// currently is rather than whatever it was when this container was
-    /// last built.
-    ///
-    /// Every step lands in the replicated update record, so a redeploy shows
-    /// real progress from any node's api.
+    /// Stops (if running), force-removes, then creates and starts a fresh container from
+    /// `target`'s current spec. Shared by `Action::Recreate` and `Action::Start`'s stale-network
+    /// recovery; every step lands in the replicated update record.
     async fn replace(&self, id: &InstanceId, target: &Target, name: &str) -> Result<()> {
         let result = self.replace_steps(id, target, name).await;
         match &result {
@@ -602,9 +551,8 @@ impl Reconciler {
         self.route_container_networks(name, &target.spec).await
     }
 
-    /// Attach a created (not yet started) container to every container-kind
-    /// network it uses, with its pinned address and, for a router, the
-    /// interface name its image expects.
+    /// Attach a created container to every container-kind network it uses, at its pinned
+    /// address (and, for a router, the interface name its image expects).
     async fn connect_container_networks(
         &self,
         container: &str,
@@ -627,11 +575,10 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Put the routes of every container-kind attachment into the container's
-    /// namespace (`ip route replace`, so safe to repeat: this is also what
-    /// swaps a client's `prohibit` for the real route once the router
-    /// exists), then keep the proxy addresses on the overlay when a
-    /// `0.0.0.0/0` network took the default route.
+    /// Put the routes of every container-kind attachment into the container's namespace
+    /// (`ip route replace`, so repeatable; this swaps a client's `prohibit` for the real route
+    /// once the router exists), and keep proxy addresses on the overlay when a `0.0.0.0/0`
+    /// network took the default route.
     async fn route_container_networks(&self, name: &str, spec: &ContainerSpec) -> Result<()> {
         if spec.container_networks.is_empty() {
             return Ok(());
@@ -654,11 +601,9 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Per-tick catch-up for container-kind networks, the same idea as
-    /// `reconcile_egress_attachments`: a client started before its router
-    /// existed gets the real route once it appears, a router that moved or a
-    /// node set that changed gets its routes refreshed, and a container
-    /// running without an attachment gets connected. Everything is idempotent.
+    /// Per-tick catch-up for container-kind networks, like `reconcile_egress_attachments`:
+    /// late routers, moved routers and changed node sets refresh routes, and an unattached
+    /// container gets connected. Idempotent.
     async fn reconcile_container_attachments(&self, targets: &[Target], actual: &[ContainerState]) {
         let running: BTreeMap<InstanceId, &ContainerState> = actual
             .iter()
@@ -721,8 +666,7 @@ impl Reconciler {
         self.pin_proxy_routes(name, spec).await
     }
 
-    /// Without this, a route published on a network the service is a member
-    /// of resolves to a node address that is not on the overlay, follows the
+    /// Without this, a published route resolves to a node address off the overlay, follows the
     /// egress default route and dies in the bridge's kill-switch.
     async fn pin_proxy_routes(&self, name: &str, spec: &ContainerSpec) -> Result<()> {
         let Some(gateway) = spec.pinned_gateway else {
@@ -769,11 +713,9 @@ pub fn health_gate(health: Option<cl_docker::HealthState>, waited_secs: i64) -> 
     }
 }
 
-/// Whether applying `action` brings up the new container of an update that
-/// is at `phase`. A missing container mid-update is the one the update took
-/// away (queued is excluded: that update has not touched anything yet). A
-/// stopped one only counts once the old container is known to be gone,
-/// otherwise this would be restarting the very container being replaced.
+/// Whether applying `action` brings up the new container of an update at `phase`. A missing
+/// container counts mid-update (not when queued); a stopped one only once the old container
+/// is gone, else we would restart the one being replaced.
 fn finishes_update(action: &Action, phase: Option<UpdatePhase>) -> bool {
     use UpdatePhase::*;
     matches!(
@@ -785,17 +727,10 @@ fn finishes_update(action: &Action, phase: Option<UpdatePhase>) -> bool {
     )
 }
 
-/// Whether a docker error is the container's network having been torn down
-/// and rebuilt under it — the overlay bridge still exists by the same name,
-/// but with a fresh docker network id, because it was removed and remade
-/// (e.g. `overlay.rs` rebuilding it fresh after this node's daemon
-/// restarted) while this container was still attached to the old one.
-/// Docker refuses to start it and otherwise nothing ever notices: the
-/// container's spec hasn't changed, so `diff()` keeps deciding `Start`
-/// forever instead of `Recreate`, and the same failure repeats every sweep
-/// until something forces a fresh container. Dockerd has no distinct error
-/// code for this (it comes back as a generic 500), only this message —
-/// same tradeoff `DockerError::is_not_found` already makes for 404s.
+/// Whether a docker error means the container's network was torn down and rebuilt under it
+/// (same bridge name, new network id, e.g. after a daemon restart). Docker refuses to start
+/// it and `diff()` keeps choosing `Start` forever instead of `Recreate`. Dockerd gives only
+/// a generic 500, so this matches the message (like `DockerError::is_not_found`).
 fn is_stale_network_error(e: &DockerError) -> bool {
     e.to_string().contains("Could not attach to network")
 }

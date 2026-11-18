@@ -1,6 +1,4 @@
-//! The `clouduler stack` commands. These talk to a running daemon over the node
-//! RPC channel; the stack and its files end up in the replicated database, so
-//! every manager holds them and any node can run the containers.
+//! The `clouduler stack` commands.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,11 +25,8 @@ pub async fn deploy(
     deploy_bundle(cfg, name, bundle, via).await
 }
 
-/// The part of deploying shared by `stack deploy` (bundle read from a file
-/// named on the command line) and `stack source set` (bundle read from a
-/// file or stdin, name taken from the existing stack). Creates the stack if
-/// it doesn't exist yet, otherwise bumps its revision - see
-/// `Request::DeployStack` in cl-raft.
+/// Shared by `stack deploy` and `stack source set`. Creates the stack or bumps
+/// its revision (see `Request::DeployStack`).
 async fn deploy_bundle(
     cfg: &ClusterConfig,
     name: String,
@@ -94,10 +89,7 @@ async fn deploy_bundle(
     Ok(())
 }
 
-/// Print a stack's raw source: the yaml exactly as bundled at deploy time,
-/// which is what `stack source set` (and a redeploy from a saved copy of
-/// this output) would take back in. Same content `stack show` prints,
-/// without the `--files` mode.
+/// Print a stack's raw source yaml as bundled at deploy time (`stack show` without `--files`).
 pub async fn source_get(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
     let state = client_for(cfg, via)?
         .state()
@@ -111,11 +103,8 @@ pub async fn source_get(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> R
     Ok(())
 }
 
-/// Replace a stack's source, read from `file` if given or from stdin
-/// otherwise, the same as redeploying it with a new copy of its file. Unlike
-/// `stack deploy`, this is edit-in-place: it refuses a name with no existing
-/// stack rather than silently creating one, since `stack source` is for
-/// editing, not creating.
+/// Replace a stack's source from `file` or stdin. Unlike `stack deploy`, refuses
+/// a name with no existing stack.
 pub async fn source_set(
     cfg: &ClusterConfig,
     name: &str,
@@ -153,13 +142,9 @@ pub async fn source_set(
     deploy_bundle(cfg, name.to_string(), bundle, via).await
 }
 
-/// Turn the stack's bundled files into cluster config and secret objects, so
-/// the containers can mount them wherever they end up running.
-///
-/// Secrets are sealed here rather than by the cluster, because plaintext must
-/// never travel through the raft log. That means this command needs the cluster
-/// key, which is fine on a node and is the reason the error below says where to
-/// go instead when it is missing.
+/// Turn the stack's bundled files into cluster config and secret objects.
+/// Secrets are sealed here because plaintext must never travel through the
+/// raft log, which needs the cluster key.
 async fn publish_objects(
     cfg: &ClusterConfig,
     client: &Client,
@@ -360,11 +345,9 @@ fn remove_container_path(instance: &impl std::fmt::Display) -> String {
     format!("/api/instances/internal/{instance}/remove-container")
 }
 
-/// Restarts every running instance of the stack where it already is: the
-/// owning node removes the container and its reconcile loop builds a fresh one
-/// from the same assignment. Placement, volume primaries and `stack update`
-/// image pins are untouched (an `Unassign` would drop all three), and
-/// instances of a stopped stack are skipped so they stay stopped.
+/// Restarts every running instance in place: the owning node removes the container
+/// and reconcile rebuilds it. Placement, volume primaries and image pins are
+/// untouched (an `Unassign` would drop all three); stopped stacks are skipped.
 pub async fn restart(cfg: &ClusterConfig, name: &str, via: Option<&str>) -> Result<()> {
     let client = client_for(cfg, via)?;
     let state = client.state().await.map_err(|e| anyhow!("{e}"))?;

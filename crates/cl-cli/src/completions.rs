@@ -1,17 +1,8 @@
 //! `clouduler completions print|install`.
-//!
-//! Live value completion (`crate::completion`) needs the completer to run
-//! the actual `clouduler` binary again for every keystroke - `clap_complete`'s
-//! static `generate()` only ever knows the fixed subcommand/flag tree, so it
-//! can't call back into a running cluster. clap_complete's `unstable-dynamic`
-//! `CompleteEnv` engine (wired up in `main`, right before `Cli::parse()`)
-//! covers that: it re-execs `clouduler` with a `COMPLETE=<shell>` env var
-//! set, either to print a short shell-specific registration snippet (no
-//! other args) or to answer one completion request (args after `--`).
-//!
-//! So "installing completions" here just means getting that snippet sourced
-//! by the shell, not writing out a generated script - see
-//! `clap_complete::env` for the exact one-liners this mirrors.
+//! Live completion uses clap_complete's `unstable-dynamic` `CompleteEnv` engine
+//! (wired up in `main`), which re-execs `clouduler` with `COMPLETE=<shell>` to print
+//! a registration snippet or answer a request, so "installing" just means getting
+//! that snippet sourced by the shell.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -33,12 +24,8 @@ impl ShellArg {
     }
 }
 
-/// The line to add to the shell's startup so it re-sources
-/// `COMPLETE=<shell> clouduler` (or, for fish, pipes it) on every new shell.
-/// The `COMPLETE` env var is clap_complete's trigger: set with no other args
-/// it makes `clouduler` print this same registration script instead of
-/// running normally, and with a partial command line after `--` it answers
-/// one completion request - see `clap_complete::env`.
+/// The line to add to the shell startup so it sources `COMPLETE=<shell> clouduler`
+/// (piped for fish) on every new shell.
 fn registration_line(shell: ShellArg, bin: &str) -> String {
     match shell {
         ShellArg::Bash => format!("source <(COMPLETE=bash {bin})"),
@@ -78,15 +65,9 @@ fn bin_name() -> Result<String> {
         .unwrap_or_else(|| "clouduler".to_string()))
 }
 
-/// The dynamic completers in `completion.rs` read `cluster.yaml` (and, for
-/// stack/instance/volume/backup names, talk to a live manager) to answer
-/// with real data instead of nothing. Both of those need this user to be
-/// able to read the config file, which - once a node's daemon has run at
-/// least once - is root-owned but group-readable by `clouduler` (see
-/// `init::permissions::ensure`). Installing the shell hook for a user who
-/// cannot read it would look identical to a working install right up until
-/// the first tab press, so check now and say so up front instead of leaving
-/// that to be a silently-empty completion list later.
+/// The dynamic completers read `cluster.yaml`, which is group-readable by `clouduler`
+/// (see `init::permissions::ensure`). Check now that the user can read it, since
+/// otherwise the install looks fine until completion silently returns nothing.
 fn warn_if_not_in_group() {
     match permissions::current_user_is_member() {
         Some(true) => {}
@@ -130,10 +111,8 @@ fn rc_file(shell: ShellArg) -> Result<PathBuf> {
     })
 }
 
-/// Append the registration line to the shell's rc file (or, for fish, write
-/// a small standalone completion file - fish loads every file under
-/// `~/.config/fish/completions/` automatically, which is the idiomatic place
-/// rather than `config.fish`). Does nothing if the line is already there.
+/// Append the registration line to the shell's rc file (fish: write a file under
+/// `~/.config/fish/completions/`). Does nothing if already present.
 pub fn install(shell: Option<ShellArg>) -> Result<()> {
     warn_if_not_in_group();
 
@@ -166,9 +145,7 @@ pub fn install(shell: Option<ShellArg>) -> Result<()> {
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
 
-    // Fish's own completion file is sourced verbatim by fish, so it wants
-    // the bare command with no shell comment convention; every other rc
-    // file is a normal shell script, so a `#` comment fits.
+    // Fish sources its completion file verbatim, so no `#` comment there.
     if matches!(shell, ShellArg::Fish) {
         writeln!(f, "{line}")
     } else {

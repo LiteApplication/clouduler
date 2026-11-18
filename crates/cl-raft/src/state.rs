@@ -1,8 +1,6 @@
-//! The replicated cluster state and the commands that mutate it.
-//!
-//! Everything here is pure: `apply` is the only way state changes, and it never
-//! performs IO. That keeps the state machine deterministic across nodes and
-//! makes the invariants unit testable.
+//! The replicated cluster state and the commands that mutate it. `apply` is the
+//! only way state changes and it never does IO, keeping the state machine
+//! deterministic across nodes and its invariants unit testable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -17,15 +15,12 @@ use crate::alerts::{
 };
 use crate::ids::{InstanceId, VolumeId};
 
-/// Whether a node may take new work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Availability {
-    /// Normal, schedulable.
     Active,
     /// Keeps running what it has, takes nothing new. Set before a migration.
     Drain,
-    /// Removed from the cluster, holds nothing.
     Decommissioned,
 }
 
@@ -36,87 +31,62 @@ pub enum Role {
     Worker,
 }
 
-/// A node as the cluster currently sees it. Seeded from the config file, then
-/// edited at runtime through the web ui.
+/// A node as the cluster sees it; seeded from config, edited at runtime via the ui.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeState {
     pub name: String,
-    /// Config-declared identity (`cl_config::Node::id`) this roster entry was
-    /// created for. See the `removed` field on `ClusterState`.
+    /// Config-declared identity (`cl_config::Node::id`); see `ClusterState::removed`.
     pub id: uuid::Uuid,
     pub role: Role,
     pub rpc_addr: SocketAddr,
-    /// Drives this node implements, mapped to its local backing directory.
     pub drives: BTreeMap<String, PathBuf>,
     pub availability: Availability,
-    /// Labels from the cluster config, replicated so the scheduler can match
-    /// `node.labels.<key>` constraints without reading the config file.
+    /// Config labels, replicated for `node.labels.<key>` constraints.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// `cl_config::Node::last_resort`, replicated so the scheduler can rank
-    /// this node last without reading the config file.
+    /// `cl_config::Node::last_resort`, replicated so the scheduler can rank this node last.
     #[serde(default)]
     pub last_resort: bool,
-    /// Egress-kind networks this node has a host interface address for. Used
-    /// the same way `drives` is: a service on one of these networks can only
-    /// be placed on a node that implements it.
+    /// Egress-kind networks this node has a host address for; placement requires it, like `drives`.
     #[serde(default)]
     pub egress_networks: BTreeSet<String>,
-    /// Every network this node has any address on, keyed by network name.
-    /// Used the same way `drives` is: a service attached to one of these
-    /// networks can only be placed on a node that implements it.
+    /// Every network this node has an address on, by name; placement requires it, like `drives`.
     #[serde(default)]
     pub networks: BTreeSet<String>,
-    /// Ports this node's public-network router forwards to it, keyed by
-    /// network name. A raw `x-clouduler.expose` port on a public network can
-    /// only be placed on a node that lists that `(protocol, port)` pair here.
+    /// Ports this node's public-network router forwards to it, by network name; a raw
+    /// `x-clouduler.expose` port is only placed on a node listing its `(protocol, port)`.
     #[serde(default)]
     pub open_ports: BTreeMap<String, BTreeSet<(PortProtocol, u16)>>,
-    /// `std::env::consts::ARCH` of the running binary, e.g. `x86_64` or
-    /// `aarch64`. Lets the self-update orchestrator group nodes by what needs
-    /// a native build.
+    /// `std::env::consts::ARCH` of the running binary; groups nodes by native build for self-update.
     #[serde(default)]
     pub arch: String,
-    /// Blake3 hash of the currently running binary, hex encoded. Lets the
-    /// self-update orchestrator confirm a restarted node actually came back
-    /// on the freshly built binary rather than just coming back.
+    /// Blake3 hex of the running binary; confirms a restarted node runs the new build.
     #[serde(default)]
     pub binary_hash: String,
-    /// This node's X25519 public key, base64, self-reported once its local
-    /// keypair exists. `None` until then. Lets any node holding the cluster
-    /// secret key wrap a copy for this one without ever transmitting the
-    /// plaintext key itself — see `wrapped_keys` on `ClusterState`.
+    /// X25519 public key (base64), self-reported once the local keypair exists, so a
+    /// key holder can wrap the cluster secret key for this node (`wrapped_keys`).
     #[serde(default)]
     pub node_pubkey: Option<String>,
-    /// Total system memory in bytes, self-reported alongside `arch` and
-    /// `binary_hash` (see `report_self` in `cl-daemon`). 0 until the node has
-    /// reported in at least once. Lets the scheduler weigh a node's memory
-    /// pressure instead of treating every node as equally sized.
+    /// Total system memory in bytes, self-reported (`report_self` in `cl-daemon`); 0
+    /// until reported. The scheduler weighs memory pressure with it.
     #[serde(default)]
     pub memory_total_bytes: u64,
-    /// Release version of the running binary (`CARGO_PKG_VERSION`),
-    /// self-reported next to `binary_hash`. Empty until the node has
-    /// reported in. The ui shows it; nothing decides on it.
+    /// Release version of the running binary, self-reported; empty until then. Display only.
     #[serde(default)]
     pub version: String,
-    /// GPUs and GPU-related device nodes this node found on itself,
-    /// self-reported by `report_self` in `cl-daemon`. Empty until the node has
-    /// reported (and on a node too old to report it at all), which the
-    /// scheduler reads as "no GPUs". Boxed to keep `Request::UpsertNode`
-    /// from growing.
+    /// GPUs and device nodes found on the node, self-reported; empty until reported
+    /// (read as "no GPUs"). Boxed to keep `Request::UpsertNode` small.
     #[serde(default)]
     pub gpus: Box<NodeGpus>,
-    /// Image references present in this node's docker (`repo:tag` and
-    /// `repo@sha256:...`), self-reported by `report_self`. Lets the scheduler
-    /// prefer a node that already holds a pinned image when a registry is
-    /// unreachable. Empty until the node has reported.
+    /// Image references in this node's docker (`repo:tag`, `repo@sha256:...`),
+    /// self-reported; lets the scheduler prefer a node holding a pinned image when
+    /// a registry is unreachable.
     #[serde(default)]
     pub images: BTreeSet<String>,
 }
 
 impl NodeState {
-    /// Whether this node reported holding `image`, pinned to `digest` when
-    /// one is given (the digest alone identifies the bits).
+    /// Whether this node holds `image`, matched on `digest` when given.
     pub fn holds_image(&self, image: &str, digest: Option<&str>) -> bool {
         match digest {
             Some(d) => {
@@ -128,7 +98,6 @@ impl NodeState {
     }
 }
 
-/// One NVIDIA GPU, as `nvidia-smi` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NvidiaGpu {
     pub index: u32,
@@ -136,52 +105,42 @@ pub struct NvidiaGpu {
     pub name: String,
 }
 
-/// A DRI render node (`/dev/dri/renderD*`), with the kernel driver behind it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderNode {
     pub path: String,
-    /// `i915`, `xe`, `amdgpu`, ... Empty when sysfs did not say.
     #[serde(default)]
     pub driver: String,
 }
 
-/// What a node detected about its GPUs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeGpus {
-    /// `/dev/nvidia[0-9]*` device nodes present on the host.
     #[serde(default)]
     pub nvidia_devices: Vec<String>,
-    /// GPUs listed by `nvidia-smi`. May be empty on a node with device nodes
-    /// but no `nvidia-smi` on its path.
+    /// GPUs listed by `nvidia-smi`; may be empty on a node with device nodes but no `nvidia-smi`.
     #[serde(default)]
     pub nvidia: Vec<NvidiaGpu>,
-    /// Whether docker has an `nvidia` runtime registered (the NVIDIA
-    /// container toolkit is configured).
+    /// Whether docker has an `nvidia` runtime registered.
     #[serde(default)]
     pub nvidia_runtime: bool,
-    /// Path of `nvidia-container-runtime-hook` or `nvidia-container-cli`
-    /// when one was found in the usual PATH directories. Docker's device
-    /// requests also work with only this and no registered runtime.
+    /// Path of `nvidia-container-runtime-hook`/`nvidia-container-cli` if found; docker
+    /// device requests also work with only this and no registered runtime.
     #[serde(default)]
     pub nvidia_hook: Option<String>,
     #[serde(default)]
     pub render_nodes: Vec<RenderNode>,
-    /// Host device paths a service's `devices:` entry may name: the entries
-    /// directly under `/dev` and under a few device directories (`dri`, `snd`,
-    /// `input`, `dvb`, `nvidia-caps`), plus those directories themselves.
+    /// Host device paths a service's `devices:` entry may name: entries under `/dev`
+    /// and a few device directories (`dri`, `snd`, `input`, `dvb`, `nvidia-caps`), and those directories.
     #[serde(default)]
     pub dev_paths: BTreeSet<String>,
 }
 
 impl NodeGpus {
-    /// How many NVIDIA GPUs docker could hand out: whichever of `nvidia-smi`
-    /// and the device nodes saw more.
+    /// How many NVIDIA GPUs docker could hand out: the larger of `nvidia-smi` and device-node counts.
     pub fn nvidia_count(&self) -> usize {
         self.nvidia.len().max(self.nvidia_devices.len())
     }
 
-    /// Whether `id` (a GPU index or uuid, as `device_ids` takes) names a GPU
-    /// this node has.
+    /// Whether `id` (GPU index or uuid) names a GPU this node has.
     pub fn has_nvidia_id(&self, id: &str) -> bool {
         if self
             .nvidia
@@ -190,15 +149,14 @@ impl NodeGpus {
         {
             return true;
         }
-        // No nvidia-smi: only an index can be checked, against the device nodes.
+        // No nvidia-smi: only an index can be checked.
         self.nvidia.is_empty()
             && id
                 .parse::<usize>()
                 .is_ok_and(|i| self.nvidia_devices.contains(&format!("/dev/nvidia{i}")))
     }
 
-    /// Whether docker can serve an NVIDIA device request: the `nvidia`
-    /// runtime is registered, or the toolkit's hook/cli binary is installed.
+    /// Whether docker can serve an NVIDIA request: runtime registered or hook/cli installed.
     pub fn nvidia_ready(&self) -> bool {
         self.nvidia_runtime || self.nvidia_hook.is_some()
     }
@@ -227,15 +185,13 @@ impl NodeState {
             .is_some_and(|ports| ports.contains(&(protocol, port)))
     }
 
-    /// A drained or decommissioned node must not receive new containers.
     pub fn schedulable(&self) -> bool {
         self.availability == Availability::Active
     }
 }
 
-/// Transport protocol for a port a node's router forwards to it. Mirrors
-/// `cl_config::stack::Protocol`, redeclared here so `cl-raft` does not depend
-/// on `cl-config` (see `ClusterConfigEntry` below for the same reasoning).
+/// Transport protocol for a router-forwarded port; mirrors `cl_config::stack::Protocol`
+/// so `cl-raft` does not depend on `cl-config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PortProtocol {
@@ -243,69 +199,50 @@ pub enum PortProtocol {
     Udp,
 }
 
-/// A deployed stack. The spec is kept as the raw yaml the user submitted so the
-/// ui can round trip it without lossy reserialisation.
+/// A deployed stack; the spec is the raw submitted yaml so the ui can round trip it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StackState {
     pub name: String,
     pub spec: String,
-    /// Bumped on every redeploy, so nodes can tell a spec change from a restart.
+    /// Bumped on every redeploy, to tell a spec change from a restart.
     pub revision: u64,
-    /// Cluster config objects this stack brought with it, so removing the stack
-    /// takes them away too. A subset of `used_configs`: only the ones this
-    /// stack bundled a `file:` for, not every config a service references.
+    /// Cluster configs this stack brought with it (removed with it): those it bundled a `file:` for.
     #[serde(default)]
     pub configs: BTreeSet<String>,
-    /// Cluster secrets this stack brought with it. Same ownership caveat as
-    /// `configs`.
+    /// Cluster secrets this stack brought with it; same ownership as `configs`.
     #[serde(default)]
     pub secrets: BTreeSet<String>,
-    /// Every cluster config any service in this stack references, whether or
-    /// not the stack bundles its own file for it. Kept alongside `configs`
-    /// so the ui can show a stack's full config usage without the daemon
-    /// having to reparse the spec.
+    /// Every cluster config any service references, bundled or not, so the ui need not reparse the spec.
     #[serde(default)]
     pub used_configs: BTreeSet<String>,
-    /// Every cluster secret any service in this stack references. Same
-    /// relationship to `secrets` as `used_configs` has to `configs`.
+    /// Every cluster secret any service references; relates to `secrets` as `used_configs` to `configs`.
     #[serde(default)]
     pub used_secrets: BTreeSet<String>,
-    /// Unix seconds of the latest `DeployStack`. Taken from the request so
-    /// `apply` stays clock-free. 0 for a stack deployed before this existed.
+    /// Unix seconds of the latest `DeployStack`, from the request so `apply` stays clock-free; 0 if predating this.
     #[serde(default)]
     pub deployed_at: i64,
-    /// The spec this stack had before the latest deploy that changed it.
-    /// Lets the ui show "changes since last deploy". `None` on a first deploy.
+    /// The spec before the latest deploy that changed it (for "changes since last deploy"); `None` on a first deploy.
     #[serde(default)]
     pub previous_spec: Option<String>,
 }
 
-/// The cluster config file, replicated so an edit made on one node reaches the
-/// file on disk on every node.
-///
-/// The file is what each daemon reads at startup, and a node that was down
-/// during an edit would otherwise come back with a stale one. Held as the raw
-/// yaml rather than a parsed `ClusterConfig` so `cl-raft` does not depend on
-/// `cl-config`, and so comments and key order survive a round trip.
+/// The cluster config file, replicated so an edit on one node reaches every
+/// node's file (a node down during the edit would otherwise return stale). Raw
+/// yaml so `cl-raft` does not depend on `cl-config` and comments/key order survive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClusterConfigEntry {
     pub yaml: String,
-    /// Bumped on every accepted edit. A node writes the file only when this
-    /// moves, so a restarted daemon does not fight the operator over an
-    /// unchanged file.
+    /// Bumped on every accepted edit; a node writes the file only when this moves.
     pub generation: u64,
 }
 
-/// A cluster wide config object, mounted read only into the containers that
-/// reference it. Stored in the clear: a config is not a secret.
+/// A cluster wide config object, mounted read only into referencing containers. Stored in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigEntry {
     pub name: String,
-    /// Base64, so the state machine stays valid json.
     pub content: String,
-    /// Bumped on every update, so a node can tell its mounted copy is stale.
+    /// Bumped on every update, so nodes can tell their mounted copy is stale.
     pub revision: u64,
-    /// Stack that owns it, if it came from a stack file rather than the ui.
     #[serde(default)]
     pub owner: Option<String>,
 }
@@ -324,27 +261,21 @@ impl ConfigEntry {
     }
 }
 
-/// A cluster wide secret, mounted at `/run/secrets/<name>` like a docker secret.
-///
-/// The value is sealed before it reaches here, so the database, its snapshots
-/// and any backup of them carry only ciphertext. A node without the cluster key
-/// replicates this fine but cannot open it, and so cannot run a container that
-/// needs it.
+/// A cluster wide secret mounted at `/run/secrets/<name>`. Sealed before it
+/// reaches here, so the database, snapshots and backups hold only ciphertext; a
+/// node without the cluster key replicates it but cannot run containers needing it.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub name: String,
-    /// Base64 of nonce followed by ciphertext, from `cl_secret::Sealed`.
     pub sealed: String,
     pub revision: u64,
-    /// Fingerprint of the key it was sealed under, so a node holding the wrong
-    /// key can say so instead of reporting a decryption failure.
+    /// Fingerprint of the sealing key, so a node with the wrong key can say so.
     pub key_fingerprint: String,
     #[serde(default)]
     pub owner: Option<String>,
 }
 
-/// Prints no ciphertext, on the principle that nothing about a secret belongs
-/// in a log line.
+/// Prints no ciphertext: nothing about a secret belongs in a log line.
 impl fmt::Debug for SecretEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretEntry")
@@ -355,26 +286,17 @@ impl fmt::Debug for SecretEntry {
     }
 }
 
-/// The cluster secret key, encrypted to one node's public key so only that
-/// node can recover it. Written by whichever node currently holds the
-/// plaintext key; the plaintext itself never appears here or anywhere else in
-/// this state machine.
+/// The cluster secret key encrypted to one node's public key; the plaintext never appears in this state.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct WrappedKeyEntry {
-    /// Base64 of the one-time ephemeral public key used for this wrap, from
-    /// `cl_secret::WrappedKey::ephemeral_public`.
     pub ephemeral_public: String,
-    /// Base64 of nonce followed by ciphertext, from `cl_secret::Sealed`.
     pub sealed: String,
-    /// Fingerprint of the key that was wrapped, for observability.
     pub key_fingerprint: String,
-    /// The recipient public key this was wrapped for. Compared against the
-    /// node's current `node_pubkey` to notice a keypair rotation and
-    /// re-wrap, rather than serving a copy nobody can open any more.
+    /// The recipient public key; compared with the node's current `node_pubkey` to notice a rotation and re-wrap.
     pub target_pubkey: String,
 }
 
-/// Prints no ciphertext, same reasoning as `SecretEntry`'s `Debug`.
+/// Prints no ciphertext (see `SecretEntry`).
 impl fmt::Debug for WrappedKeyEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WrappedKeyEntry")
@@ -384,12 +306,10 @@ impl fmt::Debug for WrappedKeyEntry {
     }
 }
 
-/// Cap on one config or secret. Same reasoning as the stack file limit: it goes
-/// through the raft log and into every snapshot.
+/// Cap on one config or secret: it goes through the raft log and every snapshot.
 pub const MAX_OBJECT_BYTES: usize = 1024 * 1024;
 
-/// Config and secret names become filenames under the mount directory, so they
-/// have to be safe to join onto a path.
+/// Names become filenames under the mount directory, so they must be safe to join onto a path.
 fn validate_object_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 253 {
         return Err(format!("{name:?} must be between 1 and 253 characters"));
@@ -415,28 +335,21 @@ pub enum DesiredState {
     Stopped,
 }
 
-/// Where an instance runs and what it should be doing there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Assignment {
     pub instance: InstanceId,
     pub node: String,
     pub desired: DesiredState,
-    /// Pinned image digest. Set once pulled so every replica runs the same bits
-    /// even when the tag is `:latest`.
+    /// Pinned image digest, set once pulled so all replicas run the same bits even for `:latest`.
     pub image_digest: Option<String>,
-    /// Present while the instance is moving to another node.
     pub migration: Option<Migration>,
 }
 
-/// A move between nodes, recorded step by step so a crash mid-move is recoverable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Migration {
-    /// The node driving the move, which is where the instance started.
-    ///
-    /// Recorded rather than derived from the assignment because `Switching`
-    /// repoints the assignment at the target: from that phase on there is no
-    /// other way to tell who owns the remaining work, and a node that crashed
-    /// mid-move has to be able to recognise its own job when it comes back.
+    /// The node driving the move (where the instance started). Recorded because
+    /// `Switching` repoints the assignment at the target, after which a node that
+    /// crashed mid-move could not otherwise recognise its own job.
     pub from: String,
     pub to: String,
     pub phase: MigrationPhase,
@@ -445,15 +358,10 @@ pub struct Migration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MigrationPhase {
-    /// Container is being stopped on the source node.
     Stopping,
-    /// Final volume delta is being sent to the target.
     Syncing,
-    /// Target is checking what it received.
     Verifying,
-    /// Assignment is being switched over.
     Switching,
-    /// Container is starting on the target.
     Starting,
     Done,
     Failed {
@@ -462,7 +370,6 @@ pub enum MigrationPhase {
 }
 
 impl MigrationPhase {
-    /// The phase this one advances to, or None when the move is over.
     pub fn next(&self) -> Option<MigrationPhase> {
         use MigrationPhase::*;
         match self {
@@ -480,57 +387,44 @@ impl MigrationPhase {
     }
 }
 
-/// Replication bookkeeping for one volume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VolumeState {
     pub id: VolumeId,
-    /// Bumped by whichever node last wrote the volume. Lets a node tell whether
-    /// its copy is behind without hashing the whole tree.
+    /// Bumped by whichever node last wrote the volume; shows if a copy is behind without hashing.
     pub generation: u64,
-    /// Node holding the authoritative copy.
     pub primary: String,
-    /// Generation each node has caught up to.
     pub replicas: BTreeMap<String, u64>,
-    /// Set while an operator is editing the volume by hand: replication of
-    /// it is paused so nothing syncs over (or deletes) the edits.
+    /// Set while an operator hand-edits the volume: replication is paused so nothing syncs over the edits.
     #[serde(default)]
     pub frozen: Option<FrozenVolume>,
-    /// Set while the source node is refusing to replicate this volume because
-    /// pushing it would wipe data off a replica. Cleared by the next sync that
-    /// goes through.
+    /// Set while the source refuses to replicate because pushing would wipe data off a
+    /// replica; cleared by the next sync that goes through.
     #[serde(default)]
     pub sync_refused: Option<SyncRefusal>,
-    /// Set while the volume's source has found it holding no files at all,
-    /// twice in a row. Only the verdict lives here: how much is in the volume
-    /// and how old its newest file is gets scanned on demand. Cleared by the
-    /// first scan that finds a file.
+    /// Set while the source has twice found the volume holding no files. Only the
+    /// verdict lives here; size and newest file are scanned on demand. Cleared by the first scan finding a file.
     #[serde(default)]
     pub looks_empty: bool,
 }
 
-/// Why a volume's replication was stopped to protect a replica's data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncRefusal {
-    /// The node that refused to push.
     pub from: String,
-    /// The replica it would have overwritten.
     pub to: String,
     pub reason: String,
-    /// Unix seconds, stamped by the refusing node so `apply` stays clock free.
+    /// Unix seconds, stamped by the refusing node to keep `apply` clock free.
     pub at: i64,
 }
 
-/// Why and where a volume's replication is paused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrozenVolume {
-    /// Node being edited; it becomes the primary again on unfreeze.
+    /// Node being edited; primary again on unfreeze.
     pub node: String,
-    /// Instances the freeze stopped, so unfreeze can start exactly those.
+    /// Instances the freeze stopped, so unfreeze starts exactly those.
     pub stopped: Vec<InstanceId>,
 }
 
 impl VolumeState {
-    /// Nodes whose copy is current.
     pub fn in_sync(&self) -> BTreeSet<&str> {
         self.replicas
             .iter()
@@ -540,61 +434,50 @@ impl VolumeState {
     }
 }
 
-/// A certificate clouduler holds, distributed to every node so any of them can
-/// terminate TLS.
+/// A certificate distributed to every node so any can terminate TLS.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CertificateState {
     pub fqdn: String,
     pub chain_pem: String,
     pub key_pem: String,
-    /// Unix seconds.
     pub not_after: i64,
-    /// Unix seconds the certificate was issued at. 0 when unknown (stored
-    /// before this field existed).
+    /// Unix seconds issued; 0 when unknown (stored before this field existed).
     #[serde(default)]
     pub issued_at: i64,
 }
 
-/// A DNS record clouduler created, tracked so ownership survives leader change.
+/// A DNS record clouduler created, tracked so ownership survives a leader change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DnsRecordState {
     pub fqdn: String,
     pub record_type: String,
     pub content: String,
     pub zone: String,
-    /// Cloudflare's id, so the record can be updated or deleted later.
+    /// Cloudflare's id, for later update or delete.
     pub provider_id: Option<String>,
 }
 
-/// Where a certificate or DNS record stands before it has anything to show
-/// for itself in `certificates`/`dns_records` - set as soon as a hostname
-/// becomes desired, so the ui has something to render instead of silence
-/// between "stack created" and "record live"/"cert issued".  Cleared (the
-/// map entry removed) once the real record/certificate lands, so presence
-/// in `certificates`/`dns_records` alone is always the "ready" case.
+/// A hostname's state before it has a live `certificates`/`dns_records` entry; set
+/// as soon as it becomes desired so the ui has something to show, removed once
+/// the real record lands (so presence there always means "ready").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReconcileStatus {
     Pending,
     Error {
         message: String,
-        /// Unix seconds, so the ui can show how stale the failure is.
         at: i64,
     },
 }
 
-/// A place restic can keep a drive's backup history. A drive may back up to
-/// several of these at once - see `DriveBackupTarget`.
+/// A place restic can keep a drive's backup history; see `DriveBackupTarget`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackupDestination {
     pub id: String,
     pub name: String,
     pub kind: BackupDestinationKind,
-    /// Name of the cluster secret holding the restic repo password. Always
-    /// set: restic requires one regardless of backend.
+    /// Cluster secret holding the restic repo password (required for every backend).
     pub password_secret: String,
-    /// Name of the cluster secret holding backend credentials (an ssh
-    /// private key for `Ssh`, an access/secret key pair for `S3`). `None`
-    /// for `NodeLocal`, which needs none of its own.
+    /// Cluster secret holding backend credentials (ssh key for `Ssh`, key pair for `S3`); `None` for `NodeLocal`.
     #[serde(default)]
     pub credentials_secret: Option<String>,
 }
@@ -602,12 +485,9 @@ pub struct BackupDestination {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", tag = "kind")]
 pub enum BackupDestinationKind {
-    /// A path on one cluster node's own disk. If that node does not already
-    /// hold the drive being backed up, the runner syncs the data there once
-    /// before running restic locally against it, rather than adding the node
-    /// as a standing replica - a live mirror and a point-in-time history are
-    /// different concerns and conflating them would mean every backup
-    /// destination permanently costs ongoing replication traffic.
+    /// A path on one node's disk. If that node does not hold the drive, the runner
+    /// syncs the data there once before running restic locally, rather than adding
+    /// a standing replica (a live mirror and point-in-time history are separate concerns).
     NodeLocal { node: String, path: String },
     Ssh {
         host: String,
@@ -625,27 +505,22 @@ pub enum BackupDestinationKind {
     },
 }
 
-/// One drive's backup relationship with one destination: how often, what
-/// time, and how long to keep it. A drive may have several of these, one per
-/// destination it backs up to.
+/// One drive's backup schedule and retention against one destination.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DriveBackupTarget {
     pub id: String,
     pub drive: String,
     pub destination_id: String,
     pub enabled: bool,
-    /// How often to run, in seconds.
     pub frequency_secs: u64,
-    /// "HH:MM", 24h, node-local time. `None` means "any time of day once
-    /// `frequency_secs` has elapsed", i.e. plain interval scheduling.
+    /// "HH:MM", 24h, node-local time; `None` means any time once `frequency_secs` has elapsed.
     #[serde(default)]
     pub time_of_day: Option<String>,
     #[serde(default)]
     pub keep_last: Option<u32>,
     #[serde(default)]
     pub keep_within_secs: Option<u64>,
-    /// Keep the newest snapshot of each of the last N days / ISO weeks /
-    /// months / years (restic `--keep-daily` and friends).
+    /// Keep the newest snapshot of each of the last N days/weeks/months/years (restic `--keep-*`).
     #[serde(default)]
     pub keep_daily: Option<u32>,
     #[serde(default)]
@@ -654,18 +529,15 @@ pub struct DriveBackupTarget {
     pub keep_monthly: Option<u32>,
     #[serde(default)]
     pub keep_yearly: Option<u32>,
-    /// Overrides the resolved x-clouduler stop-before-backup default when
-    /// set. `None` defers to the stack/service override, then a hardcoded
-    /// `true` (see `cl_config::stack::StackFile::effective_backup_stop_before`).
+    /// Overrides the resolved stop-before-backup default when set (see
+    /// `cl_config::stack::StackFile::effective_backup_stop_before`).
     #[serde(default)]
     pub stop_containers: Option<bool>,
-    /// Unix seconds this target last *started* a run, so the scheduler can
-    /// tell whether `frequency_secs` has elapsed. `None` before its first run.
+    /// Unix seconds this target last started a run, to tell if `frequency_secs` elapsed; `None` before the first.
     #[serde(default)]
     pub last_run: Option<i64>,
 }
 
-/// One completed, failed, or in-flight backup run, kept as history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackupRun {
     pub id: String,
@@ -681,11 +553,8 @@ pub struct BackupRun {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum BackupRunOutcome {
-    /// `percent` is restic's own `percent_done` from its last `--json`
-    /// status line, updated in place by repeated `RecordBackupRun` submits
-    /// against the same run id while it executes - see
-    /// `clouduler::backup_runner::run_restic_backup`. `None` until the first
-    /// status line lands.
+    /// restic's `percent_done` from its last status line, updated in place by repeated
+    /// `RecordBackupRun` submits for the same run id; `None` until the first.
     Running {
         #[serde(default)]
         percent: Option<f64>,
@@ -693,10 +562,8 @@ pub enum BackupRunOutcome {
     Succeeded {
         snapshot_id: String,
         bytes: u64,
-        /// Set when the snapshot itself was taken but something after it
-        /// went wrong (retention `forget --prune` failed, the containers
-        /// could not be restarted...). The run is a success - the data is
-        /// safe - but an operator should see the message.
+        /// Set when the snapshot was taken but something after it failed (retention
+        /// `forget --prune`, restarting containers). The run is a success; the operator should see the message.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         warning: Option<String>,
     },
@@ -705,14 +572,10 @@ pub enum BackupRunOutcome {
     },
 }
 
-// Hand-written so a raft log/snapshot written before `Running` grew its
-// `percent` field (a bare unit variant, serialized as the JSON string
-// `"Running"`) still replays: the derive-generated `Deserialize` rejects
-// that shape outright, which crashes every node on startup the moment any
-// node's log has ever recorded a pre-upgrade `Running` outcome. Route
-// through `serde_json::Value` (works under any format, not just JSON) so the
-// legacy string can be special-cased before falling back to the current
-// struct-variant shape for everything else.
+// Hand-written so a raft log/snapshot from before `Running` grew `percent` (a bare
+// unit variant, the JSON string `"Running"`) still replays: the derived
+// `Deserialize` rejects it and crashes every node on startup. Routes through
+// `serde_json::Value` (format-agnostic) to special-case the legacy string.
 impl<'de> Deserialize<'de> for BackupRunOutcome {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -761,13 +624,10 @@ pub enum BackupTrigger {
     Manual { by: String },
 }
 
-/// Newest runs kept per `(drive, destination_id)` pair. Same reasoning as
-/// `MAX_OBJECT_BYTES`: history goes through the raft log and into every
-/// snapshot, so it needs a bound even though nothing here is user-editable.
+/// Newest runs kept per `(drive, destination_id)`; bounded like `MAX_OBJECT_BYTES` since history goes through the raft log and snapshots.
 pub const MAX_BACKUP_RUNS_PER_TARGET: usize = 50;
 
-/// What a restore request restores: a whole drive, one volume, or every
-/// volume a service uses. Mirrors `backup_restore`'s three granularities.
+/// What a restore covers: a drive, one volume, or every volume a service uses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RestoreScope {
     Drive { drive: String },
@@ -783,22 +643,17 @@ pub enum RestoreStatus {
     Failed { error: String },
 }
 
-/// A restore submitted through raft, by the api or by a CLI run on a node
-/// that cannot carry the restore out itself. Whichever node can (the drive's
-/// primary, or the node holding a node-local repository - see
-/// `backup_restore.rs`) claims it (`Pending` -> `Running`) and executes, the
-/// same "submit an intent through raft, the node that can act on it does"
-/// pattern `BackupRun` uses for scheduled/manual backups.
+/// A restore submitted through raft. Whichever node can carry it out (the drive's
+/// primary, or the holder of a node-local repository; see `backup_restore.rs`)
+/// claims it (`Pending` -> `Running`) and executes, like `BackupRun`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestoreRequest {
     pub id: String,
     pub scope: RestoreScope,
-    /// Destination to restore from. Required for `Drive`/`Volume`; optional
-    /// for `Service`, where it can be resolved automatically if the drive
-    /// backs up to only one destination (see `backup_restore::resolve_service_destination`).
+    /// Destination to restore from. Required for `Drive`/`Volume`; for `Service` optional
+    /// when resolvable (see `backup_restore::resolve_service_destination`).
     #[serde(default)]
     pub destination_id: Option<String>,
-    /// Snapshot id, or `None`/`"latest"` for the most recent one.
     #[serde(default)]
     pub snapshot: Option<String>,
     pub requested_at: i64,
@@ -808,189 +663,132 @@ pub struct RestoreRequest {
     pub requested_by: String,
 }
 
-/// Newest requests kept. Restores are rare enough that, unlike backup runs,
-/// one bound across the whole set (not per drive/destination) is simplest.
+/// Newest requests kept, one bound across the whole set (restores are rare).
 pub const MAX_RESTORE_REQUESTS: usize = 50;
 
-/// The schema version this build's `ClusterState`/`Request` shapes are at.
-/// Bump by hand whenever a change ships that an older node's persisted data
-/// needs a `crate::migrations` entry to read, or that is otherwise unsafe
-/// for a node behind this version to have installed - see `store.rs`'s use
-/// of this alongside `StateMachine::schema_version`.
+/// Schema version of this build's `ClusterState`/`Request` shapes. Bump by hand
+/// when a change needs a `crate::migrations` entry or is unsafe for a node behind
+/// to have installed (see `store.rs`).
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
-/// How long `RecordCrashMove` keeps a node on an instance's crash-move list
-/// before the next record prunes it. Also the window the scheduler avoids a
-/// node for, so a pruned entry is never one that still mattered.
+/// How long `RecordCrashMove` keeps a node on an instance's crash-move list; also the window the scheduler avoids it.
 pub const CRASH_MOVE_RETENTION_SECS: u64 = 30 * 60;
 
-/// Everything the cluster agrees on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClusterState {
     pub nodes: BTreeMap<String, NodeState>,
     pub stacks: BTreeMap<String, StackState>,
     pub assignments: BTreeMap<InstanceId, Assignment>,
     pub volumes: BTreeMap<VolumeId, VolumeState>,
-    /// The cluster config file, so every node can keep its own copy current.
     #[serde(default)]
     pub cluster_config: Option<ClusterConfigEntry>,
-    /// Cluster wide config objects, mounted read only into containers.
     #[serde(default)]
     pub configs: BTreeMap<String, ConfigEntry>,
-    /// Cluster wide secrets, sealed. Mounted at /run/secrets/<name>.
     #[serde(default)]
     pub secrets: BTreeMap<String, SecretEntry>,
     pub certificates: BTreeMap<String, CertificateState>,
     pub dns_records: BTreeMap<String, DnsRecordState>,
-    /// Pending/error status for a hostname that has no entry in
-    /// `certificates` yet, keyed by fqdn. See `ReconcileStatus`.
+    /// Pending/error status for hostnames with no `certificates` entry yet, by fqdn.
     #[serde(default)]
     pub cert_status: BTreeMap<String, ReconcileStatus>,
-    /// Pending/error status for a hostname that has no live record in
-    /// `dns_records` yet, keyed by fqdn. See `ReconcileStatus`.
+    /// Pending/error status for hostnames with no live `dns_records` entry yet, by fqdn.
     #[serde(default)]
     pub dns_status: BTreeMap<String, ReconcileStatus>,
-    /// This cluster's secret key, wrapped once per node, keyed by node name.
-    /// See `WrappedKeyEntry`.
+    /// The cluster secret key wrapped once per node, keyed by node name.
     #[serde(default)]
     pub wrapped_keys: BTreeMap<String, WrappedKeyEntry>,
-    /// Nodes the leader has stopped hearing from. Observed rather than
-    /// configured, so it is kept apart from `availability`, which is what the
-    /// operator asked for.
+    /// Nodes the leader has stopped hearing from; observed, so kept apart from the operator-set `availability`.
     #[serde(default)]
     pub unreachable: BTreeSet<String>,
-    /// Ids (`cl_config::Node::id`) removed through `RemoveNode`, kept as a
-    /// tombstone forever. Without this, a leader whose in-memory config still
-    /// lists the node (it is only ever reloaded from disk on restart) treats
-    /// it as newly joined the next time it seeds the roster, undoing the
-    /// removal. Keyed by id rather than name so the name is free to reuse: a
-    /// node re-provisioned under the same name gets a fresh id and was never
-    /// in this set.
+    /// Ids (`cl_config::Node::id`) removed through `RemoveNode`, a permanent tombstone:
+    /// without it a leader whose in-memory config still lists the node would treat
+    /// it as newly joined and undo the removal. Keyed by id so the name can be reused.
     #[serde(default)]
     pub removed: BTreeSet<uuid::Uuid>,
-    /// Overlay subnet and address assignments, as json owned by cl-net. Kept
-    /// opaque here so the address book can evolve without touching the state
-    /// machine, which every node has to agree on byte for byte.
+    /// Overlay subnet and address assignments, opaque json owned by cl-net so the address book can evolve without touching the state machine.
     #[serde(default)]
     pub overlay: Option<String>,
-    /// Set by `Store::emergency`'s offline recovery write, never by a normal
-    /// `Request`: while this holds stack names, the scheduler places and
-    /// starts only those stacks' instances, leaving every other assignment's
-    /// `desired` untouched rather than forcing it to `Stopped` - so nothing
-    /// has to be restored by hand once this clears. `ClearEmergency` is the
-    /// only way out, submitted by `watch_leadership` the moment this node can
-    /// once again reach another voter (see `QuorumStatus::reachable`), which
-    /// is the cluster's own signal that another manager has come back.
+    /// Set only by `Store::emergency`'s offline write, never a normal `Request`: while
+    /// it holds stack names, the scheduler places and starts only those stacks,
+    /// leaving other assignments' `desired` untouched so nothing needs restoring
+    /// when it clears. `ClearEmergency` is the only way out, submitted by
+    /// `watch_leadership` once another voter is reachable (`QuorumStatus::reachable`).
     #[serde(default)]
     pub emergency_stacks: BTreeSet<String>,
-    /// Stacks `clouduler prioritize` has bumped ahead of every other stack,
-    /// for starting instances and for syncing their volumes, until it is
-    /// reset. See `Request::SetPrioritized`.
+    /// Stacks `clouduler prioritize` bumped ahead of others for starts and volume syncs. See `Request::SetPrioritized`.
     #[serde(default)]
     pub prioritized: BTreeSet<String>,
-    /// Where a drive can back up to. See `BackupDestination`.
     #[serde(default)]
     pub restic_destinations: BTreeMap<String, BackupDestination>,
-    /// A drive's schedule/retention against one destination. See
-    /// `DriveBackupTarget`.
     #[serde(default)]
     pub restic_targets: BTreeMap<String, DriveBackupTarget>,
-    /// Backup run history, bounded per target - see `MAX_BACKUP_RUNS_PER_TARGET`.
     #[serde(default)]
     pub restic_runs: BTreeMap<String, BackupRun>,
-    /// Restore requests submitted through the api, bounded - see
-    /// `MAX_RESTORE_REQUESTS`.
     #[serde(default)]
     pub restore_requests: BTreeMap<String, RestoreRequest>,
-    /// Live container state as last self-reported by the node that runs each
-    /// instance, keyed by instance. Populated by `cl_sched::run::Scheduler`'s
-    /// reconcile pass (roughly every `SWEEP_INTERVAL`) rather than by whoever
-    /// changes `desired` - so anyone waiting for a container to actually stop,
-    /// including one running on a different node, can poll this instead of
-    /// blindly sleeping out a worst-case deadline. See `Request::ReportContainerStatus`.
+    /// Live container state as self-reported by each instance's node, keyed by
+    /// instance. Filled by the scheduler's reconcile pass, so waiters can poll it
+    /// instead of sleeping out a worst-case deadline. See `Request::ReportContainerStatus`.
     #[serde(default)]
     pub container_status: BTreeMap<InstanceId, ContainerStatus>,
-    /// Image updates and redeploys in flight (or recently finished), keyed by
-    /// instance, written step by step by whichever node is doing the work -
-    /// so every node's api, and so every browser, sees the same real
-    /// progress no matter which node it happens to be talking to. See
-    /// `InstanceUpdate`.
+    /// Image updates and redeploys in flight or recently finished, keyed by instance,
+    /// written step by step by the working node so every node's api shows the same progress.
     #[serde(default)]
     pub instance_updates: BTreeMap<InstanceId, InstanceUpdate>,
-    /// Nodes a crash-looping instance was recently moved away from, mapped to
-    /// the unix second of the move. Lives in raft rather than on the node that
-    /// noticed the loop because the instance changes owner with every move: a
-    /// node-local memory would start empty on each new owner and let a service
-    /// that crashes everywhere bounce between nodes forever. Written by
-    /// `Request::RecordCrashMove`, cleared when the stack's spec changes or the
-    /// instance goes away; individual entries age out via the scheduler's window.
+    /// Nodes a crash-looping instance was recently moved from, with the move's unix
+    /// second. In raft because the owner changes with each move: node-local memory
+    /// would start empty each time and let a service that crashes everywhere bounce
+    /// forever. Written by `Request::RecordCrashMove`; cleared on spec change or
+    /// instance removal; entries age out via the scheduler's window.
     #[serde(default)]
     pub crash_moves: BTreeMap<InstanceId, BTreeMap<String, u64>>,
-    /// The digest an instance was pinned to before its current pin, kept by
-    /// `Request::SetImageDigest` so a rolling update that produces a broken
-    /// container can re-pin what worked. Absent for an instance that has only
-    /// ever had one pin.
+    /// The digest an instance was pinned to before its current pin, so a broken rolling update can re-pin what worked.
     #[serde(default)]
     pub previous_image_digests: BTreeMap<InstanceId, String>,
-    /// What `x-clouduler.auto_update` did about the newest registry digest
-    /// of each instance's image. Written by the leader only, and kept in raft
-    /// so a new leader neither restarts a delay countdown nor retries an
-    /// update that already failed. See `AutoUpdateRecord`.
+    /// What `x-clouduler.auto_update` did about each instance's newest registry digest.
+    /// Leader-written and in raft so a new leader neither restarts a delay countdown
+    /// nor retries a failed update. See `AutoUpdateRecord`.
     #[serde(default)]
     pub auto_updates: BTreeMap<InstanceId, AutoUpdateRecord>,
-    /// What the registries last said about each image reference a stack
-    /// declares, keyed by that reference (`nginx:1.25`). Filled by the
-    /// leader's timer and by the Updates page's Refresh button; reading it
-    /// never touches a registry. See `ImageCheck`.
+    /// What registries last said about each declared image reference (`nginx:1.25`).
+    /// Filled by the leader's timer and the Updates page Refresh; reading never hits a registry. See `ImageCheck`.
     #[serde(default)]
     pub image_checks: BTreeMap<String, ImageCheck>,
-    /// Unix seconds the last registry check finished, 0 before the first.
+    /// Unix seconds the last registry check finished; 0 before the first.
     #[serde(default)]
     pub image_checks_at: i64,
-    /// Which node holds each served drive's authoritative copy, keyed by
-    /// drive. A drive with no entry has had no failover yet and is served by
-    /// the first reachable `served_by` candidate. See `served`.
+    /// Node holding each served drive's authoritative copy, by drive; no entry means
+    /// no failover yet (first reachable `served_by` candidate serves). See `served`.
     #[serde(default)]
     pub served: BTreeMap<String, crate::served::ServedAuthority>,
-    /// Volumes deleted on purpose, with the nodes that still have to remove
-    /// their copy. A node takes its name off once the directory is gone, and
-    /// the entry goes with the last one.
+    /// Volumes deleted on purpose, with the nodes still to remove their copy; the entry goes with the last.
     #[serde(default)]
     pub volume_removals: BTreeMap<VolumeId, BTreeSet<String>>,
-    /// Logged-in browser sessions, keyed by a hash of the session id so the
-    /// raft log never holds a usable cookie. Replicated so a login survives a
-    /// daemon restart and a leader change. Deliberately not part of the git
-    /// backup export. See `Request::PutSession`.
+    /// Logged-in browser sessions keyed by a hash of the session id (so the raft log
+    /// holds no usable cookie); replicated to survive restarts and leader changes.
+    /// Not in the git backup. See `Request::PutSession`.
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionRecord>,
-    /// Sessions of the reverse proxy's `authenticated` login, keyed by a hash
-    /// of the cookie value. One per (browser, hostname): the login portal's
-    /// own session and one per protected app. Same storage rules as
-    /// `sessions`. See `Request::PutProxySession`.
+    /// Sessions of the reverse proxy's `authenticated` login keyed by a hash of the
+    /// cookie: one per (browser, hostname), including the portal's own. Same storage
+    /// rules as `sessions`. See `Request::PutProxySession`.
     #[serde(default)]
     pub proxy_sessions: BTreeMap<String, ProxySessionRecord>,
-    /// Single-use tokens handed from the login portal to a protected
-    /// hostname's cookie endpoint, keyed by a hash of the token. See
-    /// `Request::RedeemProxyToken`.
+    /// Single-use tokens from the login portal to a protected hostname's cookie endpoint, keyed by token hash.
     #[serde(default)]
     pub proxy_tokens: BTreeMap<String, ProxyTokenRecord>,
-    /// The in-app alert feed (open alerts plus history), keyed by record id.
-    /// Written only by the leader's alert engine. Not part of the git backup.
+    /// The in-app alert feed (open alerts plus history) by record id; leader-written, not in the git backup.
     #[serde(default)]
     pub alerts: BTreeMap<String, AlertRecord>,
-    /// Signals nodes pushed for the engine to turn into records. Bounded by
-    /// `MAX_ALERT_INBOX`; the leader drains it.
+    /// Signals nodes pushed for the engine to turn into records; bounded by `MAX_ALERT_INBOX`, drained by the leader.
     #[serde(default)]
     pub alert_inbox: BTreeMap<String, AlertSignal>,
-    /// Last delivery outcome per alert destination, keyed by name.
     #[serde(default)]
     pub alert_destinations: BTreeMap<String, DestinationHealth>,
-    /// Incremented on every applied command. Cheap way for watchers to notice
-    /// a change without diffing.
+    /// Incremented on every applied command, so watchers notice changes without diffing.
     pub version: u64,
 }
 
-/// Who a session cookie belongs to. See `ClusterState::sessions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub subject: String,
@@ -1000,112 +798,80 @@ pub struct SessionRecord {
     pub expires_at: i64,
 }
 
-/// `ProxySessionRecord::host` of a saved client address (`ip:<network>:<ip>`)
-/// rather than of a cookie session. No real hostname starts with it.
+/// `ProxySessionRecord::host` of a saved client address (`ip:<network>:<ip>`) rather than a cookie session; no real hostname starts with it.
 pub const REMEMBERED_IP_HOST_PREFIX: &str = "ip:";
 
-/// Who a reverse proxy login cookie belongs to, on which hostname.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxySessionRecord {
-    /// Hostname the cookie was issued for (lowercase, no port). A cookie is
-    /// only honoured on that host.
+    /// Hostname the cookie was issued for (lowercase, no port); honoured only there.
     pub host: String,
     pub subject: String,
     pub username: String,
-    /// Groups the identity provider reported at login.
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Unix seconds after which the session no longer counts.
     pub expires_at: i64,
-    /// Key of the portal session this one was handed out from, empty for a
-    /// portal session itself. Removing the parent removes it too, which is
-    /// how signing out at the portal ends every app cookie.
+    /// Key of the portal session this was handed out from, empty for a portal
+    /// session; removing the parent removes it (sign-out ends every app cookie).
     #[serde(default)]
     pub parent: String,
 }
 
-/// A one-time pass from the login portal to one protected hostname: whoever
-/// presents it gets a session there. See `Request::RedeemProxyToken`.
+/// A one-time pass from the login portal to one protected hostname. See `Request::RedeemProxyToken`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyTokenRecord {
-    /// The only hostname that may redeem it.
     pub host: String,
     pub subject: String,
     pub username: String,
     #[serde(default)]
     pub groups: Vec<String>,
-    /// The session it mints ends here (the portal session's own end).
     pub session_expires_at: i64,
-    /// The token itself is worthless after this.
     pub expires_at: i64,
-    /// Key of the portal session that issued it; must still exist to redeem.
     #[serde(default)]
     pub parent: String,
 }
 
-/// One instance's last-observed docker state, as reported by the node that
-/// runs it. See `ClusterState::container_status`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContainerStatus {
-    /// The node that reported this, so a fresh report from that node can
-    /// replace exactly its own prior entries (including dropping ones for
-    /// instances it no longer runs) without touching what other nodes report.
+    /// The reporting node, so a fresh report replaces exactly its own prior entries (including dropped instances).
     pub node: String,
     pub running: bool,
-    /// The revision of each cluster secret the container was created with,
-    /// read from its `clouduler.secrets` label. Empty for a container with no
-    /// secrets, and for one created before the label existed: the two cannot
-    /// be told apart here, so callers compare against the secrets the stack
-    /// declares.
+    /// Revision of each cluster secret the container was created with (from its
+    /// `clouduler.secrets` label). Empty both for no secrets and for pre-label
+    /// containers, which are indistinguishable here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_revisions: BTreeMap<String, u64>,
 }
 
-/// Where one instance's image update or redeploy stands. Written through
-/// `Request::SetInstanceUpdate` at every real docker step, and cleared by the
-/// owning node's scheduler a while after it reaches a terminal phase.
+/// Where one instance's image update or redeploy stands; written via
+/// `Request::SetInstanceUpdate` at each docker step, cleared by the owner a while after a terminal phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceUpdate {
-    /// The node whose docker the steps run on: the one the instance is
-    /// assigned to when the update began.
+    /// The node whose docker runs the steps (the instance's node when the update began).
     pub node: String,
     pub phase: UpdatePhase,
-    /// Unix seconds this update began, carried over from phase to phase.
     pub started_at: i64,
-    /// Unix seconds of the latest phase change.
     pub at: i64,
-    /// Why it failed, only on `UpdatePhase::Failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// What one registry lookup said about an image reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageCheck {
-    /// The digest the registry serves for the reference. Kept from the
-    /// previous check when the latest lookup failed, so a rate limit does not
-    /// blank what is known.
+    /// The registry's digest for the reference; kept from the previous check when the latest lookup failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_digest: Option<String>,
-    /// Unix seconds of the latest lookup, successful or not.
     pub checked_at: i64,
-    /// Why the latest lookup failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// How far `x-clouduler.auto_update` got with one registry digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoUpdateRecord {
-    /// The registry digest this record is about. A different digest seen
-    /// later replaces the record and restarts its countdown.
+    /// The registry digest this record is about; a different one replaces it and restarts the countdown.
     pub digest: String,
-    /// Unix seconds this digest was first seen as newer than the running one.
     pub detected_at: i64,
     pub outcome: AutoUpdateOutcome,
-    /// Unix seconds of the latest outcome change.
     pub at: i64,
-    /// Why it failed, only on `AutoUpdateOutcome::Failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1125,12 +891,11 @@ pub enum AutoUpdateOutcome {
     Notified,
 }
 
-/// The steps of an update, in the order they happen. The old container keeps
-/// serving through `Queued` and `Pulling`; it only goes away at `Stopping`.
+/// The steps of an update in order; the old container keeps serving through `Queued` and `Pulling`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePhase {
-    /// Accepted, waiting for its turn: per node, one image downloads and one instance restarts at a time.
+    /// Accepted, waiting its turn (per node, one image download and one restart at a time).
     Queued,
     /// Downloading the new image while the old container keeps running.
     Pulling,
@@ -1149,21 +914,12 @@ impl UpdatePhase {
     }
 }
 
-/// A command submitted through raft. Every mutation of cluster state is one of these.
-///
-/// `Deserialize` is hand-written below rather than derived - see the impl for
-/// why: an unrecognized variant tag (from a node running newer code) must
-/// fall back to `Unknown` instead of failing outright, both for local log/
-/// snapshot reads and for this enum's use as the wire payload for raft
-/// replication itself.
+/// A command submitted through raft; every mutation of cluster state is one of these.
+/// `Deserialize` is hand-written (see its impl) so an unknown variant from a newer node becomes `Unknown`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Request {
-    /// Replace the cluster config file on every node.
-    ///
-    /// `expect_generation` is the generation the writer read before editing, 0
-    /// when nothing was stored yet. A mismatch means someone else edited in
-    /// between and the command is refused rather than silently overwriting
-    /// their change.
+    /// Replace the cluster config file on every node. `expect_generation` is the
+    /// generation the writer read (0 if none stored); a mismatch is refused rather than overwriting.
     PutClusterConfig {
         yaml: String,
         expect_generation: u64,
@@ -1173,8 +929,7 @@ pub enum Request {
         node: String,
         availability: Availability,
     },
-    /// Submitted by the leader once a node has been silent for longer than
-    /// `failover.node_timeout`, or once it answers again.
+    /// Submitted by the leader once a node is silent past `failover.node_timeout`, or answers again.
     SetReachable {
         node: String,
         reachable: bool,
@@ -1182,32 +937,24 @@ pub enum Request {
     RemoveNode {
         node: String,
     },
-    /// Tombstone an id without touching the roster, so `reap_removed_nodes`
-    /// drops it from raft membership on its own timer.
-    ///
-    /// For a roster entry that changes identity while keeping its name: a
-    /// node re-provisioned fresh (`clouduler init --force`) after its old
-    /// state was lost, or one `force_quorum` had demoted to a learner rather
-    /// than dropped, coming back under a new id through `init --join`.
-    /// `RemoveNode` does not fit this case, since it deletes the name's
-    /// whole roster entry, which here still points at a live node under its
-    /// new id.
+    /// Tombstone an id without touching the roster, so `reap_removed_nodes` drops it
+    /// from raft membership on its own timer. For an entry that changes identity
+    /// but keeps its name (re-provisioned via `init --force`, or a node demoted by
+    /// `force_quorum` returning under a new id); `RemoveNode` would delete the live entry.
     RetireNodeId {
         id: uuid::Uuid,
     },
     DeployStack {
         name: String,
         spec: String,
-        /// Unix seconds of the deploy, stamped by the caller so `apply`
-        /// needs no clock.
+        /// Unix seconds of the deploy, stamped by the caller so `apply` needs no clock.
         #[serde(default)]
         at: i64,
     },
     RemoveStack {
         name: String,
     },
-    /// Record which cluster objects a stack owns, so removing the stack cleans
-    /// them up. Sent after the objects themselves have been written.
+    /// Record which cluster objects a stack owns so removing it cleans them up; sent after they are written.
     SetStackObjects {
         name: String,
         configs: BTreeSet<String>,
@@ -1217,8 +964,7 @@ pub enum Request {
         #[serde(default)]
         used_secrets: BTreeSet<String>,
     },
-    /// Place an instance. `drives` lists what the instance needs, so the state
-    /// machine can refuse a node that does not implement all of them.
+    /// Place an instance; `drives` lets the state machine refuse a node lacking any.
     Assign {
         instance: InstanceId,
         node: String,
@@ -1244,9 +990,7 @@ pub enum Request {
         instance: InstanceId,
         phase: MigrationPhase,
     },
-    /// Forgets a failed move so the instance reads as steady-state again.
-    /// Refused unless the record is `Failed`: an active move must run to its
-    /// end and a finished one has no record left to clear.
+    /// Forgets a failed move. Refused unless the record is `Failed`.
     ClearMigration {
         instance: InstanceId,
     },
@@ -1254,46 +998,38 @@ pub enum Request {
         id: VolumeId,
         primary: String,
     },
-    /// Records that `node` has replicated the volume up to `generation`.
     SetVolumeReplica {
         id: VolumeId,
         node: String,
         generation: u64,
     },
-    /// Bumps the generation, marking every other replica stale.
     TouchVolume {
         id: VolumeId,
         primary: String,
     },
-    /// Records (or, with `None`, clears) that the source refused to replicate
-    /// the volume because it would have wiped a replica.
+    /// Records (or with `None` clears) that the source refused to replicate to avoid wiping a replica.
     SetVolumeSyncRefusal {
         id: VolumeId,
         refusal: Option<SyncRefusal>,
     },
-    /// Deletes a volume, files included, on every node that implements its
-    /// drive. Refused while the volume is frozen or any stack mounts it.
+    /// Deletes a volume, files included, on every node implementing its drive. Refused while frozen or mounted.
     RemoveVolume {
         id: VolumeId,
     },
-    /// `node` has removed its copy of a volume deleted with `RemoveVolume`.
     AckVolumeRemoved {
         id: VolumeId,
         node: String,
     },
-    /// Records whether the volume's source found it without a single file.
     SetVolumeEmpty {
         id: VolumeId,
         empty: bool,
     },
-    /// Pauses replication of the volume while `node` is edited by hand.
     FreezeVolume {
         id: VolumeId,
         node: String,
         stopped: Vec<InstanceId>,
     },
-    /// Resumes replication, making the frozen node's copy the new generation
-    /// every replica re-pulls.
+    /// Resumes replication; the frozen node's copy becomes the new generation.
     UnfreezeVolume {
         id: VolumeId,
     },
@@ -1301,8 +1037,7 @@ pub enum Request {
     RemoveCertificate {
         fqdn: String,
     },
-    /// Records that a hostname's certificate is being ordered, or failed to
-    /// be. Superseded by `StoreCertificate` once issuance succeeds.
+    /// A hostname's certificate is being ordered or failed; superseded by `StoreCertificate`.
     SetCertStatus {
         fqdn: String,
         status: ReconcileStatus,
@@ -1311,33 +1046,26 @@ pub enum Request {
     RemoveDnsRecord {
         key: String,
     },
-    /// Records that a hostname's dns record is being reconciled, or failed
-    /// to be. Superseded once `UpsertDnsRecord` lands a live record for it.
+    /// A hostname's dns record is being reconciled or failed; superseded by `UpsertDnsRecord`.
     SetDnsStatus {
         fqdn: String,
         status: ReconcileStatus,
     },
-    /// Drops any cert/dns reconcile status for a hostname. Statuses are only
-    /// superseded by a successful store/upsert, so one for a hostname that
-    /// left the config (or whose record is already live) would otherwise
-    /// linger in `clouduler status` forever.
+    /// Drops a hostname's cert/dns reconcile status, which only a successful
+    /// store/upsert otherwise supersedes (one for a departed hostname would linger).
     ClearReconcileStatus {
         fqdn: String,
     },
     PutConfig {
         name: String,
-        /// Base64 content.
         content: String,
         #[serde(default)]
         owner: Option<String>,
     },
-    /// `PutConfig`, applied only if the object's current revision is still
-    /// `expect_revision` (0 meaning "does not exist yet"). For a read-modify-
-    /// write of an object that more than one writer touches: the loser gets
-    /// an error and re-reads instead of silently overwriting the other.
+    /// `PutConfig` applied only if the current revision is still `expect_revision`
+    /// (0 = does not exist yet), so the loser of a read-modify-write races gets an error.
     PutConfigCas {
         name: String,
-        /// Base64 content.
         content: String,
         #[serde(default)]
         owner: Option<String>,
@@ -1346,8 +1074,7 @@ pub enum Request {
     RemoveConfig {
         name: String,
     },
-    /// The value is sealed by the caller: plaintext never travels through the
-    /// raft log, so it is never written to disk unencrypted.
+    /// Sealed by the caller: plaintext never enters the raft log.
     PutSecret {
         name: String,
         sealed: String,
@@ -1358,15 +1085,13 @@ pub enum Request {
     RemoveSecret {
         name: String,
     },
-    /// Written by whichever node currently holds the plaintext cluster key,
-    /// once it sees `node` publish a pubkey with no wrapped copy yet (or a
-    /// stale one, after a keypair rotation).
+    /// Written by the node holding the plaintext key once `node` publishes a pubkey
+    /// with no (or a stale, after rotation) wrapped copy.
     PutWrappedKey {
         node: String,
         entry: WrappedKeyEntry,
     },
-    /// Overlay address book. Allocation goes through raft so two nodes cannot
-    /// hand out the same address for the same stack network.
+    /// Overlay address book; allocation goes through raft so two nodes never hand out the same address.
     SetOverlayAllocations {
         allocations: String,
     },
@@ -1378,50 +1103,35 @@ pub enum Request {
     RemoveBackupTarget {
         id: String,
     },
-    /// Submitted by the leader when it decides a target is due, claiming the
-    /// tick so no other leader term double-fires it.
+    /// Submitted by the leader when a target is due, claiming the tick so no other term double-fires.
     SetBackupTargetLastRun {
         id: String,
         at: i64,
     },
-    /// Insert or update-in-place by id: `Running` -> `Succeeded`/`Failed`.
+    /// Insert or update by id (`Running` -> `Succeeded`/`Failed`).
     RecordBackupRun(BackupRun),
-    /// Submitted by an api handler; always inserted with `status: Pending`
-    /// regardless of what the caller sent, since only the node that goes on
-    /// to claim and execute it may advance that.
+    /// Submitted by an api handler; always inserted `Pending`, since only the claiming node may advance it.
     PutRestoreRequest(RestoreRequest),
-    /// Advances one restore request's status: a claim (`Pending` ->
-    /// `Running`), or a terminal outcome. The claim step doubles as an
-    /// optimistic lock - if two nodes both think they should run the same
-    /// request, only the first `SetRestoreStatus{Running}` to commit wins;
-    /// the loser's own claim attempt fails because the status is no longer
-    /// `Pending`, and it skips the request (see `backup_restore` module docs).
+    /// Advances a restore's status: a claim (`Pending` -> `Running`) or a terminal
+    /// outcome. The claim is an optimistic lock: of two racing claimers only the
+    /// first commits (see `backup_restore`).
     SetRestoreStatus {
         id: String,
         status: RestoreStatus,
-        /// Unix seconds, supplied by the caller rather than read from the
-        /// clock here - `apply` must stay pure so every replica computes the
-        /// same state from the same log. Only used (as `finished_at`) when
-        /// `status` is terminal.
+        /// Unix seconds from the caller (keeps `apply` pure); used as `finished_at` when `status` is terminal.
         at: i64,
     },
-    /// Self-reported by `cl_sched::run::Scheduler` each reconcile pass: the
-    /// running/stopped state of every instance currently assigned to `node`,
-    /// wholesale-replacing that node's prior entries in `container_status` -
-    /// so an instance moved or removed since the last report is dropped
-    /// rather than left stale.
+    /// Self-reported each reconcile pass: state of every instance assigned to
+    /// `node`, wholesale-replacing its prior `container_status` entries so moved or removed instances drop out.
     ReportContainerStatus {
         node: String,
         running: BTreeMap<InstanceId, bool>,
-        /// Per instance, the secret revisions its container was created with.
-        /// Optional so a report from a node that predates it still applies.
+        /// Per instance, the secret revisions its container was created with; optional for older nodes' reports.
         #[serde(default)]
         secret_revisions: BTreeMap<InstanceId, BTreeMap<String, u64>>,
     },
-    /// Record the step an instance's update or redeploy has reached. `at` is
-    /// unix seconds, supplied by the caller so `apply` stays pure. Rejected
-    /// for an instance with no assignment, so nothing can leave an entry
-    /// behind for an instance that is gone.
+    /// Record the step an update or redeploy reached; `at` is caller-supplied unix
+    /// seconds. Rejected for an instance with no assignment.
     SetInstanceUpdate {
         instance: InstanceId,
         node: String,
@@ -1430,13 +1140,11 @@ pub enum Request {
         error: Option<String>,
         at: i64,
     },
-    /// Forget an instance's update entry.
     ClearInstanceUpdate {
         instance: InstanceId,
     },
-    /// Record what `x-clouduler.auto_update` did about `digest`. A record for
-    /// the same digest keeps its `detected_at`; a different digest starts a
-    /// fresh one at `at`. `at` is unix seconds, supplied by the caller.
+    /// Record what `x-clouduler.auto_update` did about `digest`; the same digest keeps
+    /// its `detected_at`, a new one starts afresh at `at` (unix seconds).
     SetAutoUpdate {
         instance: InstanceId,
         digest: String,
@@ -1445,52 +1153,38 @@ pub enum Request {
         error: Option<String>,
         at: i64,
     },
-    /// Replace the registry check results wholesale: images no stack
-    /// declares any more drop out. `at` (unix seconds) becomes
-    /// `image_checks_at`. An entry that failed keeps the digest the previous
-    /// entry for the same image had.
+    /// Replace the registry check results wholesale (undeclared images drop out);
+    /// `at` becomes `image_checks_at`. A failed entry keeps the previous digest.
     SetImageChecks {
         checks: BTreeMap<String, ImageCheck>,
         at: i64,
     },
-    /// Drops every recorded failure: failed backup runs, restore requests,
-    /// image updates and migrations, certificate/DNS errors and failed alert
-    /// deliveries. These only linger as history, so an operator who has dealt
-    /// with the cause (or does not care) uses this to stop them showing up as
-    /// problems. Running, pending and succeeded records are left alone.
+    /// Drops every recorded failure (failed backup runs, restores, updates,
+    /// migrations, cert/DNS errors, failed alert deliveries); running, pending and succeeded records stay.
     ClearErrors,
-    /// Store a login session under `key` (a hash of the session id, never the
-    /// id itself). `now` is unix seconds supplied by the caller so `apply`
-    /// stays pure; sessions already expired at `now` are dropped at the same
-    /// time so the map cannot grow without bound.
+    /// Store a login session under `key` (a hash of the session id); `now` is caller
+    /// supplied, and expired sessions are dropped at the same time.
     PutSession {
         key: String,
         session: SessionRecord,
         now: i64,
     },
-    /// Log a session out.
     RemoveSession {
         key: String,
     },
-    /// Drop every session that expired at or before `now`.
     PruneSessions {
         now: i64,
     },
-    /// Queue something a node saw for the leader's alert engine. The inbox is
-    /// bounded: the oldest signals go first.
+    /// Queue a node's signal for the alert engine; the inbox is bounded, oldest dropped first.
     PushAlertSignal(AlertSignal),
-    /// Remove signals the engine has processed.
     TakeAlertSignals {
         ids: Vec<String>,
     },
-    /// Insert or replace an alert record.
     PutAlert(AlertRecord),
-    /// Delete one alert record.
     RemoveAlert {
         id: String,
     },
-    /// Delete resolved and one-shot records last touched before `before`, then
-    /// the oldest of those (and finally of any) until at most `max` remain.
+    /// Delete resolved and one-shot records last touched before `before`, then the oldest until at most `max` remain.
     PruneAlerts {
         before: i64,
         max: usize,
@@ -1502,39 +1196,31 @@ pub enum Request {
     RemoveDestinationHealth {
         name: String,
     },
-    /// Store a reverse proxy session under `key` (hash of the cookie value).
-    /// Also sweeps expired proxy sessions and tokens, as `PutSession` does.
+    /// Store a reverse proxy session under `key` (hash of the cookie); also sweeps expired ones, like `PutSession`.
     PutProxySession {
         key: String,
         session: ProxySessionRecord,
         now: i64,
     },
-    /// End a reverse proxy session.
     RemoveProxySession {
         key: String,
     },
-    /// Store a one-time token (under a hash of it) for `host` to redeem.
     PutProxyToken {
         key: String,
         token: ProxyTokenRecord,
         now: i64,
     },
-    /// Atomically spend the token under `token_key`: it must exist, be
-    /// unexpired and have been issued for `host`. On success the token is
-    /// gone and a session for `host` exists under `session_key`; on any
-    /// failure nothing changes (an expired or wrong-host token is left to
-    /// the sweep). Raft applies commands one at a time, so of two racing
-    /// redeems exactly one succeeds.
+    /// Atomically spend the token under `token_key`: it must exist, be unexpired and
+    /// issued for `host`; then a session for `host` exists under `session_key`. On
+    /// failure nothing changes. Of two racing redeems exactly one succeeds.
     RedeemProxyToken {
         token_key: String,
         host: String,
         session_key: String,
         now: i64,
     },
-    /// Remember that `instance` was moved off `from` because it kept crashing
-    /// there. `at` is unix seconds supplied by the caller so `apply` stays
-    /// pure; entries older than `CRASH_MOVE_RETENTION_SECS` before `at` are
-    /// dropped at the same time so the map cannot grow without bound.
+    /// Remember that `instance` was moved off `from` for crashing; `at` is caller
+    /// supplied, and entries older than `CRASH_MOVE_RETENTION_SECS` are dropped.
     RecordCrashMove {
         instance: InstanceId,
         from: String,
@@ -1542,49 +1228,34 @@ pub enum Request {
     },
     /// Written on leader election so the log always has a fresh entry to commit.
     NoOp,
-    /// Ends emergency mode: clears `ClusterState::emergency_stacks`, letting
-    /// every stack's own `desired` state (never touched by emergency) govern
-    /// placement again. Submitted by `watch_leadership` once this node can
-    /// reach another voter, not by an operator - see `emergency_stacks`.
+    /// Ends emergency mode (`ClusterState::emergency_stacks`). Submitted by
+    /// `watch_leadership` once another voter is reachable, not by an operator.
     ClearEmergency,
-    /// Puts `stack` ahead of every other stack (`on`) or back at its own
-    /// `x-clouduler.priority` (`!on`), until reset. Turning it on for a
-    /// stack that is not deployed is refused; turning it off never is.
+    /// Puts `stack` ahead of all others (`on`) or back at its own priority (`!on`).
+    /// Turning on for an undeployed stack is refused.
     SetPrioritized {
         stack: String,
         on: bool,
     },
-    /// Changes who holds a served drive, or a handover between holders. See
-    /// `served::ServedOp`.
+    /// Changes who holds a served drive, or a handover. See `served::ServedOp`.
     Served {
         drive: String,
         op: crate::served::ServedOp,
     },
-    /// Stand-in for a variant this node's binary doesn't recognize - a
-    /// command a newer node submitted that this (older) node hasn't been
-    /// upgraded to understand yet. `dispatch` treats it as a no-op (and does
-    /// not bump `version`, see `ClusterState::apply`); the command's real
-    /// effect lands once this node is upgraded and either replays a snapshot
-    /// the (by-then-migrated) leader sends, or is itself upgraded before this
-    /// entry is compacted. Never constructed directly - only ever produced
-    /// by `Deserialize` below, and only for a tag that is genuinely not a
-    /// known variant name.
-    ///
-    /// Holds the raw JSON exactly as received and is `untagged` on the wire,
-    /// so re-serializing it (an old node that is leader re-replicating the
-    /// entry to others, or writing it to its log) reproduces the original
-    /// payload verbatim instead of losing it. Old logs that wrote the unit
-    /// variant as the bare string `"Unknown"` still deserialize (as
-    /// `Unknown("Unknown")`) and serialize back to that same string.
+    /// Stand-in for a variant this (older) binary does not recognize, produced only
+    /// by `Deserialize` for a genuinely unknown tag. `dispatch` treats it as a
+    /// no-op without bumping `version`; the real effect lands once this node is
+    /// upgraded and replays a snapshot or the entry. Holds the raw JSON and is
+    /// `untagged` so re-serializing reproduces the payload verbatim (an old leader
+    /// re-replicating it); the legacy bare string `"Unknown"` round trips too.
     #[serde(untagged)]
     Unknown(serde_json::Value),
 }
 
-/// Every externally-tagged variant name `Request` has except `Unknown`.
-/// `Deserialize` uses this to tell "tag this build has never heard of"
-/// (falls back to `Unknown`) from "known tag, malformed body" (hard error).
-/// Must be extended with each new variant, alongside `request_mirror` -
-/// `every_current_request_variant_round_trips_and_is_not_unknown` checks it.
+/// Every variant name except `Unknown`: tells "never-heard-of tag" (falls back to
+/// `Unknown`) from "known tag, malformed body" (hard error). Extend with each
+/// new variant, alongside `request_mirror` (checked by
+/// `every_current_request_variant_round_trips_and_is_not_unknown`).
 const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "PutClusterConfig",
     "UpsertNode",
@@ -1660,15 +1331,10 @@ const KNOWN_REQUEST_VARIANTS: &[&str] = &[
     "Served",
 ];
 
-// Mirrors `Request` field-for-field purely so `#[derive(Deserialize)]` can
-// generate the normal per-variant parsing logic under a different entry
-// point (`serde(remote)`), which the impl below calls into. Every variant
-// added to `Request` must be added here too, in the same shape - `dispatch`'s
-// exhaustive match forces you to handle a new variant there, but nothing
-// forces updating this mirror, and if it drifts a variant this build
-// genuinely understands would incorrectly deserialize as `Unknown`. The
-// `every_variant_name_round_trips` test below is the tripwire for that: it
-// must be extended with each new variant.
+// Mirrors `Request` field-for-field so `#[derive(Deserialize)]` can generate the
+// per-variant parsing under `serde(remote)`. Every new `Request` variant must be
+// added here too: nothing forces it, and drift would make a known variant
+// deserialize as `Unknown` (the `every_variant_name_round_trips` test is the tripwire).
 mod request_mirror {
     use super::*;
 
@@ -1941,34 +1607,23 @@ mod request_mirror {
             drive: String,
             op: crate::served::ServedOp,
         },
-        // `Unknown` is deliberately absent: there is no wire shape a sender
-        // would legitimately produce for it - it is only ever the fallback
-        // result when nothing above matches.
+        // `Unknown` is absent: it is only ever the fallback when nothing matches.
     }
 }
 
-// Hand-written for the same reason as `BackupRunOutcome`'s impl above - but
-// here the concern is forward, not backward, compatibility: this must
-// tolerate a variant tag it has never heard of (from a node running code
-// newer than this build), not just an old shape of one it knows. Delegates
-// the real parsing to `request_mirror::RequestMirror` (a field-for-field
-// copy of `Request` under `#[serde(remote = "Request")]`, the standard serde
-// idiom for "derive normally, but let me override the public impl") and
-// falls back to `Request::Unknown` - rather than an error - when the tag
-// isn't in `KNOWN_REQUEST_VARIANTS` (a known tag with a bad body is an error). `dispatch` treats `Unknown`
-// as a no-op: the sending node is newer, this one just hasn't caught up yet.
-// This also covers raft replication itself, not just local log/snapshot
-// reads: openraft's `Entry<TypeConfig>` embeds `Request` directly, so this
-// impl is what protects an old follower from a newer leader's brand-new
-// command variant.
+// Hand-written like `BackupRunOutcome`'s impl, but for forward compatibility: a
+// tag from a newer node must not fail. Delegates to `request_mirror::RequestMirror`
+// (`serde(remote)`) and falls back to `Request::Unknown` when the tag is not in
+// `KNOWN_REQUEST_VARIANTS` (a known tag with a bad body is an error). Also
+// covers raft replication itself, since openraft's `Entry` embeds `Request`:
+// this protects an old follower from a newer leader's new command.
 impl<'de> Deserialize<'de> for Request {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        // The externally-tagged variant name: the bare string for a unit
-        // variant, or the sole key of a one-entry object.
+        // The externally-tagged variant name: bare string or sole object key.
         let tag = match &value {
             serde_json::Value::String(s) => Some(s.as_str()),
             serde_json::Value::Object(map) if map.len() == 1 => {
@@ -1977,15 +1632,12 @@ impl<'de> Deserialize<'de> for Request {
             _ => None,
         };
         match tag {
-            // Only a tag this build has genuinely never heard of is "from a
-            // newer node". Old logs wrote the unit variant as "Unknown".
+            // Only a never-heard-of tag is "from a newer node" (old logs wrote "Unknown").
             Some(tag) if tag == "Unknown" || !KNOWN_REQUEST_VARIANTS.contains(&tag) => {
                 Ok(Request::Unknown(value))
             }
-            // A known tag with a body that doesn't parse (or a payload that
-            // isn't even tag-shaped) is a bug or corruption, not version
-            // skew: failing loudly beats applying a silent no-op on this
-            // node while every other node applies the real command.
+            // A known tag with an unparseable body is a bug or corruption, not version
+            // skew: fail loudly rather than no-op here while other nodes apply it.
             _ => {
                 request_mirror::RequestMirror::deserialize(&value).map_err(serde::de::Error::custom)
             }
@@ -1993,8 +1645,7 @@ impl<'de> Deserialize<'de> for Request {
     }
 }
 
-/// Result of applying a command. Failures are values, not errors: a rejected
-/// command is still a committed log entry on every node.
+/// Result of applying a command; failures are values, since a rejected command is still a committed entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     pub version: u64,
@@ -2022,8 +1673,7 @@ impl Response {
 }
 
 impl ClusterState {
-    /// Keep at most `max` alert records: resolved and one-shot ones go first,
-    /// oldest first, and open ones only when nothing else is left.
+    /// Keep at most `max` alert records: resolved and one-shot first, oldest first, open ones last.
     fn trim_alerts(&mut self, max: usize) {
         while self.alerts.len() > max {
             let victim = self
@@ -2044,20 +1694,15 @@ impl ClusterState {
         }
     }
 
-    /// Drop reverse proxy sessions and tokens that ended at or before `now`.
     fn sweep_proxy_auth(&mut self, now: i64) {
         self.proxy_sessions.retain(|_, s| s.expires_at > now);
         self.proxy_tokens.retain(|_, t| t.expires_at > now);
     }
 
-    /// Apply one command. Must stay deterministic, so no clocks, no randomness
-    /// and no IO.
+    /// Apply one command. Must stay deterministic: no clocks, randomness or IO.
     pub fn apply(&mut self, req: &Request) -> Response {
-        // An `Unknown` command changes nothing here, so it must not look like
-        // a state change: `version` drives the SSE state stream, the
-        // "how far behind" readings and snapshot ids, and a no-op that moved
-        // it would make this node's version run ahead of what its state
-        // reflects. It still succeeds so the entry counts as applied.
+        // An `Unknown` command must not bump `version` (it drives the SSE stream, lag
+        // readings and snapshot ids); it still succeeds so the entry counts as applied.
         if matches!(req, Request::Unknown(_)) {
             let _ = self.dispatch(req);
             return Response::ok(self.version);
@@ -2266,13 +1911,10 @@ impl ClusterState {
                 }
                 for volume in self.volumes.values_mut() {
                     volume.replicas.remove(node);
-                    // A removed node must not stay a volume's primary. Hand it
-                    // to the remaining replica that is furthest along
-                    // (highest generation, ties broken by BTree order, so
-                    // every node picks the same one). Removal is never
-                    // refused over this - that would wedge removing a dead
-                    // node. With no replica left the primary is left as is,
-                    // which health reports as "primary not a member".
+                    // A removed node must not stay a volume's primary: hand it to the replica
+                    // furthest along (highest generation, BTree order for ties, so all nodes agree).
+                    // Never refused over this (that would wedge removing a dead node); with no
+                    // replica left it stays, which health reports as "primary not a member".
                     if volume.primary == *node {
                         let mut best: Option<(&String, u64)> = None;
                         for (candidate, generation) in &volume.replicas {
@@ -2298,9 +1940,7 @@ impl ClusterState {
             Request::DeployStack { name, spec, at } => {
                 let revision = self.stacks.get(name).map(|s| s.revision + 1).unwrap_or(1);
                 let previous = self.stacks.get(name);
-                // A changed spec (new image, new limits) may well have fixed
-                // whatever made an instance crash, so every node is worth
-                // trying again.
+                // A changed spec may have fixed the crash, so every node is worth retrying.
                 if previous.is_some_and(|p| p.spec != *spec) {
                     self.crash_moves.retain(|id, _| &id.stack != name);
                 }
@@ -2308,8 +1948,7 @@ impl ClusterState {
                 let secrets = previous.map(|s| s.secrets.clone()).unwrap_or_default();
                 let used_configs = previous.map(|s| s.used_configs.clone()).unwrap_or_default();
                 let used_secrets = previous.map(|s| s.used_secrets.clone()).unwrap_or_default();
-                // A redeploy of an unchanged spec keeps the older "previous"
-                // so the diff still shows the last real change.
+                // An unchanged redeploy keeps the older "previous" so the diff shows the last real change.
                 let previous_spec = match previous {
                     Some(p) if p.spec != *spec => Some(p.spec.clone()),
                     Some(p) => p.previous_spec.clone(),
@@ -2379,26 +2018,13 @@ impl ClusterState {
                 drives,
             } => {
                 self.check_placement(node, drives)?;
-                // Carry over a pin from the assignment being replaced. An
-                // instance moved to a different node by the scheduler (its
-                // old node went unreachable, was drained, or stopped
-                // implementing something it needs) is still running the same
-                // pinned image - only where it runs changed - so losing the
-                // pin here would let it silently drift back to whatever tag
-                // it deploys from now resolves to the next time it restarts.
-                //
-                // The same holds for `desired`: re-placing an instance an
-                // operator stopped must not silently start it elsewhere. A
-                // brand-new assignment starts Running.
-                //
-                // `migration` is kept only when the node is unchanged. A
-                // re-Assign to a different node supersedes any move in flight
-                // (its from/to and phase no longer describe where the
-                // instance is), and leaving it would let a migration driver
-                // keep advancing a stale move - `Switching` would even
-                // repoint the assignment back at the old target. When the
-                // node is the same the placement didn't change, so an active
-                // migration is none of this command's business.
+                // Carry over from the assignment being replaced: the pin (a node move does not
+                // change the image, and losing it would drift to whatever the tag resolves to
+                // next restart) and `desired` (re-placing an operator-stopped instance must not
+                // start it; a new assignment starts Running). `migration` is kept only when
+                // the node is unchanged: a re-Assign elsewhere supersedes any move in flight,
+                // and a stale one would let a driver keep advancing it (`Switching` would
+                // repoint the assignment back at the old target).
                 let previous = self.assignments.get(instance);
                 let image_digest = previous.and_then(|a| a.image_digest.clone());
                 let desired = previous.map(|a| a.desired).unwrap_or(DesiredState::Running);
@@ -2435,8 +2061,7 @@ impl ClusterState {
             Request::SetImageDigest { instance, digest } => {
                 let assignment = self.assignment_mut(instance)?;
                 let old = assignment.image_digest.replace(digest.clone());
-                // Re-pinning the same digest must not erase what the last
-                // real change replaced.
+                // Re-pinning the same digest must not erase what the last real change replaced.
                 if let Some(old) = old.filter(|old| old != digest) {
                     self.previous_image_digests.insert(instance.clone(), old);
                 }
@@ -2473,16 +2098,13 @@ impl ClusterState {
                     .as_mut()
                     .ok_or_else(|| format!("{instance} is not migrating"))?;
 
-                // Asking for the phase already on record changes nothing, so
-                // it succeeds rather than reading as an illegal transition. A
-                // driver that retries a submit it never saw the answer to has
-                // to be able to tell "already done" from "not allowed".
+                // The phase already on record succeeds, so a driver retrying a submit it never
+                // saw answered can tell "already done" from "not allowed".
                 if &migration.phase == phase {
                     return Ok(());
                 }
 
-                // Failure can interrupt at any point, but forward progress must
-                // follow the phase order so a stale message cannot rewind a move.
+                // Failure can interrupt anywhere; forward progress must follow phase order so a stale message cannot rewind.
                 let allowed = matches!(phase, MigrationPhase::Failed { .. })
                     || migration.phase.next().as_ref() == Some(phase);
                 if !allowed {
@@ -2494,8 +2116,7 @@ impl ClusterState {
 
                 migration.phase = phase.clone();
                 match phase {
-                    // Switching over is the point of no return: the target owns
-                    // the instance from here.
+                    // Switching is the point of no return: the target owns the instance.
                     MigrationPhase::Switching => assignment.node = migration.to.clone(),
                     MigrationPhase::Done => assignment.migration = None,
                     _ => {}
@@ -2701,8 +2322,7 @@ impl ClusterState {
             Request::PutBackupTarget(target) => {
                 validate_object_name(&target.id)?;
                 if target.frequency_secs == 0 {
-                    // Would be due again on every scheduler poll, starting a
-                    // new run the instant the previous one finished.
+                    // Would be due on every scheduler poll, starting a new run the instant the last finished.
                     return Err("frequency_secs must be at least 1".to_string());
                 }
                 if !self.drive_known(&target.drive) {
@@ -2750,9 +2370,7 @@ impl ClusterState {
             }
 
             Request::RecordBackupRun(run) => {
-                // A progress/finish update against a run's own id is always
-                // allowed (that run *is* the one already running); only a
-                // brand-new run competing for the same target is rejected.
+                // Progress/finish for a run's own id is always allowed; only a new run competing for the target is rejected.
                 if matches!(run.outcome, BackupRunOutcome::Running { .. })
                     && self.restic_runs.values().any(|r| {
                         r.target_id == run.target_id
@@ -2772,9 +2390,7 @@ impl ClusterState {
                     .filter(|r| r.drive == run.drive && r.destination_id == run.destination_id)
                     .collect();
                 if same_target.len() > MAX_BACKUP_RUNS_PER_TARGET {
-                    // Oldest first, but never the run just recorded (it may
-                    // carry an old timestamp) and drop finished runs before
-                    // any still Running.
+                    // Oldest first, never the run just recorded (may carry an old timestamp); finished before still Running.
                     same_target.retain(|r| r.id != run.id);
                     same_target.sort_by_key(|r| {
                         (
@@ -2825,8 +2441,7 @@ impl ClusterState {
                 self.restore_requests.insert(request_id.clone(), request);
 
                 if self.restore_requests.len() > MAX_RESTORE_REQUESTS {
-                    // Never the request just inserted (it may carry an old
-                    // timestamp); finished ones go before Pending/Running.
+                    // Never the request just inserted (old timestamp possible); finished before Pending/Running.
                     let mut all: Vec<&RestoreRequest> = self
                         .restore_requests
                         .values()
@@ -2909,8 +2524,7 @@ impl ClusterState {
                 if !self.assignments.contains_key(instance) {
                     return Err(format!("unknown instance {instance}"));
                 }
-                // A phase change of the same update keeps its start time; a
-                // fresh update after a finished one starts a new clock.
+                // A phase change keeps its start time; a fresh update after a finished one restarts it.
                 let started_at = match self.instance_updates.get(instance) {
                     Some(current) if !current.phase.is_terminal() => current.started_at,
                     _ => *at,
@@ -2993,8 +2607,7 @@ impl ClusterState {
                         assignment.migration = None;
                     }
                 }
-                // A reconciler that is still failing writes its error back on
-                // its next pass, so this only clears stale ones.
+                // A still-failing reconciler rewrites its error next pass, so this only clears stale ones.
                 for statuses in [&mut self.cert_status, &mut self.dns_status] {
                     statuses.retain(|_, s| !matches!(s, ReconcileStatus::Error { .. }));
                 }
@@ -3210,23 +2823,16 @@ impl ClusterState {
         self.nodes.get(node).is_some_and(|n| n.implements(drive))
     }
 
-    /// Whether a node may take new work: the operator has not held it back and
-    /// the cluster can still hear from it.
+    /// Whether a node may take new work: not held back by the operator and still heard from.
     pub fn can_schedule(&self, node: &str) -> bool {
         self.nodes.get(node).is_some_and(|n| n.schedulable()) && !self.unreachable.contains(node)
     }
 
-    /// The core scheduling invariant: an instance only lands on a node that is
-    /// taking work and implements every *replicated* drive its volumes live
-    /// on. A served drive has one authoritative copy any node can reach over
-    /// the internal network (mounted per volume, on demand, once the
-    /// instance is actually placed), so it never narrows candidates this way
-    /// — mirrors the same carve-out `cl_sched::place::rejection` applies
-    /// when it picks a candidate in the first place; this is the second,
-    /// independent check every node's own state machine runs on the
-    /// resulting `PlaceInstance`/`MoveInstance` request, and the two have to
-    /// agree or a served-drive placement the scheduler chose would always be
-    /// rejected here.
+    /// The core scheduling invariant: an instance only lands on a node that takes
+    /// work and implements every *replicated* drive its volumes live on. A served
+    /// drive has one authoritative copy reachable by any node, so it never narrows
+    /// candidates; this mirrors the carve-out in `cl_sched::place::rejection` and
+    /// the two must agree or a scheduler-chosen served-drive placement would be rejected here.
     fn check_placement(&self, node: &str, drives: &BTreeSet<String>) -> Result<(), String> {
         let target = self
             .nodes
@@ -3247,13 +2853,9 @@ impl ClusterState {
         Ok(())
     }
 
-    /// Drive names whose mode is `served`, read from the replicated cluster
-    /// config's raw yaml with a minimal shape local to this crate rather
-    /// than `cl_config::ClusterConfig` (see `ClusterConfigEntry`'s doc
-    /// comment for why `cl-raft` does not depend on `cl-config` for this).
-    /// Empty if no config has been published yet or it fails to parse, same
-    /// fallback `cl_sched::run::served_drives` uses for the config this is
-    /// mirrored from.
+    /// Drive names whose mode is `served`, parsed from the replicated config's raw
+    /// yaml with a minimal local shape (see `ClusterConfigEntry`). Empty if no
+    /// config is published or it fails to parse, like `cl_sched::run::served_drives`.
     fn served_drives(&self) -> BTreeSet<String> {
         #[derive(Deserialize)]
         struct Shape {
@@ -3279,8 +2881,7 @@ impl ClusterState {
             .collect()
     }
 
-    /// Stacks referencing a config, so removing one in use is refused rather
-    /// than quietly breaking a container on its next restart.
+    /// Stacks referencing a config, so removing one in use is refused.
     fn config_in_use(&self, name: &str) -> Option<String> {
         self.stacks
             .values()
@@ -3295,9 +2896,7 @@ impl ClusterState {
             .map(|s| format!("stack {}", s.name))
     }
 
-    /// Whether `drive` is declared in the replicated cluster config at all
-    /// (served or replicated) - same minimal-shape parse as `served_drives`,
-    /// for the same reason (`cl-raft` does not depend on `cl-config`).
+    /// Whether `drive` is declared in the replicated config at all (served or replicated).
     fn drive_known(&self, drive: &str) -> bool {
         #[derive(Deserialize)]
         struct Shape {
@@ -3313,8 +2912,7 @@ impl ClusterState {
         shape.drives.contains_key(drive)
     }
 
-    /// Backup targets referencing a destination, so removing one in use is
-    /// refused rather than quietly orphaning its targets.
+    /// Backup targets referencing a destination, so removing one in use is refused.
     fn destination_in_use(&self, id: &str) -> Option<String> {
         self.restic_targets
             .values()
@@ -3322,10 +2920,7 @@ impl ClusterState {
             .map(|t| format!("backup target {}", t.id))
     }
 
-    /// A copy with every secret blanked, for anything that leaves the node.
-    ///
-    /// The lengths stay right so the ui can still show that a secret is set
-    /// without ever handling its contents.
+    /// A copy with every secret blanked, for anything that leaves the node; lengths stay right so the ui can show a secret is set.
     pub fn redacted(&self) -> ClusterState {
         let mut copy = self.clone();
         for secret in copy.secrets.values_mut() {
@@ -3334,16 +2929,14 @@ impl ClusterState {
         for cert in copy.certificates.values_mut() {
             cert.key_pem = String::new();
         }
-        // Login material, including the client addresses visitors saved. The
-        // ui never needs it, and an address plus a username is not for every
-        // viewer to read; the admin list reads the unredacted state.
+        // Login material, including saved client addresses: the ui never needs it and
+        // the admin list reads the unredacted state.
         copy.proxy_sessions.clear();
         copy.proxy_tokens.clear();
         copy
     }
 
-    /// A stack's priority as the scheduler and the drive syncs see it: lower is
-    /// more important, and a prioritized stack beats every other one.
+    /// A stack's priority for the scheduler and drive syncs: lower is more important; prioritized beats all.
     pub fn effective_priority(&self, stack: &str, own: i32) -> i32 {
         if self.prioritized.contains(stack) {
             i32::MIN
@@ -3352,25 +2945,21 @@ impl ClusterState {
         }
     }
 
-    /// Whether `clouduler emergency` is in force.
     pub fn in_emergency(&self) -> bool {
         !self.emergency_stacks.is_empty()
     }
 
-    /// Whether `stack` may be scheduled: always outside emergency mode, only
-    /// the emergency stacks during it.
+    /// Whether `stack` may be scheduled: always outside emergency mode, only emergency stacks during it.
     pub fn emergency_allows(&self, stack: &str) -> bool {
         self.emergency_stacks.is_empty() || self.emergency_stacks.contains(stack)
     }
 
-    /// Instances a node should be running right now.
     pub fn assignments_on<'a>(&'a self, node: &'a str) -> impl Iterator<Item = &'a Assignment> {
         self.assignments.values().filter(move |a| a.node == node)
     }
 }
 
-/// Base64 helpers, kept here so the encoding used for attachments is defined in
-/// exactly one place.
+/// Base64 helpers, so the attachment encoding is defined in one place.
 pub fn base64_encode(raw: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(raw)
@@ -3383,18 +2972,12 @@ pub fn base64_decode(encoded: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Records are keyed by the triple that makes them unique in a zone.
 pub fn dns_key(fqdn: &str, record_type: &str, content: &str) -> String {
     format!("{fqdn}|{record_type}|{content}")
 }
 
-// ---------------------------------------------------------------------------
-// Utility queries on the applied state
-// ---------------------------------------------------------------------------
 
-/// Instances whose stack mounts the given volume.
-/// Stacks whose spec mounts the volume (or the whole drive), whether or not
-/// any instance is currently assigned.
+/// Stacks whose spec mounts the volume (or the whole drive), whether or not an instance is assigned.
 pub fn stacks_declaring_volume(state: &ClusterState, id: &crate::ids::VolumeId) -> Vec<String> {
     use cl_config::StackFile;
 
@@ -3483,8 +3066,7 @@ impl ClusterState {
             .collect()
     }
 
-    /// Reachable nodes implementing the volume's drive whose copy is not yet
-    /// at the volume's current generation.
+    /// Reachable nodes implementing the volume's drive whose copy is behind its current generation.
     pub fn replicas_behind(&self, volume: &crate::ids::VolumeId) -> Vec<String> {
         let Some(v) = self.volumes.get(volume) else {
             return Vec::new();
@@ -3693,11 +3275,8 @@ mod tests {
 
     #[test]
     fn every_current_request_variant_round_trips_and_is_not_unknown() {
-        // One instance per real `Request` variant (excluding `Unknown`
-        // itself, which has no legitimate wire shape). Guards against
-        // `request_mirror::RequestMirror` drifting out of sync with
-        // `Request`: a variant missing from the mirror would silently
-        // deserialize as `Unknown` here instead of round-tripping.
+        // One instance per real `Request` variant (not `Unknown`); guards against
+        // `request_mirror::RequestMirror` drifting, which would deserialize a variant as `Unknown`.
         let requests = vec![
             Request::PutClusterConfig {
                 yaml: "y".into(),
@@ -4053,10 +3632,7 @@ mod tests {
 
     #[test]
     fn cluster_state_ignores_an_unknown_top_level_field() {
-        // Guards against ever adding `#[serde(deny_unknown_fields)]` here: a
-        // brand-new field a newer node's `ClusterState` has must stay silently
-        // ignorable by an older node reading the same JSON, with no per-field
-        // work required - see the migration plan's forward-tolerance design.
+        // Guards against `#[serde(deny_unknown_fields)]`: a new field from a newer node must stay ignorable by an older one.
         let mut value = serde_json::to_value(ClusterState::default()).unwrap();
         value.as_object_mut().unwrap().insert(
             "some_field_from_the_future".into(),
@@ -4262,12 +3838,9 @@ mod tests {
             .contains("n2 does not implement drive bulk"));
     }
 
-    /// A served drive has one authoritative copy any node can reach over the
-    /// internal network, so `check_placement` must not reject a node just
-    /// because it never declared a local directory for it — this is the
-    /// same carve-out `cl_sched::place::rejection` applies when picking a
-    /// candidate; the two have to agree, or the scheduler's own choice would
-    /// always be rejected here (this state machine's independent check).
+    /// A served drive has one authoritative copy reachable by any node, so
+    /// `check_placement` must not reject a node lacking a local directory for it;
+    /// must agree with `cl_sched::place::rejection`.
     #[test]
     fn a_served_drive_does_not_require_the_node_to_implement_it() {
         let served_config = Request::PutClusterConfig {
@@ -5142,9 +4715,7 @@ mod tests {
         assert!(!rendered.contains("ciphertext"));
     }
 
-    /// The self-update deploy key rides the ordinary secrets map under a
-    /// reserved name, with no special casing in `redacted()`. This confirms
-    /// that falls out for free rather than needing its own blanking rule.
+    /// The self-update deploy key rides the ordinary secrets map under a reserved name; `redacted()` needs no special case.
     #[test]
     fn redacted_blanks_the_self_update_deploy_key_like_any_other_secret() {
         let mut state = ClusterState::default();
@@ -5367,9 +4938,7 @@ mod tests {
         assert!(!state.dns_status.contains_key("app.example.com"));
     }
 
-    /// A cluster with "fast" declared in the replicated config, so
-    /// `drive_known` sees it - `cluster()` alone only makes nodes implement
-    /// drives, it never publishes a config for `drive_known` to read.
+    /// A cluster with "fast" declared in the replicated config so `drive_known` sees it.
     fn cluster_with_known_drive() -> ClusterState {
         let mut state = cluster();
         state.apply(&Request::PutClusterConfig {

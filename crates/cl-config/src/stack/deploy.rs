@@ -59,9 +59,8 @@ pub fn parse_memory_bytes(raw: &str) -> Option<u64> {
         .and_then(|n| n.checked_mul(multiplier))
 }
 
-/// `deploy.resources.reservations`. Only `devices` has any effect: `cpus` and
-/// `memory` are parsed and otherwise ignored, as compose reservations are
-/// scheduler hints clouduler does not use.
+/// `deploy.resources.reservations`. Only `devices` has any effect; `cpus` and
+/// `memory` are parsed and ignored.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Reservations {
@@ -74,12 +73,10 @@ pub struct Reservations {
     pub devices: Vec<DeviceRequest>,
 }
 
-/// The most replicas a single service may ask for. `plan::expand` builds one
-/// `Desired` per replica on every leader pass, so an unbounded count is a way
-/// to exhaust a leader's memory with one line of yaml.
+/// The most replicas a service may ask for; `plan::expand` builds one
+/// `Desired` per replica every leader pass, so an unbounded count exhausts memory.
 pub const MAX_REPLICAS: u32 = 1000;
 
-/// `deploy.resources`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
@@ -89,7 +86,6 @@ pub struct Resources {
     pub reservations: Option<Reservations>,
 }
 
-/// `deploy.restart_policy`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeployRestartPolicy {
@@ -129,7 +125,6 @@ pub struct UpdateConfig {
     pub failure_action: Option<String>,
 }
 
-/// `deploy:` block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Deploy {

@@ -1,14 +1,10 @@
 //! Which addresses the rpc server listens on.
 //!
-//! A node's rpc address is not fixed for life: moving a cluster onto another
-//! network (a VPN, a new subnet) re-addresses every node, managers included.
-//! Raft peers dial the address stored in raft membership, and that only
-//! changes once the leader commits it, after it has checked the node answers
-//! at the new one. So for a while the address the config says and the address
-//! membership says differ, and the node must answer on both: the new one so
-//! the leader can verify and then use it, the old one so the cluster keeps
-//! working until that commit lands. An address no longer wanted is kept a
-//! little longer, since a lagging peer may still dial it.
+//! A node's rpc address can change (VPN, new subnet). Raft peers dial the
+//! address in membership, which only changes once the leader commits it after
+//! verifying the node answers there, so for a while config and membership
+//! differ and the node must answer on both. An address no longer wanted is kept
+//! a little longer for lagging peers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;

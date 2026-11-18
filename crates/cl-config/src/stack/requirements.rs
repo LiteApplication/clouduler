@@ -1,7 +1,6 @@
 //! What a stack needs from the cluster to schedule: networks, drives, and
-//! cluster configs/secrets its services reference. Used by the ui to explain
-//! why a service cannot be placed, and to know which configs/secrets a stack
-//! bundles its own file for (so redeploying can offer to replace them).
+//! cluster configs/secrets. Used by the ui to explain why a service cannot be
+//! placed, and to know which configs/secrets a stack bundles its own file for.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,35 +43,27 @@ pub struct StackRequirements {
     pub file_configs: BTreeSet<String>,
     /// Top level secrets this stack bundles its own file for.
     pub file_secrets: BTreeSet<String>,
-    /// Fully qualified hostnames this stack's services are proxied under.
-    /// Empty until filled in from `StackFile::hosts`, which needs the
-    /// cluster config to resolve a bare label's network domain - not
-    /// available from the stack file alone.
+    /// Fully qualified hostnames this stack's services are proxied under. Empty
+    /// until filled from `StackFile::hosts`, which needs the cluster config.
     #[serde(default)]
     pub hosts: BTreeSet<String>,
-    /// `x-clouduler.node`, this service's effective hard pin (its own, or
-    /// the stack wide default), if any. Per-service only: a stack aggregate
-    /// has no single meaningful pin when services disagree, so this is left
-    /// `None` on `requirements()` and only filled in by
+    /// `x-clouduler.node`: this service's effective hard pin (own or stack
+    /// default). Per-service only (no single meaningful pin for a stack
+    /// aggregate), so `None` from `requirements()`, filled by
     /// `service_requirements()`.
     #[serde(default)]
     pub pinned_node: Option<String>,
-    /// Raw `deploy.placement.constraints` entries (Swarm syntax, e.g.
-    /// `node.hostname==n1` or `node.labels.fast==true`). Per-service only,
-    /// same reasoning as `pinned_node`.
+    /// Raw `deploy.placement.constraints` entries (Swarm syntax). Per-service only.
     #[serde(default)]
     pub placement_constraints: Vec<String>,
     /// `x-clouduler.expose` entries on a port-gated (public or wireguard)
-    /// network: a node must have the port marked open to be a candidate.
-    /// Per-service only, same reasoning as `pinned_node`.
+    /// network: a candidate node must have the port open. Per-service only.
     #[serde(default)]
     pub bound_ports: Vec<BoundPort>,
-    /// Drives mounted whole (`drive/.`, see `cl_drive::registry::resolve_relative`)
-    /// rather than as a named subvolume — a subset of `drives`. These need
-    /// the stricter "pinned to the drive's one real holder" eligibility
-    /// `validate_whole_drive_mounts` enforces, not the ordinary
-    /// implements-or-served check every other drive gets. Per-service only,
-    /// same reasoning as `pinned_node`.
+    /// Drives mounted whole (`drive/.`, see `cl_drive::registry::resolve_relative`),
+    /// a subset of `drives`. These need the stricter "pinned to the drive's one
+    /// real holder" eligibility `validate_whole_drive_mounts` enforces.
+    /// Per-service only.
     #[serde(default)]
     pub whole_drive_mounts: BTreeSet<String>,
     /// `drive/volume` ids of the named volumes mounted, so the ui can show a
@@ -85,13 +76,11 @@ pub struct StackRequirements {
     /// the stack, not to one service.
     #[serde(default)]
     pub allowed: BTreeMap<String, Option<Vec<String>>>,
-    /// NVIDIA device requests (`deploy.resources.reservations.devices`): a
-    /// node must report enough GPUs, and the nvidia docker runtime. Per-service
-    /// only, same reasoning as `pinned_node`.
+    /// NVIDIA device requests (`deploy.resources.reservations.devices`): a node
+    /// must report enough GPUs and the nvidia runtime. Per-service only.
     #[serde(default)]
     pub gpu_requests: Vec<GpuRequirement>,
-    /// Host paths from `devices:`; a node must report each one. Per-service
-    /// only, same reasoning as `pinned_node`.
+    /// Host paths from `devices:`; a node must report each. Per-service only.
     #[serde(default)]
     pub host_devices: Vec<String>,
 }
@@ -139,13 +128,9 @@ impl StackFile {
         r
     }
 
-    /// The same breakdown `requirements` computes, but one `StackRequirements`
-    /// per service rather than unioned across the whole stack — what the ui
-    /// needs to show a separate placement table per service instead of one
-    /// table that can't tell you which constraint belongs to which container.
-    /// `file_configs`/`file_secrets` are a stack-level concept (which object
-    /// the stack bundles its own file for) and are left empty here; use
-    /// `requirements()` for those.
+    /// The same breakdown as `requirements`, one per service instead of unioned,
+    /// for a per-service placement table. `file_configs`/`file_secrets` are
+    /// stack-level and left empty here.
     pub fn service_requirements(&self) -> BTreeMap<String, StackRequirements> {
         let mut out = BTreeMap::new();
         for (name, svc) in &self.services {
@@ -192,10 +177,8 @@ impl StackFile {
         out
     }
 
-    /// Every fully qualified hostname this stack's services are proxied
-    /// under, resolved against `cfg`'s per-network domains the same way the
-    /// proxy itself does. Used to show a stack's DNS/certificate status
-    /// without the caller having to re-derive it.
+    /// Every fully qualified hostname this stack's services are proxied under,
+    /// resolved against `cfg` the way the proxy does.
     pub fn hosts(&self, cfg: &ClusterConfig) -> BTreeSet<String> {
         let mut hosts = BTreeSet::new();
         for svc in self.services.values() {

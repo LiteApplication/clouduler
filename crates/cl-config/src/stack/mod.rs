@@ -48,9 +48,8 @@ use crate::error::{ConfigError, Result};
 /// drive itself specifies one. Mirrors `cluster::Drive`'s default.
 pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// The shortest per-volume `volume_sync` interval that is honoured: the sync
-/// scheduler looks for due volumes every 30 seconds, so anything shorter
-/// would not run any sooner.
+/// The shortest honoured per-volume `volume_sync` interval: the sync scheduler
+/// looks for due volumes every 30 seconds.
 pub const MIN_VOLUME_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Root of a stack file.
@@ -175,9 +174,8 @@ pub struct Service {
     /// host path under `/dev/` (see `DeviceMapping::parse`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<String>,
-    /// Makes the container's root filesystem read-only. A service that writes
-    /// outside its declared volumes will fail rather than silently
-    /// accumulating state nothing backs up.
+    /// Makes the root filesystem read-only, so writes outside declared volumes
+    /// fail instead of accumulating unbacked state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
     #[serde(
@@ -280,10 +278,9 @@ impl StackFile {
     /// Parse without any cluster cross-checks, so a stack file can be linted
     /// on its own. Use `validate` for the full check against a cluster.
     ///
-    /// Successful parses are memoised by the exact text: the daemon's
-    /// reconcile loops each re-parse every stored stack on every pass, which
-    /// on a small board costs far more than cloning the result (and delayed
-    /// the proxy's first routes after a restart). Failures are not cached.
+    /// Successful parses are memoised by exact text: reconcile loops re-parse
+    /// every stored stack each pass, which cost more than cloning (and delayed
+    /// the proxy's first routes after restart). Failures are not cached.
     pub fn parse(raw: &str) -> Result<Self> {
         static CACHE: parking_lot::Mutex<Option<std::collections::HashMap<String, StackFile>>> =
             parking_lot::Mutex::new(None);
@@ -362,10 +359,8 @@ mod tests {
             .expect("simple stack matches the reference cluster");
     }
 
-    /// The qemu suite's publishing scenario is the only end to end cover for
-    /// the proxy, published ports and the internal resolver. A stack file that
-    /// no longer validates would fail an hour into a vm run, so it is checked
-    /// here too.
+    /// The qemu suite's publishing scenario is the only end to end cover for the
+    /// proxy, published ports and resolver; check it validates here too.
     #[test]
     fn the_publishing_scenario_stack_is_valid() {
         const PUBLISH_YAML: &str =

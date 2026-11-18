@@ -1,12 +1,6 @@
-//! `clouduler update`: manually trigger the same container-image
-//! pull-and-recreate the web ui's Updates page runs, without a browser.
-//!
-//! Goes over the same node-to-node channel `git-backup pull` uses (see
-//! `git_backup_cli`): scheduling pulls is imperative action against the
-//! running daemon, not a raft state change, so there is nothing for
-//! `client.submit` to write, and the internal-auth signature (HMAC over the
-//! cluster key) is what the cli already has on disk instead of a separate
-//! admin api key.
+//! `clouduler update`: trigger the pull-and-recreate the web ui's Updates page runs.
+//! Uses the node-to-node channel `git-backup pull` uses (HMAC over the cluster key);
+//! it is an imperative action, not a raft state change.
 
 use anyhow::{anyhow, Context, Result};
 use cl_config::ClusterConfig;
@@ -41,13 +35,9 @@ struct Accepted {
     accepted: Vec<String>,
 }
 
-/// Trigger a pull-and-recreate for `instances` (each `stack.service.index`),
-/// or for every instance with an update available when `instances` is
-/// empty — the same default the ui's "update all" button uses.
-///
-/// Answers as soon as the work is scheduled, not once it is done: a pull can
-/// take minutes, so this only reports what was accepted. `clouduler update`
-/// again, or the web ui, shows progress.
+/// Trigger a pull-and-recreate for `instances` (each `stack.service.index`), or for
+/// every instance with an update available when empty. Returns once the work is
+/// scheduled, not done.
 pub async fn apply(cfg: &ClusterConfig, instances: Vec<String>, via: Option<&str>) -> Result<()> {
     let node = pick_node(cfg, via)?;
     let base = cl_update::peers::base_url(cfg, node)

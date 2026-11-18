@@ -54,7 +54,6 @@ fn node(name: &str) -> NodeState {
     }
 }
 
-/// Build one log entry carrying `request` at the given index.
 fn entry(index: u64, request: Request) -> cl_raft::types::Entry {
     use openraft::{CommittedLeaderId, Entry, EntryPayload, LogId};
     Entry {
@@ -142,11 +141,9 @@ async fn snapshots_round_trip_the_state_machine() {
     assert!(guard.data.nodes.contains_key("n1"));
 }
 
-/// `force_quorum` on its own must not touch any assignment's `desired` state
-/// - that would be indistinguishable from an operator deliberately stopping
-/// a stack, and there would be nothing left recording it should come back.
-/// Only `emergency` (below) treats "not the recovering stack" specially, and
-/// even that leaves `desired` alone in favour of `emergency_stack`.
+/// `force_quorum` alone must not touch any assignment's `desired`: that would look
+/// like an operator stopping a stack. Even `emergency` leaves `desired` alone,
+/// using `emergency_stacks` instead.
 #[tokio::test]
 async fn force_quorum_leaves_assignments_desired_state_alone() {
     let dir = TempDir::new().expect("temp dir");
@@ -240,10 +237,8 @@ async fn emergency_sets_the_flag_marks_other_nodes_unreachable_and_stamps_volume
     assert!(!guard.data.volumes.contains_key(&untouched));
 }
 
-/// A volume `emergency` is told about that was never registered through raft
-/// (a brand new one this node has local data for, but never wrote
-/// `UpsertVolume` for before losing quorum) still needs to come out of this
-/// as authoritative on this node, not silently skipped.
+/// A volume `emergency` is told about that was never registered through raft must
+/// still come out authoritative on this node, not be skipped.
 #[tokio::test]
 async fn emergency_registers_a_volume_it_has_never_seen_before() {
     let dir = TempDir::new().expect("temp dir");
@@ -391,7 +386,6 @@ async fn restore_state_replaces_content_but_never_membership() {
     assert_eq!(guard.membership, membership_before);
 }
 
-/// Builds a snapshot of a store with one applied entry, to tamper with.
 async fn one_entry_snapshot() -> (TempDir, openraft::storage::Snapshot<TypeConfig>) {
     use openraft::RaftSnapshotBuilder;
     let dir = TempDir::new().expect("temp dir");

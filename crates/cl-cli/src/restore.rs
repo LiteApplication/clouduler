@@ -1,8 +1,6 @@
-//! `clouduler restore`: disaster recovery for lost *content* (cluster
-//! config, stack specs, cluster configs, secrets), read back from the git
-//! repo `backup:` mirrors it to. See `cl_raft::node::restore` for what
-//! actually changes, and `crate::node::emergency` for the sibling command
-//! this mirrors that recovers *quorum* instead of content.
+//! `clouduler restore`: disaster recovery for lost content (config, stacks,
+//! secrets) from the git repo `backup:` mirrors to. See `cl_raft::node::restore`;
+//! `crate::node::emergency` is the sibling that recovers quorum instead.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -25,9 +23,8 @@ pub struct RestoreArgs<'a> {
     pub yes: bool,
 }
 
-/// Unlike every other command in this module, this never talks to a running
-/// daemon - it edits `name`'s own data directory directly, so its daemon
-/// must be stopped first.
+/// Never talks to a running daemon: edits `name`'s data directory directly, so
+/// its daemon must be stopped first.
 pub async fn run(cfg: &ClusterConfig, args: RestoreArgs<'_>) -> Result<()> {
     let RestoreArgs {
         name,
@@ -126,11 +123,8 @@ struct RestoredState {
     skipped: Vec<String>,
 }
 
-/// Converts a parsed git tree into the four fields `Store::restore_state`
-/// takes. Revision/generation numbers are reset to a fresh sequence (git
-/// history's own numbers are meaningless to a freshly rebuilt state
-/// machine); ownership metadata is not reproduced, since `cl_backup::tree`
-/// never exported it in the first place.
+/// Converts a parsed git tree into the fields `Store::restore_state` takes.
+/// Revision numbers are reset; ownership metadata is not reproduced.
 fn build_restored_state(
     parsed: cl_backup::tree::ParsedTree,
     identity: &age::x25519::Identity,
@@ -237,10 +231,8 @@ impl LocalCheckout {
     }
 }
 
-/// `source` is used as-is if it names an existing local directory; otherwise
-/// it is treated as a url and cloned into a temp dir with the ambient ssh
-/// agent, since a fresh restore cannot rely on clouduler's own deploy key
-/// being available yet - that key is itself part of the state being
+/// `source` is used as-is if it is a local directory; otherwise it is cloned with
+/// the ambient ssh agent, since clouduler's deploy key is part of the state being
 /// recovered.
 fn local_checkout(source: &str, branch: &str) -> Result<LocalCheckout> {
     let path = Path::new(source);
@@ -260,11 +252,7 @@ fn local_checkout(source: &str, branch: &str) -> Result<LocalCheckout> {
 mod tests {
     use super::*;
 
-    /// Offline round-trip: hand-write a git working tree the way
-    /// `cl_backup::tree::build` would have, run it through the conversion
-    /// this command applies, and check the result is directly what
-    /// `Store::restore_state` expects - a secret readable by this node's own
-    /// cluster key, not the age identity it arrived encrypted for.
+    /// Offline round-trip of a hand-written git tree through the conversion.
     #[test]
     fn a_hand_written_tree_round_trips_into_restorable_state() -> Result<()> {
         let key = ClusterKey::generate();

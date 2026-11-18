@@ -127,9 +127,8 @@ fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Deserializes a network's `allowed` key. A key with no value (`allowed:`,
-/// typically every entry commented out) is an error, not "no restriction":
-/// silently opening a stack up is the worst way to read an empty list.
+/// Deserializes a network's `allowed` key. A key with no value is an error, not
+/// "no restriction": silently opening a stack up is the worst reading.
 pub(super) fn list<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Vec<AllowedTarget>>, D::Error> {

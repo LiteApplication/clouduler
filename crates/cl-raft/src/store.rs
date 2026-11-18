@@ -1,10 +1,6 @@
-//! Persistent raft storage on redb.
-//!
-//! The log lives in its own table keyed by index. The state machine is written
-//! out in full on every apply, which keeps recovery trivial: no log replay is
-//! needed past the last applied id, and snapshots become a read rather than a
-//! rebuild. The whole cluster state is a few kilobytes at this scale, so the
-//! cost of rewriting it per command is not worth optimising away.
+//! Persistent raft storage on redb. The state machine is written out in full on
+//! every apply (it is a few kilobytes), so recovery needs no log replay past the
+//! last applied id and snapshots are a read.
 
 // openraft's StorageError is 224 bytes and is fixed by its trait signatures.
 #![allow(clippy::result_large_err)]
@@ -38,24 +34,19 @@ const KEY_PURGED: &str = "purged";
 const KEY_STATE_MACHINE: &str = "state_machine";
 const KEY_SNAPSHOT: &str = "snapshot";
 
-/// The applied state, persisted as a unit so it can never be half written.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateMachine {
     pub last_applied: Option<LogId>,
     pub membership: StoredMembership,
     pub data: ClusterState,
-    /// Which schema this blob was written at - see `state::CURRENT_SCHEMA_VERSION`
-    /// and `crate::migrations`. `#[serde(default)]` so data written before this
-    /// field existed reads as version `0`.
+    /// Schema this blob was written at (see `crate::migrations`); absent reads as `0`.
     #[serde(default)]
     pub schema_version: u32,
 }
 
 impl Default for StateMachine {
-    /// A fresh node's state is built by this build, so it is already in the
-    /// current shape: stamp the current schema version rather than `0`, or
-    /// the first real migration would re-run on data it was never meant for.
-    /// (`0` is only ever the serde default for blobs that predate the field.)
+    /// A fresh node is already in the current shape: stamp the current version, not
+    /// `0`, or the first real migration would re-run on data it was not meant for.
     fn default() -> Self {
         Self {
             last_applied: None,
@@ -66,25 +57,21 @@ impl Default for StateMachine {
     }
 }
 
-/// A stored snapshot: its metadata plus the serialized state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSnapshot {
     meta: SnapshotMeta,
     data: Vec<u8>,
 }
 
-/// Opens the redb file and hands out the two halves raft needs.
 pub struct Store {
     db: Arc<Database>,
     sm: Arc<RwLock<StateMachine>>,
 }
 
 impl Store {
-    /// Open or create the store at `path`, restoring any state machine already there.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let db = Database::create(path.as_ref()).map_err(read_err)?;
 
-        // Creating the tables up front means every later read can assume they exist.
         let txn = db.begin_write().map_err(write_err)?;
         {
             txn.open_table(LOGS).map_err(write_err)?;
@@ -96,11 +83,9 @@ impl Store {
         let sm = match read_meta(&db, KEY_STATE_MACHINE)? {
             Some(raw) => match load_state_machine(&raw)? {
                 LoadedStateMachine::Current(sm) => *sm,
-                // This node's own local data, with nowhere else to fall back
-                // to - stays a hard, visible failure rather than silently
-                // starting on data this build doesn't understand. Distinct
-                // from `install_snapshot`'s peer-schema-skew handling below,
-                // which has a live cluster to fall back on.
+                // This node's own local data has no fallback: a hard, visible failure beats
+                // silently starting on data this build does not understand (unlike
+                // `install_snapshot`, which has a live cluster to fall back on).
                 LoadedStateMachine::TooNew { found } => {
                     return Err(StorageIOError::<NodeId>::read(AnyError::error(format!(
                         "local state machine is schema_version {found}, newer than this build's {} - this looks like a downgrade after a newer version already ran here; upgrade this node rather than downgrading it",
@@ -131,33 +116,17 @@ impl Store {
         }
     }
 
-    /// Shared handle onto the applied state, for read only callers outside raft.
     pub fn shared_state(&self) -> Arc<RwLock<StateMachine>> {
         self.sm.clone()
     }
 
-    /// Force this node to be the cluster's sole voter, bypassing consensus
-    /// entirely by rewriting the local log and state machine directly.
+    /// Force this node to be the cluster's sole voter by rewriting the local log
+    /// and state machine directly, for a cluster that lost quorum for good (like
+    /// etcd's `--force-new-cluster`). Appends one synthetic committed membership
+    /// entry; other known nodes stay in the node map (the lost voter becomes a
+    /// learner, so it can rejoin and workers keep replicating).
     ///
-    /// For a cluster that has lost quorum for good - a voter's local state
-    /// gone forever, with no backup - normal `change_membership` can never
-    /// run again, since driving it through raft itself needs the quorum
-    /// that is missing. This is the same escape hatch etcd's
-    /// `--force-new-cluster` or Consul's `peers.json` recovery provide: it
-    /// appends one synthetic, already-committed membership entry and moves
-    /// on, with no other voter ever asked to agree.
-    ///
-    /// Every node this store already knew about, including the lost voter,
-    /// stays in the new membership's node map - only the voter set shrinks
-    /// to `id` alone. That is deliberate: a worker resumes replicating
-    /// without needing to be re-added as a learner, and the lost voter is
-    /// demoted to a learner rather than dropped, so it can rejoin cleanly
-    /// once it comes back.
-    ///
-    /// Must only run while the daemon owning this data directory is
-    /// stopped: this writes straight past the raft runtime, so anything
-    /// else with the file open would either fail to open it or race this
-    /// write.
+    /// Must only run while the daemon owning this data directory is stopped.
     pub async fn force_quorum(
         &self,
         id: NodeId,
@@ -169,20 +138,13 @@ impl Store {
         Ok(membership)
     }
 
-    /// `force_quorum`, plus the extra state `clouduler emergency` needs: only
-    /// `stack`'s instances are allowed to start once this node comes back up
-    /// (`ClusterState::emergency_stacks`, cleared automatically once another
-    /// voter is reachable again - see `Request::ClearEmergency`), every other
-    /// currently known node is marked unreachable (so a served drive `stack`
-    /// uses picks this node as its active server, the same
-    /// first-reachable-candidate logic `drives.rs` always uses - see
-    /// `docs/clouduler-emergency.md`), and every volume `stack` uses is
-    /// stamped as current on this node, so nothing waits for, or tries to
-    /// pull from, a copy elsewhere that may not even exist any more.
-    ///
-    /// `stack_volumes` is computed by the caller (`clouduler::node::emergency`)
-    /// from the stack's own spec before this runs, so this crate does not have
-    /// to depend on stack-file parsing here.
+    /// `force_quorum` plus what `clouduler emergency` needs: only `stack`'s instances
+    /// may start once this node is back (`ClusterState::emergency_stacks`, cleared
+    /// once another voter is reachable, see `Request::ClearEmergency`), every other
+    /// known node is marked unreachable (so a served drive `stack` uses is served
+    /// here, see `docs/clouduler-emergency.md`), and every volume `stack` uses is
+    /// stamped current on this node. `stack_volumes` is computed by the caller so
+    /// this crate need not parse stack files.
     pub async fn emergency(
         &self,
         id: NodeId,
@@ -196,14 +158,9 @@ impl Store {
 
         sm.data.emergency_stacks = stacks.clone();
 
-        // The other managers' fate is unknown - some worker may still be
-        // running an instance this node's stale copy of the state also
-        // thinks is unassigned, or a redeploy that never reached quorum may
-        // resurrect a container that conflicts with one still alive
-        // elsewhere. Marking them unreachable rather than touching any
-        // assignment's `desired` means nothing needs restoring by hand once
-        // `emergency_stacks` clears: every stack's own desired state was never
-        // altered.
+        // The other managers' fate is unknown: a worker may still run an instance this
+        // stale state thinks is unassigned. Marking them unreachable rather than
+        // touching any `desired` leaves nothing to restore once `emergency_stacks` clears.
         let others: Vec<String> = sm
             .data
             .nodes
@@ -245,23 +202,15 @@ impl Store {
         Ok(membership)
     }
 
-    /// Replaces this node's `cluster_config`/`stacks`/`configs`/`secrets`
-    /// with content read back out of a git backup (see `cl-backup`), for
-    /// `clouduler restore`.
+    /// Replaces `cluster_config`/`stacks`/`configs`/`secrets` with content from a
+    /// git backup (see `cl-backup`), for `clouduler restore`. Never touches
+    /// membership or the log: a backup restores content, not quorum (run
+    /// `force_quorum`/`emergency` first for disaster recovery).
+    /// `assignments`/`volumes`/`certificates`/`dns_records`/`unreachable`/
+    /// `emergency_stacks` are left alone: the scheduler reconciles against the bumped
+    /// `StackState.revision`, and touching them risks orphaning containers.
     ///
-    /// Unlike `force_quorum`/`emergency`, this never touches
-    /// `sm.membership` or appends to the log - a git backup restores
-    /// *content*, not *quorum*. The two compose: a full disaster recovery
-    /// runs `force_quorum`/`emergency` first to get a reachable cluster,
-    /// then `restore` to refill it. `assignments`/`volumes`/`certificates`/
-    /// `dns_records`/`unreachable`/`emergency_stacks` are left untouched for
-    /// the same reason `emergency` leaves them alone: the scheduler
-    /// reconciles assignments against the bumped `StackState.revision` on
-    /// its own, and touching them here risks orphaning containers this node
-    /// doesn't know to stop.
-    ///
-    /// Must only run while the daemon owning this data directory is
-    /// stopped, for the same reason as `force_quorum`/`emergency`.
+    /// Must only run while the daemon is stopped.
     pub async fn restore_state(
         &self,
         cluster_config: Option<crate::state::ClusterConfigEntry>,
@@ -279,27 +228,9 @@ impl Store {
         Ok(())
     }
 
-    /// The shared part of `force_quorum`/`emergency`: append one synthetic,
-    /// already-committed membership entry making `id` the cluster's sole
-    /// voter, bypassing consensus entirely by rewriting the local log and
-    /// state machine directly.
-    ///
-    /// For a cluster that has lost quorum for good - a voter's local state
-    /// gone forever, with no backup - normal `change_membership` can never
-    /// run again, since driving it through raft itself needs the quorum
-    /// that is missing. This is the same escape hatch etcd's
-    /// `--force-new-cluster` or Consul's `peers.json` recovery provide.
-    ///
-    /// Every node this store already knew about, including the lost voter,
-    /// stays in the new membership's node map - only the voter set shrinks
-    /// to `id` alone. That is deliberate: a worker resumes replicating
-    /// without needing to be re-added as a learner, and the lost voter is
-    /// demoted to a learner rather than dropped, so it can rejoin cleanly
-    /// once it comes back.
-    ///
-    /// Leaves `sm`'s membership/log fields updated but does not persist: the
-    /// caller writes the state machine once, after making whatever further
-    /// changes it needs.
+    /// Shared part of `force_quorum`/`emergency`: append a synthetic committed
+    /// membership entry making `id` the sole voter (see `force_quorum`). Updates
+    /// `sm`'s membership/log fields but does not persist; the caller writes once.
     async fn rewrite_membership(
         &self,
         sm: &mut StateMachine,
@@ -376,8 +307,7 @@ impl RaftLogReader<TypeConfig> for LogStore {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry>, StorageError> {
-        // `RB` isn't `'static` (the trait doesn't require it), so it can't be
-        // moved into `spawn_blocking` as-is; owned bounds can.
+        // `RB` isn't 'static, so it cannot move into `spawn_blocking`; owned bounds can.
         let range = (range.start_bound().cloned(), range.end_bound().cloned());
         let db = self.db.clone();
         blocking(move || {
@@ -411,7 +341,6 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                     let entry: Entry = decode(value.value())?;
                     Some(entry.log_id)
                 }
-                // With no entries left, the last purged id is the last id we know of.
                 None => purged,
             };
 
@@ -479,7 +408,6 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                         .map_err(write_err)?;
                 }
             }
-            // redb commits durably, so the callback can fire as soon as this returns.
             txn.commit().map_err(write_err)
         })
         .await?;
@@ -531,7 +459,6 @@ pub struct StateMachineStore {
 }
 
 impl StateMachineStore {
-    /// Persist the in memory state machine. Called while the write lock is held.
     async fn persist(&self, sm: &StateMachine) -> Result<(), StorageError> {
         let db = self.db.clone();
         let sm = sm.clone();
@@ -558,7 +485,6 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         for entry in entries {
             sm.last_applied = Some(entry.log_id);
             let response = match entry.payload {
-                // Blank entries mark a new term, nothing to apply.
                 EntryPayload::Blank => Response {
                     version: sm.data.version,
                     error: None,
@@ -593,22 +519,14 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError> {
         let data = snapshot.into_inner();
-        // A snapshot this node cannot (or should not) install MUST fail the
-        // install. Returning `Ok(())` without touching state - as this once
-        // did - makes openraft believe the snapshot is installed: it advances
-        // `last_applied` to `meta.last_log_id`, purges the log up to there and
-        // applies later entries on top of the stale state, which silently and
-        // permanently diverges this node from the cluster.
+        // A snapshot this node cannot install MUST fail the install. Returning `Ok(())`
+        // without touching state (as this once did) makes openraft advance
+        // `last_applied`, purge the log and apply later entries on stale state,
+        // permanently diverging this node.
         //
-        // Trade-off: openraft 0.9 has no "retriable" error for this call. Any
-        // `StorageError` from `install_snapshot` is propagated by the state
-        // machine worker to the raft core, which treats it as fatal and shuts
-        // the core down (the leader then re-sends the snapshot after the
-        // process restarts, so a transient problem heals on restart). That is
-        // the crash-loop a past shape change caused when this was an error -
-        // but a stopped, loudly failing node that needs an upgrade is strictly
-        // better than a node serving and replicating wrong state. The error
-        // text says why, so the operator knows to upgrade this node.
+        // Trade-off: openraft 0.9 has no retriable error here; any `StorageError` is
+        // fatal to the core (the leader re-sends after restart). A stopped, loudly
+        // failing node that needs an upgrade beats one serving wrong state.
         let restored = match load_state_machine(&data)? {
             LoadedStateMachine::Current(sm) => *sm,
             LoadedStateMachine::TooNew { found } => {
@@ -634,10 +552,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         let mut restored = restored;
         restored.schema_version = crate::state::CURRENT_SCHEMA_VERSION;
 
-        // Hold the write lock across the disk write so a concurrent
-        // `build_snapshot` cannot interleave and leave an older snapshot
-        // stored over this newer one. State machine and snapshot go to disk
-        // in one transaction so a crash cannot leave one without the other.
+        // Hold the write lock across the disk write so a concurrent `build_snapshot`
+        // cannot store an older snapshot over this one; state machine and snapshot
+        // go in one transaction.
         let mut sm = self.sm.write().await;
         let db = self.db.clone();
         let stored = StoredSnapshot {
@@ -677,16 +594,14 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot, StorageError> {
-        // The read lock is held across the disk write: `install_snapshot`
-        // takes the write lock, so the two can no longer interleave and an
-        // older snapshot can't overwrite a newer installed one.
+        // The read lock is held across the disk write: `install_snapshot` takes the
+        // write lock, so an older snapshot cannot overwrite a newer installed one.
         let sm = self.sm.read().await;
         let data = encode(&*sm)?;
         let meta = SnapshotMeta {
             last_log_id: sm.last_applied,
             last_membership: sm.membership.clone(),
-            // Version makes successive snapshots distinguishable, which is
-            // all openraft needs from the id.
+            // The version just distinguishes successive snapshots.
             snapshot_id: format!(
                 "{}-{}",
                 sm.last_applied.map(|id| id.index).unwrap_or(0),
@@ -722,21 +637,15 @@ fn decode<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, StorageError> {
 
 enum LoadedStateMachine {
     Current(Box<StateMachine>),
-    /// `schema_version` on the blob is greater than
-    /// `state::CURRENT_SCHEMA_VERSION` - this build has no migration that
-    /// could apply, because none has been written for a version that
-    /// doesn't exist yet from its point of view. Callers decide what
-    /// "ignore it, log clearly" means for their situation.
+    /// `schema_version` on the blob is newer than `state::CURRENT_SCHEMA_VERSION`;
+    /// no migration can apply. Callers decide how to react.
     TooNew {
         found: u32,
     },
 }
 
-/// Peeks a `StateMachine` blob's `schema_version` before committing to a
-/// strict decode, runs any migrations needed to bring it up to
-/// `state::CURRENT_SCHEMA_VERSION`, then decodes normally. See
-/// `crate::migrations` for why this exists instead of permanent
-/// backward-compat shims on the live types.
+/// Peeks a blob's `schema_version`, runs needed migrations (see
+/// `crate::migrations`), then decodes normally.
 fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
     let value: serde_json::Value = serde_json::from_slice(raw)
         .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
@@ -750,7 +659,7 @@ fn load_state_machine(raw: &[u8]) -> Result<LoadedStateMachine, StorageError> {
     let migrated = crate::migrations::migrate_to_current(value, found);
     let mut sm: StateMachine = serde_json::from_value(migrated)
         .map_err(|e| StorageError::from(StorageIOError::<NodeId>::read(AnyError::new(&e))))?;
-    // Migrated (or already current): stamp it so it is never migrated twice.
+    // Stamp so it is never migrated twice.
     sm.schema_version = crate::state::CURRENT_SCHEMA_VERSION;
     Ok(LoadedStateMachine::Current(Box::new(sm)))
 }
@@ -774,7 +683,6 @@ fn write_meta<T: Serialize>(db: &Database, key: &str, value: &T) -> Result<(), S
     txn.commit().map_err(write_err)
 }
 
-/// Writes several META keys in one transaction, all or nothing.
 fn write_metas(db: &Database, entries: &[(&str, Vec<u8>)]) -> Result<(), StorageError> {
     let txn = db.begin_write().map_err(write_err)?;
     {
@@ -794,18 +702,10 @@ fn write_err<E: std::error::Error + 'static>(e: E) -> StorageError {
     StorageIOError::<NodeId>::write(AnyError::new(&e)).into()
 }
 
-/// Runs a redb operation on the blocking thread pool.
-///
-/// redb's `commit()` does a real `fsync`, which on the aarch64 nodes' SD/USB
-/// storage routinely takes well past the raft heartbeat's soft ttl (see
-/// `cl-raft::network::Channel::call`) whenever something else on the box is
-/// also hitting disk. Called inline on the async task handling that peer's
-/// connection, a slow commit stalls the response to a totally unrelated
-/// heartbeat or vote RPC on the same executor, which is what actually shows
-/// up as a raft "Unreachable" timeout — the peer was never actually
-/// unreachable, this node just hadn't gotten back to answering it yet.
-/// Running it here instead lets the executor keep serving other RPCs while
-/// the disk catches up.
+/// Runs a redb operation on the blocking pool. `commit()` fsyncs, which on slow
+/// SD/USB storage can exceed the raft heartbeat soft ttl; inline on the async
+/// task it would stall unrelated heartbeat/vote RPCs on the same executor and
+/// show up as a bogus "Unreachable" timeout.
 async fn blocking<T, F>(f: F) -> Result<T, StorageError>
 where
     F: FnOnce() -> Result<T, StorageError> + Send + 'static,

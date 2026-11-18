@@ -54,11 +54,8 @@ impl NodeKeypair {
         })
     }
 
-    /// Load the keypair, or create one if the file is missing.
-    ///
-    /// Every node always has its own keypair, so unlike `ClusterKey` there is
-    /// no case where creating one is refused. Returns whether a keypair was
-    /// created, mirroring `ClusterKey::load_or_create`.
+    /// Load the keypair, or create one if missing. Returns whether one was
+    /// created. Unlike `ClusterKey`, creation is never refused.
     pub fn load_or_create(path: impl AsRef<Path>) -> Result<(Self, bool)> {
         let path = path.as_ref();
         if path.exists() {
@@ -156,8 +153,7 @@ impl NodeKeypair {
     }
 }
 
-/// A key other users can read is a key you have to assume is gone. Same check
-/// as `ClusterKey`'s, including the group-read exception — see its doc comment.
+/// Same permission check as `ClusterKey`, including the group-read exception.
 fn check_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

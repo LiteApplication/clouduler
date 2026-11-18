@@ -1,8 +1,5 @@
-//! Placement: deciding which node each instance runs on.
-//!
-//! Pure over its inputs, so the whole decision surface is unit testable without
-//! docker or a cluster. The output is a list of raft commands the caller
-//! submits; nothing here has side effects.
+//! Placement: deciding which node each instance runs on. Pure over its inputs, so it is
+//! unit testable without docker or a cluster; the output is raft commands for the caller.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,18 +38,12 @@ impl Decision {
 }
 
 impl Decision {
-    /// As `into_request`, but a re-placement of an instance that has volumes off
-    /// a node that is still reachable (a drained node, say) becomes a
-    /// migration instead of a bare re-`Assign`. The migration stops the
-    /// container, sends the volume's final delta, verifies it and only then
-    /// switches over, so writes made since the last periodic sync are not lost.
-    /// A node that is unreachable cannot take part in a migration, so those
-    /// still fail over with a plain `Assign`.
+    /// As `into_request`, but re-placing an instance with volumes off a still-reachable node
+    /// (a drained one, say) becomes a migration (stop, final delta, verify, switch over) so
+    /// recent writes are not lost. Unreachable nodes fail over with a plain `Assign`.
     ///
-    /// `None` means leave the instance alone this pass: a migration is already
-    /// in flight, or ended in failure and is waiting for the operator to retry
-    /// or dismiss it (`Assign` would silently abandon it, and with it the
-    /// final sync).
+    /// `None` means leave it alone: a migration is in flight or failed awaiting the operator
+    /// (`Assign` would silently abandon it).
     pub fn into_request_for(
         self,
         state: &ClusterState,
@@ -126,11 +117,8 @@ impl Constraint {
     }
 
     fn matches(&self, node: &NodeState) -> bool {
-        // A label the node does not carry is a real answer, not a missing one:
-        // `node.labels.fast == true` must exclude a node without the label,
-        // and `node.labels.fast != true` must include it. Treating an absent
-        // label as an empty string gets both, where returning None would make
-        // the negative form exclude every node in the cluster.
+        // A label the node lacks is a real answer, not a missing one: `labels.fast == true`
+        // excludes it and `!= true` includes it (None would make `!=` exclude every node).
         if let Some(key) = self.key.strip_prefix("node.labels.") {
             let actual = node.labels.get(key).map(String::as_str).unwrap_or("");
             return (actual == self.value) == self.equal;
@@ -157,18 +145,12 @@ impl Constraint {
     }
 }
 
-/// Whether `node` holds a copy of `record` an instance may start on.
-///
-/// A copy at the current generation always is. A copy that is behind is only
-/// once every node holding a current one is unreachable: the generation is
-/// bumped the moment a primary takes over, before any sync can have carried it
-/// to the replicas, so a primary that dies within one `sync_interval` of a
-/// handover leaves every other copy "behind" for good. Insisting on a current
-/// copy then keeps the service down until that machine is back. The freshest
-/// reachable copy is the best data left, so it is the one allowed to take over
-/// (costing the writes since its last sync, the same price any failover pays);
-/// a copy that is not the freshest still is not, and neither is a node that
-/// never received the volume at all.
+/// Whether `node` holds a copy of `record` an instance may start on. A current copy always
+/// is. A behind copy is only once every node holding a current one is unreachable: the
+/// generation is bumped when a primary takes over, before any sync, so a primary dying
+/// within one `sync_interval` leaves every other copy behind for good. The freshest
+/// reachable copy then takes over (losing writes since its last sync, as any failover
+/// does); a non-freshest copy, or a node that never received the volume, never does.
 fn holds_usable_copy(state: &ClusterState, record: &VolumeState, node: &str) -> bool {
     let Some(&held) = record.replicas.get(node) else {
         return false;
@@ -193,11 +175,8 @@ fn holds_usable_copy(state: &ClusterState, record: &VolumeState, node: &str) -> 
         .any(|(name, generation)| *generation > held && reachable(name))
 }
 
-/// Why `node` cannot give an instance the GPUs and devices it asked for, as
-/// the tail of a sentence about the node. `None` when it can.
-///
-/// What a node has is what it reported itself; one that never reported (an
-/// older version) has none.
+/// Why `node` cannot give an instance the GPUs and devices it asked for, as the tail of a
+/// sentence; `None` when it can. A node that never reported has none.
 fn gpu_shortfall(node: &NodeState, needs: &GpuNeeds) -> Option<String> {
     let gpus = &node.gpus;
     if !needs.nvidia.is_empty() {
@@ -277,28 +256,17 @@ fn rejection(
         }
     }
     for drive in &desired.drives {
-        // A served drive has one authoritative copy that any node can reach
-        // over the internal network (mounted per volume, on demand, once the
-        // instance is actually placed); only a replicated drive, which has
-        // no such fallback, requires the node to already hold a local copy.
+        // A served drive has one authoritative copy reachable over the internal network, so only
+        // a replicated drive requires a local copy.
         if !served_drives.contains(drive) && !node.implements(drive) {
             return Some(format!("{} does not implement drive {drive}", node.name));
         }
     }
-    // Implementing a replicated drive says the node has the directory, not
-    // that it has this volume's data. Every node holds its own copy and only
-    // one of them is authoritative, so being allowed to run here is a question
-    // about the copy, not about the drive.
-    //
-    // The bar is holding a copy at the volume's current generation. Anything
-    // less is a node that has never received this volume (its mount is an
-    // empty directory, and an instance started on it comes up as if its data
-    // had never existed) or one whose copy is behind (it missed the syncs
-    // since the last handover). Either way `run::volume_requests` would then
-    // make *that* copy the primary, and the sync scheduler would push it over
-    // the good one everywhere else. The primary itself always clears this bar,
-    // so there is always a candidate as long as it is up. See
-    // `holds_usable_copy` for the one case a copy that is behind still counts.
+    // Implementing a replicated drive says the node has the directory, not this volume's data.
+    // Require a copy at the volume's current generation: a node that never received it (empty
+    // mount) or is behind would make `run::volume_requests` promote that copy to primary and
+    // the sync would push it over the good ones. The primary always clears the bar. See
+    // `holds_usable_copy` for the one case a behind copy counts.
     for volume in &desired.volumes {
         if served_drives.contains(&volume.drive) {
             continue;
@@ -316,9 +284,7 @@ fn rejection(
         }
     }
     if let Some(net) = &desired.egress_network {
-        // A nat network declares no per-node interface at all: every node
-        // implements it the same way, so it never narrows candidates the
-        // way an egress or wireguard interface does.
+        // A nat network declares no per-node interface, so it never narrows candidates.
         if !everywhere_networks.contains(net) && !node.implements_egress_network(net) {
             return Some(format!(
                 "{} does not implement egress network {net}",
@@ -340,9 +306,8 @@ fn rejection(
         }
     }
     if let Some(missing) = gpu_shortfall(node, &desired.gpu_needs) {
-        // An explicit pin to this node overrides what it reported, so a node
-        // whose detection fails (or that predates detection) can still be
-        // forced. `candidates` logs the warning.
+        // An explicit pin overrides what the node reported, so failed or missing detection can be
+        // forced past (`candidates` logs the warning).
         if !is_explicitly_pinned(node, desired, constraints) {
             return Some(format!("{} {missing}", node.name));
         }
@@ -361,19 +326,15 @@ fn rejection(
     None
 }
 
-/// An instance the cluster wants but that could not be placed on any node,
-/// with the reason so an operator (or the ui) can say why rather than just
-/// "unschedulable".
+/// An instance that could not be placed anywhere, with the reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unplaceable {
     pub instance: InstanceId,
     pub reason: String,
 }
 
-/// What a scheduling pass decided: placements/removals to submit, plus
-/// whatever could not be placed. Unlike an error, this never aborts the rest
-/// of the batch — one instance with no eligible node must not stop every
-/// other instance in the cluster from scheduling.
+/// What a pass decided: placements/removals to submit plus what could not be placed (which
+/// never aborts the rest of the batch).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaceOutcome {
     pub decisions: Vec<Decision>,
@@ -382,15 +343,10 @@ pub struct PlaceOutcome {
 
 /// Nodes that could run this instance, with the reasons the others could not.
 ///
-/// Note what this deliberately does *not* do: prefer the node currently
-/// holding a replicated volume's primary. Co-locating the instance with the
-/// authoritative copy is required (otherwise the sync overwrites the running
-/// container's data), but there are two ways to get there and dragging the
-/// instance to the primary is the expensive one - it means stopping a healthy
-/// service and restarting it on a copy that is at best equally fresh. Moving
-/// the *primary* to the instance costs one raft entry and no downtime, so that
-/// is what `run::volume_requests` does. Placement's only job here is to refuse
-/// nodes whose copy is not current, which is what keeps that promotion safe.
+/// Deliberately does not prefer the node holding a replicated volume's primary: moving the
+/// primary to the instance costs one raft entry and no downtime (`run::volume_requests`),
+/// while dragging a healthy service to the primary does not. Placement only refuses nodes
+/// whose copy is not current, which keeps that promotion safe.
 /// A desired item's eligible nodes, and the rejection reason for each node
 /// that was ruled out.
 type Candidates<'a> = (Vec<&'a NodeState>, Vec<String>);
@@ -431,15 +387,9 @@ pub fn candidates<'a>(
     Ok((eligible, rejected))
 }
 
-/// Decide where everything goes.
-///
-/// Instances already placed on a still-valid node stay put: reshuffling a
-/// running cluster because a better node appeared would mean needless downtime
-/// and volume transfers. Moves are the operator's call, through the ui.
-///
-/// An instance with no eligible node is reported in `unplaceable` rather than
-/// aborting the pass: one bad service must not stop every other instance in
-/// the cluster from scheduling.
+/// Decide where everything goes. Validly placed instances stay put (reshuffling means
+/// needless downtime and volume transfers; moves are the operator's call). An instance with
+/// no eligible node lands in `unplaceable` without aborting the pass.
 pub fn place(
     state: &ClusterState,
     desired: &[Desired],
@@ -449,18 +399,15 @@ pub fn place(
     let mut decisions = Vec::new();
     let mut unplaceable = Vec::new();
     let mut wanted: BTreeSet<InstanceId> = BTreeSet::new();
-    // Where this pass put each instance it placed, so `near` counts see
-    // decisions that are not in `state` yet.
+    // Where this pass put each instance, so `near` counts see decisions not yet in `state`.
     let mut pass_node: BTreeMap<InstanceId, String> = BTreeMap::new();
-    // Track what we hand out in this pass so spreading sees its own decisions.
     let mut load: BTreeMap<String, usize> = state
         .nodes
         .keys()
         .map(|name| (name.clone(), state.assignments_on(name).count()))
         .collect();
 
-    // Each item's own candidate nodes, computed once up front and reused by
-    // every pass below instead of re-running `candidates` per item per pass.
+    // Each item's candidate nodes, computed once and reused by every pass below.
     let per_item: Vec<std::result::Result<Candidates, String>> = desired
         .iter()
         .map(|item| {
@@ -468,17 +415,9 @@ pub fn place(
         })
         .collect();
 
-    // A co-located group (a shared proxied hostname, or an `x-clouduler.colocate`
-    // group) can only ever land on a node every member of the group can
-    // actually run on - not just whichever member happens to be scheduled
-    // first. Without this, the first instance in a group to be placed
-    // anchors the whole group to a node chosen using only *its own*
-    // requirements, and a sibling with a stricter one (a volume needing a
-    // drive that node lacks, say) is left permanently unplaceable even
-    // though a node satisfying every member exists elsewhere. Intersecting
-    // every member's own eligible-node set here makes each member's
-    // constraints binding on the whole group, the same way a single
-    // instance's own constraints already are on itself.
+    // A co-located group (shared proxied hostname or `x-clouduler.colocate`) can only land on
+    // a node every member can run on; otherwise the first member placed would anchor the group
+    // using only its own requirements and leave a stricter sibling permanently unplaceable.
     let mut group_eligible: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (item, result) in desired.iter().zip(&per_item) {
         let Ok((eligible, _)) = result else { continue };
@@ -491,15 +430,9 @@ pub fn place(
         }
     }
 
-    // Anchor every proxied hostname or `x-clouduler.colocate` group to
-    // whichever node already (validly) hosts it, so an instance sharing that
-    // key joins it instead of spreading to a different node. Seeded from
-    // existing assignments before any new placement decisions are made, so a
-    // running cluster stays put. "Validly" now means valid for every member
-    // of the group, not just the instance currently sitting there - a node
-    // that stops implementing what a co-located sibling needs (a drive
-    // removed, say) can't keep anchoring the whole group to it, the same way
-    // a node that stops working for the instance itself already could not.
+    // Anchor each proxied hostname / colocate group to the node that already validly hosts it,
+    // seeded from existing assignments before new decisions so a running cluster stays put.
+    // Valid means valid for every group member.
     let mut host_node: BTreeMap<&str, &str> = BTreeMap::new();
     for (item, result) in desired.iter().zip(&per_item) {
         let Some(current) = state.assignments.get(&item.id) else {
@@ -532,12 +465,9 @@ pub fn place(
         };
 
         if item.global {
-            // One copy per eligible node. Ids are not derived from the node's
-            // position in the eligible list: a node dropping out of (or
-            // rejoining) the list would shift every later node's id, tearing
-            // down and recreating healthy containers under new names. Instead
-            // a node keeps the id it already has, and only a node with none
-            // gets the lowest index nothing currently holds.
+            // One copy per eligible node. A node keeps the id it has (ids by list position would shift
+            // when a node drops out or rejoins and recreate healthy containers); a node with none gets
+            // the lowest unheld index.
             let existing: BTreeMap<u32, &str> = state
                 .assignments
                 .iter()
@@ -577,17 +507,10 @@ pub fn place(
 
         wanted.insert(item.id.clone());
 
-        // An instance sharing an anchor key (a proxied hostname or a
-        // `colocate` group) with an already-anchored instance can only go
-        // where that key already lands - it can't point at two nodes at
-        // once. Keys anchored to different nodes (one instance's routes span
-        // more than one, or two of its keys disagree) leave nothing
-        // eligible: a real conflict the operator has to resolve, not a node
-        // to guess between. Before any key has an anchor yet (the group is
-        // being placed for the first time this pass), narrow down to
-        // `group_eligible` instead of this instance's own eligible set, so
-        // whichever member happens to be processed first still only ever
-        // proposes a node every co-located sibling can also use.
+        // An instance sharing an anchor key with an anchored instance can only go where the key
+        // lands. Keys anchored to different nodes leave nothing eligible: a conflict for the
+        // operator, not a guess. With no anchor yet, narrow to `group_eligible` so the first member
+        // processed only proposes a node every sibling can use.
         let anchors: BTreeSet<&str> = item
             .anchor_keys()
             .filter_map(|k| host_node.get(k))

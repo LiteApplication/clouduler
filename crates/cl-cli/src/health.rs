@@ -1,17 +1,8 @@
-//! `clouduler stack unhealthy` — an at-a-glance list of stacks whose actual
-//! state doesn't match what's desired: crashed, restart-looping, failing its
-//! healthcheck, mid-migration, on an unreachable node, assigned with no
-//! container at all, running something other than the pinned image, wanted
-//! but unable to land anywhere, or stopped (shown either way, so it's clear
-//! the stop was deliberate rather than a crash that happens to look the
-//! same). Ends with `cluster_warnings`, for the faults that belong to no
-//! single instance.
-//!
-//! Health and liveness only exist on the node running (or trying to run) a
-//! container, so this reaches every node the same way `clouduler logs` and
-//! `clouduler stack restart` do: the internal api, HMAC-signed over the
-//! shared cluster key rather than a session, one cluster member asking
-//! another about its own local docker state.
+//! `clouduler stack unhealthy`: stacks whose actual state doesn't match what is
+//! desired (crashed, restart-looping, failing healthcheck, mid-migration, on an
+//! unreachable node, no container, wrong image, unplaceable, or stopped), ending
+//! with `cluster_warnings`. Health only exists on the owning node, so this uses
+//! the HMAC-signed internal api like `clouduler logs`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -45,19 +36,14 @@ struct Row {
     health: String,
     started_at: Option<String>,
     reason: Option<String>,
-    /// The reverse proxy's own active check of this instance's service, when
-    /// it publishes a route. A backend that answers docker's health check
-    /// but that the proxy can't actually reach (wrong port, app not bound
-    /// yet, crashed mid-request) shows up here rather than in `health`.
+    /// The reverse proxy's active check of this instance's service, when routed.
+    /// Catches backends docker calls healthy but the proxy cannot reach.
     proxy_error: Option<String>,
 }
 
 impl Row {
-    /// Worth showing: either the desired state doesn't match what's actually
-    /// running (a stopped stack is always shown too, alongside real
-    /// mismatches like a crash or a stuck placement), or something else is
-    /// wrong (bad health, a failed migration, an unreachable node, a route
-    /// the proxy can't reach its backend for).
+    /// Worth showing: desired state mismatches what runs (a stopped stack is always
+    /// shown), or something else is wrong.
     fn unhealthy(&self) -> bool {
         self.reason.is_some()
             || self.proxy_error.is_some()
@@ -71,9 +57,8 @@ impl Row {
     }
 }
 
-/// Explains a row's state relative to its desired state, so `--placement`
-/// can tell a deliberate `stack stop` apart from a crash - both report
-/// state=exited, but only one is a problem.
+/// Explains a row's state relative to its desired state, so `--placement` can tell
+/// a deliberate `stack stop` from a crash.
 fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
     match (desired, state) {
         (DesiredState::Stopped, "exited" | "stopped") => Some("stopped (stack stop)".to_string()),
@@ -83,12 +68,8 @@ fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
         (DesiredState::Running, "exited") => {
             Some("exited but desired state is running".to_string())
         }
-        // Assigned to a node, wanted running, and no container exists there
-        // at all. Distinct from `exited`, which at least got as far as being
-        // created: this is a node that has not acted on its assignment —
-        // docker unreachable, an image that will not pull, a reconcile loop
-        // that is not running. It reported nothing before, because "stopped"
-        // is not a state `unhealthy` used to consider wrong.
+        // Assigned and wanted running, but no container exists: distinct from
+        // `exited`; the node has not acted on its assignment.
         (DesiredState::Running, "stopped") => {
             Some("no container exists on its node, but desired state is running".to_string())
         }
@@ -99,13 +80,8 @@ fn describe_state(desired: DesiredState, state: &str) -> Option<String> {
     }
 }
 
-/// A container that is not running the image the cluster pinned for it.
-///
-/// Not an update being available — that is the Updates view's question, and
-/// answering it needs a registry round trip this command deliberately does
-/// not make. This is the purely local disagreement: a pin was recorded and
-/// the container was never rebuilt onto it, so the cluster believes it is
-/// running bits it is not.
+/// A container not running the image the cluster pinned for it. A purely local
+/// disagreement; update availability needs a registry round trip and is not checked.
 fn describe_pin_drift(summary: &InstanceSummary) -> Option<String> {
     let pinned = summary.image_digest.as_deref()?;
     let running = summary.running_digest.as_deref()?;
@@ -257,14 +233,9 @@ pub(crate) async fn stack_status(
         .collect())
 }
 
-/// Faults that belong to no single instance, and so had nowhere to be
-/// reported before.
-///
-/// All three are conditions an operator finds out about the hard way: a node
-/// that has dropped out shows up only as every one of its instances reading
-/// `unknown`, and a volume whose replica has silently stopped catching up
-/// shows up as nothing at all until the day it is promoted to primary and the
-/// data turns out to be old.
+/// Faults that belong to no single instance: a dropped node only shows as its
+/// instances reading `unknown`, and a silently lagging replica is found stale only
+/// at promotion.
 fn cluster_warnings(state: &ClusterState) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -338,9 +309,7 @@ fn uptime_of(started_at: Option<&str>) -> String {
     }
 }
 
-/// The subset of `cl-api`'s `InstanceSummary` this command needs, deserialized
-/// straight off the same internal endpoint `clouduler logs`/`exec` use to
-/// reach another node's docker.
+/// The subset of `cl-api`'s `InstanceSummary` this command needs.
 #[derive(Deserialize)]
 struct InstanceSummary {
     state: String,
@@ -397,16 +366,9 @@ async fn row_for_assignment(
                     },
                 );
             }
-            // A move that has not finished. An instance wedged in `Stopping`
-            // would otherwise show up as a plain `exited` container,
-            // indistinguishable from a crash.
-            //
-            // A move in progress is normally brief, so seeing one here is not
-            // by itself a fault; seeing the same one across successive runs
-            // is. There is no timestamp on a `Migration` to tell those apart
-            // from a single run, and adding one would mean putting a clock
-            // reading into the raft log, so this reports the phase and leaves
-            // that judgement to whoever is watching.
+            // A move that has not finished; otherwise a wedged `Stopping` would look
+            // like a plain `exited` crash. `Migration` has no timestamp (a clock reading
+            // in the raft log is not worth it), so only the phase is reported.
             phase if !phase.is_terminal() => {
                 return (
                     stack,
@@ -512,15 +474,11 @@ async fn fetch_summary(
         .with_context(|| format!("parsing {node}'s answer about {instance}"))
 }
 
-/// Instances every deployed stack wants but that have no running assignment,
-/// either because no node currently satisfies what they need, or because a
-/// placement decision exists and nothing is stopping it, yet the real
-/// scheduler loop still hasn't turned it into an assignment - the reconcile
-/// loop stalling after a partial batch is otherwise invisible: it recomputes as perfectly placeable every time this command
-/// runs, so only comparing against `unplaceable` would report "healthy"
-/// forever. Mirrors `cl-api`'s `pending_placements`, against this node's own
-/// copy of the cluster config rather than the replicated one, the same trade
-/// `stack deploy` already makes when it validates locally before submitting.
+/// Instances every deployed stack wants but that have no running assignment:
+/// either nothing satisfies their needs, or a placement exists but the scheduler
+/// has not turned it into an assignment (a stalled reconcile loop recomputes as
+/// placeable every run, so `unplaceable` alone would report healthy). Mirrors
+/// `cl-api`'s `pending_placements`, against this node's own config copy.
 fn pending_rows(cfg: &ClusterConfig, state: &ClusterState) -> Vec<(String, Row)> {
     let colocate_proxy_hosts = cfg.proxy.dns_publish == cl_config::DnsPublishMode::OwningNode;
     let desired = cl_sched::desired_instances(
@@ -575,8 +533,7 @@ fn internal_logs_path(instance: &str) -> String {
     format!("/api/instances/internal/{instance}/logs")
 }
 
-/// Best-effort: a log fetch failing must not stop the rest of the report from
-/// printing, so this prints its own error line rather than returning one.
+/// Best-effort: prints its own error line rather than failing the report.
 async fn print_log_tail(
     cfg: &ClusterConfig,
     http: &reqwest::Client,

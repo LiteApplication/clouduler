@@ -1,7 +1,6 @@
-//! Replicated alert state: the in-app feed, the inbox nodes push signals
-//! into, and the last delivery outcome per destination. The leader's engine
-//! (`cl-api`) owns every write of records and health; any node may push a
-//! signal.
+//! Replicated alert state: the in-app feed, the inbox nodes push signals into,
+//! and the last delivery outcome per destination. The leader's engine (`cl-api`)
+//! owns every write of records and health; any node may push a signal.
 
 use cl_config::AlertSeverity;
 use serde::{Deserialize, Serialize};
@@ -57,8 +56,7 @@ pub struct AlertDelivery {
     /// `opened`, `escalated`, `resolved`, `event` or `digest`.
     #[serde(default)]
     pub phase: String,
-    /// Provider-specific message identifier (e.g. Discord message ID)
-    /// captured on delivery so future transitions can edit the message.
+    /// Provider message id (e.g. Discord), kept so later transitions can edit the message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
 }

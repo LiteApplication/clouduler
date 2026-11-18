@@ -1,8 +1,5 @@
-//! Image update and redeploy progress, written into raft step by step.
-//!
-//! Kept in replicated state rather than a node-local tracker so that every
-//! node's api answers the same thing: the browser is usually talking to a
-//! different node than the one whose docker is doing the work.
+//! Image update and redeploy progress, written into raft step by step so every node's api
+//! answers the same thing.
 
 use std::sync::Arc;
 

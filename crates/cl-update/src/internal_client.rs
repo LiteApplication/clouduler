@@ -1,9 +1,4 @@
-//! Calling the internal, HMAC-authenticated self-update restart route on a
-//! peer node.
-//!
-//! Used by the orchestrator to trigger a restart once a node has staged a
-//! freshly downloaded binary. Goes over the node's normal https api
-//! listener, just a different route and a different auth header.
+//! Calling the internal HMAC-authenticated restart route on a peer node.
 
 use cl_secret::ClusterKey;
 
@@ -26,13 +21,11 @@ pub const NONCE_HEADER: &str = "X-Clouduler-Internal-Nonce";
 /// Unlike v2 it is unique per request even within one second.
 pub const SIGNATURE_V3_HEADER: &str = "X-Clouduler-Internal-Signature-V3";
 
-/// Every header an internal request carries, freshly signed. Each call makes a
-/// new timestamp and nonce, so a retry must call this again rather than reuse
-/// headers: the server rejects a signature it has already seen.
+/// Every header an internal request carries, freshly signed. Call again on
+/// retry: the server rejects a signature it has already seen.
 ///
-/// The v2 signature is sent alongside v3 so a not-yet-upgraded server mid
-/// rollout still accepts the request. Drop it once every node runs a
-/// v3-capable build.
+/// v2 is sent alongside v3 for not-yet-upgraded servers; drop it once all nodes
+/// run v3.
 pub fn auth_headers(
     key: &ClusterKey,
     method: &str,
@@ -76,10 +69,8 @@ pub fn authenticate(
 
 const RESTART_PATH: &str = "/api/self-update/internal/restart";
 
-/// Ask a peer to swap its binary and restart. Fire-and-forget in effect: a
-/// success response only means the node accepted the request before it
-/// starts shutting down, not that it has restarted yet, so the caller has to
-/// separately watch for the node going away and coming back.
+/// Ask a peer to swap its binary and restart. Success only means the request
+/// was accepted; the caller must watch for the node leaving and returning.
 pub async fn trigger_restart(
     client: &reqwest::Client,
     base_url: &str,

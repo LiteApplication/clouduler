@@ -36,9 +36,8 @@ impl Service {
             .collect()
     }
 
-    /// `deploy.resources.limits.memory`, parsed into bytes. `None` when the
-    /// service declares no memory limit at all - the rebalancer falls back to
-    /// balancing such an instance by raw instance count instead.
+    /// `deploy.resources.limits.memory` in bytes. `None` when no limit is set;
+    /// the rebalancer then balances by raw instance count.
     pub fn memory_limit_bytes(&self) -> Option<u64> {
         self.deploy
             .as_ref()?
@@ -111,11 +110,9 @@ impl StackFile {
             .and_then(|b| b.stop_before)
     }
 
-    /// Whether backing up a drive this service uses should stop it first:
-    /// the service's own override, else the stack wide default, else `None`
-    /// (the caller - which has the drive backup target's own setting and the
-    /// hardcoded final default - resolves the rest; see
-    /// `cl_raft::state::DriveBackupTarget::stop_containers`).
+    /// Whether backing up a drive this service uses should stop it first: the
+    /// service's override, else the stack default, else `None` (the caller
+    /// resolves the rest; see `cl_raft::state::DriveBackupTarget::stop_containers`).
     pub fn effective_backup_stop_before(&self, service: &str) -> Option<bool> {
         self.services
             .get(service)
@@ -123,9 +120,8 @@ impl StackFile {
             .or_else(|| self.stack_backup_stop_before())
     }
 
-    /// The alert settings for one service's containers: the stack block with
-    /// the service's own block merged over it. Log rules limited to other
-    /// services are left out.
+    /// Alert settings for one service's containers: the stack block with the
+    /// service's block merged over it.
     pub fn effective_alerts(&self, service: &str) -> super::StackAlerts {
         super::StackAlerts::merged(
             self.x_clouduler.as_ref().and_then(|x| x.alerts.as_ref()),
@@ -137,9 +133,8 @@ impl StackFile {
         )
     }
 
-    /// What happens when the registry serves a newer image for this service's
-    /// tag: the stack wide default with the service's own setting layered
-    /// over it field by field, off with no delay when neither says.
+    /// Newer-image policy for this service: the stack default with the service's
+    /// own setting layered over it per field; off with no delay when neither says.
     pub fn effective_auto_update(&self, service: &str) -> AutoUpdate {
         let stack = self.stack_auto_update();
         match self.services.get(service).and_then(Service::auto_update) {
@@ -159,10 +154,8 @@ impl StackFile {
             .or_else(|| self.stack_node().map(str::to_string))
     }
 
-    /// The egress, wireguard or nat kind network this service attaches to,
-    /// if any. A service attaches to at most one, so the scheduler can pin
-    /// it to whichever node implements that network the same way it pins to
-    /// a drive.
+    /// The egress, wireguard or nat network this service attaches to, if any (at
+    /// most one), so the scheduler can pin it to a node implementing it.
     pub fn egress_network(&self, service: &str, cluster: &ClusterConfig) -> Option<String> {
         let svc = self.services.get(service)?;
         svc.networks
@@ -190,9 +183,8 @@ impl StackFile {
             .collect()
     }
 
-    /// How often `volume` on `service` should replicate: the per-volume
-    /// override on the service, then the stack wide default for that volume,
-    /// then the backing drive's own default.
+    /// Replication interval for `volume` on `service`: per-volume service
+    /// override, then stack default, then the drive's own default.
     pub fn sync_interval(&self, service: &str, volume: &str, cluster: &ClusterConfig) -> Duration {
         let Some(svc) = self.services.get(service) else {
             return DEFAULT_SYNC_INTERVAL;
@@ -212,10 +204,8 @@ impl StackFile {
             .unwrap_or(DEFAULT_SYNC_INTERVAL)
     }
 
-    /// The `x-clouduler.volume_sync` interval override for the volume
-    /// `drive/volume`, if any service mounting it (or the stack default for
-    /// that volume name) sets one. The shortest wins when services disagree,
-    /// since the volume has one replication schedule. Not clamped.
+    /// The `x-clouduler.volume_sync` override for volume `drive/volume`, if any.
+    /// The shortest wins when services disagree (one schedule per volume). Not clamped.
     pub fn volume_sync_override(&self, drive: &str, volume: &str) -> Option<Duration> {
         self.services
             .iter()
@@ -231,11 +221,9 @@ impl StackFile {
             .min()
     }
 
-    /// The colocation group key for `service`, if `x-clouduler.colocate`
-    /// puts it in one with at least one other service. Transitively closed
-    /// over every service's `colocate` list, so `a: [b]`, `b: [c]` still
-    /// groups `a`, `b` and `c` together. `None` for a service naming no
-    /// group and named by none.
+    /// The colocation group key for `service`, if `x-clouduler.colocate` groups it
+    /// with another service. Transitively closed (`a: [b]`, `b: [c]` groups all
+    /// three). `None` when ungrouped.
     pub fn colocate_group(&self, service: &str) -> Option<String> {
         self.colocate_groups().remove(service)
     }
@@ -362,8 +350,7 @@ services:
         assert_eq!(file.colocate_group("b"), Some(key));
     }
 
-    /// `a` names `b`, `b` names `c`: all three end up in one group even
-    /// though `a` never named `c` directly.
+    /// `a` names `b`, `b` names `c`: all three group together.
     #[test]
     fn colocation_is_transitive() {
         let file = parse(
