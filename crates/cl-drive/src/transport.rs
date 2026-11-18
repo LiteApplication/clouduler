@@ -890,7 +890,7 @@ fn create_temp(tmp: &Path) -> Result<std::fs::File> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
         .open(tmp)
         .map_err(|source| DriveError::Io {
             path: tmp.to_path_buf(),
@@ -904,7 +904,7 @@ fn create_temp(tmp: &Path) -> Result<std::fs::File> {
 fn read_no_follow(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
         .open(path)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
@@ -1244,8 +1244,7 @@ mod receive_tests {
     }
 
     fn me() -> (u32, u32) {
-        // SAFETY: getuid/getgid have no preconditions and cannot fail.
-        unsafe { (libc::getuid(), libc::getgid()) }
+        (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw())
     }
 
     #[tokio::test]
@@ -1466,7 +1465,7 @@ mod receive_tests {
         let err = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
             .open(&link);
         assert!(err.is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep");

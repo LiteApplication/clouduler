@@ -210,7 +210,7 @@ pub(crate) async fn check_images(state: &AppState) {
     }
     let _reset = Reset;
 
-    let Some(docker) = state.docker.read().await.clone() else {
+    let Some(docker) = state.docker.get().await else {
         warn!("cannot check image updates: no docker connection on this node");
         return;
     };
@@ -400,7 +400,7 @@ async fn internal_scan(
 /// Inspect every container this node is assigned for what it is running.
 /// No registry is asked; see `check_images`.
 async fn scan_local(state: &AppState) -> Vec<ImageStatus> {
-    let Some(docker) = state.docker.read().await.clone() else {
+    let Some(docker) = state.docker.get().await else {
         return Vec::new();
     };
     let cluster_state = state.cluster.state().await;

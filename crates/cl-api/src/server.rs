@@ -40,7 +40,7 @@ pub struct AppState {
     /// Shared rather than owned because the daemon waits for dockerd on its
     /// own schedule; the api comes up first and picks the client up whenever
     /// it lands.
-    pub docker: Arc<RwLock<Option<Docker>>>,
+    pub docker: cl_docker::DockerHandle,
     /// Instances this node's reconciler is currently pulling the image for.
     /// Read by `routes::instances` to report a "pulling" state that a docker
     /// inspect alone cannot distinguish from "about to be created".
@@ -114,7 +114,7 @@ pub struct AppState {
 impl AppState {
     /// The docker client, or a 503 naming why there is none.
     pub async fn docker(&self) -> Result<Docker, ApiError> {
-        self.docker.read().await.clone().ok_or_else(|| {
+        self.docker.get().await.ok_or_else(|| {
             ApiError::Unavailable(
                 "this node has no docker daemon, so it cannot answer for containers".to_string(),
             )
@@ -125,7 +125,7 @@ impl AppState {
 /// What the daemon passes in to stand up the api.
 pub struct ApiServerOptions {
     pub cluster: Arc<ClusterNode>,
-    pub docker: Arc<RwLock<Option<Docker>>>,
+    pub docker: cl_docker::DockerHandle,
     pub pulling: cl_sched::PullTracker,
     pub migration_sync: cl_drive::MigrationSyncTracker,
     pub node_name: String,

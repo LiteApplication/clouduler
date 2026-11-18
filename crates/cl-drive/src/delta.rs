@@ -699,16 +699,10 @@ pub mod fast_path {
     /// (rather than an error) for anything unrecognized or unreadable, since
     /// callers only use this to decide whether to try a fast path.
     pub fn detect(path: &Path) -> FsKind {
-        let c_path = match std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
-            Ok(p) => p,
-            Err(_) => return FsKind::Other,
-        };
-        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) };
-        if rc != 0 {
+        let Ok(stat) = nix::sys::statfs::statfs(path) else {
             return FsKind::Other;
-        }
-        match stat.f_type as i64 {
+        };
+        match stat.filesystem_type().0 as i64 {
             BTRFS_SUPER_MAGIC => FsKind::Btrfs,
             ZFS_SUPER_MAGIC => FsKind::Zfs,
             _ => FsKind::Other,

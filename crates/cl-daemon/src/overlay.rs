@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cl_config::{ClusterConfig, NetworkKind, StackFile};
-use cl_docker::{Docker, NetworkSpec};
+use cl_docker::NetworkSpec;
 use cl_net::container_net::container_docker_name;
 use cl_net::ipam::{DEFAULT_OVERLAY_POOL, DEFAULT_SUBNET_PREFIX};
 use cl_net::vxlan::{allocate_vni, bridge_name, overlay_mtu, vxlan_name, Overlay};
@@ -41,7 +41,7 @@ pub fn start(
     cfg: &ClusterConfig,
     node_name: &str,
     cluster: &Arc<ClusterNode>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
 ) -> tokio::task::JoinHandle<()> {
     let ctx = Context_ {
         node: node_name.to_string(),
@@ -59,7 +59,7 @@ struct Context_ {
     /// A live view rather than a snapshot: a node started before dockerd was
     /// up, or reconnected later, picks the overlay work back up without a
     /// restart.
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     boot_cfg: ClusterConfig,
 }
 
@@ -345,7 +345,7 @@ impl Context_ {
         netlink: Option<&Overlay>,
         wanted: &BTreeMap<String, BTreeSet<InstanceId>>,
     ) -> Result<()> {
-        let Some(docker) = self.docker.read().await.clone() else {
+        let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
         for name in docker
@@ -586,7 +586,7 @@ impl Context_ {
             mtu
         };
 
-        let Some(docker) = self.docker.read().await.clone() else {
+        let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
         let stack = overlay.split('_').next().unwrap_or(overlay).to_string();

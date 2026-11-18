@@ -89,7 +89,7 @@ pub struct Scheduler {
     /// started before dockerd was up, or whose dockerd is later restarted on
     /// its own, keeps working once `docker` is reconnected, without a daemon
     /// restart. `None` is a normal, temporary state, not an error.
-    docker: Arc<RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     materializer: Materializer,
     /// Internal DNS zone, written into every container's search list.
     zone: Option<String>,
@@ -128,7 +128,7 @@ impl Scheduler {
     pub fn new(
         node: String,
         cluster: Arc<ClusterNode>,
-        docker: Arc<RwLock<Option<Docker>>>,
+        docker: cl_docker::DockerHandle,
         materializer: Materializer,
         boot_config: ClusterConfig,
         pulling: PullTracker,
@@ -308,7 +308,7 @@ impl Scheduler {
         // No docker to reconcile against yet (or right now) is not an error:
         // this pass is simply skipped, and the next one tries again once
         // `docker` is reconnected.
-        let Some(docker) = self.docker.read().await.clone() else {
+        let Some(docker) = self.docker.get().await else {
             return Ok(());
         };
         // Opened fresh each pass: see `Reconciler::registries`. A node with

@@ -49,7 +49,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use cl_config::StackFile;
-use cl_docker::Docker;
 use cl_drive::{drive_port, DeltaEngine, DriveRegistry, ProgressSink, SyncEngine};
 use cl_raft::ids::InstanceId;
 use cl_raft::node::ClusterNode;
@@ -222,7 +221,7 @@ pub fn start_runner(
     cluster: Arc<ClusterNode>,
     node_name: String,
     registry: Arc<tokio::sync::RwLock<Option<Arc<DriveRegistry>>>>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     key_rx: tokio::sync::watch::Receiver<Option<Arc<ClusterKey>>>,
     data_dir: PathBuf,
 ) -> JoinHandle<()> {
@@ -357,7 +356,7 @@ pub fn start_runner(
 async fn claim_and_execute(
     cluster: &Arc<ClusterNode>,
     registry: &DriveRegistry,
-    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: &cl_docker::DockerHandle,
     key: &ClusterKey,
     data_dir: &Path,
     node_name: &str,
@@ -403,7 +402,7 @@ async fn claim_and_execute(
 async fn execute(
     cluster: &Arc<ClusterNode>,
     registry: &DriveRegistry,
-    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: &cl_docker::DockerHandle,
     key: &ClusterKey,
     data_dir: &Path,
     node_name: &str,
@@ -448,7 +447,7 @@ async fn execute(
 async fn stop_and_back_up(
     cluster: &Arc<ClusterNode>,
     registry: &DriveRegistry,
-    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: &cl_docker::DockerHandle,
     key: &ClusterKey,
     data_dir: &Path,
     node_name: &str,
@@ -705,7 +704,7 @@ async fn wait_for_stopped(
     cluster: &Arc<ClusterNode>,
     node_name: &str,
     instances: &[InstanceId],
-    docker: &Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: &cl_docker::DockerHandle,
     deadline: Duration,
 ) -> Result<()> {
     let start = tokio::time::Instant::now();
@@ -719,7 +718,7 @@ async fn wait_for_stopped(
             .collect();
 
         let mut not_stopped: Vec<String> = Vec::new();
-        match docker.read().await.clone() {
+        match docker.get().await {
             Some(docker) => {
                 for name in &local {
                     match docker.inspect(name).await {

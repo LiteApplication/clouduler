@@ -66,14 +66,14 @@ pub fn take_listen_fds() -> Vec<std::net::TcpListener> {
 
     let mut listeners = Vec::new();
     for fd in FIRST_FD..FIRST_FD + count {
-        let _ = nix::fcntl::fcntl(
-            // Borrowed only for this call; ownership is taken just below.
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) },
-            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-        );
         // SAFETY: systemd handed us this descriptor and, per the protocol,
         // nothing else in the process owns it.
-        let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let _ = nix::fcntl::fcntl(
+            &owned,
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        );
+        let listener = std::net::TcpListener::from(owned);
         if listener.local_addr().is_ok() && listener.set_nonblocking(true).is_ok() {
             listeners.push(listener);
         } else {

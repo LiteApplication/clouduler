@@ -235,7 +235,7 @@ async fn summarize_local(
     // A local instance whose docker is unreachable reads as unknown, the same
     // as one on another node: in both cases nobody here can say what the
     // container is doing, which is a different answer from "stopped".
-    let container = match (local, state.docker.read().await.clone()) {
+    let container = match (local, state.docker.get().await) {
         (true, Some(docker)) => docker
             .inspect(&assignment.instance.container_name())
             .await
@@ -248,7 +248,7 @@ async fn summarize_local(
     // Looked up by the local image id the container was created from, not by
     // its tag: the tag has usually moved on, which is exactly the drift this
     // is here to expose.
-    let running_digest = match (&container, state.docker.read().await.clone()) {
+    let running_digest = match (&container, state.docker.get().await) {
         (Some(c), Some(docker)) => {
             let repository = cl_docker::ImageRef::parse(&c.image).repository;
             match c.image_digest.as_deref() {

@@ -358,7 +358,7 @@ impl Signature {
 pub fn start(
     wan: Arc<WanFirewall>,
     cluster: Arc<ClusterNode>,
-    docker: Arc<tokio::sync::RwLock<Option<Docker>>>,
+    docker: cl_docker::DockerHandle,
     boot_cfg: ClusterConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -383,7 +383,7 @@ pub fn start(
             if wanted.is_empty() {
                 continue;
             }
-            let Some(docker) = docker.read().await.clone() else {
+            let Some(docker) = docker.get().await else {
                 continue;
             };
             match read_sources(&docker, &cfg, &wanted).await {

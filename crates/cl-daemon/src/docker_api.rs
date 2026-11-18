@@ -24,10 +24,10 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
-type SharedDocker = Arc<RwLock<Option<cl_docker::Docker>>>;
+type SharedDocker = cl_docker::DockerHandle;
 
 /// A peer that cannot answer a small read this fast is treated as not having
 /// the image, so one slow node never stalls a scan.
@@ -57,9 +57,8 @@ impl ClusterBackend {
     /// current one, so a bounced dockerd does not need the socket restarted.
     async fn local(&self) -> BackendResult<LocalBackend> {
         self.docker
-            .read()
+            .get()
             .await
-            .clone()
             .map(LocalBackend::new)
             .ok_or_else(|| BackendError::Other("docker is not reachable on this node".into()))
     }

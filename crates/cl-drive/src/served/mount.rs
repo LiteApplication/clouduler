@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
-use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -80,8 +79,7 @@ impl MountSpec {
 /// readable by other uids — `mount(2)` itself needs `CAP_SYS_ADMIN`, which in
 /// practice means root.
 pub fn mount_permission() -> Result<()> {
-    // Safety: geteuid takes no arguments and cannot fail.
-    if unsafe { libc::geteuid() } == 0 {
+    if nix::unistd::geteuid().is_root() {
         Ok(())
     } else {
         Err(DriveError::Config(
@@ -156,27 +154,21 @@ fn do_mount(spec: &MountSpec) -> Result<()> {
     let c_fstype = cstring("nfs4")?;
     let c_data = cstring(&data)?;
 
-    // Safety: every pointer is a valid NUL-terminated `CString` kept alive
-    // for the duration of this call. `MS_NOATIME` is the one VFS-level flag
-    // this mount wants; everything NFS-specific goes through the text
-    // `data` string instead (and must — the kernel's NFS option parser
-    // rejects a VFS-level option like `noatime` showing up there).
-    let rc = unsafe {
-        libc::mount(
-            c_source.as_ptr(),
-            c_target.as_ptr(),
-            c_fstype.as_ptr(),
-            libc::MS_NOATIME,
-            c_data.as_ptr().cast::<libc::c_void>(),
-        )
-    };
-    if rc != 0 {
-        return Err(DriveError::Io {
-            path: spec.mountpoint.clone(),
-            source: io::Error::last_os_error(),
-        });
-    }
-    Ok(())
+    // `MS_NOATIME` is the one VFS-level flag this mount wants; everything
+    // NFS-specific goes through the text `data` string instead (and must — the
+    // kernel's NFS option parser rejects a VFS-level option like `noatime`
+    // showing up there).
+    nix::mount::mount(
+        Some(c_source.as_c_str()),
+        c_target.as_c_str(),
+        Some(c_fstype.as_c_str()),
+        nix::mount::MsFlags::MS_NOATIME,
+        Some(c_data.as_c_str()),
+    )
+    .map_err(|errno| DriveError::Io {
+        path: spec.mountpoint.clone(),
+        source: errno.into(),
+    })
 }
 
 /// Lazily unmount whatever is (or claims to be) at `path`, ignoring every
@@ -185,28 +177,15 @@ fn do_mount(spec: &MountSpec) -> Result<()> {
 /// missing mountpoint, a non-mount directory, or a permission error are all
 /// fine to swallow and let the caller's own error handling take over.
 fn force_unmount(path: &Path) {
-    let Some(cpath) = path.to_str().and_then(|s| CString::new(s).ok()) else {
-        return;
-    };
-    // Safety: `cpath` is a valid NUL-terminated C string for the lifetime of
-    // this call; `umount2` does not retain it past returning.
-    unsafe {
-        libc::umount2(cpath.as_ptr(), libc::MNT_DETACH);
-    }
+    let _ = nix::mount::umount2(path, nix::mount::MntFlags::MNT_DETACH);
 }
 
 /// A clean unmount; fails if the mountpoint is busy.
 fn unmount_clean(path: &Path) -> Result<()> {
-    let cpath = cstring(&path.to_string_lossy())?;
-    // Safety: `cpath` is valid for the duration of this call.
-    let rc = unsafe { libc::umount2(cpath.as_ptr(), 0) };
-    if rc != 0 {
-        return Err(DriveError::Io {
-            path: path.to_path_buf(),
-            source: io::Error::last_os_error(),
-        });
-    }
-    Ok(())
+    nix::mount::umount2(path, nix::mount::MntFlags::empty()).map_err(|errno| DriveError::Io {
+        path: path.to_path_buf(),
+        source: errno.into(),
+    })
 }
 
 /// Whether `path` currently appears as a mounted filesystem, read from
