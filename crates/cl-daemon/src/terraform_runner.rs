@@ -145,9 +145,21 @@ pub fn fingerprint(
     h.finalize().to_hex().to_string()
 }
 
+/// Error prefix set only by the orphan and stale-run paths (never by a real tofu failure).
+const INTERRUPTED_PREFIX: &str = "interrupted:";
+/// Trigger of the single automatic retry after an interrupted apply.
+const RETRY_TRIGGER: &str = "retry-after-interrupt";
+
+/// A run cut short by a daemon restart or a lost node, not failed by OpenTofu.
+fn is_interrupted(run: &TerraformRun) -> bool {
+    matches!(&run.outcome, TerraformOutcome::Failed { error } if error.starts_with(INTERRUPTED_PREFIX))
+}
+
 /// Whether a run is due, and why. A pending request always wins; otherwise an Apply is due when
 /// the fingerprint differs from the last successful Apply, unless the latest run for exactly this
-/// fingerprint already failed (no retry loop: it retries on change or on request).
+/// fingerprint already failed as an Apply (no retry loop: it retries on change or on request). A failed
+/// Plan never blocks. An apply interrupted by a restart is retried once (trigger
+/// `retry-after-interrupt`); a second interruption blocks like any failure.
 pub fn due(
     state: &ClusterState,
     key: &str,
@@ -163,10 +175,15 @@ pub fn due(
     if state.terraform_applied.get(key).map(String::as_str) == Some(fingerprint) {
         return None;
     }
-    if last.is_some_and(|r| {
-        r.fingerprint == fingerprint && matches!(r.outcome, TerraformOutcome::Failed { .. })
+    if let Some(r) = last.filter(|r| {
+        r.fingerprint == fingerprint
+            && r.mode == TerraformMode::Apply
+            && matches!(r.outcome, TerraformOutcome::Failed { .. })
     }) {
-        return None;
+        if !is_interrupted(r) || r.trigger == RETRY_TRIGGER {
+            return None;
+        }
+        return Some((TerraformMode::Apply, RETRY_TRIGGER));
     }
     Some((TerraformMode::Apply, "change"))
 }
@@ -883,7 +900,7 @@ async fn pass(ctx: &Arc<Ctx>, docker: &Docker, cfg: &TerraformConfig, key: &Arc<
             finish_failed(
                 ctx,
                 run,
-                "interrupted: the node running it stopped responding".into(),
+                format!("{INTERRUPTED_PREFIX} the node running it stopped responding"),
             )
             .await;
         }
@@ -893,7 +910,7 @@ async fn pass(ctx: &Arc<Ctx>, docker: &Docker, cfg: &TerraformConfig, key: &Arc<
             finish_failed(
                 ctx,
                 run,
-                "interrupted: the daemon restarted during the run".into(),
+                format!("{INTERRUPTED_PREFIX} the daemon restarted during the run"),
             )
             .await;
         }
@@ -1236,8 +1253,29 @@ mod tests {
         s.terraform_requests.clear();
 
         run.outcome = TerraformOutcome::Failed { error: "x".into() };
-        s.terraform_runs.insert(k.into(), run);
+        s.terraform_runs.insert(k.into(), run.clone());
         assert_eq!(due(&s, k, "f2"), None, "no retry loop");
+
+        // A failed plan does not block auto-apply.
+        let mut plan = run.clone();
+        plan.mode = TerraformMode::Plan;
+        s.terraform_runs.insert(k.into(), plan);
+        assert_eq!(due(&s, k, "f2"), Some((TerraformMode::Apply, "change")));
+
+        // An interrupted apply is retried once, then blocks.
+        let mut cut = run.clone();
+        cut.outcome = TerraformOutcome::Failed {
+            error: format!("{INTERRUPTED_PREFIX} the daemon restarted during the run"),
+        };
+        s.terraform_runs.insert(k.into(), cut.clone());
+        assert_eq!(
+            due(&s, k, "f2"),
+            Some((TerraformMode::Apply, RETRY_TRIGGER))
+        );
+        cut.trigger = RETRY_TRIGGER.into();
+        s.terraform_runs.insert(k.into(), cut);
+        assert_eq!(due(&s, k, "f2"), None, "second interruption blocks");
+        s.terraform_runs.insert(k.into(), run);
         assert_eq!(due(&s, k, "f3"), Some((TerraformMode::Apply, "change")));
         s.terraform_requests.insert(k.into(), TerraformMode::Apply);
         assert_eq!(due(&s, k, "f2"), Some((TerraformMode::Apply, "manual")));

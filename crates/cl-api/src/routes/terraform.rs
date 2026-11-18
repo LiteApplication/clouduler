@@ -234,6 +234,22 @@ pub(crate) async fn request_run(
             "terraform is not enabled: add a `terraform:` section to the cluster config".into(),
         ));
     }
+    let enabled = state
+        .cluster
+        .state()
+        .await
+        .stacks
+        .get(stack)
+        .and_then(|s| cl_config::StackFile::parse(&s.spec).ok())
+        .and_then(|p| p.services.get(service).cloned())
+        .and_then(|s| s.x_clouduler)
+        .and_then(|x| x.terraform)
+        .is_none_or(|t| t.enabled);
+    if !enabled {
+        return Err(ApiError::Conflict(format!(
+            "terraform is disabled for {stack}/{service}: x-clouduler.terraform has enabled: false"
+        )));
+    }
     let response = state
         .cluster
         .submit(ClusterRequest::RequestTerraformRun {

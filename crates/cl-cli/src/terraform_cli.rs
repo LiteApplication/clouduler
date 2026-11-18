@@ -1,7 +1,7 @@
 //! `clouduler terraform plan|apply|status`: manual runs and the last run of a stack's OpenTofu modules.
 //!
-//! Plan and apply only record a request in raft; the runner on the leader picks it up on its next
-//! pass (the leader's wake-up is in-process, so the CLI cannot nudge it).
+//! Plan and apply only record a request in raft; the runner on the node hosting the target instance
+//! claims it on its next pass (the wake-up is in-process, so the CLI cannot nudge it).
 
 use std::collections::BTreeMap;
 use std::path::Path;
