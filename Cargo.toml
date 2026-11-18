@@ -68,6 +68,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", 
 instant-acme = "0.8"
 ipnet = { version = "2", features = ["serde"] }
 nix = "0.30"
+parking_lot = "0.12"
 octocrab = "0.54"
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 rcgen = "0.14"

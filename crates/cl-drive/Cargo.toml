@@ -21,7 +21,7 @@ tracing.workspace = true
 walkdir.workspace = true
 bytes = "1"
 rand = "0.8"
-libc = "0.2"
+nix = { workspace = true, features = ["user", "fs", "mount"] }
 filetime = "0.2"
 
 [dev-dependencies]
